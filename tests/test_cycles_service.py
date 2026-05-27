@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from brain.app.api.schemas.cycles import CycleRead, CycleRunRead
+from brain.systems.cycles import execution as cycle_execution
 from brain.systems.cycles import service
 from brain.app.api.routers import cycles as cycles_router
 from brain.platform.db.models.cycle import Cycle, CycleRun
@@ -60,6 +61,9 @@ class _FirstResult:
 class _AllResult:
     def __init__(self, values):
         self._values = list(values)
+
+    def first(self):
+        return self._values[0] if self._values else None
 
     def all(self):
         return list(self._values)
@@ -119,6 +123,8 @@ class _ExecuteCycleSession:
             params = statement.compile().params
             if self.expected_run_id not in params.values():
                 return _ScalarResult(None)
+        if not self._scalar_values:
+            return _AllResult([])
         return _ScalarResult(self._scalar_values.pop(0))
 
     def execute(self, statement):
@@ -196,6 +202,9 @@ class _AsyncRunNowCreateSession:
         if model is Cycle:
             return self._cycle
         return None
+
+    async def scalars(self, statement):
+        return _AllResult([])
 
     def add(self, value):
         self._created_runs.append(value)
@@ -299,17 +308,11 @@ def test_humanize_one_time_schedule():
     assert label == "Once at May 8, 2026 9:30 AM (America/Toronto)"
 
 
-def test_cycle_defaults_reuse_same_idea_reopens_by_default():
-    assert service.cycle_defaults(execution_mode="reuse_same_idea", reopen_archived=None) is True
-    assert service.cycle_defaults(execution_mode="new_idea_per_run", reopen_archived=None) is True
-    assert service.cycle_defaults(execution_mode="new_idea_per_run", reopen_archived=True) is True
-    assert service.cycle_defaults(execution_mode="reuse_same_idea", reopen_archived=False) is True
-
-
-def test_validate_execution_mode_coerces_legacy_new_thread_mode():
-    assert service.validate_execution_mode(None) == service.REUSABLE_THREAD_EXECUTION_MODE
-    assert service.validate_execution_mode("reuse_same_idea") == service.REUSABLE_THREAD_EXECUTION_MODE
-    assert service.validate_execution_mode("new_idea_per_run") == service.REUSABLE_THREAD_EXECUTION_MODE
+def test_canonical_execution_mode_is_single_autonomous_runtime_policy():
+    assert service.canonical_execution_mode(None) == service.REUSABLE_THREAD_EXECUTION_MODE
+    assert service.canonical_execution_mode("reuse_same_idea") == service.REUSABLE_THREAD_EXECUTION_MODE
+    assert service.canonical_execution_mode("new_idea_per_run") == service.REUSABLE_THREAD_EXECUTION_MODE
+    assert service.canonical_execution_mode("ignored") == service.REUSABLE_THREAD_EXECUTION_MODE
 
 
 def test_validate_schedule_expr_rejects_non_five_field_expr():
@@ -797,7 +800,7 @@ async def test_execute_cycle_run_creates_execution_thread_when_target_thread_is_
         return True
 
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
-    monkeypatch.setattr(service, "_async_idea_has_active_run", fake_idea_has_active_run)
+    monkeypatch.setattr(cycle_execution, "_async_idea_has_active_run", fake_idea_has_active_run)
     monkeypatch.setattr(service, "_async_admit_cycle_run", fake_async_admit)
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
 
@@ -1031,7 +1034,7 @@ def test_cycle_executor_target_idea_scope_uses_workspace_with_legacy_fallback():
 
     compiled = str(
         select(Idea.id)
-        .where(service._cycle_target_idea_scope_condition(cycle))
+        .where(cycle_execution._cycle_target_idea_scope_condition(cycle))
         .compile(compile_kwargs={"literal_binds": True})
     )
 

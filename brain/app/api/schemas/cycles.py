@@ -14,9 +14,7 @@ class CycleCreate(BaseModel):
     enabled: bool = True
     model_override: str | None = None
     thinking_override: str | None = None
-    execution_mode: str = "reuse_same_idea"
     target_idea_id: str | None = None
-    reopen_archived: bool | None = None
     guidance: str | None = Field(default=None, max_length=20000)
     rationale: str | None = Field(default=None, max_length=5000)
 
@@ -30,9 +28,7 @@ class CycleUpdate(BaseModel):
     enabled: bool | None = None
     model_override: str | None = None
     thinking_override: str | None = None
-    execution_mode: str | None = None
     target_idea_id: str | None = None
-    reopen_archived: bool | None = None
     guidance: str | None = Field(default=None, max_length=20000)
     rationale: str | None = Field(default=None, max_length=5000)
 

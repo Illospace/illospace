@@ -1,7 +1,6 @@
 """Cycles router."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,24 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.schemas.cycles import CycleCreate, CycleRead, CycleRunRead, CycleUpdate
-from brain.systems.cycles.events import publish_cycle_change
-from brain.systems.cycles.service import (
-    async_add_cycle_guidance,
-    async_add_cycle_output_target,
-    async_record_cycle_revision,
-    async_run_cycle_now,
-    build_one_time_schedule_expr,
-    compute_next_run_at,
-    cycle_defaults,
-    REUSABLE_THREAD_EXECUTION_MODE,
-    serialize_cycle,
-    validate_nonempty_trimmed,
-    serialize_cycle_run,
-    validate_execution_mode,
-    validate_schedule_expr,
-    validate_thinking_override,
-    validate_timezone_name,
+from brain.systems.cycles.commands import (
+    CycleMutationActor,
+    async_create_cycle as command_create_cycle,
+    async_delete_cycle as command_delete_cycle,
+    async_update_cycle as command_update_cycle,
+    cycle_change_event,
 )
+from brain.systems.cycles.events import publish_cycle_change
+from brain.systems.cycles.serializers import serialize_cycle, serialize_cycle_run
+from brain.systems.cycles.service import async_run_cycle_now
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.org import User
@@ -62,6 +53,15 @@ def _cycle_scope_conditions(user: dict[str, Any]) -> list[Any]:
 
 def _bad_request(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
+
+
+def _cycle_actor(user: dict[str, Any]) -> CycleMutationActor:
+    return CycleMutationActor(
+        user_id=str(user["id"]),
+        org_id=str(user["org_id"]) if user.get("org_id") else None,
+        principal_type=user.get("principal_type") or "user",
+        source_id=str(user["id"]),
+    )
 
 
 def _target_idea_scope_conditions(idea_id: str, user: dict[str, Any]) -> list[Any]:
@@ -128,94 +128,28 @@ async def create_cycle(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
+    await _validate_target_idea(db, body.target_idea_id, user)
     try:
-        timezone_name = validate_timezone_name(body.timezone)
-        if body.run_at is not None:
-            schedule_expr = build_one_time_schedule_expr(body.run_at, timezone_name)
-        elif body.schedule_expr:
-            schedule_expr = validate_schedule_expr(body.schedule_expr, timezone_name)
-        else:
-            raise HTTPException(status_code=400, detail="schedule_expr or run_at is required")
-        execution_mode = validate_execution_mode(body.execution_mode)
-        thinking_override = validate_thinking_override(body.thinking_override)
-        name = validate_nonempty_trimmed(body.name, "name")
-        prompt = validate_nonempty_trimmed(body.prompt, "prompt")
-        next_run_at = compute_next_run_at(schedule_expr, timezone_name)
+        cycle = await command_create_cycle(
+            db,
+            actor=_cycle_actor(user),
+            name=body.name,
+            prompt=body.prompt,
+            timezone_name=body.timezone,
+            schedule_expr=body.schedule_expr,
+            run_at=body.run_at,
+            enabled=body.enabled,
+            model_override=body.model_override,
+            thinking_override=body.thinking_override,
+            target_idea_id=body.target_idea_id,
+            guidance=body.guidance,
+            rationale=body.rationale,
+        )
     except ValueError as exc:
         raise _bad_request(exc) from exc
-    await _validate_target_idea(db, body.target_idea_id, user)
-    cycle = Cycle(
-        user_id=user["id"],
-        org_id=user.get("org_id"),
-        creator_type=user.get("principal_type") or "user",
-        creator_id=str(user["id"]),
-        maintainer_type=user.get("principal_type") or "user",
-        maintainer_id=str(user["id"]),
-        name=name,
-        prompt=prompt,
-        schedule_expr=schedule_expr,
-        timezone=timezone_name,
-        enabled=body.enabled,
-        model_override=(body.model_override or "").strip() or None,
-        thinking_override=thinking_override,
-        execution_mode=REUSABLE_THREAD_EXECUTION_MODE,
-        target_idea_id=body.target_idea_id,
-        reopen_archived=cycle_defaults(
-            execution_mode=execution_mode,
-            reopen_archived=body.reopen_archived,
-        ),
-        next_run_at=next_run_at,
-    )
-    db.add(cycle)
-    await db.flush()
-    revision = await async_record_cycle_revision(
-        db,
-        cycle,
-        source_type=user.get("principal_type") or "user",
-        source_id=str(user["id"]),
-        rationale=body.rationale or "Initial Cycle definition.",
-    )
-    await async_add_cycle_output_target(
-        db,
-        cycle,
-        target_type="cycle_ledger",
-        target_id=str(cycle.id),
-        label="Cycle ledger",
-        source_type=user.get("principal_type") or "user",
-        source_id=str(user["id"]),
-        rationale="Every Cycle persists durable memory in its ledger.",
-        revision_id=revision.id,
-    )
-    if cycle.target_idea_id:
-        await async_add_cycle_output_target(
-            db,
-            cycle,
-            target_type="thread",
-            target_id=str(cycle.target_idea_id),
-            label="Cycle thread",
-            source_type=user.get("principal_type") or "user",
-            source_id=str(user["id"]),
-            rationale="Initial display thread for Cycle output.",
-            revision_id=revision.id,
-        )
-    if body.guidance:
-        await async_add_cycle_guidance(
-            db,
-            cycle,
-            guidance=body.guidance,
-            source_type=user.get("principal_type") or "user",
-            source_id=str(user["id"]),
-            rationale=body.rationale,
-            revision_id=revision.id,
-        )
     await db.refresh(cycle)
     payload = serialize_cycle(cycle)
-    event = {
-        "org_id": cycle.org_id,
-        "user_id": cycle.user_id,
-        "cycle_id": cycle.id,
-        "target_idea_id": cycle.target_idea_id,
-    }
+    event = cycle_change_event(cycle)
     await db.commit()
     publish_cycle_change(
         action="create",
@@ -246,74 +180,31 @@ async def update_cycle(
         await _validate_target_idea(db, updates["target_idea_id"], user)
 
     try:
-        next_timezone = cycle.timezone
-        if "timezone" in updates and updates["timezone"] is not None:
-            next_timezone = validate_timezone_name(updates["timezone"])
-
-        next_schedule_expr = cycle.schedule_expr
-        if "run_at" in updates and updates["run_at"] is not None:
-            next_schedule_expr = build_one_time_schedule_expr(updates["run_at"], next_timezone)
-        elif "schedule_expr" in updates and updates["schedule_expr"] is not None:
-            next_schedule_expr = validate_schedule_expr(updates["schedule_expr"], next_timezone)
-
-        next_run_at = compute_next_run_at(next_schedule_expr, next_timezone)
-
-        if "name" in updates and updates["name"] is not None:
-            cycle.name = validate_nonempty_trimmed(updates["name"], "name")
-        if "prompt" in updates and updates["prompt"] is not None:
-            cycle.prompt = validate_nonempty_trimmed(updates["prompt"], "prompt")
-        cycle.timezone = next_timezone
-        cycle.schedule_expr = next_schedule_expr
-        if "enabled" in updates and updates["enabled"] is not None:
-            cycle.enabled = updates["enabled"]
-        if "model_override" in updates:
-            cycle.model_override = (updates["model_override"] or "").strip() or None
-        if "thinking_override" in updates:
-            cycle.thinking_override = validate_thinking_override(updates["thinking_override"])
-        if "execution_mode" in updates and updates["execution_mode"] is not None:
-            cycle.execution_mode = validate_execution_mode(updates["execution_mode"])
-        if "target_idea_id" in updates:
-            cycle.target_idea_id = updates["target_idea_id"]
-        if "reopen_archived" in updates and updates["reopen_archived"] is not None:
-            cycle.reopen_archived = updates["reopen_archived"]
-        elif "execution_mode" in updates and "reopen_archived" not in updates:
-            cycle.reopen_archived = cycle_defaults(
-                execution_mode=cycle.execution_mode,
-                reopen_archived=None,
-            )
-
-        cycle.execution_mode = REUSABLE_THREAD_EXECUTION_MODE
-        cycle.reopen_archived = True
-
-        cycle.next_run_at = next_run_at
-    except ValueError as exc:
-        raise _bad_request(exc) from exc
-    revision = await async_record_cycle_revision(
-        db,
-        cycle,
-        source_type=user.get("principal_type") or "user",
-        source_id=str(user["id"]),
-        rationale=updates.get("rationale") or "Cycle updated.",
-    )
-    if updates.get("guidance"):
-        await async_add_cycle_guidance(
+        await command_update_cycle(
             db,
             cycle,
-            guidance=updates["guidance"],
-            source_type=user.get("principal_type") or "user",
-            source_id=str(user["id"]),
+            actor=_cycle_actor(user),
+            name=updates.get("name"),
+            prompt=updates.get("prompt"),
+            timezone_name=updates.get("timezone"),
+            schedule_expr=updates.get("schedule_expr"),
+            run_at=updates.get("run_at"),
+            enabled=updates.get("enabled"),
+            model_override=updates.get("model_override"),
+            model_override_provided="model_override" in updates,
+            thinking_override=updates.get("thinking_override"),
+            thinking_override_provided="thinking_override" in updates,
+            target_idea_id=updates.get("target_idea_id"),
+            target_idea_provided="target_idea_id" in updates,
+            guidance=updates.get("guidance"),
             rationale=updates.get("rationale"),
-            revision_id=revision.id,
         )
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
     await db.flush()
     await db.refresh(cycle)
     payload = serialize_cycle(cycle)
-    event = {
-        "org_id": cycle.org_id,
-        "user_id": cycle.user_id,
-        "cycle_id": cycle.id,
-        "target_idea_id": cycle.target_idea_id,
-    }
+    event = cycle_change_event(cycle)
     await db.commit()
     publish_cycle_change(
         action="update",
@@ -329,15 +220,8 @@ async def delete_cycle(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     cycle = await _get_cycle_or_404(db, cycle_id, user)
-    cycle.enabled = False
-    cycle.deleted_at = datetime.now(timezone.utc)
-    event = {
-        "org_id": cycle.org_id,
-        "user_id": cycle.user_id,
-        "cycle_id": cycle_id,
-        "target_idea_id": cycle.target_idea_id,
-    }
-    await db.flush()
+    await command_delete_cycle(db, cycle)
+    event = cycle_change_event(cycle)
     await db.commit()
     publish_cycle_change(
         action="delete",
