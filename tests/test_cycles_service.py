@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -211,6 +211,31 @@ class _AsyncCycleListSession:
 
     async def scalars(self, statement):
         return _AllResult(self._cycles)
+
+
+class _RecoverStaleSession:
+    def __init__(self, *, runs, cycles=None, agent_runs=None):
+        self._runs = list(runs)
+        self._cycles = {cycle.id: cycle for cycle in (cycles or [])}
+        self._agent_runs = {run.id: run for run in (agent_runs or [])}
+
+    async def scalars(self, statement):
+        return _AllResult(self._runs)
+
+    async def get(self, model, value):
+        if model is Cycle:
+            return self._cycles.get(value)
+        if model is AgentRun:
+            return self._agent_runs.get(value)
+        return None
+
+
+class _SingleRunSession:
+    def __init__(self, run):
+        self._run = run
+
+    async def scalars(self, statement):
+        return _ScalarResult(self._run)
 
 
 def _fail_sync_bridge(*args, **kwargs):
@@ -719,6 +744,99 @@ async def test_manage_cycle_list_uses_native_uow_without_sync_bridges(monkeypatc
     assert factory.uows[0].entered is True
     assert payload["cycles"][0]["id"] == cycle.id
     assert payload["cycles"][0]["name"] == cycle.name
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_cycle_runs_executes_recent_queued_and_settles_old_rows(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    recent_queued = CycleRun()
+    recent_queued.id = 21
+    recent_queued.cycle_id = 5
+    recent_queued.status = "queued"
+    recent_queued.scheduled_for = now.replace(microsecond=0) - timedelta(hours=2)
+    recent_queued.prompt_snapshot = "Run recent missed work"
+
+    old_queued = CycleRun()
+    old_queued.id = 22
+    old_queued.cycle_id = 5
+    old_queued.status = "queued"
+    old_queued.scheduled_for = now.replace(microsecond=0) - timedelta(days=3)
+    old_queued.prompt_snapshot = "Run ancient missed work"
+
+    stale_running = CycleRun()
+    stale_running.id = 23
+    stale_running.cycle_id = 6
+    stale_running.status = "running"
+    stale_running.scheduled_for = now.replace(microsecond=0) - timedelta(hours=3)
+    stale_running.started_at = stale_running.scheduled_for
+    stale_running.run_id = 99
+    stale_running.prompt_snapshot = "Finish stale running work"
+
+    active_cycle = Cycle()
+    active_cycle.id = 5
+    active_cycle.deleted_at = None
+    active_cycle.last_run_at = now
+    active_cycle.last_status = "completed"
+    active_cycle.last_error = None
+
+    running_cycle = Cycle()
+    running_cycle.id = 6
+    running_cycle.deleted_at = None
+    running_cycle.last_run_at = stale_running.scheduled_for
+    running_cycle.last_status = "running"
+    running_cycle.last_error = None
+
+    agent_run = AgentRun()
+    agent_run.id = 99
+    agent_run.status = "completed"
+
+    factory = _AsyncUnitOfWorkFactory([
+        _RecoverStaleSession(
+            runs=[old_queued, recent_queued, stale_running],
+            cycles=[active_cycle, running_cycle],
+            agent_runs=[agent_run],
+        )
+    ])
+    executed_run_ids = []
+
+    async def fake_async_execute_cycle_run(run_id):
+        executed_run_ids.append(run_id)
+        recent_queued.status = "running"
+
+    monkeypatch.setattr(service, "UnitOfWork", factory)
+    monkeypatch.setattr(service, "async_execute_cycle_run", fake_async_execute_cycle_run)
+
+    recovered = await service.async_recover_stale_cycle_runs_once(
+        stale_after_seconds=60,
+        catchup_window_seconds=24 * 60 * 60,
+    )
+
+    assert recovered == [recent_queued.id]
+    assert executed_run_ids == [recent_queued.id]
+    assert old_queued.status == "skipped"
+    assert old_queued.skip_reason == "missed_catchup_window"
+    assert active_cycle.last_status == "completed"
+    assert stale_running.status == "completed"
+    assert stale_running.completed_at is not None
+    assert running_cycle.last_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_execute_cycle_run_ignores_non_queued_rows(monkeypatch):
+    run = CycleRun()
+    run.id = 12
+    run.status = "running"
+
+    factory = _AsyncUnitOfWorkFactory([
+        _SingleRunSession(run),
+    ])
+
+    monkeypatch.setattr(service, "UnitOfWork", factory)
+
+    await service.async_execute_cycle_run(run.id)
+
+    assert run.status == "running"
 
 
 def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):

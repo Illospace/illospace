@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import asyncio
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -35,6 +35,17 @@ TERMINAL_RUN_STATUSES = CYCLE_RUN_TERMINAL_STATUSES
 ONE_TIME_SCHEDULE_PREFIX = "at:"
 CYCLE_LAUNCH_ENVELOPE_VERSION = 1
 CYCLE_CONTROL_TOOLS = ("manage_cycle",)
+DEFAULT_STALE_CYCLE_RUN_SECONDS = 60
+DEFAULT_CYCLE_RUN_CATCHUP_WINDOW_SECONDS = 24 * 60 * 60
+RUN_STATUS_TO_CYCLE_RUN_STATUS = {
+    "completed": "completed",
+    "failed": "failed",
+    "error": "failed",
+    "canceled": "failed",
+    "cancelled": "failed",
+    "expired": "failed",
+    "blocked": "failed",
+}
 
 
 def validate_nonempty_trimmed(value: str, field_name: str) -> str:
@@ -460,6 +471,31 @@ def _finalize_cycle_run(
     cycle.last_error = error
 
 
+def _finalize_stale_cycle_run(
+    run: CycleRun,
+    cycle: Cycle | None,
+    *,
+    status: str,
+    error: str | None = None,
+    skip_reason: str | None = None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    run.status = status
+    run.completed_at = now
+    run.error = error
+    run.skip_reason = skip_reason
+    if cycle is None:
+        return
+    cycle_last_run_at = _aware_utc(cycle.last_run_at)
+    scheduled_for = _aware_utc(run.scheduled_for)
+    if cycle_last_run_at is None or (
+        scheduled_for is not None and scheduled_for >= cycle_last_run_at
+    ):
+        cycle.last_run_at = now
+        cycle.last_status = status
+        cycle.last_error = error
+
+
 async def async_run_cycle_now(cycle_id: int) -> dict:
     scheduled_for = datetime.now(timezone.utc)
     async with UnitOfWork() as uow:
@@ -480,12 +516,91 @@ async def async_run_cycle_now(cycle_id: int) -> dict:
 
     async with UnitOfWork() as uow:
         run = await uow.session.get(CycleRun, run_id)
-        return serialize_cycle_run(run)
+    return serialize_cycle_run(run)
+
+
+def _aware_utc(value: datetime | None) -> datetime | None:
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _agent_run_terminal_cycle_status(agent_run: AgentRun | None) -> str | None:
+    if agent_run is None:
+        return None
+    return RUN_STATUS_TO_CYCLE_RUN_STATUS.get(str(agent_run.status or "").strip().lower())
+
+
+async def async_recover_stale_cycle_runs_once(
+    *,
+    limit: int = 10,
+    stale_after_seconds: int = DEFAULT_STALE_CYCLE_RUN_SECONDS,
+    catchup_window_seconds: int = DEFAULT_CYCLE_RUN_CATCHUP_WINDOW_SECONDS,
+) -> list[int]:
+    now = datetime.now(timezone.utc)
+    stale_cutoff = now - timedelta(seconds=max(0, int(stale_after_seconds)))
+    catchup_cutoff = now - timedelta(seconds=max(0, int(catchup_window_seconds)))
+    executable_run_ids: list[int] = []
+
+    async with UnitOfWork() as uow:
+        active_stmt = (
+            select(CycleRun)
+            .where(
+                CycleRun.status.in_(ACTIVE_RUN_STATUSES),
+                CycleRun.scheduled_for <= stale_cutoff,
+            )
+            .order_by(CycleRun.scheduled_for.asc(), CycleRun.id.asc())
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        active_runs = list((await uow.session.scalars(active_stmt)).all())
+        for run in active_runs:
+            cycle = await uow.session.get(Cycle, run.cycle_id)
+            if run.status == "queued":
+                scheduled_for = _aware_utc(run.scheduled_for)
+                if scheduled_for is not None and scheduled_for < catchup_cutoff:
+                    _finalize_stale_cycle_run(
+                        run,
+                        cycle,
+                        status="skipped",
+                        skip_reason="missed_catchup_window",
+                    )
+                elif cycle is None or cycle.deleted_at is not None:
+                    _finalize_stale_cycle_run(
+                        run,
+                        cycle,
+                        status="failed",
+                        error="Cycle unavailable before stale queued run recovered",
+                    )
+                else:
+                    executable_run_ids.append(run.id)
+                continue
+
+            agent_run = await uow.session.get(AgentRun, run.run_id) if run.run_id else None
+            terminal_status = _agent_run_terminal_cycle_status(agent_run)
+            if terminal_status is not None:
+                _finalize_stale_cycle_run(
+                    run,
+                    cycle,
+                    status=terminal_status,
+                    error=(
+                        "Agent run ended without cycle-run finalization"
+                        if terminal_status == "failed"
+                        else None
+                    ),
+                )
+
+    for run_id in executable_run_ids:
+        await async_execute_cycle_run(run_id)
+
+    return executable_run_ids
 
 
 async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
     claimed_run_ids: list[int] = []
     now = datetime.now(timezone.utc)
+
+    await async_recover_stale_cycle_runs_once(limit=limit)
 
     async with UnitOfWork() as uow:
         stmt = (
@@ -544,7 +659,7 @@ async def async_execute_cycle_run(run_id: int) -> None:
             select(CycleRun).where(CycleRun.id == run_id).with_for_update()
         )
         run = result.first()
-        if not run or run.status in TERMINAL_RUN_STATUSES:
+        if not run or run.status != "queued":
             return
         result = await uow.session.scalars(
             select(Cycle).where(Cycle.id == run.cycle_id).with_for_update()
