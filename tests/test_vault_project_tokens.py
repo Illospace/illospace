@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import base64
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -201,6 +201,55 @@ async def test_ask_secret_without_matching_project_creates_pending_grant(patch_u
     assert result["allowed"] is False
     assert result["status"] == "pending"
     assert result["grant"]["key_name"] == "GITHUB_TOKEN"
+
+
+async def test_secret_reference_does_not_consume_approved_grant(patch_uow, session):
+    from brain.systems.vault import authorize_agent_secret_read, authorize_agent_secret_reference
+
+    await _secret(session, "GITHUB_TOKEN", "ghp-test", access_level="ask")
+    grant = VaultAgentGrant(
+        key_name="GITHUB_TOKEN",
+        org_id=ORG_ID,
+        requested_by_user_id=USER_ID,
+        run_id=42,
+        requested_by="agent",
+        reason="Need GitHub access for this project task",
+        status="approved",
+        requested_at=datetime.now(timezone.utc),
+        decided_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        max_reads=1,
+        read_count=0,
+    )
+    session.add(grant)
+    await session.flush()
+
+    reference = await authorize_agent_secret_reference(
+        "GITHUB_TOKEN",
+        actor_user_id=USER_ID,
+        org_id=ORG_ID,
+        run_id=42,
+        reason="Need GitHub access for this project task",
+    )
+    await session.refresh(grant)
+
+    assert reference["allowed"] is True
+    assert reference["status"] == "approved"
+    assert grant.read_count == 0
+    assert grant.status == "approved"
+
+    read = await authorize_agent_secret_read(
+        "GITHUB_TOKEN",
+        actor_user_id=USER_ID,
+        org_id=ORG_ID,
+        run_id=42,
+        reason="Need GitHub access for this project task",
+    )
+    await session.refresh(grant)
+
+    assert read["allowed"] is True
+    assert grant.read_count == 1
+    assert grant.status == "used"
 
 
 async def test_resolve_project_bound_env_tokens_returns_org_bound_tokens_for_members(patch_uow, session):
@@ -520,6 +569,40 @@ def test_exec_command_redacts_project_bound_git_auth_from_output(monkeypatch, tm
     assert encoded not in result["stderr"]
     assert result["stdout"].count("[secret redacted]") == 3
     assert result["stderr"].count("[secret redacted]") == 1
+
+
+def test_exec_command_uses_explicit_secret_env_mounts_without_returning_values(tmp_path):
+    from brain.systems.runs.tool_catalog.handlers.files import _handle_exec_command
+
+    token = "ghp-secret-value"
+    encoded = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    proc = SimpleNamespace(
+        returncode=0,
+        stdout=f"token={token}\nencoded={encoded}\n",
+        stderr="",
+    )
+
+    with patch("subprocess.run", return_value=proc) as run:
+        result = _handle_exec_command("gh auth status", working_dir=str(tmp_path), secret_env={"GH_TOKEN": token})
+
+    run_env = run.call_args.kwargs["env"]
+    assert run_env["GH_TOKEN"] == token
+    assert result["injected_env"] == ["GH_TOKEN"]
+    assert result["git_auth_configured"] == ["github.com"]
+    assert token not in str(result)
+    assert encoded not in str(result)
+    assert result["stdout"].count("[secret redacted]") == 2
+
+
+def test_exec_command_rejects_unresolved_secret_env_specs(tmp_path):
+    from brain.systems.runs.tool_catalog.handlers.files import _handle_exec_command
+
+    with pytest.raises(ValueError, match="resolved string value"):
+        _handle_exec_command(
+            "gh auth status",
+            working_dir=str(tmp_path),
+            secret_env={"GH_TOKEN": {"vault_key": "GITHUB_TOKEN"}},
+        )
 
 
 def test_run_script_uses_project_bound_env_and_redacts_values(monkeypatch, tmp_path):

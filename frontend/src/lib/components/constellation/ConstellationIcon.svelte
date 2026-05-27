@@ -38,6 +38,7 @@
     IconListDetails,
     IconLogout,
     IconMenu2,
+    IconMessages,
     IconMessageReply,
     IconMoon,
     IconMoodPlus,
@@ -74,6 +75,7 @@
     | 'bolt'
     | 'brush'
     | 'check'
+    | 'chat'
     | 'close'
     | 'code'
     | 'copy'
@@ -143,6 +145,7 @@
     bolt: IconBolt,
     brush: IconBrush,
     check: IconCheck,
+    chat: IconMessages,
     close: IconX,
     code: IconCode,
     copy: IconCopy,

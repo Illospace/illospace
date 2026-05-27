@@ -19,6 +19,10 @@ from brain.systems.runs.actions import (
 )
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType, EventVisibility
 from brain.systems.runs.events import activity_event, redact_tool_call_result, run_event
+from brain.systems.runs.secret_mounts import (
+    handler_args_with_resolved_secret_env,
+    resolve_secret_env_mounts,
+)
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.tool_catalog.metadata import ActionPolicyResult
 
@@ -141,11 +145,12 @@ class AsyncRunToolExecutor:
         manifest_id = None
         try:
             enforce_tool_scope(tool.name, tool.args, scope)
+            action_context = await self._action_context(run_id, root_run_id=root_run_id)
             manifest = build_action_manifest(
                 tool.name,
                 (),
                 tool.args,
-                context=await self._action_context(run_id, root_run_id=root_run_id),
+                context=action_context,
             )
             manifest_id = await _maybe_await(record_action_manifest(manifest)) if manifest else None
             policy_result = await self._apply_action_policy_gate(
@@ -165,7 +170,15 @@ class AsyncRunToolExecutor:
                     root_run_id=root_run_id,
                     collector=collector,
                 )
-            result = _runtime_policy_handler(tool.handler)(**tool.args)
+            secret_env = await resolve_secret_env_mounts(
+                tool.name,
+                tool.args.get("secret_env"),
+                run_id=run_id,
+                context=action_context,
+            )
+            handler = _runtime_policy_handler(tool.handler)
+            handler_args = handler_args_with_resolved_secret_env(tool.name, tool.args, secret_env)
+            result = handler(**handler_args)
             if inspect.isawaitable(result):
                 result = await result
         except Exception as exc:

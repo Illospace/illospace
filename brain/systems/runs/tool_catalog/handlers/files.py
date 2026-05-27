@@ -341,6 +341,7 @@ def _handle_exec_command(
     working_dir: str | None = None,
     timeout: int = 60,
     _workspace: str | None = None,
+    secret_env: Mapping[str, str] | None = None,
 ) -> dict:
     """Execute a shell command with safety limits."""
     import subprocess
@@ -373,7 +374,7 @@ def _handle_exec_command(
     # Otherwise split into a list for safer execution.
     _SHELL_CHARS = {'|', '>', '<', '&&', '||', ';', '`', '$(' }
     needs_shell = any(ch in command for ch in _SHELL_CHARS)
-    project_execution = _prepare_project_execution_env()
+    project_execution = _prepare_project_execution_env(extra_env=secret_env)
 
     try:
         if needs_shell:
@@ -428,7 +429,13 @@ def _handle_exec_command(
         return result
 
 
-def _handle_run_script(script: str, description: str | None = None, timeout: int = 60, _workspace: str | None = None) -> dict:
+def _handle_run_script(
+    script: str,
+    description: str | None = None,
+    timeout: int = 60,
+    _workspace: str | None = None,
+    secret_env: Mapping[str, str] | None = None,
+) -> dict:
     """Write a Python script to a tempfile and execute it."""
     import subprocess
     import tempfile
@@ -437,7 +444,7 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
     if _workspace and os.path.exists(_workspace) and not os.path.isdir(_workspace):
         _workspace = None
     cwd = _workspace or _patched_workspace_root()
-    project_execution = _prepare_project_execution_env()
+    project_execution = _prepare_project_execution_env(extra_env=secret_env)
 
     try:
         _block_project_source_command_write(script, operation="script", cwd=cwd)

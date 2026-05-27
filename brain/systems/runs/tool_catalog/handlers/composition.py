@@ -311,12 +311,13 @@ def _get_tool_handlers(
 
     ws = workspace_root  # capture for closures
     handlers.update({
-        "exec_command": lambda command, working_dir=None, timeout=60, workspace=None: (
+        "exec_command": lambda command, working_dir=None, timeout=60, workspace=None, secret_env=None: (
             _handle_exec_command(
                 command,
                 working_dir=working_dir,
                 timeout=timeout,
                 _workspace=_select_workspace(workspace, ws, allowed_workspaces),
+                secret_env=secret_env,
             )
         ),
         "read_file": lambda path, workspace=None, start_line=None, end_line=None: (
@@ -357,12 +358,13 @@ def _get_tool_handlers(
                 _workspace=_select_workspace(workspace, ws, allowed_workspaces),
             )
         ),
-        "run_script": lambda script, description=None, timeout=60, workspace=None: (
+        "run_script": lambda script, description=None, timeout=60, workspace=None, secret_env=None: (
             _handle_run_script(
                 script,
                 description,
                 timeout,
                 _workspace=_select_workspace(workspace, ws, allowed_workspaces),
+                secret_env=secret_env,
             )
         ),
     })
@@ -403,12 +405,13 @@ def _get_tool_handlers(
             "file_summary",
             _file_summary_with_workspace,
         )
-        handlers["test_runner"] = lambda target, pattern=None, verbose=False: (
+        handlers["test_runner"] = lambda target, pattern=None, verbose=False, secret_env=None: (
             extended_handlers["test_runner"](
                 target,
                 pattern=pattern,
                 verbose=verbose,
                 workspace_root=_workspace_hint(),
+                secret_env=secret_env,
             )
         )
         handlers["project_context"] = lambda path=None: (

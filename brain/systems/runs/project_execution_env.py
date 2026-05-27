@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 from dataclasses import dataclass
 import logging
 import os
@@ -14,6 +15,7 @@ from brain.systems.runs.execution_context import _agent_context
 logger = logging.getLogger("agent")
 
 _GITHUB_TOKEN_ENV_NAMES = ("GH_TOKEN", "GITHUB_TOKEN")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -266,6 +268,23 @@ def current_project_bound_env() -> dict[str, str]:
     return {}
 
 
+def _resolved_extra_env(extra_env: Mapping[str, str] | None) -> dict[str, str]:
+    """Validate already-resolved one-shot env values supplied by trusted callers."""
+    if extra_env is None:
+        return {}
+    if not isinstance(extra_env, Mapping):
+        raise ValueError("extra_env must be a mapping of resolved environment variable names to string values")
+    resolved: dict[str, str] = {}
+    for raw_key, raw_value in extra_env.items():
+        key = str(raw_key or "").strip()
+        if not _ENV_NAME_RE.fullmatch(key):
+            raise ValueError(f"Invalid extra_env variable name: {key or '<empty>'}")
+        if not isinstance(raw_value, str):
+            raise ValueError(f"extra_env.{key} must be a resolved string value")
+        resolved[key] = raw_value
+    return resolved
+
+
 async def async_current_project_bound_env() -> dict[str, str]:
     """Resolve project-bound vault tokens for command env injection."""
     user_id = getattr(_agent_context, "user_id", None)
@@ -290,9 +309,10 @@ async def async_current_project_bound_env() -> dict[str, str]:
         return {}
 
 
-def prepare_project_execution_env() -> ProjectExecutionEnv:
-    project_env = current_project_bound_env()
-    if not project_env:
+def prepare_project_execution_env(extra_env: Mapping[str, str] | None = None) -> ProjectExecutionEnv:
+    injected_env = current_project_bound_env()
+    injected_env.update(_resolved_extra_env(extra_env))
+    if not injected_env:
         return ProjectExecutionEnv(
             env=None,
             injected_env=[],
@@ -301,21 +321,22 @@ def prepare_project_execution_env() -> ProjectExecutionEnv:
         )
 
     run_env = os.environ.copy()
-    run_env.update(project_env)
-    git_auth_hosts, git_sensitive_values = _configure_project_bound_git_auth(run_env, project_env)
+    run_env.update(injected_env)
+    git_auth_hosts, git_sensitive_values = _configure_project_bound_git_auth(run_env, injected_env)
     if git_auth_hosts:
         _configure_project_bound_git_identity(run_env)
     return ProjectExecutionEnv(
         env=run_env,
-        injected_env=sorted(project_env),
+        injected_env=sorted(injected_env),
         git_auth_hosts=git_auth_hosts,
-        sensitive_values=list(project_env.values()) + git_sensitive_values,
+        sensitive_values=list(injected_env.values()) + git_sensitive_values,
     )
 
 
-async def async_prepare_project_execution_env() -> ProjectExecutionEnv:
-    project_env = await async_current_project_bound_env()
-    if not project_env:
+async def async_prepare_project_execution_env(extra_env: Mapping[str, str] | None = None) -> ProjectExecutionEnv:
+    injected_env = await async_current_project_bound_env()
+    injected_env.update(_resolved_extra_env(extra_env))
+    if not injected_env:
         return ProjectExecutionEnv(
             env=None,
             injected_env=[],
@@ -324,15 +345,15 @@ async def async_prepare_project_execution_env() -> ProjectExecutionEnv:
         )
 
     run_env = os.environ.copy()
-    run_env.update(project_env)
-    git_auth_hosts, git_sensitive_values = _configure_project_bound_git_auth(run_env, project_env)
+    run_env.update(injected_env)
+    git_auth_hosts, git_sensitive_values = _configure_project_bound_git_auth(run_env, injected_env)
     if git_auth_hosts:
         _configure_project_bound_git_identity(run_env)
     return ProjectExecutionEnv(
         env=run_env,
-        injected_env=sorted(project_env),
+        injected_env=sorted(injected_env),
         git_auth_hosts=git_auth_hosts,
-        sensitive_values=list(project_env.values()) + git_sensitive_values,
+        sensitive_values=list(injected_env.values()) + git_sensitive_values,
     )
 
 

@@ -28,6 +28,8 @@
   import { THEME_OPTIONS, theme, type ThemeId } from '$lib/stores/theme.svelte';
   import { ui } from '$lib/stores/ui.svelte';
   import {
+    ConstellationIcon,
+    ConstellationIconButton,
     ConstellationSegmentedToggle,
     ConstellationWorkspaceBackdrop,
   } from '$lib/design-system/constellation';
@@ -591,6 +593,15 @@
     chatDockForeground = false;
   }
 
+  async function toggleWorkspaceChat() {
+    if (chatDockExpanded) {
+      compactWorkspaceChat();
+      return;
+    }
+
+    await openChatToMostRecentConversation();
+  }
+
   async function handleNotificationSelect(notification: AppNotification) {
     await notifications.markRead(notification.id);
     workspaceOverlay.closeWorkspaceApp();
@@ -795,6 +806,10 @@
     if (cortexSurfaceReady && (chatDockExpanded || chatDockForeground)) {
       ensureCortexChatDockLoaded();
     }
+  });
+
+  $effect(() => {
+    if (!chatDockExpanded && chatDockForeground) chatDockForeground = false;
   });
 
   $effect(() => {
@@ -1104,6 +1119,26 @@
             onActiveKeyChange={handleThemeChange}
           />
 
+          <div class="workspace-chat-trigger-shell">
+            <ConstellationIconButton
+              label={chatDockExpanded ? 'Close chat' : 'Open chat'}
+              title={chatDockExpanded ? 'Close chat' : 'Open chat'}
+              size="md"
+              variant="secondary"
+              className="workspace-chat-trigger"
+              pressed={chatDockExpanded}
+              onclick={toggleWorkspaceChat}
+            >
+              <ConstellationIcon name="chat" size={16} stroke={1.85} />
+            </ConstellationIconButton>
+
+            {#if notifications.summary.chat_unread_total > 0}
+              <span class="workspace-chat-trigger-badge">
+                {notifications.summary.chat_unread_total > 9 ? '9+' : notifications.summary.chat_unread_total}
+              </span>
+            {/if}
+          </div>
+
           {#if CortexNotificationsMenuComponent}
             <CortexNotificationsMenuComponent onSelect={handleNotificationSelect} />
           {/if}
@@ -1129,7 +1164,7 @@
       />
     {/if}
 
-    {#if cortexSurfaceReady}
+    {#if cortexSurfaceReady && chatDockExpanded}
       <WorkspaceChatDock
         bind:expanded={chatDockExpanded}
         panelOpen={cortex.panelOpen}
@@ -1378,6 +1413,31 @@
     justify-content: flex-end;
     gap: 12px;
     pointer-events: auto;
+  }
+
+  .workspace-chat-trigger-shell {
+    position: relative;
+    flex: 0 0 auto;
+  }
+
+  .workspace-chat-trigger-badge {
+    position: absolute;
+    top: -5px;
+    right: -4px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    background: linear-gradient(180deg, rgba(94, 169, 255, 0.96), rgba(54, 114, 222, 0.94));
+    color: rgba(247, 251, 255, 0.98);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    box-shadow: 0 10px 22px rgba(24, 72, 151, 0.32);
+    pointer-events: none;
   }
 
   .workspace-top-tools-layer {
