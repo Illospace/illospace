@@ -390,6 +390,40 @@ BRAIN_TOOLS = [
         },
     },
     {
+        "name": "transcribe_audio_attachment",
+        "description": (
+            "Transcribe an audio attachment from the current thread or an uploaded file using "
+            "the Voice Runtime's selected transcription provider. Use this for Slack voice notes, "
+            "recorded messages, or audio files when the spoken content is needed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {
+                    "type": "string",
+                    "description": (
+                        "Attachment id from the current thread attachment context. "
+                        "Optional if there is exactly one audio attachment."
+                    ),
+                },
+                "attachment_url": {
+                    "type": "string",
+                    "description": "Uploaded attachment URL, such as /static/uploads/voice.webm.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Backend storage path for an uploaded audio attachment.",
+                },
+                "language": {
+                    "type": "string",
+                    "enum": ["auto", "en", "fr"],
+                    "default": "auto",
+                    "description": "Optional language hint. Use auto for bilingual English/French audio.",
+                },
+            },
+        },
+    },
+    {
         "name": "read_thread_messages",
         "description": (
             "Read or search raw stored messages from this agent run's persistent LLM session when "

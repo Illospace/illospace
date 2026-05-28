@@ -110,6 +110,55 @@ async def test_runtime_voice_is_missing_without_openai_memory_key(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_runtime_voice_reports_gemini_as_not_enabled(monkeypatch):
+    from brain.systems.runtime_settings import voice as voice_settings
+    from brain.systems.runtime_settings.schemas import RuntimeMemoryRead
+
+    memory = RuntimeMemoryRead(
+        embedder="gemini",
+        embedding_status="ready",
+        indexed_vectors=0,
+        api_key_statuses={"openai": True, "gemini": True},
+        reranker="weighted",
+        embedder_options=[],
+        embedding_model_options=[],
+        reranker_options=[],
+    )
+
+    voice = voice_settings.runtime_voice_from_memory(
+        memory,
+        voice_settings.RuntimeVoiceConfig(provider="gemini", language="auto"),
+    )
+
+    assert voice.provider == "gemini"
+    assert voice.model == "gemini-live"
+    assert voice.status == "error"
+    assert "not enabled yet" in (voice.detail or "")
+
+
+@pytest.mark.asyncio
+async def test_runtime_voice_session_does_not_use_openai_key_when_gemini_selected(monkeypatch):
+    from fastapi import HTTPException
+
+    from brain.systems.runtime_settings import voice as voice_settings
+
+    key_lookup = AsyncMock(return_value="sk-memory-openai")
+    monkeypatch.setattr(
+        voice_settings,
+        "async_get_runtime_voice_config",
+        AsyncMock(return_value=voice_settings.RuntimeVoiceConfig(provider="gemini", language="auto")),
+    )
+    monkeypatch.setattr(voice_settings, "_async_installation_embedding_api_key", key_lookup)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await voice_settings.async_create_runtime_voice_session(MagicMock(), SimpleNamespace(id="user-1"))
+
+    assert excinfo.value.status_code == 409
+    assert "Gemini Live voice is not enabled yet" in str(excinfo.value.detail)
+    key_lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_runtime_voice_session_uses_openai_memory_key_without_returning_it(monkeypatch):
     from brain.systems.runtime_settings import voice as voice_settings
 

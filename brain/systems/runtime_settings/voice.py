@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 OPENAI_REALTIME_TRANSCRIPTION_MODEL = "gpt-realtime-whisper"
 OPENAI_REALTIME_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 OPENAI_MEMORY_KEY_REQUIRED_DETAIL = "Voice dictation needs an OpenAI API key in AI Runtime memory settings."
+GEMINI_LIVE_MODEL = "gemini-live"
+GEMINI_VOICE_UNAVAILABLE_DETAIL = "Gemini Live voice is not enabled yet."
 RUNTIME_VOICE_SETTINGS_KEY = "runtime_voice"
 VOICE_PROVIDER_OPTIONS = [
     RuntimeOption(
@@ -117,6 +119,18 @@ def runtime_voice_from_memory(
             language_options=VOICE_LANGUAGE_OPTIONS,
         )
 
+    if config.provider == "gemini":
+        return RuntimeVoiceRead(
+            provider="gemini",
+            model=GEMINI_LIVE_MODEL,
+            source="memory",
+            language=_voice_language(config.language),
+            status="error",
+            detail=GEMINI_VOICE_UNAVAILABLE_DETAIL,
+            provider_options=VOICE_PROVIDER_OPTIONS,
+            language_options=VOICE_LANGUAGE_OPTIONS,
+        )
+
     return RuntimeVoiceRead(
         provider="openai",
         model=OPENAI_REALTIME_TRANSCRIPTION_MODEL,
@@ -131,8 +145,13 @@ def runtime_voice_from_memory(
 
 async def async_create_runtime_voice_session(session: AsyncSession, user: User) -> RuntimeVoiceSessionRead:
     config = await async_get_runtime_voice_config(session)
+    if config.provider != "openai":
+        raise HTTPException(
+            status_code=409,
+            detail=GEMINI_VOICE_UNAVAILABLE_DETAIL,
+        )
     api_key = await _async_installation_embedding_api_key(session, "openai")
-    if config.provider != "openai" or not api_key:
+    if not api_key:
         raise HTTPException(
             status_code=409,
             detail=OPENAI_MEMORY_KEY_REQUIRED_DETAIL,
@@ -192,7 +211,10 @@ def _openai_transcription_settings(language: str) -> dict[str, str]:
 
 
 def _voice_provider(value: object) -> str:
-    return "openai" if str(value or "openai").strip().lower() == "openai" else "openai"
+    provider = str(value or "openai").strip().lower()
+    if provider in {"gemini", "google"}:
+        return "gemini"
+    return "openai"
 
 
 def _voice_language(value: object) -> str:

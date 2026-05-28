@@ -11,7 +11,7 @@ ConnectionStatus = Literal["connected", "missing", "error"]
 EmbedderKey = Literal["local_gpu", "local_cpu", "openai", "gemini"]
 RerankerKey = Literal["weighted"]
 RuntimeUpdateStatus = Literal["idle", "running"]
-VoiceProviderKey = Literal["openai"]
+VoiceProviderKey = Literal["openai", "gemini"]
 VoiceLanguageKey = Literal["auto", "en", "fr"]
 VoiceStatus = Literal["ready", "missing", "error"]
 

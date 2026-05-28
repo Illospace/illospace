@@ -12,6 +12,7 @@ greenlet>=3.2
 numpy>=2.0
 scikit-learn>=1.8
 httpx>=0.28
+websockets>=15.0
 readability-lxml>=0.8
 pyyaml>=6.0
 rich>=14.0

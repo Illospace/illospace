@@ -61,6 +61,7 @@ from brain.systems.runs.tool_catalog.handlers.session_tools import (
     _handle_session_write,
 )
 from brain.systems.runs.tool_catalog.handlers.activity import _handle_my_activity
+from brain.systems.runs.tool_catalog.handlers.voice import _handle_transcribe_audio_attachment
 from brain.systems.runs.tool_catalog.handlers.web import _handle_web_fetch, _handle_web_search
 from brain.systems.runs.tool_catalog.handlers.workers import _handle_spawn_worker
 from brain.systems.runs.tool_catalog.handlers.workspace_data import (
@@ -194,6 +195,10 @@ def _get_tool_handlers(
             user_id=getattr(_agent_context, "user_id", None),
             org_id=getattr(_agent_context, "org_id", None),
         ),
+        "transcribe_audio_attachment": lambda **kw: _patched_private(
+            "_handle_transcribe_audio_attachment",
+            _handle_transcribe_audio_attachment,
+        )(**kw),
         "manage_soul": lambda action, content=None, reason=None: manage_agent_soul(
             action,
             content=content,

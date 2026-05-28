@@ -18,6 +18,7 @@ RUN apt-get update \
         ca-certificates \
         chromium \
         curl \
+        ffmpeg \
         fonts-liberation \
         git \
         jq \
