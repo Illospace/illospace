@@ -479,6 +479,21 @@ def test_slack_tools_are_available_on_normal_illo_tool_surface():
 
 
 @pytest.mark.asyncio
+async def test_manage_slack_setup_instructions_are_runtime_self_contained():
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_manage_slack
+
+    result = json.loads(await _handle_manage_slack(action="setup_instructions"))
+
+    setup = result["setup"]
+    assert setup["slack_admin_url"] == "https://api.slack.com/apps"
+    assert setup["token_sources"]["SLACK_BOT_TOKEN"].endswith("Bot User OAuth Token")
+    assert setup["token_sources"]["SLACK_APP_TOKEN"].endswith("token with connections:write")
+    assert setup["docker_compose_command"] == "docker compose --profile slack up -d slack-connector"
+    assert any("Invite Illo" in step for step in setup["steps"])
+    assert "Do not store Slack tokens" in setup["token_handling"]
+
+
+@pytest.mark.asyncio
 async def test_slack_connector_processes_actionable_socket_payload(session):
     from brain.systems.slack.connector import SlackConnectorConfig, process_socket_payload
 

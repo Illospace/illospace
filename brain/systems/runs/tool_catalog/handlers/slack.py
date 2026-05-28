@@ -210,12 +210,34 @@ def _slack_setup_instructions() -> dict[str, Any]:
         "required_env": ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"],
         "optional_env": ["SLACK_TEAM_ID", "SLACK_BOT_USER_ID", "ILLO_SLACK_ORG_ID", "ILLO_SLACK_OWNER_USER_ID"],
         "connector_command": "python -m brain.app.cli.slack_connector",
+        "docker_compose_command": "docker compose --profile slack up -d slack-connector",
+        "slack_admin_url": "https://api.slack.com/apps",
+        "token_handling": (
+            "Ask the admin to set Slack tokens in the Illospace deployment environment or secret store. "
+            "Do not store Slack tokens in Illospace metadata."
+        ),
         "steps": [
-            "Create a Slack app from the checked-in manifest.",
-            "Enable Socket Mode in Slack.",
-            "Install the app to the workspace.",
-            "Set SLACK_BOT_TOKEN to the bot token and SLACK_APP_TOKEN to the app-level token.",
+            "Open https://api.slack.com/apps and choose Create New App.",
+            "Choose From an app manifest, select the Slack workspace, and paste the manifest from deploy/slack/illo-self-hosted-manifest.yml.",
+            "In Basic Information, confirm the app is named Illo.",
+            "In Socket Mode, enable Socket Mode and create an app-level token with the connections:write scope.",
+            "In OAuth & Permissions, install the app to the workspace and copy the Bot User OAuth Token.",
+            "Set SLACK_BOT_TOKEN to the Bot User OAuth Token, usually prefixed xoxb-.",
+            "Set SLACK_APP_TOKEN to the app-level Socket Mode token, usually prefixed xapp-.",
+            "Optionally set SLACK_TEAM_ID and SLACK_BOT_USER_ID so event filtering and health records are explicit.",
             "Run the Slack connector process alongside the Illospace API worker.",
+            "Invite Illo to any Slack channels where it should participate, then mention @Illo or DM it.",
+        ],
+        "token_sources": {
+            "SLACK_BOT_TOKEN": "Slack app > OAuth & Permissions > Bot User OAuth Token",
+            "SLACK_APP_TOKEN": "Slack app > Basic Information > App-Level Tokens > token with connections:write",
+            "SLACK_TEAM_ID": "Slack workspace/team id, visible in event payloads or Slack admin URLs",
+            "SLACK_BOT_USER_ID": "Slack app bot user id, visible in app authorizations or bot profile details",
+        },
+        "success_checks": [
+            "manage_slack action=status should show a Slack connection after the connector starts.",
+            "Mentioning @Illo in an invited channel should create a slack_message inbound event.",
+            "Illo should answer in Slack through post_slack_reply.",
         ],
     }
 
