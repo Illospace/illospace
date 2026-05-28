@@ -60,6 +60,11 @@ from brain.systems.runs.tool_catalog.handlers.session_tools import (
     _handle_session_read,
     _handle_session_write,
 )
+from brain.systems.runs.tool_catalog.handlers.slack import (
+    _handle_manage_slack,
+    _handle_post_slack_reply,
+    _handle_read_slack_conversation,
+)
 from brain.systems.runs.tool_catalog.handlers.activity import _handle_my_activity
 from brain.systems.runs.tool_catalog.handlers.voice import _handle_transcribe_audio_attachment
 from brain.systems.runs.tool_catalog.handlers.web import _handle_web_fetch, _handle_web_search
@@ -218,6 +223,10 @@ def _get_tool_handlers(
             "_handle_post_chat_message",
             _handle_post_chat_message,
         )(**kw),
+        "post_slack_reply": lambda **kw: _patched_private(
+            "_handle_post_slack_reply",
+            _handle_post_slack_reply,
+        )(**kw),
         "post_thread_discussion_reply": lambda **kw: _patched_private(
             "_handle_post_thread_discussion_reply",
             _handle_post_thread_discussion_reply,
@@ -229,6 +238,14 @@ def _get_tool_handlers(
         "read_thread_discussion": lambda **kw: _patched_private(
             "_handle_read_thread_discussion",
             _handle_read_thread_discussion,
+        )(**kw),
+        "read_slack_conversation": lambda **kw: _patched_private(
+            "_handle_read_slack_conversation",
+            _handle_read_slack_conversation,
+        )(**kw),
+        "manage_slack": lambda **kw: _patched_private(
+            "_handle_manage_slack",
+            _handle_manage_slack,
         )(**kw),
         "manage_cycle": lambda **kw: _patched_private("_handle_manage_cycle", _handle_manage_cycle)(**kw),
         "manage_domain": lambda **kw: _patched_private("_handle_manage_domain", _handle_manage_domain)(**kw),
