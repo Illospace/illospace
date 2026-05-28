@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 from dataclasses import dataclass
@@ -41,6 +42,9 @@ ACTION_ILO_REQUIRED = "ilo_required"
 ACTION_THREAD_ATTACHED = "thread.attached"
 ACTION_CONTEXT_ACCEPTED = "accepted"
 CONTEXT_ENVELOPE_KIND = "context"
+SPECIAL_ENVELOPE_HANDLER_PATHS = {
+    "slack_message": "brain.systems.slack.inbound:process_slack_message_envelope",
+}
 
 DOMAIN_PROJECTION_ACTIONS = frozenset(
     {ACTION_DOMAIN_PROJECTION_UPSERT, "domain_projection", "create_domain_record"}
@@ -202,6 +206,14 @@ async def submit_inbound_envelope(
                 event=event,
                 normalized=normalized,
             )
+        special_result = await _process_registered_envelope(
+            session,
+            context=context,
+            event=event,
+            normalized=normalized,
+        )
+        if special_result is not None:
+            return special_result
 
         policy = await match_source_policy(
             session,
@@ -517,6 +529,23 @@ async def _store_inbound_event(
             return existing, True
         raise
     return event, False
+
+
+async def _process_registered_envelope(
+    session: AsyncSession,
+    *,
+    context: _ConnectionContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    handler_path = SPECIAL_ENVELOPE_HANDLER_PATHS.get(str(normalized.get("kind") or ""))
+    if handler_path is None:
+        return None
+
+    module_name, function_name = handler_path.split(":", 1)
+    module = importlib.import_module(module_name)
+    handler = getattr(module, function_name)
+    return await handler(session, context=context, event=event, normalized=normalized)
 
 
 async def _projection_for_policy(

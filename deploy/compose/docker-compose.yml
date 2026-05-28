@@ -137,6 +137,24 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  slack-connector:
+    <<: *backend-service
+    profiles: ["slack"]
+    command: ["python", "-m", "brain.app.cli.slack_connector"]
+    environment:
+      <<: *illo-env
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
+      SLACK_TEAM_ID: ${SLACK_TEAM_ID:-}
+      SLACK_BOT_USER_ID: ${SLACK_BOT_USER_ID:-}
+      ILLO_SLACK_ORG_ID: ${ILLO_SLACK_ORG_ID:-}
+      ILLO_SLACK_OWNER_USER_ID: ${ILLO_SLACK_OWNER_USER_ID:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
   updater:
     image: ${ILLO_UPDATER_IMAGE:-ghcr.io/illospace/updater:latest}
     build:

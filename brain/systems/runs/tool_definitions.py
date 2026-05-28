@@ -1254,6 +1254,42 @@ CHAT_TOOLS = [
         },
     },
     {
+        "name": "post_slack_reply",
+        "description": (
+            "Post an Illo-authored reply into Slack. Use this when a run was "
+            "triggered by a Slack mention or DM and the visible answer belongs "
+            "back in Slack. Defaults to the originating Slack channel, thread, or DM."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "string",
+                    "description": "Concise Slack markdown message to post as Illo.",
+                },
+                "channel_id": {
+                    "type": "string",
+                    "description": "Optional Slack channel or DM id. Defaults to the triggering surface.",
+                },
+                "thread_ts": {
+                    "type": "string",
+                    "description": "Optional Slack thread timestamp. Defaults to the triggering response target.",
+                },
+                "visibility": {
+                    "type": "string",
+                    "enum": ["public", "ephemeral"],
+                    "description": "Whether to post publicly or ephemerally. Defaults to public.",
+                    "default": "public",
+                },
+                "user_id": {
+                    "type": "string",
+                    "description": "Slack user id required for ephemeral replies outside a Slack-triggered run.",
+                },
+            },
+            "required": ["body"],
+        },
+    },
+    {
         "name": "post_ai_timeline_message",
         "description": (
             "Post an Illo-authored message into the linked Thread AI Timeline. "
@@ -1298,6 +1334,75 @@ CHAT_TOOLS = [
                     "default": 50,
                 },
             },
+        },
+    },
+    {
+        "name": "read_slack_conversation",
+        "description": (
+            "Read bounded Slack context for the current Slack-triggered run. "
+            "Use this intentionally when the triggering message is not enough. "
+            "Slack channel history is not automatically included in every prompt."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "enum": ["triggering_message", "thread", "recent_channel"],
+                    "description": "Which Slack context to read. Defaults to the triggering thread.",
+                    "default": "thread",
+                },
+                "channel_id": {
+                    "type": "string",
+                    "description": "Optional Slack channel or DM id. Defaults to the triggering surface.",
+                },
+                "thread_ts": {
+                    "type": "string",
+                    "description": "Optional Slack thread timestamp. Defaults to the triggering thread.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum Slack messages to return.",
+                    "default": 50,
+                },
+            },
+        },
+    },
+    {
+        "name": "manage_slack",
+        "description": (
+            "Inspect self-hosted Slack setup, connector health, and Slack-to-Illospace "
+            "identity mappings. Use this when helping an admin set up Slack or when "
+            "a Slack actor needs to be linked to an Illospace user."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "setup_instructions",
+                        "status",
+                        "list_mappings",
+                        "link_identity",
+                        "unlink_identity",
+                    ],
+                    "description": "Slack management action.",
+                },
+                "connection_id": {
+                    "type": "string",
+                    "description": "Slack source connection id. Optional when only one Slack connection exists.",
+                },
+                "slack_user_id": {
+                    "type": "string",
+                    "description": "Slack user id, required for link_identity and unlink_identity.",
+                },
+                "user_id": {
+                    "type": "string",
+                    "description": "Illospace user id, required for link_identity.",
+                },
+            },
+            "required": ["action"],
         },
     }
 ]

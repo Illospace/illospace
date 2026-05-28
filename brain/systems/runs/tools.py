@@ -34,6 +34,7 @@ FILE_EDIT_TOOLS = frozenset({"apply_patch", "edit_file", "write_file"})
 COMMAND_OUTPUT_TOOLS = frozenset({"exec_command", "run_script", "test_runner"})
 CHAT_MESSAGE_TOOLS = frozenset({
     "post_chat_message",
+    "post_slack_reply",
     "post_thread_discussion_reply",
     "post_ai_timeline_message",
 })
