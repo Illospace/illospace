@@ -17,6 +17,7 @@ export interface VoiceDictationSession {
 export interface VoiceDictationTransportHandlers {
   onTranscriptDelta: (delta: string) => void;
   onTranscriptCompleted?: (transcript: string) => void;
+  onAudioLevel?: (level: number) => void;
 }
 
 export interface VoiceDictationConnection {

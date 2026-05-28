@@ -464,7 +464,7 @@
 
   {#snippet footerStatus()}
     {#if isVoiceRecording}
-      <WorkspaceVoiceRecording elapsedMs={voiceDictation.elapsedMs} />
+      <WorkspaceVoiceRecording elapsedMs={voiceDictation.elapsedMs} levels={voiceDictation.audioLevels} />
     {/if}
   {/snippet}
 
