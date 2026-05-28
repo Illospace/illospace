@@ -206,28 +206,45 @@ def _slack_connection_payload(connection) -> dict[str, Any]:
 
 def _slack_setup_instructions() -> dict[str, Any]:
     return {
-        "manifest_path": "deploy/slack/illo-self-hosted-manifest.yml",
-        "required_env": ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"],
-        "optional_env": ["SLACK_TEAM_ID", "SLACK_BOT_USER_ID", "ILLO_SLACK_ORG_ID", "ILLO_SLACK_OWNER_USER_ID"],
-        "connector_command": "python -m brain.app.cli.slack_connector",
-        "docker_compose_command": "docker compose --profile slack up -d slack-connector",
+        "audience": "Slack admin and Illospace deployment admin",
         "slack_admin_url": "https://api.slack.com/apps",
         "token_handling": (
-            "Ask the admin to set Slack tokens in the Illospace deployment environment or secret store. "
-            "Do not store Slack tokens in Illospace metadata."
+            "Slack tokens are secrets. Ask the admin to add them to the Illospace server configuration "
+            "or secret store; do not paste them into chat and do not store them in Illospace metadata."
         ),
-        "steps": [
-            "Open https://api.slack.com/apps and choose Create New App.",
-            "Choose From an app manifest, select the Slack workspace, and paste the manifest from deploy/slack/illo-self-hosted-manifest.yml.",
-            "In Basic Information, confirm the app is named Illo.",
-            "In Socket Mode, enable Socket Mode and create an app-level token with the connections:write scope.",
-            "In OAuth & Permissions, install the app to the workspace and copy the Bot User OAuth Token.",
-            "Set SLACK_BOT_TOKEN to the Bot User OAuth Token, usually prefixed xoxb-.",
-            "Set SLACK_APP_TOKEN to the app-level Socket Mode token, usually prefixed xapp-.",
-            "Optionally set SLACK_TEAM_ID and SLACK_BOT_USER_ID so event filtering and health records are explicit.",
-            "Run the Slack connector process alongside the Illospace API worker.",
-            "Invite Illo to any Slack channels where it should participate, then mention @Illo or DM it.",
+        "slack_steps": [
+            "Open https://api.slack.com/apps and create a new Slack app for Illo in the target workspace.",
+            "Set the app name and bot display name to Illo.",
+            "Enable Socket Mode.",
+            "Create an app-level token with the connections:write scope.",
+            "Add the required bot OAuth scopes.",
+            "Subscribe the bot to the required Slack events.",
+            "Install the app to the Slack workspace and copy the Bot User OAuth Token.",
+            "Invite Illo to any channels where it should participate, then mention @Illo or DM it.",
         ],
+        "illospace_admin_steps": [
+            "Add the Bot User OAuth Token to the Illospace server secret named SLACK_BOT_TOKEN.",
+            "Add the app-level Socket Mode token to the Illospace server secret named SLACK_APP_TOKEN.",
+            "Enable or restart the Illospace Slack connector using the deployment's normal service controls.",
+            "Return here and ask Illo to check Slack status.",
+        ],
+        "required_bot_scopes": [
+            "app_mentions:read",
+            "channels:history",
+            "channels:read",
+            "chat:write",
+            "files:read",
+            "files:write",
+            "groups:history",
+            "groups:read",
+            "im:history",
+            "im:read",
+            "im:write",
+            "users:read",
+        ],
+        "required_bot_events": ["app_mention", "message.channels", "message.groups", "message.im"],
+        "required_secret_names": ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"],
+        "optional_secret_names": ["SLACK_TEAM_ID", "SLACK_BOT_USER_ID", "ILLO_SLACK_ORG_ID", "ILLO_SLACK_OWNER_USER_ID"],
         "token_sources": {
             "SLACK_BOT_TOKEN": "Slack app > OAuth & Permissions > Bot User OAuth Token",
             "SLACK_APP_TOKEN": "Slack app > Basic Information > App-Level Tokens > token with connections:write",

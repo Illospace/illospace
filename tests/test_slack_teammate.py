@@ -479,18 +479,62 @@ def test_slack_tools_are_available_on_normal_illo_tool_surface():
 
 
 @pytest.mark.asyncio
-async def test_manage_slack_setup_instructions_are_runtime_self_contained():
+async def test_manage_slack_setup_instructions_are_runtime_safe_admin_guidance():
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_manage_slack
 
     result = json.loads(await _handle_manage_slack(action="setup_instructions"))
 
     setup = result["setup"]
     assert setup["slack_admin_url"] == "https://api.slack.com/apps"
+    assert setup["audience"] == "Slack admin and Illospace deployment admin"
     assert setup["token_sources"]["SLACK_BOT_TOKEN"].endswith("Bot User OAuth Token")
     assert setup["token_sources"]["SLACK_APP_TOKEN"].endswith("token with connections:write")
-    assert setup["docker_compose_command"] == "docker compose --profile slack up -d slack-connector"
-    assert any("Invite Illo" in step for step in setup["steps"])
-    assert "Do not store Slack tokens" in setup["token_handling"]
+    assert {"app_mentions:read", "chat:write", "im:history"} <= set(setup["required_bot_scopes"])
+    assert {"app_mention", "message.im"} <= set(setup["required_bot_events"])
+    assert any("Invite Illo" in step for step in setup["slack_steps"])
+    assert any("SLACK_BOT_TOKEN" in step for step in setup["illospace_admin_steps"])
+    assert "do not store them in Illospace metadata" in setup["token_handling"]
+    serialized = json.dumps(setup)
+    assert "docker compose" not in serialized
+    assert "python -m" not in serialized
+    assert "deploy/slack" not in serialized
+    assert "manifest_path" not in setup
+
+
+@pytest.mark.asyncio
+async def test_manage_slack_status_does_not_leak_developer_setup_details(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_manage_slack
+
+    class _Scalars:
+        def all(self):
+            return []
+
+    class _Session:
+        async def scalars(self, _stmt):
+            return _Scalars()
+
+    class _UnitOfWork:
+        session = _Session()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
+
+    with bind_agent_context({"org_id": ORG_ID}):
+        result = json.loads(await _handle_manage_slack(action="status"))
+
+    assert result["ok"] is True
+    assert result["connections"] == []
+    serialized = json.dumps(result["setup"])
+    assert "docker compose" not in serialized
+    assert "python -m" not in serialized
+    assert "deploy/slack" not in serialized
+    assert "manifest_path" not in result["setup"]
 
 
 @pytest.mark.asyncio
