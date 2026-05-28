@@ -106,6 +106,16 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
             "scopes": ["narrow"],
         },
     },
+    "transcribe_audio_attachment": {
+        "permission": "network_read",
+        "risk_class": "low",
+        "side_effect_class": "read_only_external",
+        "reversibility": "read_only_external",
+        "output_budget_chars": 24_000,
+        "evidence_emitter": True,
+        "action_manifest": True,
+        "expected_effect": "stream an uploaded audio attachment to OpenAI Realtime and return the transcript",
+    },
     "manage_soul": {
         "permission": "manage_soul",
         "risk_class": "medium",

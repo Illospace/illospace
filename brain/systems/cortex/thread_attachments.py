@@ -26,6 +26,40 @@ READABLE_TEXT_MIME_TYPES = {
     "text/yaml",
 }
 IMAGE_EXTENSIONS = {"avif", "gif", "jpeg", "jpg", "png", "webp"}
+AUDIO_EXTENSIONS = {
+    "aac",
+    "aif",
+    "aiff",
+    "flac",
+    "m4a",
+    "mp3",
+    "mp4",
+    "mpeg",
+    "mpga",
+    "oga",
+    "ogg",
+    "opus",
+    "wav",
+    "weba",
+    "webm",
+}
+AUDIO_MIME_TYPES = {
+    "audio/aac",
+    "audio/aiff",
+    "audio/flac",
+    "audio/m4a",
+    "audio/mp3",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/mpga",
+    "audio/ogg",
+    "audio/opus",
+    "audio/wav",
+    "audio/webm",
+    "audio/x-aiff",
+    "audio/x-m4a",
+    "audio/x-wav",
+}
 MAX_TEXT_ATTACHMENT_CHARS = 18_000
 MAX_TOTAL_TEXT_ATTACHMENT_CHARS = 36_000
 MAX_IMAGE_BLOCK_BYTES = 8_000_000
@@ -101,6 +135,14 @@ def is_image_attachment(attachment: dict[str, Any], path: Path) -> bool:
     return attachment_content_type(attachment).startswith("image/")
 
 
+def is_audio_attachment(attachment: dict[str, Any], path: Path) -> bool:
+    ext = path.suffix.lower().lstrip(".")
+    if ext in AUDIO_EXTENSIONS:
+        return True
+    content_type = attachment_content_type(attachment)
+    return content_type.startswith("audio/") or content_type in AUDIO_MIME_TYPES
+
+
 def _read_text_excerpt(path: Path, *, limit: int = MAX_TEXT_ATTACHMENT_CHARS) -> tuple[str, bool]:
     text = path.read_text(encoding="utf-8", errors="replace")
     if len(text) <= limit:
@@ -159,6 +201,8 @@ def build_thread_attachment_context(
             items.append(item)
         elif is_image_attachment(attachment, path):
             items.append(_base_item(attachment, path, kind="image"))
+        elif is_audio_attachment(attachment, path):
+            items.append(_base_item(attachment, path, kind="audio"))
         if len(items) >= MAX_CONTEXT_ATTACHMENTS:
             break
 
@@ -235,6 +279,12 @@ def attachment_context_prompt(items: list[dict[str, Any]]) -> str:
                 lines.append("Text extraction failed for this file.")
         elif item.get("kind") == "image":
             lines.append("Image attached. Inspect the image input when vision is available.")
+        elif item.get("kind") == "audio":
+            attachment_id = item.get("id") or f"attachment {index}"
+            lines.append(
+                f"Audio attached. Use transcribe_audio_attachment with attachment_id={attachment_id} "
+                "if the spoken content is needed."
+            )
     return "\n".join(lines).strip()
 
 
@@ -300,6 +350,7 @@ __all__ = [
     "build_thread_attachment_context",
     "image_content_blocks_from_attachment_context",
     "initial_user_content_blocks",
+    "is_audio_attachment",
     "is_image_attachment",
     "is_readable_text_attachment",
     "project_context_from_text_attachments",
