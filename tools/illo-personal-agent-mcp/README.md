@@ -77,7 +77,7 @@ Local repo config before package publish:
 
 ## Tools
 
-- `illo_submit_context`: default path for personal agents sending new context to Illo. Sends an intent, ordered context parts, provenance, constraints, correlation, and idempotency key so Illo can place the context in the team workspace.
+- `illo_submit_context`: default path for personal agents sending new context to Illo. Sends an intent, ordered context parts, provenance, constraints, correlation, and idempotency key so Illo can store the context without starting a run or creating a visible Thread. When correlation points to an existing Thread, the context is attached there and the result includes `thread_url`.
 - `illo_search_workspace`: search existing Illo ideas/threads before creating duplicates.
 - `illo_get_thread`: inspect visible context for an existing Illo thread.
 - `illo_create_thread`: advanced compatibility tool for explicitly requested visible team threads.
@@ -92,8 +92,8 @@ without a separate skill or prompt file.
 ## Context Submission
 
 Personal agents should prefer `illo_submit_context` when they need to hand new
-conversation, trace, file, diff, link, or artifact context to Illo. A typical
-payload:
+conversation, trace, file, diff, link, or artifact context to Illo without
+summoning a visible Illo response. A typical payload:
 
 ```json
 {

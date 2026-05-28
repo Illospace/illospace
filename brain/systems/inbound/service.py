@@ -38,7 +38,6 @@ from brain.systems.user_domains.service import AsyncDomainService, DomainError, 
 ACTION_STORE_ONLY = "store_only"
 ACTION_DOMAIN_PROJECTION_UPSERT = "domain_projection.upsert"
 ACTION_ILO_REQUIRED = "ilo_required"
-ACTION_THREAD_CREATED = "thread.created"
 ACTION_THREAD_ATTACHED = "thread.attached"
 ACTION_CONTEXT_ACCEPTED = "accepted"
 CONTEXT_ENVELOPE_KIND = "context"
@@ -1023,34 +1022,90 @@ async def _process_context_envelope(
     event: InboundEventRow,
     normalized: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Attach submitted personal-agent context to a Thread without LLM routing."""
+    """Store submitted personal-agent context without starting Illo work."""
 
     if not context.owner_user_id:
-        return await _complete_event(
+        return await _store_context_event(
             session,
-            event,
-            policy=None,
-            status=STATUS_PROCESSED,
-            action_type=ACTION_CONTEXT_ACCEPTED,
-            action_result={
-                "operation": "stored",
-                "reason": "missing_authority_user",
-                "event_id": str(event.id),
-            },
-            confidence=1.0,
-            target={"kind": "inbound_event", "event_id": str(event.id)},
-            tool_use={"type": ACTION_CONTEXT_ACCEPTED},
-            reasoning_summary="Context was accepted as an inbound event because no authority user was available.",
+            context=context,
+            event=event,
+            normalized=normalized,
+            reason="missing_authority_user",
+            message="Context accepted and stored as an inbound event because no authority user was available.",
         )
 
     correlation = dict(normalized.get("correlation") or {})
     thread = await _correlated_thread(session, context=context, correlation=correlation)
-    operation = "attached"
-    action_type = ACTION_THREAD_ATTACHED
     if thread is None:
-        thread = await _create_context_thread(session, context=context, event=event, normalized=normalized)
-        operation = "created"
-        action_type = ACTION_THREAD_CREATED
+        return await _store_context_event(
+            session,
+            context=context,
+            event=event,
+            normalized=normalized,
+            reason="no_correlated_thread",
+            message=(
+                "Context accepted and stored. No visible Thread was created because "
+                "the submission was not correlated with an existing Thread."
+            ),
+        )
+
+    return await _attach_context_to_thread(
+        session,
+        context=context,
+        event=event,
+        normalized=normalized,
+        correlation=correlation,
+        thread=thread,
+    )
+
+
+async def _store_context_event(
+    session: AsyncSession,
+    *,
+    context: _ConnectionContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+    reason: str,
+    message: str,
+) -> dict[str, Any]:
+    parts = list(normalized.get("parts") or [])
+    action_result = {
+        "operation": "stored",
+        "reason": reason,
+        "event_id": str(event.id),
+        "origin": normalized.get("origin"),
+        "part_count": len(parts),
+        "message": message,
+    }
+    return await _complete_event(
+        session,
+        event,
+        policy=None,
+        status=STATUS_PROCESSED,
+        action_type=ACTION_CONTEXT_ACCEPTED,
+        action_result=action_result,
+        confidence=1.0,
+        target={"kind": "inbound_event", "event_id": str(event.id)},
+        tool_use={"type": "illo_submit_context", "operation": "stored"},
+        reasoning_summary=message,
+        reusable_pattern_candidate={
+            "kind": CONTEXT_ENVELOPE_KIND,
+            "origin": normalized.get("origin"),
+            "source_kind": context.source_kind,
+        },
+    )
+
+
+async def _attach_context_to_thread(
+    session: AsyncSession,
+    *,
+    context: _ConnectionContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+    correlation: Mapping[str, Any],
+    thread: Idea,
+) -> dict[str, Any]:
+    operation = "attached"
 
     source = dict(normalized.get("source") or {})
     constraints = dict(normalized.get("constraints") or {})
@@ -1110,11 +1165,7 @@ async def _process_context_envelope(
         "context_submission_id": str(submission.id),
         "thread_message_id": thread_message.id,
         "event_id": str(event.id),
-        "message": (
-            "Context accepted and attached to an existing Thread."
-            if operation == "attached"
-            else "Context accepted and a Thread was created."
-        ),
+        "message": "Context accepted and attached to an existing Thread.",
     }
     submission.routing_result = dict(action_result)
     return await _complete_event(
@@ -1122,16 +1173,12 @@ async def _process_context_envelope(
         event,
         policy=None,
         status=STATUS_PROCESSED,
-        action_type=action_type,
+        action_type=ACTION_THREAD_ATTACHED,
         action_result=action_result,
         confidence=1.0,
         target={"kind": "cortex_idea", "idea_id": str(thread.id)},
         tool_use={"type": "illo_submit_context", "operation": operation},
-        reasoning_summary=(
-            "Context ingress was routed deterministically by explicit correlation."
-            if operation == "attached"
-            else "Context ingress created a Thread immediately so the personal agent can return a link."
-        ),
+        reasoning_summary="Context ingress was routed deterministically by explicit correlation.",
         reusable_pattern_candidate={
             "kind": CONTEXT_ENVELOPE_KIND,
             "origin": normalized.get("origin"),
@@ -1153,38 +1200,6 @@ async def _correlated_thread(
     if thread is None or str(thread.org_id) != str(context.org_id):
         raise InboundValidationError("correlation.thread_id does not match an accessible Thread")
     return thread
-
-
-async def _create_context_thread(
-    session: AsyncSession,
-    *,
-    context: _ConnectionContext,
-    event: InboundEventRow,
-    normalized: Mapping[str, Any],
-) -> Idea:
-    intent = _clean_optional(normalized.get("intent")) or _clean_optional(normalized.get("summary"))
-    source_name = context.display_name or context.source_kind or "personal agent"
-    title = _truncate(intent or f"Context from {source_name}", 180)
-    idea = Idea(
-        title=title,
-        description=_truncate(f"{source_name} submitted context to Illo.", 500),
-        status="emerged",
-        origin="inbound_context",
-        origin_ref=f"inbound_event:{event.id}",
-        user_id=str(context.owner_user_id),
-        org_id=context.org_id,
-        agent_details={
-            "context_ingress": {
-                "event_id": str(event.id),
-                "origin": normalized.get("origin"),
-                "connection_id": context.connection_id,
-                "source_kind": context.source_kind,
-            }
-        },
-    )
-    session.add(idea)
-    await session.flush()
-    return idea
 
 
 def _context_timeline_preview(
