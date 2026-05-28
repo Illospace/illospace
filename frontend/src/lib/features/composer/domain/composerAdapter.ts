@@ -96,6 +96,9 @@ export interface WorkspaceComposerAdapterProps {
   attachmentsSlot?: Snippet;
   leadingControls?: Snippet;
   extraLeadingControls?: Snippet;
+  footerStatusActive?: boolean;
+  footerStatus?: Snippet;
+  extraTrailingControls?: Snippet;
   trailingControls?: Snippet;
   supporting?: Snippet;
 }

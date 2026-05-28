@@ -30,11 +30,13 @@ from .schemas import (
     RuntimeModelsUpdate,
     RuntimeSettingsRead,
     RuntimeUpdateRead,
+    RuntimeVoiceRead,
     RuntimeVoiceSessionRead,
+    RuntimeVoiceUpdate,
 )
 from .service import async_get_runtime_settings, can_manage_runtime_settings
 from .self_update import async_get_runtime_update_status, async_start_runtime_update
-from .voice import async_create_runtime_voice_session
+from .voice import async_create_runtime_voice_session, async_update_runtime_voice
 
 router = APIRouter(prefix="/api/runtime-settings", tags=["runtime-settings"], dependencies=[Depends(rate_limit)])
 _OPENAI_OAUTH_CALLBACK_START_MODES = {"auto", "server", "local_bridge"}
@@ -171,6 +173,16 @@ async def create_voice_session(
     db: AsyncSession = Depends(get_db),
 ) -> RuntimeVoiceSessionRead:
     return await async_create_runtime_voice_session(db, user)
+
+
+@router.patch("/voice", response_model=RuntimeVoiceRead)
+async def save_runtime_voice(
+    payload: RuntimeVoiceUpdate,
+    user: User = Depends(_runtime_user),
+    db: AsyncSession = Depends(get_db),
+) -> RuntimeVoiceRead:
+    _require_settings_admin(user)
+    return await async_update_runtime_voice(db, user, payload)
 
 
 @router.get("/update", response_model=RuntimeUpdateRead)

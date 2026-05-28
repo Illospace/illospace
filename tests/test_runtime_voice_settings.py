@@ -28,14 +28,17 @@ async def test_runtime_voice_defaults_to_ready_openai_realtime_from_memory_key(m
             )
         ),
     )
+    monkeypatch.setattr(voice_settings, "_async_read_runtime_config_value", AsyncMock(return_value=None))
 
     voice = await voice_settings.async_get_runtime_voice(session, user)
 
     assert voice.provider == "openai"
     assert voice.model == "gpt-realtime-whisper"
     assert voice.source == "memory"
+    assert voice.language == "auto"
     assert voice.status == "ready"
     assert voice.detail is None
+    assert [option.key for option in voice.language_options] == ["auto", "en", "fr"]
 
 
 @pytest.mark.asyncio
@@ -71,11 +74,13 @@ async def test_runtime_settings_payload_includes_voice_status(monkeypatch):
         "async_get_runtime_memory",
         AsyncMock(return_value=memory),
     )
+    monkeypatch.setattr(runtime_service, "async_get_runtime_voice_config", AsyncMock(return_value=None))
 
     settings = await runtime_service.async_get_runtime_settings(session, user)
 
     assert settings.voice.model == "gpt-realtime-whisper"
     assert settings.voice.status == "ready"
+    assert settings.voice.language == "auto"
 
 
 @pytest.mark.asyncio
@@ -99,6 +104,7 @@ async def test_runtime_voice_is_missing_without_openai_memory_key(monkeypatch):
     assert voice.provider == "openai"
     assert voice.model == "gpt-realtime-whisper"
     assert voice.source == "memory"
+    assert voice.language == "auto"
     assert voice.status == "missing"
     assert "OpenAI API key" in (voice.detail or "")
 
@@ -116,11 +122,7 @@ async def test_runtime_voice_session_uses_openai_memory_key_without_returning_it
         }
     )
 
-    monkeypatch.setattr(
-        voice_settings,
-        "async_get_embedding_runtime_config",
-        AsyncMock(return_value=SimpleNamespace(backend="api", provider="openai")),
-    )
+    monkeypatch.setattr(voice_settings, "async_get_runtime_voice_config", AsyncMock(return_value=voice_settings.RuntimeVoiceConfig(language="fr")))
     monkeypatch.setattr(
         voice_settings,
         "_async_installation_embedding_api_key",
@@ -132,11 +134,13 @@ async def test_runtime_voice_session_uses_openai_memory_key_without_returning_it
 
     assert result.provider == "openai"
     assert result.model == "gpt-realtime-whisper"
+    assert result.language == "fr"
     assert result.client_secret == "ek_test_voice"
     assert result.expires_at == 1_800_000_000
     assert "sk-memory-openai" not in result.model
     create_secret.assert_awaited_once()
     assert create_secret.await_args.args[0] == "sk-memory-openai"
+    assert create_secret.await_args.kwargs["language"] == "fr"
 
 
 @pytest.mark.asyncio
@@ -166,7 +170,77 @@ async def test_openai_realtime_secret_request_uses_manual_commit_for_realtime_wh
     assert captured["url"] == "https://api.openai.com/v1/realtime/client_secrets"
     assert request_json["session"]["type"] == "transcription"
     assert audio_input["transcription"]["model"] == "gpt-realtime-whisper"
+    assert "language" not in audio_input["transcription"]
+    assert "English or French" in audio_input["transcription"]["prompt"]
     assert audio_input["turn_detection"] is None
+
+
+@pytest.mark.asyncio
+async def test_openai_realtime_secret_request_can_pin_french_language(monkeypatch):
+    from brain.systems.runtime_settings import voice as voice_settings
+
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"value": "ek_test_voice", "expires_at": 1_800_000_000}
+
+    async def fake_post(url, **kwargs):
+        captured["kwargs"] = kwargs
+        return Response()
+
+    monkeypatch.setattr(voice_settings, "async_http_post", fake_post)
+
+    await voice_settings._async_create_openai_realtime_client_secret("sk-memory-openai", language="fr")
+
+    transcription = captured["kwargs"]["json"]["session"]["audio"]["input"]["transcription"]
+    assert transcription["language"] == "fr"
+    assert "French" in transcription["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_voice_update_persists_language(monkeypatch):
+    from brain.systems.runtime_settings import voice as voice_settings
+    from brain.systems.runtime_settings.schemas import RuntimeMemoryRead, RuntimeVoiceUpdate
+
+    session = MagicMock()
+    user = SimpleNamespace(id="user-1", org_id="org-1")
+    written = {}
+
+    async def fake_write(_session, key, value):
+        written["key"] = key
+        written["value"] = value
+
+    monkeypatch.setattr(voice_settings, "_async_write_runtime_config_value", fake_write)
+    monkeypatch.setattr(
+        voice_settings,
+        "async_get_runtime_memory",
+        AsyncMock(
+            return_value=RuntimeMemoryRead(
+                embedder="gemini",
+                embedding_status="ready",
+                indexed_vectors=0,
+                api_key_statuses={"openai": True, "gemini": True},
+                reranker="weighted",
+                embedder_options=[],
+                embedding_model_options=[],
+                reranker_options=[],
+            )
+        ),
+    )
+
+    result = await voice_settings.async_update_runtime_voice(
+        session,
+        user,
+        RuntimeVoiceUpdate(provider="openai", language="fr"),
+    )
+
+    assert written["key"] == "runtime_voice"
+    assert '"language": "fr"' in written["value"]
+    assert result.language == "fr"
+    assert result.status == "ready"
 
 
 def test_runtime_voice_secret_helpers_accept_current_openai_response_shape():
