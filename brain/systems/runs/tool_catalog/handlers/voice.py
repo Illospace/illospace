@@ -5,16 +5,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.cortex.thread_attachments import (
-    attachment_content_type,
-    attachment_display_name,
-    is_audio_attachment,
-    upload_path_from_attachment,
-)
-from brain.systems.runtime_settings.audio_transcription import (
-    AudioTranscriptionError,
-    async_transcribe_audio_path,
-)
+from brain.systems.voice.transcription import AudioTranscriptionError, async_transcribe_audio_path
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
 
 
@@ -96,7 +87,7 @@ def _current_audio_context_items() -> list[dict[str, Any]]:
         if not path_value:
             continue
         candidate = Path(path_value)
-        if item.get("kind") == "audio" or is_audio_attachment(item, candidate):
+        if item.get("kind") == "audio" or _is_audio_attachment(item, candidate):
             audio_items.append(dict(item))
     return audio_items
 
@@ -146,16 +137,16 @@ def _resolve_direct_audio(explicit: dict[str, str]) -> dict[str, Any] | None:
         attachment["url"] = explicit["url"]
     if explicit["path"]:
         attachment["storage_path"] = explicit["path"]
-    resolved = upload_path_from_attachment(attachment)
-    if resolved is None or not is_audio_attachment(attachment, resolved):
+    resolved = _upload_path_from_attachment(attachment)
+    if resolved is None or not _is_audio_attachment(attachment, resolved):
         return None
     return {
         "id": f"attachment-{hashlib.sha1(str(resolved).encode('utf-8', errors='ignore')).hexdigest()[:16]}",
         "kind": "audio",
-        "filename": attachment_display_name(attachment, resolved),
+        "filename": _attachment_display_name(attachment, resolved),
         "path": str(resolved),
         "url": explicit["url"] or None,
-        "mime": attachment_content_type(attachment),
+        "mime": _attachment_content_type(attachment),
         "size": resolved.stat().st_size,
     }
 
@@ -171,3 +162,27 @@ def _safety_identifier() -> str | None:
         return None
     digest = hashlib.sha256(f"{org_id or ''}:{user_id}".encode("utf-8", errors="ignore")).hexdigest()[:32]
     return f"illo-user-{digest}"
+
+
+def _is_audio_attachment(attachment: dict[str, Any], path: Path) -> bool:
+    from brain.systems.cortex.thread_attachments import is_audio_attachment
+
+    return is_audio_attachment(attachment, path)
+
+
+def _upload_path_from_attachment(attachment: dict[str, Any]) -> Path | None:
+    from brain.systems.cortex.thread_attachments import upload_path_from_attachment
+
+    return upload_path_from_attachment(attachment)
+
+
+def _attachment_display_name(attachment: dict[str, Any], path: Path) -> str:
+    from brain.systems.cortex.thread_attachments import attachment_display_name
+
+    return attachment_display_name(attachment, path)
+
+
+def _attachment_content_type(attachment: dict[str, Any]) -> str:
+    from brain.systems.cortex.thread_attachments import attachment_content_type
+
+    return attachment_content_type(attachment)

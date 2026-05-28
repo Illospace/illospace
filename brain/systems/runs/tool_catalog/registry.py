@@ -114,7 +114,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "output_budget_chars": 24_000,
         "evidence_emitter": True,
         "action_manifest": True,
-        "expected_effect": "stream an uploaded audio attachment to OpenAI Realtime and return the transcript",
+        "expected_effect": "stream an uploaded audio attachment to the configured voice transcription provider and return the transcript",
     },
     "manage_soul": {
         "permission": "manage_soul",

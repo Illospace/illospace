@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -8,7 +9,7 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_realtime_transcription_streams_pcm_commit_and_uses_whisper():
-    from brain.systems.runtime_settings import audio_transcription
+    from brain.systems.voice import openai_realtime
 
     sent: list[dict] = []
     captured: dict[str, object] = {}
@@ -38,9 +39,13 @@ async def test_realtime_transcription_streams_pcm_commit_and_uses_whisper():
     def fake_connect(url: str, headers: dict[str, str]):
         return FakeWebSocket(url, headers)
 
-    result = await audio_transcription.async_transcribe_pcm_with_openai_realtime(
+    async def chunks():
+        yield b"\x00\x01" * 50
+        yield b"\x00\x01" * 50
+
+    result = await openai_realtime.async_transcribe_pcm_stream_with_openai_realtime(
         "sk-memory-openai",
-        b"\x00\x01" * 100,
+        chunks(),
         language="fr",
         websocket_connect=fake_connect,
         safety_identifier="illo-user-test",
@@ -67,47 +72,63 @@ async def test_realtime_transcription_streams_pcm_commit_and_uses_whisper():
 
 @pytest.mark.asyncio
 async def test_transcribe_audio_path_reuses_memory_key_and_runtime_language(monkeypatch, tmp_path):
-    from brain.systems.runtime_settings import audio_transcription
+    from brain.systems.voice import openai_realtime, transcription
 
     audio_path = tmp_path / "voice.webm"
     audio_path.write_bytes(b"webm audio")
 
     transcribe = AsyncMock(
-        return_value=audio_transcription.RealtimeAudioTranscription(
+        return_value=transcription.AudioTranscriptionResult(
             transcript="allo team",
             language="fr",
+            provider="openai",
+            transport="realtime_websocket",
+            model="gpt-realtime-whisper",
             bytes_streamed=9,
         )
     )
     monkeypatch.setattr(
-        audio_transcription,
-        "async_get_runtime_voice_config",
-        AsyncMock(return_value=audio_transcription.RuntimeVoiceConfig(language="fr")),
+        transcription,
+        "_runtime_voice_config",
+        AsyncMock(return_value=SimpleNamespace(provider="openai", language="fr")),
     )
-    monkeypatch.setattr(
-        audio_transcription,
-        "_async_installation_embedding_api_key",
-        AsyncMock(return_value="sk-memory-openai"),
-    )
-    monkeypatch.setattr(audio_transcription, "async_audio_file_to_pcm", AsyncMock(return_value=b"pcm bytes"))
-    monkeypatch.setattr(audio_transcription, "async_transcribe_pcm_with_openai_realtime", transcribe)
+    monkeypatch.setattr(openai_realtime, "async_transcribe_openai_audio_path", transcribe)
 
-    result = await audio_transcription.async_transcribe_audio_path(object(), audio_path)
+    session = object()
+    result = await transcription.async_transcribe_audio_path(session, audio_path)
 
     assert result.transcript == "allo team"
     transcribe.assert_awaited_once_with(
-        "sk-memory-openai",
-        b"pcm bytes",
+        session,
+        audio_path,
         language="fr",
         safety_identifier=None,
     )
 
 
 @pytest.mark.asyncio
+async def test_transcribe_audio_path_reports_gemini_boundary(monkeypatch, tmp_path):
+    from brain.systems.voice import transcription
+
+    audio_path = tmp_path / "voice.webm"
+    audio_path.write_bytes(b"webm audio")
+    monkeypatch.setattr(
+        transcription,
+        "_runtime_voice_config",
+        AsyncMock(return_value=SimpleNamespace(provider="gemini", language="auto")),
+    )
+
+    with pytest.raises(transcription.AudioTranscriptionError) as excinfo:
+        await transcription.async_transcribe_audio_path(object(), audio_path)
+
+    assert "Gemini Live is selected" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
 async def test_transcribe_audio_attachment_handler_uses_context_audio(monkeypatch, tmp_path):
-    from brain.systems.runtime_settings import audio_transcription
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import voice as voice_handler
+    from brain.systems.voice import transcription
 
     audio_path = tmp_path / "voice.webm"
     audio_path.write_bytes(b"webm audio")
@@ -126,9 +147,12 @@ async def test_transcribe_audio_attachment_handler_uses_context_audio(monkeypatc
         captured["session"] = session
         captured["path"] = path
         captured["kwargs"] = kwargs
-        return audio_transcription.RealtimeAudioTranscription(
+        return transcription.AudioTranscriptionResult(
             transcript="ship the voice tool",
             language="auto",
+            provider="openai",
+            transport="realtime_websocket",
+            model="gpt-realtime-whisper",
             bytes_streamed=512,
         )
 

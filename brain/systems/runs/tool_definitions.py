@@ -393,7 +393,7 @@ BRAIN_TOOLS = [
         "name": "transcribe_audio_attachment",
         "description": (
             "Transcribe an audio attachment from the current thread or an uploaded file using "
-            "the Voice Runtime's OpenAI Realtime transcription model. Use this for Slack voice notes, "
+            "the Voice Runtime's selected transcription provider. Use this for Slack voice notes, "
             "recorded messages, or audio files when the spoken content is needed."
         ),
         "input_schema": {
