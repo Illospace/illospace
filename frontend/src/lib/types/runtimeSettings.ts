@@ -1,5 +1,7 @@
 export type ModelTier = 'low' | 'medium' | 'high';
 export type EmbedderKey = 'local_gpu' | 'local_cpu' | 'openai' | 'gemini';
+export type RuntimeVoiceProvider = 'openai';
+export type RuntimeVoiceLanguage = 'auto' | 'en' | 'fr';
 
 export interface RuntimeOption {
   key: string;
@@ -45,16 +47,20 @@ export interface RuntimeSettings {
 }
 
 export interface RuntimeVoiceSettings {
-  provider: 'openai';
+  provider: RuntimeVoiceProvider;
   model: string;
   source: 'memory';
+  language: RuntimeVoiceLanguage;
   status: 'ready' | 'missing' | 'error';
   detail?: string | null;
+  provider_options: RuntimeOption[];
+  language_options: RuntimeOption[];
 }
 
 export interface RuntimeVoiceSession {
-  provider: 'openai';
+  provider: RuntimeVoiceProvider;
   model: string;
+  language: RuntimeVoiceLanguage;
   client_secret: string;
   expires_at?: number | null;
 }

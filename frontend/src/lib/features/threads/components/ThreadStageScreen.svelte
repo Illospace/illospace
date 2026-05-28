@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ConstellationIcon } from '$lib/components/constellation';
+  import { ConstellationComposerOrb, ConstellationIcon } from '$lib/components/constellation';
   import { auth } from '$lib/stores/auth.svelte';
   import { cortex } from '$lib/stores/cortex.svelte';
   import { theme } from '$lib/stores/theme.svelte';
@@ -65,8 +65,10 @@
   import BrowserThoughtPanel from '$lib/features/browser-sessions/components/BrowserThoughtPanel.svelte';
   import ThreadCyclesPane from '$lib/features/cycles/components/ThreadCyclesPane.svelte';
   import ProjectContextPicker from '$lib/features/composer/components/ProjectContextPicker.svelte';
+  import WorkspaceVoiceRecording from '$lib/features/composer/components/WorkspaceVoiceRecording.svelte';
   import SkillMentionOverlay from '$lib/features/composer/components/SkillMentionOverlay.svelte';
   import SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
+  import { WorkspaceVoiceDictationController } from '$lib/features/composer/controllers/workspaceVoiceDictation.svelte.ts';
   import { resizeComposerTextareaToContent } from '$lib/features/composer/domain/composerTextareaSizing';
   import ThreadAttachmentPreviewPane from '$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte';
   import ThreadCodeReviewPane from '$lib/features/threads/components/ThreadCodeReviewPane.svelte';
@@ -236,7 +238,19 @@
     ),
   );
   const codeReviewSignature = $derived.by(() => codeReviewFiles.map((file) => file.path).join('|'));
-
+  const voiceDictation = new WorkspaceVoiceDictationController({
+    getDraft: () => inputValue,
+    setDraft: (next) => {
+      inputValue = next;
+      void tick().then(autoGrowTextarea);
+    },
+    submit: send,
+    onError: (message) => ui.toast(message, 'error'),
+    onSettled: () => tick().then(autoGrowTextarea),
+    focusDraft: () => requestAnimationFrame(() => textareaEl?.focus()),
+  });
+  const isVoiceRecording = $derived(voiceDictation.isRecording);
+  const voiceControlDisabled = $derived(sending || voiceDictation.controlDisabled);
 
   function ideaDisplayTitle(source: { display_title?: string | null; title?: string | null }): string {
     return source.display_title?.trim() || source.title?.trim() || 'Untitled thread';
@@ -736,7 +750,11 @@
 
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      send();
+      if (isVoiceRecording) {
+        void voiceDictation.send();
+        return;
+      }
+      void send();
     }
   }
 
@@ -975,9 +993,11 @@
 
   onMount(async () => {
     document.addEventListener('click', handleDocClick);
+    await voiceDictation.loadSettings();
   });
 
   onDestroy(() => {
+    voiceDictation.destroy();
     document.removeEventListener('click', handleDocClick);
     if (transcriptScrollFrame !== null) {
       cancelAnimationFrame(transcriptScrollFrame);
@@ -1057,9 +1077,10 @@
         kicker={composerKicker()}
         placeholder={composerPlaceholder()}
         attachments={pendingAttachments}
-        canSubmit={(inputValue.trim().length > 0 || pendingAttachments.length > 0) && pendingProjectContextState.valid}
+        canSubmit={(isVoiceRecording || inputValue.trim().length > 0 || pendingAttachments.length > 0) && pendingProjectContextState.valid}
+        footerStatusActive={isVoiceRecording}
         allowSubmitWhileWorking={Boolean(activeFastRun())}
-        actionState={runInfo || idea?.status === 'working' ? 'working' : 'idle'}
+        actionState={isVoiceRecording ? 'idle' : (runInfo || idea?.status === 'working' ? 'working' : 'idle')}
         disabled={sending}
         className="cortex-thread-composer-adapter"
         sendLabel={activeRunSendLabel()}
@@ -1074,7 +1095,7 @@
         secondaryIntentValue={activeFastRun() ? activeRunMessageIntent : undefined}
         secondaryIntentAriaLabel="Message intent"
         onSecondaryIntentChange={setActiveRunMessageIntent}
-        onSubmit={send}
+        onSubmit={() => (isVoiceRecording ? void voiceDictation.send() : void send())}
         onStop={() => void threadStreamController.cancelAll()}
         onAttach={() => fileInputEl?.click()}
         onRemoveAttachment={removeAttachment}
@@ -1094,6 +1115,24 @@
           {#if projectContextError}
             <span class="project-context-inline-error">{projectContextError}</span>
           {/if}
+        {/snippet}
+        {#snippet footerStatus()}
+          {#if isVoiceRecording}
+            <WorkspaceVoiceRecording elapsedMs={voiceDictation.elapsedMs} />
+          {/if}
+        {/snippet}
+        {#snippet extraTrailingControls()}
+          <ConstellationComposerOrb
+            label={voiceDictation.controlLabel}
+            title={voiceDictation.controlTitle}
+            disabled={voiceControlDisabled}
+            variant="bare"
+            onclick={() => {
+              if (!sending) voiceDictation.toggle();
+            }}
+          >
+            <ConstellationIcon name={isVoiceRecording ? 'stop' : 'mic'} size={18} stroke={2} />
+          </ConstellationComposerOrb>
         {/snippet}
       </WorkspaceComposerAdapter>
     </div>

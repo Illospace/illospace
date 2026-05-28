@@ -1627,6 +1627,11 @@ export const api = {
     fetchJson<any>('/api/runtime-settings/models', { method: 'PATCH', body: JSON.stringify(data) }),
   updateRuntimeMemory: (data: { embedder: string; embedding_model?: string | null; reranker?: string }) =>
     fetchJson<any>('/api/runtime-settings/memory', { method: 'PATCH', body: JSON.stringify(data) }),
+  updateRuntimeVoice: (data: { provider: string; language: string }) =>
+    fetchJson<RuntimeSettings['voice']>('/api/runtime-settings/voice', {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
   checkRuntimeMemory: () =>
     fetchJson<any>('/api/runtime-settings/memory/check', { method: 'POST' }),
   createRuntimeVoiceSession: () =>

@@ -1,10 +1,12 @@
-import type { EmbedderKey } from '$lib/types/runtimeSettings';
+import type { EmbedderKey, RuntimeVoiceLanguage, RuntimeVoiceProvider } from '$lib/types/runtimeSettings';
 
 export type {
   EmbedderKey,
   ModelTier,
   RuntimeOption,
   RuntimeSettings,
+  RuntimeVoiceLanguage,
+  RuntimeVoiceProvider,
   RuntimeVoiceSession,
   RuntimeVoiceSettings,
 } from '$lib/types/runtimeSettings';
@@ -32,6 +34,11 @@ export interface MemoryDraft {
   embedder: EmbedderKey;
   embedding_model: string;
   reranker: string;
+}
+
+export interface VoiceDraft {
+  provider: RuntimeVoiceProvider;
+  language: RuntimeVoiceLanguage;
 }
 
 export interface NoticeState {

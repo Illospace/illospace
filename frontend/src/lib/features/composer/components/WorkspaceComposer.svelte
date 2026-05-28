@@ -387,6 +387,10 @@
   }
 
   function handleComposerSubmit(event: KeyboardEvent) {
+    if (isVoiceRecording) {
+      void voiceDictation.send();
+      return;
+    }
     const requestedBehavior = event.metaKey || event.ctrlKey ? 'keep-workspace' : undefined;
     void submitPrompt(requestedBehavior);
   }
@@ -422,6 +426,7 @@
   placeholder="Ask Illo anything..."
   actionState={sending ? 'working' : 'idle'}
   canSubmit={(isVoiceRecording || inputValue.trim().length > 0 || pendingAttachments.length > 0) && projectContextValid}
+  footerStatusActive={isVoiceRecording}
   settingsGroups={buildRunSettingsGroups({
     mode: cortex.executionProfile,
     intelligence: cortex.intelligenceTier,
@@ -455,6 +460,15 @@
       loadServerProfiles={projectContextLoadServerProfiles}
       onStateChange={handleProjectContextState}
     />
+  {/snippet}
+
+  {#snippet footerStatus()}
+    {#if isVoiceRecording}
+      <WorkspaceVoiceRecording elapsedMs={voiceDictation.elapsedMs} />
+    {/if}
+  {/snippet}
+
+  {#snippet extraTrailingControls()}
     <ConstellationComposerOrb
       label={voiceDictation.controlLabel}
       title={voiceDictation.controlTitle}
@@ -470,29 +484,25 @@
 
   {#snippet editor()}
     <div class="workspace-input-wrap">
-      {#if isVoiceRecording}
-        <WorkspaceVoiceRecording elapsedMs={voiceDictation.elapsedMs} />
-      {:else}
-        <MentionAutocomplete bind:this={mentionRef} bind:textarea={textareaEl} onselect={insertMention} />
-        <AiPromptComposer
-          bind:value={inputValue}
-          bind:textarea={textareaEl}
-          className="workspace-ai-prompt"
-          rows={1}
-          placeholder="Ask Illo anything..."
-          ariaLabel="Workspace prompt"
-          minHeight={WORKSPACE_COMPOSER_MIN_HEIGHT}
-          maxHeight={workspaceComposerMaxHeight}
-          submitOnEnter
-          disabled={sending}
-          onKeydown={handleKeydown}
-          onInput={handleInput}
-          onCursorChange={handleCursorChange}
-          onSubmit={handleComposerSubmit}
-          onPaste={handlePaste}
-          onSlashTokenChange={(token) => (activeSlashToken = token)}
-        />
-      {/if}
+      <MentionAutocomplete bind:this={mentionRef} bind:textarea={textareaEl} onselect={insertMention} />
+      <AiPromptComposer
+        bind:value={inputValue}
+        bind:textarea={textareaEl}
+        className="workspace-ai-prompt"
+        rows={1}
+        placeholder="Ask Illo anything..."
+        ariaLabel="Workspace prompt"
+        minHeight={WORKSPACE_COMPOSER_MIN_HEIGHT}
+        maxHeight={workspaceComposerMaxHeight}
+        submitOnEnter
+        disabled={sending}
+        onKeydown={handleKeydown}
+        onInput={handleInput}
+        onCursorChange={handleCursorChange}
+        onSubmit={handleComposerSubmit}
+        onPaste={handlePaste}
+        onSlashTokenChange={(token) => (activeSlashToken = token)}
+      />
     </div>
   {/snippet}
 </WorkspaceComposerAdapter>

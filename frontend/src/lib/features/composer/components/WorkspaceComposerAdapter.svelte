@@ -57,6 +57,9 @@
     attachmentsSlot,
     leadingControls,
     extraLeadingControls,
+    footerStatusActive = false,
+    footerStatus,
+    extraTrailingControls,
     trailingControls,
     supporting,
   }: WorkspaceComposerAdapterProps = $props();
@@ -449,7 +452,11 @@
 
     <div class="composer-footer">
       <div class="composer-footer-start">
-        {#if leadingControls}
+        {#if footerStatusActive && footerStatus}
+          <div class="composer-footer-status">
+            {@render footerStatus()}
+          </div>
+        {:else if leadingControls}
           {@render leadingControls()}
         {:else}
           <div class="composer-default-leading">
@@ -594,6 +601,9 @@
         {#if trailingControls}
           {@render trailingControls()}
         {:else}
+          {#if extraTrailingControls}
+            {@render extraTrailingControls()}
+          {/if}
           <ConstellationComposerActionOrb
             actionState={effectiveActionState}
             label={actionLabel}
@@ -836,15 +846,22 @@
   }
 
   .composer-default-leading,
+  .composer-footer-status,
   .composer-chip-group {
     display: flex;
     align-items: center;
     min-width: 0;
   }
 
-  .composer-default-leading {
+  .composer-default-leading,
+  .composer-footer-status {
     flex: 1 1 auto;
     gap: 8px;
+  }
+
+  .composer-footer-status :global(.workspace-voice-recording) {
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .composer-chip-group {

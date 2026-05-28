@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import logging
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException
@@ -9,52 +12,133 @@ from brain.platform.async_io import async_http_post
 from brain.platform.db.models.org import User
 
 from .memory import (
+    _async_read_runtime_config_value,
     _async_installation_embedding_api_key,
-    async_get_embedding_runtime_config,
+    _async_write_runtime_config_value,
     async_get_runtime_memory,
 )
-from .schemas import RuntimeMemoryRead, RuntimeVoiceRead, RuntimeVoiceSessionRead
+from .schemas import RuntimeMemoryRead, RuntimeOption, RuntimeVoiceRead, RuntimeVoiceSessionRead, RuntimeVoiceUpdate
+
+logger = logging.getLogger(__name__)
 
 OPENAI_REALTIME_TRANSCRIPTION_MODEL = "gpt-realtime-whisper"
 OPENAI_REALTIME_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 OPENAI_MEMORY_KEY_REQUIRED_DETAIL = "Voice dictation needs an OpenAI API key in AI Runtime memory settings."
+RUNTIME_VOICE_SETTINGS_KEY = "runtime_voice"
+VOICE_PROVIDER_OPTIONS = [
+    RuntimeOption(
+        key="openai",
+        label="OpenAI Realtime",
+        description="Uses the OpenAI API key saved for AI Runtime memory.",
+    ),
+    RuntimeOption(
+        key="gemini",
+        label="Gemini Live",
+        description="Not enabled yet for browser dictation.",
+        disabled=True,
+    ),
+]
+VOICE_LANGUAGE_OPTIONS = [
+    RuntimeOption(
+        key="auto",
+        label="Auto (English / French)",
+        description="Detect English or French and preserve the spoken language.",
+    ),
+    RuntimeOption(key="en", label="English", description="Prefer English transcription."),
+    RuntimeOption(key="fr", label="French", description="Prefer French transcription."),
+]
+
+
+@dataclass(frozen=True)
+class RuntimeVoiceConfig:
+    provider: str = "openai"
+    language: str = "auto"
+
+    def stored_settings(self) -> dict[str, str]:
+        return {"provider": self.provider, "language": self.language}
 
 
 async def async_get_runtime_voice(session: AsyncSession, user: User) -> RuntimeVoiceRead:
     memory = await async_get_runtime_memory(session, user)
-    return runtime_voice_from_memory(memory)
+    config = await async_get_runtime_voice_config(session)
+    return runtime_voice_from_memory(memory, config)
 
 
-def runtime_voice_from_memory(memory: RuntimeMemoryRead) -> RuntimeVoiceRead:
-    if memory.embedder == "openai" and memory.api_key_statuses.get("openai"):
+async def async_get_runtime_voice_config(session: AsyncSession) -> RuntimeVoiceConfig:
+    raw = await _async_read_runtime_config_value(session, RUNTIME_VOICE_SETTINGS_KEY)
+    if not raw:
+        return RuntimeVoiceConfig()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Ignoring invalid runtime voice settings JSON")
+        return RuntimeVoiceConfig()
+    if not isinstance(data, dict):
+        return RuntimeVoiceConfig()
+    return RuntimeVoiceConfig(
+        provider=_voice_provider(data.get("provider")),
+        language=_voice_language(data.get("language")),
+    )
+
+
+async def async_update_runtime_voice(
+    session: AsyncSession,
+    user: User,
+    update: RuntimeVoiceUpdate,
+) -> RuntimeVoiceRead:
+    config = RuntimeVoiceConfig(
+        provider=_voice_provider(update.provider),
+        language=_voice_language(update.language),
+    )
+    await _async_write_runtime_config_value(
+        session,
+        RUNTIME_VOICE_SETTINGS_KEY,
+        json.dumps(config.stored_settings(), sort_keys=True),
+    )
+    memory = await async_get_runtime_memory(session, user)
+    return runtime_voice_from_memory(memory, config)
+
+
+def runtime_voice_from_memory(
+    memory: RuntimeMemoryRead,
+    config: RuntimeVoiceConfig | None = None,
+) -> RuntimeVoiceRead:
+    config = config or RuntimeVoiceConfig()
+    has_openai_key = bool(memory.api_key_statuses.get("openai"))
+    if config.provider == "openai" and has_openai_key:
         return RuntimeVoiceRead(
             provider="openai",
             model=OPENAI_REALTIME_TRANSCRIPTION_MODEL,
             source="memory",
+            language=_voice_language(config.language),
             status="ready",
             detail=None,
+            provider_options=VOICE_PROVIDER_OPTIONS,
+            language_options=VOICE_LANGUAGE_OPTIONS,
         )
 
     return RuntimeVoiceRead(
         provider="openai",
         model=OPENAI_REALTIME_TRANSCRIPTION_MODEL,
         source="memory",
+        language=_voice_language(config.language),
         status="missing",
         detail=OPENAI_MEMORY_KEY_REQUIRED_DETAIL,
+        provider_options=VOICE_PROVIDER_OPTIONS,
+        language_options=VOICE_LANGUAGE_OPTIONS,
     )
 
 
 async def async_create_runtime_voice_session(session: AsyncSession, user: User) -> RuntimeVoiceSessionRead:
-    runtime = await async_get_embedding_runtime_config(session, include_secret=False)
-    provider = str(getattr(runtime, "provider", "") or "").strip().lower()
+    config = await async_get_runtime_voice_config(session)
     api_key = await _async_installation_embedding_api_key(session, "openai")
-    if provider != "openai" or not api_key:
+    if config.provider != "openai" or not api_key:
         raise HTTPException(
             status_code=409,
             detail=OPENAI_MEMORY_KEY_REQUIRED_DETAIL,
         )
 
-    payload = await _async_create_openai_realtime_client_secret(api_key)
+    payload = await _async_create_openai_realtime_client_secret(api_key, language=config.language)
     secret = _client_secret_value(payload)
     if not secret:
         raise HTTPException(status_code=502, detail="OpenAI did not return a realtime voice client secret")
@@ -62,12 +146,13 @@ async def async_create_runtime_voice_session(session: AsyncSession, user: User) 
     return RuntimeVoiceSessionRead(
         provider="openai",
         model=OPENAI_REALTIME_TRANSCRIPTION_MODEL,
+        language=_voice_language(config.language),
         client_secret=secret,
         expires_at=_client_secret_expires_at(payload),
     )
 
 
-async def _async_create_openai_realtime_client_secret(api_key: str) -> dict[str, Any]:
+async def _async_create_openai_realtime_client_secret(api_key: str, *, language: str = "auto") -> dict[str, Any]:
     response = await async_http_post(
         OPENAI_REALTIME_CLIENT_SECRETS_URL,
         timeout=20,
@@ -83,7 +168,7 @@ async def _async_create_openai_realtime_client_secret(api_key: str) -> dict[str,
                     "input": {
                         "format": {"type": "audio/pcm", "rate": 24000},
                         "noise_reduction": {"type": "near_field"},
-                        "transcription": {"model": OPENAI_REALTIME_TRANSCRIPTION_MODEL},
+                        "transcription": _openai_transcription_settings(language),
                         "turn_detection": None,
                     }
                 },
@@ -94,6 +179,43 @@ async def _async_create_openai_realtime_client_secret(api_key: str) -> dict[str,
         raise HTTPException(status_code=502, detail="OpenAI realtime voice session creation failed")
     data = response.json()
     return data if isinstance(data, dict) else {}
+
+
+def _openai_transcription_settings(language: str) -> dict[str, str]:
+    normalized = _voice_language(language)
+    settings = {
+        "model": OPENAI_REALTIME_TRANSCRIPTION_MODEL,
+        "prompt": _openai_transcription_prompt(normalized),
+    }
+    if normalized in {"en", "fr"}:
+        settings["language"] = normalized
+    return settings
+
+
+def _openai_transcription_prompt(language: str) -> str:
+    if language == "en":
+        return (
+            "Transcribe the user's speech in English for an AI chat composer. "
+            "Do not translate to another language. Preserve product names, code terms, and natural punctuation."
+        )
+    if language == "fr":
+        return (
+            "Transcribe the user's speech in French for an AI chat composer. "
+            "Do not translate to another language. Preserve product names, code terms, and natural punctuation."
+        )
+    return (
+        "The user may speak English or French. Transcribe in the same language the user speaks. "
+        "Do not translate. Preserve product names, code terms, and natural punctuation."
+    )
+
+
+def _voice_provider(value: object) -> str:
+    return "openai" if str(value or "openai").strip().lower() == "openai" else "openai"
+
+
+def _voice_language(value: object) -> str:
+    language = str(value or "auto").strip().lower()
+    return language if language in {"auto", "en", "fr"} else "auto"
 
 
 def _client_secret_value(payload: dict[str, Any]) -> str | None:

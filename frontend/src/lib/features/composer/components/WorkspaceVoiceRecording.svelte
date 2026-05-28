@@ -26,6 +26,8 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    width: 100%;
+    box-sizing: border-box;
     min-height: 40px;
     padding: 2px 3px 0;
     color: var(--constellation-composer-textarea);

@@ -12,6 +12,7 @@ EmbedderKey = Literal["local_gpu", "local_cpu", "openai", "gemini"]
 RerankerKey = Literal["weighted"]
 RuntimeUpdateStatus = Literal["idle", "running"]
 VoiceProviderKey = Literal["openai"]
+VoiceLanguageKey = Literal["auto", "en", "fr"]
 VoiceStatus = Literal["ready", "missing", "error"]
 
 
@@ -65,13 +66,17 @@ class RuntimeVoiceRead(BaseModel):
     provider: VoiceProviderKey
     model: str
     source: Literal["memory"] = "memory"
+    language: VoiceLanguageKey = "auto"
     status: VoiceStatus
     detail: str | None = None
+    provider_options: list[RuntimeOption] = Field(default_factory=list)
+    language_options: list[RuntimeOption] = Field(default_factory=list)
 
 
 class RuntimeVoiceSessionRead(BaseModel):
     provider: VoiceProviderKey
     model: str
+    language: VoiceLanguageKey = "auto"
     client_secret: str
     expires_at: int | None = None
 
@@ -126,3 +131,8 @@ class RuntimeMemoryUpdate(BaseModel):
     embedder: EmbedderKey
     embedding_model: str | None = None
     reranker: RerankerKey = "weighted"
+
+
+class RuntimeVoiceUpdate(BaseModel):
+    provider: VoiceProviderKey = "openai"
+    language: VoiceLanguageKey = "auto"
