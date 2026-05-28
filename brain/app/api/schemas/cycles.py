@@ -14,9 +14,9 @@ class CycleCreate(BaseModel):
     enabled: bool = True
     model_override: str | None = None
     thinking_override: str | None = None
-    execution_mode: str = "reuse_same_idea"
     target_idea_id: str | None = None
-    reopen_archived: bool | None = None
+    guidance: str | None = Field(default=None, max_length=20000)
+    rationale: str | None = Field(default=None, max_length=5000)
 
 
 class CycleUpdate(BaseModel):
@@ -28,15 +28,20 @@ class CycleUpdate(BaseModel):
     enabled: bool | None = None
     model_override: str | None = None
     thinking_override: str | None = None
-    execution_mode: str | None = None
     target_idea_id: str | None = None
-    reopen_archived: bool | None = None
+    guidance: str | None = Field(default=None, max_length=20000)
+    rationale: str | None = Field(default=None, max_length=5000)
 
 
 class CycleRead(BaseModel):
     id: int
     user_id: str
     org_id: str | None = None
+    workspace_id: str | None = None
+    creator_type: str
+    creator_id: str | None = None
+    maintainer_type: str
+    maintainer_id: str | None = None
     name: str
     prompt: str
     schedule_expr: str
@@ -59,6 +64,7 @@ class CycleRead(BaseModel):
 class CycleRunRead(BaseModel):
     id: int
     cycle_id: int
+    revision_id: int | None = None
     scheduled_for: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -68,4 +74,8 @@ class CycleRunRead(BaseModel):
     idea_id: str | None = None
     run_id: int | None = None
     prompt_snapshot: str
+    guidance_snapshot: list = Field(default_factory=list)
+    output_targets_snapshot: list = Field(default_factory=list)
+    context_snapshot: dict = Field(default_factory=dict)
+    self_review_summary: str | None = None
     created_at: datetime

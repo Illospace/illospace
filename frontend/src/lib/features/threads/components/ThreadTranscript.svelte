@@ -1556,8 +1556,24 @@
     --thread-message-owner: var(--constellation-thread-message-illo-owner);
     --thread-message-body: var(--constellation-thread-message-illo-body);
     --thread-message-meta: var(--constellation-thread-message-illo-meta);
+    grid-template-columns: 18px minmax(0, 1fr);
+    align-items: start;
+    column-gap: 10px;
+    row-gap: 0;
     justify-self: start;
     margin-right: auto;
+  }
+
+  .thread-message-illo .thread-message-header {
+    grid-column: 1;
+    grid-row: 1;
+    align-self: start;
+    margin-top: 2px;
+  }
+
+  .thread-message-illo .thread-message-content {
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .thread-message-inline-work.thread-message-illo {

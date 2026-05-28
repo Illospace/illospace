@@ -282,6 +282,18 @@ def test_action_policy_comes_from_registry_metadata():
     ) is None
 
 
+def test_manage_cycle_schema_matches_canonical_runtime_policy():
+    from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS
+
+    tool = next(tool for tool in COORDINATOR_TOOLS if tool["name"] == "manage_cycle")
+    properties = tool["input_schema"]["properties"]
+
+    assert "execution_mode" not in properties
+    assert "reopen_archived" not in properties
+    assert "add_guidance" in properties["action"]["enum"]
+    assert "add_output_target" in properties["action"]["enum"]
+
+
 def test_tool_result_truncation_uses_registry_output_budget():
     from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, resolve_tool_call
     from brain.systems.runs.tool_catalog.registry import output_budget_chars_for_tool

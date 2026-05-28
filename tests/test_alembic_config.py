@@ -30,6 +30,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0008_org_owned_vault.py",
     # Upgrade removes replaced user API key/share tables after migrating data.
     "0009_org_owned_provider_credentials.py",
+    # Downgrade removes only the Cycle memory tables introduced by this migration.
+    "0013_cycle_memory_primitives.py",
 }
 
 
