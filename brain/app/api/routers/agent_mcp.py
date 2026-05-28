@@ -52,9 +52,11 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 "Submit ordered context from a personal agent to Illo, the user's team agent. "
                 "Use this when the user wants Illo or the team to have the current AI thread, "
                 "trace, artifacts, files, links, diffs, or other source material. The personal "
-                "agent supplies context and provenance; Illo coordinates the team workspace. "
-                "Do not encode a workflow such as decision request here. Use correlation when "
-                "attaching to a known Thread; otherwise IlloSpace may create one and return thread_url."
+                "agent supplies context and provenance; IlloSpace records it without starting "
+                "an Illo run or creating a visible Thread. Use "
+                "correlation when attaching to a known Thread; otherwise IlloSpace stores the "
+                "context as an inbound event. When correlation attaches context to a Thread, "
+                "the result includes thread_url. Do not encode a workflow such as a decision request here."
             ),
             {
                 "intent": {

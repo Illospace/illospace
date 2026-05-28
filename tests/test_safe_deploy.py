@@ -273,6 +273,7 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
     assert "track_io_timing=on" in compose
     assert "log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT_MS:-1000}" in compose
     assert "POSTGRES_LOG_MIN_DURATION_STATEMENT_MS=1000" in env_example
+    assert 'ILLO_DB_NULLPOOL: "1"' in compose
     assert 'ILLO_WORKER_ENABLE_CYCLE_SCHEDULER: "1"' in compose
     assert 'ILLO_WORKER_DISABLE_CYCLE_SCHEDULER: "0"' in compose
     assert "deploy/docker/updater.Dockerfile" in compose

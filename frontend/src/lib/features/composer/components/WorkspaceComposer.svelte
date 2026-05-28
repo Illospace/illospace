@@ -1,11 +1,16 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import {
+    ConstellationComposerOrb,
+    ConstellationIcon,
+  } from '$lib/components/constellation';
   import { cortex } from '$lib/stores/cortex.svelte';
   import { ui } from '$lib/stores/ui.svelte';
   import AiPromptComposer from '$lib/features/composer/components/AiPromptComposer.svelte';
   import MentionAutocomplete from '$lib/features/composer/components/MentionAutocomplete.svelte';
   import ProjectContextPicker from '$lib/features/composer/components/ProjectContextPicker.svelte';
   import WorkspaceComposerAdapter from './WorkspaceComposerAdapter.svelte';
+  import WorkspaceVoiceRecording from './WorkspaceVoiceRecording.svelte';
   import { applyRunSetting, buildRunSettingsGroups } from '$lib/features/composer/domain/runSettings';
   import {
     attachIdeaProjectContext,
@@ -26,6 +31,7 @@
     getWorkspaceComposerProjectContextSaveErrorMessage,
     saveWorkspaceComposerProjectContext,
   } from '$lib/features/composer/controllers/projectContextComposerController';
+  import { WorkspaceVoiceDictationController } from '$lib/features/composer/controllers/workspaceVoiceDictation.svelte.ts';
   import {
     getWorkspaceComposerScreenOrigin,
     getWorkspaceComposerWorldOrigin,
@@ -102,8 +108,25 @@
   type CreationBehavior = 'open-thread' | 'keep-workspace';
 
   let viewportHeight = $state(800);
+  const voiceDictation = new WorkspaceVoiceDictationController({
+    getDraft: () => inputValue,
+    setDraft: (next) => {
+      inputValue = next;
+      void syncComposerHeight();
+    },
+    submit: async () => {
+      await syncComposerHeight();
+      await submitPrompt();
+    },
+    onError: (message) => ui.toast(message, 'error'),
+    onSettled: syncComposerHeight,
+    focusDraft: () => requestAnimationFrame(() => textareaEl?.focus()),
+  });
 
   const workspaceComposerMaxHeight = $derived(getWorkspaceComposerMaxHeight(viewportHeight));
+  const isVoiceRecording = $derived(voiceDictation.isRecording);
+  const isVoiceBusy = $derived(voiceDictation.isBusy);
+  const voiceControlDisabled = $derived(sending || voiceDictation.controlDisabled);
 
   function updateViewportHeight() {
     viewportHeight = getWorkspaceComposerViewportHeight(window);
@@ -131,10 +154,12 @@
 
   onMount(() => {
     updateViewportHeight();
+    void voiceDictation.loadSettings();
     window.addEventListener('resize', updateViewportHeight);
     window.visualViewport?.addEventListener('resize', updateViewportHeight);
 
     return () => {
+      voiceDictation.destroy();
       window.removeEventListener('resize', updateViewportHeight);
       window.visualViewport?.removeEventListener('resize', updateViewportHeight);
     };
@@ -379,7 +404,6 @@
     projectContextValid = state.valid;
     projectContextError = state.error;
   }
-
 </script>
 
 <input
@@ -397,7 +421,7 @@
   kicker=""
   placeholder="Ask Illo anything..."
   actionState={sending ? 'working' : 'idle'}
-  canSubmit={(inputValue.trim().length > 0 || pendingAttachments.length > 0) && projectContextValid}
+  canSubmit={(isVoiceRecording || inputValue.trim().length > 0 || pendingAttachments.length > 0) && projectContextValid}
   settingsGroups={buildRunSettingsGroups({
     mode: cortex.executionProfile,
     intelligence: cortex.intelligenceTier,
@@ -419,41 +443,56 @@
   onDrop={handleDrop}
   onDragOver={handleDragOver}
   onDragLeave={handleDragLeave}
-  onSubmit={() => void submitPrompt()}
+  onSubmit={() => (isVoiceRecording ? void voiceDictation.send() : void submitPrompt())}
   {onthreadintent}
 >
   {#snippet extraLeadingControls()}
     <ProjectContextPicker
       mode="inline"
-      disabled={sending}
+      disabled={sending || isVoiceBusy}
       initialOpen={projectContextInitialOpen}
       initialProfileId={projectContextInitialProfileId}
       loadServerProfiles={projectContextLoadServerProfiles}
       onStateChange={handleProjectContextState}
     />
+    <ConstellationComposerOrb
+      label={voiceDictation.controlLabel}
+      title={voiceDictation.controlTitle}
+      disabled={voiceControlDisabled}
+      variant="bare"
+      onclick={() => {
+        if (!sending) voiceDictation.toggle();
+      }}
+    >
+      <ConstellationIcon name={isVoiceRecording ? 'stop' : 'mic'} size={18} stroke={2} />
+    </ConstellationComposerOrb>
   {/snippet}
 
   {#snippet editor()}
     <div class="workspace-input-wrap">
-      <MentionAutocomplete bind:this={mentionRef} bind:textarea={textareaEl} onselect={insertMention} />
-      <AiPromptComposer
-        bind:value={inputValue}
-        bind:textarea={textareaEl}
-        className="workspace-ai-prompt"
-        rows={1}
-        placeholder="Ask Illo anything..."
-        ariaLabel="Workspace prompt"
-        minHeight={WORKSPACE_COMPOSER_MIN_HEIGHT}
-        maxHeight={workspaceComposerMaxHeight}
-        submitOnEnter
-        disabled={sending}
-        onKeydown={handleKeydown}
-        onInput={handleInput}
-        onCursorChange={handleCursorChange}
-        onSubmit={handleComposerSubmit}
-        onPaste={handlePaste}
-        onSlashTokenChange={(token) => (activeSlashToken = token)}
-      />
+      {#if isVoiceRecording}
+        <WorkspaceVoiceRecording elapsedMs={voiceDictation.elapsedMs} />
+      {:else}
+        <MentionAutocomplete bind:this={mentionRef} bind:textarea={textareaEl} onselect={insertMention} />
+        <AiPromptComposer
+          bind:value={inputValue}
+          bind:textarea={textareaEl}
+          className="workspace-ai-prompt"
+          rows={1}
+          placeholder="Ask Illo anything..."
+          ariaLabel="Workspace prompt"
+          minHeight={WORKSPACE_COMPOSER_MIN_HEIGHT}
+          maxHeight={workspaceComposerMaxHeight}
+          submitOnEnter
+          disabled={sending}
+          onKeydown={handleKeydown}
+          onInput={handleInput}
+          onCursorChange={handleCursorChange}
+          onSubmit={handleComposerSubmit}
+          onPaste={handlePaste}
+          onSlashTokenChange={(token) => (activeSlashToken = token)}
+        />
+      {/if}
     </div>
   {/snippet}
 </WorkspaceComposerAdapter>

@@ -618,16 +618,16 @@
             {@const isIllo = isIlloMessage(item)}
             {@const hasSupplementalMeta = hasMessageSupplementalMeta(item)}
             <article class={getMessageClass(item)}>
-              <header class="thread-message-header">
-                <ThreadAuthorMark
-                  author={item.author}
-                  role={item.role}
-                  tone={getMessageTone(item)}
-                  {isIllo}
-                  presenceStyle={getUserPresenceStyle(item)}
-                />
+              {#if !isIllo}
+                <header class="thread-message-header">
+                  <ThreadAuthorMark
+                    author={item.author}
+                    role={item.role}
+                    tone={getMessageTone(item)}
+                    {isIllo}
+                    presenceStyle={getUserPresenceStyle(item)}
+                  />
 
-                {#if !isIllo}
                   <div class="thread-message-meta">
                     <span class="thread-message-author">{item.author}</span>
 
@@ -647,8 +647,8 @@
                       </span>
                     {/if}
                   </div>
-                {/if}
-              </header>
+                </header>
+              {/if}
 
               <div class="thread-message-content">
                 {#if item.html}

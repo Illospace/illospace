@@ -11,6 +11,8 @@ ConnectionStatus = Literal["connected", "missing", "error"]
 EmbedderKey = Literal["local_gpu", "local_cpu", "openai", "gemini"]
 RerankerKey = Literal["weighted"]
 RuntimeUpdateStatus = Literal["idle", "running"]
+VoiceProviderKey = Literal["openai"]
+VoiceStatus = Literal["ready", "missing", "error"]
 
 
 class RuntimeOption(BaseModel):
@@ -59,6 +61,21 @@ class RuntimeMemoryCheckRead(BaseModel):
     duration_ms: int | None = None
 
 
+class RuntimeVoiceRead(BaseModel):
+    provider: VoiceProviderKey
+    model: str
+    source: Literal["memory"] = "memory"
+    status: VoiceStatus
+    detail: str | None = None
+
+
+class RuntimeVoiceSessionRead(BaseModel):
+    provider: VoiceProviderKey
+    model: str
+    client_secret: str
+    expires_at: int | None = None
+
+
 class RuntimePermissionsRead(BaseModel):
     can_manage_settings: bool
 
@@ -77,6 +94,7 @@ class RuntimeSettingsRead(BaseModel):
     connection: RuntimeConnectionRead
     models: RuntimeModelsRead
     memory: RuntimeMemoryRead
+    voice: RuntimeVoiceRead
     permissions: RuntimePermissionsRead
 
 

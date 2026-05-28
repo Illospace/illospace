@@ -72,45 +72,59 @@
     ];
     return parts.join('; ');
   });
+  const workspaceShellStyle = '--workspace-stage-frame-width: var(--thread-stage-frame-width)';
 
   function handleDismiss() {
     ondismiss?.();
   }
 </script>
 
-<WorkspaceStageShell
-  className="thread-stage-shell"
-  frameClassName="thread-stage-frame"
-  {entering}
-  {ready}
-  style={shellStyle}
-  dismissLabel="Leave thread"
-  dismissCursor="zoom-out"
-  ondismiss={handleDismiss}
->
-  {#snippet periphery()}
-    {#if peripherySignals.length > 0}
-      <div class="thread-periphery-layer" aria-hidden="true">
-        {#each peripherySignals as cue, index (`${cue.side}-${Math.round(cue.offset)}-${index}`)}
-          <div
-            class={`thread-edge-signal side-${cue.side} kind-${cue.kind} ${cue.related ? 'is-related' : ''}`}
-            style={`--signal-offset:${cue.offset}%; --signal-color:${cue.color}; --signal-rgb:${cue.rgb}; --signal-strength:${cue.strength}; --signal-duration:${cue.pulseMs}ms; --signal-span:${cue.span}px; --signal-opacity:${cue.opacity};`}
-          >
-            <div class="thread-edge-aura"></div>
-            <div class="thread-edge-core"></div>
-            {#if cue.count > 1}
-              <div class="thread-edge-trace"></div>
-            {/if}
-          </div>
-        {/each}
-      </div>
-    {/if}
-  {/snippet}
+<div class="thread-stage-shell thread-shell-presence" style={shellStyle}>
+  <WorkspaceStageShell
+    className="thread-stage-workspace"
+    frameClassName="thread-stage-frame"
+    {entering}
+    {ready}
+    style={workspaceShellStyle}
+    dismissLabel="Leave thread"
+    dismissCursor="zoom-out"
+    ondismiss={handleDismiss}
+  >
+    {#snippet periphery()}
+      {#if peripherySignals.length > 0}
+        <div class="thread-periphery-layer" aria-hidden="true">
+          {#each peripherySignals as cue, index (`${cue.side}-${Math.round(cue.offset)}-${index}`)}
+            <div
+              class={`thread-edge-signal side-${cue.side} kind-${cue.kind} ${cue.related ? 'is-related' : ''}`}
+              style={`--signal-offset:${cue.offset}%; --signal-color:${cue.color}; --signal-rgb:${cue.rgb}; --signal-strength:${cue.strength}; --signal-duration:${cue.pulseMs}ms; --signal-span:${cue.span}px; --signal-opacity:${cue.opacity};`}
+            >
+              <div class="thread-edge-aura"></div>
+              <div class="thread-edge-core"></div>
+              {#if cue.count > 1}
+                <div class="thread-edge-trace"></div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+    {/snippet}
 
-  {@render children?.()}
-</WorkspaceStageShell>
+    {@render children?.()}
+  </WorkspaceStageShell>
+</div>
 
 <style>
+  .thread-stage-shell {
+    --thread-stage-frame-width: clamp(1040px, 78vw, 1760px);
+    position: absolute;
+    inset: 0;
+    z-index: 25;
+  }
+
+  .thread-stage-shell :global(.thread-stage-frame) {
+    width: min(100%, var(--thread-stage-frame-width));
+  }
+
   .thread-periphery-layer {
     position: absolute;
     inset: 0;

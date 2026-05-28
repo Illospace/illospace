@@ -374,10 +374,11 @@ async def test_webhook_and_mcp_context_share_inbound_event_path(session, monkeyp
     assert webhook_response.json()["status"] == "review_required"
     assert mcp_payload["status"] == "processed"
     assert mcp_payload["matched_policy_id"] is None
-    assert mcp_payload["thread_id"]
-    assert mcp_payload["thread_url"] == f"https://illo.example.com/cortex?idea={mcp_payload['thread_id']}"
-    assert mcp_payload["url"] == mcp_payload["thread_url"]
-    assert mcp_payload["thread_route"] == f"/cortex?idea={mcp_payload['thread_id']}"
+    assert mcp_payload["operation"] == "stored"
+    assert mcp_payload["thread_id"] is None
+    assert mcp_payload["thread_url"] is None
+    assert mcp_payload["url"] is None
+    assert mcp_payload["thread_route"] is None
     webhook_triage = await _assert_queued_triage(
         session,
         webhook_response.json()["ilo_outcome"],
@@ -387,7 +388,7 @@ async def test_webhook_and_mcp_context_share_inbound_event_path(session, monkeyp
     events = (await session.scalars(select(InboundEventRow).order_by(InboundEventRow.created_at))).all()
     assert [event.origin for event in events] == ["jira.ticket_created", "codex.context"]
     assert [event.status for event in events] == ["review_required", "processed"]
-    assert [event.action_type for event in events] == ["ilo_required", "thread.created"]
+    assert [event.action_type for event in events] == ["ilo_required", "accepted"]
     assert all(event.connection_id == CONNECTION_ID for event in events)
     assert all(event.authority_user_id == USER_ID for event in events)
     assert events[0].ingress_context["surface"] == "webhook"
@@ -409,8 +410,9 @@ async def test_webhook_and_mcp_context_share_inbound_event_path(session, monkeyp
     assert [receipt.event_id for receipt in receipts] == [str(event.id) for event in events]
     assert receipts[0].outcome["reason"] == "no_matching_source_policy"
     assert receipts[0].outcome["triage"]["status"] == "queued"
-    assert receipts[1].outcome["operation"] == "created"
-    assert all(receipt.target["kind"] == "cortex_idea" for receipt in receipts)
+    assert receipts[1].outcome["operation"] == "stored"
+    assert receipts[0].target["kind"] == "cortex_idea"
+    assert receipts[1].target["kind"] == "inbound_event"
     assert receipts[0].tool_use["type"] == "illo_triage"
     assert receipts[1].tool_use["type"] == "illo_submit_context"
 
@@ -434,7 +436,7 @@ async def test_malformed_mcp_json_fails_without_creating_event(session):
     assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 0
 
 
-async def test_mcp_context_ignores_signal_policy_and_creates_thread(session, monkeypatch):
+async def test_mcp_context_ignores_signal_policy_and_stores_without_thread(session, monkeypatch):
     monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
     await _seed_connection(session)
     await inbound.create_source_policy(
@@ -474,16 +476,19 @@ async def test_mcp_context_ignores_signal_policy_and_creates_thread(session, mon
     event = (await session.scalars(select(InboundEventRow))).one()
     assert response.status_code == 200
     assert body["status"] == "processed"
-    assert body["thread_id"]
-    assert body["thread_url"] == f"https://illo.example.com/cortex?idea={body['thread_id']}"
-    assert body["url"] == body["thread_url"]
-    assert body["thread_route"] == f"/cortex?idea={body['thread_id']}"
+    assert body["operation"] == "stored"
+    assert body["thread_id"] is None
+    assert body["thread_url"] is None
+    assert body["url"] is None
+    assert body["thread_route"] is None
     assert body["matched_policy_id"] is None
     assert body["error"] is None
     assert event.status == "processed"
+    assert event.action_type == "accepted"
     assert event.kind == "context"
     assert event.raw_payload["intent"] == "Ask the team to review inbound follow-up fixes."
     assert event.normalized_payload["source"]["source_tool"] == "codex"
+    assert await session.scalar(select(func.count()).select_from(Idea)) == 0
 
 
 async def test_mcp_context_requires_non_empty_intent(session):
@@ -825,7 +830,7 @@ async def test_idempotent_insert_integrity_error_returns_existing_replay(session
     assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 1
 
 
-async def test_context_envelope_creates_thread_submission_and_preview(session, monkeypatch):
+async def test_context_envelope_stores_without_uncorrelated_thread(session, monkeypatch):
     monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
     principal = await _seed_connection(session)
 
@@ -848,30 +853,14 @@ async def test_context_envelope_creates_thread_submission_and_preview(session, m
 
     assert result["status"] == "processed"
     assert result["matched_policy_id"] is None
-    assert result["ilo_outcome"]["operation"] == "created"
-    thread_id = result["ilo_outcome"]["thread_id"]
-    assert result["ilo_outcome"]["thread_url"] == f"https://illo.example.com/cortex?idea={thread_id}"
-    assert result["ilo_outcome"]["url"] == result["ilo_outcome"]["thread_url"]
-    assert result["ilo_outcome"]["thread_route"] == f"/cortex?idea={thread_id}"
-
-    idea = await session.get(Idea, thread_id)
-    assert idea is not None
-    assert idea.origin == "inbound_context"
-    assert idea.title == "Ask the team to review the agent trace"
-
-    submission = (await session.scalars(select(ThreadContextSubmission))).one()
-    assert submission.thread_id == thread_id
-    assert submission.intent == "Ask the team to review the agent trace"
-    assert submission.source["source_tool"] == "codex"
-    assert submission.parts[0]["type"] == "conversation"
-    assert submission.routing_result["thread_id"] == thread_id
-    assert submission.routing_result["thread_url"] == result["ilo_outcome"]["thread_url"]
-    assert submission.routing_result["thread_route"] == result["ilo_outcome"]["thread_route"]
-
-    preview = (await session.scalars(select(IdeaThread).where(IdeaThread.idea_id == thread_id))).one()
-    assert preview.message_type == "context_submission"
-    assert "Context submitted from Jira webhook." in preview.content
-    assert preview.metadata_["context_submission_id"] == str(submission.id)
+    assert result["ilo_outcome"]["operation"] == "stored"
+    assert result["ilo_outcome"]["reason"] == "no_correlated_thread"
+    assert result["ilo_outcome"]["part_count"] == 2
+    assert "No visible Thread was created" in result["ilo_outcome"]["message"]
+    assert "thread_id" not in result["ilo_outcome"]
+    assert await session.scalar(select(func.count()).select_from(Idea)) == 0
+    assert await session.scalar(select(func.count()).select_from(IdeaThread)) == 0
+    assert await session.scalar(select(func.count()).select_from(ThreadContextSubmission)) == 0
 
 
 async def test_context_envelope_attaches_to_correlated_thread_and_replays_idempotently(session, monkeypatch):

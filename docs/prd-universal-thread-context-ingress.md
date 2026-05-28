@@ -68,8 +68,8 @@ The two high-level MCP primitives are:
   behind `illo_get_ask`.
 - `illo_submit_context`: universal ingress for new context from a personal
   agent to Illo. It acknowledges receipt quickly, records the context through
-  inbound coordination, and returns any immediately available absolute Thread
-  URL.
+  inbound coordination, and returns an absolute Thread URL only when the
+  submission is explicitly correlated with an existing Thread.
 
 Universal Thread product vocabulary:
 
@@ -98,8 +98,8 @@ MVP proof loop:
 ```text
 personal agent submits context
 -> inbound coordination records/routes it
--> Illo may create or update a Thread
--> existing Thread UI renders submitted context
+-> Illo may attach it to a correlated Thread or store it event-only
+-> existing Thread UI renders attached context
 -> Discussion exists as an attached comment surface
 -> @illo from Discussion acknowledges there and can act through surface tools
 ```
@@ -216,13 +216,13 @@ loop is out of scope unless explicitly pulled in.
 - Extend inbound envelope handling to accept a new kind such as `context`. The
   existing inbound event table and decision receipt table remain the audit and
   result spine.
-- Add routing results that can describe Thread outcomes generically, such as
-  `thread.created`, `thread.attached`, `accepted`, `stored`, or
-  `needs_clarification`.
+- Add routing results that can describe passive context outcomes clearly, such
+  as `thread.attached`, `accepted`, `stored`, or `needs_clarification`. Visible
+  Thread creation remains the job of explicit Thread tools.
 - Keep `illo_submit_context` async-safe. The tool should acknowledge quickly,
   return any immediately available `thread_id`, internal route/path, and
-  user-facing absolute `thread_url`, and let longer Illo reasoning continue
-  through normal Thread/AgentRun state.
+  user-facing absolute `thread_url` when context attaches to a known Thread,
+  and avoid creating empty visible Threads for passive context submissions.
 - The MCP result must not depend on the personal agent reconstructing a URL from
   a relative route. A relative path can remain useful for clients inside
   Illospace, but Codex and other personal agents need a complete URL they can
@@ -249,9 +249,9 @@ loop is out of scope unless explicitly pulled in.
   - `parts`
   - `routing_result`
   - `created_at`
-- Persist every context submission first as an inbound event. If it creates or
-  attaches to a Thread, also persist it as a `thread_context_submissions` row.
-  If no Thread exists, keep it as an inbound event/source record only.
+- Persist every context submission first as an inbound event. If it attaches to
+  a Thread, also persist it as a `thread_context_submissions` row. If no Thread
+  exists, keep it as an inbound event/source record only.
 - Preserve raw submitted trace/context as the canonical source artifact. Any
   summaries, previews, extracted decisions, or timeline cards are derived views.
 - Allow multiple context submissions to attach to the same Thread when
@@ -306,11 +306,10 @@ loop and left a few product/technical decisions explicit for future review:
   worth paying for.
 - Context ingress is deterministic in the MVP hot path. If the caller supplies
   `correlation.thread_id` or `correlation.idea_id`, the context attaches to that
-  Thread when it belongs to the user's org. Otherwise, when the source has an
-  owner user, IlloSpace creates a new Thread immediately and returns its link.
-  If there is no owner user, the context remains a stored inbound event. This
-  keeps MCP acknowledgement quick and avoids a long Illo routing run inside the
-  tool call.
+  Thread when it belongs to the user's org. Otherwise, IlloSpace stores the
+  context as an inbound event without creating a visible Thread. This keeps MCP
+  acknowledgement quick, avoids a long Illo routing run inside the tool call,
+  and prevents passive submissions from appearing as empty AI Timeline blobs.
 - The deterministic context path still enters through
   `submit_inbound_envelope`; it is not a parallel ingress stack. Context simply
   gets its own envelope normalization and routing branch before the older signal
@@ -412,9 +411,8 @@ implementation details. The important behaviors are:
   and hosted MCP.
 - Inbound events preserve source actor, authority user, ingress metadata,
   envelope kind, intent, source, constraints, correlation, and parts.
-- Routing can create a Thread and return an absolute user-facing URL plus stable
-  IDs/routes for programmatic clients.
-- Routing can attach a second context submission to an existing Thread.
+- Routing can attach context submissions to an existing Thread and return an
+  absolute user-facing URL plus stable IDs/routes for programmatic clients.
 - Routing can store a context submission without a Thread while preserving the
   inbound event/receipt.
 - Raw submitted context remains available after derived previews are generated.
@@ -489,8 +487,8 @@ The loop is:
 ```text
 personal agent submits context
 -> inbound coordination records/routes it
--> Illo may create or update a Thread
--> existing Thread UI renders submitted context
+-> Illo may attach it to a correlated Thread or store it event-only
+-> existing Thread UI renders attached context
 -> Discussion exists as an attached comment surface
 -> @illo from Discussion acknowledges there and can act through surface tools
 ```
