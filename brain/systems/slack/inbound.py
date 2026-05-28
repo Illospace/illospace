@@ -6,16 +6,18 @@ from typing import Any, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.app.triggers.adapters.slack import build_slack_message_trigger
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.inbound import InboundEventRow
 from brain.platform.db.models.org import User
 from brain.systems.inbound.service import _clean_optional, _complete_event
 from brain.systems.inbound.status import STATUS_FAILED, STATUS_PROCESSED
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
+from brain.systems.slack.triggers import (
+    SLACK_MESSAGE_ENVELOPE_KIND,
+    build_slack_work_intake_payload,
+)
 
 ACTION_SLACK_RUN_ADMITTED = "slack.run_admitted"
-SLACK_MESSAGE_ENVELOPE_KIND = "slack_message"
 
 
 async def process_slack_message_envelope(
@@ -47,7 +49,7 @@ async def process_slack_message_envelope(
             reasoning_summary="Slack events need a connection owner for the permissive self-hosted MVP.",
         )
 
-    trigger = build_slack_message_trigger(
+    trigger_payload = build_slack_work_intake_payload(
         org_id=context.org_id,
         authority_user_id=authority_user_id,
         payload=dict(normalized.get("payload") or {}),
@@ -57,7 +59,7 @@ async def process_slack_message_envelope(
     )
     admission = await admit_work(
         session,
-        WorkIntakeEvent.from_trigger_payload(trigger.to_payload()),
+        WorkIntakeEvent.from_trigger_payload(trigger_payload),
     )
     slack_payload = dict(normalized.get("payload") or {})
     target = {

@@ -264,7 +264,19 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
     services_section = compose.split("services:", 1)[1].rsplit("\nvolumes:", 1)[0]
     service_names = re.findall(r"^  ([a-z][a-z0-9_-]+):$", services_section, flags=re.MULTILINE)
 
-    assert service_names == ["postgres", "migrate", "api", "worker", "scheduler", "updater", "web"]
+    assert service_names == [
+        "postgres",
+        "migrate",
+        "api",
+        "worker",
+        "scheduler",
+        "slack-connector",
+        "updater",
+        "web",
+    ]
+    slack_section = services_section.split("  slack-connector:", 1)[1].split("\n  updater:", 1)[0]
+    assert 'profiles: ["slack"]' in slack_section
+    assert "\n    ports:" not in slack_section
     assert "127.0.0.1:${ILLO_WEB_PORT:-8080}:8080" in compose
     assert "ILLO_SELF_UPDATE_REQUEST_FILE" in compose
     assert "ILLO_SELF_UPDATE_HEARTBEAT_FILE" in compose
