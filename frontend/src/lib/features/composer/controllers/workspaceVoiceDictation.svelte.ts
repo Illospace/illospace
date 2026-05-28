@@ -4,6 +4,7 @@ import {
   createVoiceDictationController,
   type VoiceDictationSnapshot,
 } from '$lib/features/composer/domain/voiceDictation';
+import { appendVoiceLevel } from '$lib/features/composer/domain/voiceLevels';
 import type { RuntimeVoiceSettings } from '$lib/types/runtimeSettings';
 
 type VoiceErrorReporter = (message: string) => void;
@@ -25,6 +26,7 @@ export class WorkspaceVoiceDictationController {
   settings = $state<RuntimeVoiceSettings | null>(null);
   snapshot = $state<VoiceDictationSnapshot>(idleSnapshot());
   elapsedMs = $state(0);
+  audioLevels = $state<number[]>([]);
 
   private controller: ReturnType<typeof createVoiceDictationController> | null = null;
   private startedAt = 0;
@@ -81,12 +83,14 @@ export class WorkspaceVoiceDictationController {
   async start() {
     if (!this.isReady) return;
     const controller = this.ensureController();
+    this.resetAudioLevels();
     await controller.start();
     this.refreshSnapshot();
     if (this.snapshot.status === 'recording') {
       this.startTimer();
       return;
     }
+    this.resetAudioLevels();
     this.reportCurrentError('Voice dictation could not start.');
   }
 
@@ -118,6 +122,7 @@ export class WorkspaceVoiceDictationController {
 
   destroy() {
     this.stopTimer();
+    this.resetAudioLevels();
   }
 
   private ensureController() {
@@ -127,7 +132,13 @@ export class WorkspaceVoiceDictationController {
       setDraft: this.deps.setDraft,
       submit: this.deps.submit,
       createSession: () => api.createRuntimeVoiceSession(),
-      connect: createOpenAIRealtimeVoiceConnection,
+      connect: (session, handlers) =>
+        createOpenAIRealtimeVoiceConnection(session, {
+          ...handlers,
+          onAudioLevel: (level) => {
+            this.audioLevels = appendVoiceLevel(this.audioLevels, level);
+          },
+        }),
     });
     this.refreshSnapshot();
     return this.controller;
@@ -139,7 +150,7 @@ export class WorkspaceVoiceDictationController {
   }
 
   private startTimer() {
-    this.stopTimer();
+    this.clearTimer();
     this.startedAt = Date.now();
     this.elapsedMs = 0;
     this.timer = window.setInterval(() => {
@@ -147,16 +158,25 @@ export class WorkspaceVoiceDictationController {
     }, 250);
   }
 
-  private stopTimer() {
+  private clearTimer() {
     if (this.timer) {
       window.clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  private stopTimer() {
+    this.clearTimer();
     this.startedAt = 0;
     this.elapsedMs = 0;
+    this.resetAudioLevels();
   }
 
   private reportCurrentError(fallback: string) {
     this.deps.onError(this.snapshot.error || fallback);
+  }
+
+  private resetAudioLevels() {
+    this.audioLevels = [];
   }
 }

@@ -5,6 +5,10 @@ import {
   appendVoiceTranscriptDraft,
   createVoiceDictationController,
 } from '../features/composer/domain/voiceDictation.ts';
+import {
+  appendVoiceLevel,
+  voiceLevelToBarHeight,
+} from '../features/composer/domain/voiceLevels.ts';
 
 test('voice dictation appends transcript to the end of an existing draft with smart spacing', () => {
   assert.equal(
@@ -111,4 +115,22 @@ test('voice dictation stop leaves recoverable error state when transport cleanup
   assert.equal(draft, 'Please update the UI.');
   assert.equal(controller.snapshot().status, 'error');
   assert.equal(controller.snapshot().error, 'Could not commit audio.');
+});
+
+test('voice level history clamps samples and keeps the latest values', () => {
+  const history = [0.1, 0.2];
+  assert.deepEqual(appendVoiceLevel(history, 2, 3), [0.1, 0.2, 1]);
+  assert.deepEqual(appendVoiceLevel([0.1, 0.2, 0.3], -1, 3), [0.2, 0.3, 0]);
+  assert.deepEqual(appendVoiceLevel([0.1, 0.2, 0.3], 0.4, 1), [0.4]);
+});
+
+test('voice level bar heights grow with louder input', () => {
+  const silence = voiceLevelToBarHeight(0);
+  const speech = voiceLevelToBarHeight(0.35);
+  const loud = voiceLevelToBarHeight(1);
+
+  assert.equal(silence, 3);
+  assert.ok(speech > silence);
+  assert.ok(loud > speech);
+  assert.equal(loud, 24);
 });
