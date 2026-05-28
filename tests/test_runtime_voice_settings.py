@@ -171,7 +171,7 @@ async def test_openai_realtime_secret_request_uses_manual_commit_for_realtime_wh
     assert request_json["session"]["type"] == "transcription"
     assert audio_input["transcription"]["model"] == "gpt-realtime-whisper"
     assert "language" not in audio_input["transcription"]
-    assert "English or French" in audio_input["transcription"]["prompt"]
+    assert "prompt" not in audio_input["transcription"]
     assert audio_input["turn_detection"] is None
 
 
@@ -196,8 +196,9 @@ async def test_openai_realtime_secret_request_can_pin_french_language(monkeypatc
     await voice_settings._async_create_openai_realtime_client_secret("sk-memory-openai", language="fr")
 
     transcription = captured["kwargs"]["json"]["session"]["audio"]["input"]["transcription"]
+    assert transcription["model"] == "gpt-realtime-whisper"
     assert transcription["language"] == "fr"
-    assert "French" in transcription["prompt"]
+    assert "prompt" not in transcription
 
 
 @pytest.mark.asyncio

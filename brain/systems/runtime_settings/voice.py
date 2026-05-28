@@ -185,28 +185,10 @@ def _openai_transcription_settings(language: str) -> dict[str, str]:
     normalized = _voice_language(language)
     settings = {
         "model": OPENAI_REALTIME_TRANSCRIPTION_MODEL,
-        "prompt": _openai_transcription_prompt(normalized),
     }
     if normalized in {"en", "fr"}:
         settings["language"] = normalized
     return settings
-
-
-def _openai_transcription_prompt(language: str) -> str:
-    if language == "en":
-        return (
-            "Transcribe the user's speech in English for an AI chat composer. "
-            "Do not translate to another language. Preserve product names, code terms, and natural punctuation."
-        )
-    if language == "fr":
-        return (
-            "Transcribe the user's speech in French for an AI chat composer. "
-            "Do not translate to another language. Preserve product names, code terms, and natural punctuation."
-        )
-    return (
-        "The user may speak English or French. Transcribe in the same language the user speaks. "
-        "Do not translate. Preserve product names, code terms, and natural punctuation."
-    )
 
 
 def _voice_provider(value: object) -> str:
