@@ -8,7 +8,18 @@ HEARTBEAT_FILE="${ILLO_SELF_UPDATE_HEARTBEAT_FILE:-/data/private/self-update/hea
 LOG_PATH="${ILLO_SELF_UPDATE_LOG_PATH:-/data/private/logs/illo-self-update.log}"
 WORKER_DRAIN_TIMEOUT_FILE="${ILLO_SELF_UPDATE_WORKER_DRAIN_TIMEOUT_FILE:-/data/private/self-update/worker-drain-timeout.json}"
 POLL_SECONDS="${ILLO_SELF_UPDATE_POLL_SECONDS:-2}"
+APP_UID="${ILLO_APP_UID:-10001}"
+APP_GID="${ILLO_APP_GID:-10001}"
 RUNNING_FILE="${REQUEST_FILE}.running"
+
+prepare_shared_paths() {
+  mkdir -p "$(dirname "$REQUEST_FILE")" "$(dirname "$STATUS_FILE")" "$(dirname "$HEARTBEAT_FILE")" "$(dirname "$LOG_PATH")"
+  if [ "$(id -u)" = "0" ]; then
+    chown "$APP_UID:$APP_GID" "$(dirname "$REQUEST_FILE")" "$(dirname "$STATUS_FILE")" "$(dirname "$HEARTBEAT_FILE")" 2>/dev/null || true
+    chmod 0775 "$(dirname "$REQUEST_FILE")" "$(dirname "$STATUS_FILE")" "$(dirname "$HEARTBEAT_FILE")" 2>/dev/null || true
+  fi
+  git config --global --add safe.directory "$REPO" >/dev/null 2>&1 || true
+}
 
 json_write() {
   local path="$1"
@@ -89,7 +100,7 @@ process_request() {
   rm -f "$RUNNING_FILE"
 }
 
-mkdir -p "$(dirname "$REQUEST_FILE")" "$(dirname "$STATUS_FILE")" "$(dirname "$HEARTBEAT_FILE")" "$(dirname "$LOG_PATH")"
+prepare_shared_paths
 write_status "idle" "Compose updater sidecar is ready." "" ""
 
 while true; do
