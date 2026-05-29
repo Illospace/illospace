@@ -306,6 +306,15 @@ def test_compose_self_update_sidecar_can_bootstrap_from_api_queue():
     assert "chown \"$APP_UID:$APP_GID\"" in self_update_daemon
     assert "chmod 0775" in self_update_daemon
     assert "safe.directory" in self_update_daemon
+    assert "ILLO_DOCTOR_SKIP_LOCAL_HTTP_PROBES=1" in self_update_daemon
+
+
+def test_compose_doctor_can_skip_host_local_http_probes_from_sidecars():
+    root = Path(__file__).resolve().parents[1]
+    doctor = (root / "deploy" / "scripts" / "doctor.sh").read_text()
+
+    assert "ILLO_DOCTOR_SKIP_LOCAL_HTTP_PROBES" in doctor
+    assert "outside the host network namespace" in doctor
 
 
 def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
