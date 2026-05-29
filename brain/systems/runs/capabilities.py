@@ -274,7 +274,7 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         "name": "Slack",
         "category": "external_surface",
         "summary": "Illo can participate in Slack conversations when a Slack source connection is registered for the workspace.",
-        "aliases": ("slack", "team chat", "chat teammate"),
+        "aliases": ("slack", "team chat", "chat teammate", "slack integration"),
         "tools": ("manage_slack", "read_slack_conversation", "post_slack_reply"),
         "status_check": {"tool": "manage_slack", "args": {"action": "status"}},
         "setup": {
@@ -502,6 +502,22 @@ def _matches_query(manifest: CapabilityManifest, query: str) -> bool:
     return any(term in haystack for term in terms)
 
 
+def _identity_matches_query(manifest: CapabilityManifest, query: str) -> bool:
+    text = query.lower()
+    identities = (manifest.key, manifest.name, *manifest.aliases)
+    for identity in identities:
+        term = _coerce_text(identity).lower()
+        if not term:
+            continue
+        if " " in term:
+            if term in text:
+                return True
+            continue
+        if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text):
+            return True
+    return False
+
+
 def filter_capability_manifests(
     manifests: Iterable[CapabilityManifest],
     *,
@@ -512,11 +528,22 @@ def filter_capability_manifests(
     key = _coerce_text(capability_key).lower()
     cat = _coerce_text(category).lower()
     q = _coerce_text(query).lower()
+    manifest_list = list(manifests)
+    if q and not key:
+        identity_matches = [
+            manifest
+            for manifest in manifest_list
+            if (not cat or manifest.category.lower() == cat)
+            and _identity_matches_query(manifest, q)
+        ]
+        if identity_matches:
+            return identity_matches
+
     result: list[CapabilityManifest] = []
-    for manifest in manifests:
+    for manifest in manifest_list:
         if key and key not in {manifest.key.lower(), *(alias.lower() for alias in manifest.aliases)}:
             continue
-        if cat and manifest.category.lower() != cat:
+        if cat and not key and manifest.category.lower() != cat:
             continue
         if q and not _matches_query(manifest, q):
             continue
