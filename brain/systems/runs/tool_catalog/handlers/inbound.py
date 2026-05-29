@@ -127,7 +127,7 @@ async def _handle_manage_inbound(
 
             if action == "create_connection":
                 if not user_id:
-                    return _error("create_connection requires a user-scoped run")
+                    return _error("create_connection requires user context")
                 if not display_name:
                     return _error("create_connection requires: display_name")
                 row = await inbound_admin.create_connection(

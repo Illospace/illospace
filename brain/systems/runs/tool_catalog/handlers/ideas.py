@@ -445,7 +445,7 @@ async def _handle_manage_idea(
 
             if normalized_action == "create":
                 if not actor_user_id:
-                    return json.dumps({"error": "create requires a user-scoped run"})
+                    return json.dumps({"error": "create requires user context"})
                 if not title:
                     return json.dumps({"error": "create requires: title"})
                 requested_status = status or "emerged"

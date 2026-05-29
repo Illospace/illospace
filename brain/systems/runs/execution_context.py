@@ -42,7 +42,7 @@ class _AgentContextProxy:
     def __delattr__(self, name: str) -> None:
         values = dict(_context_values.get())
         if name not in values:
-            raise AttributeError(name)
+            return
         del values[name]
         _context_values.set(values)
 

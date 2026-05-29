@@ -44,6 +44,7 @@ async def test_deep_graph_shape_is_agent_run_children_and_artifacts(session_fact
     store = AsyncAgentRunStore(session)
     parent = await store.create_run(
         AgentRunRequest(
+            org_id="org-1",
             thread_id="idea-1",
             message="Investigate, implement, and verify the cleanup.",
             profile=RunProfile.DEEP,
@@ -158,6 +159,7 @@ async def test_child_run_can_use_headless_thread_without_bypassing_store(session
     store = AsyncAgentRunStore(session)
     parent = await store.create_run(
         AgentRunRequest(
+            org_id="org-1",
             thread_id="idea-1",
             message="Keep working.",
             profile=RunProfile.FAST,
@@ -207,6 +209,7 @@ async def test_visible_run_fetch_overfetches_when_headless_rows_are_newer(sessio
     store = AsyncAgentRunStore(session)
     visible = await store.create_run(
         AgentRunRequest(
+            org_id="org-1",
             thread_id="idea-1",
             message="Visible run.",
             profile=RunProfile.FAST,
@@ -215,6 +218,7 @@ async def test_visible_run_fetch_overfetches_when_headless_rows_are_newer(sessio
     )
     await store.create_run(
         AgentRunRequest(
+            org_id="org-1",
             thread_id="headless-worker:1:report",
             message="Hidden report.",
             profile=RunProfile.FAST,

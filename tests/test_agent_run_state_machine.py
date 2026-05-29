@@ -16,11 +16,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.schema import CreateTable
 
-from brain.systems.runs.domain import AgentRunRequest, RunRecipe
+from brain.systems.runs.domain import AgentRunRequest as _AgentRunRequest, RunRecipe
 from brain.systems.runs.engine import AsyncAgentRunEngine, RunRecipeResult, RunRuntime, StaticAnswerRecipe
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
+
+
+def _run_request(**kwargs) -> _AgentRunRequest:
+    return _AgentRunRequest(org_id=kwargs.pop("org_id", "org-1"), **kwargs)
 
 
 @pytest.fixture
@@ -64,7 +68,7 @@ async def test_restart_resume_skips_completed_steps_from_persisted_cursor(sessio
 
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    run = await store.create_run(AgentRunRequest(thread_id="thread-1", message="resume me"))
+    run = await store.create_run(_run_request(thread_id="thread-1", message="resume me"))
     await store.set_status(run.id, RunStatus.STARTING)
     await store.set_status(run.id, RunStatus.RUNNING)
     await store.start_step(run.id, "first")
@@ -85,11 +89,60 @@ async def test_restart_resume_skips_completed_steps_from_persisted_cursor(sessio
     assert (await _event_types(restarted, run.id)).count("run.step_skipped") == 1
 
 
+async def test_create_run_requires_workspace_org_id(session_factory):
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+
+    with pytest.raises(ValueError, match="workspace org_id"):
+        await store.create_run(_AgentRunRequest(thread_id="thread-1", message="missing workspace"))
+
+
+async def test_runtime_fails_legacy_run_without_workspace_org_id(session_factory):
+    class UnexpectedRecipe:
+        async def execute(self, _runtime: RunRuntime) -> RunRecipeResult:
+            raise AssertionError("runs without workspace context must not execute")
+
+    session = session_factory()
+    row = AgentRunRow(
+        thread_id="thread-1",
+        profile=RunRecipe.FAST.value,
+        recipe=RunRecipe.FAST.value,
+        status=RunStatus.QUEUED.value,
+        input_message="legacy queued run",
+        target_ref={},
+        workspace_ref={},
+        model_policy={},
+        metadata_={},
+    )
+    session.add(row)
+    await session.flush()
+    row.root_run_id = row.id
+    await session.flush()
+
+    result = await AsyncAgentRunEngine(session, recipes={"fast": UnexpectedRecipe()}).run_existing(row.id)
+
+    assert result.status == RunStatus.FAILED
+    row = await session.get(AgentRunRow, result.id)
+    assert row is not None
+    assert row.status == RunStatus.FAILED.value
+    status_events = (
+        await session.scalars(
+            select(AgentRunEventRow)
+            .where(
+                AgentRunEventRow.run_id == result.id,
+                AgentRunEventRow.event_type == "run.status_changed",
+            )
+            .order_by(AgentRunEventRow.sequence_no.asc())
+        )
+    ).all()
+    assert status_events[-1].payload["reason"] == "AgentRun missing workspace org_id"
+
+
 async def test_claim_and_completion_are_idempotent(session_factory):
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    first = await store.create_run(AgentRunRequest(thread_id="thread-1", message="one"))
-    second = await store.create_run(AgentRunRequest(thread_id="thread-1", message="two"))
+    first = await store.create_run(_run_request(thread_id="thread-1", message="one"))
+    second = await store.create_run(_run_request(thread_id="thread-1", message="two"))
 
     claimed = await store.claim_next()
     assert claimed is not None
@@ -129,7 +182,7 @@ async def test_post_completion_tasks_run_after_terminal_completion(session_facto
 
     run = await asyncio.wait_for(
         AsyncAgentRunEngine(session, recipes={"fast": PostCompletionRecipe()}).run(
-            AgentRunRequest(thread_id="thread-1", message="hello")
+            _run_request(thread_id="thread-1", message="hello")
         ),
         timeout=1,
     )
@@ -145,11 +198,11 @@ async def test_post_completion_tasks_run_after_terminal_completion(session_facto
 async def test_deferred_queued_run_waits_for_target_terminal(session_factory):
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    active = await store.create_run(AgentRunRequest(thread_id="thread-1", message="active"))
+    active = await store.create_run(_run_request(thread_id="thread-1", message="active"))
     await store.set_status(active.id, RunStatus.STARTING)
     await store.set_status(active.id, RunStatus.RUNNING)
     deferred = await store.create_run(
-        AgentRunRequest(
+        _run_request(
             thread_id="thread-1",
             message="queued next",
             metadata={"queued_after_run_id": active.id},
@@ -169,18 +222,18 @@ async def test_deferred_queued_run_waits_for_target_terminal(session_factory):
 async def test_deferred_queued_runs_stay_sequential_after_target_finishes(session_factory):
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    active = await store.create_run(AgentRunRequest(thread_id="thread-1", message="active"))
+    active = await store.create_run(_run_request(thread_id="thread-1", message="active"))
     await store.set_status(active.id, RunStatus.STARTING)
     await store.set_status(active.id, RunStatus.RUNNING)
     first_deferred = await store.create_run(
-        AgentRunRequest(
+        _run_request(
             thread_id="thread-1",
             message="queued first",
             metadata={"queued_after_run_id": active.id},
         )
     )
     second_deferred = await store.create_run(
-        AgentRunRequest(
+        _run_request(
             thread_id="thread-1",
             message="queued second",
             metadata={"queued_after_run_id": active.id},
@@ -205,18 +258,18 @@ async def test_deferred_queued_runs_stay_sequential_after_target_finishes(sessio
 async def test_blocked_deferred_run_does_not_starve_other_threads(session_factory):
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    active = await store.create_run(AgentRunRequest(thread_id="thread-1", message="active"))
+    active = await store.create_run(_run_request(thread_id="thread-1", message="active"))
     await store.set_status(active.id, RunStatus.STARTING)
     await store.set_status(active.id, RunStatus.RUNNING)
     for index in range(30):
         await store.create_run(
-            AgentRunRequest(
+            _run_request(
                 thread_id="thread-1",
                 message=f"queued next {index}",
                 metadata={"queued_after_run_id": active.id},
             )
         )
-    eligible = await store.create_run(AgentRunRequest(thread_id="thread-2", message="normal queued"))
+    eligible = await store.create_run(_run_request(thread_id="thread-2", message="normal queued"))
 
     claimed = await store.claim_next()
     assert claimed is not None
@@ -226,7 +279,7 @@ async def test_blocked_deferred_run_does_not_starve_other_threads(session_factor
 async def test_durable_steering_drains_once_from_run_events(session_factory):
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    run = await store.create_run(AgentRunRequest(thread_id="thread-1", message="listen"))
+    run = await store.create_run(_run_request(thread_id="thread-1", message="listen"))
     event = await store.append_steering(
         run.id,
         "  Don't fetch everything.  ",
@@ -250,7 +303,7 @@ async def test_durable_steering_drains_once_from_run_events(session_factory):
 async def test_durable_steering_no_rows_autocommit_releases_transaction(session_factory, monkeypatch):
     session = session_factory()
     store = AsyncAgentRunStore(session, auto_commit=True)
-    run = await store.create_run(AgentRunRequest(thread_id="thread-1", message="listen"))
+    run = await store.create_run(_run_request(thread_id="thread-1", message="listen"))
 
     def fail_locked_run(_run_id):
         raise AssertionError("draining an empty steering inbox should not lock the run")
@@ -264,7 +317,7 @@ async def test_durable_steering_no_rows_autocommit_releases_transaction(session_
 async def test_durable_steering_with_rows_autocommit_releases_transaction(session_factory):
     session = session_factory()
     store = AsyncAgentRunStore(session, auto_commit=True)
-    run = await store.create_run(AgentRunRequest(thread_id="thread-1", message="listen"))
+    run = await store.create_run(_run_request(thread_id="thread-1", message="listen"))
     event = await store.append_steering(run.id, "keep going", user_id="user-1")
 
     messages = await store.drain_steering(run.id)
@@ -280,7 +333,7 @@ async def test_durable_steering_with_rows_autocommit_releases_transaction(sessio
 async def test_run_heartbeat_updates_liveness_without_event_noise(session_factory):
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    run = await store.create_run(AgentRunRequest(thread_id="thread-1", message="heartbeat"))
+    run = await store.create_run(_run_request(thread_id="thread-1", message="heartbeat"))
     await store.set_status(run.id, RunStatus.STARTING)
     before_events = await _event_types(session, run.id)
     now = datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc)
@@ -303,7 +356,7 @@ async def test_failed_recipe_records_step_and_run_failure(session_factory):
 
     session = session_factory()
     result = await AsyncAgentRunEngine(session, recipes={"fast": FailingRecipe()}).run(
-        AgentRunRequest(thread_id="thread-1", message="fail")
+        _run_request(thread_id="thread-1", message="fail")
     )
 
     assert result.status == RunStatus.FAILED
@@ -326,7 +379,7 @@ async def test_runtime_cancel_token_stops_run_after_recipe_returns(session_facto
         session,
         recipes={"fast": SlowRecipe()},
         cancel_event_factory=lambda _run_id: SimpleNamespace(is_set=lambda: True),
-    ).run(AgentRunRequest(thread_id="thread-1", message="cancel me"))
+    ).run(_run_request(thread_id="thread-1", message="cancel me"))
 
     assert result.status == RunStatus.CANCELED
     events = await _event_types(session, result.id)
@@ -339,7 +392,7 @@ async def test_auto_commit_store_finishes_event_transactions(session_factory):
     store = AsyncAgentRunStore(session, auto_commit=True)
 
     with patch.object(session, "commit", wraps=session.commit) as commit:
-        run = await store.create_run(AgentRunRequest(thread_id="thread-1", message="live"))
+        run = await store.create_run(_run_request(thread_id="thread-1", message="live"))
         await store.set_status(run.id, RunStatus.STARTING)
 
     assert commit.call_count >= 2
@@ -351,7 +404,7 @@ async def test_cancel_endpoint_helper_records_run_canceled_event(session_factory
 
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    run = await store.create_run(AgentRunRequest(thread_id="thread-1", message="cancel me"))
+    run = await store.create_run(_run_request(thread_id="thread-1", message="cancel me"))
 
     class _AsyncStore:
         async def require_run(self, run_id: int):
@@ -378,7 +431,7 @@ async def test_cancel_runs_for_idea_records_run_canceled_event(session_factory):
 
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    run = await store.create_run(AgentRunRequest(thread_id="idea-1", message="cancel me"))
+    run = await store.create_run(_run_request(thread_id="idea-1", message="cancel me"))
     await store.set_status(run.id, RunStatus.STARTING)
     await store.set_status(run.id, RunStatus.RUNNING)
 
@@ -399,7 +452,7 @@ async def test_stale_active_run_reaper_fails_abandoned_runs(session_factory):
 
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    run = await store.create_run(AgentRunRequest(thread_id="idea-1", message="stale"))
+    run = await store.create_run(_run_request(thread_id="idea-1", message="stale"))
     await store.set_status(run.id, RunStatus.STARTING)
     await store.set_status(run.id, RunStatus.RUNNING)
     now = datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc)
@@ -449,7 +502,7 @@ async def test_stale_active_run_reaper_uses_recent_events_as_liveness(session_fa
 
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    run = await store.create_run(AgentRunRequest(thread_id="idea-1", message="active events"))
+    run = await store.create_run(_run_request(thread_id="idea-1", message="active events"))
     await store.set_status(run.id, RunStatus.STARTING)
     await store.set_status(run.id, RunStatus.RUNNING)
     now = datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc)
@@ -485,7 +538,7 @@ async def test_stale_active_run_reaper_does_not_reap_child_while_root_active(ses
 
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    root = await store.create_run(AgentRunRequest(thread_id="idea-1", message="root"))
+    root = await store.create_run(_run_request(thread_id="idea-1", message="root"))
     child = await store.create_child_run(root, recipe=RunRecipe.WORKER, message="child", step_key="node:investigate")
     await store.set_status(root.id, RunStatus.STARTING)
     await store.set_status(root.id, RunStatus.RUNNING)

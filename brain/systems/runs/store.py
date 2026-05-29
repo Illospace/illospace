@@ -89,6 +89,13 @@ def _row_value(row: AgentRunRow, key: str) -> Any:
     return row.__dict__.get(key)
 
 
+def _require_workspace_org_id(request: AgentRunRequest) -> str:
+    org_id = str(request.org_id or "").strip()
+    if not org_id:
+        raise ValueError("AgentRun requires workspace org_id")
+    return org_id
+
+
 def _deferred_run_target_id(row: AgentRunRow) -> int | None:
     metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
     for key in _DEFERRED_RUN_TARGET_METADATA_KEYS:
@@ -123,8 +130,9 @@ class AsyncAgentRunStore:
     async def create_run(self, request: AgentRunRequest) -> AgentRun:
         profile = request.normalized_profile
         recipe = request.normalized_recipe
+        org_id = _require_workspace_org_id(request)
         row = AgentRunRow(
-            org_id=request.org_id,
+            org_id=org_id,
             user_id=request.user_id,
             thread_id=request.thread_id,
             parent_run_id=request.parent_run_id,
