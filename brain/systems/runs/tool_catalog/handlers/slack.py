@@ -206,55 +206,25 @@ def _slack_connection_payload(connection) -> dict[str, Any]:
 
 def _slack_setup_instructions() -> dict[str, Any]:
     return {
-        "audience": "Slack admin and Illospace deployment admin",
         "slack_admin_url": "https://api.slack.com/apps",
-        "token_handling": (
-            "Slack tokens are secrets. Ask the admin to add them to the Illospace server configuration "
-            "or secret store; do not paste them into chat and do not store them in Illospace metadata."
+        "what_illo_can_do": [
+            "Check whether Slack is connected to this Illospace workspace.",
+            "Link Slack users to Illospace users after Slack is connected.",
+            "Read and reply in Slack conversations after Illo is mentioned or DM'd.",
+        ],
+        "what_illo_cannot_do": [
+            "Create or install the Slack app for the workspace.",
+            "Receive Slack tokens in chat.",
+            "Change Slack or Illospace installation settings.",
+        ],
+        "setup_boundary": (
+            "If Slack is not connected, an Illospace admin must finish the Slack connection outside this chat. "
+            "Slack tokens must never be pasted to Illo, Slack chat, or Thread chat, "
+            "and they are not Illospace Vault entries."
         ),
-        "slack_steps": [
-            "Open https://api.slack.com/apps and create a new Slack app for Illo in the target workspace.",
-            "Set the app name and bot display name to Illo.",
-            "Enable Socket Mode.",
-            "Create an app-level token with the connections:write scope.",
-            "Add the required bot OAuth scopes.",
-            "Subscribe the bot to the required Slack events.",
-            "Install the app to the Slack workspace and copy the Bot User OAuth Token.",
-            "Invite Illo to any channels where it should participate, then mention @Illo or DM it.",
-        ],
-        "illospace_admin_steps": [
-            "Add the Bot User OAuth Token to the Illospace server secret named SLACK_BOT_TOKEN.",
-            "Add the app-level Socket Mode token to the Illospace server secret named SLACK_APP_TOKEN.",
-            "Enable or restart the Illospace Slack connector using the deployment's normal service controls.",
-            "Return here and ask Illo to check Slack status.",
-        ],
-        "required_bot_scopes": [
-            "app_mentions:read",
-            "channels:history",
-            "channels:read",
-            "chat:write",
-            "files:read",
-            "files:write",
-            "groups:history",
-            "groups:read",
-            "im:history",
-            "im:read",
-            "im:write",
-            "users:read",
-        ],
-        "required_bot_events": ["app_mention", "message.channels", "message.groups", "message.im"],
-        "required_secret_names": ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"],
-        "optional_secret_names": ["SLACK_TEAM_ID", "SLACK_BOT_USER_ID", "ILLO_SLACK_ORG_ID", "ILLO_SLACK_OWNER_USER_ID"],
-        "token_sources": {
-            "SLACK_BOT_TOKEN": "Slack app > OAuth & Permissions > Bot User OAuth Token",
-            "SLACK_APP_TOKEN": "Slack app > Basic Information > App-Level Tokens > token with connections:write",
-            "SLACK_TEAM_ID": "Slack workspace/team id, visible in event payloads or Slack admin URLs",
-            "SLACK_BOT_USER_ID": "Slack app bot user id, visible in app authorizations or bot profile details",
-        },
-        "success_checks": [
-            "manage_slack action=status should show a Slack connection after the connector starts.",
-            "Mentioning @Illo in an invited channel should create a slack_message inbound event.",
-            "Illo should answer in Slack through post_slack_reply.",
+        "after_connected": [
+            "Ask Illo to check Slack status.",
+            "Invite Illo to the Slack channels where it should participate, then mention @Illo or DM it.",
         ],
     }
 
@@ -265,7 +235,7 @@ async def _handle_manage_slack(
     slack_user_id: str | None = None,
     user_id: str | None = None,
 ) -> str:
-    """Inspect Slack setup/health and manage minimal identity mappings."""
+    """Inspect Slack connection health and manage minimal identity mappings."""
 
     normalized_action = str(action or "").strip().lower()
     if normalized_action == "setup_instructions":
@@ -297,10 +267,16 @@ async def _handle_manage_slack(
                 .order_by(ExternalAgentConnectionRow.created_at.asc(), ExternalAgentConnectionRow.id.asc())
             )
             rows = list((await uow.session.scalars(stmt)).all())
+            setup_state = "connected" if rows else "not_connected"
             return json.dumps(
                 {
                     "ok": True,
-                    "setup": _slack_setup_instructions(),
+                    "setup_state": setup_state,
+                    "next_step": (
+                        "Slack is connected. Invite Illo to a channel, mention @Illo, or DM it."
+                        if rows
+                        else "Slack is not connected. Ask an Illospace admin to finish the Slack connection outside this chat, then ask Illo to check status again."
+                    ),
                     "connections": [_slack_connection_payload(row) for row in rows],
                 },
                 default=str,
@@ -339,7 +315,7 @@ async def _handle_manage_slack(
             )
             return json.dumps({"ok": True, "mapping": mapping}, default=str)
 
-    return json.dumps({"error": "manage_slack action must be setup_instructions, status, list_mappings, link_identity, or unlink_identity"})
+    return json.dumps({"error": "manage_slack action must be status, list_mappings, link_identity, or unlink_identity"})
 
 
 __all__ = [

@@ -478,6 +478,22 @@ def test_slack_tools_are_available_on_normal_illo_tool_surface():
     assert {"post_slack_reply", "read_slack_conversation", "manage_slack"} <= names
 
 
+def test_manage_slack_tool_definition_has_no_operator_setup_action():
+    from brain.systems.runs.tool_definitions import CHAT_TOOLS
+
+    tool = next(tool for tool in CHAT_TOOLS if tool["name"] == "manage_slack")
+    actions = tool["input_schema"]["properties"]["action"]["enum"]
+    serialized_tool = json.dumps(tool)
+
+    assert actions == ["status", "list_mappings", "link_identity", "unlink_identity"]
+    assert "setup_instructions" not in serialized_tool
+    assert "SLACK_" not in serialized_tool
+    assert "docker" not in serialized_tool
+    assert "deploy" not in serialized_tool
+    assert "manifest" not in serialized_tool
+    assert "secret" not in serialized_tool
+
+
 @pytest.mark.asyncio
 async def test_manage_slack_setup_instructions_are_runtime_safe_admin_guidance():
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_manage_slack
@@ -486,19 +502,20 @@ async def test_manage_slack_setup_instructions_are_runtime_safe_admin_guidance()
 
     setup = result["setup"]
     assert setup["slack_admin_url"] == "https://api.slack.com/apps"
-    assert setup["audience"] == "Slack admin and Illospace deployment admin"
-    assert setup["token_sources"]["SLACK_BOT_TOKEN"].endswith("Bot User OAuth Token")
-    assert setup["token_sources"]["SLACK_APP_TOKEN"].endswith("token with connections:write")
-    assert {"app_mentions:read", "chat:write", "im:history"} <= set(setup["required_bot_scopes"])
-    assert {"app_mention", "message.im"} <= set(setup["required_bot_events"])
-    assert any("Invite Illo" in step for step in setup["slack_steps"])
-    assert any("SLACK_BOT_TOKEN" in step for step in setup["illospace_admin_steps"])
-    assert "do not store them in Illospace metadata" in setup["token_handling"]
-    serialized = json.dumps(setup)
-    assert "docker compose" not in serialized
-    assert "python -m" not in serialized
-    assert "deploy/slack" not in serialized
-    assert "manifest_path" not in setup
+    assert any("Check whether Slack is connected" in step for step in setup["what_illo_can_do"])
+    assert any("Change Slack or Illospace installation settings" in step for step in setup["what_illo_cannot_do"])
+    assert "not Illospace Vault entries" in setup["setup_boundary"]
+    assert any("Invite Illo" in step for step in setup["after_connected"])
+
+    serialized_setup = json.dumps(setup)
+    assert "SLACK_" not in serialized_setup
+    assert "deploy/slack" not in serialized_setup
+    assert "docker compose" not in serialized_setup
+    assert "python -m" not in serialized_setup
+    assert "manifest" not in serialized_setup
+    assert "runtime configuration" not in serialized_setup
+    assert "secret manager" not in serialized_setup
+    assert "server secret store" not in serialized_setup
 
 
 @pytest.mark.asyncio
@@ -529,12 +546,17 @@ async def test_manage_slack_status_does_not_leak_developer_setup_details(monkeyp
         result = json.loads(await _handle_manage_slack(action="status"))
 
     assert result["ok"] is True
+    assert result["setup_state"] == "not_connected"
     assert result["connections"] == []
-    serialized = json.dumps(result["setup"])
+    assert "setup" not in result
+    serialized = json.dumps(result)
+    assert "SLACK_" not in serialized
     assert "docker compose" not in serialized
     assert "python -m" not in serialized
     assert "deploy/slack" not in serialized
-    assert "manifest_path" not in result["setup"]
+    assert "manifest" not in serialized
+    assert "secret manager" not in serialized
+    assert "server secret store" not in serialized
 
 
 @pytest.mark.asyncio

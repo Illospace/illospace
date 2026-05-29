@@ -1371,9 +1371,11 @@ CHAT_TOOLS = [
     {
         "name": "manage_slack",
         "description": (
-            "Inspect self-hosted Slack setup, connector health, and Slack-to-Illospace "
-            "identity mappings. Use this when helping an admin set up Slack or when "
-            "a Slack actor needs to be linked to an Illospace user."
+            "Inspect Slack connection health and Slack-to-Illospace identity mappings. "
+            "Use this to check whether Slack is connected or when a Slack actor needs "
+            "to be linked to an Illospace user. This tool only reports connection "
+            "state and identity mappings; it cannot change Slack or Illospace "
+            "installation settings."
         ),
         "input_schema": {
             "type": "object",
@@ -1381,7 +1383,6 @@ CHAT_TOOLS = [
                 "action": {
                     "type": "string",
                     "enum": [
-                        "setup_instructions",
                         "status",
                         "list_mappings",
                         "link_identity",
