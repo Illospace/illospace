@@ -239,6 +239,8 @@ class TestToolDefinitions:
         assert "brain_encode" in names
         assert "brain_vault" in names
         assert "runtime_settings" in names
+        assert "read_self_context" in names
+        assert "read_capabilities" in names
 
     def test_exec_tools_defined(self):
         from brain.systems.runs.direct_agent import EXEC_TOOLS
@@ -1505,6 +1507,60 @@ class TestExecToolHandlers:
 
 
 class TestFinalReplyReview:
+    def test_checker_rejects_ungrounded_illospace_setup_surface_without_llm(self):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+
+        provider = MagicMock()
+        llm = _mock_llm_client(MagicMock(), provider="openai")
+
+        result = review_candidate_final_reply(
+            user_request="Help me set up Slack",
+            candidate_output=(
+                "Slack is not connected yet.\n\n"
+                "Setup path:\n"
+                "1. Open **Illospace -> Settings -> Integrations -> Slack**.\n"
+                "2. Click **Connect Slack**."
+            ),
+            execution_context=(
+                "Evidence guardrail: approve direct source/runtime claims only when supported.\n"
+                'Recent tool result 1: {"tool_name":"manage_slack","result_preview":'
+                '"{\\"ok\\": true, \\"setup_state\\": \\"not_connected\\", '
+                '\\"needs_connection\\": true, \\"connection_count\\": 0, \\"connections\\": []}"}'
+            ),
+            provider=provider,
+            llm=llm,
+            model="openai/gpt-5.5",
+        )
+
+        assert result["status"] == "continue"
+        assert result["approved"] is False
+        assert "not present in this run's execution evidence" in result["rationale"]
+        provider.create.assert_not_called()
+
+    def test_checker_rejects_ungrounded_illospace_authority_role_without_llm(self):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+
+        provider = MagicMock()
+        llm = _mock_llm_client(MagicMock(), provider="openai")
+
+        result = review_candidate_final_reply(
+            user_request="Help me set up Slack",
+            candidate_output="Ask your Illospace admin to connect Slack for this workspace.",
+            execution_context=(
+                "Evidence guardrail: approve direct source/runtime claims only when supported.\n"
+                'Recent tool result 1: {"tool_name":"manage_slack","result_preview":'
+                '"{\\"ok\\": true, \\"setup_state\\": \\"not_connected\\", '
+                '\\"connection_count\\": 0, \\"connections\\": []}"}'
+            ),
+            provider=provider,
+            llm=llm,
+            model="openai/gpt-5.5",
+        )
+
+        assert result["status"] == "continue"
+        assert result["approved"] is False
+        provider.create.assert_not_called()
+
     @patch("brain.systems.runs.direct_loop.final_reply_checker.get_provider")
     @patch("brain.systems.runs.direct_loop.final_reply_checker.resolve_llm_client")
     def test_checker_reviews_partial_reply_with_llm(self, mock_client, mock_get_provider):
@@ -1662,6 +1718,128 @@ class TestFinalReplyReview:
 
 
 class TestCortexReplyHandler:
+    def test_read_capabilities_reports_slack_manifest(self):
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        payload = json.loads(_handle_read_capabilities(query="help me set up Slack"))
+
+        assert payload["source"] == "runtime_capability_registry"
+        assert payload["detail_level"] == "full"
+        assert payload["count"] == 1
+        slack = payload["capabilities"][0]
+        assert slack["key"] == "slack"
+        assert slack["source"] == "tool_registry"
+        assert slack["availability"] == "available"
+        assert slack["status_check"] == {"tool": "manage_slack", "args": {"action": "status"}}
+        assert slack["status_check_available"] is True
+        assert slack["setup"]["credential_store"] == "Vault"
+        assert [credential["key_name"] for credential in slack["setup"]["credentials"]] == [
+            "SLACK_BOT_TOKEN",
+            "SLACK_APP_TOKEN",
+        ]
+        assert {detail["name"] for detail in slack["tool_details"]} == set(slack["tools"])
+        assert "guide_ref" not in slack["setup"]
+
+    def test_read_capabilities_generic_query_returns_registry(self):
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        payload = json.loads(_handle_read_capabilities(query="what integrations can you do?"))
+
+        keys = {capability["key"] for capability in payload["capabilities"]}
+
+        assert payload["detail_level"] == "summary"
+        assert len(json.dumps(payload)) < 16_000
+        assert payload["count"] >= 10
+        assert any(capability["key"] == "slack" for capability in payload["capabilities"])
+        assert {"domains", "cycles", "code_execution", "workspace_context"} <= keys
+        assert all("tool_details" not in capability for capability in payload["capabilities"])
+        assert all("tool_count" in capability for capability in payload["capabilities"])
+
+    def test_read_capabilities_registry_details_come_from_tool_registry(self):
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        payload = json.loads(_handle_read_capabilities(capability_key="domains"))
+
+        assert payload["detail_level"] == "full"
+        assert payload["count"] == 1
+        domains = payload["capabilities"][0]
+        assert domains["source"] == "tool_registry"
+        assert domains["category"] == "core_workspace"
+        assert domains["tools"] == ["read_workspace_records", "manage_domain"]
+        assert {detail["name"] for detail in domains["tool_details"]} == set(domains["tools"])
+        assert any("domain" in (detail["expected_effect"] or "").lower() for detail in domains["tool_details"])
+
+    def test_read_capabilities_marks_disabled_capability_tools_unavailable(self):
+        from brain.systems.runs.execution_context import bind_agent_context
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        disabled_slack_tools = [
+            "manage_slack",
+            "read_slack_conversation",
+            "post_slack_reply",
+        ]
+        with bind_agent_context({
+            "execution_metadata": {
+                "tool_policy": {"disabled_tools": disabled_slack_tools},
+            }
+        }):
+            payload = json.loads(_handle_read_capabilities(query="Slack setup"))
+
+        assert payload["count"] == 1
+        slack = payload["capabilities"][0]
+        assert slack["key"] == "slack"
+        assert slack["availability"] == "unavailable"
+        assert slack["tools"] == []
+        assert set(slack["unavailable_tools"]) == set(disabled_slack_tools)
+        assert slack["status_check_available"] is False
+
+    def test_read_self_context_reports_identity_source_and_inspection_tools(self):
+        from brain.systems.runs.tool_catalog.handlers.self_context import _handle_read_self_context
+
+        payload = json.loads(_handle_read_self_context(include_git=False))
+
+        assert payload["identity"]["agent_name"] == "Illo"
+        assert payload["identity"]["workspace_product"] == "Illospace"
+        assert payload["open_source"]["repository_url"] == "https://github.com/Illospace/illospace"
+        assert payload["installation"]["source_root"]["exists"] is True
+        assert payload["source_inspection"]["tools"]["read_file"]["registered"] is True
+        assert "git" not in payload
+
+    def test_read_capabilities_includes_custom_manifest_from_context(self):
+        from brain.systems.runs.execution_context import bind_agent_context
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        with bind_agent_context({
+            "workspace_ref": {
+                "capability_manifests": [
+                    {
+                        "key": "custom_crm",
+                        "name": "Custom CRM",
+                        "category": "sales",
+                        "summary": "Look up account records from the workspace CRM.",
+                        "aliases": ["accounts"],
+                        "tools": ["crm_lookup"],
+                        "setup": {
+                            "mode": "managed_by_tool",
+                            "guide_markdown": "# CRM Setup\nUse the CRM tool's own connection wizard.",
+                        },
+                    }
+                ]
+            }
+        }):
+            payload = json.loads(_handle_read_capabilities(
+                capability_key="accounts",
+                include_setup_guide=True,
+            ))
+
+        assert payload["count"] == 1
+        capability = payload["capabilities"][0]
+        assert capability["key"] == "custom_crm"
+        assert capability["source"] == "capability_manifests"
+        assert capability["tools"] == ["crm_lookup"]
+        assert payload["setup_guides"][0]["available"] is True
+        assert payload["setup_guides"][0]["ref"] == "inline"
+
     def test_final_reply_context_preserves_worker_evidence_confidence(self):
         from types import SimpleNamespace
 
@@ -1687,6 +1865,14 @@ class TestCortexReplyHandler:
             ],
         )
         _agent_context.execution_artifacts = []
+        _agent_context.recent_tool_results = [
+            {
+                "tool_name": "manage_slack",
+                "args_preview": '{"action": "status"}',
+                "is_error": False,
+                "result_preview": '{"ok": true, "setup_state": "not_connected", "connection_count": 0}',
+            }
+        ]
         _agent_context.intent_satisfaction = {
             "intent_type": "broad_refactor",
             "completion_mode": "strict_contract",
@@ -1699,6 +1885,7 @@ class TestCortexReplyHandler:
         finally:
             _agent_context.run = None
             _agent_context.execution_artifacts = []
+            _agent_context.recent_tool_results = []
             _agent_context.intent_satisfaction = None
 
         assert "Evidence guardrail" in context
@@ -1708,6 +1895,9 @@ class TestCortexReplyHandler:
         assert "Raw DB row was not available" in context
         assert "strict_contract" in context
         assert "Complete every refactor phase" in context
+        assert "Recent tool result 1" in context
+        assert "manage_slack" in context
+        assert "not_connected" in context
 
     def test_cortex_reply_whitespace_normalizer_collapses_punctuation_lines(self):
         from brain.systems.runs.tool_catalog.handlers.cortex_reply import _normalize_reply_whitespace
@@ -1849,6 +2039,38 @@ class TestCortexReplyHandler:
 
 
 class TestExecutionArtifacts:
+    def test_emit_resolved_tool_call_records_recent_result_for_reply_context(self):
+        from brain.systems.runs.direct_loop.tool_execution import ResolvedToolCall, emit_resolved_tool_call
+
+        agent_context = SimpleNamespace(tool_calls_log=[], recent_tool_results=[])
+        tool_results = []
+
+        emit_resolved_tool_call(
+            ResolvedToolCall(
+                block_id="tool-1",
+                tool_name="manage_slack",
+                tool_input={"action": "status"},
+                result_text='{"ok": true, "setup_state": "not_connected"}',
+            ),
+            tool_results,
+            None,
+            None,
+            None,
+            "coordinator",
+            agent_context=agent_context,
+        )
+
+        assert agent_context.tool_calls_log == ["manage_slack"]
+        assert agent_context.recent_tool_results == [
+            {
+                "tool_name": "manage_slack",
+                "args_preview": '{"action": "status"}',
+                "is_error": False,
+                "result_preview": '{"ok": true, "setup_state": "not_connected"}',
+            }
+        ]
+        assert tool_results[0]["content"] == '{"ok": true, "setup_state": "not_connected"}'
+
     def test_exec_command_records_git_provenance(self):
         from brain.systems.runs.direct_agent import _handle_exec_command, _agent_context
 

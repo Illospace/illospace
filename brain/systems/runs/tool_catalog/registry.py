@@ -116,6 +116,26 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
             "scopes": ["narrow"],
         },
     },
+    "read_self_context": {
+        "permission": "read_runtime",
+        "output_budget_chars": 12_000,
+        "evidence_emitter": True,
+        "context_route": {
+            "description": "Read verified Illo/Illospace identity, source-root, open-source repository, git, install, and source-inspection facts for the current run.",
+            "domains": ["self context", "identity", "source code", "installation", "open source repo", "where Illo runs"],
+            "scopes": ["narrow"],
+        },
+    },
+    "read_capabilities": {
+        "permission": "read_runtime",
+        "output_budget_chars": 16_000,
+        "evidence_emitter": True,
+        "context_route": {
+            "description": "Read machine-readable capability manifests: what Illo can inspect, do, or guide; status tools; setup modes; and setup guide references.",
+            "domains": ["capabilities", "integrations", "connectors", "plugins", "tools", "setup", "what Illo can do"],
+            "scopes": ["narrow", "broad"],
+        },
+    },
     "transcribe_audio_attachment": {
         "permission": "network_read",
         "risk_class": "low",

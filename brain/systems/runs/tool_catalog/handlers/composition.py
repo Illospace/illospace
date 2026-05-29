@@ -25,6 +25,7 @@ from brain.systems.runs.tool_catalog.handlers.browser import (
     _handle_browser_upload_attachment,
     _handle_browser_wait,
 )
+from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
 from brain.systems.runs.tool_catalog.handlers.cortex_reply import (
     _build_final_reply_check_context,
     _handle_cortex_reply,
@@ -60,6 +61,7 @@ from brain.systems.runs.tool_catalog.handlers.session_tools import (
     _handle_session_read,
     _handle_session_write,
 )
+from brain.systems.runs.tool_catalog.handlers.self_context import _handle_read_self_context
 from brain.systems.runs.tool_catalog.handlers.slack import (
     _handle_manage_slack,
     _handle_post_slack_reply,
@@ -210,6 +212,8 @@ def _get_tool_handlers(
             user_id=getattr(_agent_context, "user_id", None),
             org_id=getattr(_agent_context, "org_id", None),
         ),
+        "read_self_context": _handle_read_self_context,
+        "read_capabilities": _handle_read_capabilities,
         "manage_deployment": _manage_deployment,
         "transcribe_audio_attachment": lambda **kw: _patched_private(
             "_handle_transcribe_audio_attachment",
