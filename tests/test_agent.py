@@ -242,6 +242,18 @@ class TestToolDefinitions:
         assert "read_self_context" in names
         assert "read_capabilities" in names
 
+    def test_read_capabilities_schema_is_query_first_for_models(self):
+        from brain.systems.runs.direct_agent import BRAIN_TOOLS
+
+        tool = next(tool for tool in BRAIN_TOOLS if tool["name"] == "read_capabilities")
+        properties = tool["input_schema"]["properties"]
+
+        assert "query" in properties
+        assert "detail_level" in properties
+        assert "include_setup_guide" in properties
+        assert "capability_key" not in properties
+        assert "category" not in properties
+
     def test_exec_tools_defined(self):
         from brain.systems.runs.direct_agent import EXEC_TOOLS
         names = [t["name"] for t in EXEC_TOOLS]
@@ -1768,6 +1780,35 @@ class TestCortexReplyHandler:
         assert domains["tools"] == ["read_workspace_records", "manage_domain"]
         assert {detail["name"] for detail in domains["tool_details"]} == set(domains["tools"])
         assert any("domain" in (detail["expected_effect"] or "").lower() for detail in domains["tool_details"])
+
+    def test_read_capabilities_query_first_matches_slack_communication_setup(self):
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        payload = json.loads(_handle_read_capabilities(
+            query="communication integration setup guide connect Illospace to Slack",
+            detail_level="auto",
+            include_setup_guide=True,
+        ))
+
+        assert payload["count"] == 1
+        assert payload["detail_level"] == "full"
+        slack = payload["capabilities"][0]
+        assert slack["key"] == "slack"
+        assert slack["setup"]["credential_store"] == "Vault"
+        assert "setup_guides" not in payload
+
+    def test_read_capabilities_internal_key_recovers_from_wrong_category_hint(self):
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        payload = json.loads(_handle_read_capabilities(
+            capability_key="slack",
+            category="communication",
+            detail_level="full",
+        ))
+
+        assert payload["count"] == 1
+        assert payload["category_ignored"] is True
+        assert payload["capabilities"][0]["key"] == "slack"
 
     def test_read_capabilities_marks_disabled_capability_tools_unavailable(self):
         from brain.systems.runs.execution_context import bind_agent_context

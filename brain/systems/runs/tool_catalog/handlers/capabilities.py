@@ -18,6 +18,9 @@ from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
 
 
+_FILTER_FIELDS = ("capability_key", "category")
+
+
 def _context_containers() -> list[dict[str, Any]]:
     containers: list[dict[str, Any]] = []
     for attr in ("target_ref", "workspace_ref"):
@@ -65,6 +68,58 @@ def _resolved_detail_level(
     return "summary"
 
 
+def _filter_with_fallbacks(
+    manifests: list,
+    *,
+    query: str | None,
+    capability_key: str | None,
+    category: str | None,
+) -> tuple[list, list[str]]:
+    matches = filter_capability_manifests(
+        manifests,
+        query=query,
+        capability_key=capability_key,
+        category=category,
+    )
+    if matches:
+        return matches, []
+
+    ignored: list[str] = []
+    if category:
+        matches = filter_capability_manifests(
+            manifests,
+            query=query,
+            capability_key=capability_key,
+        )
+        if matches:
+            ignored.append("category")
+            return matches, ignored
+
+    if capability_key:
+        matches = filter_capability_manifests(
+            manifests,
+            query=query,
+            category=category,
+        )
+        if matches:
+            ignored.append("capability_key")
+            return matches, ignored
+
+    if query:
+        matches = filter_capability_manifests(manifests, query=query)
+        if matches:
+            ignored.extend(
+                field for field, value in (
+                    ("capability_key", capability_key),
+                    ("category", category),
+                )
+                if value
+            )
+            return matches, ignored
+
+    return matches, ignored
+
+
 def _handle_read_capabilities(
     query: str | None = None,
     capability_key: str | None = None,
@@ -87,7 +142,7 @@ def _handle_read_capabilities(
             registered_tool_names=registered_tools,
         ),
     ])
-    matches = filter_capability_manifests(
+    matches, ignored_filters = _filter_with_fallbacks(
         manifests,
         query=query,
         capability_key=capability_key,
@@ -103,27 +158,31 @@ def _handle_read_capabilities(
         "ok": True,
         "source": "runtime_capability_registry",
         "query": query,
-        "capability_key": capability_key,
-        "category": category,
         "detail_level": resolved_detail,
         "count": len(matches),
+        "ignored_filters": ignored_filters,
         "capabilities": [
             manifest.to_payload(detail_level=resolved_detail)
             for manifest in matches
         ],
         "answering_guidance": [
             "Use capability manifests and tool schemas as the authority for what Illo can inspect, do, or guide.",
-            "Use summary results as a capability index; request a single capability or detail_level=full before relying on exact tools or setup fields.",
+            "Use summary results as a capability index; single matches include setup/status fields when they exist.",
+            "Setup guides are optional extra documentation; when no setup guide is returned, use the capability setup/status fields.",
             "For custom capabilities, rely on the provided manifest fields instead of general model assumptions.",
         ],
     }
+    for field in _FILTER_FIELDS:
+        payload[f"{field}_ignored"] = field in ignored_filters
     if include_setup_guide:
         guide_targets = matches if capability_key or len(matches) == 1 else []
-        payload["setup_guides"] = [
+        setup_guides = [
             guide
             for guide in (load_setup_guide(manifest) for manifest in guide_targets)
             if guide is not None
         ]
+        if setup_guides:
+            payload["setup_guides"] = setup_guides
     return json.dumps(payload, default=str)
 
 
