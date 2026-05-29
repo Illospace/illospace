@@ -84,6 +84,22 @@ def test_workspace_data_tool_is_read_only_agent_run_surface():
     assert "read_team_activity" in _get_tool_handlers()
 
 
+def test_capability_tool_is_read_only_agent_run_surface():
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+    from brain.systems.runs.tool_catalog.registry import context_route_tool_names, get_tool_registration
+
+    registration = get_tool_registration("read_capabilities")
+
+    assert registration is not None
+    assert registration.permission == "read_runtime"
+    assert registration.side_effect_class == "read_only"
+    assert registration.evidence_emitter is True
+    assert registration.context_route is not None
+    assert "capabilities" in registration.context_route.domains
+    assert "read_capabilities" in context_route_tool_names()
+    assert "read_capabilities" in _get_tool_handlers()
+
+
 def test_thread_discussion_reply_tool_is_registered_and_exposed():
     from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
     from brain.systems.runs.tool_handlers import _get_tool_handlers
@@ -182,6 +198,7 @@ def test_context_route_surface_is_registry_driven():
         "brain_recall",
         "my_activity",
         "query_workspace_data",
+        "read_capabilities",
         "read_cycles",
         "read_project_contexts",
         "read_team_activity",
@@ -197,6 +214,7 @@ def test_context_route_surface_is_registry_driven():
     assert "thread transcript" in routes["read_thread_messages"]["domains"]
     assert routes["query_workspace_data"]["empty_result_policy"] == "answer_honestly"
     assert "workspace records" in routes["query_workspace_data"]["domains"]
+    assert "setup" in routes["read_capabilities"]["domains"]
     assert "workspace setup" in routes["read_workspace_overview"]["domains"]
 
 
@@ -218,6 +236,26 @@ def test_onboarding_intro_requires_workspace_overview():
     assert tool == "read_workspace_overview"
     assert message is not None
     assert "workspace overview" in message
+
+
+def test_capability_setup_question_requires_capabilities():
+    from brain.systems.runs.introspection import required_introspection_tool
+
+    tool, message = required_introspection_tool("Hi Illo, I would like to set you up in our Slack.")
+
+    assert tool == "read_capabilities"
+    assert message is not None
+    assert "capability/setup context" in message
+
+
+def test_named_capability_setup_question_requires_capabilities_without_agent_mention():
+    from brain.systems.runs.introspection import required_introspection_tool
+
+    tool, message = required_introspection_tool("Help me set up Slack for the team.")
+
+    assert tool == "read_capabilities"
+    assert message is not None
+    assert "capability/setup context" in message
 
 
 def test_memory_question_does_not_force_workspace_data():

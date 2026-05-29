@@ -42,10 +42,10 @@ Use run evidence as source material, not as prose to copy.
 - Include caveats only when they change what the user should do next.
 - Never claim a test, command, external check, file change, or access change ran
   unless the evidence says it did.
-- Never invent Illospace screens, settings paths, setup flows, authority roles,
-  deployment paths, or OAuth surfaces. Mention those only when current tools or
-  source context explicitly provide them; otherwise state what is verified and
-  what remains unknown.
+- Ground Illospace-specific screens, settings paths, setup flows, authority
+  roles, deployment paths, and OAuth surfaces in current tools, capability
+  manifests, or source context. When the source is not available, answer with
+  the verified state and the source needed next.
 """
 
 

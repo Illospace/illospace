@@ -390,6 +390,38 @@ BRAIN_TOOLS = [
         },
     },
     {
+        "name": "read_capabilities",
+        "description": (
+            "Read machine-readable capability manifests for Illo's runtime and installed/custom capabilities. "
+            "Use this before answering setup, connect, install, integration, connector, plugin, tool, "
+            "or 'can you do X?' questions. Capability manifests and tool schemas are the source of truth "
+            "for setup modes, status checks, credential stores, and agent actions. For a matched setup "
+            "request, set include_setup_guide=true when the manifest points to a registered setup guide."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural-language capability lookup, such as the integration or action the user asked about.",
+                },
+                "capability_key": {
+                    "type": "string",
+                    "description": "Optional exact capability key or alias, such as a registered integration key.",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Optional capability category filter, such as communication, project, data, or custom.",
+                },
+                "include_setup_guide": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "When true, include the registered setup guide for an exact or single matched capability.",
+                },
+            },
+        },
+    },
+    {
         "name": "transcribe_audio_attachment",
         "description": (
             "Transcribe an audio attachment from the current thread or an uploaded file using "
@@ -530,8 +562,8 @@ BRAIN_TOOLS = [
         "name": "read_workspace_overview",
         "description": (
             "Read a curated overview of the current Illospace workspace before introducing Illo, "
-            "answering broad setup questions, or explaining what context is available. Returns team members, "
-            "active/recent Cortex thoughts, recent agent runs/messages, Project Context profiles and attachments, "
+            "answering broad workspace setup questions, or explaining what context is available. "
+            "Returns team members, active/recent Cortex thoughts, recent agent runs/messages, Project Context profiles and attachments, "
             "Domains/records, workspace apps, Cycles, and setup gaps. Use this first for 'what is this workspace?', "
             "'what can you see?', and onboarding setup guidance. "
             f"{WORKSPACE_OVERVIEW_SPARSE_GUIDANCE}"
@@ -2573,7 +2605,7 @@ COORDINATOR_TOOLS = (
 # Brain gate: these tool names satisfy the "brain context accessed" requirement
 _BRAIN_TOOL_NAMES = frozenset({
     "brain_recall", "brain_guardrails", "brain_skills", "skill_view", "skill_asset",
-    "brain_encode", "runtime_settings", "query_workspace_data", "read_workspace_overview",
+    "brain_encode", "runtime_settings", "read_capabilities", "query_workspace_data", "read_workspace_overview",
     "read_team_activity", "read_project_contexts", "read_team_members", "read_workspace_records",
     "read_cycles", "read_workspace_apps",
 })

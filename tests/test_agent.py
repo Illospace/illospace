@@ -239,6 +239,7 @@ class TestToolDefinitions:
         assert "brain_encode" in names
         assert "brain_vault" in names
         assert "runtime_settings" in names
+        assert "read_capabilities" in names
 
     def test_exec_tools_defined(self):
         from brain.systems.runs.direct_agent import EXEC_TOOLS
@@ -1716,6 +1717,66 @@ class TestFinalReplyReview:
 
 
 class TestCortexReplyHandler:
+    def test_read_capabilities_reports_builtin_slack_manifest(self):
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        payload = json.loads(_handle_read_capabilities(query="help me set up Slack"))
+
+        assert payload["source"] == "runtime_capability_registry"
+        assert payload["count"] == 1
+        slack = payload["capabilities"][0]
+        assert slack["key"] == "slack"
+        assert slack["status_check"] == {"tool": "manage_slack", "args": {"action": "status"}}
+        assert slack["setup"]["credential_store"] == "Vault"
+        assert [credential["key_name"] for credential in slack["setup"]["credentials"]] == [
+            "SLACK_BOT_TOKEN",
+            "SLACK_APP_TOKEN",
+        ]
+        assert "guide_ref" not in slack["setup"]
+
+    def test_read_capabilities_generic_query_returns_registry(self):
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        payload = json.loads(_handle_read_capabilities(query="what integrations can you do?"))
+
+        assert payload["count"] >= 1
+        assert any(capability["key"] == "slack" for capability in payload["capabilities"])
+
+    def test_read_capabilities_includes_custom_manifest_from_context(self):
+        from brain.systems.runs.execution_context import bind_agent_context
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        with bind_agent_context({
+            "workspace_ref": {
+                "capability_manifests": [
+                    {
+                        "key": "custom_crm",
+                        "name": "Custom CRM",
+                        "category": "sales",
+                        "summary": "Look up account records from the workspace CRM.",
+                        "aliases": ["accounts"],
+                        "tools": ["crm_lookup"],
+                        "setup": {
+                            "mode": "managed_by_tool",
+                            "guide_markdown": "# CRM Setup\nUse the CRM tool's own connection wizard.",
+                        },
+                    }
+                ]
+            }
+        }):
+            payload = json.loads(_handle_read_capabilities(
+                capability_key="accounts",
+                include_setup_guide=True,
+            ))
+
+        assert payload["count"] == 1
+        capability = payload["capabilities"][0]
+        assert capability["key"] == "custom_crm"
+        assert capability["source"] == "capability_manifests"
+        assert capability["tools"] == ["crm_lookup"]
+        assert payload["setup_guides"][0]["available"] is True
+        assert payload["setup_guides"][0]["ref"] == "inline"
+
     def test_final_reply_context_preserves_worker_evidence_confidence(self):
         from types import SimpleNamespace
 
