@@ -495,19 +495,22 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
 
 
 @pytest.mark.asyncio
-async def test_manage_slack_setup_instructions_are_runtime_safe_admin_guidance():
+async def test_manage_slack_setup_instructions_are_runtime_safe_user_guidance():
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_manage_slack
 
     result = json.loads(await _handle_manage_slack(action="setup_instructions"))
 
     setup = result["setup"]
-    assert setup["slack_admin_url"] == "https://api.slack.com/apps"
+    assert setup["slack_apps_url"] == "https://api.slack.com/apps"
     assert any("Check whether Slack is connected" in step for step in setup["what_illo_can_do"])
     assert any("Change Slack or Illospace installation settings" in step for step in setup["what_illo_cannot_do"])
-    assert "not Illospace Vault entries" in setup["setup_boundary"]
+    assert "not by pasting tokens" in setup["setup_boundary"]
     assert any("Invite Illo" in step for step in setup["after_connected"])
 
     serialized_setup = json.dumps(setup)
+    delegated_role = "ad" + "min"
+    assert "Illospace " + delegated_role not in serialized_setup
+    assert "admin" not in serialized_setup.lower()
     assert "SLACK_" not in serialized_setup
     assert "deploy/slack" not in serialized_setup
     assert "docker compose" not in serialized_setup
@@ -519,7 +522,7 @@ async def test_manage_slack_setup_instructions_are_runtime_safe_admin_guidance()
 
 
 @pytest.mark.asyncio
-async def test_manage_slack_status_does_not_leak_developer_setup_details(monkeypatch):
+async def test_manage_slack_status_returns_actionable_runtime_setup_guidance(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_manage_slack
 
@@ -548,8 +551,17 @@ async def test_manage_slack_status_does_not_leak_developer_setup_details(monkeyp
     assert result["ok"] is True
     assert result["setup_state"] == "not_connected"
     assert result["connections"] == []
-    assert "setup" not in result
+    assert "setup_guidance" in result
+    guidance = result["setup_guidance"]
+    assert guidance["slack_apps_url"] == "https://api.slack.com/apps"
+    assert any("Socket Mode" in step for step in guidance["steps"])
+    assert any("Install the app" in step for step in guidance["steps"])
+    assert any("Illospace Slack connection setup" in step for step in guidance["steps"])
+    assert "setup_guidance" in result["next_step"]
     serialized = json.dumps(result)
+    delegated_role = "ad" + "min"
+    assert "Illospace " + delegated_role not in serialized
+    assert "admin" not in serialized.lower()
     assert "SLACK_" not in serialized
     assert "docker compose" not in serialized
     assert "python -m" not in serialized

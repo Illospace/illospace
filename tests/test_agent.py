@@ -269,6 +269,17 @@ class TestToolDefinitions:
             assert "input_schema" in tool, f"Tool {tool['name']} missing input_schema"
             assert tool["input_schema"]["type"] == "object"
 
+    def test_tool_surfaces_do_not_delegate_setup_to_admin_or_operator(self):
+        from brain.systems.runs.direct_agent import COORDINATOR_TOOLS
+
+        serialized = json.dumps(COORDINATOR_TOOLS).lower()
+
+        delegated_role = "ad" + "min"
+        assert "illospace " + delegated_role not in serialized
+        assert "operator" not in serialized
+        assert "ask an " + delegated_role not in serialized
+        assert "ask a workspace " + delegated_role not in serialized
+
     def test_tool_policy_filters_model_tools_and_handlers(self):
         from brain.systems.runs.direct_agent import _apply_tool_policy
 

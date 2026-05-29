@@ -922,7 +922,7 @@ INBOUND_TOOLS = [
             "event logs, and decision receipts. Use this when a user asks Illo to set up or adjust "
             "webhooks, MCP personal-tool signals, Jira/GitHub/Stripe-style sources, routing rules, "
             "or deterministic storage into Domains. External tools should submit signals through "
-            "hosted MCP or POST /webhooks; this tool is Illo's chat-based admin/configuration surface. "
+            "hosted MCP or POST /webhooks; this tool is Illo's chat-based configuration surface. "
             "Use action='help' or action='schema' with operation before mutating unfamiliar configs."
         ),
         "input_schema": {
@@ -978,7 +978,7 @@ INBOUND_TOOLS = [
                 "remote_agent_id": {"type": "string", "description": "Optional source-side agent or app id."},
                 "remote_agent_card": {"type": "object", "description": "Optional source card/metadata."},
                 "capabilities": {"type": "object", "description": "Source capability metadata."},
-                "metadata": {"type": "object", "description": "Operator notes or structured metadata."},
+                "metadata": {"type": "object", "description": "Setup notes or structured metadata."},
                 "status": {"type": "string", "description": "Connection status override."},
                 "include_disabled": {"type": "boolean", "default": False},
                 "include_revoked": {
@@ -1375,7 +1375,8 @@ CHAT_TOOLS = [
             "Use this to check whether Slack is connected or when a Slack actor needs "
             "to be linked to an Illospace user. This tool only reports connection "
             "state and identity mappings; it cannot change Slack or Illospace "
-            "installation settings."
+            "installation settings. When status returns setup_guidance, summarize "
+            "those steps for the user without adding details that are not in the tool result."
         ),
         "input_schema": {
             "type": "object",
