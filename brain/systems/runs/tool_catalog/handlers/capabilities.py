@@ -58,66 +58,13 @@ def _resolved_detail_level(
     *,
     matches: list,
     capability_key: str | None,
-    include_setup_guide: bool,
 ) -> str:
     detail = str(requested or "auto").strip().lower()
     if detail in {"summary", "tools", "full"}:
         return detail
-    if capability_key or include_setup_guide or len(matches) == 1:
+    if capability_key or len(matches) == 1:
         return "full"
     return "summary"
-
-
-def _filter_with_fallbacks(
-    manifests: list,
-    *,
-    query: str | None,
-    capability_key: str | None,
-    category: str | None,
-) -> tuple[list, list[str]]:
-    matches = filter_capability_manifests(
-        manifests,
-        query=query,
-        capability_key=capability_key,
-        category=category,
-    )
-    if matches:
-        return matches, []
-
-    ignored: list[str] = []
-    if category:
-        matches = filter_capability_manifests(
-            manifests,
-            query=query,
-            capability_key=capability_key,
-        )
-        if matches:
-            ignored.append("category")
-            return matches, ignored
-
-    if capability_key:
-        matches = filter_capability_manifests(
-            manifests,
-            query=query,
-            category=category,
-        )
-        if matches:
-            ignored.append("capability_key")
-            return matches, ignored
-
-    if query:
-        matches = filter_capability_manifests(manifests, query=query)
-        if matches:
-            ignored.extend(
-                field for field, value in (
-                    ("capability_key", capability_key),
-                    ("category", category),
-                )
-                if value
-            )
-            return matches, ignored
-
-    return matches, ignored
 
 
 def _handle_read_capabilities(
@@ -142,17 +89,17 @@ def _handle_read_capabilities(
             registered_tool_names=registered_tools,
         ),
     ])
-    matches, ignored_filters = _filter_with_fallbacks(
+    matches = filter_capability_manifests(
         manifests,
         query=query,
         capability_key=capability_key,
         category=category,
     )
+    ignored_filters = ["category"] if category and capability_key else []
     resolved_detail = _resolved_detail_level(
         detail_level,
         matches=matches,
         capability_key=capability_key,
-        include_setup_guide=include_setup_guide,
     )
     payload: dict[str, Any] = {
         "ok": True,

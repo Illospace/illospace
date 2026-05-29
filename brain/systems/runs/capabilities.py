@@ -274,7 +274,7 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         "name": "Slack",
         "category": "external_surface",
         "summary": "Illo can participate in Slack conversations when a Slack source connection is registered for the workspace.",
-        "aliases": ("slack", "team chat", "chat teammate", "communication", "messaging", "slack integration"),
+        "aliases": ("slack", "team chat", "chat teammate", "slack integration"),
         "tools": ("manage_slack", "read_slack_conversation", "post_slack_reply"),
         "status_check": {"tool": "manage_slack", "args": {"action": "status"}},
         "setup": {
@@ -543,7 +543,7 @@ def filter_capability_manifests(
     for manifest in manifest_list:
         if key and key not in {manifest.key.lower(), *(alias.lower() for alias in manifest.aliases)}:
             continue
-        if cat and manifest.category.lower() != cat:
+        if cat and not key and manifest.category.lower() != cat:
             continue
         if q and not _matches_query(manifest, q):
             continue

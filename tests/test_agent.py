@@ -1785,7 +1785,7 @@ class TestCortexReplyHandler:
         from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
 
         payload = json.loads(_handle_read_capabilities(
-            query="communication integration setup guide connect Illospace to Slack",
+            query="Slack integration setup guide connect Illospace to Slack",
             detail_level="auto",
             include_setup_guide=True,
         ))
@@ -1796,6 +1796,26 @@ class TestCortexReplyHandler:
         assert slack["key"] == "slack"
         assert slack["setup"]["credential_store"] == "Vault"
         assert "setup_guides" not in payload
+
+    def test_read_capabilities_does_not_treat_generic_communication_as_slack(self):
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        payload = json.loads(_handle_read_capabilities(query="communication setup"))
+
+        assert payload["count"] == 0
+
+    def test_read_capabilities_keeps_broad_setup_guide_query_compact(self):
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        payload = json.loads(_handle_read_capabilities(
+            query="what integrations can you do?",
+            include_setup_guide=True,
+        ))
+
+        assert payload["count"] >= 10
+        assert payload["detail_level"] == "summary"
+        assert len(json.dumps(payload)) < 16_000
+        assert all("tool_details" not in capability for capability in payload["capabilities"])
 
     def test_read_capabilities_internal_key_recovers_from_wrong_category_hint(self):
         from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
