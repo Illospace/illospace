@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -27,6 +28,46 @@ from brain.systems.sessions import _content_to_dicts
 logger = logging.getLogger("agent")
 
 _RESOLVED_STATUSES = {"resolved", "blocked_on_user"}
+_PRODUCT_SURFACE_EVIDENCE_MARKERS = (
+    "recent tool result",
+    "artifact",
+    "worker",
+    "evidence",
+    "source",
+    "runtime",
+)
+_PRODUCT_SURFACE_TERMS = (
+    "settings",
+    "integrations",
+    "oauth",
+    "setup screen",
+    "setup path",
+    "setup ui",
+    "admin screen",
+    "admin/integration screen",
+    "illospace admin",
+    "workspace admin",
+    "admin approval",
+    "deployment/admin",
+    "deployment",
+    "self-serve ui",
+)
+_PRODUCT_SURFACE_UNCERTAINTY = (
+    "i don't have a confirmed",
+    "i do not have a confirmed",
+    "i don't see a confirmed",
+    "i do not see a confirmed",
+    "i shouldn't invent",
+    "i should not invent",
+    "not confirmed",
+    "was not confirmed",
+    "i didn't read",
+    "i did not read",
+)
+_PRODUCT_SURFACE_NAV_RE = re.compile(
+    r"\b(open|go to|navigate to|click|choose|approve|redirect|select|configure)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -138,6 +179,62 @@ def _review_scope(
     }
 
 
+def _normalize_grounding_text(text: str | None) -> str:
+    normalized = str(text or "").lower()
+    normalized = normalized.replace("→", "->")
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized
+
+
+def _supported_by_execution_evidence(candidate: str, execution_context: str | None) -> bool:
+    evidence = _normalize_grounding_text(execution_context)
+    if not evidence:
+        return False
+    if not any(marker in evidence for marker in _PRODUCT_SURFACE_EVIDENCE_MARKERS):
+        return False
+    mentioned_terms = [term for term in _PRODUCT_SURFACE_TERMS if term in candidate]
+    if not mentioned_terms:
+        return False
+    return all(term in evidence for term in mentioned_terms)
+
+
+def _ungrounded_product_surface_issue(
+    candidate_output: str,
+    execution_context: str | None,
+) -> str | None:
+    """Detect invented product UI/setup surfaces before the LLM checker can bless them."""
+
+    candidate = _normalize_grounding_text(candidate_output)
+    if "illospace" not in candidate:
+        return None
+
+    has_route_chain = "->" in candidate
+    has_product_terms = any(term in candidate for term in _PRODUCT_SURFACE_TERMS)
+    has_navigation_step = bool(_PRODUCT_SURFACE_NAV_RE.search(candidate))
+    explicitly_uncertain = any(marker in candidate for marker in _PRODUCT_SURFACE_UNCERTAINTY)
+    asserts_surface = (
+        (has_route_chain and has_product_terms)
+        or (has_navigation_step and has_product_terms)
+        or "illospace admin" in candidate
+        or "workspace admin" in candidate
+        or "admin approval" in candidate
+        or "deployment/admin" in candidate
+        or "admin/integration screen" in candidate
+    )
+    if not asserts_surface:
+        return None
+    if explicitly_uncertain and not has_navigation_step and not any(
+        marker in candidate for marker in ("deployment/admin", "admin/integration screen")
+    ):
+        return None
+    if _supported_by_execution_evidence(candidate, execution_context):
+        return None
+    return (
+        "The candidate asserts an Illospace UI/setup/deployment surface that is not present "
+        "in this run's execution evidence."
+    )
+
+
 def _token_resolution_verdict(
     provider,
     llm,
@@ -211,6 +308,18 @@ def review_candidate_final_reply(
 ) -> dict:
     """Run the final-reply checker and return a dict-compatible review payload."""
 
+    grounding_issue = _ungrounded_product_surface_issue(candidate_output, execution_context)
+    if grounding_issue:
+        return FinalReplyReview(
+            status="continue",
+            approved=False,
+            rationale=grounding_issue,
+            missing_requirements=(
+                "Answer only with setup/product surfaces supported by current tool results or source context.",
+            ),
+            raw_output="deterministic_product_surface_grounding",
+        ).to_dict()
+
     checker_model = normalize_model(model) if model else None
     checker_llm = llm
     checker_provider = provider
@@ -248,7 +357,9 @@ def review_candidate_final_reply(
             "For light quick-answer intents, do not demand extra work when the answer directly satisfies the question. "
             "For analysis intents, caveats are acceptable when the requested analysis or judgment is delivered. "
             "For strict_contract intents, reject partial progress, first-slice completions, unsupported side-effect claims, "
-            "or 'there may be more' endings unless a concrete blocker makes further work impossible."
+            "or 'there may be more' endings unless a concrete blocker makes further work impossible. "
+            "Reject candidate replies that invent Illospace UI screens, settings paths, setup flows, admin roles, "
+            "deployment paths, or external OAuth flows not present in execution evidence."
         ),
     }]
     message_parts = [

@@ -1357,6 +1357,10 @@ async def run_agent_async(
     _previous_agent_session_id = getattr(_agent_context, "session_id", _session_sentinel)
     context_attrs = {
         "session_id": session_id,
+        "start_time": start_time,
+        "reply_contents": [],
+        "tool_calls_log": [],
+        "recent_tool_results": [],
         "final_reply_review": None,
     }
     if workspace_root:

@@ -1505,6 +1505,60 @@ class TestExecToolHandlers:
 
 
 class TestFinalReplyReview:
+    def test_checker_rejects_ungrounded_illospace_setup_surface_without_llm(self):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+
+        provider = MagicMock()
+        llm = _mock_llm_client(MagicMock(), provider="openai")
+
+        result = review_candidate_final_reply(
+            user_request="Help me set up Slack",
+            candidate_output=(
+                "Slack is not connected yet.\n\n"
+                "Setup path:\n"
+                "1. Open **Illospace -> Settings -> Integrations -> Slack**.\n"
+                "2. Click **Connect Slack**."
+            ),
+            execution_context=(
+                "Evidence guardrail: approve direct source/runtime claims only when supported.\n"
+                'Recent tool result 1: {"tool_name":"manage_slack","result_preview":'
+                '"{\\"ok\\": true, \\"setup_state\\": \\"not_connected\\", '
+                '\\"needs_connection\\": true, \\"connection_count\\": 0, \\"connections\\": []}"}'
+            ),
+            provider=provider,
+            llm=llm,
+            model="openai/gpt-5.5",
+        )
+
+        assert result["status"] == "continue"
+        assert result["approved"] is False
+        assert "not present in this run's execution evidence" in result["rationale"]
+        provider.create.assert_not_called()
+
+    def test_checker_rejects_ungrounded_illospace_authority_role_without_llm(self):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+
+        provider = MagicMock()
+        llm = _mock_llm_client(MagicMock(), provider="openai")
+
+        result = review_candidate_final_reply(
+            user_request="Help me set up Slack",
+            candidate_output="Ask your Illospace admin to connect Slack for this workspace.",
+            execution_context=(
+                "Evidence guardrail: approve direct source/runtime claims only when supported.\n"
+                'Recent tool result 1: {"tool_name":"manage_slack","result_preview":'
+                '"{\\"ok\\": true, \\"setup_state\\": \\"not_connected\\", '
+                '\\"connection_count\\": 0, \\"connections\\": []}"}'
+            ),
+            provider=provider,
+            llm=llm,
+            model="openai/gpt-5.5",
+        )
+
+        assert result["status"] == "continue"
+        assert result["approved"] is False
+        provider.create.assert_not_called()
+
     @patch("brain.systems.runs.direct_loop.final_reply_checker.get_provider")
     @patch("brain.systems.runs.direct_loop.final_reply_checker.resolve_llm_client")
     def test_checker_reviews_partial_reply_with_llm(self, mock_client, mock_get_provider):
@@ -1687,6 +1741,14 @@ class TestCortexReplyHandler:
             ],
         )
         _agent_context.execution_artifacts = []
+        _agent_context.recent_tool_results = [
+            {
+                "tool_name": "manage_slack",
+                "args_preview": '{"action": "status"}',
+                "is_error": False,
+                "result_preview": '{"ok": true, "setup_state": "not_connected", "connection_count": 0}',
+            }
+        ]
         _agent_context.intent_satisfaction = {
             "intent_type": "broad_refactor",
             "completion_mode": "strict_contract",
@@ -1699,6 +1761,7 @@ class TestCortexReplyHandler:
         finally:
             _agent_context.run = None
             _agent_context.execution_artifacts = []
+            _agent_context.recent_tool_results = []
             _agent_context.intent_satisfaction = None
 
         assert "Evidence guardrail" in context
@@ -1708,6 +1771,9 @@ class TestCortexReplyHandler:
         assert "Raw DB row was not available" in context
         assert "strict_contract" in context
         assert "Complete every refactor phase" in context
+        assert "Recent tool result 1" in context
+        assert "manage_slack" in context
+        assert "not_connected" in context
 
     def test_cortex_reply_whitespace_normalizer_collapses_punctuation_lines(self):
         from brain.systems.runs.tool_catalog.handlers.cortex_reply import _normalize_reply_whitespace
@@ -1849,6 +1915,38 @@ class TestCortexReplyHandler:
 
 
 class TestExecutionArtifacts:
+    def test_emit_resolved_tool_call_records_recent_result_for_reply_context(self):
+        from brain.systems.runs.direct_loop.tool_execution import ResolvedToolCall, emit_resolved_tool_call
+
+        agent_context = SimpleNamespace(tool_calls_log=[], recent_tool_results=[])
+        tool_results = []
+
+        emit_resolved_tool_call(
+            ResolvedToolCall(
+                block_id="tool-1",
+                tool_name="manage_slack",
+                tool_input={"action": "status"},
+                result_text='{"ok": true, "setup_state": "not_connected"}',
+            ),
+            tool_results,
+            None,
+            None,
+            None,
+            "coordinator",
+            agent_context=agent_context,
+        )
+
+        assert agent_context.tool_calls_log == ["manage_slack"]
+        assert agent_context.recent_tool_results == [
+            {
+                "tool_name": "manage_slack",
+                "args_preview": '{"action": "status"}',
+                "is_error": False,
+                "result_preview": '{"ok": true, "setup_state": "not_connected"}',
+            }
+        ]
+        assert tool_results[0]["content"] == '{"ok": true, "setup_state": "not_connected"}'
+
     def test_exec_command_records_git_provenance(self):
         from brain.systems.runs.direct_agent import _handle_exec_command, _agent_context
 

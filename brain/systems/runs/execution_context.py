@@ -66,6 +66,7 @@ class AgentExecutionContext:
     start_time: float | None = None
     reply_contents: list[str] = field(default_factory=list)
     tool_calls_log: list[str] = field(default_factory=list)
+    recent_tool_results: list[dict] = field(default_factory=list)
     execution_artifacts: list[dict] = field(default_factory=list)
     execution_metadata: dict | None = None
     intent_satisfaction: dict | None = None
