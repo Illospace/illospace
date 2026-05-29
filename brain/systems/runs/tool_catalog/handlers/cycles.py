@@ -137,7 +137,7 @@ async def _handle_manage_cycle_async(
 
     user_id = getattr(_agent_context, "user_id", None)
     if not user_id:
-        return json.dumps({"error": "manage_cycle requires a user-scoped cortex run"})
+        return json.dumps({"error": "manage_cycle requires user context"})
 
     args = ManageCycleArgs(
         action=normalized_action,

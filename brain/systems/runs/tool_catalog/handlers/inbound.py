@@ -98,7 +98,7 @@ async def _handle_manage_inbound(
 
     org_id, user_id = _inbound_context()
     if not org_id:
-        return _error("manage_inbound requires an org-scoped run")
+        return _error("manage_inbound could not access this workspace context")
 
     try:
         async with UnitOfWork() as uow:
@@ -127,7 +127,7 @@ async def _handle_manage_inbound(
 
             if action == "create_connection":
                 if not user_id:
-                    return _error("create_connection requires a user-scoped run")
+                    return _error("create_connection requires user context")
                 if not display_name:
                     return _error("create_connection requires: display_name")
                 row = await inbound_admin.create_connection(

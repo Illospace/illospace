@@ -243,7 +243,7 @@ async def _handle_manage_slack(
 
     org_id = str(getattr(_agent_context, "org_id", "") or "").strip()
     if not org_id:
-        return json.dumps({"error": "manage_slack requires an org-scoped run"})
+        return json.dumps({"error": "manage_slack could not access this workspace context"})
 
     from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
     from brain.platform.db.repositories.unit_of_work import UnitOfWork

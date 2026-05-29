@@ -1,14 +1,53 @@
-"""Thread-local execution context for live AgentRun tool calls."""
+"""Context-local execution context for live AgentRun tool calls."""
 
 from __future__ import annotations
 
+import contextvars
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
-import threading
 from typing import Iterator, Mapping
 
 
-_agent_context = threading.local()
+_context_values: contextvars.ContextVar[dict[str, object]] = contextvars.ContextVar(
+    "agent_execution_context",
+    default={},
+)
+
+
+class _AgentContextProxy:
+    """Context-local attribute proxy for live AgentRun tool calls.
+
+    Agent runs execute tool calls concurrently in the same event-loop thread. A
+    plain ``threading.local`` lets parallel async tasks overwrite each other's
+    workspace/user context, which can make workspace-bound tools believe they
+    are outside a workspace. ``contextvars`` gives every task its own view
+    while preserving the attribute-style API the tool handlers use.
+    """
+
+    @property
+    def __dict__(self) -> dict[str, object]:
+        return _context_values.get()
+
+    def __getattr__(self, name: str):
+        values = _context_values.get()
+        if name in values:
+            return values[name]
+        raise AttributeError(name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        values = dict(_context_values.get())
+        values[name] = value
+        _context_values.set(values)
+
+    def __delattr__(self, name: str) -> None:
+        values = dict(_context_values.get())
+        if name not in values:
+            raise AttributeError(name)
+        del values[name]
+        _context_values.set(values)
+
+
+_agent_context = _AgentContextProxy()
 
 
 @dataclass
@@ -34,7 +73,7 @@ class AgentExecutionContext:
     resource_summary: dict | None = None
     slash_skill_refs: list[str] = field(default_factory=list)
 
-    def to_threadlocal_attrs(self) -> dict:
+    def to_context_attrs(self) -> dict:
         """Return a shallow attr mapping without deep-copying live run objects."""
         return {field.name: getattr(self, field.name) for field in fields(self)}
 
@@ -63,27 +102,18 @@ def bind_agent_context(
     attrs: dict[str, object] = {}
     if context is not None:
         if isinstance(context, AgentExecutionContext):
-            attrs.update(context.to_threadlocal_attrs())
+            attrs.update(context.to_context_attrs())
         else:
             attrs.update(dict(context))
     attrs.update(overrides)
 
-    sentinel = object()
-    previous = {
-        key: getattr(_agent_context, key, sentinel)
-        for key in attrs
-    }
+    next_values = dict(_context_values.get())
+    next_values.update(attrs)
+    token = _context_values.set(next_values)
     try:
-        for key, value in attrs.items():
-            setattr(_agent_context, key, value)
         yield _agent_context
     finally:
-        for key, value in previous.items():
-            if value is sentinel:
-                if hasattr(_agent_context, key):
-                    delattr(_agent_context, key)
-            else:
-                setattr(_agent_context, key, value)
+        _context_values.reset(token)
 
 
 __all__ = [

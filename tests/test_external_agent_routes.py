@@ -420,6 +420,8 @@ async def test_hosted_mcp_lists_tools_for_scoped_bridge_token():
     assert "illo_create_thread" in names
     assert "illo_ask" in names
     assert "illo_search_workspace" in names
+    assert "illo_inspect_domains" in names
+    assert "illo_write_domain_record" in names
 
 
 async def test_hosted_mcp_invalid_token_returns_json_rpc_error():
@@ -490,7 +492,12 @@ async def test_hosted_mcp_filters_tools_by_bridge_token_scope():
         )
 
     names = {tool["name"] for tool in response.json()["result"]["tools"]}
-    assert names == {"illo_search_workspace", "illo_get_thread", "illo_get_team_members"}
+    assert names == {
+        "illo_search_workspace",
+        "illo_get_thread",
+        "illo_get_team_members",
+        "illo_inspect_domains",
+    }
 
 
 async def test_hosted_mcp_submit_context_builds_shared_envelope():

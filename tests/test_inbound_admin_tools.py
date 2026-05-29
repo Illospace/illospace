@@ -901,8 +901,8 @@ async def test_source_card_summarizes_connection_and_persists_manual_context(
     assert after["source_card"]["purpose"] == refreshed["purpose"]
 
 
-async def test_manage_inbound_requires_org_scoped_run(patch_unit_of_work):
+async def test_manage_inbound_requires_workspace_context(patch_unit_of_work):
     with bind_agent_context(AgentExecutionContext(user_id=USER_ID)):
         result = _decode(await _handle_manage_inbound(action="list_connections"))
 
-    assert result == {"error": "manage_inbound requires an org-scoped run"}
+    assert result == {"error": "manage_inbound could not access this workspace context"}
