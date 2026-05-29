@@ -419,28 +419,20 @@ BRAIN_TOOLS = [
             "Read machine-readable capability manifests for Illo's runtime and installed/custom capabilities. "
             "Use this before answering setup, connect, install, integration, connector, plugin, tool, "
             "or 'can you do X?' questions. Capability manifests and tool schemas are the source of truth "
-            "for setup modes, status checks, credential stores, and agent actions. For a matched setup "
-            "request, set include_setup_guide=true when the manifest points to a registered setup guide."
+            "for setup modes, status checks, credential stores, and agent actions. Pass the user's natural "
+            "language request as query; do not invent capability keys or categories. Auto expands single matches."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Natural-language capability lookup, such as the integration or action the user asked about.",
-                },
-                "capability_key": {
-                    "type": "string",
-                    "description": "Optional exact capability key or alias, such as a registered integration key.",
-                },
-                "category": {
-                    "type": "string",
-                    "description": "Optional capability category filter, such as communication, project, data, or custom.",
+                    "description": "The user's natural-language capability/setup question, such as 'help me set up Slack'.",
                 },
                 "include_setup_guide": {
                     "type": "boolean",
                     "default": False,
-                    "description": "When true, include the registered setup guide for an exact or single matched capability.",
+                    "description": "When true, include a registered setup guide for a single matched capability.",
                 },
                 "detail_level": {
                     "type": "string",
