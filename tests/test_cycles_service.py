@@ -74,7 +74,6 @@ class _AllResult:
         return list(self._values)
 
 
-
 class _RouterCycleResult:
     def __init__(self, cycle):
         self._cycle = cycle
