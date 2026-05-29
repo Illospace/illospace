@@ -624,7 +624,6 @@
                     author={item.author}
                     role={item.role}
                     tone={getMessageTone(item)}
-                    {isIllo}
                     presenceStyle={getUserPresenceStyle(item)}
                   />
 
@@ -1556,30 +1555,11 @@
     --thread-message-owner: var(--constellation-thread-message-illo-owner);
     --thread-message-body: var(--constellation-thread-message-illo-body);
     --thread-message-meta: var(--constellation-thread-message-illo-meta);
-    grid-template-columns: 18px minmax(0, 1fr);
-    align-items: start;
-    column-gap: 10px;
-    row-gap: 0;
     justify-self: start;
     margin-right: auto;
   }
 
-  .thread-message-illo .thread-message-header {
-    grid-column: 1;
-    grid-row: 1;
-    align-self: start;
-    margin-top: 2px;
-  }
-
-  .thread-message-illo .thread-message-content {
-    grid-column: 2;
-    grid-row: 1;
-  }
-
   .thread-message-inline-work.thread-message-illo {
-    --thread-inline-work-outdent: 16px;
-    width: min(calc(100% + var(--thread-inline-work-outdent)), 776px);
-    margin-inline-start: calc(var(--thread-inline-work-outdent) * -1);
     gap: 8px;
   }
 
@@ -3105,10 +3085,6 @@
     .message-stack {
       gap: 14px;
       padding-bottom: 22px;
-    }
-
-    .thread-message-inline-work.thread-message-illo {
-      --thread-inline-work-outdent: 0px;
     }
 
     .thread-composer-dock {
