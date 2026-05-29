@@ -155,8 +155,18 @@ def _get_tool_handlers(
         tool_vault_inventory,
         tool_vault_secret_prompt,
         tool_runtime_settings,
+        tool_manage_deployment,
     )
     from brain.systems.personality import manage_agent_soul
+
+    def _manage_deployment(action="status", build_no_cache=False, worker_drain_timeout_seconds=None):
+        return tool_manage_deployment(
+            action=action,
+            build_no_cache=build_no_cache,
+            worker_drain_timeout_seconds=worker_drain_timeout_seconds,
+            user_id=getattr(_agent_context, "user_id", None),
+            org_id=getattr(_agent_context, "org_id", None),
+        )
 
     handlers = {
         # Brain tools (workspace-independent — always hit shared DB)
@@ -200,6 +210,7 @@ def _get_tool_handlers(
             user_id=getattr(_agent_context, "user_id", None),
             org_id=getattr(_agent_context, "org_id", None),
         ),
+        "manage_deployment": _manage_deployment,
         "transcribe_audio_attachment": lambda **kw: _patched_private(
             "_handle_transcribe_audio_attachment",
             _handle_transcribe_audio_attachment,
