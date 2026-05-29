@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import re
 from typing import Any
@@ -11,6 +11,23 @@ from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GUIDE_MAX_CHARS = 8_000
+_DETAIL_LEVELS = {"summary", "tools", "full"}
+CAPABILITY_COVERAGE_EXEMPT_TOOLS = frozenset({
+    "build_implementation_map",
+    "file_summary",
+    "parallel_tool_batch",
+    "read_thread_messages",
+    "semantic_search",
+    "session_append",
+    "session_close",
+    "session_list",
+    "session_promote",
+    "session_read",
+    "session_write",
+    "summarize_file_for_task",
+    "summarize_files_for_task",
+    "trace_symbol",
+})
 
 
 @dataclass(frozen=True)
@@ -22,63 +39,89 @@ class CapabilityManifest:
     aliases: tuple[str, ...] = ()
     affordances: tuple[str, ...] = ()
     tools: tuple[str, ...] = ()
+    unavailable_tools: tuple[str, ...] = ()
     tool_details: tuple[Mapping[str, Any], ...] = ()
     status_check: Mapping[str, Any] | None = None
     setup: Mapping[str, Any] = field(default_factory=dict)
+    availability: str = "available"
     source: str = "builtin"
 
-    def to_payload(self) -> dict[str, Any]:
-        return {
+    def to_payload(self, *, detail_level: str = "summary") -> dict[str, Any]:
+        """Return a model-visible capability card at the requested detail level."""
+
+        detail = detail_level if detail_level in _DETAIL_LEVELS else "summary"
+        payload: dict[str, Any] = {
             "key": self.key,
             "name": self.name,
             "category": self.category,
             "summary": self.summary,
+            "availability": self.availability,
+            "source": self.source,
+        }
+        if self.unavailable_tools:
+            payload["unavailable_tools"] = list(self.unavailable_tools)
+
+        setup = _setup_payload(self.setup, detail_level=detail)
+        if setup:
+            payload["setup"] = setup
+
+        if detail == "summary":
+            payload["tool_count"] = len(self.tools)
+            if self.status_check:
+                payload["has_status_check"] = True
+            return payload
+
+        payload.update({
             "aliases": list(self.aliases),
             "affordances": list(self.affordances),
             "tools": list(self.tools),
-            "tool_details": [dict(detail) for detail in self.tool_details],
-            "status_check": dict(self.status_check or {}),
-            "setup": dict(self.setup or {}),
-            "source": self.source,
-        }
+        })
+        if self.status_check:
+            payload["status_check"] = dict(self.status_check)
+            payload["status_check_available"] = _status_check_available(self)
+        if detail == "full":
+            payload["tool_details"] = [dict(detail) for detail in self.tool_details]
+        return payload
+
+
+def _setup_payload(setup: Mapping[str, Any], *, detail_level: str) -> dict[str, Any]:
+    if not setup:
+        return {}
+    if detail_level == "full":
+        return dict(setup)
+    payload = {
+        key: setup[key]
+        for key in ("mode", "credential_store", "guide_ref")
+        if key in setup
+    }
+    credentials = setup.get("credentials")
+    if isinstance(credentials, list) and credentials:
+        payload["credential_keys"] = [
+            str(item.get("key_name"))
+            for item in credentials
+            if isinstance(item, Mapping) and item.get("key_name")
+        ]
+    return payload
+
+
+def _status_check_available(manifest: CapabilityManifest) -> bool:
+    status_check = manifest.status_check or {}
+    tool = status_check.get("tool")
+    if not tool:
+        return False
+    return str(tool) in set(manifest.tools)
+
+
+def _availability_for(tools: tuple[str, ...], unavailable_tools: tuple[str, ...]) -> str:
+    if unavailable_tools and not tools:
+        return "unavailable"
+    if unavailable_tools:
+        return "partial"
+    return "available"
 
 
 def builtin_capability_manifests() -> list[CapabilityManifest]:
-    return [
-        CapabilityManifest(
-            key="slack",
-            name="Slack",
-            category="external_surface",
-            summary=(
-                "Illo can participate in Slack conversations when a Slack source "
-                "connection is registered for the workspace."
-            ),
-            aliases=("slack", "team chat", "chat teammate"),
-            affordances=(
-                "inspect connection health",
-                "map Slack users to Illospace users",
-                "read bounded Slack context for Slack-triggered runs",
-                "reply to the originating Slack conversation",
-            ),
-            tools=("manage_slack", "read_slack_conversation", "post_slack_reply"),
-            status_check={"tool": "manage_slack", "args": {"action": "status"}},
-            setup={
-                "mode": "guided_user_action",
-                "agent_role": "check_status_collect_credentials_and_answer_questions",
-                "credential_store": "Vault",
-                "credentials": [
-                    {
-                        "key_name": "SLACK_BOT_TOKEN",
-                        "description": "Slack bot token for the Illo app.",
-                    },
-                    {
-                        "key_name": "SLACK_APP_TOKEN",
-                        "description": "Slack app-level Socket Mode token for the Illo app.",
-                    },
-                ],
-            },
-        ),
-    ]
+    return []
 
 
 def _coerce_text(value: Any, default: str = "") -> str:
@@ -107,12 +150,14 @@ def _manifest_from_mapping(value: Mapping[str, Any], *, default_key: str | None 
         aliases=_coerce_text_tuple(value.get("aliases")),
         affordances=_coerce_text_tuple(value.get("affordances") or value.get("capabilities")),
         tools=_coerce_text_tuple(value.get("tools")),
+        unavailable_tools=_coerce_text_tuple(value.get("unavailable_tools")),
         tool_details=tuple(
             dict(item) for item in value.get("tool_details", ())
             if isinstance(item, Mapping)
         ) if isinstance(value.get("tool_details"), Iterable) else (),
         status_check=value.get("status_check") if isinstance(value.get("status_check"), Mapping) else None,
         setup=value.get("setup") if isinstance(value.get("setup"), Mapping) else {},
+        availability=_coerce_text(value.get("availability"), "available"),
         source=source,
     )
 
@@ -225,6 +270,30 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         "tools": ("manage_inbound",),
     },
     {
+        "key": "slack",
+        "name": "Slack",
+        "category": "external_surface",
+        "summary": "Illo can participate in Slack conversations when a Slack source connection is registered for the workspace.",
+        "aliases": ("slack", "team chat", "chat teammate"),
+        "tools": ("manage_slack", "read_slack_conversation", "post_slack_reply"),
+        "status_check": {"tool": "manage_slack", "args": {"action": "status"}},
+        "setup": {
+            "mode": "guided_user_action",
+            "agent_role": "check_status_collect_credentials_and_answer_questions",
+            "credential_store": "Vault",
+            "credentials": [
+                {
+                    "key_name": "SLACK_BOT_TOKEN",
+                    "description": "Slack bot token for the Illo app.",
+                },
+                {
+                    "key_name": "SLACK_APP_TOKEN",
+                    "description": "Slack app-level Socket Mode token for the Illo app.",
+                },
+            ],
+        },
+    },
+    {
         "key": "code_execution",
         "name": "Code and File Execution",
         "category": "runtime_surface",
@@ -314,6 +383,50 @@ def _tool_affordance(registration: Any) -> str:
     return str(registration.description)
 
 
+def first_party_capability_tool_names() -> set[str]:
+    return {
+        str(tool_name)
+        for spec in _FIRST_PARTY_CAPABILITY_SPECS
+        for tool_name in spec.get("tools", ())
+    }
+
+
+def normalize_capability_manifests(
+    manifests: Iterable[CapabilityManifest],
+    *,
+    available_tool_names: Iterable[str] | None = None,
+    registered_tool_names: Iterable[str] | None = None,
+) -> list[CapabilityManifest]:
+    if available_tool_names is None:
+        return list(manifests)
+
+    available = {str(name) for name in available_tool_names}
+    registered = {str(name) for name in registered_tool_names or available}
+    normalized: list[CapabilityManifest] = []
+    for manifest in manifests:
+        tools: list[str] = []
+        unavailable = list(manifest.unavailable_tools)
+        for tool_name in manifest.tools:
+            if tool_name in registered and tool_name not in available:
+                unavailable.append(tool_name)
+            else:
+                tools.append(tool_name)
+        unavailable_tuple = tuple(dict.fromkeys(unavailable))
+        tools_tuple = tuple(tools)
+        availability = (
+            manifest.availability
+            if not unavailable_tuple and manifest.availability != "available"
+            else _availability_for(tools_tuple, unavailable_tuple)
+        )
+        normalized.append(replace(
+            manifest,
+            tools=tools_tuple,
+            unavailable_tools=unavailable_tuple,
+            availability=availability,
+        ))
+    return normalized
+
+
 def registry_capability_manifests(
     *,
     available_tool_names: Iterable[str] | None = None,
@@ -324,13 +437,15 @@ def registry_capability_manifests(
     available = {str(name) for name in available_tool_names} if available_tool_names is not None else set(registrations)
     manifests: list[CapabilityManifest] = []
     for spec in _FIRST_PARTY_CAPABILITY_SPECS:
-        tools = tuple(
+        registered_tools = tuple(
             name
             for name in spec["tools"]
-            if name in registrations and name in available
+            if name in registrations
         )
-        if not tools:
+        if not registered_tools:
             continue
+        tools = tuple(name for name in registered_tools if name in available)
+        unavailable_tools = tuple(name for name in registered_tools if name not in available)
         details = tuple(_tool_detail(name, registrations[name]) for name in tools)
         affordances = tuple(_tool_affordance(registrations[name]) for name in tools)
         manifests.append(CapabilityManifest(
@@ -341,8 +456,11 @@ def registry_capability_manifests(
             aliases=_coerce_text_tuple(spec.get("aliases")),
             affordances=affordances,
             tools=tools,
+            unavailable_tools=unavailable_tools,
             tool_details=details,
-            setup={"mode": "built_in"},
+            status_check=spec.get("status_check") if isinstance(spec.get("status_check"), Mapping) else None,
+            setup=spec.get("setup") if isinstance(spec.get("setup"), Mapping) else {"mode": "built_in"},
+            availability=_availability_for(tools, unavailable_tools),
             source="tool_registry",
         ))
     return manifests
@@ -443,10 +561,13 @@ def load_setup_guide(manifest: CapabilityManifest) -> dict[str, Any] | None:
 
 __all__ = [
     "CapabilityManifest",
+    "CAPABILITY_COVERAGE_EXEMPT_TOOLS",
     "builtin_capability_manifests",
     "custom_capability_manifests",
     "filter_capability_manifests",
+    "first_party_capability_tool_names",
     "load_setup_guide",
     "merge_capability_manifests",
+    "normalize_capability_manifests",
     "registry_capability_manifests",
 ]

@@ -20,6 +20,19 @@ def test_every_exposed_tool_has_registry_metadata():
     assert exposed <= registered
 
 
+def test_registered_tools_have_capability_coverage_or_explicit_exemption():
+    from brain.systems.runs.capabilities import (
+        CAPABILITY_COVERAGE_EXEMPT_TOOLS,
+        first_party_capability_tool_names,
+    )
+    from brain.systems.runs.tool_catalog.registry import all_tool_registrations
+
+    registered = set(all_tool_registrations())
+    covered = first_party_capability_tool_names() | set(CAPABILITY_COVERAGE_EXEMPT_TOOLS)
+
+    assert registered - covered == set()
+
+
 def test_registry_role_membership_matches_current_tool_lists():
     from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
     from brain.systems.runs.tool_catalog.registry import all_tool_registrations

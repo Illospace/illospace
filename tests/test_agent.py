@@ -1718,21 +1718,26 @@ class TestFinalReplyReview:
 
 
 class TestCortexReplyHandler:
-    def test_read_capabilities_reports_builtin_slack_manifest(self):
+    def test_read_capabilities_reports_slack_manifest(self):
         from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
 
         payload = json.loads(_handle_read_capabilities(query="help me set up Slack"))
 
         assert payload["source"] == "runtime_capability_registry"
+        assert payload["detail_level"] == "full"
         assert payload["count"] == 1
         slack = payload["capabilities"][0]
         assert slack["key"] == "slack"
+        assert slack["source"] == "tool_registry"
+        assert slack["availability"] == "available"
         assert slack["status_check"] == {"tool": "manage_slack", "args": {"action": "status"}}
+        assert slack["status_check_available"] is True
         assert slack["setup"]["credential_store"] == "Vault"
         assert [credential["key_name"] for credential in slack["setup"]["credentials"]] == [
             "SLACK_BOT_TOKEN",
             "SLACK_APP_TOKEN",
         ]
+        assert {detail["name"] for detail in slack["tool_details"]} == set(slack["tools"])
         assert "guide_ref" not in slack["setup"]
 
     def test_read_capabilities_generic_query_returns_registry(self):
@@ -1742,15 +1747,20 @@ class TestCortexReplyHandler:
 
         keys = {capability["key"] for capability in payload["capabilities"]}
 
+        assert payload["detail_level"] == "summary"
+        assert len(json.dumps(payload)) < 16_000
         assert payload["count"] >= 10
         assert any(capability["key"] == "slack" for capability in payload["capabilities"])
         assert {"domains", "cycles", "code_execution", "workspace_context"} <= keys
+        assert all("tool_details" not in capability for capability in payload["capabilities"])
+        assert all("tool_count" in capability for capability in payload["capabilities"])
 
     def test_read_capabilities_registry_details_come_from_tool_registry(self):
         from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
 
         payload = json.loads(_handle_read_capabilities(capability_key="domains"))
 
+        assert payload["detail_level"] == "full"
         assert payload["count"] == 1
         domains = payload["capabilities"][0]
         assert domains["source"] == "tool_registry"
@@ -1758,6 +1768,30 @@ class TestCortexReplyHandler:
         assert domains["tools"] == ["read_workspace_records", "manage_domain"]
         assert {detail["name"] for detail in domains["tool_details"]} == set(domains["tools"])
         assert any("domain" in (detail["expected_effect"] or "").lower() for detail in domains["tool_details"])
+
+    def test_read_capabilities_marks_disabled_capability_tools_unavailable(self):
+        from brain.systems.runs.execution_context import bind_agent_context
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        disabled_slack_tools = [
+            "manage_slack",
+            "read_slack_conversation",
+            "post_slack_reply",
+        ]
+        with bind_agent_context({
+            "execution_metadata": {
+                "tool_policy": {"disabled_tools": disabled_slack_tools},
+            }
+        }):
+            payload = json.loads(_handle_read_capabilities(query="Slack setup"))
+
+        assert payload["count"] == 1
+        slack = payload["capabilities"][0]
+        assert slack["key"] == "slack"
+        assert slack["availability"] == "unavailable"
+        assert slack["tools"] == []
+        assert set(slack["unavailable_tools"]) == set(disabled_slack_tools)
+        assert slack["status_check_available"] is False
 
     def test_read_self_context_reports_identity_source_and_inspection_tools(self):
         from brain.systems.runs.tool_catalog.handlers.self_context import _handle_read_self_context

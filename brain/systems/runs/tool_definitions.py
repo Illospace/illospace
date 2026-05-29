@@ -442,6 +442,12 @@ BRAIN_TOOLS = [
                     "default": False,
                     "description": "When true, include the registered setup guide for an exact or single matched capability.",
                 },
+                "detail_level": {
+                    "type": "string",
+                    "enum": ["auto", "summary", "tools", "full"],
+                    "default": "auto",
+                    "description": "Use summary for compact capability lists, tools for tool names, or full for exact setup/tool metadata. Auto expands only narrow matches.",
+                },
             },
         },
     },
