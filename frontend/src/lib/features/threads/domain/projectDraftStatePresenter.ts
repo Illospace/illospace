@@ -19,6 +19,31 @@ export type DraftChangeMetric = {
   tone: 'changed' | 'new' | 'deleted' | 'conflicted';
 };
 
+export type ProjectSelectorItem = {
+  id: string;
+  name: string;
+  subtitle: string;
+  group: 'attached' | 'recent';
+  contentLabels: string[];
+  searchText: string;
+};
+
+type ProjectContextResourceRecord = Record<string, unknown>;
+type ProjectContextSnapshotRecord = Record<string, unknown> & {
+  resources?: ProjectContextResourceRecord[];
+};
+type ProjectSelectorProfileRecord = Record<string, unknown> & {
+  id?: string | number | null;
+  name?: string | null;
+  slug?: string | null;
+  content_summary?: Record<string, unknown> | null;
+  project_context?: ProjectContextSnapshotRecord | null;
+};
+type ProjectSelectorAttachmentRecord = Record<string, unknown> & {
+  project_profile_id?: string | number | null;
+  snapshot?: ProjectContextSnapshotRecord | null;
+};
+
 export type NormalizedRootVersions = {
   groups: ProjectDraftRootVersionGroup[];
   versionCount: number;
@@ -151,6 +176,144 @@ export const PROJECT_DRAFT_CHANGE_METRICS: DraftChangeMetric[] = [
 ];
 
 type ProjectDraftStateLike = ProjectDraftStateResponse | ProjectDraftStateRead | null;
+
+function projectText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function projectNameFromSnapshot(snapshot: ProjectContextSnapshotRecord | null | undefined): string {
+  return (
+    projectText(snapshot?.selected_profile_name)
+    || projectText(snapshot?.name)
+    || projectText(snapshot?.title)
+    || projectText(snapshot?.project_slug)
+    || 'Project'
+  );
+}
+
+function positiveInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : null;
+}
+
+function projectResourcesFromContext(
+  context: ProjectContextSnapshotRecord | null | undefined,
+): ProjectContextResourceRecord[] {
+  return Array.isArray(context?.resources) ? context.resources : [];
+}
+
+function projectResourceIsRepo(resource: ProjectContextResourceRecord): boolean {
+  const kind = projectText(resource.kind || resource.type || resource.resource_type).toLowerCase();
+  const source = projectText(resource.source || resource.provider).toLowerCase();
+  const uri = projectText(resource.uri || resource.url || resource.repo_url).toLowerCase();
+  return (
+    ['github', 'github_repo', 'github_repository', 'repo', 'repository'].includes(kind)
+    || ['github', 'git'].includes(source)
+    || Boolean(projectText(resource.repo))
+    || uri.startsWith('git@')
+    || uri.startsWith('https://github.com/')
+    || uri.startsWith('http://github.com/')
+    || uri.endsWith('.git')
+  );
+}
+
+function inferredProjectFileCount(resources: ProjectContextResourceRecord[]): number {
+  let count = 0;
+  for (const resource of resources) {
+    const explicitCount = positiveInteger(resource.file_count ?? resource.uploaded_file_count);
+    if (explicitCount !== null) {
+      count += explicitCount;
+      continue;
+    }
+    const kind = projectText(resource.kind || resource.type || resource.resource_type).toLowerCase();
+    if (kind === 'file' || kind === 'doc') count += 1;
+    if (Array.isArray(resource.files)) count += resource.files.length;
+    if (Array.isArray(resource.uploaded_files)) count += resource.uploaded_files.length;
+  }
+  return count;
+}
+
+function projectSelectorContentLabels(
+  profile: ProjectSelectorProfileRecord | undefined,
+  fallbackContext: ProjectContextSnapshotRecord | null = null,
+): string[] {
+  const summary = profile?.content_summary || {};
+  const context = profile?.project_context || fallbackContext || {};
+  const resources = projectResourcesFromContext(context);
+  const summaryFileCount = positiveInteger(summary.file_count);
+  const fileCount = summaryFileCount ?? inferredProjectFileCount(resources);
+  const repoCount = positiveInteger(summary.repo_count) ?? resources.filter(projectResourceIsRepo).length;
+  const fileSuffix = summary.file_count_exact === false ? '+' : '';
+  const labels = [`${fileCount}${fileSuffix} file${fileCount === 1 ? '' : 's'}`];
+  if (repoCount > 0) labels.push(`${repoCount} repo${repoCount === 1 ? '' : 's'}`);
+  return labels;
+}
+
+export function projectSelectorOptions(
+  profiles: readonly ProjectSelectorProfileRecord[],
+  attachments: readonly ProjectSelectorAttachmentRecord[],
+): ProjectSelectorItem[] {
+  const profilesById = new Map<string, ProjectSelectorProfileRecord>();
+  for (const profile of profiles) {
+    const id = projectText(profile.id);
+    if (id) profilesById.set(id, profile);
+  }
+
+  const seen = new Set<string>();
+  const attached: ProjectSelectorItem[] = [];
+  for (const attachment of attachments) {
+    const id = projectText(attachment.project_profile_id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const profile = profilesById.get(id);
+    const snapshot = attachment.snapshot ?? null;
+    const name = projectText(profile?.name) || projectNameFromSnapshot(snapshot);
+    const contentLabels = projectSelectorContentLabels(profile, snapshot);
+    attached.push({
+      id,
+      name,
+      subtitle: 'Attached project',
+      group: 'attached',
+      contentLabels,
+      searchText: contentLabels.join(' '),
+    });
+  }
+
+  const recent: ProjectSelectorItem[] = [];
+  for (const profile of profiles) {
+    const id = projectText(profile.id);
+    if (!id || seen.has(id)) continue;
+    const name = projectText(profile.name) || projectText(profile.slug) || 'Project';
+    const contentLabels = projectSelectorContentLabels(profile);
+    recent.push({
+      id,
+      name,
+      subtitle: 'Recent project',
+      group: 'recent',
+      contentLabels,
+      searchText: contentLabels.join(' '),
+    });
+  }
+
+  return [...attached, ...recent];
+}
+
+export function filterProjectSelectorItems(
+  items: readonly ProjectSelectorItem[],
+  query: string,
+): ProjectSelectorItem[] {
+  const terms = query
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (terms.length === 0) return [...items];
+  return items.filter((item) => {
+    const blob = `${item.name} ${item.subtitle} ${item.group} ${item.searchText}`.toLowerCase();
+    return terms.every((term) => blob.includes(term));
+  });
+}
 
 export function buildProjectDraftPanelView({
   draftState,

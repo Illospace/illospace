@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
 
-  import { api, type ChatConversationSummary, type ChatUnreadThread } from '$lib/api/client';
+  import { api, type ChatAttachmentPayload, type ChatConversationSummary, type ChatUnreadThread } from '$lib/api/client';
   import {
     mentionHandleForPerson,
     type MentionAutocompleteOption,
@@ -16,6 +16,7 @@
   import AttachmentPreviewDialog from '$lib/components/chat/AttachmentPreviewDialog.svelte';
   import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
+  import type { ChatAttachmentItem, ChatAttachmentKind } from '$lib/components/chat/chatTypes';
   import {
     CONVERSATION_SCROLL_BOTTOM_THRESHOLD,
     conversationIsNearBottom,
@@ -62,6 +63,14 @@
 
   type ChatStreamKind = 'room' | 'thread' | 'dm';
 
+  type ChatDraftBinding = {
+    key: string;
+    label: string;
+    textareaSelector: string;
+    value: string;
+    assignValue: (value: string) => void;
+  };
+
   let {
     surface = 'workspace',
     previewMembers = [],
@@ -78,11 +87,11 @@
   let shellEl: HTMLElement | undefined = $state();
   let mainLayoutEl: HTMLDivElement | undefined = $state();
   let fileInputEl: HTMLInputElement | undefined = $state();
-  let pendingAttachmentsByContext = $state<Record<string, any[]>>({});
+  let pendingAttachmentsByContext = $state<Record<string, ChatAttachmentPayload[]>>({});
   let attachmentTargetKey = $state<string | null>(null);
   let dockDragOver = $state(false);
   let dockDragTargetKey = $state<string | null>(null);
-  let previewAttachment = $state<any | null>(null);
+  let previewAttachment = $state<ChatAttachmentPayload | null>(null);
   let teamMembers = $state<TeamMember[]>([]);
   let roomComposerValue = $state('');
   let threadComposerValue = $state('');
@@ -753,11 +762,36 @@
     ui.toast('Reactions are next up.', 'info');
   }
 
-  function setAttachmentsForKey(key: string, attachments: any[]) {
+  function setAttachmentsForKey(key: string, attachments: ChatAttachmentPayload[]) {
     pendingAttachmentsByContext = {
       ...pendingAttachmentsByContext,
       [key]: attachments,
     };
+  }
+
+  function composerAttachmentKind(attachment: ChatAttachmentPayload): ChatAttachmentKind {
+    if (attachment.kind === 'image' || attachment.kind === 'link' || attachment.kind === 'file') {
+      return attachment.kind;
+    }
+
+    const previewKind = attachmentPreviewKind(attachment);
+    if (previewKind === 'image' || previewKind === 'link') return previewKind;
+    return 'file';
+  }
+
+  function composerAttachments(attachments: readonly ChatAttachmentPayload[]): ChatAttachmentItem[] {
+    return attachments.map((attachment, index) => {
+      const url = attachmentUrl(attachment);
+      const previewUrl = typeof attachment.previewUrl === 'string' ? attachment.previewUrl : undefined;
+      return {
+        id: attachment.id ?? `${url || attachmentLabel(attachment)}-${index}`,
+        kind: composerAttachmentKind(attachment),
+        label: attachmentLabel(attachment),
+        detail: attachmentDetail(attachment),
+        url,
+        previewUrl,
+      };
+    });
   }
 
   function queueAttachmentPicker(targetKey: string) {
@@ -767,7 +801,7 @@
 
   async function uploadFiles(files: File[], targetKey: string) {
     const results = await Promise.allSettled(files.map((file) => api.uploadFile(file)));
-    const succeeded: any[] = [];
+    const succeeded: ChatAttachmentPayload[] = [];
 
     for (const result of results) {
       if (result.status === 'fulfilled') {
@@ -821,29 +855,64 @@
     return activeChatDropTargetKey;
   }
 
+  function draftBindings(): ChatDraftBinding[] {
+    const bindings: ChatDraftBinding[] = [
+      {
+        key: roomDraftKey,
+        label: 'team room',
+        textareaSelector: '.chat-room-column textarea:not(:disabled)',
+        value: roomComposerValue,
+        assignValue: (value) => {
+          roomComposerValue = value;
+        },
+      },
+    ];
+
+    if (threadDraftKey) {
+      bindings.push({
+        key: threadDraftKey,
+        label: 'thread reply',
+        textareaSelector: '.chat-thread-column textarea:not(:disabled)',
+        value: threadComposerValue,
+        assignValue: (value) => {
+          threadComposerValue = value;
+        },
+      });
+    }
+
+    if (dmDraftKey) {
+      bindings.push({
+        key: dmDraftKey,
+        label: activeDmDisplayName || 'direct message',
+        textareaSelector: '.chat-dm-column textarea:not(:disabled)',
+        value: dmComposerValue,
+        assignValue: (value) => {
+          dmComposerValue = value;
+        },
+      });
+    }
+
+    return bindings;
+  }
+
+  function draftBindingForKey(targetKey: string | null) {
+    if (!targetKey) return null;
+    return draftBindings().find((binding) => binding.key === targetKey) ?? null;
+  }
+
   function dropTargetLabelForKey(targetKey: string | null) {
     if (!targetKey) return 'chat';
-    if (threadDraftKey && targetKey === threadDraftKey) return 'thread reply';
-    if (dmDraftKey && targetKey === dmDraftKey) return activeDmDisplayName || 'direct message';
-    return 'team room';
+    return draftBindingForKey(targetKey)?.label ?? 'team room';
   }
 
   function draftValueForKey(targetKey: string) {
-    if (targetKey === roomDraftKey) return roomComposerValue;
-    if (threadDraftKey && targetKey === threadDraftKey) return threadComposerValue;
-    if (dmDraftKey && targetKey === dmDraftKey) return dmComposerValue;
+    const binding = draftBindingForKey(targetKey);
+    if (binding) return binding.value;
     return chat.draftByContext[targetKey] ?? '';
   }
 
   function setDraftValueForKey(targetKey: string, nextValue: string) {
-    if (targetKey === roomDraftKey) {
-      roomComposerValue = nextValue;
-    } else if (threadDraftKey && targetKey === threadDraftKey) {
-      threadComposerValue = nextValue;
-    } else if (dmDraftKey && targetKey === dmDraftKey) {
-      dmComposerValue = nextValue;
-    }
-
+    draftBindingForKey(targetKey)?.assignValue(nextValue);
     chat.setDraft(targetKey, nextValue);
   }
 
@@ -858,9 +927,7 @@
   }
 
   function composerSelectorForKey(targetKey: string) {
-    if (threadDraftKey && targetKey === threadDraftKey) return '.chat-thread-column textarea:not(:disabled)';
-    if (dmDraftKey && targetKey === dmDraftKey) return '.chat-dm-column textarea:not(:disabled)';
-    return '.chat-room-column textarea:not(:disabled)';
+    return draftBindingForKey(targetKey)?.textareaSelector ?? '.chat-room-column textarea:not(:disabled)';
   }
 
   function focusComposerForKey(targetKey: string) {
@@ -1511,7 +1578,7 @@
               variant="room"
               placeholder={`Message ${conversationTitle(activeDmConversation)}…`}
               value={dmComposerValue}
-              attachments={dmAttachments}
+              attachments={composerAttachments(dmAttachments)}
               mentionOptions={chatMentionOptions}
               disabled={activeDmPage.sending}
               loading={activeDmPage.sending}
@@ -1702,7 +1769,7 @@
             variant="room"
             placeholder="Message…"
             value={roomComposerValue}
-            attachments={roomAttachments}
+            attachments={composerAttachments(roomAttachments)}
             mentionOptions={chatMentionOptions}
             disabled={roomPage.sending}
             loading={roomPage.sending}
@@ -1860,7 +1927,7 @@
                   variant="thread"
                   placeholder="Reply in thread…"
                   value={threadComposerValue}
-                  attachments={threadAttachments}
+                  attachments={composerAttachments(threadAttachments)}
                   mentionOptions={chatMentionOptions}
                   disabled={threadPage.sending}
                   loading={threadPage.sending}
@@ -1996,7 +2063,7 @@
   {/if}
 {/snippet}
 
-{#snippet messageLinkAttachmentList(body: string | null | undefined, attachments: any[] | null | undefined)}
+{#snippet messageLinkAttachmentList(body: string | null | undefined, attachments: ChatAttachmentPayload[] | null | undefined)}
   {@const linkAttachments = messageLinkAttachments(body, attachments)}
   {#if linkAttachments.length}
     <div class="chat-attachments chat-link-attachments">

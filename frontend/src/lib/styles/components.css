@@ -1129,15 +1129,6 @@
 .msg-tag-discuss { color: var(--text-3); background: var(--bg-3); }
 .msg-tag-trigger { color: #57CFA0; background: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 15%, transparent); }
 
-.thread-message {
-  display: flex; flex-direction: column; gap: 4px;
-  padding: 8px 16px; border-radius: 4px; margin-bottom: 2px;
-}
-.thread-message.agent {
-  border-left: 2px solid rgba(94,168,152,0.3);
-  background: rgba(94,168,152,0.06) !important;
-}
-
 /* ── Presence Pills (Multiplayer) ─────────────────────────────── */
 .presence-pills {
   display: flex; align-items: center; gap: 4px; margin-left: auto; margin-right: 8px;
