@@ -1266,7 +1266,6 @@ async def tool_manage_deployment(
         async_get_runtime_update_status,
         async_start_runtime_update,
     )
-    from brain.systems.runtime_settings.service import can_manage_runtime_settings
 
     normalized_action = str(action or "status").strip().lower()
     if normalized_action not in {"status", "start_update"}:
@@ -1279,21 +1278,14 @@ async def tool_manage_deployment(
                 "action": normalized_action,
                 "status": "denied",
                 "available": False,
-                "detail": "Deployment updates require an authenticated owner or admin.",
+                "detail": "Deployment updates require an authenticated workspace user.",
             }
         if org_id and str(getattr(user, "org_id", "")) != str(org_id):
             return {
                 "action": normalized_action,
                 "status": "denied",
                 "available": False,
-                "detail": "Deployment updates require an owner/admin in the active organization.",
-            }
-        if not can_manage_runtime_settings(user):
-            return {
-                "action": normalized_action,
-                "status": "denied",
-                "available": False,
-                "detail": "Deployment updates require an owner or admin.",
+                "detail": "Deployment updates require a user in the active organization.",
             }
 
         if normalized_action == "start_update":

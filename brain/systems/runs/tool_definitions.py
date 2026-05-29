@@ -2556,10 +2556,11 @@ DEPLOYMENT_TOOLS = [
         "name": "manage_deployment",
         "description": (
             "Check or start the Illospace self-update flow for the running server. "
-            "Use this only when an owner/admin explicitly asks Illo to update, deploy, "
-            "redeploy, or pull latest main for this Illospace instance. The update flow "
-            "syncs origin/main, rebuilds the Compose app images, runs database migrations, "
-            "and restarts runtime services through the updater sidecar when available."
+            "Use this only when an authenticated workspace user explicitly asks Illo "
+            "to update, deploy, redeploy, or pull latest main for this Illospace instance. "
+            "The update flow syncs origin/main, rebuilds the Compose app images, runs "
+            "database migrations, and restarts runtime services through the updater sidecar "
+            "when available."
         ),
         "input_schema": {
             "type": "object",
