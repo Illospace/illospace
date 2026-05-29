@@ -132,13 +132,14 @@ Slack surface envelope.
     questions or coordinate privately without needing a channel.
 12. As an Illospace user, I want my Slack identity linked to my Illospace
     identity, so that Illo can apply the right permissions and attribution.
-13. As an Illospace admin, I want to install the Slack app for an org, so that
-    Illo can participate in authorized Slack workspaces.
-14. As an Illospace admin, I want Illo to work wherever my team adds it in
-    Slack, so that Slack's own channel invitation model controls where Illo is
-    present.
-15. As an Illospace admin, I want clear audit records for Slack-origin actions,
-    so that I can see what Slack request caused a workspace change.
+13. As an Illospace workspace member, I want to connect Slack for my workspace,
+    so that Illo can participate where the team invites it.
+14. As an Illospace workspace member, I want Illo to work wherever my team adds
+    it in Slack, so that Slack's own channel invitation model controls where
+    Illo is present.
+15. As an Illospace workspace member, I want clear audit records for
+    Slack-origin actions, so that I can see what Slack request caused a
+    workspace change.
 16. As an operator, I want Slack events to use idempotency keys, so that retries
     do not create duplicate Threads, comments, records, or delegated tasks.
 17. As Illo, I want Slack invocations to arrive through the inbound coordination

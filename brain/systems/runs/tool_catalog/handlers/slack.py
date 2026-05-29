@@ -206,7 +206,23 @@ def _slack_connection_payload(connection) -> dict[str, Any]:
 
 def _slack_setup_instructions() -> dict[str, Any]:
     return {
-        "slack_admin_url": "https://api.slack.com/apps",
+        "slack_apps_url": "https://api.slack.com/apps",
+        "summary": (
+            "Slack is not connected to this Illospace workspace yet. "
+            "Illo can guide you through the Slack-side setup, "
+            "but the Slack tokens must be entered outside chat."
+        ),
+        "steps": [
+            "Open Slack's app management page and create or select the Illo app for this Slack workspace.",
+            "Enable Socket Mode for the Slack app.",
+            (
+                "Grant the app permission to receive mentions, DMs, messages in channels where it is invited, "
+                "and files shared in those conversations."
+            ),
+            "Install the app to the Slack workspace.",
+            "Copy the app-level Socket Mode token and bot token into the Illospace Slack connection setup outside chat.",
+            "Ask Illo to check Slack status again, then invite Illo to channels or DM it.",
+        ],
         "what_illo_can_do": [
             "Check whether Slack is connected to this Illospace workspace.",
             "Link Slack users to Illospace users after Slack is connected.",
@@ -218,9 +234,8 @@ def _slack_setup_instructions() -> dict[str, Any]:
             "Change Slack or Illospace installation settings.",
         ],
         "setup_boundary": (
-            "If Slack is not connected, an Illospace admin must finish the Slack connection outside this chat. "
-            "Slack tokens must never be pasted to Illo, Slack chat, or Thread chat, "
-            "and they are not Illospace Vault entries."
+            "If Slack is not connected, the setup has to be completed through Slack and the Illospace "
+            "Slack connection screen, not by pasting tokens into Illo, Slack chat, or Thread chat."
         ),
         "after_connected": [
             "Ask Illo to check Slack status.",
@@ -275,8 +290,12 @@ async def _handle_manage_slack(
                     "next_step": (
                         "Slack is connected. Invite Illo to a channel, mention @Illo, or DM it."
                         if rows
-                        else "Slack is not connected. Ask an Illospace admin to finish the Slack connection outside this chat, then ask Illo to check status again."
+                        else (
+                            "Slack is not connected. Share setup_guidance with the user, then ask them to "
+                            "tell Illo when setup is complete so Illo can check status again."
+                        )
                     ),
+                    **({} if rows else {"setup_guidance": _slack_setup_instructions()}),
                     "connections": [_slack_connection_payload(row) for row in rows],
                 },
                 default=str,
