@@ -84,6 +84,7 @@ process_request() {
       ILLO_COMPOSE_BUILD_NO_CACHE="${build_no_cache:-${ILLO_COMPOSE_BUILD_NO_CACHE:-0}}" \
       ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_FILE="$WORKER_DRAIN_TIMEOUT_FILE" \
       ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_SECONDS="${worker_drain_timeout_seconds:-${ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_SECONDS:-120}}" \
+      ILLO_DOCTOR_SKIP_LOCAL_HTTP_PROBES=1 \
       bash ./illo update --mode compose
   } >> "$LOG_PATH" 2>&1
   exit_code=$?
