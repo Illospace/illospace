@@ -12,6 +12,7 @@ import json
 import math
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 
 
@@ -28,6 +29,8 @@ def jsonable(value: Any, *, enum_values: bool = False, sort_sets: bool = True) -
         return value.value if enum_values else str(value)
     if isinstance(value, (datetime, date)):
         return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
     if isinstance(value, Decimal):
         return float(value)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):

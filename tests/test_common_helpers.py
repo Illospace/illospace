@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import UUID
 
 import pytest
 
@@ -90,8 +91,16 @@ def test_env_helpers_support_strict_and_permissive_boolean_semantics() -> None:
 
 
 def test_serialization_helpers_are_stable_and_bounded() -> None:
-    payload = {"when": datetime(2026, 1, 2, tzinfo=timezone.utc), "items": {"b", "a"}}
-    assert jsonable(payload) == {"when": "2026-01-02T00:00:00+00:00", "items": ["a", "b"]}
+    payload = {
+        "when": datetime(2026, 1, 2, tzinfo=timezone.utc),
+        "items": {"b", "a"},
+        "workspace_id": UUID("00000000-0000-0000-0000-000000000123"),
+    }
+    assert jsonable(payload) == {
+        "when": "2026-01-02T00:00:00+00:00",
+        "items": ["a", "b"],
+        "workspace_id": "00000000-0000-0000-0000-000000000123",
+    }
     assert stable_digest({"b": 2, "a": 1}, length=12) == stable_digest({"a": 1, "b": 2}, length=12)
     safe = json_safe({"text": "x" * 20, "empty": {}, "none": None}, max_text_chars=10)
     assert "empty" not in safe
