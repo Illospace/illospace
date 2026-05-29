@@ -13,11 +13,71 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.selected.outputs.backend }}
+      frontend: ${{ steps.selected.outputs.frontend }}
+      db: ${{ steps.selected.outputs.db }}
+
+    steps:
+      - name: Check out repository
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed areas
+        if: github.event_name != 'workflow_dispatch'
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:
+              - "brain/**"
+              - "tests/**"
+              - "requirements*.txt"
+              - "requirements-gpu.txt"
+              - "pyproject.toml"
+              - "alembic.ini"
+              - "docker-compose.test.yml"
+              - ".github/workflows/brain-ci.yml"
+            frontend:
+              - "frontend/**"
+              - ".github/workflows/brain-ci.yml"
+            db:
+              - "brain/platform/db/**"
+              - "tests/test_schema_contract.py"
+              - "tests/test_db_*.py"
+              - "tests/db_engine_utils.py"
+              - "scripts/sync_schema.py"
+              - "scripts/check_db_audit_objectives.py"
+              - "scripts/async_*db*.py"
+              - "alembic.ini"
+              - ".github/workflows/brain-ci.yml"
+
+      - name: Select jobs
+        id: selected
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "db=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "backend=${{ steps.filter.outputs.backend }}" >> "$GITHUB_OUTPUT"
+            echo "frontend=${{ steps.filter.outputs.frontend }}" >> "$GITHUB_OUTPUT"
+            echo "db=${{ steps.filter.outputs.db }}" >> "$GITHUB_OUTPUT"
+          fi
+
   backend-fast:
     name: Backend fast suite
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
 
     steps:
       - name: Check out repository
@@ -50,6 +110,8 @@ jobs:
   backend-review:
     name: Backend review-fix suites
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
 
     steps:
       - name: Check out repository
@@ -82,6 +144,8 @@ jobs:
   frontend:
     name: Frontend check and build
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
 
     steps:
       - name: Check out repository
@@ -113,6 +177,8 @@ jobs:
   db-contract:
     name: DB migration contract
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.db == 'true'
 
     services:
       postgres:
@@ -156,3 +222,31 @@ jobs:
 
       - name: Run schema contract tests
         run: python3 -m pytest tests/test_schema_contract.py -v --tb=short
+
+  ci-result:
+    name: CI result
+    runs-on: ubuntu-latest
+    needs:
+      - changes
+      - backend-fast
+      - backend-review
+      - frontend
+      - db-contract
+    if: always()
+
+    steps:
+      - name: Check selected CI jobs
+        run: |
+          for result in \
+            "${{ needs.changes.result }}" \
+            "${{ needs.backend-fast.result }}" \
+            "${{ needs.backend-review.result }}" \
+            "${{ needs.frontend.result }}" \
+            "${{ needs.db-contract.result }}"
+          do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              echo "A selected CI job failed or was cancelled."
+              exit 1
+            fi
+          done
+          echo "Selected CI jobs passed."
