@@ -65,11 +65,7 @@ non_worker_services() {
 }
 
 all_runtime_services() {
-  if [ "$SKIP_UPDATER_RESTART" = "1" ]; then
-    printf '%s\n' api worker scheduler web
-  else
-    printf '%s\n' api worker scheduler web updater
-  fi
+  non_worker_services
 }
 
 active_agent_run_count() {
@@ -156,6 +152,26 @@ update_worker_after_drain() {
   fi
 }
 
+replace_idle_worker() {
+  local worker_id stop_seconds
+  worker_id="$(worker_container_id)"
+  stop_seconds="${ILLO_COMPOSE_IDLE_WORKER_STOP_TIMEOUT_SECONDS:-30}"
+
+  if [ -z "$worker_id" ]; then
+    echo "Worker container is not running; starting worker on the new image."
+    compose up -d --force-recreate --no-deps worker
+    return 0
+  fi
+
+  echo "Worker: no active AgentRuns; replacing worker with a ${stop_seconds}s stop timeout."
+  docker update --restart=no "$worker_id" >/dev/null 2>&1 || true
+  if ! docker stop -t "$stop_seconds" "$worker_id" >/dev/null 2>&1; then
+    echo "Worker did not stop within ${stop_seconds}s despite no active AgentRuns; forcing replacement." >&2
+    docker kill "$worker_id" >/dev/null 2>&1 || true
+  fi
+  compose up -d --force-recreate --no-deps worker
+}
+
 if [ "$PULL" = "1" ]; then
   compose pull postgres api web updater || {
     echo "Image pull failed. If release images are not published yet, rerun with --build." >&2
@@ -177,6 +193,7 @@ ACTIVE_RUNS="$(active_agent_run_count)"
 if [ "$ACTIVE_RUNS" = "0" ]; then
   mapfile -t runtime_services < <(all_runtime_services)
   compose up -d --force-recreate --remove-orphans "${runtime_services[@]}"
+  replace_idle_worker
 else
   echo "Updating API, scheduler, and web while preserving active worker AgentRuns."
   mapfile -t services < <(non_worker_services)

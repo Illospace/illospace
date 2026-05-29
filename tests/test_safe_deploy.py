@@ -333,6 +333,9 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     assert "wait_for_worker_exit" in upgrade
     assert "compose up -d --force-recreate --no-deps worker" in upgrade
     assert "compose up -d --force-recreate --remove-orphans" in upgrade
+    assert "replace_idle_worker" in upgrade
+    assert "ILLO_COMPOSE_IDLE_WORKER_STOP_TIMEOUT_SECONDS" in upgrade
+    assert "no active AgentRuns" in upgrade
     assert "ILLO_COMPOSE_BUILD_NO_CACHE" in upgrade
     assert "ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_FILE" in upgrade
     assert "record_worker_drain_timeout" in upgrade
