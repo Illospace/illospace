@@ -62,9 +62,7 @@ async def test_runtime_settings_tool_returns_model_mappings_and_active_status():
 
 
 @pytest.mark.asyncio
-async def test_manage_deployment_tool_requires_owner_or_admin():
-    from types import SimpleNamespace
-
+async def test_manage_deployment_tool_requires_authenticated_user():
     import brain.systems.runtime_settings.self_update as self_update
     from brain.app.mcp.server import tool_manage_deployment
 
@@ -72,18 +70,17 @@ async def test_manage_deployment_tool_requires_owner_or_admin():
     mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
     mock_uow.__aexit__ = AsyncMock(return_value=False)
     mock_uow.session = MagicMock()
-    mock_uow.session.get = AsyncMock(return_value=SimpleNamespace(id="user-1", org_id="org-1", role="member"))
 
     with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
          patch.object(self_update, "async_start_runtime_update", AsyncMock(side_effect=AssertionError("must not start"))):
-        data = await tool_manage_deployment(action="start_update", user_id="user-1", org_id="org-1")
+        data = await tool_manage_deployment(action="start_update", user_id=None, org_id="org-1")
 
     assert data["status"] == "denied"
-    assert "owner or admin" in data["detail"]
+    assert "authenticated workspace user" in data["detail"]
 
 
 @pytest.mark.asyncio
-async def test_manage_deployment_tool_starts_update_for_owner():
+async def test_manage_deployment_tool_starts_update_for_workspace_member():
     from types import SimpleNamespace
 
     import brain.systems.runtime_settings.self_update as self_update
@@ -94,7 +91,7 @@ async def test_manage_deployment_tool_starts_update_for_owner():
     mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
     mock_uow.__aexit__ = AsyncMock(return_value=False)
     mock_uow.session = MagicMock()
-    mock_uow.session.get = AsyncMock(return_value=SimpleNamespace(id="owner-1", org_id="org-1", role="owner"))
+    mock_uow.session.get = AsyncMock(return_value=SimpleNamespace(id="user-1", org_id="org-1", role="member"))
     update = RuntimeUpdateRead(
         status="running",
         available=True,
@@ -110,7 +107,7 @@ async def test_manage_deployment_tool_starts_update_for_owner():
             action="start_update",
             build_no_cache=True,
             worker_drain_timeout_seconds=45,
-            user_id="owner-1",
+            user_id="user-1",
             org_id="org-1",
         )
 
@@ -118,9 +115,58 @@ async def test_manage_deployment_tool_starts_update_for_owner():
     assert data["status"] == "running"
     start_update.assert_awaited_once()
     _, kwargs = start_update.await_args
-    assert kwargs["requested_by"] == "owner-1"
+    assert kwargs["requested_by"] == "user-1"
     assert kwargs["build_no_cache"] is True
     assert kwargs["worker_drain_timeout_seconds"] == 45
+
+
+@pytest.mark.asyncio
+async def test_manage_deployment_tool_requires_active_org_membership():
+    from types import SimpleNamespace
+
+    import brain.systems.runtime_settings.self_update as self_update
+    from brain.app.mcp.server import tool_manage_deployment
+
+    mock_uow = MagicMock()
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    mock_uow.session = MagicMock()
+    mock_uow.session.get = AsyncMock(return_value=SimpleNamespace(id="user-1", org_id="other-org", role="member"))
+
+    with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
+         patch.object(self_update, "async_start_runtime_update", AsyncMock(side_effect=AssertionError("must not start"))):
+        data = await tool_manage_deployment(action="start_update", user_id="user-1", org_id="org-1")
+
+    assert data["status"] == "denied"
+    assert "active organization" in data["detail"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_update_http_endpoint_allows_workspace_member():
+    from types import SimpleNamespace
+
+    import brain.systems.runtime_settings.router as router
+    from brain.systems.runtime_settings.schemas import RuntimeUpdateRead
+
+    update = RuntimeUpdateRead(
+        status="idle",
+        available=True,
+        pid=None,
+        active_agent_runs=0,
+        log_path="/data/private/logs/illo-self-update.log",
+        detail="Queues the update for the Compose updater sidecar.",
+    )
+    user = SimpleNamespace(id="user-1", org_id="org-1", role="member")
+
+    with patch.object(router, "async_get_runtime_update_status", AsyncMock(return_value=update)) as get_status, \
+         patch.object(router, "async_start_runtime_update", AsyncMock(return_value=update)) as start_update:
+        assert await router.read_runtime_update(user=user, db=MagicMock()) == update
+        assert await router.start_illospace_update(user=user, db=MagicMock()) == update
+
+    get_status.assert_awaited_once()
+    start_update.assert_awaited_once()
+    _, kwargs = start_update.await_args
+    assert kwargs["requested_by"] == "user-1"
 
 
 @pytest.mark.asyncio

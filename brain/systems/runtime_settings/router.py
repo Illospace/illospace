@@ -190,7 +190,6 @@ async def read_runtime_update(
     user: User = Depends(_runtime_user),
     db: AsyncSession = Depends(get_db),
 ) -> RuntimeUpdateRead:
-    _require_settings_admin(user)
     return await async_get_runtime_update_status(db)
 
 
@@ -199,5 +198,4 @@ async def start_illospace_update(
     user: User = Depends(_runtime_user),
     db: AsyncSession = Depends(get_db),
 ) -> RuntimeUpdateRead:
-    _require_settings_admin(user)
     return await async_start_runtime_update(db, requested_by=str(user.id))
