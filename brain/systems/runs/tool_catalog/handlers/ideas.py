@@ -206,7 +206,7 @@ def _scoped_ideas_stmt(org_id: str | None, actor_user_id: str | None):
         return stmt.where(Idea.org_id == org_id)
     if actor_user_id:
         return stmt.where(Idea.user_id == actor_user_id)
-    raise ValueError("manage_idea requires an org-scoped or user-scoped run")
+    raise ValueError("manage_idea could not access this workspace or user context")
 
 
 async def _list_ideas(

@@ -19,6 +19,7 @@ from brain.systems.runs.actions import (
 )
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType, EventVisibility
 from brain.systems.runs.events import activity_event, redact_tool_call_result, run_event
+from brain.systems.runs.execution_context import bind_agent_context, current_agent_context
 from brain.systems.runs.secret_mounts import (
     handler_args_with_resolved_secret_env,
     resolve_secret_env_mounts,
@@ -179,9 +180,10 @@ class AsyncRunToolExecutor:
             )
             handler = _runtime_policy_handler(tool.handler)
             handler_args = handler_args_with_resolved_secret_env(tool.name, tool.args, secret_env)
-            result = handler(**handler_args)
-            if inspect.isawaitable(result):
-                result = await result
+            with bind_agent_context(_handler_context_from_action_context(action_context)):
+                result = handler(**handler_args)
+                if inspect.isawaitable(result):
+                    result = await result
         except Exception as exc:
             error_text = str(exc)
             if manifest_id:
@@ -386,6 +388,32 @@ class AsyncRunToolExecutor:
                 visibility=EventVisibility.PUBLIC,
             )
         )
+
+
+def _handler_context_from_action_context(action_context: dict[str, Any]) -> dict[str, Any]:
+    """Project persisted run context into handler-visible AgentRun context."""
+
+    context: dict[str, Any] = {}
+    for key in ("org_id", "run_id", "trace_id", "worker_name", "idea_id", "root_run_id"):
+        value = action_context.get(key)
+        if value not in (None, ""):
+            context[key] = value
+
+    actor_id = action_context.get("actor_id")
+    if actor_id not in (None, ""):
+        context["user_id"] = actor_id
+
+    existing_metadata = getattr(current_agent_context(), "execution_metadata", None)
+    metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+    for key in ("org_id", "run_id", "trace_id", "worker_name", "idea_id", "root_run_id"):
+        value = action_context.get(key)
+        if value not in (None, ""):
+            metadata[key] = value
+    if actor_id not in (None, ""):
+        metadata["user_id"] = actor_id
+    if metadata:
+        context["execution_metadata"] = metadata
+    return context
 
 
 async def execute_tool(
