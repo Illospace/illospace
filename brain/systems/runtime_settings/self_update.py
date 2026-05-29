@@ -54,11 +54,20 @@ async def async_start_runtime_update(
     session: AsyncSession,
     *,
     requested_by: str | None = None,
+    build_no_cache: bool = False,
+    worker_drain_timeout_seconds: int | None = None,
 ) -> RuntimeUpdateRead:
+    worker_drain_timeout_seconds = _normalize_worker_drain_timeout(worker_drain_timeout_seconds)
     root = _repo_root()
     request_file = _request_file()
     if request_file is not None:
-        return await _async_start_request_update(session, request_file, requested_by=requested_by)
+        return await _async_start_request_update(
+            session,
+            request_file,
+            requested_by=requested_by,
+            build_no_cache=build_no_cache,
+            worker_drain_timeout_seconds=worker_drain_timeout_seconds,
+        )
 
     available, detail = _availability(root)
     if not available:
@@ -96,6 +105,10 @@ async def async_start_runtime_update(
         env["ILLO_SELF_UPDATE_REQUESTED_AT"] = started_at.isoformat()
         if requested_by:
             env["ILLO_SELF_UPDATE_REQUESTED_BY"] = requested_by
+        if build_no_cache:
+            env["ILLO_COMPOSE_BUILD_NO_CACHE"] = "1"
+        if worker_drain_timeout_seconds is not None:
+            env["ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_SECONDS"] = str(worker_drain_timeout_seconds)
 
         handle = await run_blocking(log_path.open, "ab")
         try:
@@ -221,6 +234,8 @@ async def _async_start_request_update(
     request_file: Path,
     *,
     requested_by: str | None,
+    build_no_cache: bool,
+    worker_drain_timeout_seconds: int | None,
 ) -> RuntimeUpdateRead:
     available, detail = _request_availability(request_file)
     if not available:
@@ -253,6 +268,10 @@ async def _async_start_request_update(
             "requested_at": started_at.isoformat(),
             "requested_by": requested_by,
         }
+        if build_no_cache:
+            payload["build_no_cache"] = True
+        if worker_drain_timeout_seconds is not None:
+            payload["worker_drain_timeout_seconds"] = worker_drain_timeout_seconds
         _write_json_atomic(request_file, payload)
         _write_json_atomic(
             _request_status_file(request_file),
@@ -298,6 +317,18 @@ def _update_command(root: Path) -> list[str]:
         if command:
             return command
     return ["bash", str(root / "illo"), "update"]
+
+
+def _normalize_worker_drain_timeout(value: int | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="worker_drain_timeout_seconds must be a positive integer.") from exc
+    if normalized <= 0:
+        raise HTTPException(status_code=400, detail="worker_drain_timeout_seconds must be a positive integer.")
+    return normalized
 
 
 async def _async_active_agent_run_count(session: AsyncSession) -> int:

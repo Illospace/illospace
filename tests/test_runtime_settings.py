@@ -62,6 +62,68 @@ async def test_runtime_settings_tool_returns_model_mappings_and_active_status():
 
 
 @pytest.mark.asyncio
+async def test_manage_deployment_tool_requires_owner_or_admin():
+    from types import SimpleNamespace
+
+    import brain.systems.runtime_settings.self_update as self_update
+    from brain.app.mcp.server import tool_manage_deployment
+
+    mock_uow = MagicMock()
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    mock_uow.session = MagicMock()
+    mock_uow.session.get = AsyncMock(return_value=SimpleNamespace(id="user-1", org_id="org-1", role="member"))
+
+    with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
+         patch.object(self_update, "async_start_runtime_update", AsyncMock(side_effect=AssertionError("must not start"))):
+        data = await tool_manage_deployment(action="start_update", user_id="user-1", org_id="org-1")
+
+    assert data["status"] == "denied"
+    assert "owner or admin" in data["detail"]
+
+
+@pytest.mark.asyncio
+async def test_manage_deployment_tool_starts_update_for_owner():
+    from types import SimpleNamespace
+
+    import brain.systems.runtime_settings.self_update as self_update
+    from brain.app.mcp.server import tool_manage_deployment
+    from brain.systems.runtime_settings.schemas import RuntimeUpdateRead
+
+    mock_uow = MagicMock()
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    mock_uow.session = MagicMock()
+    mock_uow.session.get = AsyncMock(return_value=SimpleNamespace(id="owner-1", org_id="org-1", role="owner"))
+    update = RuntimeUpdateRead(
+        status="running",
+        available=True,
+        pid=None,
+        active_agent_runs=0,
+        log_path="/data/private/logs/illo-self-update.log",
+        detail="Illospace update queued for the Compose updater sidecar.",
+    )
+
+    with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
+         patch.object(self_update, "async_start_runtime_update", AsyncMock(return_value=update)) as start_update:
+        data = await tool_manage_deployment(
+            action="start_update",
+            build_no_cache=True,
+            worker_drain_timeout_seconds=45,
+            user_id="owner-1",
+            org_id="org-1",
+        )
+
+    assert data["action"] == "start_update"
+    assert data["status"] == "running"
+    start_update.assert_awaited_once()
+    _, kwargs = start_update.await_args
+    assert kwargs["requested_by"] == "owner-1"
+    assert kwargs["build_no_cache"] is True
+    assert kwargs["worker_drain_timeout_seconds"] == 45
+
+
+@pytest.mark.asyncio
 async def test_store_openai_connection_reports_invalid_format():
     from types import SimpleNamespace
 
@@ -588,7 +650,12 @@ async def test_start_runtime_update_launches_detached_safe_deploy(monkeypatch, t
     monkeypatch.setattr(self_update, "_pid_running", lambda _pid: False)
     monkeypatch.setattr(self_update.subprocess, "Popen", fake_popen)
 
-    status = await self_update.async_start_runtime_update(MagicMock(), requested_by="owner-1")
+    status = await self_update.async_start_runtime_update(
+        MagicMock(),
+        requested_by="owner-1",
+        build_no_cache=True,
+        worker_drain_timeout_seconds=90,
+    )
 
     assert status.status == "running"
     assert status.available is True
@@ -602,6 +669,8 @@ async def test_start_runtime_update_launches_detached_safe_deploy(monkeypatch, t
     assert kwargs["stderr"] is self_update.subprocess.STDOUT
     assert kwargs["close_fds"] is True
     assert kwargs["start_new_session"] is True
+    assert kwargs["env"]["ILLO_COMPOSE_BUILD_NO_CACHE"] == "1"
+    assert kwargs["env"]["ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_SECONDS"] == "90"
     assert (state_dir / "illo-self-update.pid").read_text(encoding="utf-8").strip() == "4242"
 
 
@@ -631,7 +700,12 @@ async def test_start_runtime_update_reuses_running_update(monkeypatch, tmp_path)
         MagicMock(side_effect=AssertionError("should not launch a duplicate update")),
     )
 
-    status = await self_update.async_start_runtime_update(MagicMock(), requested_by="owner-1")
+    status = await self_update.async_start_runtime_update(
+        MagicMock(),
+        requested_by="owner-1",
+        build_no_cache=True,
+        worker_drain_timeout_seconds=45,
+    )
 
     assert status.status == "running"
     assert status.pid == 5150
@@ -674,7 +748,12 @@ async def test_start_runtime_update_queues_compose_sidecar_request(monkeypatch, 
     monkeypatch.setenv("ILLO_SELF_UPDATE_LOG_PATH", str(log_path))
     monkeypatch.setattr(self_update, "_async_active_agent_run_count", AsyncMock(return_value=3))
 
-    status = await self_update.async_start_runtime_update(MagicMock(), requested_by="owner-1")
+    status = await self_update.async_start_runtime_update(
+        MagicMock(),
+        requested_by="owner-1",
+        build_no_cache=True,
+        worker_drain_timeout_seconds=45,
+    )
 
     assert status.status == "running"
     assert status.available is True
@@ -685,6 +764,8 @@ async def test_start_runtime_update_queues_compose_sidecar_request(monkeypatch, 
     request_payload = json.loads(request_file.read_text(encoding="utf-8"))
     status_payload = json.loads(status_file.read_text(encoding="utf-8"))
     assert request_payload["requested_by"] == "owner-1"
+    assert request_payload["build_no_cache"] is True
+    assert request_payload["worker_drain_timeout_seconds"] == 45
     assert status_payload["status"] == "queued"
 
 

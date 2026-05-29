@@ -2489,6 +2489,43 @@ LIFECYCLE_TOOLS = [
     },
 ]
 
+# ── Deployment Tools ─────────────────────────────────────────
+# Coordinator-only because deployments can restart Illospace itself.
+
+DEPLOYMENT_TOOLS = [
+    {
+        "name": "manage_deployment",
+        "description": (
+            "Check or start the Illospace self-update flow for the running server. "
+            "Use this only when an owner/admin explicitly asks Illo to update, deploy, "
+            "redeploy, or pull latest main for this Illospace instance. The update flow "
+            "syncs origin/main, rebuilds the Compose app images, runs database migrations, "
+            "and restarts runtime services through the updater sidecar when available."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["status", "start_update"],
+                    "default": "status",
+                    "description": "Use status to inspect availability/progress, or start_update to queue a deployment.",
+                },
+                "build_no_cache": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "For start_update, rebuild app images without Docker cache when cache staleness is suspected.",
+                },
+                "worker_drain_timeout_seconds": {
+                    "type": "integer",
+                    "description": "For start_update, optional positive timeout for active worker drain before leaving old worker to finish.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+]
+
 # ── Composite Tool Lists ─────────────────────────────────────
 
 # Worker tools = normal workspace/product capabilities. Harness orchestration
@@ -2524,6 +2561,7 @@ COORDINATOR_TOOLS = (
     + EXEC_TOOLS
     + SESSION_TOOLS
     + LIFECYCLE_TOOLS
+    + DEPLOYMENT_TOOLS
     + WORKER_SPAWN_TOOLS
     + [
         CORTEX_REPLY_TOOL,

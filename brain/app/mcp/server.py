@@ -1253,6 +1253,64 @@ async def tool_runtime_settings(
         )
 
 
+async def tool_manage_deployment(
+    action: str = "status",
+    build_no_cache: bool = False,
+    worker_drain_timeout_seconds: int | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict:
+    """Inspect or start the running server's self-update flow."""
+    from brain.platform.db.models.org import User
+    from brain.systems.runtime_settings.self_update import (
+        async_get_runtime_update_status,
+        async_start_runtime_update,
+    )
+    from brain.systems.runtime_settings.service import can_manage_runtime_settings
+
+    normalized_action = str(action or "status").strip().lower()
+    if normalized_action not in {"status", "start_update"}:
+        raise ValueError("manage_deployment action must be 'status' or 'start_update'.")
+
+    async with UnitOfWork() as uow:
+        user = await uow.session.get(User, user_id) if user_id else None
+        if user is None:
+            return {
+                "action": normalized_action,
+                "status": "denied",
+                "available": False,
+                "detail": "Deployment updates require an authenticated owner or admin.",
+            }
+        if org_id and str(getattr(user, "org_id", "")) != str(org_id):
+            return {
+                "action": normalized_action,
+                "status": "denied",
+                "available": False,
+                "detail": "Deployment updates require an owner/admin in the active organization.",
+            }
+        if not can_manage_runtime_settings(user):
+            return {
+                "action": normalized_action,
+                "status": "denied",
+                "available": False,
+                "detail": "Deployment updates require an owner or admin.",
+            }
+
+        if normalized_action == "start_update":
+            update = await async_start_runtime_update(
+                uow.session,
+                requested_by=str(user.id),
+                build_no_cache=bool(build_no_cache),
+                worker_drain_timeout_seconds=worker_drain_timeout_seconds,
+            )
+        else:
+            update = await async_get_runtime_update_status(uow.session)
+
+    payload = update.model_dump(mode="json")
+    payload["action"] = normalized_action
+    return payload
+
+
 # ── MCP Protocol Layer ───────────────────────────────────────
 
 TOOLS = {
@@ -1437,6 +1495,34 @@ TOOLS = {
                     "description": "Optional provider to focus on; defaults to the effective provider.",
                 },
             },
+        },
+    },
+    "manage_deployment": {
+        "function": tool_manage_deployment,
+        "description": (
+            "Check or start the Illospace self-update deployment flow. Owner/admin only; "
+            "use when the user explicitly asks Illo to update, deploy, redeploy, or pull latest main."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["status", "start_update"],
+                    "default": "status",
+                    "description": "Use status to inspect progress, or start_update to queue the updater sidecar.",
+                },
+                "build_no_cache": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "For start_update, rebuild app images without Docker cache when cache staleness is suspected.",
+                },
+                "worker_drain_timeout_seconds": {
+                    "type": "integer",
+                    "description": "For start_update, optional positive timeout for active worker drain before leaving old worker to finish.",
+                },
+            },
+            "required": ["action"],
         },
     },
 }

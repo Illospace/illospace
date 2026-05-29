@@ -309,7 +309,11 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     assert "docker update --restart=no" in upgrade
     assert 'docker kill -s TERM "$worker_id"' in upgrade
     assert "wait_for_worker_exit" in upgrade
-    assert "compose up -d --no-deps worker" in upgrade
+    assert "compose up -d --force-recreate --no-deps worker" in upgrade
+    assert "compose up -d --force-recreate --remove-orphans" in upgrade
+    assert "ILLO_COMPOSE_BUILD_NO_CACHE" in upgrade
+    assert "ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_FILE" in upgrade
+    assert "record_worker_drain_timeout" in upgrade
     assert "avoid killing active AgentRuns" in upgrade
 
 
