@@ -11,7 +11,9 @@ from brain.systems.runs.capabilities import (
     filter_capability_manifests,
     load_setup_guide,
     merge_capability_manifests,
+    registry_capability_manifests,
 )
+from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
 
 
@@ -31,6 +33,16 @@ def _context_containers() -> list[dict[str, Any]]:
     return containers
 
 
+def _available_registry_tool_names() -> set[str] | None:
+    metadata = getattr(_agent_context, "execution_metadata", None)
+    disabled = disabled_tool_names_from_metadata(metadata)
+    if not disabled:
+        return None
+    from brain.systems.runs.tool_catalog.registry import all_tool_registrations
+
+    return set(all_tool_registrations()) - disabled
+
+
 def _handle_read_capabilities(
     query: str | None = None,
     capability_key: str | None = None,
@@ -40,6 +52,7 @@ def _handle_read_capabilities(
     """Read machine-readable capability manifests available in this run."""
 
     manifests = merge_capability_manifests([
+        *registry_capability_manifests(available_tool_names=_available_registry_tool_names()),
         *builtin_capability_manifests(),
         *custom_capability_manifests(*_context_containers()),
     ])

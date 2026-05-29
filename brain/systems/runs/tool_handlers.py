@@ -20,6 +20,7 @@ from brain.systems.runs.tool_catalog.handlers.files import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.inbound import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.projects import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.session_tools import *  # noqa: F401,F403
+from brain.systems.runs.tool_catalog.handlers.self_context import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.skills import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.voice import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.web import *  # noqa: F401,F403
@@ -50,6 +51,7 @@ _COMPOSITION_PATCH_NAMES = (
     "_handle_browser_upload_attachment",
     "_handle_browser_wait",
     "_handle_read_capabilities",
+    "_handle_read_self_context",
     "_handle_cortex_reply",
     "_handle_cortex_visual_reply",
     "_handle_post_ai_timeline_message",

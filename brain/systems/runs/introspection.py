@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import re
 
-from brain.systems.runs.capabilities import builtin_capability_manifests, custom_capability_manifests
+from brain.systems.runs.capabilities import (
+    builtin_capability_manifests,
+    custom_capability_manifests,
+    registry_capability_manifests,
+)
 from brain.systems.runs.execution_context import _agent_context
 from brain.systems.runs.tool_catalog.registry import get_tool_registration
 
@@ -32,16 +36,19 @@ _WORKSPACE_ACTIVITY_PHRASES = (
 _WORKSPACE_OVERVIEW_PHRASES = (
     "finish setting up this workspace",
     "help me understand this workspace",
-    "help me understand what you can do to help me",
     "help me finish setting up this workspace",
     "introduce yourself",
-    "what can you do to help me",
     "what can you see",
     "what do you know about this workspace",
     "what you should know about the team",
     "what is this workspace",
     "workspace overview",
     "workspace setup",
+)
+_SELF_CONTEXT_PATTERNS = (
+    re.compile(r"\b(?:who are you|what is illo|what is illospace|what are you)\b"),
+    re.compile(r"\bwhere\b[^?]{0,100}\b(?:installed|running|hosted|source|code|repo|repository)\b"),
+    re.compile(r"\b(?:open[- ]source repo|github repo|source code|your code|own code|inspect yourself)\b"),
 )
 _PROJECT_CONTEXT_PHRASES = (
     "connected repo",
@@ -70,6 +77,10 @@ _CAPABILITY_SETUP_PATTERNS = (
         r"[^?]{0,100}\b(?:set\s*up|setup|connect|integrate|install|configure|enable|add)\b"
     ),
     re.compile(r"\b(?:what|which)\b[^?]{0,80}\b(?:capabilities|integrations|connectors|plugins|tools)\b"),
+    re.compile(r"\b(?:what|which)\b[^?]{0,80}\b(?:can|could)\b[^?]{0,40}\b(?:you|illo)\b[^?]{0,40}\b(?:do|help)\b"),
+    re.compile(r"\b(?:what|which)\b[^?]{0,40}\b(?:you|illo)\b[^?]{0,40}\b(?:can|could)\b[^?]{0,40}\b(?:do|help)\b"),
+    re.compile(r"\bhelp\b[^?]{0,80}\b(?:what|which)\b[^?]{0,40}\b(?:can|could)\b[^?]{0,40}\b(?:you|illo)\b[^?]{0,40}\b(?:do|help)\b"),
+    re.compile(r"\bhelp\b[^?]{0,80}\b(?:what|which)\b[^?]{0,40}\b(?:you|illo)\b[^?]{0,40}\b(?:can|could)\b[^?]{0,40}\b(?:do|help)\b"),
 )
 _CAPABILITY_CONTEXT_PATTERN_COUNT = 3
 
@@ -95,9 +106,16 @@ def _looks_like_capability_setup_question(message: str | None) -> bool:
     context_patterns = _CAPABILITY_SETUP_PATTERNS[1:_CAPABILITY_CONTEXT_PATTERN_COUNT]
     if any(pattern.search(text) for pattern in context_patterns):
         return True
-    if _CAPABILITY_SETUP_PATTERNS[-1].search(text):
+    if any(pattern.search(text) for pattern in _CAPABILITY_SETUP_PATTERNS[_CAPABILITY_CONTEXT_PATTERN_COUNT:]):
         return True
     return setup_verb and _mentions_known_capability(text)
+
+
+def _looks_like_self_context_question(message: str | None) -> bool:
+    text = _normalized_text(message)
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in _SELF_CONTEXT_PATTERNS)
 
 
 def _agent_context_containers() -> list[dict]:
@@ -118,6 +136,7 @@ def _agent_context_containers() -> list[dict]:
 
 def _known_capability_terms() -> tuple[str, ...]:
     manifests = [
+        *registry_capability_manifests(),
         *builtin_capability_manifests(),
         *custom_capability_manifests(*_agent_context_containers()),
     ]
@@ -158,6 +177,16 @@ def required_introspection_tool(
     if registration and registration.context_route is not None:
         route = registration.context_route
         return tool, f"This question requires {tool}. {route.description}"
+    if _looks_like_self_context_question(message):
+        tool = "read_self_context"
+        registration = get_tool_registration(tool)
+        if registration and registration.context_route is not None:
+            route = registration.context_route
+            return (
+                tool,
+                f"This question asks for Illo's verified identity/source/runtime context. Use {tool} "
+                f"before answering from memory. {route.description}",
+            )
     if _looks_like_capability_setup_question(message):
         tool = "read_capabilities"
         registration = get_tool_registration(tool)

@@ -143,6 +143,7 @@ class TestToolDefinitionContracts:
             "brain_vault",
             "vault_secret_prompt",
             "runtime_settings",
+            "read_self_context",
             "read_capabilities",
             "transcribe_audio_attachment",
             "read_thread_messages",

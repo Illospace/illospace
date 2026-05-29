@@ -22,6 +22,7 @@ class CapabilityManifest:
     aliases: tuple[str, ...] = ()
     affordances: tuple[str, ...] = ()
     tools: tuple[str, ...] = ()
+    tool_details: tuple[Mapping[str, Any], ...] = ()
     status_check: Mapping[str, Any] | None = None
     setup: Mapping[str, Any] = field(default_factory=dict)
     source: str = "builtin"
@@ -35,6 +36,7 @@ class CapabilityManifest:
             "aliases": list(self.aliases),
             "affordances": list(self.affordances),
             "tools": list(self.tools),
+            "tool_details": [dict(detail) for detail in self.tool_details],
             "status_check": dict(self.status_check or {}),
             "setup": dict(self.setup or {}),
             "source": self.source,
@@ -46,7 +48,7 @@ def builtin_capability_manifests() -> list[CapabilityManifest]:
         CapabilityManifest(
             key="slack",
             name="Slack",
-            category="communication",
+            category="external_surface",
             summary=(
                 "Illo can participate in Slack conversations when a Slack source "
                 "connection is registered for the workspace."
@@ -105,6 +107,10 @@ def _manifest_from_mapping(value: Mapping[str, Any], *, default_key: str | None 
         aliases=_coerce_text_tuple(value.get("aliases")),
         affordances=_coerce_text_tuple(value.get("affordances") or value.get("capabilities")),
         tools=_coerce_text_tuple(value.get("tools")),
+        tool_details=tuple(
+            dict(item) for item in value.get("tool_details", ())
+            if isinstance(item, Mapping)
+        ) if isinstance(value.get("tool_details"), Iterable) else (),
         status_check=value.get("status_check") if isinstance(value.get("status_check"), Mapping) else None,
         setup=value.get("setup") if isinstance(value.get("setup"), Mapping) else {},
         source=source,
@@ -137,6 +143,211 @@ def custom_capability_manifests(*containers: Mapping[str, Any] | None) -> list[C
     return manifests
 
 
+_FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "workspace_context",
+        "name": "Workspace Context",
+        "category": "core_workspace",
+        "summary": "Illo can inspect current Illospace workspace context: roster, recent activity, projects, records, apps, cycles, and run provenance.",
+        "aliases": ("workspace", "team activity", "workspace overview", "what can you see"),
+        "tools": ("read_workspace_overview", "read_team_activity", "read_team_members", "query_workspace_data", "my_activity"),
+    },
+    {
+        "key": "threads",
+        "name": "Threads and Discussion",
+        "category": "core_workspace",
+        "summary": "Illo can work with Illospace Threads, AI Timeline messages, and Thread Discussion surfaces.",
+        "aliases": ("thread", "threads", "discussion", "ai timeline", "ideas"),
+        "tools": ("manage_idea", "read_thread_discussion", "post_thread_discussion_reply", "post_ai_timeline_message", "post_chat_message", "cortex_reply", "cortex_visual_reply"),
+    },
+    {
+        "key": "domains",
+        "name": "Domains",
+        "category": "core_workspace",
+        "summary": "Illo can inspect and mutate user-created structured workspace databases, schemas, records, and Domain audit events.",
+        "aliases": ("domain", "domains", "workspace records", "structured records", "team database"),
+        "tools": ("read_workspace_records", "manage_domain"),
+    },
+    {
+        "key": "cycles",
+        "name": "Cycles",
+        "category": "core_workspace",
+        "summary": "Illo can inspect and manage recurring workspace work such as scheduled prompts, check-ins, reports, and automation runs.",
+        "aliases": ("cycle", "cycles", "recurring work", "automations", "scheduled work"),
+        "tools": ("read_cycles", "manage_cycle"),
+    },
+    {
+        "key": "project_context",
+        "name": "Project Context",
+        "category": "core_workspace",
+        "summary": "Illo can inspect and manage durable project context profiles, connected resources, files, folders, repos, docs, and thread attachments.",
+        "aliases": ("project", "projects", "repos", "files", "docs", "connected repo", "project context"),
+        "tools": ("read_project_contexts", "manage_project"),
+    },
+    {
+        "key": "workspace_apps",
+        "name": "Workspace Apps",
+        "category": "core_workspace",
+        "summary": "Illo can inspect and manage generated workspace apps, dashboards, app metadata, and app-local state.",
+        "aliases": ("apps", "dashboards", "workspace apps", "generated apps"),
+        "tools": ("read_workspace_apps", "manage_workspace_app"),
+    },
+    {
+        "key": "vault",
+        "name": "Vault",
+        "category": "security",
+        "summary": "Illo can reason about Vault secret metadata, ask the user for missing credentials, and request task-scoped secret access without exposing raw values.",
+        "aliases": ("secrets", "credentials", "tokens", "vault"),
+        "tools": ("vault_inventory", "vault_secret_prompt", "brain_vault"),
+    },
+    {
+        "key": "skills",
+        "name": "Skills",
+        "category": "agent_runtime",
+        "summary": "Illo can inspect, load, create, update, archive, and package installed skills and skill assets.",
+        "aliases": ("skill", "skills", "procedures", "agent skills"),
+        "tools": ("brain_skills", "skill_view", "skill_asset", "manage_skill"),
+    },
+    {
+        "key": "memory",
+        "name": "Memory",
+        "category": "agent_runtime",
+        "summary": "Illo can search and write long-term semantic memories, lessons, facts, patterns, episodes, and guardrails.",
+        "aliases": ("memory", "memories", "remember", "lessons", "guardrails"),
+        "tools": ("brain_recall", "brain_encode", "brain_guardrails"),
+    },
+    {
+        "key": "inbound_coordination",
+        "name": "Inbound Coordination",
+        "category": "integration_foundation",
+        "summary": "Illo can inspect and manage inbound source connections, tokens, policies, replay, source cards, and Domain projections.",
+        "aliases": ("inbound", "sources", "webhooks", "mcp", "personal agents", "external agents"),
+        "tools": ("manage_inbound",),
+    },
+    {
+        "key": "code_execution",
+        "name": "Code and File Execution",
+        "category": "runtime_surface",
+        "summary": "Illo can inspect files and, when enabled for the run, write/edit files and execute shell, Python, or test commands in the available workspace.",
+        "aliases": ("code", "files", "scripts", "commands", "terminal", "tests", "repository"),
+        "tools": ("read_file", "search_files", "list_files", "write_file", "edit_file", "exec_command", "run_script", "test_runner", "project_context"),
+    },
+    {
+        "key": "web_research",
+        "name": "Web Research",
+        "category": "external_read",
+        "summary": "Illo can search and fetch external web content when web tools are available.",
+        "aliases": ("web", "internet", "search", "fetch", "research"),
+        "tools": ("web_search", "web_fetch"),
+    },
+    {
+        "key": "browser_automation",
+        "name": "Browser Automation",
+        "category": "runtime_surface",
+        "summary": "Illo can inspect and operate a live browser session when browser automation is exposed to the run.",
+        "aliases": ("browser", "ui automation", "web app testing"),
+        "tools": ("browser",),
+    },
+    {
+        "key": "worker_coordination",
+        "name": "Worker Coordination",
+        "category": "agent_runtime",
+        "summary": "Illo can spawn scoped worker runs for parallel or delegated investigation when the coordinator tool is available.",
+        "aliases": ("workers", "spawn worker", "parallel agents"),
+        "tools": ("spawn_worker",),
+    },
+    {
+        "key": "runtime_self_context",
+        "name": "Runtime and Self Context",
+        "category": "agent_runtime",
+        "summary": "Illo can inspect its runtime settings, capability registry, and verified source/install context.",
+        "aliases": ("runtime", "self context", "who are you", "where are you installed", "models"),
+        "tools": ("runtime_settings", "read_self_context", "read_capabilities"),
+    },
+    {
+        "key": "deployment",
+        "name": "Deployment",
+        "category": "operations",
+        "summary": "Illo can inspect or start the self-update deployment flow when the deployment management tool is available.",
+        "aliases": ("deploy", "deployment", "update", "self update"),
+        "tools": ("manage_deployment",),
+    },
+    {
+        "key": "voice",
+        "name": "Voice and Audio",
+        "category": "media",
+        "summary": "Illo can transcribe audio attachments when the voice runtime is configured.",
+        "aliases": ("voice", "audio", "transcription", "voice notes"),
+        "tools": ("transcribe_audio_attachment",),
+    },
+    {
+        "key": "agent_personality",
+        "name": "Agent Personality",
+        "category": "agent_runtime",
+        "summary": "Illo can inspect or update its private SOUL.md personality file when that management surface is exposed.",
+        "aliases": ("soul", "personality", "agent behavior"),
+        "tools": ("manage_soul",),
+    },
+)
+
+
+def _tool_detail(name: str, registration: Any) -> dict[str, Any]:
+    route = registration.context_route
+    return {
+        "name": name,
+        "toolset": registration.toolset,
+        "availability": [role.value for role in registration.availability],
+        "permission": registration.permission.value,
+        "risk_class": registration.risk_class.value,
+        "side_effect_class": registration.side_effect_class.value,
+        "reversibility": registration.reversibility.value,
+        "expected_effect": registration.expected_effect,
+        "context_domains": list(route.domains) if route is not None else [],
+    }
+
+
+def _tool_affordance(registration: Any) -> str:
+    if registration.expected_effect:
+        return str(registration.expected_effect)
+    if registration.context_route is not None:
+        return str(registration.context_route.description)
+    return str(registration.description)
+
+
+def registry_capability_manifests(
+    *,
+    available_tool_names: Iterable[str] | None = None,
+) -> list[CapabilityManifest]:
+    from brain.systems.runs.tool_catalog.registry import all_tool_registrations
+
+    registrations = all_tool_registrations()
+    available = {str(name) for name in available_tool_names} if available_tool_names is not None else set(registrations)
+    manifests: list[CapabilityManifest] = []
+    for spec in _FIRST_PARTY_CAPABILITY_SPECS:
+        tools = tuple(
+            name
+            for name in spec["tools"]
+            if name in registrations and name in available
+        )
+        if not tools:
+            continue
+        details = tuple(_tool_detail(name, registrations[name]) for name in tools)
+        affordances = tuple(_tool_affordance(registrations[name]) for name in tools)
+        manifests.append(CapabilityManifest(
+            key=str(spec["key"]),
+            name=str(spec["name"]),
+            category=str(spec["category"]),
+            summary=str(spec["summary"]),
+            aliases=_coerce_text_tuple(spec.get("aliases")),
+            affordances=affordances,
+            tools=tools,
+            tool_details=details,
+            setup={"mode": "built_in"},
+            source="tool_registry",
+        ))
+    return manifests
+
+
 def merge_capability_manifests(manifests: Iterable[CapabilityManifest]) -> list[CapabilityManifest]:
     merged: dict[str, CapabilityManifest] = {}
     for manifest in manifests:
@@ -153,6 +364,7 @@ def _matches_query(manifest: CapabilityManifest, query: str) -> bool:
         " ".join(manifest.aliases),
         " ".join(manifest.affordances),
         " ".join(manifest.tools),
+        " ".join(str(detail.get("expected_effect") or "") for detail in manifest.tool_details),
     )).lower()
     stopwords = {
         "a", "about", "add", "agent", "an", "app", "apps", "can",
@@ -236,4 +448,5 @@ __all__ = [
     "filter_capability_manifests",
     "load_setup_guide",
     "merge_capability_manifests",
+    "registry_capability_manifests",
 ]

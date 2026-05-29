@@ -88,7 +88,16 @@ def test_capability_tool_is_read_only_agent_run_surface():
     from brain.systems.runs.tool_handlers import _get_tool_handlers
     from brain.systems.runs.tool_catalog.registry import context_route_tool_names, get_tool_registration
 
+    self_registration = get_tool_registration("read_self_context")
     registration = get_tool_registration("read_capabilities")
+
+    assert self_registration is not None
+    assert self_registration.permission == "read_runtime"
+    assert self_registration.side_effect_class == "read_only"
+    assert self_registration.evidence_emitter is True
+    assert "self context" in self_registration.context_route.domains
+    assert "read_self_context" in context_route_tool_names()
+    assert "read_self_context" in _get_tool_handlers()
 
     assert registration is not None
     assert registration.permission == "read_runtime"
@@ -201,6 +210,7 @@ def test_context_route_surface_is_registry_driven():
         "read_capabilities",
         "read_cycles",
         "read_project_contexts",
+        "read_self_context",
         "read_team_activity",
         "read_team_members",
         "read_thread_messages",
@@ -215,6 +225,7 @@ def test_context_route_surface_is_registry_driven():
     assert routes["query_workspace_data"]["empty_result_policy"] == "answer_honestly"
     assert "workspace records" in routes["query_workspace_data"]["domains"]
     assert "setup" in routes["read_capabilities"]["domains"]
+    assert "source code" in routes["read_self_context"]["domains"]
     assert "workspace setup" in routes["read_workspace_overview"]["domains"]
 
 
@@ -228,14 +239,24 @@ def test_workspace_activity_question_requires_workspace_data():
     assert "current workspace/team activity" in message
 
 
-def test_onboarding_intro_requires_workspace_overview():
+def test_ability_intro_requires_capabilities():
     from brain.systems.runs.introspection import required_introspection_tool
 
     tool, message = required_introspection_tool("Hey Illo, help me understand what you can do to help me.")
 
-    assert tool == "read_workspace_overview"
+    assert tool == "read_capabilities"
     assert message is not None
-    assert "workspace overview" in message
+    assert "capability/setup context" in message
+
+
+def test_source_identity_question_requires_self_context():
+    from brain.systems.runs.introspection import required_introspection_tool
+
+    tool, message = required_introspection_tool("Where is your source code installed?")
+
+    assert tool == "read_self_context"
+    assert message is not None
+    assert "identity/source/runtime context" in message
 
 
 def test_capability_setup_question_requires_capabilities():

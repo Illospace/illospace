@@ -239,6 +239,7 @@ class TestToolDefinitions:
         assert "brain_encode" in names
         assert "brain_vault" in names
         assert "runtime_settings" in names
+        assert "read_self_context" in names
         assert "read_capabilities" in names
 
     def test_exec_tools_defined(self):
@@ -1739,8 +1740,36 @@ class TestCortexReplyHandler:
 
         payload = json.loads(_handle_read_capabilities(query="what integrations can you do?"))
 
-        assert payload["count"] >= 1
+        keys = {capability["key"] for capability in payload["capabilities"]}
+
+        assert payload["count"] >= 10
         assert any(capability["key"] == "slack" for capability in payload["capabilities"])
+        assert {"domains", "cycles", "code_execution", "workspace_context"} <= keys
+
+    def test_read_capabilities_registry_details_come_from_tool_registry(self):
+        from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+
+        payload = json.loads(_handle_read_capabilities(capability_key="domains"))
+
+        assert payload["count"] == 1
+        domains = payload["capabilities"][0]
+        assert domains["source"] == "tool_registry"
+        assert domains["category"] == "core_workspace"
+        assert domains["tools"] == ["read_workspace_records", "manage_domain"]
+        assert {detail["name"] for detail in domains["tool_details"]} == set(domains["tools"])
+        assert any("domain" in (detail["expected_effect"] or "").lower() for detail in domains["tool_details"])
+
+    def test_read_self_context_reports_identity_source_and_inspection_tools(self):
+        from brain.systems.runs.tool_catalog.handlers.self_context import _handle_read_self_context
+
+        payload = json.loads(_handle_read_self_context(include_git=False))
+
+        assert payload["identity"]["agent_name"] == "Illo"
+        assert payload["identity"]["workspace_product"] == "Illospace"
+        assert payload["open_source"]["repository_url"] == "https://github.com/Illospace/illospace"
+        assert payload["installation"]["source_root"]["exists"] is True
+        assert payload["source_inspection"]["tools"]["read_file"]["registered"] is True
+        assert "git" not in payload
 
     def test_read_capabilities_includes_custom_manifest_from_context(self):
         from brain.systems.runs.execution_context import bind_agent_context

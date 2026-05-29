@@ -61,6 +61,7 @@ from brain.systems.runs.tool_catalog.handlers.session_tools import (
     _handle_session_read,
     _handle_session_write,
 )
+from brain.systems.runs.tool_catalog.handlers.self_context import _handle_read_self_context
 from brain.systems.runs.tool_catalog.handlers.slack import (
     _handle_manage_slack,
     _handle_post_slack_reply,
@@ -211,6 +212,7 @@ def _get_tool_handlers(
             user_id=getattr(_agent_context, "user_id", None),
             org_id=getattr(_agent_context, "org_id", None),
         ),
+        "read_self_context": _handle_read_self_context,
         "read_capabilities": _handle_read_capabilities,
         "manage_deployment": _manage_deployment,
         "transcribe_audio_attachment": lambda **kw: _patched_private(

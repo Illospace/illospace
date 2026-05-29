@@ -390,6 +390,30 @@ BRAIN_TOOLS = [
         },
     },
     {
+        "name": "read_self_context",
+        "description": (
+            "Read verified identity, source, and runtime self-context for Illo. Use this for "
+            "questions about who Illo is, what Illospace is, where this open-source install/source "
+            "can be inspected, current git/source facts, or whether code/file inspection tools are "
+            "available. This is not the capability index; use read_capabilities for what Illo can do."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "include_paths": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Include verified local source-root and documentation path facts.",
+                },
+                "include_git": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Include current git branch, commit, and remote facts when available.",
+                },
+            },
+        },
+    },
+    {
         "name": "read_capabilities",
         "description": (
             "Read machine-readable capability manifests for Illo's runtime and installed/custom capabilities. "
@@ -2605,7 +2629,7 @@ COORDINATOR_TOOLS = (
 # Brain gate: these tool names satisfy the "brain context accessed" requirement
 _BRAIN_TOOL_NAMES = frozenset({
     "brain_recall", "brain_guardrails", "brain_skills", "skill_view", "skill_asset",
-    "brain_encode", "runtime_settings", "read_capabilities", "query_workspace_data", "read_workspace_overview",
+    "brain_encode", "runtime_settings", "read_self_context", "read_capabilities", "query_workspace_data", "read_workspace_overview",
     "read_team_activity", "read_project_contexts", "read_team_members", "read_workspace_records",
     "read_cycles", "read_workspace_apps",
 })
