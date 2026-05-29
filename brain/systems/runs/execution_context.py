@@ -1,4 +1,4 @@
-"""Thread-local execution context for live AgentRun tool calls."""
+"""Context-local execution context for live AgentRun tool calls."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ class _AgentContextProxy:
     def __delattr__(self, name: str) -> None:
         values = dict(_context_values.get())
         if name not in values:
-            return
+            raise AttributeError(name)
         del values[name]
         _context_values.set(values)
 
@@ -73,7 +73,7 @@ class AgentExecutionContext:
     resource_summary: dict | None = None
     slash_skill_refs: list[str] = field(default_factory=list)
 
-    def to_threadlocal_attrs(self) -> dict:
+    def to_context_attrs(self) -> dict:
         """Return a shallow attr mapping without deep-copying live run objects."""
         return {field.name: getattr(self, field.name) for field in fields(self)}
 
@@ -102,7 +102,7 @@ def bind_agent_context(
     attrs: dict[str, object] = {}
     if context is not None:
         if isinstance(context, AgentExecutionContext):
-            attrs.update(context.to_threadlocal_attrs())
+            attrs.update(context.to_context_attrs())
         else:
             attrs.update(dict(context))
     attrs.update(overrides)

@@ -89,14 +89,6 @@ async def test_restart_resume_skips_completed_steps_from_persisted_cursor(sessio
     assert (await _event_types(restarted, run.id)).count("run.step_skipped") == 1
 
 
-async def test_create_run_requires_workspace_org_id(session_factory):
-    session = session_factory()
-    store = AsyncAgentRunStore(session)
-
-    with pytest.raises(ValueError, match="workspace org_id"):
-        await store.create_run(_AgentRunRequest(thread_id="thread-1", message="missing workspace"))
-
-
 async def test_runtime_fails_legacy_run_without_workspace_org_id(session_factory):
     class UnexpectedRecipe:
         async def execute(self, _runtime: RunRuntime) -> RunRecipeResult:

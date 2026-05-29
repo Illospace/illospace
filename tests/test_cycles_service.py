@@ -835,6 +835,7 @@ async def test_execute_cycle_run_creates_execution_thread_when_target_thread_is_
 @pytest.mark.asyncio
 async def test_manage_cycle_list_uses_native_uow_without_sync_bridges(monkeypatch):
     from brain.systems.runs.tool_catalog.handlers import cycles as cycle_handlers
+    from brain.systems.runs.execution_context import bind_agent_context
 
     cycle = _cycle_for_serialization(
         schedule_expr="0 9 * * *",
@@ -845,10 +846,9 @@ async def test_manage_cycle_list_uses_native_uow_without_sync_bridges(monkeypatc
     monkeypatch.setattr(cycle_handlers, "UnitOfWork", factory)
     monkeypatch.setattr(cycle_handlers, "open_unit_of_work", _fail_sync_bridge, raising=False)
     monkeypatch.setattr(cycle_handlers, "run_unit_of_work_task", _fail_sync_bridge, raising=False)
-    monkeypatch.setattr(cycle_handlers._agent_context, "user_id", "user-1", raising=False)
-    monkeypatch.setattr(cycle_handlers._agent_context, "org_id", None, raising=False)
 
-    payload = json.loads(await cycle_handlers._handle_manage_cycle_async(action="list"))
+    with bind_agent_context({"user_id": "user-1", "org_id": None}):
+        payload = json.loads(await cycle_handlers._handle_manage_cycle_async(action="list"))
 
     assert factory.uows[0].entered is True
     assert payload["cycles"][0]["id"] == cycle.id
