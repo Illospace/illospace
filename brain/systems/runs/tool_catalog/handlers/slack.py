@@ -204,46 +204,6 @@ def _slack_connection_payload(connection) -> dict[str, Any]:
     }
 
 
-def _slack_setup_instructions() -> dict[str, Any]:
-    return {
-        "slack_apps_url": "https://api.slack.com/apps",
-        "summary": (
-            "Slack is not connected to this Illospace workspace yet. "
-            "Illo can guide you through the Slack-side setup, "
-            "but the Slack tokens must be entered outside chat."
-        ),
-        "steps": [
-            "Open Slack's app management page and create or select the Illo app for this Slack workspace.",
-            "Enable Socket Mode for the Slack app.",
-            (
-                "Grant the app permission to receive mentions, DMs, messages in channels where it is invited, "
-                "and files shared in those conversations."
-            ),
-            "Install the app to the Slack workspace.",
-            "Copy the app-level Socket Mode token and bot token into the Illospace Slack connection setup outside chat.",
-            "Ask Illo to check Slack status again, then invite Illo to channels or DM it.",
-        ],
-        "what_illo_can_do": [
-            "Check whether Slack is connected to this Illospace workspace.",
-            "Link Slack users to Illospace users after Slack is connected.",
-            "Read and reply in Slack conversations after Illo is mentioned or DM'd.",
-        ],
-        "what_illo_cannot_do": [
-            "Create or install the Slack app for the workspace.",
-            "Receive Slack tokens in chat.",
-            "Change Slack or Illospace installation settings.",
-        ],
-        "setup_boundary": (
-            "If Slack is not connected, the setup has to be completed through Slack and the Illospace "
-            "Slack connection screen, not by pasting tokens into Illo, Slack chat, or Thread chat."
-        ),
-        "after_connected": [
-            "Ask Illo to check Slack status.",
-            "Invite Illo to the Slack channels where it should participate, then mention @Illo or DM it.",
-        ],
-    }
-
-
 async def _handle_manage_slack(
     action: str,
     connection_id: str | None = None,
@@ -253,9 +213,6 @@ async def _handle_manage_slack(
     """Inspect Slack connection health and manage minimal identity mappings."""
 
     normalized_action = str(action or "").strip().lower()
-    if normalized_action == "setup_instructions":
-        return json.dumps({"ok": True, "setup": _slack_setup_instructions()}, default=str)
-
     org_id = str(getattr(_agent_context, "org_id", "") or "").strip()
     if not org_id:
         return json.dumps({"error": "manage_slack could not access this workspace context"})
@@ -287,15 +244,8 @@ async def _handle_manage_slack(
                 {
                     "ok": True,
                     "setup_state": setup_state,
-                    "next_step": (
-                        "Slack is connected. Invite Illo to a channel, mention @Illo, or DM it."
-                        if rows
-                        else (
-                            "Slack is not connected. Share setup_guidance with the user, then ask them to "
-                            "tell Illo when setup is complete so Illo can check status again."
-                        )
-                    ),
-                    **({} if rows else {"setup_guidance": _slack_setup_instructions()}),
+                    "needs_connection": not bool(rows),
+                    "connection_count": len(rows),
                     "connections": [_slack_connection_payload(row) for row in rows],
                 },
                 default=str,

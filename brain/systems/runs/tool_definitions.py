@@ -1372,11 +1372,8 @@ CHAT_TOOLS = [
         "name": "manage_slack",
         "description": (
             "Inspect Slack connection health and Slack-to-Illospace identity mappings. "
-            "Use this to check whether Slack is connected or when a Slack actor needs "
-            "to be linked to an Illospace user. This tool only reports connection "
-            "state and identity mappings; it cannot change Slack or Illospace "
-            "installation settings. When status returns setup_guidance, summarize "
-            "those steps for the user without adding details that are not in the tool result."
+            "Use action='status' to check whether Slack is connected, and use "
+            "identity mapping actions to link Slack users to Illospace users."
         ),
         "input_schema": {
             "type": "object",
