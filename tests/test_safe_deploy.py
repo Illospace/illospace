@@ -295,6 +295,19 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
     assert "deploy " + "publish" not in launcher
 
 
+def test_compose_self_update_sidecar_can_bootstrap_from_api_queue():
+    root = Path(__file__).resolve().parents[1]
+    updater_dockerfile = (root / "deploy" / "docker" / "updater.Dockerfile").read_text()
+    self_update_daemon = (root / "deploy" / "scripts" / "self-update-daemon.sh").read_text()
+
+    assert "python3" in updater_dockerfile
+    assert "curl" in updater_dockerfile
+    assert "APP_UID" in self_update_daemon
+    assert "chown \"$APP_UID:$APP_GID\"" in self_update_daemon
+    assert "chmod 0775" in self_update_daemon
+    assert "safe.directory" in self_update_daemon
+
+
 def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     upgrade = (Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "upgrade.sh").read_text()
 
