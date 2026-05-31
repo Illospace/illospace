@@ -5,6 +5,50 @@ export type ScenePoint = {
 
 export type OrbitNodeSceneState = 'free' | 'birth';
 
+export type WorkspaceSceneIdeaSnapshot = {
+  id: string;
+  title: string;
+  display_title?: string;
+  description?: string | null;
+  status: string;
+  salience_score?: number | null;
+  position_x: number | null;
+  position_y: number | null;
+  thread_count?: number;
+  attachments?: readonly unknown[];
+  updated_at?: string;
+  created_at?: string;
+  archived_at?: string | null;
+  user_id?: string;
+  orbit_anchor_type?: string | null;
+  orbit_anchor_id?: string | null;
+  author_name?: string;
+  author_color?: string;
+  user_color?: string;
+  _ownerRank?: number;
+  _ownerCount?: number;
+  _ownerRingIndex?: number;
+  _ownerSlotIndex?: number;
+  _ownerSlotCount?: number;
+  _ownerOrbitRadius?: number;
+  _ownerSeedAngle?: number;
+};
+
+export type WorkspaceSceneNodeSnapshot = {
+  status: string;
+  title: string;
+  display_title?: string;
+  salience_score: number;
+  attachments_count: number;
+  thread_count: number;
+  user_id?: string;
+  orbit_anchor_type?: string | null;
+  orbit_anchor_id?: string | null;
+  author_name?: string;
+  author_color?: string;
+  user_color?: string;
+};
+
 export type OrbitNode = {
   id: string;
   title: string;
@@ -15,7 +59,7 @@ export type OrbitNode = {
   position_x: number | null;
   position_y: number | null;
   thread_count?: number;
-  attachments?: any[];
+  attachments?: readonly unknown[];
   updated_at?: string;
   created_at?: string;
   user_id?: string;
@@ -54,7 +98,37 @@ export function orbitNodeCoords(source: Partial<OrbitNode>): ScenePoint | null {
   return typeof x === 'number' && typeof y === 'number' ? { x, y } : null;
 }
 
-export function createOrbitNodeFromIdea(idea: any, initialCoords: ScenePoint): OrbitNode {
+export function sceneNodeSnapshotFromIdea(idea: WorkspaceSceneIdeaSnapshot): WorkspaceSceneNodeSnapshot {
+  return {
+    status: idea.status,
+    title: idea.title,
+    display_title: idea.display_title,
+    salience_score: idea.salience_score || 5,
+    attachments_count: idea.attachments?.length ?? 0,
+    thread_count: idea.thread_count || 0,
+    user_id: idea.user_id,
+    orbit_anchor_type: idea.orbit_anchor_type ?? null,
+    orbit_anchor_id: idea.orbit_anchor_id ?? null,
+    author_name: idea.author_name,
+    author_color: idea.author_color,
+    user_color: idea.user_color,
+  };
+}
+
+export function sceneNodeSnapshotChanged(
+  previous: WorkspaceSceneNodeSnapshot,
+  next: WorkspaceSceneNodeSnapshot,
+): boolean {
+  return previous.status !== next.status || previous.title !== next.title || previous.display_title !== next.display_title
+    || previous.salience_score !== next.salience_score
+    || previous.attachments_count !== next.attachments_count
+    || previous.thread_count !== next.thread_count || previous.user_id !== next.user_id
+    || previous.orbit_anchor_type !== next.orbit_anchor_type || previous.orbit_anchor_id !== next.orbit_anchor_id
+    || previous.author_name !== next.author_name || previous.author_color !== next.author_color
+    || previous.user_color !== next.user_color;
+}
+
+export function createOrbitNodeFromIdea(idea: WorkspaceSceneIdeaSnapshot, initialCoords: ScenePoint): OrbitNode {
   return {
     id: idea.id,
     title: idea.title,
@@ -91,7 +165,7 @@ export function createOrbitNodeFromIdea(idea: any, initialCoords: ScenePoint): O
 
 export function applyIdeaSnapshotToSceneNode(
   node: OrbitNode,
-  idea: any,
+  idea: WorkspaceSceneIdeaSnapshot,
   options: { usePersistedCoordsWhenUnpositioned?: boolean } = {},
 ) {
   const nextCoords = orbitNodeCoords({
@@ -105,7 +179,7 @@ export function applyIdeaSnapshotToSceneNode(
   node.display_title = idea.display_title;
   node.description = idea.description;
   node.status = idea.status;
-  node.salience_score = idea.salience_score;
+  node.salience_score = idea.salience_score || 5;
   node.position_x = idea.position_x;
   node.position_y = idea.position_y;
   node.thread_count = idea.thread_count;

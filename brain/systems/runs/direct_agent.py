@@ -253,6 +253,10 @@ def _initial_user_content(message: str, metadata: dict) -> str | list[dict]:
 
     context = metadata.get("thread_attachment_context")
     if not isinstance(context, dict):
+        thread_context = metadata.get("thread_context")
+        if isinstance(thread_context, dict) and isinstance(thread_context.get("thread_attachment_context"), dict):
+            context = thread_context.get("thread_attachment_context")
+    if not isinstance(context, dict):
         for container_key in ("target_ref", "workspace_ref"):
             container = metadata.get(container_key)
             if isinstance(container, dict) and isinstance(container.get("thread_attachment_context"), dict):

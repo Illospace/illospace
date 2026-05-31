@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
-
-from brain.app.api.routers.cortex._helpers import UPLOAD_DIR
+from urllib.parse import unquote, urljoin, urlsplit
+from urllib.request import Request, urlopen
 
 READABLE_TEXT_EXTENSIONS = {"csv", "json", "md", "txt", "xml", "yaml", "yml"}
 READABLE_TEXT_MIME_TYPES = {
@@ -64,6 +64,8 @@ MAX_TEXT_ATTACHMENT_CHARS = 18_000
 MAX_TOTAL_TEXT_ATTACHMENT_CHARS = 36_000
 MAX_IMAGE_BLOCK_BYTES = 8_000_000
 MAX_CONTEXT_ATTACHMENTS = 20
+UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads"
+UPLOAD_URL_FETCH_TIMEOUT_SECONDS = 5
 
 
 def attachment_content_type(attachment: dict[str, Any]) -> str:
@@ -288,6 +290,66 @@ def attachment_context_prompt(items: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip()
 
 
+def _same_origin_upload_url(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = urlsplit(value.strip())
+    if parsed.scheme or parsed.netloc or not parsed.path.startswith("/static/uploads/"):
+        return None
+    base_url = (
+        os.environ.get("ILLO_PUBLIC_URL")
+        or os.environ.get("ILLO_DASHBOARD_URL")
+        or os.environ.get("ILLO_API_URL")
+        or ""
+    ).strip()
+    if not base_url:
+        return None
+    relative = parsed.path.lstrip("/")
+    if parsed.query:
+        relative = f"{relative}?{parsed.query}"
+    return urljoin(base_url.rstrip("/") + "/", relative)
+
+
+def _read_upload_url_bytes(value: Any) -> bytes | None:
+    url = _same_origin_upload_url(value)
+    if not url:
+        return None
+    request = Request(url, headers={"Accept": "image/*"})
+    try:
+        with urlopen(request, timeout=UPLOAD_URL_FETCH_TIMEOUT_SECONDS) as response:
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None and int(content_length) > MAX_IMAGE_BLOCK_BYTES:
+                return None
+            data = response.read(MAX_IMAGE_BLOCK_BYTES + 1)
+    except (OSError, ValueError):
+        return None
+    if len(data) > MAX_IMAGE_BLOCK_BYTES:
+        return None
+    return data
+
+
+def _image_bytes_from_item(item: dict[str, Any]) -> tuple[bytes | None, str | None]:
+    path_value = item.get("path")
+    if isinstance(path_value, str) and path_value.strip():
+        path = Path(path_value)
+        try:
+            data = path.read_bytes()
+            if len(data) > MAX_IMAGE_BLOCK_BYTES:
+                return None, f"{item.get('filename') or path.name} (too large for vision input)"
+            return data, None
+        except OSError:
+            pass
+    data = _read_upload_url_bytes(item.get("url") or item.get("uri"))
+    if data is not None:
+        return data, None
+    filename = item.get("filename")
+    if isinstance(filename, str) and filename.strip():
+        return None, filename.strip()
+    if isinstance(path_value, str) and path_value.strip():
+        return None, Path(path_value).name
+    return None, "image attachment"
+
+
 def image_content_blocks_from_attachment_context(
     context: dict[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -300,17 +362,10 @@ def image_content_blocks_from_attachment_context(
     for item in context.get("items") or []:
         if not isinstance(item, dict) or item.get("kind") != "image":
             continue
-        path_value = item.get("path")
-        if not isinstance(path_value, str) or not path_value.strip():
-            continue
-        path = Path(path_value)
-        try:
-            data = path.read_bytes()
-        except OSError:
-            skipped.append(str(item.get("filename") or path.name))
-            continue
-        if len(data) > MAX_IMAGE_BLOCK_BYTES:
-            skipped.append(f"{item.get('filename') or path.name} (too large for vision input)")
+        data, skip_reason = _image_bytes_from_item(item)
+        if data is None:
+            if skip_reason:
+                skipped.append(skip_reason)
             continue
         media_type = str(item.get("mime") or "").strip() or "image/png"
         if not media_type.startswith("image/"):

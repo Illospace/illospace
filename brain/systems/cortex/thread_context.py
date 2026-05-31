@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
+from pathlib import PurePosixPath
 from typing import Any
 
 from sqlalchemy import select
@@ -27,6 +28,7 @@ class ThreadContextEntry:
     thread_message_id: int | None = None
     run_id: int | None = None
     artifact_id: int | None = None
+    attachments: tuple[dict[str, Any], ...] = ()
 
     def timestamp(self) -> datetime:
         value = self.created_at
@@ -50,6 +52,9 @@ class ThreadContextEntry:
             payload["run_id"] = self.run_id
         if self.artifact_id is not None:
             payload["artifact_id"] = self.artifact_id
+        if self.attachments:
+            payload["attachments_count"] = len(self.attachments)
+            payload["attachments"] = [_attachment_payload(attachment) for attachment in self.attachments]
         return payload
 
 
@@ -99,7 +104,7 @@ async def async_build_agent_visible_thread_context(
     if not kept_entries or not formatted:
         return None
 
-    return {
+    payload: dict[str, Any] = {
         "source": "cortex_visible_thread",
         "idea_id": str(idea_id),
         "omits_current_message": True,
@@ -107,6 +112,10 @@ async def async_build_agent_visible_thread_context(
         "formatted": formatted,
         "messages": [entry.to_payload() for entry in kept_entries],
     }
+    attachment_context = _thread_attachment_context_from_entries(kept_entries)
+    if attachment_context:
+        payload["thread_attachment_context"] = attachment_context
+    return payload
 
 
 async def _a_thread_message_entries(session: Any, idea_id: str, *, max_rows: int) -> list[ThreadContextEntry]:
@@ -116,6 +125,7 @@ async def _a_thread_message_entries(session: Any, idea_id: str, *, max_rows: int
             IdeaThread.role,
             IdeaThread.content,
             IdeaThread.created_at,
+            IdeaThread.attachments,
             IdeaThread.metadata_,
         )
         .where(IdeaThread.idea_id == idea_id)
@@ -141,6 +151,7 @@ async def _a_thread_message_entries(session: Any, idea_id: str, *, max_rows: int
                 source="thread",
                 thread_message_id=_coerce_int(row.id),
                 run_id=_coerce_int(metadata.get("run_id")),
+                attachments=_normalize_attachments(row.attachments),
             )
         )
     return entries
@@ -232,6 +243,9 @@ def _format_entries(
     for entry in reversed(entries):
         label = "User" if entry.role == "user" else "Illo"
         content = _truncate(entry.content, MAX_ENTRY_CHARS)
+        attachment_summary = _format_attachment_summary(entry.attachments)
+        if attachment_summary:
+            content = f"{content} {attachment_summary}".strip()
         line = f"{label}: {content}"
         next_used = used + len(line) + (1 if selected else 0)
         if selected and next_used > char_limit:
@@ -245,6 +259,133 @@ def _format_entries(
     lines = [line for line, _entry in selected]
     kept = [entry for _line, entry in selected]
     return "\n".join(lines).strip(), kept
+
+
+def _normalize_attachments(value: Any) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list):
+        return ()
+    normalized: list[dict[str, Any]] = []
+    for attachment in value:
+        if isinstance(attachment, dict):
+            normalized.append(dict(attachment))
+    return tuple(normalized)
+
+
+def _attachment_filename(attachment: dict[str, Any]) -> str:
+    for key in ("filename", "name", "label"):
+        value = attachment.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    raw_url = attachment.get("url") or attachment.get("uri") or attachment.get("storage_path")
+    if isinstance(raw_url, str) and raw_url.strip():
+        return PurePosixPath(raw_url.split("?", 1)[0].rstrip("/")).name or "attachment"
+    return "attachment"
+
+
+def _attachment_mime(attachment: dict[str, Any]) -> str:
+    value = (
+        attachment.get("content_type")
+        or attachment.get("contentType")
+        or attachment.get("mime_type")
+        or attachment.get("mime")
+        or attachment.get("type")
+        or ""
+    )
+    return str(value).split(";", 1)[0].strip().lower()
+
+
+def _attachment_kind(attachment: dict[str, Any]) -> str:
+    mime = _attachment_mime(attachment)
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("audio/"):
+        return "audio"
+    if mime.startswith("text/") or mime in {"application/json", "application/xml", "application/x-yaml"}:
+        return "text"
+    suffix = PurePosixPath(_attachment_filename(attachment)).suffix.lower().lstrip(".")
+    if suffix in {"avif", "gif", "jpeg", "jpg", "png", "webp"}:
+        return "image"
+    if suffix in {"aac", "aif", "aiff", "flac", "m4a", "mp3", "mp4", "mpeg", "mpga", "oga", "ogg", "opus", "wav", "weba", "webm"}:
+        return "audio"
+    if suffix in {"csv", "json", "md", "txt", "xml", "yaml", "yml"}:
+        return "text"
+    return "file"
+
+
+def _attachment_payload(attachment: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "filename": _attachment_filename(attachment),
+        "kind": _attachment_kind(attachment),
+    }
+    mime = _attachment_mime(attachment)
+    if mime:
+        payload["mime"] = mime
+    url = attachment.get("url") or attachment.get("uri")
+    if isinstance(url, str) and url.strip():
+        payload["url"] = url.strip()
+    return payload
+
+
+def _format_attachment_summary(attachments: tuple[dict[str, Any], ...]) -> str:
+    if not attachments:
+        return ""
+    parts = [
+        f"{_attachment_filename(attachment)} ({_attachment_kind(attachment)})"
+        for attachment in attachments[:3]
+    ]
+    if len(attachments) > 3:
+        parts.append(f"+{len(attachments) - 3} more")
+    return "[Attachments: " + ", ".join(parts) + "]"
+
+
+def _thread_attachment_context_from_entries(entries: list[ThreadContextEntry]) -> dict[str, Any] | None:
+    attachments: list[dict[str, Any]] = []
+    for entry in entries:
+        if entry.source != "thread":
+            continue
+        attachments.extend(dict(attachment) for attachment in entry.attachments)
+    if not attachments:
+        return None
+    try:
+        from brain.systems.cortex.thread_attachments import build_thread_attachment_context
+
+        context = build_thread_attachment_context(attachments)
+    except Exception:
+        logger.debug("visible_thread_attachment_context_build_failed", exc_info=True)
+        return None
+    if not isinstance(context, dict):
+        return None
+    context = dict(context)
+    context["source"] = "cortex-visible-thread-attachments"
+    context["prompt"] = _earlier_attachment_context_prompt(list(context.get("items") or []))
+    return context
+
+
+def _earlier_attachment_context_prompt(items: list[dict[str, Any]]) -> str:
+    lines = [
+        "## Earlier Thread Attachments",
+        "These files were attached to earlier messages in this same thread.",
+    ]
+    for index, item in enumerate(items, start=1):
+        filename = item.get("filename") or f"Attachment {index}"
+        kind = item.get("kind") or "file"
+        lines.append(f"\n### {index}. {filename} ({kind})")
+        if kind == "text":
+            text = str(item.get("text") or "").strip()
+            if text:
+                suffix = "\n\n[Excerpt truncated.]" if item.get("truncated") else ""
+                lines.append(f"```text\n{text}{suffix}\n```")
+            elif item.get("unavailable"):
+                lines.append("Text extraction failed for this file.")
+        elif kind == "image":
+            lines.append("Image attached earlier in the thread. Inspect the image input when vision is available.")
+        elif kind == "audio":
+            attachment_id = item.get("id") or f"attachment {index}"
+            lines.append(
+                f"Audio attached earlier in the thread. Use transcribe_audio_attachment with "
+                f"attachment_id={attachment_id} if the spoken content is needed."
+            )
+    return "\n".join(lines).strip()
 
 
 def _normalize_role(value: Any) -> str:

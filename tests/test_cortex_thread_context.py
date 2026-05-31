@@ -7,6 +7,7 @@ import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
@@ -91,6 +92,60 @@ async def test_agent_visible_context_matches_prior_visible_thread(session):
     assert [message["role"] for message in context["messages"]] == ["user", "illo"]
 
 
+async def test_agent_visible_context_keeps_prior_thread_attachments(session, tmp_path, monkeypatch):
+    from brain.systems.cortex import thread_attachments
+    from brain.systems.cortex.thread_context import async_build_agent_visible_thread_context
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    screenshot = upload_dir / "screenshot.png"
+    screenshot.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    monkeypatch.setattr(thread_attachments, "UPLOAD_DIR", upload_dir)
+
+    now = datetime(2026, 5, 6, 18, 0, tzinfo=timezone.utc)
+    session.add(
+        IdeaThread(
+            id=21,
+            idea_id=IDEA_ID,
+            role="user",
+            content="you mean this?",
+            attachments=[
+                {"url": "/static/uploads/screenshot.png", "filename": "screenshot.png", "type": "image/png"}
+            ],
+            user_id=USER_ID,
+            created_at=now,
+        )
+    )
+    session.add(
+        IdeaThread(
+            id=22,
+            idea_id=IDEA_ID,
+            role="user",
+            content="can you see my screenshot?",
+            user_id=USER_ID,
+            created_at=now + timedelta(seconds=30),
+        )
+    )
+    await session.flush()
+
+    context = await async_build_agent_visible_thread_context(
+        session,
+        IDEA_ID,
+        current_thread_message_id=22,
+        current_message="can you see my screenshot?",
+    )
+
+    assert context is not None
+    assert "you mean this? [Attachments: screenshot.png (image)]" in context["formatted"]
+    assert "can you see my screenshot?" not in context["formatted"]
+    assert context["messages"][0]["attachments_count"] == 1
+    attachment_context = context["thread_attachment_context"]
+    assert attachment_context["source"] == "cortex-visible-thread-attachments"
+    assert attachment_context["items"][0]["kind"] == "image"
+    assert attachment_context["items"][0]["filename"] == "screenshot.png"
+    assert "Earlier Thread Attachments" in attachment_context["prompt"]
+
+
 async def test_work_intake_attaches_prior_visible_context_without_current_message(session):
     from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
 
@@ -145,6 +200,21 @@ async def test_work_intake_attaches_prior_visible_context_without_current_messag
     assert "use-example-api" in thread_context["formatted"]
     assert "EXAMPLE_API_KEY" in thread_context["formatted"]
     assert "fantastic I added it" not in thread_context["formatted"]
+
+
+def test_fast_recipe_uses_prior_thread_attachment_context_when_current_message_has_none():
+    from brain.systems.runs.recipes.fast import _thread_attachment_context
+
+    prior_context = {"source": "cortex-visible-thread-attachments", "items": [{"kind": "image"}]}
+    runtime = SimpleNamespace(
+        request=SimpleNamespace(
+            metadata={"thread_context": {"thread_attachment_context": prior_context}},
+            target_ref={},
+            workspace_ref={},
+        )
+    )
+
+    assert _thread_attachment_context(runtime) == prior_context
 
 
 def test_run_context_prompt_includes_thread_context():

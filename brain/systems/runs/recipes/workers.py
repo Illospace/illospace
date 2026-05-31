@@ -42,6 +42,9 @@ def _thread_attachment_context(runtime: RunRuntime) -> dict[str, Any] | None:
     metadata_context = runtime.request.metadata.get("thread_attachment_context")
     if isinstance(metadata_context, dict):
         return metadata_context
+    thread_context = runtime.request.metadata.get("thread_context")
+    if isinstance(thread_context, dict) and isinstance(thread_context.get("thread_attachment_context"), dict):
+        return thread_context["thread_attachment_context"]
     for container in (runtime.request.target_ref, runtime.request.workspace_ref):
         value = container.get("thread_attachment_context") if isinstance(container, dict) else None
         if isinstance(value, dict):

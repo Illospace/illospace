@@ -239,6 +239,75 @@ def test_thread_attachment_context_promotes_text_image_and_audio(tmp_path, monke
     assert blocks[1]["source"]["media_type"] == "image/png"
 
 
+def test_image_blocks_fetch_same_origin_upload_when_local_path_missing(monkeypatch):
+    from brain.systems.cortex import thread_attachments
+
+    class FakeResponse:
+        headers = {"Content-Length": "12"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def read(self, _limit):
+            return b"\x89PNG\r\n\x1a\nfake"
+
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
+    monkeypatch.setattr(thread_attachments, "urlopen", fake_urlopen)
+
+    blocks, skipped = thread_attachments.image_content_blocks_from_attachment_context({
+        "items": [
+            {
+                "kind": "image",
+                "filename": "screenshot.png",
+                "path": "/app/brain/uploads/missing.png",
+                "url": "/static/uploads/screenshot.png",
+                "mime": "image/png",
+            }
+        ]
+    })
+
+    assert skipped == []
+    assert captured == {"url": "https://illo.example.com/static/uploads/screenshot.png", "timeout": 5}
+    assert blocks[0]["type"] == "image"
+    assert blocks[0]["source"]["media_type"] == "image/png"
+    assert blocks[0]["source"]["data"]
+
+
+def test_image_blocks_do_not_fetch_non_upload_urls(monkeypatch):
+    from brain.systems.cortex import thread_attachments
+
+    def fake_urlopen(*_args, **_kwargs):
+        raise AssertionError("non-upload URLs must not be fetched")
+
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
+    monkeypatch.setattr(thread_attachments, "urlopen", fake_urlopen)
+
+    blocks, skipped = thread_attachments.image_content_blocks_from_attachment_context({
+        "items": [
+            {
+                "kind": "image",
+                "filename": "avatar.png",
+                "path": "/app/brain/uploads/missing.png",
+                "url": "https://evil.example.com/static/uploads/avatar.png",
+                "mime": "image/png",
+            }
+        ]
+    })
+
+    assert blocks == []
+    assert skipped == ["avatar.png"]
+
+
 def test_project_context_merge_into_idea_agent_details():
     from brain.app.api.routers.cortex._idea_ops import _merge_project_context_into_idea
 
