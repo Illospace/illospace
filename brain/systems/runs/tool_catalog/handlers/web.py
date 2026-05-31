@@ -7,7 +7,12 @@ from brain.systems.runs.tool_catalog.handlers.common import *
 def _handle_web_search(query: str, provider: str | None = None, limit: int = 5) -> dict:
     from brain.app.web import web_search
 
-    return web_search(query, provider=provider, limit=limit)
+    return web_search(
+        query,
+        provider=provider,
+        limit=limit,
+        runtime_secret_context=_current_runtime_secret_context(),
+    )
 
 
 def _handle_web_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 12000) -> dict:

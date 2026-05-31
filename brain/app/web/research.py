@@ -42,6 +42,26 @@ class WebResearchError(RuntimeError):
     """Raised when web research fails safely."""
 
 
+async def _search_api_key(key_name: str, runtime_secret_context: Any = None) -> str:
+    from brain.systems.vault.runtime_secrets import (
+        RuntimeSecretContext,
+        RuntimeSecretUnavailable,
+        read_runtime_secret,
+    )
+
+    try:
+        return await read_runtime_secret(
+            key_name,
+            context=runtime_secret_context or RuntimeSecretContext(actor_user_id=None, org_id=None),
+            reason="Run Illo's web search tool through a configured search provider.",
+            requested_by="web_search",
+            access="service",
+            allow_env_fallback=True,
+        )
+    except RuntimeSecretUnavailable as exc:
+        raise WebResearchError(f"{key_name} is not configured") from exc
+
+
 def _cache_get(cache: dict[str, _CacheEntry], key: str):
     now = time.time()
     with _cache_lock:
@@ -121,6 +141,27 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+def _accepts_runtime_secret_context(fn) -> bool:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    positional = 0
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+            return True
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "runtime_secret_context":
+            return True
+        if parameter.kind in {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        }:
+            positional += 1
+    return positional >= 3
+
+
 def _strip_html(text: str) -> str:
     text = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", text)
     text = re.sub(r"(?is)<br\s*/?>", "\n", text)
@@ -161,10 +202,8 @@ def _markdown_from_text(text: str) -> str:
     return "\n\n".join(lines)
 
 
-async def _brave_search(query: str, limit: int) -> dict[str, Any]:
-    api_key = os.environ.get("BRAVE_SEARCH_API_KEY")
-    if not api_key:
-        raise WebResearchError("BRAVE_SEARCH_API_KEY is not configured")
+async def _brave_search(query: str, limit: int, runtime_secret_context: Any = None) -> dict[str, Any]:
+    api_key = await _search_api_key("BRAVE_SEARCH_API_KEY", runtime_secret_context)
     async with _http_client() as client:
         response = await client.get(
             "https://api.search.brave.com/res/v1/web/search",
@@ -184,10 +223,8 @@ async def _brave_search(query: str, limit: int) -> dict[str, Any]:
     return {"provider": "brave", "results": results}
 
 
-async def _tavily_search(query: str, limit: int) -> dict[str, Any]:
-    api_key = os.environ.get("TAVILY_API_KEY")
-    if not api_key:
-        raise WebResearchError("TAVILY_API_KEY is not configured")
+async def _tavily_search(query: str, limit: int, runtime_secret_context: Any = None) -> dict[str, Any]:
+    api_key = await _search_api_key("TAVILY_API_KEY", runtime_secret_context)
     async with _http_client() as client:
         response = await client.post(
             "https://api.tavily.com/search",
@@ -274,7 +311,13 @@ def _normalize_duckduckgo_result_url(value: str) -> str | None:
     return url if url.startswith(("http://", "https://")) else None
 
 
-async def web_search(query: str, *, provider: str | None = None, limit: int = 5) -> dict[str, Any]:
+async def web_search(
+    query: str,
+    *,
+    provider: str | None = None,
+    limit: int = 5,
+    runtime_secret_context: Any = None,
+) -> dict[str, Any]:
     normalized_query = (query or "").strip()
     if not normalized_query:
         raise WebResearchError("Query is required")
@@ -301,7 +344,10 @@ async def web_search(query: str, *, provider: str | None = None, limit: int = 5)
             provider_errors.append({"provider": name, "error": f"Unsupported search provider: {name}"})
             continue
         try:
-            result = await _maybe_await(fn(normalized_query, limit))
+            if _accepts_runtime_secret_context(fn):
+                result = await _maybe_await(fn(normalized_query, limit, runtime_secret_context))
+            else:
+                result = await _maybe_await(fn(normalized_query, limit))
             results = list(result.get("results") or [])
             if auto_mode and not results:
                 provider_errors.append({"provider": result.get("provider", name), "error": "No results returned"})

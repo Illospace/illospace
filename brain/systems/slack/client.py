@@ -79,6 +79,9 @@ class SlackWebClient:
             payload["thread_ts"] = thread_ts
         return await self.api_call("chat.postEphemeral", payload)
 
+    async def open_conversation(self, *, users: str) -> dict[str, Any]:
+        return await self.api_call("conversations.open", {"users": users})
+
     async def conversation_replies(
         self,
         *,

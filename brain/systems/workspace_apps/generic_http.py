@@ -156,13 +156,15 @@ async def _resolve_secret(
             raise WorkspaceAppActionContractError("vault_key auth requires connector_spec.auth.vault_key")
         if not context.user_id:
             raise WorkspaceAppActionContractError("Vault-backed connector auth requires a human user")
-        from brain.systems.vault import get_secret
+        from brain.systems.vault.runtime_secrets import RuntimeSecretContext, read_runtime_secret
 
-        return await get_secret(
+        return await read_runtime_secret(
             key,
-            actor_user_id=context.user_id,
-            org_id=context.org_id,
-            accessed_by="workspace_app_connector",
+            context=RuntimeSecretContext(actor_user_id=context.user_id, org_id=context.org_id),
+            reason=f"Run workspace app connector action {context.action_key}.",
+            requested_by="workspace_app_connector",
+            access="service",
+            allow_env_fallback=False,
         )
     if source in {"project_env", "project_vault_binding"}:
         env_name = str(auth.get("env") or auth.get("env_name") or "GITHUB_TOKEN").strip()
