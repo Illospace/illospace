@@ -239,7 +239,15 @@ async def _handle_manage_slack(
                 .order_by(ExternalAgentConnectionRow.created_at.asc(), ExternalAgentConnectionRow.id.asc())
             )
             rows = list((await uow.session.scalars(stmt)).all())
-            setup_state = "connected" if rows else "not_connected"
+            statuses = {str(row.status or "").strip().lower() for row in rows}
+            if not rows:
+                setup_state = "not_connected"
+            elif statuses & {"connected", "online"}:
+                setup_state = "connected"
+            elif "error" in statuses:
+                setup_state = "error"
+            else:
+                setup_state = "configured"
             return json.dumps(
                 {
                     "ok": True,
