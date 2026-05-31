@@ -2576,6 +2576,31 @@ DEPLOYMENT_TOOLS = [
             "required": ["action"],
         },
     },
+    {
+        "name": "manage_runtime_services",
+        "description": (
+            "List, inspect, or restart known Illospace runtime services through the host controller. "
+            "Use list before choosing targets. Use restart when an authenticated workspace user asks "
+            "Illo to restart one, many, or all services in this Illospace installation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "status", "restart"],
+                    "default": "list",
+                    "description": "Use list/status to inspect service management, or restart to queue a service restart.",
+                },
+                "services": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "For restart, one or more service ids returned by list, or all.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
 ]
 
 # ── Composite Tool Lists ─────────────────────────────────────

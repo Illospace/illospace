@@ -52,9 +52,10 @@ fi
 
 [ -z "$WORKER_DRAIN_TIMEOUT_FILE" ] || rm -f "$WORKER_DRAIN_TIMEOUT_FILE" 2>/dev/null || true
 
-compose() {
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
-}
+COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_FILE="$WORKER_DRAIN_TIMEOUT_FILE"
+COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS="${ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_SECONDS:-86400}"
+
+source "$SCRIPT_DIR/compose-runtime-lib.sh"
 
 non_worker_services() {
   if [ "$SKIP_UPDATER_RESTART" = "1" ]; then
@@ -66,110 +67,6 @@ non_worker_services() {
 
 all_runtime_services() {
   non_worker_services
-}
-
-active_agent_run_count() {
-  local count
-  if count="$(compose exec -T postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "
-SELECT count(*) FROM agent_runs WHERE status IN ('\''starting'\'', '\''running'\'', '\''paused'\'', '\''verifying'\'');
-"' 2>/dev/null | tr -d '[:space:]')"; then
-    if [[ "$count" =~ ^[0-9]+$ ]]; then
-      printf '%s\n' "$count"
-      return 0
-    fi
-  fi
-  printf 'unknown\n'
-}
-
-worker_container_id() {
-  compose ps -q worker 2>/dev/null || true
-}
-
-start_worker_handoff() {
-  compose run \
-    -d \
-    --no-deps \
-    -e ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1 \
-    -e ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS="${ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS:-infinity}" \
-    worker
-}
-
-container_running() {
-  local id="$1"
-  [ -n "$id" ] || return 1
-  [ "$(docker inspect --format '{{.State.Running}}' "$id" 2>/dev/null || echo false)" = "true" ]
-}
-
-record_worker_drain_timeout() {
-  [ -n "$WORKER_DRAIN_TIMEOUT_FILE" ] || return 0
-  mkdir -p "$(dirname "$WORKER_DRAIN_TIMEOUT_FILE")" 2>/dev/null || true
-  printf '{"status":"worker_draining","updated_at":"%s"}\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-    > "$WORKER_DRAIN_TIMEOUT_FILE" 2>/dev/null || true
-}
-
-wait_for_worker_exit() {
-  local id="$1"
-  local wait_seconds="${ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_SECONDS:-86400}"
-  local deadline=$((SECONDS + wait_seconds))
-  while container_running "$id"; do
-    if [ "$SECONDS" -ge "$deadline" ]; then
-      echo "Worker did not drain within ${wait_seconds}s; leaving it on the old image to avoid killing active AgentRuns." >&2
-      record_worker_drain_timeout
-      return 1
-    fi
-    sleep 5
-  done
-}
-
-update_worker_after_drain() {
-  local active_runs="$1"
-  local worker_id handoff_id
-  worker_id="$(worker_container_id)"
-
-  if [ -z "$worker_id" ]; then
-    echo "Worker container is not running; starting worker on the new image."
-    compose up -d --force-recreate --no-deps worker
-    return 0
-  fi
-
-  handoff_id="$(start_worker_handoff)"
-  echo "Worker: started handoff worker ${handoff_id:-unknown} on the new image for new AgentRuns."
-  echo "Worker: ${active_runs} active AgentRun(s); signaling drain before replacing worker."
-  docker update --restart=no "$worker_id" >/dev/null 2>&1 || true
-  docker kill -s TERM "$worker_id" >/dev/null 2>&1 || true
-  if ! wait_for_worker_exit "$worker_id"; then
-    docker update --restart=unless-stopped "$worker_id" >/dev/null 2>&1 || true
-    return 0
-  fi
-  compose up -d --force-recreate --no-deps worker
-  if [ -n "$handoff_id" ]; then
-    echo "Worker: regular worker is on the new image; draining handoff worker $handoff_id."
-    docker kill -s TERM "$handoff_id" >/dev/null 2>&1 || true
-    (
-      docker wait "$handoff_id" >/dev/null 2>&1 || true
-      docker rm "$handoff_id" >/dev/null 2>&1 || true
-    ) &
-  fi
-}
-
-replace_idle_worker() {
-  local worker_id stop_seconds
-  worker_id="$(worker_container_id)"
-  stop_seconds="${ILLO_COMPOSE_IDLE_WORKER_STOP_TIMEOUT_SECONDS:-30}"
-
-  if [ -z "$worker_id" ]; then
-    echo "Worker container is not running; starting worker on the new image."
-    compose up -d --force-recreate --no-deps worker
-    return 0
-  fi
-
-  echo "Worker: no active AgentRuns; replacing worker with a ${stop_seconds}s stop timeout."
-  docker update --restart=no "$worker_id" >/dev/null 2>&1 || true
-  if ! docker stop -t "$stop_seconds" "$worker_id" >/dev/null 2>&1; then
-    echo "Worker did not stop within ${stop_seconds}s despite no active AgentRuns; forcing replacement." >&2
-    docker kill "$worker_id" >/dev/null 2>&1 || true
-  fi
-  compose up -d --force-recreate --no-deps worker
 }
 
 if [ "$PULL" = "1" ]; then

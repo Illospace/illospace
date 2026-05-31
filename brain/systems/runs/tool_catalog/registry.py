@@ -76,6 +76,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "expected_effect": "start or inspect the Illospace self-update deployment flow",
         "output_budget_chars": 8_000,
     },
+    "manage_runtime_services": {
+        "permission": "manage_runtime",
+        "risk_class": "high",
+        "side_effect_class": "deployment_management",
+        "reversibility": "variable",
+        "action_manifest": True,
+        "expected_effect": "list, inspect, or restart known Illospace runtime services",
+        "output_budget_chars": 8_000,
+    },
     "brain_encode": {
         "permission": "write_memory",
         "risk_class": "low",

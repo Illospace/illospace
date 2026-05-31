@@ -9,8 +9,10 @@ public Slack Events API endpoint.
 1. Create a Slack app from `deploy/slack/illo-self-hosted-manifest.yml`.
 2. Enable Socket Mode in Slack.
 3. Install the app to your Slack workspace.
-4. Set `SLACK_BOT_TOKEN` to the bot token.
-5. Set `SLACK_APP_TOKEN` to the app-level Socket Mode token.
+4. Save `SLACK_BOT_TOKEN` to Illospace Vault, or set it as an environment
+   variable for the connector process.
+5. Save `SLACK_APP_TOKEN` to Illospace Vault, or set it as an environment
+   variable for the connector process.
 6. Start the connector process:
 
 ```bash
@@ -22,6 +24,9 @@ For Docker Compose, run the optional Slack profile:
 ```bash
 docker compose --profile slack up -d slack-connector
 ```
+
+When using the Illospace server deployment, Illo can queue a restart for known
+runtime services through the host controller after the Vault tokens are saved.
 
 `ILLO_SLACK_ORG_ID` and `ILLO_SLACK_OWNER_USER_ID` are optional. If omitted,
 the connector uses the first Illospace user it can find as the permissive

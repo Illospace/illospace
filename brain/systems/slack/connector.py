@@ -51,9 +51,97 @@ class SlackConnectorConfig:
             bot_user_id=os.environ.get("SLACK_BOT_USER_ID"),
         )
 
+    @classmethod
+    async def from_runtime(cls) -> "SlackConnectorConfig":
+        """Load connector config from env first, then trusted org Vault secrets."""
+
+        bot_token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
+        app_token = os.environ.get("SLACK_APP_TOKEN", "").strip()
+        org_id = os.environ.get("ILLO_SLACK_ORG_ID") or os.environ.get("ILLO_ORG_ID")
+        owner_user_id = (
+            os.environ.get("ILLO_SLACK_OWNER_USER_ID")
+            or os.environ.get("ILLO_OWNER_USER_ID")
+        )
+        if not bot_token or not app_token or not org_id or not owner_user_id:
+            org_id, owner_user_id = await resolve_slack_connector_authority(
+                org_id=org_id,
+                owner_user_id=owner_user_id,
+            )
+        if not bot_token:
+            bot_token = await _runtime_vault_secret(
+                "SLACK_BOT_TOKEN",
+                org_id=org_id,
+                owner_user_id=owner_user_id,
+            )
+        if not app_token:
+            app_token = await _runtime_vault_secret(
+                "SLACK_APP_TOKEN",
+                org_id=org_id,
+                owner_user_id=owner_user_id,
+            )
+        if not bot_token:
+            raise SlackConfigurationError("SLACK_BOT_TOKEN is required")
+        if not app_token:
+            raise SlackConfigurationError("SLACK_APP_TOKEN is required")
+        return cls(
+            bot_token=bot_token,
+            app_token=app_token,
+            org_id=org_id,
+            owner_user_id=owner_user_id,
+            team_id=os.environ.get("SLACK_TEAM_ID"),
+            bot_user_id=os.environ.get("SLACK_BOT_USER_ID"),
+        )
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def resolve_slack_connector_authority(
+    *,
+    org_id: str | None,
+    owner_user_id: str | None,
+) -> tuple[str, str]:
+    if org_id and owner_user_id:
+        return str(org_id), str(owner_user_id)
+
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+    async with UnitOfWork() as uow:
+        if owner_user_id:
+            user = await uow.session.get(User, str(owner_user_id))
+            if user is None:
+                raise SlackConfigurationError("ILLO_SLACK_OWNER_USER_ID does not match an Illospace user")
+            return str(org_id or user.org_id), str(owner_user_id)
+
+        stmt = select(User).order_by(User.created_at.asc(), User.id.asc()).limit(1)
+        if org_id:
+            stmt = stmt.where(User.org_id == str(org_id))
+        user = (await uow.session.scalars(stmt)).first()
+    if user is None:
+        raise SlackConfigurationError(
+            "No Illospace user found; set ILLO_SLACK_ORG_ID and ILLO_SLACK_OWNER_USER_ID"
+        )
+    return str(org_id or user.org_id), str(owner_user_id or user.id)
+
+
+async def _runtime_vault_secret(
+    key_name: str,
+    *,
+    org_id: str,
+    owner_user_id: str,
+) -> str:
+    from brain.systems.vault import get_secret
+
+    return (
+        await get_secret(
+            key_name,
+            actor_user_id=owner_user_id,
+            org_id=org_id,
+            accessed_by="slack_connector",
+        )
+        or ""
+    )
 
 
 async def ensure_slack_connection(
@@ -213,7 +301,7 @@ async def run_socket_mode_loop(
 
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
-    config = config or SlackConnectorConfig.from_env()
+    config = config or await SlackConnectorConfig.from_runtime()
     socket_url = config.socket_mode_url or await open_socket_mode_url(config)
     logger.info("slack_socket_mode_connecting")
     async with websockets.connect(socket_url) as websocket:

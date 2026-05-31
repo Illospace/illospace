@@ -122,6 +122,39 @@ def test_self_hosted_slack_manifest_supports_illo_teammate_loop():
     assert "assistant_view" not in features
 
 
+@pytest.mark.asyncio
+async def test_slack_connector_runtime_config_falls_back_to_vault(monkeypatch):
+    from brain.systems.slack import connector
+
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+    monkeypatch.delenv("ILLO_SLACK_ORG_ID", raising=False)
+    monkeypatch.delenv("ILLO_SLACK_OWNER_USER_ID", raising=False)
+
+    async def resolve_authority(*, org_id, owner_user_id):
+        assert org_id is None
+        assert owner_user_id is None
+        return ORG_ID, USER_ID
+
+    async def vault_secret(key_name, *, org_id, owner_user_id):
+        assert org_id == ORG_ID
+        assert owner_user_id == USER_ID
+        return {
+            "SLACK_BOT_TOKEN": "xoxb-from-vault",
+            "SLACK_APP_TOKEN": "xapp-from-vault",
+        }[key_name]
+
+    monkeypatch.setattr(connector, "resolve_slack_connector_authority", resolve_authority)
+    monkeypatch.setattr(connector, "_runtime_vault_secret", vault_secret)
+
+    config = await connector.SlackConnectorConfig.from_runtime()
+
+    assert config.bot_token == "xoxb-from-vault"
+    assert config.app_token == "xapp-from-vault"
+    assert config.org_id == ORG_ID
+    assert config.owner_user_id == USER_ID
+
+
 def _socket_mode_app_mention(**event_overrides):
     event = {
         "type": "app_mention",

@@ -11,6 +11,7 @@ ConnectionStatus = Literal["connected", "missing", "error"]
 EmbedderKey = Literal["local_gpu", "local_cpu", "openai", "gemini"]
 RerankerKey = Literal["weighted"]
 RuntimeUpdateStatus = Literal["idle", "running"]
+RuntimeServiceStatus = Literal["idle", "running"]
 VoiceProviderKey = Literal["openai", "gemini"]
 VoiceLanguageKey = Literal["auto", "en", "fr"]
 VoiceStatus = Literal["ready", "missing", "error"]
@@ -91,6 +92,24 @@ class RuntimeUpdateRead(BaseModel):
     pid: int | None = None
     started_at: datetime | None = None
     active_agent_runs: int = 0
+    log_path: str | None = None
+    detail: str | None = None
+
+
+class RuntimeServiceRead(BaseModel):
+    id: str
+    name: str
+    description: str
+    restartable: bool = True
+    optional: bool = False
+
+
+class RuntimeServicesRead(BaseModel):
+    status: RuntimeServiceStatus
+    available: bool
+    services: list[RuntimeServiceRead]
+    requested_services: list[str] = Field(default_factory=list)
+    started_at: datetime | None = None
     log_path: str | None = None
     detail: str | None = None
 

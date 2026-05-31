@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
 async def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    config = SlackConnectorConfig.from_env()
+    config = await SlackConnectorConfig.from_runtime()
     if args.check:
         print(
             json.dumps(
