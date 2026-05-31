@@ -280,6 +280,8 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
     assert "127.0.0.1:${ILLO_WEB_PORT:-8080}:8080" in compose
     assert "ILLO_SELF_UPDATE_REQUEST_FILE" in compose
     assert "ILLO_SELF_UPDATE_HEARTBEAT_FILE" in compose
+    assert "ILLO_RUNTIME_SERVICES_REQUEST_FILE" in compose
+    assert "ILLO_RUNTIME_SERVICES_STATUS_FILE" in compose
     assert "shared_preload_libraries=pg_stat_statements" in compose
     assert "pg_stat_statements.track=all" in compose
     assert "track_io_timing=on" in compose
@@ -307,6 +309,8 @@ def test_compose_self_update_sidecar_can_bootstrap_from_api_queue():
     assert "chmod 0775" in self_update_daemon
     assert "safe.directory" in self_update_daemon
     assert "ILLO_DOCTOR_SKIP_LOCAL_HTTP_PROBES=1" in self_update_daemon
+    assert "process_runtime_services_request" in self_update_daemon
+    assert "deploy/scripts/runtime-services.sh" in self_update_daemon
 
 
 def test_compose_doctor_can_skip_host_local_http_probes_from_sidecars():
@@ -318,28 +322,49 @@ def test_compose_doctor_can_skip_host_local_http_probes_from_sidecars():
 
 
 def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
-    upgrade = (Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "upgrade.sh").read_text()
+    root = Path(__file__).resolve().parents[1]
+    upgrade = (root / "deploy" / "scripts" / "upgrade.sh").read_text()
+    runtime_lib = (root / "deploy" / "scripts" / "compose-runtime-lib.sh").read_text()
+    combined = upgrade + runtime_lib
 
-    assert "active_agent_run_count" in upgrade
-    assert "status IN" in upgrade
+    assert 'source "$SCRIPT_DIR/compose-runtime-lib.sh"' in upgrade
+    assert "active_agent_run_count" in runtime_lib
+    assert "status IN" in runtime_lib
     assert "non_worker_services" in upgrade
     assert "api scheduler web updater" in upgrade
     assert "ILLO_COMPOSE_SKIP_UPDATER_RESTART" in upgrade
-    assert "start_worker_handoff" in upgrade
-    assert "ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1" in upgrade
-    assert "started handoff worker" in upgrade
-    assert "docker update --restart=no" in upgrade
-    assert 'docker kill -s TERM "$worker_id"' in upgrade
-    assert "wait_for_worker_exit" in upgrade
-    assert "compose up -d --force-recreate --no-deps worker" in upgrade
+    assert "start_worker_handoff" in runtime_lib
+    assert "ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1" in runtime_lib
+    assert "started handoff worker" in runtime_lib
+    assert "docker update --restart=no" in runtime_lib
+    assert 'docker kill -s TERM "$worker_id"' in runtime_lib
+    assert "wait_for_worker_exit" in runtime_lib
+    assert "compose up -d --force-recreate --no-deps worker" in runtime_lib
     assert "compose up -d --force-recreate --remove-orphans" in upgrade
-    assert "replace_idle_worker" in upgrade
-    assert "ILLO_COMPOSE_IDLE_WORKER_STOP_TIMEOUT_SECONDS" in upgrade
-    assert "no active AgentRuns" in upgrade
+    assert "replace_idle_worker" in combined
+    assert "ILLO_COMPOSE_IDLE_WORKER_STOP_TIMEOUT_SECONDS" in runtime_lib
+    assert "no active AgentRuns" in runtime_lib
     assert "ILLO_COMPOSE_BUILD_NO_CACHE" in upgrade
     assert "ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_FILE" in upgrade
-    assert "record_worker_drain_timeout" in upgrade
-    assert "avoid killing active AgentRuns" in upgrade
+
+
+def test_compose_runtime_service_restart_supports_one_many_or_all_services():
+    root = Path(__file__).resolve().parents[1]
+    runtime_services = (root / "deploy" / "scripts" / "runtime-services.sh").read_text()
+    runtime_lib = (root / "deploy" / "scripts" / "compose-runtime-lib.sh").read_text()
+    catalog = (root / "deploy" / "compose" / "runtime-services.json").read_text()
+
+    assert "runtime_service_ids" in runtime_services
+    assert 'source "$SCRIPT_DIR/compose-runtime-lib.sh"' in runtime_services
+    assert "expand_runtime_services" in runtime_lib
+    assert "slack_connector" in catalog
+    assert "slack-connector" in catalog
+    assert "runtime-services.json" in runtime_lib
+    assert "compose up -d --force-recreate --no-deps" in runtime_lib
+    assert "restart_runtime_worker_service" in runtime_lib
+    assert "active_agent_run_count" in runtime_lib
+    assert "started handoff worker" in runtime_lib
+    assert "avoid interrupting active AgentRuns" in runtime_lib
 
 
 def test_safe_deploy_active_run_guards_match_canonical_active_statuses():
@@ -347,9 +372,10 @@ def test_safe_deploy_active_run_guards_match_canonical_active_statuses():
     upgrade = (root / "deploy" / "scripts" / "upgrade.sh").read_text()
     launcher = (root / "illo").read_text()
     ops_deploy = (root / "ops" / "deploy.sh").read_text()
+    runtime_lib = (root / "deploy" / "scripts" / "compose-runtime-lib.sh").read_text()
 
     for status in ACTIVE_RUN_STATUS_VALUES:
-        assert repr(status) in upgrade
+        assert repr(status) in upgrade + runtime_lib
     assert "ACTIVE_RUN_STATUS_VALUES" in launcher
     assert "ACTIVE_RUN_STATUS_VALUES" in ops_deploy
     assert '("starting", "running", "verifying")' not in launcher

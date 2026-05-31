@@ -335,11 +335,11 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
     },
     {
         "key": "deployment",
-        "name": "Deployment",
+        "name": "Deployment and Runtime Operations",
         "category": "operations",
-        "summary": "Illo can inspect or start the self-update deployment flow when the deployment management tool is available.",
-        "aliases": ("deploy", "deployment", "update", "self update"),
-        "tools": ("manage_deployment",),
+        "summary": "Illo can inspect or start the self-update deployment flow, and can list or restart known runtime services when host management is available.",
+        "aliases": ("deploy", "deployment", "update", "self update", "restart", "services", "runtime services"),
+        "tools": ("manage_deployment", "manage_runtime_services"),
     },
     {
         "key": "voice",

@@ -158,6 +158,7 @@ def _get_tool_handlers(
         tool_vault_secret_prompt,
         tool_runtime_settings,
         tool_manage_deployment,
+        tool_manage_runtime_services,
     )
     from brain.systems.personality import manage_agent_soul
 
@@ -166,6 +167,14 @@ def _get_tool_handlers(
             action=action,
             build_no_cache=build_no_cache,
             worker_drain_timeout_seconds=worker_drain_timeout_seconds,
+            user_id=getattr(_agent_context, "user_id", None),
+            org_id=getattr(_agent_context, "org_id", None),
+        )
+
+    def _manage_runtime_services(action="list", services=None):
+        return tool_manage_runtime_services(
+            action=action,
+            services=services,
             user_id=getattr(_agent_context, "user_id", None),
             org_id=getattr(_agent_context, "org_id", None),
         )
@@ -215,6 +224,7 @@ def _get_tool_handlers(
         "read_self_context": _handle_read_self_context,
         "read_capabilities": _handle_read_capabilities,
         "manage_deployment": _manage_deployment,
+        "manage_runtime_services": _manage_runtime_services,
         "transcribe_audio_attachment": lambda **kw: _patched_private(
             "_handle_transcribe_audio_attachment",
             _handle_transcribe_audio_attachment,

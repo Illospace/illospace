@@ -142,6 +142,94 @@ async def test_manage_deployment_tool_requires_active_org_membership():
 
 
 @pytest.mark.asyncio
+async def test_manage_runtime_services_tool_requires_authenticated_user():
+    import brain.systems.runtime_settings.runtime_services as runtime_services
+    from brain.app.mcp.server import tool_manage_runtime_services
+
+    mock_uow = MagicMock()
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    mock_uow.session = MagicMock()
+
+    with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
+         patch.object(runtime_services, "async_restart_runtime_services", AsyncMock(side_effect=AssertionError("must not restart"))):
+        data = await tool_manage_runtime_services(action="restart", services=["api"], user_id=None, org_id="org-1")
+
+    assert data["status"] == "denied"
+    assert "authenticated workspace user" in data["detail"]
+
+
+@pytest.mark.asyncio
+async def test_manage_runtime_services_tool_restarts_multiple_services_for_workspace_member():
+    from types import SimpleNamespace
+
+    import brain.systems.runtime_settings.runtime_services as runtime_services
+    from brain.app.mcp.server import tool_manage_runtime_services
+    from brain.systems.runtime_settings.schemas import RuntimeServiceRead, RuntimeServicesRead
+
+    mock_uow = MagicMock()
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    mock_uow.session = MagicMock()
+    mock_uow.session.get = AsyncMock(return_value=SimpleNamespace(id="user-1", org_id="org-1", role="member"))
+    status = RuntimeServicesRead(
+        status="running",
+        available=True,
+        services=[
+            RuntimeServiceRead(id="api", name="Illospace API", description="HTTP API"),
+            RuntimeServiceRead(id="worker", name="Agent worker", description="AgentRun worker"),
+        ],
+        requested_services=["api", "worker"],
+        log_path="/data/private/logs/illo-runtime-services.log",
+        detail="Runtime service restart queued for the host controller.",
+    )
+
+    with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
+         patch.object(runtime_services, "async_restart_runtime_services", AsyncMock(return_value=status)) as restart:
+        data = await tool_manage_runtime_services(
+            action="restart",
+            services=["api", "worker"],
+            user_id="user-1",
+            org_id="org-1",
+        )
+
+    assert data["action"] == "restart"
+    assert data["status"] == "running"
+    assert data["requested_services"] == ["api", "worker"]
+    restart.assert_awaited_once_with(["api", "worker"], requested_by="user-1")
+
+
+@pytest.mark.asyncio
+async def test_runtime_services_queues_restart_request(monkeypatch, tmp_path):
+    import json
+    from datetime import datetime, timezone
+
+    from brain.systems.runtime_settings.runtime_services import async_restart_runtime_services
+
+    request_file = tmp_path / "runtime-services" / "request.json"
+    status_file = tmp_path / "runtime-services" / "status.json"
+    heartbeat_file = tmp_path / "self-update" / "heartbeat.json"
+    heartbeat_file.parent.mkdir(parents=True)
+    heartbeat_file.write_text(
+        json.dumps({"status": "ready", "updated_at": datetime.now(timezone.utc).isoformat()}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ILLO_RUNTIME_SERVICES_REQUEST_FILE", str(request_file))
+    monkeypatch.setenv("ILLO_RUNTIME_SERVICES_STATUS_FILE", str(status_file))
+    monkeypatch.setenv("ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE", str(heartbeat_file))
+
+    result = await async_restart_runtime_services(["api", "worker"], requested_by="user-1")
+
+    assert result.status == "running"
+    assert result.requested_services == ["api", "worker"]
+    payload = json.loads(request_file.read_text(encoding="utf-8"))
+    assert payload["action"] == "restart"
+    assert payload["services"] == ["api", "worker"]
+    status = json.loads(status_file.read_text(encoding="utf-8"))
+    assert status["detail"] == "Runtime service restart queued for the host controller."
+
+
+@pytest.mark.asyncio
 async def test_runtime_update_http_endpoint_allows_workspace_member():
     from types import SimpleNamespace
 
