@@ -8,7 +8,7 @@ import os
 import signal
 import time
 
-from brain.systems.runs.cortex.runner import start_runner, stop_runner
+from brain.systems.runs.cortex.runner import runner_health_snapshot, start_runner, stop_runner
 from brain.systems.cycles import start_cycle_scheduler, stop_cycle_scheduler
 
 logging.basicConfig(
@@ -52,6 +52,13 @@ def _shutdown_drain_timeout_seconds() -> float | None:
         return None
 
 
+def _runner_health_grace_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv("ILLO_AGENT_RUNNER_HEALTH_GRACE_SECONDS", "15")))
+    except Exception:
+        return 15.0
+
+
 def _require_embedding_backend_ready() -> None:
     """Block worker startup until the configured GPU embedding worker is ready."""
     import brain.kernel.config as cfg
@@ -87,8 +94,19 @@ def main() -> None:
     else:
         logger.info("cycle scheduler disabled for this worker")
     start_runner()
+    last_healthy = time.monotonic()
+    health_grace_seconds = _runner_health_grace_seconds()
     try:
         while _running:
+            health = runner_health_snapshot()
+            if health.get("runner_running"):
+                last_healthy = time.monotonic()
+            elif time.monotonic() - last_healthy > health_grace_seconds:
+                logger.error(
+                    "agent-run worker runner supervisor unhealthy; exiting for restart",
+                    extra={"runner_health": health},
+                )
+                raise SystemExit(1)
             time.sleep(_poll_interval())
     finally:
         stop_runner(drain_timeout_seconds=_shutdown_drain_timeout_seconds())

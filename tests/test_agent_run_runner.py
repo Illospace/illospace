@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 
 def test_runner_concurrency_is_configurable(monkeypatch):
@@ -49,6 +50,7 @@ def test_start_runner_starts_configured_worker_pool(monkeypatch):
     monkeypatch.setattr(runner, "_runner_concurrency", lambda: 3)
     monkeypatch.setattr(runner, "_loop", fake_loop)
     monkeypatch.setattr(runner, "_reap_stale_runs_if_due_async", _noop_reap)
+    monkeypatch.setattr(runner, "_nudge_stale_queued_runs_if_due_async", _noop_nudge)
     try:
         runner.start_runner()
         for _ in range(100):
@@ -80,6 +82,7 @@ def test_stop_runner_can_drain_active_slots(monkeypatch):
     monkeypatch.setattr(runner, "_runner_concurrency", lambda: 1)
     monkeypatch.setattr(runner, "_loop", fake_loop)
     monkeypatch.setattr(runner, "_reap_stale_runs_if_due_async", _noop_reap)
+    monkeypatch.setattr(runner, "_nudge_stale_queued_runs_if_due_async", _noop_nudge)
     try:
         runner.start_runner()
         assert entered.wait(timeout=1)
@@ -110,6 +113,7 @@ def test_runner_pool_uses_one_event_loop(monkeypatch):
     monkeypatch.setattr(runner, "_runner_concurrency", lambda: 3)
     monkeypatch.setattr(runner, "_loop", fake_loop)
     monkeypatch.setattr(runner, "_reap_stale_runs_if_due_async", _noop_reap)
+    monkeypatch.setattr(runner, "_nudge_stale_queued_runs_if_due_async", _noop_nudge)
     try:
         runner.start_runner()
         for _ in range(100):
@@ -122,6 +126,31 @@ def test_runner_pool_uses_one_event_loop(monkeypatch):
 
     assert len(loops) == 3
     assert len(set(loops)) == 1
+
+
+def test_runner_health_snapshot_requires_supervisor_and_slots(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    class AliveThread:
+        def is_alive(self):
+            return True
+
+    class DeadThread:
+        def is_alive(self):
+            return False
+
+    runner.stop_runner()
+    monkeypatch.setattr(runner, "_runner_concurrency", lambda: 2)
+    monkeypatch.setattr(runner, "_active_runner_count", lambda: 1)
+    monkeypatch.setattr(runner, "_runner_supervisor_thread", AliveThread())
+    assert runner.runner_health_snapshot()["runner_running"] is True
+
+    monkeypatch.setattr(runner, "_runner_supervisor_thread", DeadThread())
+    assert runner.runner_health_snapshot()["runner_running"] is False
+
+    monkeypatch.setattr(runner, "_runner_supervisor_thread", AliveThread())
+    monkeypatch.setattr(runner, "_active_runner_count", lambda: 0)
+    assert runner.runner_health_snapshot()["runner_running"] is False
 
 
 async def test_supervisor_starts_runner_slots_before_stale_reconcile_finishes(monkeypatch):
@@ -145,6 +174,7 @@ async def test_supervisor_starts_runner_slots_before_stale_reconcile_finishes(mo
     runner._stop_event.clear()
     monkeypatch.setattr(runner, "_runner_concurrency", lambda: 1)
     monkeypatch.setattr(runner, "_reap_stale_runs_if_due_async", blocked_reap)
+    monkeypatch.setattr(runner, "_nudge_stale_queued_runs_if_due_async", _noop_nudge)
     monkeypatch.setattr(runner, "_loop", fake_loop)
     supervisor = asyncio.create_task(runner._supervisor_async_loop())
     try:
@@ -187,5 +217,68 @@ async def test_runner_slot_logs_and_survives_queue_errors(monkeypatch, caplog):
     assert "agent_run_runner_slot_failed" in caplog.text
 
 
+async def test_queued_watchdog_nudges_stale_queue_when_capacity_available(monkeypatch, caplog):
+    from brain.systems.runs.cortex import runner
+
+    calls = 0
+    oldest = datetime.now(timezone.utc) - timedelta(seconds=60)
+    release = asyncio.Event()
+
+    async def fake_snapshot():
+        return 1, oldest, 0
+
+    async def fake_run_queued_once(*, limit=1):
+        nonlocal calls
+        calls += 1
+        assert limit == 1
+        await release.wait()
+        return 1
+
+    runner._queued_watchdog_tasks.clear()
+    runner._last_queued_watchdog_monotonic = 0
+    monkeypatch.setattr(runner, "_queued_backlog_snapshot_async", fake_snapshot)
+    monkeypatch.setattr(runner, "_queued_watchdog_after_seconds", lambda: 10)
+    monkeypatch.setattr(runner, "_runner_concurrency", lambda: 4)
+    monkeypatch.setattr(runner, "_run_queued_once_async", fake_run_queued_once)
+    caplog.set_level(logging.WARNING, logger=runner.__name__)
+
+    nudged = await runner._nudge_stale_queued_runs_if_due_async(force=True)
+    assert nudged is True
+    assert len(runner._queued_watchdog_tasks) == 1
+    task = next(iter(runner._queued_watchdog_tasks))
+    release.set()
+    await asyncio.wait_for(task, timeout=1)
+    await asyncio.sleep(0)
+
+    assert calls == 1
+    assert "agent_run_queued_watchdog_nudge" in caplog.text
+
+
+async def test_queued_watchdog_respects_configured_capacity(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    oldest = datetime.now(timezone.utc) - timedelta(seconds=60)
+
+    async def fake_snapshot():
+        return 1, oldest, 4
+
+    async def fail_run_queued_once(*, limit=1):
+        raise AssertionError("watchdog should not run when capacity is full")
+
+    runner._queued_watchdog_tasks.clear()
+    runner._last_queued_watchdog_monotonic = 0
+    monkeypatch.setattr(runner, "_queued_backlog_snapshot_async", fake_snapshot)
+    monkeypatch.setattr(runner, "_queued_watchdog_after_seconds", lambda: 10)
+    monkeypatch.setattr(runner, "_runner_concurrency", lambda: 4)
+    monkeypatch.setattr(runner, "_run_queued_once_async", fail_run_queued_once)
+
+    assert await runner._nudge_stale_queued_runs_if_due_async(force=True) is False
+    assert not runner._queued_watchdog_tasks
+
+
 async def _noop_reap(**_kwargs):
     return 0
+
+
+async def _noop_nudge(**_kwargs):
+    return False
