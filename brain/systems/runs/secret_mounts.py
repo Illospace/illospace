@@ -84,36 +84,26 @@ async def resolve_secret_env_mounts(
     if not mounts:
         return {}
 
-    from brain.systems.vault.agent_access import read_agent_secret_for_runtime
+    from brain.systems.vault.runtime_secrets import RuntimeSecretContext, runtime_secret_env
 
     user_id = str(context.get("actor_id") or "").strip()
     org_id = str(context.get("org_id") or "").strip() or None
     if not user_id:
         raise PermissionError("secret_env mounts require an authenticated user context")
 
-    resolved: dict[str, str] = {}
-    for env_name, mount in mounts.items():
-        response = await read_agent_secret_for_runtime(
-            mount.vault_key,
-            reason=mount.reason,
-            user_id=user_id,
+    return await runtime_secret_env(
+        {env_name: (mount.vault_key, mount.reason) for env_name, mount in mounts.items()},
+        context=RuntimeSecretContext(
+            actor_user_id=user_id,
             org_id=org_id,
             run_id=run_id,
             idea_id=str(context.get("idea_id") or "").strip() or None,
-            requested_by="secret_env_mount",
             project_slug=context.get("project_slug"),
             project_slugs=context.get("project_slugs"),
             target_registry_id=context.get("target_registry_id"),
-        )
-        if not isinstance(response, dict):
-            raise PermissionError(f"Vault secret '{mount.vault_key}' could not be read")
-        if response.get("error"):
-            raise PermissionError(str(response.get("error")))
-        value = response.get("value")
-        if value is None:
-            raise PermissionError(f"Vault secret '{mount.vault_key}' did not return a value")
-        resolved[env_name] = str(value)
-    return resolved
+        ),
+        requested_by="secret_env_mount",
+    )
 
 
 def handler_args_with_resolved_secret_env(

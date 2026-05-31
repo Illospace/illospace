@@ -546,6 +546,34 @@ def _looks_like_concrete_blocker_reply(reply: str, execution_context: str | None
     return (
         any(marker in text for marker in _BLOCKED_REPLY_MARKERS)
         and any(marker in text for marker in _CONCRETE_BLOCKER_MARKERS)
+)
+
+
+def _coerce_agent_run_id(value) -> int | None:
+    try:
+        return int(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _current_runtime_secret_context():
+    """Return the current AgentRun identity for trusted runtime secret reads."""
+
+    from brain.systems.vault.runtime_secrets import RuntimeSecretContext
+
+    execution_metadata = getattr(_agent_context, "execution_metadata", None)
+    metadata = execution_metadata if isinstance(execution_metadata, dict) else {}
+    run = getattr(_agent_context, "run", None)
+    run_id = (
+        getattr(_agent_context, "run_id", None)
+        or getattr(run, "run_id", None)
+        or metadata.get("run_id")
+    )
+    return RuntimeSecretContext(
+        actor_user_id=str(getattr(_agent_context, "user_id", None) or metadata.get("user_id") or "").strip() or None,
+        org_id=str(getattr(_agent_context, "org_id", None) or metadata.get("org_id") or "").strip() or None,
+        run_id=_coerce_agent_run_id(run_id),
+        idea_id=str(getattr(_agent_context, "idea_id", None) or metadata.get("idea_id") or "").strip() or None,
     )
 
 

@@ -19,6 +19,10 @@ trusted local automation system, not as a hardened multi-tenant sandbox.
   for that tool call, and redacts the mounted value from command output and
   artifacts; prompts and public traces should contain only Vault key names and
   environment variable names.
+- First-party runtime tools and integrations resolve required credentials
+  through the same central runtime secret resolver instead of reading
+  secret-like environment variables directly. Service integrations use audited
+  Vault reads in server-side code; raw values are never returned to the model.
 - Never paste real secrets into issues, PRs, logs, screenshots, or fixtures.
 
 ## Tool Execution

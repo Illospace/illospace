@@ -136,16 +136,20 @@ async def test_slack_connector_runtime_config_falls_back_to_vault(monkeypatch):
         assert owner_user_id is None
         return ORG_ID, USER_ID
 
-    async def vault_secret(key_name, *, org_id, owner_user_id):
-        assert org_id == ORG_ID
-        assert owner_user_id == USER_ID
+    async def read_runtime_secret(key_name, *, context, reason, requested_by, access, allow_env_fallback):
+        assert context.org_id == ORG_ID
+        assert context.actor_user_id == USER_ID
+        assert reason
+        assert requested_by == "slack_connector"
+        assert access == "service"
+        assert allow_env_fallback is True
         return {
             "SLACK_BOT_TOKEN": "xoxb-from-vault",
             "SLACK_APP_TOKEN": "xapp-from-vault",
         }[key_name]
 
     monkeypatch.setattr(connector, "resolve_slack_connector_authority", resolve_authority)
-    monkeypatch.setattr(connector, "_runtime_vault_secret", vault_secret)
+    monkeypatch.setattr("brain.systems.vault.runtime_secrets.read_runtime_secret", read_runtime_secret)
 
     config = await connector.SlackConnectorConfig.from_runtime()
 
@@ -367,10 +371,12 @@ async def test_post_slack_reply_tool_posts_to_triggering_thread(monkeypatch):
             calls.append(kwargs)
             return {"ok": True, "ts": "1716900200.000300", "channel": kwargs["channel"]}
 
-    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    async def slack_client():
+        return _SlackClient()
+
     monkeypatch.setattr(
-        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_env",
-        lambda: _SlackClient(),
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
     )
 
     with bind_agent_context(
@@ -399,6 +405,89 @@ async def test_post_slack_reply_tool_posts_to_triggering_thread(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_slack_runtime_client_uses_central_vault_resolver(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _slack_client_from_runtime
+
+    calls = []
+
+    async def read_runtime_secret(key_name, *, context, reason, requested_by, access, allow_env_fallback):
+        calls.append(
+            {
+                "key_name": key_name,
+                "actor_user_id": context.actor_user_id,
+                "org_id": context.org_id,
+                "run_id": context.run_id,
+                "reason": reason,
+                "requested_by": requested_by,
+                "access": access,
+                "allow_env_fallback": allow_env_fallback,
+            }
+        )
+        return "xoxb-from-vault"
+
+    class _SlackClient:
+        def __init__(self, token):
+            self.token = token
+
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.setattr("brain.systems.vault.runtime_secrets.read_runtime_secret", read_runtime_secret)
+    monkeypatch.setattr("brain.systems.slack.client.SlackWebClient", _SlackClient)
+
+    with bind_agent_context({"org_id": ORG_ID, "user_id": USER_ID, "run_id": 9, "idea_id": "thread-1"}):
+        client = await _slack_client_from_runtime()
+
+    assert client.token == "xoxb-from-vault"
+    assert calls == [
+        {
+            "key_name": "SLACK_BOT_TOKEN",
+            "actor_user_id": USER_ID,
+            "org_id": ORG_ID,
+            "run_id": 9,
+            "reason": "Use the configured Slack app to read and reply from Illo's Slack teammate surface.",
+            "requested_by": "slack_runtime_tool",
+            "access": "service",
+            "allow_env_fallback": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_slack_reply_tool_opens_dm_for_slack_user_id(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
+
+    calls = []
+
+    class _SlackClient:
+        async def open_conversation(self, **kwargs):
+            calls.append(("open", kwargs))
+            return {"ok": True, "channel": {"id": "D456"}}
+
+        async def post_message(self, **kwargs):
+            calls.append(("post", kwargs))
+            return {"ok": True, "ts": "1716900200.000300", "channel": kwargs["channel"]}
+
+    async def slack_client():
+        return _SlackClient()
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    with bind_agent_context({"org_id": ORG_ID, "user_id": USER_ID, "run_id": 9}):
+        result = json.loads(await _handle_post_slack_reply(body="hi", channel_id="U04R1A6MZST"))
+
+    assert result["ok"] is True
+    assert result["channel_id"] == "D456"
+    assert calls == [
+        ("open", {"users": "U04R1A6MZST"}),
+        ("post", {"channel": "D456", "text": "hi", "thread_ts": None}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_read_slack_conversation_tool_reads_bounded_thread_context(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_read_slack_conversation
@@ -416,10 +505,12 @@ async def test_read_slack_conversation_tool_reads_bounded_thread_context(monkeyp
                 ],
             }
 
-    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    async def slack_client():
+        return _SlackClient()
+
     monkeypatch.setattr(
-        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_env",
-        lambda: _SlackClient(),
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
     )
 
     with bind_agent_context(

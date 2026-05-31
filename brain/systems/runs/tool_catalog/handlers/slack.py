@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from brain.systems.runs.tool_catalog.handlers.common import _agent_context
+from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _current_runtime_secret_context
 
 
 def _execution_metadata() -> dict[str, Any]:
@@ -46,10 +46,32 @@ def _coerce_slack_limit(value: Any, default: int = 50) -> int:
         return default
 
 
-def _slack_client_from_env():
-    from brain.systems.slack.client import slack_web_client_from_env
+async def _slack_client_from_runtime():
+    from brain.systems.slack.client import SlackWebClient
+    from brain.systems.vault.runtime_secrets import read_runtime_secret
 
-    return slack_web_client_from_env()
+    token = await read_runtime_secret(
+        "SLACK_BOT_TOKEN",
+        context=_current_runtime_secret_context(),
+        reason="Use the configured Slack app to read and reply from Illo's Slack teammate surface.",
+        requested_by="slack_runtime_tool",
+        access="service",
+        allow_env_fallback=True,
+    )
+    return SlackWebClient(token)
+
+
+def _looks_like_slack_user_id(value: str) -> bool:
+    return value.startswith(("U", "W"))
+
+
+async def _resolve_post_channel(client, channel_id: str, visibility: str) -> str:
+    if visibility == "ephemeral" or not _looks_like_slack_user_id(channel_id):
+        return channel_id
+    response = await client.open_conversation(users=channel_id)
+    channel = response.get("channel") if isinstance(response.get("channel"), dict) else {}
+    resolved = str(channel.get("id") or "").strip()
+    return resolved or channel_id
 
 
 async def _handle_post_slack_reply(
@@ -78,7 +100,8 @@ async def _handle_post_slack_reply(
         return json.dumps({"error": "post_slack_reply requires channel_id outside a Slack-triggered run"})
 
     try:
-        client = _slack_client_from_env()
+        client = await _slack_client_from_runtime()
+        target_channel = await _resolve_post_channel(client, target_channel, target_visibility)
         if target_visibility == "ephemeral":
             target_user = str(user_id or trigger.get("slack_user_id") or "").strip()
             if not target_user:
@@ -137,7 +160,7 @@ async def _handle_read_slack_conversation(
     if not target_channel:
         return json.dumps({"error": "read_slack_conversation requires channel_id outside a Slack-triggered run"})
     try:
-        client = _slack_client_from_env()
+        client = await _slack_client_from_runtime()
         if normalized_scope == "thread":
             if not target_thread_ts:
                 return json.dumps({"error": "read_slack_conversation scope=thread requires thread_ts"})

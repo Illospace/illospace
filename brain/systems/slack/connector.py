@@ -53,32 +53,40 @@ class SlackConnectorConfig:
 
     @classmethod
     async def from_runtime(cls) -> "SlackConnectorConfig":
-        """Load connector config from env first, then trusted org Vault secrets."""
+        """Load connector config through the central Vault-first runtime resolver."""
 
-        bot_token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
-        app_token = os.environ.get("SLACK_APP_TOKEN", "").strip()
         org_id = os.environ.get("ILLO_SLACK_ORG_ID") or os.environ.get("ILLO_ORG_ID")
         owner_user_id = (
             os.environ.get("ILLO_SLACK_OWNER_USER_ID")
             or os.environ.get("ILLO_OWNER_USER_ID")
         )
-        if not bot_token or not app_token or not org_id or not owner_user_id:
+        if not org_id or not owner_user_id:
             org_id, owner_user_id = await resolve_slack_connector_authority(
                 org_id=org_id,
                 owner_user_id=owner_user_id,
             )
-        if not bot_token:
-            bot_token = await _runtime_vault_secret(
-                "SLACK_BOT_TOKEN",
-                org_id=org_id,
-                owner_user_id=owner_user_id,
-            )
-        if not app_token:
-            app_token = await _runtime_vault_secret(
-                "SLACK_APP_TOKEN",
-                org_id=org_id,
-                owner_user_id=owner_user_id,
-            )
+        from brain.systems.vault.runtime_secrets import RuntimeSecretContext, read_runtime_secret
+
+        secret_context = RuntimeSecretContext(
+            actor_user_id=owner_user_id,
+            org_id=org_id,
+        )
+        bot_token = await read_runtime_secret(
+            "SLACK_BOT_TOKEN",
+            context=secret_context,
+            reason="Run the self-hosted Slack connector.",
+            requested_by="slack_connector",
+            access="service",
+            allow_env_fallback=True,
+        )
+        app_token = await read_runtime_secret(
+            "SLACK_APP_TOKEN",
+            context=secret_context,
+            reason="Run the self-hosted Slack connector.",
+            requested_by="slack_connector",
+            access="service",
+            allow_env_fallback=True,
+        )
         if not bot_token:
             raise SlackConfigurationError("SLACK_BOT_TOKEN is required")
         if not app_token:
@@ -123,25 +131,6 @@ async def resolve_slack_connector_authority(
             "No Illospace user found; set ILLO_SLACK_ORG_ID and ILLO_SLACK_OWNER_USER_ID"
         )
     return str(org_id or user.org_id), str(owner_user_id or user.id)
-
-
-async def _runtime_vault_secret(
-    key_name: str,
-    *,
-    org_id: str,
-    owner_user_id: str,
-) -> str:
-    from brain.systems.vault import get_secret
-
-    return (
-        await get_secret(
-            key_name,
-            actor_user_id=owner_user_id,
-            org_id=org_id,
-            accessed_by="slack_connector",
-        )
-        or ""
-    )
 
 
 async def ensure_slack_connection(
