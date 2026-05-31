@@ -25,6 +25,7 @@ class SidecarQueue:
     heartbeat_file_env: str | None = None
     fallback_heartbeat_file_env: str | None = None
     default_status_name: str = "status.json"
+    require_heartbeat: bool = False
 
     def request_file(self) -> Path | None:
         raw = os.getenv(self.request_file_env, "").strip()
@@ -57,6 +58,8 @@ class SidecarQueue:
             return False, f"{self.queue_unavailable_label} is not writable: {request_file.parent}"
 
         heartbeat_file = self.heartbeat_file()
+        if heartbeat_file is None and self.require_heartbeat:
+            return False, self.waiting_detail
         if heartbeat_file is not None:
             heartbeat = read_json(heartbeat_file)
             updated_at = parse_datetime(heartbeat.get("updated_at"))

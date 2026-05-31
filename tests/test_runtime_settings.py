@@ -230,6 +230,60 @@ async def test_runtime_services_queues_restart_request(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_runtime_services_requires_dedicated_controller_heartbeat(monkeypatch, tmp_path):
+    import json
+    from datetime import datetime, timezone
+
+    from fastapi import HTTPException
+
+    from brain.systems.runtime_settings.runtime_services import (
+        async_get_runtime_services_status,
+        async_restart_runtime_services,
+    )
+
+    request_file = tmp_path / "runtime-services" / "request.json"
+    status_file = tmp_path / "runtime-services" / "status.json"
+    runtime_heartbeat_file = tmp_path / "runtime-services" / "heartbeat.json"
+    self_update_heartbeat_file = tmp_path / "self-update" / "heartbeat.json"
+    request_file.parent.mkdir(parents=True)
+    self_update_heartbeat_file.parent.mkdir(parents=True)
+    request_file.write_text(
+        json.dumps({"action": "restart", "services": ["slack_connector"]}),
+        encoding="utf-8",
+    )
+    status_file.write_text(
+        json.dumps(
+            {
+                "status": "queued",
+                "detail": "Runtime service restart queued for the host controller.",
+                "services": ["slack_connector"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    self_update_heartbeat_file.write_text(
+        json.dumps({"status": "ready", "updated_at": datetime.now(timezone.utc).isoformat()}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ILLO_RUNTIME_SERVICES_REQUEST_FILE", str(request_file))
+    monkeypatch.setenv("ILLO_RUNTIME_SERVICES_STATUS_FILE", str(status_file))
+    monkeypatch.setenv("ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE", str(runtime_heartbeat_file))
+    monkeypatch.setenv("ILLO_SELF_UPDATE_HEARTBEAT_FILE", str(self_update_heartbeat_file))
+
+    result = await async_get_runtime_services_status()
+
+    assert result.available is False
+    assert result.status == "idle"
+    assert result.requested_services == ["slack_connector"]
+    assert result.detail == "Runtime service management is waiting for the host controller."
+
+    with pytest.raises(HTTPException) as exc:
+        await async_restart_runtime_services(["slack_connector"], requested_by="user-1")
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Runtime service management is waiting for the host controller."
+
+
+@pytest.mark.asyncio
 async def test_runtime_update_http_endpoint_allows_workspace_member():
     from types import SimpleNamespace
 

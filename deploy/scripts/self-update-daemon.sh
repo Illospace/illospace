@@ -8,6 +8,7 @@ HEARTBEAT_FILE="${ILLO_SELF_UPDATE_HEARTBEAT_FILE:-/data/private/self-update/hea
 LOG_PATH="${ILLO_SELF_UPDATE_LOG_PATH:-/data/private/logs/illo-self-update.log}"
 RUNTIME_SERVICES_REQUEST_FILE="${ILLO_RUNTIME_SERVICES_REQUEST_FILE:-/data/private/runtime-services/request.json}"
 RUNTIME_SERVICES_STATUS_FILE="${ILLO_RUNTIME_SERVICES_STATUS_FILE:-/data/private/runtime-services/status.json}"
+RUNTIME_SERVICES_HEARTBEAT_FILE="${ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE:-/data/private/runtime-services/heartbeat.json}"
 RUNTIME_SERVICES_LOG_PATH="${ILLO_RUNTIME_SERVICES_LOG_PATH:-/data/private/logs/illo-runtime-services.log}"
 WORKER_DRAIN_TIMEOUT_FILE="${ILLO_SELF_UPDATE_WORKER_DRAIN_TIMEOUT_FILE:-/data/private/self-update/worker-drain-timeout.json}"
 POLL_SECONDS="${ILLO_SELF_UPDATE_POLL_SECONDS:-2}"
@@ -17,10 +18,10 @@ RUNNING_FILE="${REQUEST_FILE}.running"
 RUNTIME_SERVICES_RUNNING_FILE="${RUNTIME_SERVICES_REQUEST_FILE}.running"
 
 prepare_shared_paths() {
-  mkdir -p "$(dirname "$REQUEST_FILE")" "$(dirname "$STATUS_FILE")" "$(dirname "$HEARTBEAT_FILE")" "$(dirname "$LOG_PATH")" "$(dirname "$RUNTIME_SERVICES_REQUEST_FILE")" "$(dirname "$RUNTIME_SERVICES_STATUS_FILE")" "$(dirname "$RUNTIME_SERVICES_LOG_PATH")"
+  mkdir -p "$(dirname "$REQUEST_FILE")" "$(dirname "$STATUS_FILE")" "$(dirname "$HEARTBEAT_FILE")" "$(dirname "$LOG_PATH")" "$(dirname "$RUNTIME_SERVICES_REQUEST_FILE")" "$(dirname "$RUNTIME_SERVICES_STATUS_FILE")" "$(dirname "$RUNTIME_SERVICES_HEARTBEAT_FILE")" "$(dirname "$RUNTIME_SERVICES_LOG_PATH")"
   if [ "$(id -u)" = "0" ]; then
-    chown "$APP_UID:$APP_GID" "$(dirname "$REQUEST_FILE")" "$(dirname "$STATUS_FILE")" "$(dirname "$HEARTBEAT_FILE")" "$(dirname "$RUNTIME_SERVICES_REQUEST_FILE")" "$(dirname "$RUNTIME_SERVICES_STATUS_FILE")" 2>/dev/null || true
-    chmod 0775 "$(dirname "$REQUEST_FILE")" "$(dirname "$STATUS_FILE")" "$(dirname "$HEARTBEAT_FILE")" "$(dirname "$RUNTIME_SERVICES_REQUEST_FILE")" "$(dirname "$RUNTIME_SERVICES_STATUS_FILE")" 2>/dev/null || true
+    chown "$APP_UID:$APP_GID" "$(dirname "$REQUEST_FILE")" "$(dirname "$STATUS_FILE")" "$(dirname "$HEARTBEAT_FILE")" "$(dirname "$RUNTIME_SERVICES_REQUEST_FILE")" "$(dirname "$RUNTIME_SERVICES_STATUS_FILE")" "$(dirname "$RUNTIME_SERVICES_HEARTBEAT_FILE")" 2>/dev/null || true
+    chmod 0775 "$(dirname "$REQUEST_FILE")" "$(dirname "$STATUS_FILE")" "$(dirname "$HEARTBEAT_FILE")" "$(dirname "$RUNTIME_SERVICES_REQUEST_FILE")" "$(dirname "$RUNTIME_SERVICES_STATUS_FILE")" "$(dirname "$RUNTIME_SERVICES_HEARTBEAT_FILE")" 2>/dev/null || true
   fi
   git config --global --add safe.directory "$REPO" >/dev/null 2>&1 || true
 }
@@ -86,6 +87,12 @@ write_runtime_services_status() {
 
 write_heartbeat() {
   json_write "$HEARTBEAT_FILE" \
+    --arg updated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    '{status: "ready", updated_at: $updated_at}'
+}
+
+write_runtime_services_heartbeat() {
+  json_write "$RUNTIME_SERVICES_HEARTBEAT_FILE" \
     --arg updated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     '{status: "ready", updated_at: $updated_at}'
 }
@@ -170,6 +177,7 @@ write_runtime_services_status "idle" "Runtime service host controller is ready."
 
 while true; do
   write_heartbeat
+  write_runtime_services_heartbeat
   if [ -f "$REQUEST_FILE" ]; then
     set +e
     process_request
