@@ -282,6 +282,9 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
     assert "ILLO_SELF_UPDATE_HEARTBEAT_FILE" in compose
     assert "ILLO_RUNTIME_SERVICES_REQUEST_FILE" in compose
     assert "ILLO_RUNTIME_SERVICES_STATUS_FILE" in compose
+    assert "ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE" in compose
+    assert "/data/private/runtime-services/heartbeat.json" in compose
+    assert "ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE: /data/private/self-update/heartbeat.json" not in compose
     assert "shared_preload_libraries=pg_stat_statements" in compose
     assert "pg_stat_statements.track=all" in compose
     assert "track_io_timing=on" in compose
@@ -310,6 +313,8 @@ def test_compose_self_update_sidecar_can_bootstrap_from_api_queue():
     assert "safe.directory" in self_update_daemon
     assert "ILLO_DOCTOR_SKIP_LOCAL_HTTP_PROBES=1" in self_update_daemon
     assert "process_runtime_services_request" in self_update_daemon
+    assert "RUNTIME_SERVICES_HEARTBEAT_FILE" in self_update_daemon
+    assert "write_runtime_services_heartbeat" in self_update_daemon
     assert "deploy/scripts/runtime-services.sh" in self_update_daemon
 
 
@@ -333,6 +338,9 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     assert "non_worker_services" in upgrade
     assert "api scheduler web updater" in upgrade
     assert "ILLO_COMPOSE_SKIP_UPDATER_RESTART" in upgrade
+    assert "schedule_updater_refresh_after_self_update" in upgrade
+    assert "ILLO_COMPOSE_UPDATER_SELF_REFRESH_DELAY_SECONDS" in upgrade
+    assert "up -d --force-recreate --no-deps updater" in upgrade
     assert "start_worker_handoff" in runtime_lib
     assert "ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1" in runtime_lib
     assert "started handoff worker" in runtime_lib

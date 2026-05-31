@@ -27,7 +27,7 @@ _RUNTIME_SERVICES_QUEUE = SidecarQueue(
     waiting_detail="Runtime service management is waiting for the host controller.",
     stale_detail="Runtime service management is unavailable because the host controller heartbeat is stale.",
     heartbeat_file_env="ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE",
-    fallback_heartbeat_file_env="ILLO_SELF_UPDATE_HEARTBEAT_FILE",
+    require_heartbeat=True,
 )
 
 
@@ -47,14 +47,16 @@ async def async_get_runtime_services_status() -> RuntimeServicesRead:
     status_data = _RUNTIME_SERVICES_QUEUE.status_data(request_file)
     detail = status_data.get("detail") if isinstance(status_data.get("detail"), str) else None
 
+    running = available and _RUNTIME_SERVICES_QUEUE.status_is_running(request_file, status_data)
+
     return RuntimeServicesRead(
-        status="running" if _RUNTIME_SERVICES_QUEUE.status_is_running(request_file, status_data) else "idle",
+        status="running" if running else "idle",
         available=available,
         services=services,
         requested_services=_coerce_service_list(status_data.get("services")),
         started_at=parse_datetime(status_data.get("started_at") or status_data.get("requested_at")),
         log_path=str(_RUNTIME_SERVICES_QUEUE.log_path()),
-        detail=detail or availability_detail,
+        detail=(detail if available else None) or availability_detail,
     )
 
 

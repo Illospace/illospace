@@ -69,6 +69,19 @@ all_runtime_services() {
   non_worker_services
 }
 
+schedule_updater_refresh_after_self_update() {
+  local delay
+  [ "$SKIP_UPDATER_RESTART" = "1" ] || return 0
+  delay="${ILLO_COMPOSE_UPDATER_SELF_REFRESH_DELAY_SECONDS:-15}"
+  if [[ ! "$delay" =~ ^[0-9]+$ ]]; then
+    delay="15"
+  fi
+  echo "Updater: scheduling self-refresh in ${delay}s so the host controller runs the latest code."
+  compose run -d --rm --no-deps --entrypoint sh updater -lc \
+    "sleep $delay; docker compose --env-file \"\${ILLO_COMPOSE_ENV_FILE:-/repo/deploy/compose/.env}\" -f /repo/deploy/compose/docker-compose.yml up -d --force-recreate --no-deps updater" \
+    >/dev/null || echo "Updater: could not schedule delayed self-refresh; restart updater manually after this update." >&2
+}
+
 if [ "$PULL" = "1" ]; then
   compose pull postgres api web updater || {
     echo "Image pull failed. If release images are not published yet, rerun with --build." >&2
@@ -99,3 +112,4 @@ else
 fi
 
 "$SCRIPT_DIR/doctor.sh"
+schedule_updater_refresh_after_self_update
