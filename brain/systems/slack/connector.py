@@ -104,6 +104,19 @@ class SlackConnectorConfig:
         )
 
 
+def validate_slack_connector_tokens(*, bot_token: str, app_token: str) -> None:
+    bot = str(bot_token or "").strip()
+    app = str(app_token or "").strip()
+    if bot.startswith("xapp-"):
+        raise SlackConfigurationError(
+            "Slack bot token must be a bot token, not an app-level Socket Mode token"
+        )
+    if app.startswith(("xoxb-", "xoxp-")):
+        raise SlackConfigurationError(
+            "Slack app-level Socket Mode token must be an app-level token, not a bot/user token"
+        )
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -413,7 +426,21 @@ async def run_socket_mode_loop(
         session_factory=session_factory,
         connection_factory=connection_factory,
     )
-    socket_url = config.socket_mode_url or await open_socket_mode_url(config)
+    try:
+        validate_slack_connector_tokens(
+            bot_token=config.bot_token,
+            app_token=config.app_token,
+        )
+        socket_url = config.socket_mode_url or await open_socket_mode_url(config)
+    except Exception as exc:
+        await _ensure_runtime_connection(
+            config,
+            status="error",
+            last_error=str(exc),
+            session_factory=session_factory,
+            connection_factory=connection_factory,
+        )
+        raise
     logger.info("slack_socket_mode_connecting")
     async with websockets.connect(socket_url) as websocket:
         logger.info("slack_socket_mode_connected")
@@ -443,6 +470,7 @@ async def _ensure_runtime_connection(
     config: SlackConnectorConfig,
     *,
     status: str,
+    last_error: str | None = None,
     session_factory=None,
     connection_factory=None,
 ) -> tuple[ExternalAgentConnectionRow, SlackConnectorConfig]:
@@ -453,12 +481,22 @@ async def _ensure_runtime_connection(
                 if connection is None:
                     raise SlackConfigurationError("Slack connection factory returned no connection")
                 return connection, config
-            return await ensure_slack_connection_for_config(session, config, status=status)
+            return await ensure_slack_connection_for_config(
+                session,
+                config,
+                status=status,
+                last_error=last_error,
+            )
 
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
     async with UnitOfWork() as uow:
-        return await ensure_slack_connection_for_config(uow.session, config, status=status)
+        return await ensure_slack_connection_for_config(
+            uow.session,
+            config,
+            status=status,
+            last_error=last_error,
+        )
 
 
 async def _process_runtime_socket_payload(
@@ -539,4 +577,5 @@ __all__ = [
     "open_socket_mode_url",
     "run_socket_mode_loop",
     "run_forever",
+    "validate_slack_connector_tokens",
 ]
