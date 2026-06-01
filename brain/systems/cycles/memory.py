@@ -21,6 +21,12 @@ from brain.systems.cycles.common import (
     string_or_none,
     validate_nonempty_trimmed,
 )
+from brain.systems.cycles.contracts import (
+    cycle_launch_receipt,
+    cycle_result_contract,
+    cycle_scheduled_review_window,
+    pending_evidence_health_receipt,
+)
 from brain.systems.cycles.serializers import (
     serialize_cycle_guidance,
     serialize_cycle_output_target,
@@ -151,6 +157,7 @@ async def async_prepare_cycle_run_memory_snapshot(session, cycle: Cycle, run: Cy
     target_rows = await _async_active_cycle_output_targets(session, cycle.id)
     snapshot = _build_cycle_run_memory_snapshot(
         cycle,
+        run=run,
         revision=revision,
         guidance_rows=guidance_rows,
         target_rows=target_rows,
@@ -167,12 +174,15 @@ async def async_prepare_cycle_run_memory_snapshot(session, cycle: Cycle, run: Cy
 def _build_cycle_run_memory_snapshot(
     cycle: Cycle,
     *,
+    run: CycleRun | None = None,
     revision: CycleRevision | None,
     guidance_rows: list[CycleGuidance],
     target_rows: list[CycleOutputTarget],
 ) -> dict:
     output_targets = [serialize_cycle_output_target(target) for target in target_rows]
     _ensure_default_output_targets(cycle, output_targets)
+    scheduled_for = getattr(run, "scheduled_for", None)
+    cycle_run_id = getattr(run, "id", None)
 
     return {
         "revision_id": revision.id if revision is not None else None,
@@ -185,6 +195,16 @@ def _build_cycle_run_memory_snapshot(
                 "revision": serialize_cycle_revision(revision),
                 "workspace_id": string_or_none(cycle.org_id),
                 "owner_user_id": string_or_none(cycle.user_id),
+                "scheduled_review_window": cycle_scheduled_review_window(scheduled_for),
+                "result_contract": cycle_result_contract(),
+                "evidence_health": pending_evidence_health_receipt(scheduled_for),
+                "launch_receipts": [
+                    cycle_launch_receipt(
+                        cycle_id=cycle.id,
+                        cycle_run_id=cycle_run_id,
+                        scheduled_for=scheduled_for,
+                    )
+                ],
                 **creator_payload(cycle),
             }
         ),
@@ -308,6 +328,7 @@ async def record_cycle_run_evaluation(
         skip_reason=skip_reason,
     )
     run.self_review_summary = summary
+    context_snapshot = json_dict(getattr(run, "context_snapshot", None))
     session.add(
         CycleRunEvaluation(
             cycle_id=cycle.id,
@@ -322,6 +343,10 @@ async def record_cycle_run_evaluation(
                 "skip_reason": skip_reason,
                 "agent_run_id": run.run_id,
                 "idea_id": string_or_none(run.idea_id),
+                "scheduled_review_window": context_snapshot.get("scheduled_review_window"),
+                "result_contract": context_snapshot.get("result_contract"),
+                "evidence_health": context_snapshot.get("evidence_health"),
+                "launch_receipts": context_snapshot.get("launch_receipts", []),
             },
         )
     )

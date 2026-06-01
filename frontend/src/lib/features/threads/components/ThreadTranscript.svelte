@@ -1391,6 +1391,10 @@
     line-height: 1.58;
   }
 
+  .thread-message-illo .thread-message-content {
+    color: var(--thread-message-body);
+  }
+
   .thread-message-content > * {
     margin: 0;
   }

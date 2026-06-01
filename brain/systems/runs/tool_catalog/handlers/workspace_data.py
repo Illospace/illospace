@@ -196,6 +196,13 @@ def _valid_uuid(value: Any) -> str | None:
         return None
 
 
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _normalize_postgres_uuid_filter(
     payload: dict[str, Any],
     *,
@@ -203,9 +210,10 @@ def _normalize_postgres_uuid_filter(
     value: str | None,
     fallback: str = _ZERO_UUID,
 ) -> str | None:
-    if value is None:
+    text = _optional_text(value)
+    if text is None:
         return None
-    normalized = _valid_uuid(value)
+    normalized = _valid_uuid(text)
     if normalized:
         return normalized
     payload["warnings"].append({
@@ -1663,6 +1671,10 @@ async def query_workspace_data(
     """Query typed workspace data with source-level failure isolation."""
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
+    org_id = _optional_text(org_id)
+    user_id = _optional_text(user_id)
+    idea_id = _optional_text(idea_id)
+    object_key = _optional_text(object_key)
     source_names = _normalize_sources(sources)
     start, end, resolved_window = _time_bounds(time_window, start_at=start_at, end_at=end_at)
     per_source_limit = min(max(int(limit or 20), 1), 100)
@@ -1788,16 +1800,19 @@ def _workspace_query_scope(
 ) -> dict[str, Any]:
     run = getattr(_agent_context, "run", None)
     execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
-    scoped_idea_id = idea_id
-    if scoped_idea_id is None and default_current_idea:
-        scoped_idea_id = getattr(_agent_context, "idea_id", None) or execution_metadata.get("idea_id")
+    if idea_id is None and default_current_idea:
+        scoped_idea_id = _optional_text(
+            getattr(_agent_context, "idea_id", None) or execution_metadata.get("idea_id")
+        )
+    else:
+        scoped_idea_id = _optional_text(idea_id)
     return {
         "idea_id": scoped_idea_id,
         "domain_id": domain_id,
-        "object_key": object_key,
+        "object_key": _optional_text(object_key),
         "include_archived": include_archived,
-        "user_id": getattr(_agent_context, "user_id", None) or execution_metadata.get("user_id"),
-        "org_id": getattr(_agent_context, "org_id", None) or execution_metadata.get("org_id"),
+        "user_id": _optional_text(getattr(_agent_context, "user_id", None) or execution_metadata.get("user_id")),
+        "org_id": _optional_text(getattr(_agent_context, "org_id", None) or execution_metadata.get("org_id")),
         "run_id": getattr(run, "run_id", None) or execution_metadata.get("run_id"),
     }
 
