@@ -25,6 +25,11 @@ from brain.systems.runs.events import activity_event, run_event
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.stream import RunStream
+from brain.systems.runs.cortex.queue_health import (
+    queued_backlog_snapshot_async as _shared_queued_backlog_snapshot_async,
+    queued_watchdog_after_seconds as _shared_queued_watchdog_after_seconds,
+    runner_concurrency as _shared_runner_concurrency,
+)
 from brain.systems.runs.ui_events import run_event_to_ui_message
 from brain.systems.cortex.events import publish_live_safe, publish_safe
 from brain.systems.cortex.project_context.materializer import (
@@ -62,26 +67,14 @@ _runner_thread_index = 0
 _poll_interval_sec = 0.5
 _runner_reconcile_interval_sec = 2.0
 _stale_reconcile_interval_sec = 30.0
-_default_runner_concurrency = 4
-_max_runner_concurrency = 32
 _default_heartbeat_interval_sec = 10.0
 _default_stale_run_sec = 300.0
-_default_queued_watchdog_after_sec = 15.0
 _queued_watchdog_interval_sec = 5.0
 _last_stale_reconcile_monotonic = 0.0
 _last_queued_watchdog_monotonic = 0.0
 _queued_watchdog_tasks: set[asyncio.Task[int]] = set()
 
 _PROCESS_ACTIVE_STATUS_VALUES = PROCESSING_RUN_STATUS_VALUES
-
-
-def _coerce_concurrency(value: Any, *, default: int | None = None) -> int | None:
-    try:
-        if value is None or value == "":
-            return default
-        return max(1, min(_max_runner_concurrency, int(value)))
-    except (TypeError, ValueError):
-        return default
 
 
 def _coerce_float(value: Any, *, default: float, minimum: float) -> float:
@@ -114,18 +107,11 @@ def _stale_run_seconds() -> float:
 
 
 def _queued_watchdog_after_seconds() -> float:
-    return _coerce_float(
-        os.getenv("ILLO_AGENT_RUN_QUEUED_WATCHDOG_SECONDS"),
-        default=_default_queued_watchdog_after_sec,
-        minimum=1.0,
-    )
+    return _shared_queued_watchdog_after_seconds()
 
 
 def _runner_concurrency() -> int:
-    return _coerce_concurrency(
-        os.getenv("ILLO_AGENT_RUNNER_CONCURRENCY"),
-        default=_default_runner_concurrency,
-    ) or _default_runner_concurrency
+    return _shared_runner_concurrency()
 
 
 def _active_runner_count() -> int:
@@ -796,19 +782,7 @@ async def _reap_stale_runs_if_due_async(*, force: bool = False) -> int:
 
 
 async def _queued_backlog_snapshot_async() -> tuple[int, datetime | None, int]:
-    async with _unit_of_work_factory()() as uow:
-        queued_result = await uow.session.execute(
-            select(func.count(AgentRunRow.id), func.min(AgentRunRow.created_at)).where(
-                AgentRunRow.status == RunStatus.QUEUED.value
-            )
-        )
-        queued_count, oldest_created_at = queued_result.one()
-        active_count = await uow.session.scalar(
-            select(func.count(AgentRunRow.id)).where(
-                AgentRunRow.status.in_(_PROCESS_ACTIVE_STATUS_VALUES)
-            )
-        )
-    return int(queued_count or 0), _normalize_datetime(oldest_created_at), int(active_count or 0)
+    return await _shared_queued_backlog_snapshot_async()
 
 
 def _forget_queued_watchdog_task(task: asyncio.Task[int]) -> None:

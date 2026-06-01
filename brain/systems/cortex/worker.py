@@ -8,7 +8,12 @@ import os
 import signal
 import time
 
-from brain.systems.runs.cortex.runner import runner_health_snapshot, start_runner, stop_runner
+from brain.systems.runs.cortex.queue_health import QueueStallMonitor, queued_backlog_health_snapshot
+from brain.systems.runs.cortex.runner import (
+    runner_health_snapshot,
+    start_runner,
+    stop_runner,
+)
 from brain.systems.cycles import start_cycle_scheduler, stop_cycle_scheduler
 
 logging.basicConfig(
@@ -59,6 +64,20 @@ def _runner_health_grace_seconds() -> float:
         return 15.0
 
 
+def _queue_health_check_interval_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv("ILLO_AGENT_RUN_QUEUE_HEALTH_CHECK_SECONDS", "5")))
+    except Exception:
+        return 5.0
+
+
+def _queue_stall_grace_seconds() -> float:
+    try:
+        return max(5.0, float(os.getenv("ILLO_AGENT_RUN_QUEUE_STALL_GRACE_SECONDS", "45")))
+    except Exception:
+        return 45.0
+
+
 def _require_embedding_backend_ready() -> None:
     """Block worker startup until the configured GPU embedding worker is ready."""
     import brain.kernel.config as cfg
@@ -96,17 +115,39 @@ def main() -> None:
     start_runner()
     last_healthy = time.monotonic()
     health_grace_seconds = _runner_health_grace_seconds()
+    queue_stall_monitor = QueueStallMonitor(
+        check_interval_seconds=_queue_health_check_interval_seconds(),
+        stall_grace_seconds=_queue_stall_grace_seconds(),
+    )
     try:
         while _running:
+            now = time.monotonic()
             health = runner_health_snapshot()
             if health.get("runner_running"):
-                last_healthy = time.monotonic()
-            elif time.monotonic() - last_healthy > health_grace_seconds:
+                last_healthy = now
+            elif now - last_healthy > health_grace_seconds:
                 logger.error(
                     "agent-run worker runner supervisor unhealthy; exiting for restart",
                     extra={"runner_health": health},
                 )
                 raise SystemExit(1)
+
+            if queue_stall_monitor.should_check(now=now):
+                try:
+                    queue_health = queued_backlog_health_snapshot()
+                except Exception as exc:
+                    logger.warning("agent-run worker queue health check failed: %s", exc)
+                else:
+                    stale_for_seconds = queue_stall_monitor.observe(queue_health, now=now)
+                    if stale_for_seconds is not None:
+                        logger.error(
+                            "agent-run worker queue stalled; exiting for restart",
+                            extra={
+                                "queue_health": queue_health,
+                                "stale_for_seconds": stale_for_seconds,
+                            },
+                        )
+                        raise SystemExit(1)
             time.sleep(_poll_interval())
     finally:
         stop_runner(drain_timeout_seconds=_shutdown_drain_timeout_seconds())
