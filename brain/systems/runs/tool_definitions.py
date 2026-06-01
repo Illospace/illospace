@@ -1312,7 +1312,8 @@ CHAT_TOOLS = [
         "description": (
             "Post an Illo-authored reply into Slack. Use this when a run was "
             "triggered by a Slack mention or DM and the visible answer belongs "
-            "back in Slack. Defaults to the originating Slack channel, thread, or DM."
+            "back in Slack. Defaults to the originating Slack channel, existing "
+            "thread, or DM; top-level mentions and DMs are not threaded."
         ),
         "input_schema": {
             "type": "object",
@@ -1327,7 +1328,7 @@ CHAT_TOOLS = [
                 },
                 "thread_ts": {
                     "type": "string",
-                    "description": "Optional Slack thread timestamp. Defaults to the triggering response target.",
+                    "description": "Optional Slack thread timestamp. Defaults to the triggering response target; omit for top-level channel replies and DMs.",
                 },
                 "visibility": {
                     "type": "string",

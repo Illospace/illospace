@@ -78,9 +78,19 @@ def _surface(channel_type: str, thread_ts: str, message_ts: str) -> str:
 
 
 def _response_thread_ts(channel_type: str, thread_ts: str, message_ts: str) -> str | None:
-    if channel_type == "im" and thread_ts == message_ts:
+    """Return the Slack thread timestamp Illo should use for its visible reply.
+
+    Slack uses ``thread_ts=message_ts`` to create a thread under a top-level
+    message. That made top-level mentions look like Illo could only answer in
+    threads. The response target should only carry a thread when the user invoked
+    Illo from an existing Slack thread. DMs should stay as normal DM messages.
+    """
+
+    if channel_type == "im":
         return None
-    return thread_ts or message_ts or None
+    if thread_ts and thread_ts != message_ts:
+        return thread_ts
+    return None
 
 
 def normalize_slack_socket_event(
@@ -110,7 +120,13 @@ def normalize_slack_socket_event(
     thread_ts = str(event.get("thread_ts") or message_ts).strip()
     slack_user_id = str(event.get("user") or "").strip()
     event_id = str(payload.get("event_id") or "").strip()
-    idempotency_key = f"slack:{team_id}:{event_id}" if event_id else f"slack:{team_id}:{channel_id}:{message_ts}"
+    # Slack may deliver both an app_mention event and a message.* event for the
+    # same user-visible mention. Use the Slack message identity, not Slack's
+    # per-event id, so one Slack message admits at most one Illo run.
+    if channel_id and message_ts:
+        idempotency_key = f"slack:{team_id}:{channel_id}:{message_ts}"
+    else:
+        idempotency_key = f"slack:{team_id}:{event_id}"
     surface = _surface(channel_type, thread_ts, message_ts)
     response_target = {
         "channel_id": channel_id,
