@@ -89,6 +89,9 @@ def test_idea_list_load_columns_cover_idea_read_response_fields():
 
     assert "active_agents" in columns
     assert "attachments" in columns
+    assert "preview_summary" in columns
+    assert "preview_source" in columns
+    assert "preview_updated_at" in columns
 
 
 class TestRowToDict:
