@@ -947,6 +947,84 @@ def test_slack_connector_config_requires_socket_mode_tokens(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_slack_connector_marks_connection_error_when_socket_open_fails(session, monkeypatch):
+    from brain.systems.slack import connector
+    from brain.systems.slack.client import SlackApiError
+
+    connection = await _seed_slack_connection(session)
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    async def connection_factory(_session):
+        return connection
+
+    async def open_socket_mode_url(_config):
+        raise SlackApiError("not_allowed_token_type")
+
+    monkeypatch.setattr(connector, "open_socket_mode_url", open_socket_mode_url)
+
+    with pytest.raises(SlackApiError, match="not_allowed_token_type"):
+        await connector.run_socket_mode_loop(
+            config=connector.SlackConnectorConfig(
+                bot_token="xoxb-test",
+                app_token="xapp-test",
+                org_id=ORG_ID,
+                owner_user_id=USER_ID,
+                team_id="T789",
+                bot_user_id="BILLO",
+            ),
+            session_factory=_SessionContext,
+            connection_factory=connection_factory,
+        )
+
+    assert connection.status == "error"
+    assert connection.last_error == "not_allowed_token_type"
+    assert connection.metadata_["health"]["status"] == "error"
+    assert connection.metadata_["health"]["last_error"] == "not_allowed_token_type"
+
+
+@pytest.mark.asyncio
+async def test_slack_connector_reports_bot_token_used_as_app_token(session):
+    from brain.systems.slack import connector
+    from brain.systems.slack.client import SlackConfigurationError
+
+    connection = await _seed_slack_connection(session)
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    async def connection_factory(_session):
+        return connection
+
+    with pytest.raises(SlackConfigurationError, match="app-level Socket Mode token"):
+        await connector.run_socket_mode_loop(
+            config=connector.SlackConnectorConfig(
+                bot_token="xoxb-test",
+                app_token="xoxb-wrong-token",
+                org_id=ORG_ID,
+                owner_user_id=USER_ID,
+                team_id="T789",
+                bot_user_id="BILLO",
+            ),
+            session_factory=_SessionContext,
+            connection_factory=connection_factory,
+        )
+
+    assert connection.status == "error"
+    assert "app-level Socket Mode token" in str(connection.last_error)
+    assert connection.metadata_["health"]["status"] == "error"
+
+
+@pytest.mark.asyncio
 async def test_slack_connection_health_record_uses_env_backed_tokens(session):
     from brain.systems.slack.connector import ensure_slack_connection
 
@@ -1004,6 +1082,19 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
     assert "secret" not in serialized_tool
     assert "does not" not in serialized_tool.lower()
     assert "cannot" not in serialized_tool.lower()
+
+
+def test_manage_slack_setup_state_reflects_connector_health():
+    from brain.systems.runs.tool_catalog.handlers.slack import _slack_setup_state
+
+    class _Row:
+        def __init__(self, status):
+            self.status = status
+
+    assert _slack_setup_state([]) == "not_connected"
+    assert _slack_setup_state([_Row("configured")]) == "configured"
+    assert _slack_setup_state([_Row("connected")]) == "connected"
+    assert _slack_setup_state([_Row("connected"), _Row("error")]) == "error"
 
 
 @pytest.mark.asyncio

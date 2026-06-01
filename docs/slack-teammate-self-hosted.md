@@ -13,7 +13,8 @@ public Slack Events API endpoint.
 4. Save `SLACK_BOT_TOKEN` to Illospace Vault, or set it as an environment
    variable for the connector process.
 5. Save `SLACK_APP_TOKEN` to Illospace Vault, or set it as an environment
-   variable for the connector process.
+   variable for the connector process. This must be a Slack app-level Socket
+   Mode token, usually prefixed `xapp-`; do not reuse the bot token here.
 6. Start the connector process:
 
 ```bash
@@ -54,6 +55,9 @@ Optional Slack hints:
   message events as trigger sources because Slack can also deliver the same
   human mention as `app_mention`.
 - Socket Mode envelopes are acknowledged before durable inbound processing.
+- The connector records durable health while it connects. If the app-level
+  Socket Mode token is wrong or Slack rejects the connection, `manage_slack`
+  reports the connection as `error` instead of leaving it looking configured.
 - Actionable Slack events are stored as inbound events with kind
   `slack_message`.
 - Slack-origin runs receive normal Illospace tools plus:

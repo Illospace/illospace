@@ -251,6 +251,17 @@ def _slack_connection_payload(connection) -> dict[str, Any]:
     }
 
 
+def _slack_setup_state(rows: list[Any]) -> str:
+    if not rows:
+        return "not_connected"
+    statuses = {str(row.status or "").strip().lower() for row in rows}
+    if "error" in statuses:
+        return "error"
+    if statuses & {"connected", "online"}:
+        return "connected"
+    return "configured"
+
+
 async def _handle_manage_slack(
     action: str,
     connection_id: str | None = None,
@@ -286,7 +297,7 @@ async def _handle_manage_slack(
                 .order_by(ExternalAgentConnectionRow.created_at.asc(), ExternalAgentConnectionRow.id.asc())
             )
             rows = list((await uow.session.scalars(stmt)).all())
-            setup_state = "connected" if rows else "not_connected"
+            setup_state = _slack_setup_state(rows)
             return json.dumps(
                 {
                     "ok": True,

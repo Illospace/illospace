@@ -104,6 +104,19 @@ class SlackConnectorConfig:
         )
 
 
+def validate_slack_connector_tokens(*, bot_token: str, app_token: str) -> None:
+    bot = str(bot_token or "").strip()
+    app = str(app_token or "").strip()
+    if bot.startswith("xapp-"):
+        raise SlackConfigurationError(
+            "Slack bot token must be a bot token, not an app-level Socket Mode token"
+        )
+    if app.startswith(("xoxb-", "xoxp-")):
+        raise SlackConfigurationError(
+            "Slack app-level Socket Mode token must be an app-level token, not a bot/user token"
+        )
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -323,6 +336,96 @@ async def _set_processing_status(config: SlackConnectorConfig, envelope: Mapping
         logger.info("slack_processing_status_failed: %s", exc)
 
 
+def _slack_error_text(exc: BaseException) -> str:
+    text = str(exc or "").strip() or exc.__class__.__name__
+    return text[:500]
+
+
+async def _record_slack_connector_status(
+    session,
+    *,
+    config: SlackConnectorConfig,
+    status: str,
+    last_error: str | None = None,
+    connection_id: str | None = None,
+    connection_factory=None,
+) -> ExternalAgentConnectionRow:
+    connection = None
+    if connection_factory is not None:
+        connection = await connection_factory(session)
+    elif connection_id:
+        connection = await session.get(ExternalAgentConnectionRow, str(connection_id))
+
+    if connection is None:
+        org_id, owner_user_id = await resolve_slack_connection_identity(session, config)
+        return await ensure_slack_connection(
+            session,
+            org_id=org_id,
+            owner_user_id=owner_user_id,
+            team_id=config.team_id,
+            bot_user_id=config.bot_user_id,
+            status=status,
+            last_error=last_error,
+        )
+
+    connection.status = status
+    connection.last_error = last_error
+    connection.last_tested_at = utcnow()
+    if status in {"connected", "online"}:
+        connection.last_seen_at = utcnow()
+
+    metadata = dict(connection.metadata_ or {})
+    slack_metadata = dict(metadata.get("slack") or {})
+    if config.team_id:
+        slack_metadata["team_id"] = str(config.team_id)
+    if config.bot_user_id:
+        slack_metadata["bot_user_id"] = str(config.bot_user_id)
+    metadata["slack"] = slack_metadata
+    metadata["health"] = {
+        "status": status,
+        "last_error": last_error,
+        "checked_at": utcnow().isoformat(),
+    }
+    connection.metadata_ = metadata
+    await session.flush()
+    return connection
+
+
+async def _record_slack_connector_status_with_factory(
+    *,
+    config: SlackConnectorConfig,
+    status: str,
+    last_error: str | None = None,
+    connection_id: str | None = None,
+    session_factory=None,
+    connection_factory=None,
+) -> str | None:
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+    if session_factory is not None:
+        async with session_factory() as session:
+            connection = await _record_slack_connector_status(
+                session,
+                config=config,
+                status=status,
+                last_error=last_error,
+                connection_id=connection_id,
+                connection_factory=connection_factory,
+            )
+            return str(connection.id)
+
+    async with UnitOfWork() as uow:
+        connection = await _record_slack_connector_status(
+            uow.session,
+            config=config,
+            status=status,
+            last_error=last_error,
+            connection_id=connection_id,
+            connection_factory=connection_factory,
+        )
+        return str(connection.id)
+
+
 async def open_socket_mode_url(config: SlackConnectorConfig) -> str:
     """Open a Slack Socket Mode URL using the app-level token."""
 
@@ -353,49 +456,99 @@ async def run_socket_mode_loop(
 
     import websockets
 
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
     config = config or await SlackConnectorConfig.from_runtime()
-    socket_url = config.socket_mode_url or await open_socket_mode_url(config)
+    connection_id = await _record_slack_connector_status_with_factory(
+        config=config,
+        status="connecting",
+        session_factory=session_factory,
+        connection_factory=connection_factory,
+    )
+    try:
+        validate_slack_connector_tokens(
+            bot_token=config.bot_token,
+            app_token=config.app_token,
+        )
+        socket_url = config.socket_mode_url or await open_socket_mode_url(config)
+    except Exception as exc:
+        await _record_slack_connector_status_with_factory(
+            config=config,
+            status="error",
+            last_error=_slack_error_text(exc),
+            connection_id=connection_id,
+            session_factory=session_factory,
+            connection_factory=connection_factory,
+        )
+        raise
     logger.info("slack_socket_mode_connecting")
-    async with websockets.connect(socket_url) as websocket:
-        logger.info("slack_socket_mode_connected")
-        async for raw_message in websocket:
-            socket_payload = json.loads(raw_message)
-            ack = socket_mode_ack(socket_payload)
-            if ack:
-                await websocket.send(json.dumps(ack))
-            try:
-                if session_factory is not None:
-                    async with session_factory() as session:
-                        connection = await connection_factory(session) if connection_factory else None
-                        if connection is None:
-                            raise SlackConfigurationError("Slack connection factory returned no connection")
-                        await process_socket_payload(
-                            session,
-                            connection=connection,
-                            socket_payload=socket_payload,
-                            config=config,
-                        )
-                else:
-                    async with UnitOfWork() as uow:
-                        org_id, owner_user_id = await resolve_slack_connection_identity(uow.session, config)
-                        connection = await ensure_slack_connection(
-                            uow.session,
-                            org_id=org_id,
-                            owner_user_id=owner_user_id,
-                            team_id=config.team_id,
-                            bot_user_id=config.bot_user_id,
-                            status="connected",
-                        )
-                        await process_socket_payload(
-                            uow.session,
-                            connection=connection,
-                            socket_payload=socket_payload,
-                            config=config,
-                        )
-            except Exception as exc:
-                logger.exception("slack_socket_mode_payload_failed: %s", exc)
+    try:
+        async with websockets.connect(socket_url) as websocket:
+            logger.info("slack_socket_mode_connected")
+            connection_id = await _record_slack_connector_status_with_factory(
+                config=config,
+                status="connected",
+                connection_id=connection_id,
+                session_factory=session_factory,
+                connection_factory=connection_factory,
+            )
+            async for raw_message in websocket:
+                socket_payload = json.loads(raw_message)
+                ack = socket_mode_ack(socket_payload)
+                if ack:
+                    await websocket.send(json.dumps(ack))
+                try:
+                    if session_factory is not None:
+                        async with session_factory() as session:
+                            connection = (
+                                await connection_factory(session)
+                                if connection_factory
+                                else await session.get(ExternalAgentConnectionRow, str(connection_id))
+                            )
+                            if connection is None:
+                                raise SlackConfigurationError("Slack connection factory returned no connection")
+                            await process_socket_payload(
+                                session,
+                                connection=connection,
+                                socket_payload=socket_payload,
+                                config=config,
+                            )
+                    else:
+                        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+                        async with UnitOfWork() as uow:
+                            connection = (
+                                await uow.session.get(ExternalAgentConnectionRow, str(connection_id))
+                                if connection_id
+                                else None
+                            )
+                            if connection is None:
+                                org_id, owner_user_id = await resolve_slack_connection_identity(uow.session, config)
+                                connection = await ensure_slack_connection(
+                                    uow.session,
+                                    org_id=org_id,
+                                    owner_user_id=owner_user_id,
+                                    team_id=config.team_id,
+                                    bot_user_id=config.bot_user_id,
+                                    status="connected",
+                                )
+                                connection_id = str(connection.id)
+                            await process_socket_payload(
+                                uow.session,
+                                connection=connection,
+                                socket_payload=socket_payload,
+                                config=config,
+                            )
+                except Exception as exc:
+                    logger.exception("slack_socket_mode_payload_failed: %s", exc)
+    except Exception as exc:
+        await _record_slack_connector_status_with_factory(
+            config=config,
+            status="error",
+            last_error=_slack_error_text(exc),
+            connection_id=connection_id,
+            session_factory=session_factory,
+            connection_factory=connection_factory,
+        )
+        raise
 
 
 async def run_forever() -> None:
@@ -416,4 +569,5 @@ __all__ = [
     "open_socket_mode_url",
     "run_socket_mode_loop",
     "run_forever",
+    "validate_slack_connector_tokens",
 ]
