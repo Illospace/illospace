@@ -1,7 +1,5 @@
 """Vault access for backend-owned Project Context connectors."""
 from __future__ import annotations
-
-import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,25 +15,6 @@ from brain.systems.vault import (
 class ProjectContextVaultError(Exception):
     status_code: int
     detail: str
-
-
-def github_token_from_vault(
-    key_name: str,
-    *,
-    user: dict[str, Any],
-    unlock_token: str | None,
-) -> str:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(
-            async_github_token_from_vault(
-                key_name,
-                user=user,
-                unlock_token=unlock_token,
-            )
-        )
-    raise ProjectContextVaultError(500, "Use async_github_token_from_vault inside async request handlers")
 
 
 async def async_github_token_from_vault(

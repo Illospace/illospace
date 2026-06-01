@@ -10,9 +10,9 @@ import logging
 import os
 from typing import Any, Mapping
 
-import httpx
 from sqlalchemy import select
 
+from brain.platform.async_io import async_http_client
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.org import User
@@ -392,7 +392,7 @@ async def _set_processing_status(config: SlackConnectorConfig, envelope: Mapping
 async def open_socket_mode_url(config: SlackConnectorConfig) -> str:
     """Open a Slack Socket Mode URL using the app-level token."""
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with async_http_client(timeout=10.0) as client:
         response = await client.post(
             "https://slack.com/api/apps.connections.open",
             headers={"Authorization": f"Bearer {config.app_token}"},

@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 import subprocess
 
+from brain.platform.async_io import run_subprocess_sync
+
 
 DEFAULT_PUBLISH_BRANCH = "illo/project-draft-publish"
 DEFAULT_BASE_BRANCH = "main"
@@ -98,7 +100,7 @@ class RepoDraftPublishResult:
 
 
 def default_run_cmd(command: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return run_subprocess_sync(
         list(command),
         cwd=str(cwd),
         capture_output=True,
