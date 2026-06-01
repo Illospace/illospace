@@ -23,7 +23,28 @@ export interface Idea {
   _agents?: number;
   project_context?: Record<string, any> | null;
   agent_details?: Record<string, any> | null;
+  preview_summary?: string | null;
+  preview_source?: string | null;
+  preview_updated_at?: string | null;
+  thread_route?: string | null;
+  thread_url?: string | null;
   metadata?: Record<string, any> | null;
+}
+
+export interface ObjectReferencePayload {
+  object_type: 'thread' | string;
+  status?: 'available' | 'unavailable' | string;
+  thread_id?: string | null;
+  title?: string | null;
+  preview_summary?: string | null;
+  preview_source?: string | null;
+  preview_updated_at?: string | null;
+  thread_route?: string | null;
+  thread_url?: string | null;
+  url?: string | null;
+  original_ref?: string | null;
+  handoff?: Record<string, any> | null;
+  [key: string]: unknown;
 }
 
 export interface StreamItem {
@@ -35,6 +56,8 @@ export interface StreamItem {
   content?: string;
   attachments?: any[];
   metadata?: Record<string, any>;
+  object_references?: ObjectReferencePayload[];
+  thread_references?: ObjectReferencePayload[];
   user_id?: string;
   user_name?: string;
   user_color?: string;

@@ -16,6 +16,11 @@ from brain.app.api.routers.ws import ws_manager
 from brain.app.mentions import classify_mention_intent
 from brain.platform.db.models.idea import ThreadDiscussionComment
 from brain.platform.db.models.org import User
+from brain.systems.cortex.object_references import (
+    SOURCE_THREAD_DISCUSSION_COMMENT,
+    merge_object_reference_metadata,
+    store_object_references_for_source,
+)
 
 THREAD_DISCUSSION_SURFACE = "thread_discussion"
 THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
@@ -33,6 +38,7 @@ def _comment_payload(
     author_name: str | None = None,
     author_color: str | None = None,
 ) -> dict[str, Any]:
+    metadata = comment.metadata_ if isinstance(comment.metadata_, dict) else {}
     return {
         "id": comment.id,
         "thread_id": str(comment.thread_id),
@@ -43,7 +49,9 @@ def _comment_payload(
         "author_color": author_color,
         "body": comment.body,
         "attachments": comment.attachments or [],
-        "metadata": comment.metadata_ or {},
+        "metadata": metadata,
+        "object_references": metadata.get("object_references") or [],
+        "thread_references": metadata.get("thread_references") or [],
         "created_at": comment.created_at.isoformat() if comment.created_at else None,
     }
 
@@ -179,6 +187,18 @@ async def create_thread_discussion_comment(
     )
     db.add(comment)
     await db.flush()
+
+    references = await store_object_references_for_source(
+        db,
+        source_type=SOURCE_THREAD_DISCUSSION_COMMENT,
+        source_id=comment.id,
+        org_id=org_id,
+        text=text,
+        user_id=str(user.get("id")) if user.get("id") else None,
+    )
+    if references:
+        comment.metadata_ = merge_object_reference_metadata(comment.metadata_, references)
+        await db.flush()
 
     trigger = None
     if classify_mention_intent(text, invoke_without_mentions=False).should_invoke_illo:

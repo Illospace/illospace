@@ -36,6 +36,7 @@
   } from '$lib/design-system/constellation';
   import type { CortexWorkspacePoint } from '$lib/features/workspace-scene/domain/workspacePoint';
   import { isLocalPreviewMemberId } from '$lib/utils/cortexLocalPreview';
+  import { threadRoute } from '$lib/features/threads/domain/threadLinks';
   import { workspaceApps } from '$lib/stores/workspaceApps.svelte';
   import { workspacePins } from '$lib/stores/workspacePins.svelte';
   import CortexLocalPreviewControls from '$lib/features/cortex/components/LocalPreviewControls.svelte';
@@ -88,8 +89,17 @@
   let workspacePageLoading = $state(false);
   let workspacePageLoadToken = 0;
   let lastRequestedIdeaId = $state<string | null>(null);
-  let initialDirectThreadIdeaId = $state<string | null>($page.url.searchParams.get('idea'));
-  let directThreadUrlPending = $state(Boolean($page.url.searchParams.get('idea')));
+  let lastSyncedThreadRoute = $state<string | null>(null);
+  function requestedThreadIdeaIdFromPage() {
+    return $page.params.threadId ?? $page.url.searchParams.get('idea');
+  }
+
+  function isThreadStageUrl() {
+    return $page.url.pathname.startsWith('/threads/') || Boolean($page.url.searchParams.get('idea'));
+  }
+
+  let initialDirectThreadIdeaId = $state<string | null>(requestedThreadIdeaIdFromPage());
+  let directThreadUrlPending = $state(Boolean(requestedThreadIdeaIdFromPage()));
   let lastAutoOpenedAppId = $state<string | null>(null);
   let threadStagePrewarmQueued = false;
   let CortexArchiveBinMenuComponent = $state<typeof import('$lib/features/cortex/components/ArchiveBinMenu.svelte').default | null>(null);
@@ -138,7 +148,7 @@
   }
 
   function runtimeReadyIntroIsDeferred() {
-    return isRuntimeReadyOnboardingUrl() && !$page.url.searchParams.get('idea');
+    return isRuntimeReadyOnboardingUrl() && !requestedThreadIdeaIdFromPage();
   }
 
   function runtimeReadyIntroOpenExisting() {
@@ -480,6 +490,14 @@
     const shouldRefreshWorkspaceSceneSidecars = directThreadActive || !workspaceSceneSidecarsReady;
     cortex.selectIdea(null);
     initialDirectThreadIdeaId = null;
+    lastSyncedThreadRoute = null;
+    if (browser && isThreadStageUrl()) {
+      void goto('/cortex', {
+        replaceState: true,
+        keepFocus: true,
+        noScroll: true,
+      });
+    }
     ensureWorkspaceRealtime();
     void cortex.loadTeamMembers();
     if (shouldRefreshWorkspaceSceneSidecars) {
@@ -880,7 +898,7 @@
   }
 
   async function maybeSelectIdeaFromUrl() {
-    const requestedIdeaId = $page.url.searchParams.get('idea');
+    const requestedIdeaId = requestedThreadIdeaIdFromPage();
     if (!requestedIdeaId) {
       directThreadUrlPending = false;
       return;
@@ -895,9 +913,24 @@
     }
     if (cortex.ideas.some((idea) => idea.id === requestedIdeaId)) {
       await cortex.selectIdea(requestedIdeaId);
+      syncCanonicalThreadUrl(requestedIdeaId);
     }
     clearRuntimeReadyOnboardingUrl();
     directThreadUrlPending = false;
+  }
+
+  function syncCanonicalThreadUrl(ideaId: string | null | undefined) {
+    if (!browser || !ideaId) return;
+    const nextRoute = threadRoute(ideaId);
+    const current = `${$page.url.pathname}${$page.url.search}${$page.url.hash}`;
+    lastSyncedThreadRoute = nextRoute;
+    if (current === nextRoute) return;
+    const replaceState = $page.url.pathname.startsWith('/threads/') || Boolean($page.url.searchParams.get('idea'));
+    void goto(nextRoute, {
+      replaceState,
+      keepFocus: true,
+      noScroll: true,
+    });
   }
 
   function ensureWorkspacePinsWs() {
@@ -935,6 +968,27 @@
   $effect(() => {
     if (
       !browser
+      || requestedThreadIdeaIdFromPage()
+      || directThreadUrlPending
+      || !cortex.panelOpen
+      || !lastSyncedThreadRoute
+    ) {
+      return;
+    }
+    lastSyncedThreadRoute = null;
+    initialDirectThreadIdeaId = null;
+    void cortex.selectIdea(null);
+    ensureWorkspaceRealtime();
+  });
+
+  $effect(() => {
+    if (!cortex.panelOpen || !cortex.selectedIdea?.id) return;
+    syncCanonicalThreadUrl(cortex.selectedIdea.id);
+  });
+
+  $effect(() => {
+    if (
+      !browser
       || runtimeReadyIntroHandled
       || runtimeReadyIntroStarting
       || !runtimeReadyIntroIsDeferred()
@@ -960,7 +1014,7 @@
   });
 
   onMount(() => {
-    const requestedIdeaId = $page.url.searchParams.get('idea');
+    const requestedIdeaId = requestedThreadIdeaIdFromPage();
     initialDirectThreadIdeaId = requestedIdeaId;
     directThreadUrlPending = Boolean(requestedIdeaId);
     cortex.setupWs();
@@ -972,6 +1026,7 @@
       if (requestedIdeaId) {
         lastRequestedIdeaId = requestedIdeaId;
         await cortex.loadDirectThread(requestedIdeaId);
+        syncCanonicalThreadUrl(requestedIdeaId);
         clearRuntimeReadyOnboardingUrl();
         directThreadUrlPending = false;
       } else {

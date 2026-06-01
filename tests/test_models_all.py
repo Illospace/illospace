@@ -62,6 +62,7 @@ EXPECTED_TABLES = {
     "memory_summaries",
     "narrative_sessions",
     "notification_events",
+    "object_references",
     "org_api_keys",
     "org_provider_model_mappings",
     "orgs",

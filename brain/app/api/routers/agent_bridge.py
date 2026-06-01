@@ -24,6 +24,7 @@ from brain.app.api.schemas.external_agents import (
 )
 from brain.app.mentions import classify_mention_intent
 from brain.platform.db.models.idea import Idea
+from brain.systems.cortex.thread_links import thread_link_payload
 from brain.systems.external_agents import service as external_agents
 
 
@@ -64,15 +65,45 @@ def require_bridge_scope(required_scope: str) -> Callable[..., Any]:
 
 
 def _thread_payload(idea: Idea, message: Any, notified_user_ids: list[str]) -> dict[str, Any]:
+    links = thread_link_payload(idea.id)
+    display_title = getattr(idea, "display_title", None)
+    title = getattr(idea, "title", None)
+    preview_updated_at = getattr(idea, "preview_updated_at", None)
+    thread_reference = {
+        "type": "thread_reference",
+        "object_type": "thread",
+        "object_id": str(idea.id),
+        "thread_id": str(idea.id),
+        "status": "available",
+        "title": display_title or title,
+        "preview_summary": getattr(idea, "preview_summary", None),
+        "preview_source": getattr(idea, "preview_source", None),
+        "preview_updated_at": (
+            preview_updated_at.isoformat()
+            if preview_updated_at
+            else None
+        ),
+        **links,
+    }
     return {
         "idea": {
             "id": str(idea.id),
-            "title": idea.title,
-            "status": idea.status,
-            "origin": idea.origin,
-            "origin_ref": idea.origin_ref,
+            "thread_id": str(idea.id),
+            "title": title,
+            "display_title": display_title,
+            "status": getattr(idea, "status", None),
+            "origin": getattr(idea, "origin", None),
+            "origin_ref": getattr(idea, "origin_ref", None),
+            "preview_summary": getattr(idea, "preview_summary", None),
+            "preview_source": getattr(idea, "preview_source", None),
+            **links,
             "created_at": message.created_at.isoformat() if getattr(message, "created_at", None) else None,
         },
+        "thread_reference": thread_reference,
+        "thread_id": str(idea.id),
+        "thread_url": links["thread_url"],
+        "thread_route": links["thread_route"],
+        "url": links["thread_url"],
         "message": external_agents.serialize_thread_message(message),
         "notified_user_ids": notified_user_ids,
     }

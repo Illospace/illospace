@@ -2,6 +2,7 @@ import type { Snippet } from 'svelte';
 
 import type { AttachmentPreviewKind } from '$lib/utils/attachmentPreview';
 import type { RunEvidenceDebug } from '$lib/utils/runEvidenceDebug';
+import type { ObjectReferencePayload } from '$lib/types/cortex';
 import { CORTEX_THREAD_STAGE_RUN_STATUSES } from '../../../constants/statuses.ts';
 
 export const CORTEX_THREAD_STAGE_TONES = ['spectral', 'amber'] as const;
@@ -32,6 +33,9 @@ export interface CortexThreadStageHeaderConfig {
   titleActionLabel?: string;
   titleActionLoading?: boolean;
   onTitleAction?: () => void;
+  linkActionLabel?: string;
+  linkActionLoading?: boolean;
+  onLinkAction?: () => void;
   archiveActionLabel?: string;
   archiveActionLoading?: boolean;
   onArchiveAction?: () => void;
@@ -69,6 +73,8 @@ export interface CortexThreadStageMessageItem {
   paragraphs?: readonly string[];
   sections?: readonly CortexThreadStageMessageSection[];
   attachments?: readonly CortexThreadStageAttachmentItem[];
+  objectReferences?: readonly ObjectReferencePayload[];
+  threadReferences?: readonly ObjectReferencePayload[];
   inlineWithWork?: boolean;
 }
 

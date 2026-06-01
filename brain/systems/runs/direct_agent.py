@@ -901,6 +901,13 @@ async def _update_thread_handoff_after_run_async(
         payload,
         user_id=user_id,
     ))
+    if run_id is not None:
+        try:
+            from brain.systems.cortex.thread_read_model import refresh_thread_read_model_for_run_id
+
+            await refresh_thread_read_model_for_run_id(run_id, payload)
+        except Exception as exc:
+            logger.debug("Agent %s: thread preview refresh failed: %s", session_id, exc)
     if fallback_error:
         logger.debug("Agent %s: post-run handoff fallback used: %s", session_id, fallback_error)
     logger.info(
