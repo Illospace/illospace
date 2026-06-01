@@ -1756,10 +1756,14 @@ async def test_runtime_tool_executor_resolves_secret_env_mount_without_public_va
     secret_value = "ghp-secret-value"
     vault_calls = []
 
+    async def fake_get_secret_record(key, actor_user_id, *, org_id):
+        return object() if key == "DataForSeoLogin" else None
+
     async def fake_runtime_secret_read(key, **kwargs):
         vault_calls.append({"key": key, **kwargs})
         return {"key": key, "value": secret_value}
 
+    monkeypatch.setattr("brain.systems.vault.async_get_secret_record", fake_get_secret_record)
     monkeypatch.setattr("brain.systems.vault.agent_access.read_agent_secret_for_runtime", fake_runtime_secret_read)
 
     runtime = _runtime("worker")
@@ -1777,9 +1781,9 @@ async def test_runtime_tool_executor_resolves_secret_env_mount_without_public_va
             args={
                 "command": "gh api user",
                 "secret_env": {
-                    "GH_TOKEN": {
-                        "vault_key": "GITHUB_TOKEN",
-                        "reason": "Check the token identity without exposing it.",
+                    "DATAFORSEO_LOGIN": {
+                        "vault_key": "DataForSeoLogin",
+                        "reason": "Run a bounded DataForSEO SERP check without exposing the login.",
                     },
                 },
             },
@@ -1789,10 +1793,10 @@ async def test_runtime_tool_executor_resolves_secret_env_mount_without_public_va
     )
 
     assert result["exit_code"] == 0
-    assert seen["kwargs"]["_resolved_secret_env"] == {"GH_TOKEN": secret_value}
+    assert seen["kwargs"]["_resolved_secret_env"] == {"DATAFORSEO_LOGIN": secret_value}
     assert vault_calls == [{
-        "key": "GITHUB_TOKEN",
-        "reason": "Check the token identity without exposing it.",
+        "key": "DataForSeoLogin",
+        "reason": "Run a bounded DataForSEO SERP check without exposing the login.",
         "user_id": "user-1",
         "org_id": "org-1",
         "run_id": 42,
