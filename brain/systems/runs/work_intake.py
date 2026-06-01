@@ -647,6 +647,41 @@ async def build_agent_run_request(
             }
         )
 
+    if event.source == "slack" or target.get("kind") == "slack_message":
+        from brain.systems.runs.work_intake_slack import agent_run_request_for_slack
+
+        org_id = _event_org_id(event)
+        trigger_payload = {
+            "source": event.source,
+            "event_type": event.event_type,
+            "actor": _as_mapping(event.actor),
+            "org_id": org_id,
+            "target": target,
+            "payload": {
+                **dict(event.payload or {}),
+                "message": message,
+                "metadata": metadata,
+            },
+            "idempotency_key": idempotency_key,
+            "policy": {
+                **_event_policy(event),
+                "priority": priority,
+            },
+        }
+        request = agent_run_request_for_slack(trigger_payload)
+        return AgentRunRequest(
+            **{
+                **request.__dict__,
+                "metadata": {
+                    **request.metadata,
+                    "source": event.source,
+                    "producer": producer,
+                    "idempotency_key": idempotency_key,
+                    "work_intake": metadata["work_intake"],
+                },
+            }
+        )
+
     if target.get("kind") == THREAD_DISCUSSION_SURFACE:
         org_id = _event_org_id(event)
         trigger_payload = {

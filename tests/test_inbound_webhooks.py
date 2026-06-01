@@ -510,6 +510,7 @@ async def test_mcp_submit_ignores_signal_policy_and_queues_illo(session, monkeyp
     assert event.action_type == "illo.submit_queued"
     assert event.raw_payload["message"] == "Ask Illo to review inbound follow-up fixes."
     assert event.normalized_payload["source"]["source_tool"] == "codex"
+    assert await session.scalar(select(func.count()).select_from(Idea)) == 0
 
 
 async def test_mcp_submit_requires_non_empty_message(session):

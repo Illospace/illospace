@@ -7,14 +7,16 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "brain/**"
-      - "frontend/**"
-      - "deploy/compose/**"
+      - ".dockerignore"
+      - "frontend/package.json"
+      - "frontend/package-lock.json"
       - "deploy/docker/**"
-      - "requirements.txt"
+      - "deploy/scripts/self-update-daemon.sh"
+      - "deploy/scripts/self-update-healthcheck.sh"
       - "requirements-production.txt"
       - "pyproject.toml"
       - "alembic.ini"
+      - "ops/install-browser-runtime.sh"
       - ".github/workflows/container-images.yml"
   workflow_dispatch:
 
@@ -24,20 +26,72 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
   packages: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.image }} image
+  changes:
+    name: Detect image changes
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: api
-            dockerfile: deploy/docker/api.Dockerfile
-          - image: web
-            dockerfile: deploy/docker/web.Dockerfile
+    outputs:
+      api: ${{ steps.selected.outputs.api }}
+      web: ${{ steps.selected.outputs.web }}
+      updater: ${{ steps.selected.outputs.updater }}
+
+    steps:
+      - name: Check out repository
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+
+      - name: Detect image changes
+        if: github.event_name == 'pull_request'
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            api:
+              - ".dockerignore"
+              - "deploy/docker/api.Dockerfile"
+              - "requirements-production.txt"
+              - "pyproject.toml"
+              - "alembic.ini"
+              - "ops/install-browser-runtime.sh"
+              - ".github/workflows/container-images.yml"
+            web:
+              - ".dockerignore"
+              - "frontend/package.json"
+              - "frontend/package-lock.json"
+              - "deploy/docker/web.Dockerfile"
+              - "deploy/docker/web.nginx.conf"
+              - ".github/workflows/container-images.yml"
+            updater:
+              - ".dockerignore"
+              - "deploy/docker/updater.Dockerfile"
+              - "deploy/scripts/self-update-daemon.sh"
+              - "deploy/scripts/self-update-healthcheck.sh"
+              - ".github/workflows/container-images.yml"
+
+      - name: Select images
+        id: selected
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "api=${{ steps.filter.outputs.api }}" >> "$GITHUB_OUTPUT"
+            echo "web=${{ steps.filter.outputs.web }}" >> "$GITHUB_OUTPUT"
+            echo "updater=${{ steps.filter.outputs.updater }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "api=true" >> "$GITHUB_OUTPUT"
+            echo "web=true" >> "$GITHUB_OUTPUT"
+            echo "updater=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-api:
+    name: Build api image
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    env:
+      IMAGE_NAME: api
+      DOCKERFILE: deploy/docker/api.Dockerfile
 
     steps:
       - name: Check out repository
@@ -58,7 +112,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/illospace/${{ matrix.image }}
+          images: ghcr.io/illospace/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -71,9 +125,105 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: ${{ env.DOCKERFILE }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}
+
+  build-web:
+    name: Build web image
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    env:
+      IMAGE_NAME: web
+      DOCKERFILE: deploy/docker/web.Dockerfile
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/illospace/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ env.DOCKERFILE }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}
+
+  build-updater:
+    name: Build updater image
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.updater == 'true'
+    env:
+      IMAGE_NAME: updater
+      DOCKERFILE: deploy/docker/updater.Dockerfile
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/illospace/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ env.DOCKERFILE }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}

@@ -38,6 +38,8 @@
     IconListDetails,
     IconLogout,
     IconMenu2,
+    IconMicrophone,
+    IconMessages,
     IconMessageReply,
     IconMoon,
     IconMoodPlus,
@@ -74,6 +76,7 @@
     | 'bolt'
     | 'brush'
     | 'check'
+    | 'chat'
     | 'close'
     | 'code'
     | 'copy'
@@ -98,6 +101,7 @@
     | 'logout'
     | 'memory'
     | 'menu'
+    | 'mic'
     | 'moon'
     | 'notification'
     | 'overview'
@@ -143,6 +147,7 @@
     bolt: IconBolt,
     brush: IconBrush,
     check: IconCheck,
+    chat: IconMessages,
     close: IconX,
     code: IconCode,
     copy: IconCopy,
@@ -167,6 +172,7 @@
     logout: IconLogout,
     memory: IconNotes,
     menu: IconMenu2,
+    mic: IconMicrophone,
     moon: IconMoon,
     notification: IconBell,
     overview: IconLayoutGrid,

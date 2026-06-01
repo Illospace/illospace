@@ -6,12 +6,10 @@ Hermes or OpenClaw.
 ## Architecture
 
 - `POST /mcp` (also `POST /api/mcp`): hosted remote MCP endpoint. This is
-  the preferred MVP path for Hermes, Codex, OpenClaw, or another remote-capable
-  MCP client. Clients provide `Authorization: Bearer illo_conn_...`.
+  the MCP path for Hermes, Codex, OpenClaw, or another remote-capable MCP
+  client. Clients provide `Authorization: Bearer illo_conn_...`.
 - `tools/personal-agent-bridge/bridge.py`: outbound worker. Illo queues external
   tasks, the bridge claims them, runs Hermes/OpenClaw, then posts results back.
-- `tools/illo-personal-agent-mcp/`: optional local stdio MCP package for dev
-  and clients that cannot consume hosted remote MCP yet.
 
 MVP deliverable is hosted MCP for personal-agent -> Illo collaboration. The
 outbound bridge remains proven for Hermes task delegation, but OpenClaw adapter
@@ -54,7 +52,7 @@ case, use the client-specific secret/auth field and keep the MCP URL as
 Default CI should run the no-network contract tests:
 
 ```bash
-venv/bin/python -m pytest tests/test_external_agents_service.py tests/test_external_agent_routes.py tests/test_illo_personal_agent_mcp.py tests/test_alembic_config.py -q
+venv/bin/python -m pytest tests/test_external_agents_service.py tests/test_external_agent_routes.py tests/test_alembic_config.py -q
 ```
 
 These tests cover:

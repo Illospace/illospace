@@ -203,7 +203,7 @@ def test_project_context_extraction_merges_project_and_readable_upload(tmp_path,
     assert [resource.get("kind") or resource.get("type") for resource in result["resources"]] == ["folder", "file"]
 
 
-def test_thread_attachment_context_promotes_text_and_image(tmp_path, monkeypatch):
+def test_thread_attachment_context_promotes_text_image_and_audio(tmp_path, monkeypatch):
     from brain.systems.cortex import thread_attachments
 
     upload_dir = tmp_path / "uploads"
@@ -214,21 +214,27 @@ def test_thread_attachment_context_promotes_text_and_image(tmp_path, monkeypatch
     config.write_text("feature: enabled", encoding="utf-8")
     image = upload_dir / "screenshot.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    audio = upload_dir / "voice.webm"
+    audio.write_bytes(b"webm audio")
     monkeypatch.setattr(thread_attachments, "UPLOAD_DIR", upload_dir)
 
     context = thread_attachments.build_thread_attachment_context([
         {"url": "/static/uploads/note.md", "filename": "note.md", "type": "text/markdown"},
         {"url": "/static/uploads/config.yaml", "filename": "config.yaml", "type": "application/x-yaml"},
         {"url": "/static/uploads/screenshot.png", "filename": "screenshot.png", "type": "image/png"},
+        {"url": "/static/uploads/voice.webm", "filename": "voice.webm", "type": "audio/webm"},
     ])
     blocks = thread_attachments.initial_user_content_blocks("Read these", context)
 
-    assert context["attachment_count"] == 3
+    assert context["attachment_count"] == 4
     assert context["items"][0]["text"] == "hello attachment"
     assert context["items"][1]["text"] == "feature: enabled"
+    assert context["items"][3]["kind"] == "audio"
+    assert "transcribe_audio_attachment" in context["prompt"]
     assert blocks[0]["type"] == "text"
     assert "hello attachment" in blocks[0]["text"]
     assert "feature: enabled" in blocks[0]["text"]
+    assert "voice.webm" in blocks[0]["text"]
     assert blocks[1]["type"] == "image"
     assert blocks[1]["source"]["media_type"] == "image/png"
 
@@ -559,7 +565,24 @@ def test_manage_idea_tool_is_available_to_agents():
     tool = next(item for item in WORKER_TOOLS if item["name"] == "manage_idea")
 
     assert "archive this thread" in tool["description"]
+    assert "thread_url" in tool["input_schema"]["properties"]
     assert "manage_idea" in _get_tool_handlers()
+
+
+def test_manage_idea_target_accepts_thread_url():
+    from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
+
+    assert (
+        idea_tools._target_idea_id(
+            idea_id=None,
+            thread_id=None,
+            thread_url="https://illo.example.com/threads/idea-1",
+            url=None,
+            thread_route=None,
+            context_idea_id="current-idea",
+        )
+        == "idea-1"
+    )
 
 
 async def test_manage_idea_archive_defaults_to_current_thread(monkeypatch):
@@ -1960,6 +1983,48 @@ def test_project_profile_read_includes_visibility_and_access():
     assert payload.access[0].name == "Alex"
     assert payload.project_context["project_key"] == "project-1"
     assert payload.project_context["slug"] == "yc"
+
+
+def test_project_profile_read_includes_root_file_and_repo_counts(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context.profiles import profile_to_read
+
+    workspace_root = tmp_path / "workspaces"
+    root = workspace_root / "project-roots" / "project-1"
+    root.mkdir(parents=True)
+    (root / "README.md").write_text("Project notes", encoding="utf-8")
+    (root / "docs").mkdir()
+    (root / "docs" / "summary.md").write_text("Summary", encoding="utf-8")
+    (root / ".illo-project-history").mkdir()
+    (root / ".illo-project-history" / "internal.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+
+    profile = SimpleNamespace(
+        id="project-1",
+        org_id="org-1",
+        user_id="owner-1",
+        slug="yc",
+        name="YC",
+        description=None,
+        project_context={
+            "resources": [
+                {"kind": "github_repo", "repo": "Illospace/illospace"},
+                {"kind": "file", "path": "README.md"},
+            ]
+        },
+        visibility="private",
+        default_environment_binding_id=None,
+        active=True,
+        metadata_={},
+        created_at=None,
+    )
+
+    summary = profile_to_read(profile).content_summary
+
+    assert summary.root_exists is True
+    assert summary.file_count == 2
+    assert summary.file_count_exact is True
+    assert summary.repo_count == 1
+    assert summary.resource_count == 2
 
 
 def test_project_profile_create_defaults_private():

@@ -178,6 +178,19 @@ def test_generated_app_host_styles_use_theme_tokens():
     assert offenders == []
 
 
+def test_generated_structured_ui_host_has_definite_scroll_area():
+    source = (
+        REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/GeneratedUiRenderer.svelte"
+    ).read_text()
+    style = _last_style_block(source)
+    body_rule = style.split(".generated-ui__body {", 1)[1].split("}", 1)[0]
+
+    assert "height: min(820px, calc(100vh - 112px));" in style
+    assert "height: calc(100vh - 96px);" in style
+    assert "height: 100%;" in body_rule
+    assert "overflow: auto;" in body_rule
+
+
 def test_app_capsule_runtime_uses_new_bridge_and_responsive_surface():
     dispatcher = (
         REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/GeneratedAppRenderer.svelte"
@@ -361,6 +374,36 @@ def test_thread_stage_expands_while_reading_column_stays_bounded():
     assert "width: min(100%, var(--thread-stage-thread-max));" in stage_screen
     assert "--thread-column-max: var(--thread-stage-readable-max);" in stage_screen
     assert "--thread-column-max: var(--thread-stage-thread-max);" not in stage_screen
+
+
+def test_thread_stage_right_dock_does_not_auto_open_from_loaded_thread_state():
+    source = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadStageScreen.svelte").read_text()
+    idea_change_body = source.split("const currentIdeaId = idea?.id ?? null;", 1)[1].split(
+        "$effect(() => {\n    if (!idea) return;",
+        1,
+    )[0]
+
+    assert "onBrowserOpenChange?.(false);" in idea_change_body
+    assert "sidePanelTabs = createDefaultThreadSidePanelTabs();" in idea_change_body
+    assert "lastAutoOpenedBrowserSessionId" not in source
+    assert "lastAutoOpenedVaultPromptId" not in source
+    assert "lastAutoOpenedVaultGrantPromptId" not in source
+    assert "lastAutoOpenedCycleSignal" not in source
+    assert "lastAutoOpenedCodeReviewSignature" not in source
+    assert "lastAutoSelectedAppId" not in source
+
+
+def test_thread_transcript_keeps_illo_mark_without_illo_message_meta_header():
+    source = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadTranscript.svelte").read_text()
+    message_block = source.split("{:else if item.kind === 'message'}", 1)[1].split(
+        "{:else if item.kind === 'visual'}",
+        1,
+    )[0]
+
+    assert "<ThreadAuthorMark" in message_block
+    assert "{#if !isIllo}" in message_block
+    assert "{#if !isIllo || hasSupplementalMeta}" not in message_block
+    assert ".thread-message-illo .thread-message-content" in source
 
 
 def test_thread_stage_dismiss_preserves_mounted_workspace_scene():

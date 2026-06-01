@@ -105,6 +105,64 @@ async def test_web_search_uses_provider_and_caches(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_web_search_uses_runtime_vault_secret_context(monkeypatch):
+    from brain.app.web.research import _search_cache, web_search
+    from brain.systems.vault.runtime_secrets import RuntimeSecretContext
+
+    _search_cache.clear()
+
+    calls = []
+
+    async def read_runtime_secret(key_name, *, context, reason, requested_by, access, allow_env_fallback):
+        calls.append(
+            {
+                "key_name": key_name,
+                "actor_user_id": context.actor_user_id,
+                "org_id": context.org_id,
+                "run_id": context.run_id,
+                "reason": reason,
+                "requested_by": requested_by,
+                "access": access,
+                "allow_env_fallback": allow_env_fallback,
+            }
+        )
+        return "vault-brave-key"
+
+    payload = {"web": {"results": [{"title": "Result A", "url": "https://a.test", "description": "Snippet A"}]}}
+    client = _FakeClient(_FakeResponse(json_data=payload, headers={"content-type": "application/json"}))
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+    monkeypatch.setattr("brain.systems.vault.runtime_secrets.read_runtime_secret", read_runtime_secret)
+    monkeypatch.setattr("brain.app.web.research._http_client", lambda: client)
+
+    result = await web_search(
+        "illo brain",
+        provider="brave",
+        limit=1,
+        runtime_secret_context=RuntimeSecretContext(
+            actor_user_id="user-1",
+            org_id="org-1",
+            run_id=42,
+            idea_id="thread-1",
+        ),
+    )
+
+    assert result["provider"] == "brave"
+    assert client.calls[0][2]["headers"]["X-Subscription-Token"] == "vault-brave-key"
+    assert calls == [
+        {
+            "key_name": "BRAVE_SEARCH_API_KEY",
+            "actor_user_id": "user-1",
+            "org_id": "org-1",
+            "run_id": 42,
+            "reason": "Run Illo's web search tool through a configured search provider.",
+            "requested_by": "web_search",
+            "access": "service",
+            "allow_env_fallback": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_web_search_auto_skips_empty_provider_without_caching(monkeypatch):
     from brain.app.web.research import WebResearchError, _search_cache, web_search
 

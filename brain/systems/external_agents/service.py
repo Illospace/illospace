@@ -35,6 +35,8 @@ from brain.systems.cortex.thought_lifecycle import (
     post_thread_message,
     transition_thought_status,
 )
+from brain.systems.cortex.thread_links import thread_id_from_reference, thread_link_payload
+from brain.systems.cortex.thread_read_model import thread_reference_payload
 from brain.systems.cortex.status import EXTERNAL_TASK_STARTABLE_IDEA_STATUSES
 from brain.systems.external_agents.status import EXTERNAL_AGENT_TASK_TERMINAL_STATUSES
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
@@ -49,6 +51,7 @@ SCOPE_TASK_UPDATE = "task:update"
 SCOPE_TASK_COMPLETE = "task:complete"
 SCOPE_ARTIFACT_WRITE = "artifact:write"
 SCOPE_WORKSPACE_READ = "workspace:read"
+SCOPE_DOMAIN_WRITE = "domain:write"
 SCOPE_ILLO_ASK = "illo:ask"
 SCOPE_ILLO_ACT = "illo:act"
 SCOPE_ILLO_THREAD_CREATE = "illo:thread:create"
@@ -62,6 +65,7 @@ DEFAULT_BRIDGE_SCOPES = (
     SCOPE_TASK_COMPLETE,
     SCOPE_ARTIFACT_WRITE,
     SCOPE_WORKSPACE_READ,
+    SCOPE_DOMAIN_WRITE,
     SCOPE_ILLO_ASK,
     SCOPE_ILLO_ACT,
     SCOPE_ILLO_THREAD_CREATE,
@@ -711,19 +715,7 @@ async def _thread_context(session: AsyncSession, idea_id: str, *, limit: int = 3
         ).all()
     )
     rows.reverse()
-    return [
-        {
-            "id": row.id,
-            "role": row.role,
-            "content": row.content,
-            "attachments": row.attachments or [],
-            "metadata": _json_dict(row.metadata_),
-            "message_type": row.message_type,
-            "user_id": str(row.user_id) if row.user_id else None,
-            "created_at": _iso(row.created_at),
-        }
-        for row in rows
-    ]
+    return [_thread_message_payload(row) for row in rows]
 
 
 async def _idea_for_org(session: AsyncSession, *, idea_id: str, org_id: str) -> Idea:
@@ -945,13 +937,16 @@ async def append_artifact(
 
 
 def _thread_message_payload(message: IdeaThread) -> dict[str, Any]:
+    metadata = _json_dict(message.metadata_)
     return {
         "id": message.id,
         "idea_id": str(message.idea_id) if message.idea_id else None,
         "role": message.role,
         "content": message.content,
         "attachments": message.attachments or [],
-        "metadata": _json_dict(message.metadata_),
+        "metadata": metadata,
+        "object_references": metadata.get("object_references") or [],
+        "thread_references": metadata.get("thread_references") or [],
         "user_id": str(message.user_id) if message.user_id else None,
         "message_type": message.message_type,
         "created_at": _iso(message.created_at),
@@ -1122,13 +1117,26 @@ async def search_workspace(
         )
     ).all()
     for idea in ideas:
+        links = thread_link_payload(idea.id)
         results.append(
             {
-                "type": "idea",
+                "type": "thread",
                 "idea_id": str(idea.id),
+                "thread_id": str(idea.id),
                 "title": idea.title,
+                "display_title": idea.display_title,
                 "description": idea.description,
                 "status": idea.status,
+                "preview_summary": idea.preview_summary,
+                "preview_source": idea.preview_source,
+                **links,
+                "thread_reference": _thread_reference_snapshot(
+                    thread_id=idea.id,
+                    title=idea.display_title or idea.title,
+                    preview_summary=idea.preview_summary,
+                    preview_source=idea.preview_source,
+                    preview_updated_at=idea.preview_updated_at,
+                ),
                 "updated_at": _iso(idea.updated_at),
             }
         )
@@ -1137,7 +1145,7 @@ async def search_workspace(
     if remaining > 0:
         rows = (
             await session.execute(
-                select(IdeaThread, Idea.title.label("idea_title"))
+                select(IdeaThread, Idea)
                 .join(Idea, IdeaThread.idea_id == Idea.id)
                 .where(
                     Idea.org_id == principal.org_id,
@@ -1150,11 +1158,22 @@ async def search_workspace(
         ).all()
         for row in rows:
             thread = row[0]
+            idea = row[1]
+            links = thread_link_payload(thread.idea_id)
             results.append(
                 {
                     "type": "thread_message",
                     "idea_id": str(thread.idea_id),
-                    "idea_title": row.idea_title,
+                    "thread_id": str(thread.idea_id),
+                    "idea_title": idea.display_title or idea.title,
+                    **links,
+                    "thread_reference": _thread_reference_snapshot(
+                        thread_id=thread.idea_id,
+                        title=idea.display_title or idea.title,
+                        preview_summary=idea.preview_summary,
+                        preview_source=idea.preview_source,
+                        preview_updated_at=idea.preview_updated_at,
+                    ),
                     "thread_message_id": thread.id,
                     "role": thread.role,
                     "content": thread.content[:600],
@@ -1164,6 +1183,28 @@ async def search_workspace(
     return {"query": text, "results": results}
 
 
+def _thread_reference_snapshot(
+    *,
+    thread_id: Any,
+    title: Any,
+    preview_summary: Any = None,
+    preview_source: Any = None,
+    preview_updated_at: Any = None,
+) -> dict[str, Any]:
+    return {
+        "type": "thread_reference",
+        "object_type": "thread",
+        "object_id": str(thread_id),
+        "thread_id": str(thread_id),
+        "status": "available",
+        "title": str(title or "Untitled thread"),
+        "preview_summary": preview_summary,
+        "preview_source": preview_source,
+        "preview_updated_at": _iso(preview_updated_at),
+        **thread_link_payload(thread_id),
+    }
+
+
 async def get_thread(
     session: AsyncSession,
     principal: AgentBridgePrincipal,
@@ -1171,16 +1212,24 @@ async def get_thread(
     idea_id: str,
     limit: int = 100,
 ) -> dict[str, Any]:
-    idea = await _idea_for_org(session, idea_id=str(idea_id), org_id=principal.org_id)
+    thread_id = thread_id_from_reference(str(idea_id), allow_raw_id=True) or str(idea_id)
+    idea = await _idea_for_org(session, idea_id=thread_id, org_id=principal.org_id)
+    links = thread_link_payload(idea.id)
     return {
         "idea": {
             "id": str(idea.id),
+            "thread_id": str(idea.id),
             "title": idea.title,
+            "display_title": idea.display_title,
             "description": idea.description,
             "status": idea.status,
+            "preview_summary": idea.preview_summary,
+            "preview_source": idea.preview_source,
+            **links,
             "created_at": _iso(idea.created_at),
             "updated_at": _iso(idea.updated_at),
         },
+        "thread_reference": await thread_reference_payload(session, idea, include_handoff=True),
         "messages": await _thread_context(session, str(idea.id), limit=limit),
     }
 
@@ -1601,6 +1650,7 @@ __all__ = [
     "SCOPE_ILLO_THREAD_CREATE",
     "SCOPE_ILLO_THREAD_WRITE",
     "SCOPE_SIGNAL_SUBMIT",
+    "SCOPE_DOMAIN_WRITE",
     "SCOPE_TASK_CLAIM",
     "SCOPE_TASK_COMPLETE",
     "SCOPE_TASK_UPDATE",

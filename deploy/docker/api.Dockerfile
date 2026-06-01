@@ -18,6 +18,7 @@ RUN apt-get update \
         ca-certificates \
         chromium \
         curl \
+        ffmpeg \
         fonts-liberation \
         git \
         jq \
@@ -35,6 +36,7 @@ RUN python3 -m pip install --upgrade pip setuptools wheel \
     && python3 -m pip install -r requirements-production.txt
 
 COPY brain ./brain
+COPY deploy/compose/runtime-services.json ./deploy/compose/runtime-services.json
 COPY ops/install-browser-runtime.sh ./ops/install-browser-runtime.sh
 COPY README.md LICENSE NOTICE.md ./
 

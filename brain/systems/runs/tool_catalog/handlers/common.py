@@ -29,6 +29,7 @@ from brain.systems.runs.execution_artifacts import (
 from brain.systems.runs.execution_context import (
     _agent_context,
     bind_agent_context,
+    snapshot_agent_context,
 )
 from brain.systems.runs.project_execution_env import (
     _canonical_project_token_slug,
@@ -93,16 +94,31 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         "list": {"required": [], "optional": [], "effect": "read scheduled cycles"},
         "create": {
             "required": ["name", "prompt", "timezone", "schedule_expr or run_at"],
-            "optional": ["enabled", "target_idea_id", "model_override", "thinking_override"],
+            "optional": ["enabled", "target_idea_id", "model_override", "thinking_override", "guidance", "rationale"],
             "effect": "create a recurring cycle or one-time reminder",
         },
         "update": {
             "required": ["id"],
-            "optional": ["name", "prompt", "timezone", "schedule_expr", "run_at", "enabled", "target_idea_id"],
+            "optional": ["name", "prompt", "timezone", "schedule_expr", "run_at", "enabled", "target_idea_id", "guidance", "rationale"],
             "effect": "change an existing cycle",
         },
         "delete": {"required": ["id"], "optional": [], "effect": "archive/disable a cycle"},
         "run": {"required": ["id"], "optional": [], "effect": "run a cycle immediately"},
+        "add_guidance": {
+            "required": ["id", "guidance"],
+            "optional": ["rationale"],
+            "effect": "append durable guidance for future cycle runs",
+        },
+        "add_output_target": {
+            "required": ["id", "output_target_type"],
+            "optional": ["output_target_id", "output_target_label", "output_target_config", "rationale"],
+            "effect": "add a durable output target the cycle may publish to or repair",
+        },
+        "remove_output_target": {
+            "required": ["id", "output_target_id"],
+            "optional": ["rationale"],
+            "effect": "deactivate a durable output target",
+        },
     },
     "manage_domain": {
         "list": {"required": [], "optional": ["include_archived"], "effect": "read available domains"},
@@ -389,21 +405,21 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
     },
     "manage_idea": {
         "list": {"required": [], "optional": ["status", "search", "include_archived", "limit"], "effect": "read Cortex thoughts"},
-        "get": {"required": ["idea_id unless a current thread is bound"], "optional": [], "effect": "read one thought"},
+        "get": {"required": ["idea_id/thread_url unless a current thread is bound"], "optional": [], "effect": "read one thought"},
         "create": {
             "required": ["title"],
             "optional": ["thread_message", "description", "status", "start_run", "parent_id", "user_id"],
             "effect": "create a Cortex thought with an Illo-authored seed message; user_id assigns the owner",
         },
         "update": {
-            "required": ["idea_id unless a current thread is bound", "at least one changed field"],
+            "required": ["idea_id/thread_url unless a current thread is bound", "at least one changed field"],
             "optional": ["title", "display_title", "description", "status", "position_x", "position_y", "user_id"],
             "effect": "update thought metadata",
         },
-        "archive": {"required": ["idea_id unless a current thread is bound"], "optional": [], "effect": "archive a thought"},
-        "restore": {"required": ["idea_id"], "optional": [], "effect": "restore an archived thought"},
-        "set_status": {"required": ["idea_id unless a current thread is bound", "status"], "optional": [], "effect": "change status"},
-        "mark_read": {"required": ["idea_id unless a current thread is bound"], "optional": [], "effect": "mark a thought read"},
+        "archive": {"required": ["idea_id/thread_url unless a current thread is bound"], "optional": [], "effect": "archive a thought"},
+        "restore": {"required": ["idea_id/thread_url"], "optional": [], "effect": "restore an archived thought"},
+        "set_status": {"required": ["idea_id/thread_url unless a current thread is bound", "status"], "optional": [], "effect": "change status"},
+        "mark_read": {"required": ["idea_id/thread_url unless a current thread is bound"], "optional": [], "effect": "mark a thought read"},
     },
     "manage_project": {
         "list": {"required": [], "optional": ["query", "limit", "include_inactive"], "effect": "read project context profiles, optionally filtered by project name, description, aliases, or resources"},
@@ -531,6 +547,34 @@ def _looks_like_concrete_blocker_reply(reply: str, execution_context: str | None
     return (
         any(marker in text for marker in _BLOCKED_REPLY_MARKERS)
         and any(marker in text for marker in _CONCRETE_BLOCKER_MARKERS)
+)
+
+
+def _coerce_agent_run_id(value) -> int | None:
+    try:
+        return int(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _current_runtime_secret_context():
+    """Return the current AgentRun identity for trusted runtime secret reads."""
+
+    from brain.systems.vault.runtime_secrets import RuntimeSecretContext
+
+    execution_metadata = getattr(_agent_context, "execution_metadata", None)
+    metadata = execution_metadata if isinstance(execution_metadata, dict) else {}
+    run = getattr(_agent_context, "run", None)
+    run_id = (
+        getattr(_agent_context, "run_id", None)
+        or getattr(run, "run_id", None)
+        or metadata.get("run_id")
+    )
+    return RuntimeSecretContext(
+        actor_user_id=str(getattr(_agent_context, "user_id", None) or metadata.get("user_id") or "").strip() or None,
+        org_id=str(getattr(_agent_context, "org_id", None) or metadata.get("org_id") or "").strip() or None,
+        run_id=_coerce_agent_run_id(run_id),
+        idea_id=str(getattr(_agent_context, "idea_id", None) or metadata.get("idea_id") or "").strip() or None,
     )
 
 

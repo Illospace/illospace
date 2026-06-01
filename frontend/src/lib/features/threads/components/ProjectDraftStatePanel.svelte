@@ -28,12 +28,15 @@
     projectFileStatusLabel,
     projectFileStatusTone,
     projectSpreadsheetPreviewRows,
+    filterProjectSelectorItems,
+    projectSelectorOptions,
     visibleProjectExplorerRows,
     type ProjectFileKind,
     type ProjectExplorerFile,
     type ProjectExplorerDirectory,
     type ProjectExplorerRow,
     type ProjectPreviewLayerKey,
+    type ProjectSelectorItem,
   } from '$lib/features/threads/domain/projectDraftStatePresenter';
   import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
   import type {
@@ -47,13 +50,6 @@
   } | null;
 
   const CHANGE_METRICS = PROJECT_DRAFT_CHANGE_METRICS;
-
-  type ProjectSelectorItem = {
-    id: string;
-    name: string;
-    subtitle: string;
-    group: 'attached' | 'recent';
-  };
 
   let {
     idea,
@@ -115,6 +111,7 @@
     selectedProjectItem?.subtitle
       ?? (selectedProjectProfileId ? 'Accessible project' : 'Current thread Project'),
   );
+  const selectedProjectContentLabels = $derived(selectedProjectItem?.contentLabels ?? []);
   const selectedFile = $derived(
     fileBrowser.files.find((file) => file.key === selectedFileKey) ?? null,
   );
@@ -231,79 +228,6 @@
 
   function canEmbedFinalKind(kind: ProjectFileKind): boolean {
     return kind === 'image' || kind === 'pdf' || kind === 'video';
-  }
-
-  function projectText(value: unknown): string {
-    return typeof value === 'string' ? value.trim() : '';
-  }
-
-  function projectNameFromSnapshot(snapshot: any): string {
-    return (
-      projectText(snapshot?.selected_profile_name)
-      || projectText(snapshot?.name)
-      || projectText(snapshot?.title)
-      || projectText(snapshot?.project_slug)
-      || 'Project'
-    );
-  }
-
-  function projectSelectorOptions(
-    profiles: ThreadProjectContextProfile[],
-    attachments: ThreadProjectContextAttachment[],
-  ): ProjectSelectorItem[] {
-    const profilesById = new Map<string, ThreadProjectContextProfile>();
-    for (const profile of profiles) {
-      const id = projectText((profile as any)?.id);
-      if (id) profilesById.set(id, profile);
-    }
-
-    const seen = new Set<string>();
-    const attached: ProjectSelectorItem[] = [];
-    for (const attachment of attachments) {
-      const id = projectText((attachment as any)?.project_profile_id);
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      const profile = profilesById.get(id);
-      const snapshot = (attachment as any)?.snapshot;
-      const name = projectText((profile as any)?.name) || projectNameFromSnapshot(snapshot);
-      attached.push({
-        id,
-        name,
-        subtitle: 'Attached project',
-        group: 'attached',
-      });
-    }
-
-    const recent: ProjectSelectorItem[] = [];
-    for (const profile of profiles) {
-      const id = projectText((profile as any)?.id);
-      if (!id || seen.has(id)) continue;
-      const name = projectText((profile as any)?.name) || projectText((profile as any)?.slug) || 'Project';
-      recent.push({
-          id,
-          name,
-          subtitle: 'Recent project',
-        group: 'recent',
-      });
-    }
-
-    return [...attached, ...recent];
-  }
-
-  function filterProjectSelectorItems(
-    items: ProjectSelectorItem[],
-    query: string,
-  ): ProjectSelectorItem[] {
-    const terms = query
-      .trim()
-      .toLowerCase()
-      .split(/\s+/)
-      .filter(Boolean);
-    if (terms.length === 0) return items;
-    return items.filter((item) => {
-      const blob = `${item.name} ${item.subtitle} ${item.group}`.toLowerCase();
-      return terms.every((term) => blob.includes(term));
-    });
   }
 
   function selectProjectProfile(projectId: string) {
@@ -581,6 +505,13 @@
             <span class="project-draft-kicker">Project</span>
             <strong>{selectedProjectLabel}</strong>
             <small>{selectedProjectSubtitle}</small>
+            {#if selectedProjectContentLabels.length > 0}
+              <span class="project-selector-counts" aria-label="Selected Project contents">
+                {#each selectedProjectContentLabels as label (label)}
+                  <span>{label}</span>
+                {/each}
+              </span>
+            {/if}
           </span>
           <span class="project-selector-action">
             {projectSelectorItems.length > 1 ? 'Switch' : projectsLoading ? 'Loading' : 'Current'}
@@ -622,11 +553,18 @@
                           aria-selected={project.id === selectedProjectProfileId}
                           onclick={() => selectProjectProfile(project.id)}
                         >
-                          <span>
+                          <span class="project-selector-option-copy">
                             <strong>{project.name}</strong>
                             <small>{project.subtitle}</small>
                           </span>
-                          <em>{project.id === selectedProjectProfileId ? 'Current' : 'Open'}</em>
+                          <span class="project-selector-option-aside">
+                            <span class="project-selector-option-counts" aria-label="Project contents">
+                              {#each project.contentLabels as label (label)}
+                                <span>{label}</span>
+                              {/each}
+                            </span>
+                            <em>{project.id === selectedProjectProfileId ? 'Current' : 'Open'}</em>
+                          </span>
                         </button>
                       {/each}
                     </div>
@@ -1028,7 +966,9 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+    flex: 1 1 auto;
     width: 100%;
+    min-height: 100%;
     min-width: 0;
     color: rgba(239, 244, 251, 0.86);
     font-size: 12px;
@@ -1129,6 +1069,8 @@
   }
 
   .project-selector-copy {
+    display: grid;
+    gap: 3px;
     min-width: 0;
   }
 
@@ -1149,7 +1091,6 @@
 
   .project-selector-copy small {
     display: block;
-    margin-top: 3px;
     overflow: hidden;
     color: rgba(231, 238, 247, 0.52);
     font-family: var(--constellation-font-mono, var(--font-mono));
@@ -1161,6 +1102,35 @@
 
   :global(:root[data-color-scheme='light']) .project-selector-copy small {
     color: rgba(82, 98, 111, 0.66);
+  }
+
+  .project-selector-counts,
+  .project-selector-option-counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .project-selector-counts span,
+  .project-selector-option-counts span {
+    display: inline-flex;
+    align-items: center;
+    min-height: 18px;
+    border-radius: 6px;
+    padding: 2px 6px;
+    background: rgba(255, 255, 255, 0.055);
+    color: rgba(231, 238, 247, 0.62);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 9px;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-counts span,
+  :global(:root[data-color-scheme='light']) .project-selector-option-counts span {
+    background: rgba(85, 104, 120, 0.06);
+    color: rgba(57, 70, 82, 0.7);
   }
 
   .project-selector-action {
@@ -1298,6 +1268,21 @@
     text-align: left;
     font: inherit;
     cursor: pointer;
+  }
+
+  .project-selector-option-copy,
+  .project-selector-option-aside {
+    min-width: 0;
+  }
+
+  .project-selector-option-aside {
+    display: grid;
+    justify-items: end;
+    gap: 4px;
+  }
+
+  .project-selector-option-counts {
+    justify-content: flex-end;
   }
 
   .project-selector-option:hover,

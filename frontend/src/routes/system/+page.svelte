@@ -23,6 +23,7 @@
   import MemoryCard from './MemoryCard.svelte';
   import ModelsCard from './ModelsCard.svelte';
   import ProviderConnections from './ProviderConnections.svelte';
+  import VoiceCard from './VoiceCard.svelte';
   import type {
     EmbedderKey,
     MemoryCheck,
@@ -32,6 +33,7 @@
     NoticeState,
     RuntimeOption,
     RuntimeSettings,
+    VoiceDraft,
   } from './types';
 
   type CodexSignInCallbackMode = 'auto' | 'server' | 'local_bridge';
@@ -73,6 +75,10 @@
     embedding_model: 'text-embedding-3-small',
     reranker: 'weighted',
   });
+  let voiceDraft = $state<VoiceDraft>({
+    provider: 'openai',
+    language: 'auto',
+  });
   let vaultSecrets = $state<VaultSecret[]>([]);
   let vaultLoading = $state(false);
   let vaultLoadError = $state('');
@@ -100,7 +106,7 @@
   const setupCanContinue = $derived(setupMode && connectionStatus === 'connected');
   const memoryVaultProvider = $derived<MemoryVaultProvider>(embeddingProvider(memoryDraft.embedder));
   const memoryVaultKeyOptions = $derived(buildMemoryVaultKeyOptions());
-  const hasRuntimeChanges = $derived(Boolean(settings) && (modelDraftDirty() || memoryDraftDirty()));
+  const hasRuntimeChanges = $derived(Boolean(settings) && (modelDraftDirty() || memoryDraftDirty() || voiceDraftDirty()));
   const runCheckDisabled = $derived(!canManageSettings || memoryChangeNeedsRebuild());
   const vaultSessionStorageKey = $derived(
     auth.user?.org_id && auth.user?.id
@@ -145,6 +151,10 @@
       embedder: next.memory.embedder,
       embedding_model: next.memory.embedding_model || defaultEmbeddingModel(next.memory.embedder, next),
       reranker: next.memory.reranker || 'weighted',
+    };
+    voiceDraft = {
+      provider: next.voice.provider,
+      language: next.voice.language || 'auto',
     };
   }
 
@@ -370,7 +380,8 @@
     if (!canManageSettings || !settings) return;
     const shouldSaveModels = modelDraftDirty();
     const shouldSaveMemory = memoryDraftDirty();
-    if (!shouldSaveModels && !shouldSaveMemory) {
+    const shouldSaveVoice = voiceDraftDirty();
+    if (!shouldSaveModels && !shouldSaveMemory && !shouldSaveVoice) {
       notice = { tone: 'info', title: 'Runtime settings are current.' };
       return;
     }
@@ -390,6 +401,11 @@
         nextSettings = { ...nextSettings, memory };
         memoryCheck = null;
         saved.push('Memory');
+      }
+      if (shouldSaveVoice) {
+        const voice = await api.updateRuntimeVoice(voicePayload());
+        nextSettings = { ...nextSettings, voice };
+        saved.push('Voice');
       }
       settings = nextSettings;
       notice = {
@@ -424,6 +440,10 @@
       memoryDraft = { ...memoryDraft, [key]: value } as MemoryDraft;
     }
     memoryCheck = null;
+  }
+
+  function updateVoiceDraft(key: keyof VoiceDraft, value: string) {
+    voiceDraft = { ...voiceDraft, [key]: value } as VoiceDraft;
   }
 
   function getVaultSessionStorage(): Storage | null {
@@ -501,6 +521,13 @@
     };
   }
 
+  function voicePayload() {
+    return {
+      provider: voiceDraft.provider,
+      language: voiceDraft.language,
+    };
+  }
+
   function modelDraftDirty() {
     if (!settings) return false;
     return (
@@ -517,6 +544,14 @@
       memoryDraft.embedder !== settings.memory.embedder ||
       (usesApiEmbedder(memoryDraft.embedder) && memoryDraft.embedding_model !== savedModel) ||
       memoryDraft.reranker !== settings.memory.reranker
+    );
+  }
+
+  function voiceDraftDirty() {
+    if (!settings) return false;
+    return (
+      voiceDraft.provider !== settings.voice.provider ||
+      voiceDraft.language !== (settings.voice.language || 'auto')
     );
   }
 
@@ -824,6 +859,13 @@
           syncingVaultKey={syncingMemoryVaultKey}
           onUpdateMemory={updateMemoryDraft}
           onSelectVaultKey={handleMemoryVaultKeyChange}
+        />
+
+        <VoiceCard
+          voice={settings.voice}
+          {voiceDraft}
+          {canManageSettings}
+          onUpdateVoice={updateVoiceDraft}
         />
       </div>
     </div>

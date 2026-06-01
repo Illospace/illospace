@@ -53,7 +53,7 @@ async def _handle_manage_domain(
 
     org_id, user_id, run_id, idea_id = _domain_context()
     if not org_id:
-        return json.dumps({"error": "manage_domain requires an org-scoped run"})
+        return json.dumps({"error": "manage_domain could not access this workspace context"})
 
     try:
         async with UnitOfWork() as uow:

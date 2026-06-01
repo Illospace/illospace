@@ -3,9 +3,11 @@ FROM docker:27-cli
 RUN apk add --no-cache \
     bash \
     coreutils \
+    curl \
     docker-cli-compose \
     git \
-    jq
+    jq \
+    python3
 
 WORKDIR /repo
 

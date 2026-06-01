@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ConstellationIcon } from '$lib/components/constellation';
+  import { ConstellationComposerOrb, ConstellationIcon } from '$lib/components/constellation';
   import { auth } from '$lib/stores/auth.svelte';
   import { cortex } from '$lib/stores/cortex.svelte';
   import { theme } from '$lib/stores/theme.svelte';
@@ -41,7 +41,6 @@
     createDefaultThreadSidePanelTabs,
     isThreadSidePanelSingletonKind,
     openAppThreadSidePanelTab,
-    openBrowserThreadSidePanelTab,
     openSingletonThreadSidePanelTab,
     type ThreadSidePanelTabState,
     type ThreadStageRightDockAddMenuItem,
@@ -49,6 +48,7 @@
     type ThreadStageRightDockTab,
   } from '$lib/features/threads/controllers/threadSidePanelController';
   import { threadStreamController } from '$lib/features/threads/controllers/threadStreamController';
+  import { threadUrl } from '$lib/features/threads/domain/threadLinks';
   import {
     findSlashCommandToken,
     replaceSlashCommandToken,
@@ -66,8 +66,10 @@
   import BrowserThoughtPanel from '$lib/features/browser-sessions/components/BrowserThoughtPanel.svelte';
   import ThreadCyclesPane from '$lib/features/cycles/components/ThreadCyclesPane.svelte';
   import ProjectContextPicker from '$lib/features/composer/components/ProjectContextPicker.svelte';
+  import WorkspaceVoiceRecording from '$lib/features/composer/components/WorkspaceVoiceRecording.svelte';
   import SkillMentionOverlay from '$lib/features/composer/components/SkillMentionOverlay.svelte';
   import SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
+  import { WorkspaceVoiceDictationController } from '$lib/features/composer/controllers/workspaceVoiceDictation.svelte.ts';
   import { resizeComposerTextareaToContent } from '$lib/features/composer/domain/composerTextareaSizing';
   import ThreadAttachmentPreviewPane from '$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte';
   import ThreadCodeReviewPane from '$lib/features/threads/components/ThreadCodeReviewPane.svelte';
@@ -141,12 +143,6 @@
   let activeSidePanelTabId = $state<string | null>('activity');
   let sidePanelTabs = $state<ThreadStageRightDockTab[]>(createDefaultThreadSidePanelTabs());
   let nextBrowserTabIndex = $state(1);
-  let lastAutoOpenedBrowserSessionId = $state<string | null>(null);
-  let lastAutoOpenedVaultPromptId = $state<string | null>(null);
-  let lastAutoOpenedVaultGrantPromptId = $state<string | null>(null);
-  let lastAutoOpenedCycleSignal = $state<number | null>(null);
-  let lastAutoOpenedCodeReviewSignature = $state<string | null>(null);
-  let lastAutoSelectedAppId = $state<string | null>(null);
   let dockPreviewAttachment = $state<CortexThreadStageImageAttachment | CortexThreadStageFileAttachment | null>(null);
   let teamMembers = $state<any[]>([]);
   let teamMembersLoading = false;
@@ -180,6 +176,7 @@
   let threadStageGutterPx = $state(24);
   let titleGenerating = $state(false);
   let threadArchiving = $state(false);
+  let threadLinkCopying = $state(false);
 
   const THREAD_STAGE_MIN_THREAD_WIDTH = 380;
   const THREAD_STAGE_DEFAULT_GUTTER = 24;
@@ -243,7 +240,19 @@
     ),
   );
   const codeReviewSignature = $derived.by(() => codeReviewFiles.map((file) => file.path).join('|'));
-
+  const voiceDictation = new WorkspaceVoiceDictationController({
+    getDraft: () => inputValue,
+    setDraft: (next) => {
+      inputValue = next;
+      void tick().then(autoGrowTextarea);
+    },
+    submit: send,
+    onError: (message) => ui.toast(message, 'error'),
+    onSettled: () => tick().then(autoGrowTextarea),
+    focusDraft: () => requestAnimationFrame(() => textareaEl?.focus()),
+  });
+  const isVoiceRecording = $derived(voiceDictation.isRecording);
+  const voiceControlDisabled = $derived(sending || voiceDictation.controlDisabled);
 
   function ideaDisplayTitle(source: { display_title?: string | null; title?: string | null }): string {
     return source.display_title?.trim() || source.title?.trim() || 'Untitled thread';
@@ -295,6 +304,9 @@
       title: ideaDisplayTitle(selectedIdea),
       statusLabel,
       statusState: headerStatusState,
+      linkActionLabel: threadLinkCopying ? 'Thread link copied' : 'Copy thread link',
+      linkActionLoading: threadLinkCopying,
+      onLinkAction: () => void copyThreadLink(),
       titleActionLabel: titleGenerating ? 'Generating a new thread title' : 'Generate a new thread title',
       titleActionLoading: titleGenerating,
       onTitleAction: () => void regenerateThreadTitle(),
@@ -411,6 +423,23 @@
       ui.toast(err?.detail || err?.message || 'Failed to refresh thread title', 'error');
     } finally {
       titleGenerating = false;
+    }
+  }
+
+  async function copyThreadLink() {
+    const selectedIdea = idea;
+    if (!selectedIdea?.id || threadLinkCopying) return;
+    const value = selectedIdea.thread_url || threadUrl(selectedIdea.id);
+    threadLinkCopying = true;
+    try {
+      await navigator.clipboard.writeText(value);
+      ui.toast('Thread link copied', 'success');
+    } catch {
+      ui.toast(value, 'info');
+    } finally {
+      window.setTimeout(() => {
+        threadLinkCopying = false;
+      }, 900);
     }
   }
 
@@ -743,7 +772,11 @@
 
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      send();
+      if (isVoiceRecording) {
+        void voiceDictation.send();
+        return;
+      }
+      void send();
     }
   }
 
@@ -832,10 +865,6 @@
     applySidePanelState(addBrowserThreadSidePanelTab(sidePanelState()));
   }
 
-  function openBrowserSessionTab() {
-    applySidePanelState(openBrowserThreadSidePanelTab(sidePanelState()));
-  }
-
   function openSingletonTab(kind: ThreadStageRightDockSingletonKind) {
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), kind));
   }
@@ -889,75 +918,6 @@
     }
   }
 
-  $effect(() => {
-    const changedAppId = workspaceApps.lastChangedAppId;
-    if (!changedAppId || changedAppId === lastAutoSelectedAppId) return;
-    if (workspaceApps.lastChangeAction !== 'create') return;
-    if (!workspaceApps.appById(changedAppId)) return;
-    lastAutoSelectedAppId = changedAppId;
-    openAppTab(changedAppId);
-  });
-
-  $effect(() => {
-    const browserSessionId = cortex.browserSession?.id ?? null;
-    if (!browserSessionId) {
-      lastAutoOpenedBrowserSessionId = null;
-      return;
-    }
-    if (browserSessionId === lastAutoOpenedBrowserSessionId) return;
-    lastAutoOpenedBrowserSessionId = browserSessionId;
-    openBrowserSessionTab();
-  });
-
-  $effect(() => {
-    const prompt = cortex.vaultSecretPrompt;
-    const promptId = prompt && String(prompt.idea_id ?? '') === String(idea?.id ?? '') ? prompt.id : null;
-    if (!promptId) {
-      lastAutoOpenedVaultPromptId = null;
-      return;
-    }
-    if (promptId === lastAutoOpenedVaultPromptId) return;
-    lastAutoOpenedVaultPromptId = promptId;
-    openSingletonTab('vault');
-  });
-
-  $effect(() => {
-    const prompt = cortex.vaultAgentGrantPrompt;
-    const promptId = prompt && String(prompt.idea_id ?? '') === String(idea?.id ?? '') ? prompt.id : null;
-    if (!promptId) {
-      lastAutoOpenedVaultGrantPromptId = null;
-      return;
-    }
-    if (promptId === lastAutoOpenedVaultGrantPromptId) return;
-    lastAutoOpenedVaultGrantPromptId = promptId;
-    openSingletonTab('vault');
-  });
-
-  $effect(() => {
-    const signal = cortex.cyclePanelSignal;
-    if (!signal || signal.ideaId !== idea?.id) return;
-    if (signal.serial === lastAutoOpenedCycleSignal) return;
-    lastAutoOpenedCycleSignal = signal.serial;
-    openSingletonTab('cycles');
-  });
-
-  $effect(() => {
-    const currentIdeaId = idea?.id ?? null;
-    if (!currentIdeaId) {
-      lastAutoOpenedCodeReviewSignature = null;
-      return;
-    }
-    const signature = codeReviewSignature;
-    if (!signature) {
-      lastAutoOpenedCodeReviewSignature = null;
-      return;
-    }
-    const scopedSignature = `${currentIdeaId}:${signature}`;
-    if (scopedSignature === lastAutoOpenedCodeReviewSignature) return;
-    lastAutoOpenedCodeReviewSignature = scopedSignature;
-    openSingletonTab('code-review');
-  });
-
   let pendingInitialScrollIdeaId = $state<string | null>(null);
   let lastSelectedIdeaId = $state<string | null>(null);
 
@@ -983,8 +943,11 @@
       ideaProjectContextAttachments = [];
       ideaProjectContextLoadedForIdeaId = null;
       ideaProjectContextLoadingForIdeaId = null;
+      activeSidePanelTabId = 'activity';
+      sidePanelTabs = createDefaultThreadSidePanelTabs();
+      nextBrowserTabIndex = 1;
       dockPreviewAttachment = null;
-      lastAutoOpenedCodeReviewSignature = null;
+      onBrowserOpenChange?.(false);
       if (currentIdeaId) void loadIdeaProjectContext(currentIdeaId);
     }
   });
@@ -1052,9 +1015,11 @@
 
   onMount(async () => {
     document.addEventListener('click', handleDocClick);
+    await voiceDictation.loadSettings();
   });
 
   onDestroy(() => {
+    voiceDictation.destroy();
     document.removeEventListener('click', handleDocClick);
     if (transcriptScrollFrame !== null) {
       cancelAnimationFrame(transcriptScrollFrame);
@@ -1134,9 +1099,10 @@
         kicker={composerKicker()}
         placeholder={composerPlaceholder()}
         attachments={pendingAttachments}
-        canSubmit={(inputValue.trim().length > 0 || pendingAttachments.length > 0) && pendingProjectContextState.valid}
+        canSubmit={(isVoiceRecording || inputValue.trim().length > 0 || pendingAttachments.length > 0) && pendingProjectContextState.valid}
+        footerStatusActive={isVoiceRecording}
         allowSubmitWhileWorking={Boolean(activeFastRun())}
-        actionState={runInfo || idea?.status === 'working' ? 'working' : 'idle'}
+        actionState={isVoiceRecording ? 'idle' : (runInfo || idea?.status === 'working' ? 'working' : 'idle')}
         disabled={sending}
         className="cortex-thread-composer-adapter"
         sendLabel={activeRunSendLabel()}
@@ -1151,7 +1117,7 @@
         secondaryIntentValue={activeFastRun() ? activeRunMessageIntent : undefined}
         secondaryIntentAriaLabel="Message intent"
         onSecondaryIntentChange={setActiveRunMessageIntent}
-        onSubmit={send}
+        onSubmit={() => (isVoiceRecording ? void voiceDictation.send() : void send())}
         onStop={() => void threadStreamController.cancelAll()}
         onAttach={() => fileInputEl?.click()}
         onRemoveAttachment={removeAttachment}
@@ -1171,6 +1137,24 @@
           {#if projectContextError}
             <span class="project-context-inline-error">{projectContextError}</span>
           {/if}
+        {/snippet}
+        {#snippet footerStatus()}
+          {#if isVoiceRecording}
+            <WorkspaceVoiceRecording elapsedMs={voiceDictation.elapsedMs} levels={voiceDictation.audioLevels} />
+          {/if}
+        {/snippet}
+        {#snippet extraTrailingControls()}
+          <ConstellationComposerOrb
+            label={voiceDictation.controlLabel}
+            title={voiceDictation.controlTitle}
+            disabled={voiceControlDisabled}
+            variant="bare"
+            onclick={() => {
+              if (!sending) voiceDictation.toggle();
+            }}
+          >
+            <ConstellationIcon name={isVoiceRecording ? 'stop' : 'mic'} size={18} stroke={2} />
+          </ConstellationComposerOrb>
         {/snippet}
       </WorkspaceComposerAdapter>
     </div>
@@ -1396,6 +1380,8 @@
   .thread-utility-surface {
     display: flex;
     flex-direction: column;
+    width: 100%;
+    min-width: 0;
     min-height: 0;
     height: 100%;
     gap: 14px;
@@ -1403,6 +1389,8 @@
 
   .thread-utility-surface-body {
     flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
     min-height: 0;
     display: flex;
   }

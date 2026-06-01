@@ -17,8 +17,10 @@ from brain.app.api.routers.agent_bridge import (
     _run_trigger_if_requested,
     _thread_payload,
 )
+from brain.app.api.routers.agent_mcp_domains import DOMAIN_TOOL_HANDLERS
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.mentions import classify_mention_intent
+from brain.systems.cortex.thread_links import thread_id_from_reference
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
@@ -85,7 +87,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 },
                 "correlation": {
                     "type": "object",
-                    "description": "Optional correlation such as thread_id, external_session_id, delivery_id, or previous submission reference.",
+                    "description": "Optional correlation such as thread_id, thread_url, external_session_id, delivery_id, or previous submission reference.",
                     "default": {},
                 },
                 "response": {
@@ -130,7 +132,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             {
                 "capability": {
                     "type": "string",
-                    "description": "Read capability name, such as workspace.search, thread.get, team.members.list, or capabilities.",
+                    "description": "Read capability name, such as workspace.search, thread.get, team.members.list, domain.inspect, or capabilities.",
                 },
                 "arguments": {
                     "type": "object",
@@ -151,7 +153,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             {
                 "capability": {
                     "type": "string",
-                    "description": "Action capability name, such as thread.create, thread.post_message, or capabilities.",
+                    "description": "Action capability name, such as thread.create, thread.post_message, domain.record.write, or capabilities.",
                 },
                 "arguments": {
                     "type": "object",
@@ -415,6 +417,14 @@ def _submit_tool_response(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _thread_argument_id(arguments: dict[str, Any]) -> str:
+    for key in ("thread_url", "url", "thread_route", "idea_id", "thread_id"):
+        thread_id = thread_id_from_reference(arguments.get(key), allow_raw_id=key in {"idea_id", "thread_id"})
+        if thread_id:
+            return thread_id
+    return str(arguments.get("idea_id") or arguments.get("thread_id") or "")
+
+
 async def _tool_submit(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
@@ -443,6 +453,20 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
         "description": "List visible Illo team members.",
         "arguments": {},
     },
+    "domain.inspect": {
+        "description": "Inspect Illo Domains, schemas, records, relations, and recent domain events.",
+        "arguments": {
+            "domain_id": "integer",
+            "slug": "string",
+            "object_key": "string",
+            "record_id": "integer",
+            "search": "string",
+            "include_records": "boolean",
+            "include_relations": "boolean",
+            "include_events": "boolean",
+            "limit": "integer",
+        },
+    },
 }
 
 
@@ -461,10 +485,27 @@ ACT_CAPABILITIES: dict[str, dict[str, Any]] = {
         "description": "Post a visible message into an existing Illo thread as the user's external-agent delegate.",
         "arguments": {
             "idea_id": "string",
+            "thread_id": "string",
+            "thread_url": "string",
             "body": "string",
             "teammate_user_ids": "string[]",
             "artifacts": "object[]",
             "trigger_illo": "boolean",
+        },
+    },
+    "domain.record.write": {
+        "description": "Create, update, or archive records in Illo Domains as the user's external-agent delegate.",
+        "arguments": {
+            "action": "create_record | update_record | archive_record",
+            "domain_id": "integer",
+            "slug": "string",
+            "object_key": "string",
+            "record_id": "integer",
+            "data": "object",
+            "data_patch": "object",
+            "title": "string",
+            "expected_version": "integer",
+            "reason": "string",
         },
     },
 }
@@ -522,14 +563,13 @@ async def _tool_read(
         return await external_agents.get_thread(
             db,
             principal,
-            idea_id=(
-                _clean_optional_string(capability_arguments.get("idea_id"))
-                or _required_capability_string(capability_arguments, "thread_id", capability=capability)
-            ),
+            idea_id=_thread_argument_id(capability_arguments),
             limit=int(capability_arguments.get("limit") or 100),
         )
     if capability == "team.members.list":
         return await external_agents.get_team_members(db, principal)
+    if capability == "domain.inspect":
+        return await DOMAIN_TOOL_HANDLERS["illo_inspect_domains"](db, principal, capability_arguments)
     raise ValueError(f"Unknown {READ_TOOL_NAME} capability: {capability}")
 
 
@@ -614,10 +654,7 @@ async def _act_post_thread_message(
     idea, message, notified = await external_agents.post_thread_message_from_agent(
         db,
         principal,
-        idea_id=(
-            _clean_optional_string(capability_arguments.get("idea_id"))
-            or _required_capability_string(capability_arguments, "thread_id", capability="thread.post_message")
-        ),
+        idea_id=_thread_argument_id(capability_arguments),
         body=body,
         teammate_user_ids=_clean_string_list(capability_arguments.get("teammate_user_ids")),
         artifacts=_clean_artifacts(capability_arguments.get("artifacts")),
@@ -655,6 +692,10 @@ async def _tool_act(
             capability_arguments,
             original_arguments=arguments,
         )
+    if capability == "domain.record.write":
+        result = await DOMAIN_TOOL_HANDLERS["illo_write_domain_record"](db, principal, capability_arguments)
+        result["_mutates_domain"] = True
+        return result
     raise ValueError(f"Unknown {ACT_TOOL_NAME} capability: {capability}")
 
 
@@ -823,6 +864,8 @@ async def _handle_mcp_request(
         except Exception as exc:
             raise_external_agent_http_error(exc)
         if spec.get("mutates_inbound"):
+            await db.commit()
+        if tool_payload.pop("_mutates_domain", False):
             await db.commit()
         mutates_thread = bool(spec.get("mutates_thread") or tool_payload.pop("_mutates_thread", False))
         if mutates_thread:

@@ -66,8 +66,34 @@ def test_runtime_engine_disables_pool_reuse_for_legacy_inline_dispatcher():
     assert "pool_size" not in kwargs
 
 
+def test_runtime_engine_disables_pool_reuse_for_worker_cycle_scheduler():
+    kwargs = _engine_kwargs_for_environment(
+        {
+            "ILLO_WORKER_ENABLE_CYCLE_SCHEDULER": "1",
+            "ILLO_WORKER_DISABLE_CYCLE_SCHEDULER": "0",
+        }
+    )
+
+    assert kwargs["poolclass"] is NullPool
+    assert "pool_size" not in kwargs
+
+
+def test_runtime_engine_keeps_pool_when_worker_cycle_scheduler_is_disabled():
+    kwargs = _engine_kwargs_for_environment(
+        {
+            "ILLO_WORKER_ENABLE_CYCLE_SCHEDULER": "1",
+            "ILLO_WORKER_DISABLE_CYCLE_SCHEDULER": "1",
+        }
+    )
+
+    assert kwargs["pool_size"] == config.DB_POOL_MAX
+    assert "poolclass" not in kwargs
+
+
 def test_runtime_engine_keeps_pool_for_single_loop_runtime():
     kwargs = _engine_kwargs_for_environment({})
 
     assert kwargs["pool_size"] == config.DB_POOL_MAX
+    assert kwargs["max_overflow"] == config.DB_POOL_OVERFLOW
+    assert kwargs["pool_timeout"] == config.DB_POOL_TIMEOUT_SECONDS
     assert "poolclass" not in kwargs

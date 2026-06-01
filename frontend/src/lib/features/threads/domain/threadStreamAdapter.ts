@@ -366,6 +366,8 @@ function mapThreadMessageItem(
     ownerColor: userAccent ? mixHex(userAccent, userOwnerText, themeMode === 'light' ? 0.22 : 0.78) : undefined,
     html: item.content ? renderReadableMarkdown(item.content) : undefined,
     attachments: attachments.length ? attachments : undefined,
+    objectReferences: Array.isArray(item.object_references) ? item.object_references : undefined,
+    threadReferences: Array.isArray(item.thread_references) ? item.thread_references : undefined,
     inlineWithWork: inlineWithWork || undefined,
   };
 }

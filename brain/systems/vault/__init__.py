@@ -9,6 +9,7 @@ import logging
 import os
 import secrets as stdlib_secrets
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 
 import bcrypt
 from sqlalchemy import or_, select
@@ -46,6 +47,17 @@ VAULT_AGENT_ACCESS_LEVELS = {
     VAULT_AGENT_ACCESS_ASK,
     VAULT_AGENT_ACCESS_MANUAL,
 }
+
+
+class AgentSecretAccessIntent(str, Enum):
+    REFERENCE = "reference"
+    READ = "read"
+
+    @property
+    def consumes_approved_grant(self) -> bool:
+        return self is AgentSecretAccessIntent.READ
+
+
 DEFAULT_VAULT_AGENT_ACCESS_LEVEL = VAULT_AGENT_ACCESS_ASK
 
 # ---------------------------------------------------------------------------
@@ -1206,6 +1218,32 @@ async def authorize_agent_secret_read(
     )
 
 
+async def authorize_agent_secret_reference(
+    key_name: str,
+    *,
+    actor_user_id: str,
+    org_id: str | None,
+    run_id: int | None,
+    reason: str | None,
+    requested_by: str = "agent",
+    project_slug: str | None = None,
+    project_slugs: list[str] | tuple[str, ...] | set[str] | None = None,
+    target_registry_id: int | None = None,
+) -> dict:
+    """Allow policy-based org vault references without consuming a read grant."""
+    return await async_authorize_agent_secret_reference(
+        key_name,
+        actor_user_id=actor_user_id,
+        org_id=org_id,
+        run_id=run_id,
+        reason=reason,
+        requested_by=requested_by,
+        project_slug=project_slug,
+        project_slugs=project_slugs,
+        target_registry_id=target_registry_id,
+    )
+
+
 async def async_authorize_agent_secret_read(
     key_name: str,
     *,
@@ -1219,6 +1257,61 @@ async def async_authorize_agent_secret_read(
     target_registry_id: int | None = None,
 ) -> dict:
     """Policy check/approval flow for org-owned agent secret reads."""
+    return await _async_authorize_agent_secret_access(
+        key_name,
+        actor_user_id=actor_user_id,
+        org_id=org_id,
+        run_id=run_id,
+        reason=reason,
+        requested_by=requested_by,
+        project_slug=project_slug,
+        project_slugs=project_slugs,
+        target_registry_id=target_registry_id,
+        intent=AgentSecretAccessIntent.READ,
+    )
+
+
+async def async_authorize_agent_secret_reference(
+    key_name: str,
+    *,
+    actor_user_id: str,
+    org_id: str | None,
+    run_id: int | None,
+    reason: str | None,
+    requested_by: str = "agent",
+    project_slug: str | None = None,
+    project_slugs: list[str] | tuple[str, ...] | set[str] | None = None,
+    target_registry_id: int | None = None,
+) -> dict:
+    """Policy check/approval flow for references that must not consume grants."""
+    return await _async_authorize_agent_secret_access(
+        key_name,
+        actor_user_id=actor_user_id,
+        org_id=org_id,
+        run_id=run_id,
+        reason=reason,
+        requested_by=requested_by,
+        project_slug=project_slug,
+        project_slugs=project_slugs,
+        target_registry_id=target_registry_id,
+        intent=AgentSecretAccessIntent.REFERENCE,
+    )
+
+
+async def _async_authorize_agent_secret_access(
+    key_name: str,
+    *,
+    actor_user_id: str,
+    org_id: str | None,
+    run_id: int | None,
+    reason: str | None,
+    requested_by: str = "agent",
+    project_slug: str | None = None,
+    project_slugs: list[str] | tuple[str, ...] | set[str] | None = None,
+    target_registry_id: int | None = None,
+    intent: AgentSecretAccessIntent,
+) -> dict:
+    """Policy check/approval flow for org-owned agent secret access."""
     try:
         clean_org_id = _require_org_id(org_id)
         clean_actor_user_id = _require_actor_user_id(actor_user_id)
@@ -1292,11 +1385,12 @@ async def async_authorize_agent_secret_read(
             )
         ).first()
         if grant:
-            grant.read_count = int(grant.read_count or 0) + 1
-            grant.last_used_at = now
-            if grant.read_count >= int(grant.max_reads or 1):
-                grant.status = "used"
-            await uow.session.flush()
+            if intent.consumes_approved_grant:
+                grant.read_count = int(grant.read_count or 0) + 1
+                grant.last_used_at = now
+                if grant.read_count >= int(grant.max_reads or 1):
+                    grant.status = "used"
+                await uow.session.flush()
             return {"allowed": True, "status": "approved", "grant": _grant_to_dict(grant)}
 
         pending_stmt = select(VaultAgentGrant).where(*base, VaultAgentGrant.status == "pending")

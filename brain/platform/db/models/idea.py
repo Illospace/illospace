@@ -111,6 +111,11 @@ class Idea(Base):
         DateTime(timezone=True), nullable=True
     )
     working_memory: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    preview_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    preview_source: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    preview_updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     active_agents: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0
     )

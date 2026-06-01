@@ -1,5 +1,6 @@
 import {
   api,
+  type ChatAttachmentPayload,
   type ChatBootstrap,
   type ChatConversationPage as ChatConversationPageResponse,
   type ChatConversationSummary,
@@ -109,6 +110,8 @@ function cloneUnreadSummary(summary?: Partial<ChatUnreadSummary> | null): ChatUn
 function normalizeMessage(message: ChatMessageRecord): ChatMessage {
   return {
     ...message,
+    object_references: Array.isArray(message.object_references) ? message.object_references : [],
+    thread_references: Array.isArray(message.thread_references) ? message.thread_references : [],
     optimistic: false,
     failed: false,
     error: null,
@@ -777,7 +780,7 @@ class ChatStore {
     body?: string,
     options: {
       bodyFormat?: 'markdown' | 'plain';
-      attachments?: any[];
+      attachments?: ChatAttachmentPayload[];
       replyToMessageId?: number | null;
       metadata?: Record<string, any> | null;
     } = {},
@@ -795,7 +798,7 @@ class ChatStore {
     body?: string,
     options: {
       bodyFormat?: 'markdown' | 'plain';
-      attachments?: any[];
+      attachments?: ChatAttachmentPayload[];
       metadata?: Record<string, any> | null;
     } = {},
   ) {
@@ -854,7 +857,7 @@ class ChatStore {
     body?: string,
     options: {
       bodyFormat?: 'markdown' | 'plain';
-      attachments?: any[];
+      attachments?: ChatAttachmentPayload[];
       replyToMessageId?: number | null;
       metadata?: Record<string, any> | null;
     } = {},
@@ -1365,7 +1368,7 @@ class ChatStore {
     conversationId: string;
     body: string;
     bodyFormat: 'markdown' | 'plain';
-    attachments: any[];
+    attachments: ChatAttachmentPayload[];
     metadata: Record<string, any> | null;
     clientGeneratedId: string;
     threadRootMessageId: number | null;
@@ -1387,6 +1390,8 @@ class ChatStore {
       reply_to_message_id: input.replyToMessageId,
       attachments: input.attachments,
       metadata: input.metadata,
+      object_references: [],
+      thread_references: [],
       conversation_seq: lastSequence + 1,
       reply_count: 0,
       last_reply_at: null,

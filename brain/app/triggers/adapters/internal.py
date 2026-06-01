@@ -30,23 +30,33 @@ def _discussion_mention_run_message(
     idea_id: str,
     thread_message: str,
     discussion_trigger: dict[str, Any],
+    thread_references: list[dict[str, Any]] | None = None,
 ) -> str:
     comment_id = discussion_trigger.get("comment_id")
-    return "\n".join(
-        [
-            f"[Thread: \"{idea_data['title']}\" | {idea_id}]",
-            "",
-            "A teammate summoned @illo from Thread Discussion.",
-            "This is a separate Discussion conversation attached to the Thread, not an AI Timeline reply.",
-            "Acknowledge or answer in Discussion with post_thread_discussion_reply when a visible response fits.",
-            "Use read_thread_discussion if more Discussion context is needed.",
-            "Treat the AI Timeline as related context only unless a separate tool explicitly asks you to act there.",
-            "You may also act headlessly when no visible surface update is appropriate.",
-            "",
-            f"Triggering Discussion comment id: {comment_id}",
-            f"Triggering Discussion comment: {thread_message[:2000]}",
-        ]
-    )
+    lines = [
+        f"[Thread: \"{idea_data['title']}\" | {idea_id}]",
+        "",
+        "A teammate summoned @illo from Thread Discussion.",
+        "This is a separate Discussion conversation attached to the Thread, not an AI Timeline reply.",
+        "Acknowledge or answer in Discussion with post_thread_discussion_reply when a visible response fits.",
+        "Use read_thread_discussion if more Discussion context is needed.",
+        "Treat the AI Timeline as related context only unless a separate tool explicitly asks you to act there.",
+        "You may also act headlessly when no visible surface update is appropriate.",
+        "",
+        f"Triggering Discussion comment id: {comment_id}",
+        f"Triggering Discussion comment: {thread_message[:2000]}",
+    ]
+    if thread_references:
+        lines.extend(["", "Referenced Threads:"])
+        for reference in thread_references[:5]:
+            title = reference.get("title") or "Thread"
+            thread_id = reference.get("thread_id") or ""
+            summary = reference.get("preview_summary") or ""
+            url = reference.get("thread_url") or reference.get("url") or reference.get("thread_route") or ""
+            lines.append(f"- {title} ({thread_id}) {url}".strip())
+            if summary:
+                lines.append(f"  {summary[:500]}")
+    return "\n".join(lines)
 
 
 def build_cortex_notify_trigger(
@@ -156,6 +166,7 @@ def build_thread_discussion_mention_trigger(
     metadata.setdefault("final_answer_target_surface", THREAD_DISCUSSION_SURFACE)
     metadata.setdefault("discussion_comment_id", comment_id)
     metadata.setdefault("discussion_trigger", discussion_trigger)
+    thread_references = list(metadata.get("thread_references") or [])
 
     target = {
         "kind": THREAD_DISCUSSION_SURFACE,
@@ -175,6 +186,7 @@ def build_thread_discussion_mention_trigger(
             idea_id=idea_id,
             thread_message=body,
             discussion_trigger=discussion_trigger,
+            thread_references=thread_references,
         ),
         "metadata": metadata,
         "priority": int(priority),
@@ -256,6 +268,9 @@ def build_chat_mention_trigger(
     sender_name = str(user.get("name") or "A teammate")
     body = str(getattr(message, "body", "") or "")
     root_body = str(getattr(root_message, "body", "") or "") if root_message is not None else ""
+    message_metadata = dict(getattr(message, "metadata_", None) or {})
+    object_references = list(message_metadata.get("object_references") or [])
+    thread_references = list(message_metadata.get("thread_references") or [])
     context_lines = [
         f"{sender_name} tagged @illo from the native team room.",
         "Decide whether to answer directly, create Cortex thoughts, or both.",
@@ -268,11 +283,23 @@ def build_chat_mention_trigger(
     if root_body:
         context_lines.extend(["", f"Thread root message: {root_body[:1000]}"])
     context_lines.extend(["", f"Tagged message: {body[:2000]}"])
+    if thread_references:
+        context_lines.extend(["", "Referenced Threads:"])
+        for reference in thread_references[:5]:
+            title = reference.get("title") or "Thread"
+            thread_id = reference.get("thread_id") or ""
+            summary = reference.get("preview_summary") or ""
+            url = reference.get("thread_url") or reference.get("url") or reference.get("thread_route") or ""
+            context_lines.append(f"- {title} ({thread_id}) {url}".strip())
+            if summary:
+                context_lines.append(f"  {summary[:500]}")
     run_message = "\n".join(context_lines)
     metadata = {
         "chat_trigger": chat_trigger,
         "origin": "native_chat_mention",
         "required_response_tool": "post_chat_message",
+        "object_references": object_references,
+        "thread_references": thread_references,
     }
     payload = {
         "chat": chat_trigger,

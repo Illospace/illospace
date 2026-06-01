@@ -25,6 +25,7 @@ from brain.systems.runs.tool_catalog.handlers.browser import (
     _handle_browser_upload_attachment,
     _handle_browser_wait,
 )
+from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
 from brain.systems.runs.tool_catalog.handlers.cortex_reply import (
     _build_final_reply_check_context,
     _handle_cortex_reply,
@@ -60,7 +61,14 @@ from brain.systems.runs.tool_catalog.handlers.session_tools import (
     _handle_session_read,
     _handle_session_write,
 )
+from brain.systems.runs.tool_catalog.handlers.self_context import _handle_read_self_context
+from brain.systems.runs.tool_catalog.handlers.slack import (
+    _handle_manage_slack,
+    _handle_post_slack_reply,
+    _handle_read_slack_conversation,
+)
 from brain.systems.runs.tool_catalog.handlers.activity import _handle_my_activity
+from brain.systems.runs.tool_catalog.handlers.voice import _handle_transcribe_audio_attachment
 from brain.systems.runs.tool_catalog.handlers.web import _handle_web_fetch, _handle_web_search
 from brain.systems.runs.tool_catalog.handlers.workers import _handle_spawn_worker
 from brain.systems.runs.tool_catalog.handlers.workspace_data import (
@@ -119,6 +127,12 @@ def _current_requested_by():
     return getattr(_agent_context, "worker_name", None) or "agent"
 
 
+def _resolved_secret_env_arg(secret_env=None, _resolved_secret_env=None):
+    if secret_env not in (None, {}, []):
+        raise ValueError("secret_env mount specs must be resolved by the runtime before invoking tool handlers")
+    return _resolved_secret_env
+
+
 def _get_tool_handlers(
     workspace_root: str | None = None,
     allowed_workspaces: list[str | dict] | None = None,
@@ -143,8 +157,27 @@ def _get_tool_handlers(
         tool_vault_inventory,
         tool_vault_secret_prompt,
         tool_runtime_settings,
+        tool_manage_deployment,
+        tool_manage_runtime_services,
     )
     from brain.systems.personality import manage_agent_soul
+
+    def _manage_deployment(action="status", build_no_cache=False, worker_drain_timeout_seconds=None):
+        return tool_manage_deployment(
+            action=action,
+            build_no_cache=build_no_cache,
+            worker_drain_timeout_seconds=worker_drain_timeout_seconds,
+            user_id=getattr(_agent_context, "user_id", None),
+            org_id=getattr(_agent_context, "org_id", None),
+        )
+
+    def _manage_runtime_services(action="list", services=None):
+        return tool_manage_runtime_services(
+            action=action,
+            services=services,
+            user_id=getattr(_agent_context, "user_id", None),
+            org_id=getattr(_agent_context, "org_id", None),
+        )
 
     handlers = {
         # Brain tools (workspace-independent — always hit shared DB)
@@ -188,6 +221,14 @@ def _get_tool_handlers(
             user_id=getattr(_agent_context, "user_id", None),
             org_id=getattr(_agent_context, "org_id", None),
         ),
+        "read_self_context": _handle_read_self_context,
+        "read_capabilities": _handle_read_capabilities,
+        "manage_deployment": _manage_deployment,
+        "manage_runtime_services": _manage_runtime_services,
+        "transcribe_audio_attachment": lambda **kw: _patched_private(
+            "_handle_transcribe_audio_attachment",
+            _handle_transcribe_audio_attachment,
+        )(**kw),
         "manage_soul": lambda action, content=None, reason=None: manage_agent_soul(
             action,
             content=content,
@@ -207,6 +248,10 @@ def _get_tool_handlers(
             "_handle_post_chat_message",
             _handle_post_chat_message,
         )(**kw),
+        "post_slack_reply": lambda **kw: _patched_private(
+            "_handle_post_slack_reply",
+            _handle_post_slack_reply,
+        )(**kw),
         "post_thread_discussion_reply": lambda **kw: _patched_private(
             "_handle_post_thread_discussion_reply",
             _handle_post_thread_discussion_reply,
@@ -218,6 +263,14 @@ def _get_tool_handlers(
         "read_thread_discussion": lambda **kw: _patched_private(
             "_handle_read_thread_discussion",
             _handle_read_thread_discussion,
+        )(**kw),
+        "read_slack_conversation": lambda **kw: _patched_private(
+            "_handle_read_slack_conversation",
+            _handle_read_slack_conversation,
+        )(**kw),
+        "manage_slack": lambda **kw: _patched_private(
+            "_handle_manage_slack",
+            _handle_manage_slack,
         )(**kw),
         "manage_cycle": lambda **kw: _patched_private("_handle_manage_cycle", _handle_manage_cycle)(**kw),
         "manage_domain": lambda **kw: _patched_private("_handle_manage_domain", _handle_manage_domain)(**kw),
@@ -310,15 +363,41 @@ def _get_tool_handlers(
         }
 
     ws = workspace_root  # capture for closures
+
+    def _exec_command_handler(
+        command,
+        working_dir=None,
+        timeout=60,
+        workspace=None,
+        secret_env=None,
+        _resolved_secret_env=None,
+    ):
+        return _handle_exec_command(
+            command,
+            working_dir=working_dir,
+            timeout=timeout,
+            _workspace=_select_workspace(workspace, ws, allowed_workspaces),
+            _resolved_secret_env=_resolved_secret_env_arg(secret_env, _resolved_secret_env),
+        )
+
+    def _run_script_handler(
+        script,
+        description=None,
+        timeout=60,
+        workspace=None,
+        secret_env=None,
+        _resolved_secret_env=None,
+    ):
+        return _handle_run_script(
+            script,
+            description,
+            timeout,
+            _workspace=_select_workspace(workspace, ws, allowed_workspaces),
+            _resolved_secret_env=_resolved_secret_env_arg(secret_env, _resolved_secret_env),
+        )
+
     handlers.update({
-        "exec_command": lambda command, working_dir=None, timeout=60, workspace=None: (
-            _handle_exec_command(
-                command,
-                working_dir=working_dir,
-                timeout=timeout,
-                _workspace=_select_workspace(workspace, ws, allowed_workspaces),
-            )
-        ),
+        "exec_command": _exec_command_handler,
         "read_file": lambda path, workspace=None, start_line=None, end_line=None: (
             _predictive_read(
                 path,
@@ -357,14 +436,7 @@ def _get_tool_handlers(
                 _workspace=_select_workspace(workspace, ws, allowed_workspaces),
             )
         ),
-        "run_script": lambda script, description=None, timeout=60, workspace=None: (
-            _handle_run_script(
-                script,
-                description,
-                timeout,
-                _workspace=_select_workspace(workspace, ws, allowed_workspaces),
-            )
-        ),
+        "run_script": _run_script_handler,
     })
 
     # Extended tools (semantic search, file summary, test runner, etc.)
@@ -403,14 +475,16 @@ def _get_tool_handlers(
             "file_summary",
             _file_summary_with_workspace,
         )
-        handlers["test_runner"] = lambda target, pattern=None, verbose=False: (
-            extended_handlers["test_runner"](
+        def _test_runner_handler(target, pattern=None, verbose=False, secret_env=None, _resolved_secret_env=None):
+            return extended_handlers["test_runner"](
                 target,
                 pattern=pattern,
                 verbose=verbose,
                 workspace_root=_workspace_hint(),
+                _resolved_secret_env=_resolved_secret_env_arg(secret_env, _resolved_secret_env),
             )
-        )
+
+        handlers["test_runner"] = _test_runner_handler
         handlers["project_context"] = lambda path=None: (
             extended_handlers["project_context"](
                 path=path,
@@ -528,7 +602,7 @@ def _get_tool_handlers(
                 return {"error": f"operations[{idx}].args must be an object"}
             normalized_ops.append((idx, tool_name, args))
 
-        threadlocal_context = vars(_agent_context).copy()
+        threadlocal_context = snapshot_agent_context()
         parallelism = max(1, min(
             max_parallel or len(normalized_ops),
             len(normalized_ops),

@@ -10,11 +10,14 @@
     type WorkspaceAppRead,
   } from '$lib/features/workspace-apps/api/workspaceAppsApi';
   import { ConstellationIcon } from '$lib/components/constellation';
+  import type { GeneratedAppSurface } from '$lib/features/workspace-apps/domain/generatedAppSurface';
   import { workspaceApps } from '$lib/stores/workspaceApps.svelte';
   import {
     bindingAllowsField,
     bindingAllowsOperation,
   } from '$lib/utils/generatedWorkspaceAppContract';
+
+  import GeneratedAppChrome from './GeneratedAppChrome.svelte';
 
   type GeneratedUiColumn = {
     key: string;
@@ -111,7 +114,7 @@
     onclose,
   }: {
     app: WorkspaceAppRead;
-    surface?: 'workspace' | 'dock';
+    surface?: GeneratedAppSurface;
     onclose?: () => void;
   } = $props();
 
@@ -136,6 +139,7 @@
   const stateKey = $derived(String(manifest.state_key || 'default'));
   const parsedSpec = $derived(parseSpec(activeVersion?.source_code || ''));
   const spec = $derived(parsedSpec.spec);
+  const appAccent = $derived(String(app.visual_spec?.accent || '#57CFA0'));
   const domainBindings = $derived(extractDomainBindings(manifest));
   const primaryBindingAlias = $derived(
     spec?.primary_binding || Object.keys(domainBindings)[0] || null,
@@ -754,16 +758,17 @@
   }
 </script>
 
-<section class="generated-ui generated-app-shell" class:is-dock={surface === 'dock'} class:has-board={hasBoardView}>
-  <header class="generated-ui__header generated-app-shell__header">
-    <div class="generated-ui__title-block">
-      <span class="generated-ui__eyebrow">Generated UI</span>
-      <h2>{spec?.title || app.name}</h2>
-      {#if spec?.description || app.description}
-        <p>{spec?.description || app.description}</p>
-      {/if}
-    </div>
-
+<GeneratedAppChrome
+  className={`generated-app-shell generated-ui ${hasBoardView ? 'has-board' : ''}`}
+  title={spec?.title || app.name}
+  description={spec?.description || app.description}
+  eyebrow="Generated UI"
+  accent={appAccent}
+  {surface}
+  {onclose}
+  closeLabel="Close app"
+>
+  {#snippet actions()}
     <div class="generated-ui__actions">
       {#each structuredActions as action (action.key)}
         <button
@@ -787,13 +792,8 @@
       <button type="button" class="generated-ui__icon-button" title="Refresh records" onclick={loadBoundRecords}>
         <ConstellationIcon name="refresh" size={14} stroke={1.9} />
       </button>
-      {#if onclose}
-        <button type="button" class="generated-ui__icon-button" title="Close app" onclick={onclose}>
-          <ConstellationIcon name="close" size={14} stroke={1.9} />
-        </button>
-      {/if}
     </div>
-  </header>
+  {/snippet}
 
   {#if parsedSpec.error}
     <div class="generated-ui__empty">{parsedSpec.error}</div>
@@ -1028,68 +1028,35 @@
       {/each}
     </div>
   {/if}
-</section>
+</GeneratedAppChrome>
 
 <style>
-.generated-ui {
+:global(.generated-app-chrome.generated-ui) {
   width: min(760px, calc(100vw - 28px));
+  height: min(820px, calc(100vh - 112px));
   max-height: min(820px, calc(100vh - 112px));
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
   border-radius: 18px;
 }
 
-.generated-ui.has-board {
+:global(.generated-app-chrome.generated-ui.has-board) {
   width: min(1040px, calc(100vw - 28px));
 }
 
-.generated-ui.is-dock {
+:global(.generated-app-chrome.generated-ui.is-dock) {
   width: 100%;
+  height: 100%;
   max-height: none;
   min-height: 100%;
   border-radius: 0;
 }
 
-.generated-ui__header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 16px;
-  padding: 18px 18px 14px;
-}
-
-.generated-ui__title-block {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-}
-
-.generated-ui__eyebrow {
-  color: var(--constellation-color-spectral);
-  font-family: var(--constellation-font-mono, monospace);
-  font-size: 10px;
-  font-weight: 680;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
-.generated-ui h2,
-.generated-ui h3,
-.generated-ui p {
+:global(.generated-app-chrome.generated-ui) h3,
+:global(.generated-app-chrome.generated-ui) p {
   margin: 0;
   letter-spacing: 0;
 }
 
-.generated-ui h2 {
-  overflow: hidden;
-  color: var(--constellation-section-title);
-  font-size: 19px;
-  font-weight: 680;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.generated-ui p {
+:global(.generated-app-chrome.generated-ui) p {
   color: var(--constellation-section-description);
   font-size: 12px;
   line-height: 1.45;
@@ -1120,8 +1087,8 @@
   text-transform: uppercase;
 }
 
-.generated-ui input,
-.generated-ui select {
+:global(.generated-app-chrome.generated-ui) input,
+:global(.generated-app-chrome.generated-ui) select {
   min-height: 34px;
   border: 1px solid var(--constellation-control-field-border);
   border-radius: 10px;
@@ -1130,12 +1097,12 @@
   font: inherit;
 }
 
-.generated-ui input {
+:global(.generated-app-chrome.generated-ui) input {
   min-width: 0;
   padding: 0 10px;
 }
 
-.generated-ui select {
+:global(.generated-app-chrome.generated-ui) select {
   width: 100%;
   padding: 0 8px;
 }
@@ -1178,6 +1145,7 @@
 }
 
 .generated-ui__body {
+  height: 100%;
   min-height: 0;
   overflow: auto;
   scrollbar-color: color-mix(in srgb, var(--constellation-color-spectral) 28%, transparent) transparent;
@@ -1229,14 +1197,14 @@
   overflow: auto;
 }
 
-.generated-ui table {
+:global(.generated-app-chrome.generated-ui) table {
   width: 100%;
   min-width: 460px;
   border-collapse: collapse;
   font-size: 12px;
 }
 
-.generated-ui th {
+:global(.generated-app-chrome.generated-ui) th {
   padding: 0 10px 9px;
   color: var(--constellation-label-meta);
   font-family: var(--constellation-font-mono, monospace);
@@ -1247,7 +1215,7 @@
   text-transform: uppercase;
 }
 
-.generated-ui td {
+:global(.generated-app-chrome.generated-ui) td {
   max-width: 220px;
   padding: 10px;
   border-top: 1px solid var(--constellation-surface-panel-separator);
@@ -1539,13 +1507,10 @@
 }
 
 @media (max-width: 680px) {
-  .generated-ui {
+  :global(.generated-app-chrome.generated-ui) {
     width: calc(100vw - 20px);
+    height: calc(100vh - 96px);
     max-height: calc(100vh - 96px);
-  }
-
-  .generated-ui__header {
-    grid-template-columns: 1fr;
   }
 
   .generated-ui__actions {

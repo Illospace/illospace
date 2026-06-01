@@ -19,6 +19,11 @@ from brain.systems.runs.actions import (
 )
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType, EventVisibility
 from brain.systems.runs.events import activity_event, redact_tool_call_result, run_event
+from brain.systems.runs.execution_context import bind_agent_context, current_agent_context
+from brain.systems.runs.secret_mounts import (
+    handler_args_with_resolved_secret_env,
+    resolve_secret_env_mounts,
+)
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.tool_catalog.metadata import ActionPolicyResult
 
@@ -30,6 +35,7 @@ FILE_EDIT_TOOLS = frozenset({"apply_patch", "edit_file", "write_file"})
 COMMAND_OUTPUT_TOOLS = frozenset({"exec_command", "run_script", "test_runner"})
 CHAT_MESSAGE_TOOLS = frozenset({
     "post_chat_message",
+    "post_slack_reply",
     "post_thread_discussion_reply",
     "post_ai_timeline_message",
 })
@@ -141,11 +147,12 @@ class AsyncRunToolExecutor:
         manifest_id = None
         try:
             enforce_tool_scope(tool.name, tool.args, scope)
+            action_context = await self._action_context(run_id, root_run_id=root_run_id)
             manifest = build_action_manifest(
                 tool.name,
                 (),
                 tool.args,
-                context=await self._action_context(run_id, root_run_id=root_run_id),
+                context=action_context,
             )
             manifest_id = await _maybe_await(record_action_manifest(manifest)) if manifest else None
             policy_result = await self._apply_action_policy_gate(
@@ -165,9 +172,18 @@ class AsyncRunToolExecutor:
                     root_run_id=root_run_id,
                     collector=collector,
                 )
-            result = _runtime_policy_handler(tool.handler)(**tool.args)
-            if inspect.isawaitable(result):
-                result = await result
+            secret_env = await resolve_secret_env_mounts(
+                tool.name,
+                tool.args.get("secret_env"),
+                run_id=run_id,
+                context=action_context,
+            )
+            handler = _runtime_policy_handler(tool.handler)
+            handler_args = handler_args_with_resolved_secret_env(tool.name, tool.args, secret_env)
+            with bind_agent_context(_handler_context_from_action_context(action_context)):
+                result = handler(**handler_args)
+                if inspect.isawaitable(result):
+                    result = await result
         except Exception as exc:
             error_text = str(exc)
             if manifest_id:
@@ -256,29 +272,28 @@ class AsyncRunToolExecutor:
         return result
 
     async def _action_context(self, run_id: int, *, root_run_id: int | None = None) -> dict[str, Any]:
+        require_run = getattr(self.store, "require_run", None)
+        if not callable(require_run):
+            raise RuntimeError("AgentRun context unavailable: store cannot load run")
+        run = await require_run(run_id)
+        org_id = str(getattr(run, "org_id", "") or "").strip()
+        if not org_id:
+            raise RuntimeError("AgentRun missing workspace org_id")
+        user_id = str(getattr(run, "user_id", "") or "").strip() or None
+        thread_id = str(getattr(run, "thread_id", "") or "").strip() or None
+        recipe = str(getattr(run, "recipe", "") or "").strip() or "runtime"
+        resolved_root_run_id = root_run_id if root_run_id is not None else getattr(run, "root_run_id", None)
         context: dict[str, Any] = {
             "actor": f"agent-run-{run_id}",
-            "actor_id": None,
+            "actor_id": user_id,
             "actor_kind": "agent",
-            "org_id": None,
+            "org_id": org_id,
             "run_id": int(run_id),
-            "trace_id": None,
-            "worker_name": "runtime",
-            "idea_id": None,
+            "trace_id": getattr(run, "trace_id", None),
+            "worker_name": recipe,
+            "idea_id": thread_id,
+            "root_run_id": resolved_root_run_id,
         }
-        try:
-            require_run = getattr(self.store, "require_run", None)
-            run = await require_run(run_id) if callable(require_run) else None
-        except Exception:
-            run = None
-        if run is not None:
-            context["actor_id"] = str(getattr(run, "user_id", "") or "") or None
-            context["org_id"] = str(getattr(run, "org_id", "") or "") or None
-            context["trace_id"] = getattr(run, "trace_id", None)
-            context["idea_id"] = str(getattr(run, "thread_id", "") or "") or None
-            context["worker_name"] = str(getattr(run, "recipe", "") or "runtime")
-        if root_run_id is not None:
-            context["root_run_id"] = root_run_id
         return context
 
     async def _apply_action_policy_gate(
@@ -374,6 +389,28 @@ class AsyncRunToolExecutor:
         )
 
 
+def _handler_context_from_action_context(action_context: dict[str, Any]) -> dict[str, Any]:
+    """Project persisted run context into handler-visible AgentRun context."""
+
+    context: dict[str, Any] = {
+        "org_id": action_context.get("org_id"),
+        "user_id": action_context.get("actor_id"),
+        "run_id": action_context.get("run_id"),
+        "trace_id": action_context.get("trace_id"),
+        "worker_name": action_context.get("worker_name"),
+        "idea_id": action_context.get("idea_id"),
+        "root_run_id": action_context.get("root_run_id"),
+    }
+
+    existing_metadata = getattr(current_agent_context(), "execution_metadata", None)
+    metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+    for key in ("org_id", "user_id", "run_id", "trace_id", "worker_name", "idea_id", "root_run_id"):
+        metadata.pop(key, None)
+        metadata[key] = context.get(key)
+    context["execution_metadata"] = metadata
+    return context
+
+
 async def execute_tool(
     store: AsyncAgentRunStore,
     run_id: int,
@@ -414,9 +451,19 @@ def wrap_tool_handlers(
             continue
 
         async def _handler(_tool_name=tool_name, _handler=handler, **kwargs):
+            tool_args = dict(kwargs or {})
+            handler_for_execution = _handler
+            if _tool_name == "spawn_worker":
+                async def _handler_with_runtime_run_id(**inner_kwargs):
+                    return await _maybe_await(
+                        _handler(_runtime_run_id=run_id, **inner_kwargs)
+                    )
+
+                handler_for_execution = _handler_with_runtime_run_id
+
             return await executor.execute(
                 run_id,
-                ToolExecution(name=_tool_name, args=dict(kwargs or {}), handler=_handler),
+                ToolExecution(name=_tool_name, args=tool_args, handler=handler_for_execution),
                 root_run_id=root_run_id,
                 scope=scope,
                 collector=collector,

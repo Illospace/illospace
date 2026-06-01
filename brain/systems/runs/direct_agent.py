@@ -901,6 +901,13 @@ async def _update_thread_handoff_after_run_async(
         payload,
         user_id=user_id,
     ))
+    if run_id is not None:
+        try:
+            from brain.systems.cortex.thread_read_model import refresh_thread_read_model_for_run_id
+
+            await refresh_thread_read_model_for_run_id(run_id, payload)
+        except Exception as exc:
+            logger.debug("Agent %s: thread preview refresh failed: %s", session_id, exc)
     if fallback_error:
         logger.debug("Agent %s: post-run handoff fallback used: %s", session_id, fallback_error)
     logger.info(
@@ -1357,6 +1364,10 @@ async def run_agent_async(
     _previous_agent_session_id = getattr(_agent_context, "session_id", _session_sentinel)
     context_attrs = {
         "session_id": session_id,
+        "start_time": start_time,
+        "reply_contents": [],
+        "tool_calls_log": [],
+        "recent_tool_results": [],
         "final_reply_review": None,
     }
     if workspace_root:
@@ -1383,6 +1394,11 @@ async def run_agent_async(
         chat_trigger = metadata["target_ref"].get("chat_trigger")
     if isinstance(chat_trigger, dict):
         context_attrs["chat_trigger"] = dict(chat_trigger)
+    slack_trigger = metadata.get("slack_trigger")
+    if not isinstance(slack_trigger, dict) and isinstance(metadata.get("target_ref"), dict):
+        slack_trigger = metadata["target_ref"].get("slack_trigger")
+    if isinstance(slack_trigger, dict):
+        context_attrs["slack_trigger"] = dict(slack_trigger)
     if run_id is not None:
         context_attrs["run_id"] = run_id
     _agent_agent_context = bind_agent_context(context_attrs)

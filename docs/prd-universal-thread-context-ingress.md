@@ -63,10 +63,10 @@ The relationship model is:
 
 The canonical external/MCP tool set is:
 
-- `illo_submit`: universal ingress for new context, traces, artifacts, or
-  progress from a personal agent to Illo. It acknowledges receipt quickly,
-  records the context through inbound coordination, and returns any immediately
-  available absolute Thread URL.
+- `illo_submit`: universal ingress for new context, traces, artifacts, progress,
+  instructions, or reflections from an external agent/service to Illo. It
+  acknowledges receipt quickly, records the submission through inbound
+  coordination, and queues Illo headlessly when judgment is needed.
 - `illo_read`: non-mutating read/query access to information Illo already has
   or can reason over. This is not team-visible by default.
 - `illo_act`: an explicit, human-directed request for Illo to coordinate or
@@ -102,8 +102,8 @@ MVP proof loop:
 ```text
 personal agent submits context
 -> inbound coordination records/routes it
--> Illo may create or update a Thread
--> existing Thread UI renders submitted context
+-> Illo may attach it to a correlated Thread or store it event-only
+-> existing Thread UI renders attached context
 -> Discussion exists as an attached comment surface
 -> @illo from Discussion acknowledges there and can act through surface tools
 ```
@@ -472,8 +472,8 @@ The loop is:
 ```text
 personal agent submits context
 -> inbound coordination records/routes it
--> Illo may create or update a Thread
--> existing Thread UI renders submitted context
+-> Illo may attach it to a correlated Thread or store it event-only
+-> existing Thread UI renders attached context
 -> Discussion exists as an attached comment surface
 -> @illo from Discussion acknowledges there and can act through surface tools
 ```

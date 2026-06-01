@@ -14,6 +14,15 @@ from brain.platform.db.models.notification import (
     NOTIFICATION_KIND_WORKSPACE_THREAD_ATTENTION,
     NOTIFICATION_SOURCE_WORKSPACE,
 )
+from brain.systems.cortex.object_references import (
+    SOURCE_IDEA_THREAD,
+    merge_object_reference_metadata,
+    store_object_references_for_source,
+)
+from brain.systems.cortex.thread_read_model import (
+    deterministic_preview_summary,
+    refresh_thread_read_model,
+)
 from brain.systems.cortex.status import (
     ASSISTANT_REPLY_BLOCKED_IDEA_STATUSES,
     ASSISTANT_REPLY_UNREAD_IDEA_STATUSES,
@@ -168,6 +177,7 @@ def _next_status_for_message(role: str, current_status: str | None) -> str | Non
 
 def _message_payload(thread_msg: IdeaThread, *, actor: Mapping[str, Any], user_id: str | None) -> dict[str, Any]:
     created_at = getattr(thread_msg, "created_at", None)
+    metadata = thread_msg.metadata_ if isinstance(thread_msg.metadata_, dict) else {}
     payload = {
         "id": thread_msg.id,
         "idea_id": thread_msg.idea_id,
@@ -179,6 +189,12 @@ def _message_payload(thread_msg: IdeaThread, *, actor: Mapping[str, Any], user_i
         "message_type": thread_msg.message_type,
         "created_at": created_at.isoformat() if created_at else None,
     }
+    object_references = metadata.get("object_references") or []
+    thread_references = metadata.get("thread_references") or []
+    if object_references:
+        payload["object_references"] = object_references
+    if thread_references:
+        payload["thread_references"] = thread_references
     if user_id and actor.get("name"):
         payload["user_name"] = actor.get("name")
         payload["user_color"] = actor.get("color", "#6366f1")
@@ -480,6 +496,30 @@ async def post_thread_message(
     )
     await session.flush()
 
+    notification_org_id = _actor_org_id(command, idea)
+    if notification_org_id:
+        references = await store_object_references_for_source(
+            session,
+            source_type=SOURCE_IDEA_THREAD,
+            source_id=thread_msg.id,
+            org_id=notification_org_id,
+            text=content,
+            user_id=user_id,
+        )
+        if references:
+            thread_msg.metadata_ = merge_object_reference_metadata(thread_msg.metadata_, references)
+            metadata = thread_msg.metadata_
+
+    if role == "user" and not getattr(idea, "preview_summary", None):
+        preview = deterministic_preview_summary(title=getattr(idea, "title", None), description=content)
+        if preview:
+            await refresh_thread_read_model(
+                session,
+                idea,
+                preview_summary=preview,
+                preview_source="deterministic",
+            )
+
     await _maybe_append_live_guidance(
         append_live_guidance,
         thread_msg=thread_msg,
@@ -490,7 +530,6 @@ async def post_thread_message(
         user_id=user_id,
     )
 
-    notification_org_id = _actor_org_id(command, idea)
     notification_user_ids = await _notify_mentions(
         idea=idea,
         content=content,
@@ -579,6 +618,18 @@ async def mirror_run_final_answer(
         message_type="agent_response",
     )
     await session.flush()
+    org_id = str(getattr(idea, "org_id", None) or "") or None
+    if org_id:
+        references = await store_object_references_for_source(
+            session,
+            source_type=SOURCE_IDEA_THREAD,
+            source_id=thread_msg.id,
+            org_id=org_id,
+            text=text,
+            user_id=None,
+        )
+        if references:
+            thread_msg.metadata_ = merge_object_reference_metadata(thread_msg.metadata_, references)
     return thread_msg, _message_payload(thread_msg, actor={}, user_id=None)
 
 

@@ -47,6 +47,12 @@ class AgentRunRow(Base, TimestampMixin):
         Index("ix_agent_runs_parent_run_id", "parent_run_id"),
         Index("ix_agent_runs_parent_created", "parent_run_id", "created_at", "id"),
         Index("ix_agent_runs_trace_id", "trace_id"),
+        UniqueConstraint(
+            "org_id",
+            "source_idempotency_scope",
+            "source_idempotency_key",
+            name="uq_agent_runs_org_source_idempotency",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -73,6 +79,8 @@ class AgentRunRow(Base, TimestampMixin):
     model_policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=sql_text("'{}'::jsonb"), default=dict)
     context_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False, server_default=sql_text("'{}'::jsonb"), default=dict)
+    source_idempotency_scope: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    source_idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

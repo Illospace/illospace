@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import importlib
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -25,6 +24,7 @@ from brain.platform.db.models.inbound import (
     InboundSourcePolicyRow,
 )
 from brain.systems.external_agents import service as external_agents
+from brain.systems.cortex.thread_links import thread_link_payload
 from brain.systems.inbound.status import (
     STATUS_FAILED,
     STATUS_PROCESSED,
@@ -40,6 +40,9 @@ ACTION_DOMAIN_PROJECTION_UPSERT = "domain_projection.upsert"
 ACTION_ILO_REQUIRED = "ilo_required"
 SUBMISSION_ENVELOPE_KIND = "submission"
 ACTION_ILLO_SUBMIT_QUEUED = "illo.submit_queued"
+SPECIAL_ENVELOPE_HANDLER_PATHS = {
+    "slack_message": "brain.systems.slack.inbound:process_slack_message_envelope",
+}
 
 DOMAIN_PROJECTION_ACTIONS = frozenset(
     {ACTION_DOMAIN_PROJECTION_UPSERT, "domain_projection", "create_domain_record"}
@@ -52,7 +55,6 @@ MAX_INBOUND_KIND_LENGTH = 40
 MAX_INBOUND_ORIGIN_LENGTH = 240
 MAX_TRIAGE_MESSAGE_CHARS = 8000
 MAX_TRIAGE_PAYLOAD_CHARS = 5000
-DEFAULT_PUBLIC_APP_URL = "http://localhost:8080"
 
 
 class InboundValidationError(ValueError):
@@ -201,6 +203,14 @@ async def submit_inbound_envelope(
                 event=event,
                 normalized=normalized,
             )
+        special_result = await _process_registered_envelope(
+            session,
+            context=context,
+            event=event,
+            normalized=normalized,
+        )
+        if special_result is not None:
+            return special_result
 
         policy = await match_source_policy(
             session,
@@ -522,6 +532,23 @@ async def _store_inbound_event(
             return existing, True
         raise
     return event, False
+
+
+async def _process_registered_envelope(
+    session: AsyncSession,
+    *,
+    context: _ConnectionContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    handler_path = SPECIAL_ENVELOPE_HANDLER_PATHS.get(str(normalized.get("kind") or ""))
+    if handler_path is None:
+        return None
+
+    module_name, function_name = handler_path.split(":", 1)
+    module = importlib.import_module(module_name)
+    handler = getattr(module, function_name)
+    return await handler(session, context=context, event=event, normalized=normalized)
 
 
 async def _projection_for_policy(
@@ -1180,42 +1207,15 @@ def _submission_tool_use(handling: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _public_app_base_url() -> str:
-    raw = (
-        os.environ.get("ILLO_PUBLIC_URL")
-        or os.environ.get("ILLO_DASHBOARD_URL")
-        or DEFAULT_PUBLIC_APP_URL
-    ).strip()
-    parsed = urlsplit(raw)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return DEFAULT_PUBLIC_APP_URL
-    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
-
-
-def _thread_route_for_id(thread_id: Any) -> str:
-    return f"/cortex?idea={thread_id}"
-
-
-def _thread_url_for_route(route: str) -> str:
-    return f"{_public_app_base_url()}{route}"
-
-
 def _with_thread_links(outcome: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(outcome or {})
     thread_id = _clean_optional(result.get("thread_id") or result.get("idea_id"))
     if not thread_id:
         return result
-    route = _clean_optional(result.get("thread_route"))
-    existing_url = _clean_optional(result.get("url"))
-    if route is None and existing_url and existing_url.startswith("/"):
-        route = existing_url
-    route = route or _thread_route_for_id(thread_id)
-    thread_url = _clean_optional(result.get("thread_url"))
-    if thread_url is None or thread_url.startswith("/"):
-        thread_url = _thread_url_for_route(route)
-    result["thread_route"] = route
-    result["thread_url"] = thread_url
-    result["url"] = thread_url
+    links = thread_link_payload(thread_id)
+    result["thread_route"] = links["thread_route"]
+    result["thread_url"] = links["thread_url"]
+    result["url"] = links["thread_url"]
     return result
 
 

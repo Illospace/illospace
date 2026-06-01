@@ -77,14 +77,15 @@ Local repo config before package publish:
 
 ## Tools
 
-- `illo_submit`: default path for personal agents sending ordered context or
-  work handoffs to Illo. Sends intent, parts, provenance, constraints,
-  correlation, and idempotency information so Illo can decide routing.
+- `illo_submit`: default async path for personal agents sending ordered context,
+  instructions, or work handoffs to Illo. Sends a message, parts, provenance,
+  constraints, correlation, response hints, and idempotency information so Illo
+  can decide what to do.
 - `illo_read`: non-mutating workspace read lane. Use for search, known Thread
-  or record reads, teammate resolution, and private Illo context asks.
+  or Domain reads, teammate resolution, and capability discovery.
 - `illo_act`: explicit user-authorized action lane. Use for visible team
-  coordination such as creating/updating Threads, notifying teammates, or
-  asking Illo to actively respond.
+  coordination such as creating/updating Threads, writing Domain records, or
+  asking Illo to actively respond through a named capability.
 - `illo_get_result`: retrieve or poll asynchronous results returned by
   `illo_submit`, `illo_read`, or `illo_act`.
 
@@ -103,8 +104,8 @@ payload:
 
 ```json
 {
-  "intent": "Share the Codex thread so the team can inspect the exact context and decide what to do next.",
-  "origin": "codex.context",
+  "message": "Review the Codex thread and decide what the team should do next.",
+  "origin": "codex.submit",
   "source_tool": "codex",
   "repo": "illospace-project",
   "branch": "codex/universal-thread-context",
@@ -128,14 +129,17 @@ payload:
   "correlation": {
     "thread_id": "optional-existing-illo-thread-id"
   },
+  "response": {
+    "mode": "webhook"
+  },
   "idempotency_key": "codex:universal-thread-context:2026-05-21T18:30Z"
 }
 ```
 
-The submission may include `correlation.thread_id` when the user explicitly
-means to attach context to an existing Thread. It should not choose projects,
-pins, teammates, or workflow-specific outcomes. Illo owns coordination in the
-team workspace.
+The submission may include `correlation.thread_id` or `correlation.thread_url`
+when the user is already working around an existing Thread. It should not choose
+projects, pins, teammates, or workflow-specific outcomes. Illo owns coordination
+in the team workspace.
 
 ## Read
 
@@ -144,13 +148,10 @@ A typical payload:
 
 ```json
 {
-  "request": "Find related roadmap context before I share this implementation.",
-  "resource": "workspace",
-  "query": "universal thread context ingress",
-  "limit": 10,
-  "context": {
-    "repo": "illospace-project",
-    "branch": "codex/universal-thread-context"
+  "capability": "workspace.search",
+  "arguments": {
+    "query": "universal thread context ingress",
+    "limit": 10
   }
 }
 ```
@@ -162,16 +163,14 @@ Illo to actively coordinate. A typical payload:
 
 ```json
 {
-  "intent": "Share this implementation status with the team.",
-  "action": "create_thread",
-  "target": {
-    "kind": "thread"
-  },
-  "content": {
+  "capability": "thread.create",
+  "arguments": {
     "title": "Universal Thread context ingress update",
-    "body": "Implemented local MCP forwarding and tests."
+    "body": "Implemented local MCP forwarding and tests.",
+    "teammate_user_ids": ["user_123"],
+    "trigger_illo": false
   },
-  "teammate_user_ids": ["user_123"],
+  "reason": "Share this implementation status with the team.",
   "idempotency_key": "codex:universal-thread-context:share-status"
 }
 ```
@@ -184,6 +183,7 @@ the original request:
 ```json
 {
   "result_id": "result_123",
-  "wait_ms": 1000
+  "include_payload": true,
+  "limit": 10
 }
 ```

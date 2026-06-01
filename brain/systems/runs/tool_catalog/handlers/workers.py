@@ -46,21 +46,35 @@ def _current_agent_value(name: str) -> Any:
 
 
 def _current_run_id() -> int | None:
+    explicit_run_id = _coerce_run_id(getattr(_agent_context, "run_id", None))
+    if explicit_run_id is not None:
+        return explicit_run_id
+
+    execution_metadata = getattr(_agent_context, "execution_metadata", None)
+    if isinstance(execution_metadata, Mapping):
+        metadata_run_id = _coerce_run_id(execution_metadata.get("run_id"))
+        if metadata_run_id is not None:
+            return metadata_run_id
+
     run = getattr(_agent_context, "run", None)
     candidates = (
         getattr(run, "run_id", None),
         getattr(run, "id", None),
-        getattr(_agent_context, "run_id", None),
-        _current_agent_value("run_id"),
     )
     for candidate in candidates:
-        if candidate in (None, ""):
-            continue
-        try:
-            return int(candidate)
-        except (TypeError, ValueError):
-            continue
+        run_id = _coerce_run_id(candidate)
+        if run_id is not None:
+            return run_id
     return None
+
+
+def _coerce_run_id(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _current_mapping(name: str) -> dict[str, Any]:
@@ -163,13 +177,14 @@ async def _handle_spawn_worker(
     risk_level: str = "medium",
     tool_policy: dict | None = None,
     metadata: dict | None = None,
+    _runtime_run_id: int | str | None = None,
     **_: Any,
 ) -> str:
     objective_text = str(objective or "").strip()
     if not objective_text:
         return json.dumps({"error": "spawn_worker requires objective"})
 
-    parent_run_id = _current_run_id()
+    parent_run_id = _coerce_run_id(_runtime_run_id) or _current_run_id()
     if parent_run_id is None:
         return json.dumps({"error": "spawn_worker requires an active AgentRun context"})
 

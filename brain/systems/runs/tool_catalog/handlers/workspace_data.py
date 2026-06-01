@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 from sqlalchemy import String, and_, cast, func, or_, select
 
+from brain.systems.cortex.thread_links import thread_id_from_reference, thread_link_payload
 from brain.systems.runs.tool_definitions import WORKSPACE_OVERVIEW_SPARSE_GUIDANCE
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, logger
 
@@ -196,6 +197,24 @@ def _valid_uuid(value: Any) -> str | None:
         return None
 
 
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _thread_id_from_first_reference(*values: Any) -> str | None:
+    for value in values:
+        text = _optional_text(value)
+        if not text:
+            continue
+        parsed = thread_id_from_reference(text, allow_raw_id=True)
+        if parsed:
+            return parsed
+    return None
+
+
 def _normalize_postgres_uuid_filter(
     payload: dict[str, Any],
     *,
@@ -203,9 +222,10 @@ def _normalize_postgres_uuid_filter(
     value: str | None,
     fallback: str = _ZERO_UUID,
 ) -> str | None:
-    if value is None:
+    text = _optional_text(value)
+    if text is None:
         return None
-    normalized = _valid_uuid(value)
+    normalized = _valid_uuid(text)
     if normalized:
         return normalized
     payload["warnings"].append({
@@ -270,6 +290,34 @@ def _idea_title(idea: Any) -> str | None:
     if not idea:
         return None
     return idea.display_title or idea.title
+
+
+def _thread_reference_for_idea(idea: Any, idea_id: Any = None) -> dict[str, Any] | None:
+    resolved_id = str(idea_id or getattr(idea, "id", "") or "").strip()
+    if not resolved_id:
+        return None
+    return {
+        "type": "thread_reference",
+        "object_type": "thread",
+        "object_id": resolved_id,
+        "thread_id": resolved_id,
+        "status": "available",
+        "title": _idea_title(idea) or "Untitled thread",
+        "preview_summary": getattr(idea, "preview_summary", None),
+        "preview_source": getattr(idea, "preview_source", None),
+        "preview_updated_at": _serialize_dt(getattr(idea, "preview_updated_at", None)),
+        **thread_link_payload(resolved_id),
+    }
+
+
+def _thread_link_fields(idea: Any, idea_id: Any = None) -> dict[str, Any]:
+    reference = _thread_reference_for_idea(idea, idea_id)
+    if not reference:
+        return {}
+    return {
+        **thread_link_payload(reference["thread_id"]),
+        "thread_reference": reference,
+    }
 
 
 def _add_error(payload: dict[str, Any], source: str, exc: Exception) -> None:
@@ -436,6 +484,7 @@ async def _query_runs(
             "idea_id": str(run.thread_id),
             "thread_id": str(run.thread_id),
             "idea_title": _idea_title(idea),
+            **_thread_link_fields(idea, run.thread_id),
             "user_id": str(run.user_id) if run.user_id is not None else None,
             "user_name": user.name if user else None,
             "skill": (((run.metadata_ or {}).get("routing") or {}).get("selected_skill"))
@@ -504,22 +553,26 @@ async def _query_threads(
         stmt = stmt.where(text_match)
 
     rows = await _session_execute_all(session, stmt)
-    payload["sources"]["threads"] = [
-        {
+    thread_rows: list[dict[str, Any]] = []
+    for thread, idea, user in rows:
+        links = thread_link_payload(thread.idea_id) if thread.idea_id is not None else {}
+        thread_rows.append({
             "id": int(thread.id),
             "type": "thread_message",
             "created_at": _serialize_dt(thread.created_at),
             "idea_id": str(thread.idea_id) if thread.idea_id is not None else None,
+            "thread_id": str(thread.idea_id) if thread.idea_id is not None else None,
             "idea_title": _idea_title(idea),
+            **links,
+            "thread_reference": _thread_reference_for_idea(idea, thread.idea_id),
             "role": thread.role,
             "message_type": thread.message_type,
             "user_id": str(thread.user_id) if thread.user_id is not None else None,
             "user_name": user.name if user else None,
             "content": _snippet(thread.content, 520),
             "provenance": {"table": "idea_threads", "id": int(thread.id)},
-        }
-        for thread, idea, user in rows
-    ]
+        })
+    payload["sources"]["threads"] = thread_rows
 
 
 async def _query_ideas(
@@ -552,23 +605,30 @@ async def _query_ideas(
         stmt = stmt.where(text_match)
 
     rows = await _session_scalars_all(session, stmt)
-    payload["sources"]["ideas"] = [
-        {
+    idea_rows: list[dict[str, Any]] = []
+    for idea in rows:
+        links = thread_link_payload(idea.id)
+        idea_rows.append({
             "id": str(idea.id),
             "type": "idea",
             "created_at": _serialize_dt(idea.created_at),
             "updated_at": _serialize_dt(idea.updated_at),
             "status": idea.status,
             "title": idea.display_title or idea.title,
+            "thread_id": str(idea.id),
+            **links,
+            "thread_reference": _thread_reference_for_idea(idea),
             "description": _snippet(idea.description),
+            "preview_summary": getattr(idea, "preview_summary", None),
+            "preview_source": getattr(idea, "preview_source", None),
+            "preview_updated_at": _serialize_dt(getattr(idea, "preview_updated_at", None)),
             "user_id": str(idea.user_id) if idea.user_id is not None else None,
             "org_id": str(idea.org_id) if idea.org_id is not None else None,
             "active_agents": idea.active_agents,
             "working_memory": _snippet(idea.working_memory, 360),
             "provenance": {"table": "ideas", "id": str(idea.id)},
-        }
-        for idea in rows
-    ]
+        })
+    payload["sources"]["ideas"] = idea_rows
 
 
 async def _query_tool_calls(
@@ -619,6 +679,7 @@ async def _query_tool_calls(
             "called_at": _serialize_dt(event.created_at),
             "run_id": int(event.run_id),
             "idea_id": str(run.thread_id),
+            **_thread_link_fields(idea, run.thread_id),
             "idea_title": _idea_title(idea),
             "run_status": run.status if run else None,
             "tool_name": (event.payload or {}).get("tool_name"),
@@ -750,6 +811,7 @@ async def _query_project_attachments(
             "type": "project_attachment",
             "created_at": _serialize_dt(attachment.created_at),
             "idea_id": str(attachment.idea_id),
+            **_thread_link_fields(idea, attachment.idea_id),
             "idea_title": _idea_title(idea),
             "project_profile_id": str(attachment.project_profile_id) if attachment.project_profile_id else None,
             "project_name": profile.name if profile else None,
@@ -928,6 +990,7 @@ async def _query_domain_events(
             "actor_id": event.actor_id,
             "run_id": event.run_id,
             "idea_id": str(event.idea_id) if event.idea_id else None,
+            **_thread_link_fields(None, event.idea_id),
             "reason": _snippet(event.reason),
             "provenance": {"table": "domain_events", "id": int(event.id)},
         }
@@ -1102,6 +1165,11 @@ async def _query_cycles(
             "user_id": str(cycle.user_id) if cycle.user_id is not None else None,
             "user_name": user.name if user else None,
             "org_id": str(cycle.org_id) if cycle.org_id is not None else None,
+            "workspace_id": str(cycle.org_id) if cycle.org_id is not None else None,
+            "creator_type": getattr(cycle, "creator_type", None),
+            "creator_id": getattr(cycle, "creator_id", None),
+            "maintainer_type": getattr(cycle, "maintainer_type", None),
+            "maintainer_id": getattr(cycle, "maintainer_id", None),
             "name": cycle.name,
             "prompt": _snippet(cycle.prompt, 520),
             "schedule_expr": cycle.schedule_expr,
@@ -1109,6 +1177,7 @@ async def _query_cycles(
             "enabled": bool(cycle.enabled),
             "target_idea_id": str(cycle.target_idea_id) if cycle.target_idea_id else None,
             "idea_id": str(cycle.target_idea_id) if cycle.target_idea_id else None,
+            **_thread_link_fields(idea, cycle.target_idea_id),
             "idea_title": _idea_title(idea),
             "next_run_at": _serialize_dt(cycle.next_run_at),
             "last_run_at": _serialize_dt(cycle.last_run_at),
@@ -1178,14 +1247,20 @@ async def _query_cycle_runs(
             "started_at": _serialize_dt(run.started_at),
             "completed_at": _serialize_dt(run.completed_at),
             "cycle_id": int(run.cycle_id),
+            "revision_id": int(run.revision_id) if getattr(run, "revision_id", None) is not None else None,
             "cycle_name": cycle.name,
             "status": run.status,
             "error": _snippet(run.error),
             "skip_reason": run.skip_reason,
             "idea_id": str(run.idea_id) if run.idea_id else None,
+            **_thread_link_fields(idea, run.idea_id),
             "idea_title": _idea_title(idea),
             "run_id": int(run.run_id) if run.run_id is not None else None,
             "prompt_snapshot": _snippet(run.prompt_snapshot, 520),
+            "guidance_snapshot": _jsonable(getattr(run, "guidance_snapshot", []) or []),
+            "output_targets_snapshot": _jsonable(getattr(run, "output_targets_snapshot", []) or []),
+            "context_snapshot": _jsonable(getattr(run, "context_snapshot", {}) or {}),
+            "self_review_summary": _snippet(getattr(run, "self_review_summary", None), 520),
             "user_id": str(cycle.user_id) if cycle.user_id else None,
             "user_name": user.name if user else None,
             "provenance": {"table": "cycle_runs", "id": int(run.id)},
@@ -1311,6 +1386,11 @@ def _build_activity_items(payload: Mapping[str, Any], *, limit: int = 30) -> lis
                 "user_name": record.get("user_name"),
                 "idea_id": record.get("idea_id"),
                 "idea_title": record.get("idea_title"),
+                "thread_id": record.get("thread_id") or record.get("idea_id"),
+                "thread_route": record.get("thread_route"),
+                "thread_url": record.get("thread_url") or record.get("url"),
+                "url": record.get("url") or record.get("thread_url"),
+                "thread_reference": record.get("thread_reference"),
                 "provenance": record.get("provenance"),
             })
     items.sort(key=_activity_sort_key, reverse=True)
@@ -1653,6 +1733,10 @@ async def query_workspace_data(
     """Query typed workspace data with source-level failure isolation."""
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
+    org_id = _optional_text(org_id)
+    user_id = _optional_text(user_id)
+    idea_id = _thread_id_from_first_reference(idea_id)
+    object_key = _optional_text(object_key)
     source_names = _normalize_sources(sources)
     start, end, resolved_window = _time_bounds(time_window, start_at=start_at, end_at=end_at)
     per_source_limit = min(max(int(limit or 20), 1), 100)
@@ -1713,7 +1797,7 @@ async def query_workspace_data(
         if not org_id and not user_id:
             payload["warnings"].append({
                 "source": "scope",
-                "error": "query_workspace_data requires user_id or org_id for DB-backed workspace sources",
+                "error": "query_workspace_data could not access this workspace or user context",
             })
             adapters = _source_adapters()
             source_names = [source for source in source_names if not adapters[source].db_backed]
@@ -1771,6 +1855,7 @@ async def query_workspace_data(
 def _workspace_query_scope(
     *,
     idea_id: str | None = None,
+    thread_url: str | None = None,
     domain_id: int | None = None,
     object_key: str | None = None,
     include_archived: bool = False,
@@ -1778,16 +1863,20 @@ def _workspace_query_scope(
 ) -> dict[str, Any]:
     run = getattr(_agent_context, "run", None)
     execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
-    scoped_idea_id = idea_id
-    if scoped_idea_id is None and default_current_idea:
-        scoped_idea_id = getattr(_agent_context, "idea_id", None) or execution_metadata.get("idea_id")
+    explicit_thread_scope = thread_url is not None or idea_id is not None
+    if not explicit_thread_scope and default_current_idea:
+        scoped_idea_id = _thread_id_from_first_reference(
+            getattr(_agent_context, "idea_id", None) or execution_metadata.get("idea_id")
+        )
+    else:
+        scoped_idea_id = _thread_id_from_first_reference(thread_url, idea_id)
     return {
         "idea_id": scoped_idea_id,
         "domain_id": domain_id,
-        "object_key": object_key,
+        "object_key": _optional_text(object_key),
         "include_archived": include_archived,
-        "user_id": getattr(_agent_context, "user_id", None) or execution_metadata.get("user_id"),
-        "org_id": getattr(_agent_context, "org_id", None) or execution_metadata.get("org_id"),
+        "user_id": _optional_text(getattr(_agent_context, "user_id", None) or execution_metadata.get("user_id")),
+        "org_id": _optional_text(getattr(_agent_context, "org_id", None) or execution_metadata.get("org_id")),
         "run_id": getattr(run, "run_id", None) or execution_metadata.get("run_id"),
     }
 
@@ -1795,6 +1884,7 @@ def _workspace_query_scope(
 async def _query_workspace_data_for_agent(**kwargs: Any) -> dict[str, Any]:
     scope_kwargs = _workspace_query_scope(
         idea_id=kwargs.pop("idea_id", None),
+        thread_url=kwargs.pop("thread_url", None),
         domain_id=kwargs.pop("domain_id", None),
         object_key=kwargs.pop("object_key", None),
         include_archived=bool(kwargs.pop("include_archived", False)),
@@ -1877,6 +1967,7 @@ async def _handle_query_workspace_data(
     end_at: str | None = None,
     limit: int = 20,
     idea_id: str | None = None,
+    thread_url: str | None = None,
     domain_id: int | None = None,
     object_key: str | None = None,
     include_archived: bool = False,
@@ -1891,6 +1982,7 @@ async def _handle_query_workspace_data(
         end_at=end_at,
         limit=limit,
         idea_id=idea_id,
+        thread_url=thread_url,
         domain_id=domain_id,
         object_key=object_key,
         include_archived=include_archived,
@@ -1942,6 +2034,7 @@ async def _handle_read_team_activity(
     end_at: str | None = None,
     limit: int = 20,
     idea_id: str | None = None,
+    thread_url: str | None = None,
 ) -> str:
     payload = await _query_workspace_data_for_agent(
         sources=["activity"],
@@ -1953,10 +2046,12 @@ async def _handle_read_team_activity(
         end_at=end_at,
         limit=limit,
         idea_id=idea_id,
+        thread_url=thread_url,
     )
     payload = _workspace_view_payload("team_activity", payload)
     payload["answering_guidance"] = [
         "Base recaps on activity_items first, then use per-source rows for detail.",
+        "When pointing someone to existing work in a Cortex Thread, include the returned thread_url with the Thread title.",
         "When results are empty, say what was checked instead of guessing from memory.",
     ]
     return json.dumps(payload, default=str)

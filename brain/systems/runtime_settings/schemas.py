@@ -11,6 +11,10 @@ ConnectionStatus = Literal["connected", "missing", "error"]
 EmbedderKey = Literal["local_gpu", "local_cpu", "openai", "gemini"]
 RerankerKey = Literal["weighted"]
 RuntimeUpdateStatus = Literal["idle", "running"]
+RuntimeServiceStatus = Literal["idle", "running"]
+VoiceProviderKey = Literal["openai", "gemini"]
+VoiceLanguageKey = Literal["auto", "en", "fr"]
+VoiceStatus = Literal["ready", "missing", "error"]
 
 
 class RuntimeOption(BaseModel):
@@ -59,6 +63,25 @@ class RuntimeMemoryCheckRead(BaseModel):
     duration_ms: int | None = None
 
 
+class RuntimeVoiceRead(BaseModel):
+    provider: VoiceProviderKey
+    model: str
+    source: Literal["memory"] = "memory"
+    language: VoiceLanguageKey = "auto"
+    status: VoiceStatus
+    detail: str | None = None
+    provider_options: list[RuntimeOption] = Field(default_factory=list)
+    language_options: list[RuntimeOption] = Field(default_factory=list)
+
+
+class RuntimeVoiceSessionRead(BaseModel):
+    provider: VoiceProviderKey
+    model: str
+    language: VoiceLanguageKey = "auto"
+    client_secret: str
+    expires_at: int | None = None
+
+
 class RuntimePermissionsRead(BaseModel):
     can_manage_settings: bool
 
@@ -73,10 +96,29 @@ class RuntimeUpdateRead(BaseModel):
     detail: str | None = None
 
 
+class RuntimeServiceRead(BaseModel):
+    id: str
+    name: str
+    description: str
+    restartable: bool = True
+    optional: bool = False
+
+
+class RuntimeServicesRead(BaseModel):
+    status: RuntimeServiceStatus
+    available: bool
+    services: list[RuntimeServiceRead]
+    requested_services: list[str] = Field(default_factory=list)
+    started_at: datetime | None = None
+    log_path: str | None = None
+    detail: str | None = None
+
+
 class RuntimeSettingsRead(BaseModel):
     connection: RuntimeConnectionRead
     models: RuntimeModelsRead
     memory: RuntimeMemoryRead
+    voice: RuntimeVoiceRead
     permissions: RuntimePermissionsRead
 
 
@@ -108,3 +150,8 @@ class RuntimeMemoryUpdate(BaseModel):
     embedder: EmbedderKey
     embedding_model: str | None = None
     reranker: RerankerKey = "weighted"
+
+
+class RuntimeVoiceUpdate(BaseModel):
+    provider: VoiceProviderKey = "openai"
+    language: VoiceLanguageKey = "auto"

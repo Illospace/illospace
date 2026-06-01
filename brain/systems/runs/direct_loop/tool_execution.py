@@ -10,6 +10,7 @@ import logging
 import os
 from typing import Any, Callable
 
+from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
 from brain.systems.runs.tool_catalog.registry import output_budget_chars_for_tool
 
 logger = logging.getLogger("agent")
@@ -17,6 +18,9 @@ logger = logging.getLogger("agent")
 _DEFAULT_TOOL_TIMEOUT_SECONDS = 180.0
 _DEFAULT_TOOL_TIMEOUT_GRACE_SECONDS = 5.0
 _DEFAULT_TOOL_TIMEOUT_MAX_SECONDS = 900.0
+_RECENT_TOOL_RESULT_LIMIT = 8
+_RECENT_TOOL_RESULT_PREVIEW_CHARS = 1200
+_RECENT_TOOL_ARGS_PREVIEW_CHARS = 400
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,38 @@ def _extract_model_visible_tool_content(result: Any) -> tuple[Any, Any | None]:
     return cleaned, model_content
 
 
+def _record_agent_tool_result(agent_context, resolved: ResolvedToolCall, result_text: str) -> None:
+    if agent_context is None:
+        return
+    try:
+        tool_log = getattr(agent_context, "tool_calls_log", None)
+        if not isinstance(tool_log, list):
+            tool_log = []
+        tool_log.append(resolved.tool_name)
+        setattr(agent_context, "tool_calls_log", tool_log)
+
+        try:
+            args_preview = json.dumps(resolved.tool_input, sort_keys=True, default=str)
+        except Exception:
+            args_preview = str(resolved.tool_input)
+
+        recent = getattr(agent_context, "recent_tool_results", None)
+        if not isinstance(recent, list):
+            recent = []
+        recent.append({
+            "tool_name": resolved.tool_name,
+            "args_preview": _truncate_middle_text(args_preview, _RECENT_TOOL_ARGS_PREVIEW_CHARS),
+            "is_error": bool(resolved.is_error),
+            "result_preview": _truncate_middle_text(
+                str(result_text or ""),
+                _RECENT_TOOL_RESULT_PREVIEW_CHARS,
+            ),
+        })
+        setattr(agent_context, "recent_tool_results", recent[-_RECENT_TOOL_RESULT_LIMIT:])
+    except Exception:
+        logger.debug("Failed to record recent tool result for final-reply context", exc_info=True)
+
+
 def _run_sync_boundary(awaitable: Any, *, name: str) -> Any:
     try:
         asyncio.get_running_loop()
@@ -162,26 +198,26 @@ def run_tool_awaitable(result):
     return _run_sync_boundary(result, name="run_tool_awaitable")
 
 
+def _snapshot_threadlocal_context(agent_context) -> dict | None:
+    if agent_context is None:
+        return None
+    return clone_agent_context_mapping(vars(agent_context))
+
+
 class _BoundAgentContext:
     def __init__(self, agent_context, threadlocal_context: dict | None):
-        self.agent_context = agent_context
         self.threadlocal_context = threadlocal_context
-        self.previous_context = None
+        self.context_manager = None
 
     def __enter__(self):
-        if self.agent_context is not None and self.threadlocal_context is not None:
-            self.previous_context = vars(self.agent_context).copy()
-            for key in list(vars(self.agent_context).keys()):
-                delattr(self.agent_context, key)
-            for key, value in self.threadlocal_context.items():
-                setattr(self.agent_context, key, value)
+        if self.threadlocal_context is not None:
+            self.context_manager = bind_agent_context(self.threadlocal_context)
+            return self.context_manager.__enter__()
+        return None
 
     def __exit__(self, exc_type, exc, tb):
-        if self.agent_context is not None and self.previous_context is not None:
-            for key in list(vars(self.agent_context).keys()):
-                delattr(self.agent_context, key)
-            for key, value in self.previous_context.items():
-                setattr(self.agent_context, key, value)
+        if self.context_manager is not None:
+            return self.context_manager.__exit__(exc_type, exc, tb)
         return False
 
 
@@ -369,6 +405,8 @@ def emit_resolved_tool_call(
     run_id,
     idea_id,
     tool_call_source: str,
+    *,
+    agent_context=None,
 ) -> str:
     """Append tool_result content and record side effects in block order."""
     tool_results.append({
@@ -380,6 +418,7 @@ def emit_resolved_tool_call(
     callback_result_text = resolved.result_text
     if resolved.tool_name == "brain_vault":
         callback_result_text = "[secret redacted]"
+    _record_agent_tool_result(agent_context, resolved, callback_result_text)
     if on_tool_call:
         on_tool_call(resolved.tool_name, resolved.tool_input, callback_result_text)
     return callback_result_text
@@ -392,6 +431,8 @@ async def async_emit_resolved_tool_call(
     run_id,
     idea_id,
     tool_call_source: str,
+    *,
+    agent_context=None,
 ) -> None:
     """Append a tool result and persist its trace through the async event log."""
     callback_result_text = emit_resolved_tool_call(
@@ -401,6 +442,7 @@ async def async_emit_resolved_tool_call(
         None,
         None,
         tool_call_source,
+        agent_context=agent_context,
     )
     if run_id and idea_id:
         from brain.systems.runs.events import async_record_tool_call
@@ -430,7 +472,7 @@ def execute_parallel_tool_batch(
     if not pending:
         return
 
-    threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
+    threadlocal_context = _snapshot_threadlocal_context(agent_context)
     for request in pending:
         emit_resolved_tool_call(
             resolve_tool_call(
@@ -443,6 +485,7 @@ def execute_parallel_tool_batch(
             run_id,
             idea_id,
             tool_call_source,
+            agent_context=agent_context,
         )
 
 
@@ -461,7 +504,7 @@ async def async_execute_parallel_tool_batch(
     if not pending:
         return
 
-    threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
+    threadlocal_context = _snapshot_threadlocal_context(agent_context)
     if max_parallel_tool_calls <= 1:
         for request in pending:
             await async_emit_resolved_tool_call(
@@ -475,6 +518,7 @@ async def async_execute_parallel_tool_batch(
                 run_id,
                 idea_id,
                 tool_call_source,
+                agent_context=agent_context,
             )
         return
 
@@ -513,6 +557,7 @@ async def async_execute_parallel_tool_batch(
                     run_id,
                     idea_id,
                     tool_call_source,
+                    agent_context=agent_context,
                 )
         finally:
             for _, task in tasks:
@@ -557,7 +602,7 @@ def execute_tool_calls(
 
     tool_results: list[dict] = []
     pending_parallel: list[PendingToolCall] = []
-    threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
+    threadlocal_context = _snapshot_threadlocal_context(agent_context)
 
     def flush_parallel_batch() -> None:
         nonlocal pending_parallel
@@ -646,6 +691,7 @@ def execute_tool_calls(
             run_id,
             idea_id,
             tool_call_source,
+            agent_context=agent_context,
         )
 
     flush_parallel_batch()
@@ -674,7 +720,7 @@ async def async_execute_tool_calls(
     """Execute all tool calls from async runtime code."""
     tool_results: list[dict] = []
     pending_parallel: list[PendingToolCall] = []
-    threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
+    threadlocal_context = _snapshot_threadlocal_context(agent_context)
 
     async def flush_parallel_batch() -> None:
         nonlocal pending_parallel
@@ -763,6 +809,7 @@ async def async_execute_tool_calls(
             run_id,
             idea_id,
             tool_call_source,
+            agent_context=agent_context,
         )
 
     await flush_parallel_batch()

@@ -157,13 +157,14 @@ class IlloBridgeClient:
 
     def submit(
         self,
-        intent: str,
+        message: str,
         *,
-        origin: str = "codex.context",
+        origin: str = "codex.submit",
         parts: list[dict[str, Any]] | None = None,
         source: dict[str, Any] | None = None,
         constraints: dict[str, Any] | None = None,
         correlation: dict[str, Any] | None = None,
+        response: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
         source_tool: str = "codex",
         repo: str | None = None,
@@ -179,12 +180,13 @@ class IlloBridgeClient:
             TOOL_SUBMIT,
             {
                 **extra,
-                "intent": str(intent),
-                "origin": str(origin or "codex.context"),
+                "message": str(message),
+                "origin": str(origin or "codex.submit"),
                 "parts": list(parts or []),
                 "source": dict(source or {}),
                 "constraints": dict(constraints or {}),
                 "correlation": dict(correlation or {}),
+                "response": dict(response or {}),
                 "idempotency_key": idempotency_key,
                 "source_tool": source_tool,
                 "repo": repo,
@@ -199,45 +201,26 @@ class IlloBridgeClient:
 
     def read(
         self,
-        request: str,
+        capability: str,
         *,
-        resource: str | None = None,
-        query: str | None = None,
-        target_id: str | None = None,
-        limit: int | None = None,
-        cursor: str | None = None,
-        context: dict[str, Any] | None = None,
-        constraints: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
+        arguments: dict[str, Any] | None = None,
         **extra: Any,
     ) -> dict[str, Any]:
         return self.call_tool(
             TOOL_READ,
             {
                 **extra,
-                "request": str(request),
-                "resource": resource,
-                "query": query,
-                "target_id": target_id,
-                "limit": limit,
-                "cursor": cursor,
-                "context": dict(context or {}),
-                "constraints": dict(constraints or {}),
-                "metadata": _clean_metadata(metadata),
+                "capability": str(capability),
+                "arguments": dict(arguments or {}),
             },
         )
 
     def act(
         self,
-        intent: str,
+        capability: str,
         *,
-        action: str | None = None,
-        target: dict[str, Any] | None = None,
-        content: Any | None = None,
-        artifacts: list[dict[str, Any]] | None = None,
-        teammate_user_ids: list[str] | None = None,
-        constraints: dict[str, Any] | None = None,
-        correlation: dict[str, Any] | None = None,
+        arguments: dict[str, Any] | None = None,
+        reason: str | None = None,
         idempotency_key: str | None = None,
         metadata: dict[str, Any] | None = None,
         **extra: Any,
@@ -246,14 +229,9 @@ class IlloBridgeClient:
             TOOL_ACT,
             {
                 **extra,
-                "intent": str(intent),
-                "action": action,
-                "target": dict(target or {}),
-                "content": content,
-                "artifacts": list(artifacts or []),
-                "teammate_user_ids": _clean_string_list(teammate_user_ids),
-                "constraints": dict(constraints or {}),
-                "correlation": dict(correlation or {}),
+                "capability": str(capability),
+                "arguments": dict(arguments or {}),
+                "reason": reason,
                 "idempotency_key": idempotency_key,
                 "metadata": _clean_metadata(metadata),
             },
@@ -261,19 +239,23 @@ class IlloBridgeClient:
 
     def get_result(
         self,
-        result_id: str,
+        result_id: str | None = None,
         *,
-        wait_ms: int | None = None,
-        metadata: dict[str, Any] | None = None,
+        event_id: str | None = None,
+        submission_id: str | None = None,
+        include_payload: bool | None = None,
+        limit: int | None = None,
         **extra: Any,
     ) -> dict[str, Any]:
         return self.call_tool(
             TOOL_GET_RESULT,
             {
                 **extra,
-                "result_id": str(result_id),
-                "wait_ms": wait_ms,
-                "metadata": _clean_metadata(metadata),
+                "event_id": event_id,
+                "submission_id": submission_id,
+                "result_id": result_id,
+                "include_payload": include_payload,
+                "limit": limit,
             },
         )
 
@@ -283,12 +265,13 @@ def _client() -> IlloBridgeClient:
 
 
 def tool_illo_submit(
-    intent: str,
-    origin: str = "codex.context",
+    message: str,
+    origin: str = "codex.submit",
     parts: list[dict[str, Any]] | None = None,
     source: dict[str, Any] | None = None,
     constraints: dict[str, Any] | None = None,
     correlation: dict[str, Any] | None = None,
+    response: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     source_tool: str = "codex",
     repo: str | None = None,
@@ -301,12 +284,13 @@ def tool_illo_submit(
     **extra: Any,
 ) -> dict[str, Any]:
     return _client().submit(
-        intent=intent,
+        message=message,
         origin=origin,
         parts=parts,
         source=source,
         constraints=constraints,
         correlation=correlation,
+        response=response,
         idempotency_key=idempotency_key,
         source_tool=source_tool,
         repo=repo,
@@ -321,53 +305,29 @@ def tool_illo_submit(
 
 
 def tool_illo_read(
-    request: str,
-    resource: str | None = None,
-    query: str | None = None,
-    target_id: str | None = None,
-    limit: int | None = None,
-    cursor: str | None = None,
-    context: dict[str, Any] | None = None,
-    constraints: dict[str, Any] | None = None,
-    metadata: dict[str, Any] | None = None,
+    capability: str,
+    arguments: dict[str, Any] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     return _client().read(
-        request=request,
-        resource=resource,
-        query=query,
-        target_id=target_id,
-        limit=limit,
-        cursor=cursor,
-        context=context,
-        constraints=constraints,
-        metadata=metadata,
+        capability=capability,
+        arguments=arguments,
         **extra,
     )
 
 
 def tool_illo_act(
-    intent: str,
-    action: str | None = None,
-    target: dict[str, Any] | None = None,
-    content: Any | None = None,
-    artifacts: list[dict[str, Any]] | None = None,
-    teammate_user_ids: list[str] | None = None,
-    constraints: dict[str, Any] | None = None,
-    correlation: dict[str, Any] | None = None,
+    capability: str,
+    arguments: dict[str, Any] | None = None,
+    reason: str | None = None,
     idempotency_key: str | None = None,
     metadata: dict[str, Any] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     return _client().act(
-        intent=intent,
-        action=action,
-        target=target,
-        content=content,
-        artifacts=artifacts,
-        teammate_user_ids=teammate_user_ids,
-        constraints=constraints,
-        correlation=correlation,
+        capability=capability,
+        arguments=arguments,
+        reason=reason,
         idempotency_key=idempotency_key,
         metadata=metadata,
         **extra,
@@ -375,12 +335,21 @@ def tool_illo_act(
 
 
 def tool_illo_get_result(
-    result_id: str,
-    wait_ms: int | None = None,
-    metadata: dict[str, Any] | None = None,
+    result_id: str | None = None,
+    event_id: str | None = None,
+    submission_id: str | None = None,
+    include_payload: bool | None = None,
+    limit: int | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
-    return _client().get_result(result_id=result_id, wait_ms=wait_ms, metadata=metadata, **extra)
+    return _client().get_result(
+        result_id=result_id,
+        event_id=event_id,
+        submission_id=submission_id,
+        include_payload=include_payload,
+        limit=limit,
+        **extra,
+    )
 
 
 ToolFunction = Callable[..., dict[str, Any]]
@@ -390,20 +359,19 @@ TOOLS: dict[str, dict[str, Any]] = {
     TOOL_SUBMIT: {
         "function": tool_illo_submit,
         "description": (
-            "Submit ordered context or a work handoff from a personal agent to Illo, the user's "
-            "team agent. Use this when Illo or the team should receive the current thread, trace, "
-            "artifacts, files, links, diffs, or other source material. The personal agent supplies "
-            "context and provenance; Illo decides routing and may return a receipt, result_id, or "
-            "thread_url."
+            "Submit instructions, context, traces, decisions, or work material to Illo. "
+            "Use this when the request needs Illo's judgment, memory, or coordination. "
+            "The call is async-first: Illo stores an inbound event, queues headless handling, "
+            "and returns an event id that can be read with illo_get_result."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "intent": {
+                "message": {
                     "type": "string",
-                    "description": "Natural-language reason this context is being submitted.",
+                    "description": "Natural-language instruction or context for Illo to handle.",
                 },
-                "origin": {"type": "string", "description": "Stable event name.", "default": "codex.context"},
+                "origin": {"type": "string", "description": "Stable event name.", "default": "codex.submit"},
                 "parts": {
                     "type": "array",
                     "items": {"type": "object"},
@@ -422,7 +390,12 @@ TOOLS: dict[str, dict[str, Any]] = {
                 },
                 "correlation": {
                     "type": "object",
-                    "description": "Optional thread_id, external_session_id, or prior submission reference.",
+                    "description": "Optional thread_id, thread_url, external_session_id, or prior submission reference.",
+                    "default": {},
+                },
+                "response": {
+                    "type": "object",
+                    "description": "Optional callback or webhook routing hints.",
                     "default": {},
                 },
                 "idempotency_key": {"type": "string", "description": "Optional dedupe key."},
@@ -440,95 +413,51 @@ TOOLS: dict[str, dict[str, Any]] = {
                 "run_id": {"type": "string", "description": "Optional tool run id."},
                 "metadata": {"type": "object", "description": "Optional metadata.", "default": {}},
             },
-            "required": ["intent"],
+            "required": ["message"],
         },
     },
     TOOL_READ: {
         "function": tool_illo_read,
         "description": (
-            "Read Illo workspace context without mutating team-visible state. Use this for "
-            "searching workspace context, reading a known Thread or record, resolving teammates, "
-            "or asking Illo for private context before deciding whether to act. If the read runs "
-            "asynchronously, poll the returned result_id with illo_get_result."
+            "Read deterministic Illo workspace information through a named capability. "
+            "Use this for direct lookup and search; use illo_submit when the request needs "
+            "Illo's interpretation or decision."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "request": {"type": "string", "description": "Natural-language read request."},
-                "resource": {
+                "capability": {
                     "type": "string",
-                    "description": "Optional resource hint, for example workspace, thread, team_members, project, or memory.",
+                    "description": "Read capability name, such as workspace.search, thread.get, team.members.list, domain.inspect, or capabilities.",
                 },
-                "query": {"type": "string", "description": "Optional search terms or filter text."},
-                "target_id": {"type": "string", "description": "Optional Thread, project, teammate, task, or result id."},
-                "limit": {"type": "integer", "description": "Optional maximum records to return."},
-                "cursor": {"type": "string", "description": "Optional pagination cursor."},
-                "context": {
-                    "type": "object",
-                    "description": "Optional current task context to help Illo answer privately.",
-                    "default": {},
-                },
-                "constraints": {
-                    "type": "object",
-                    "description": "Optional privacy, scope, freshness, or visibility boundaries.",
-                    "default": {},
-                },
-                "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
+                "arguments": {"type": "object", "description": "Capability-specific arguments.", "default": {}},
             },
-            "required": ["request"],
+            "required": ["capability"],
         },
     },
     TOOL_ACT: {
         "function": tool_illo_act,
         "description": (
-            "Ask Illo to take an explicit, user-authorized action in the team workspace. "
-            "Use this for visible coordination such as creating or updating a Thread, notifying "
-            "teammates, or asking Illo to actively respond. For passive context handoff use "
-            "illo_submit; for non-mutating context lookup use illo_read. Long-running actions may "
-            "return result_id for illo_get_result."
+            "Execute a deterministic external-agent action as the user's delegate through "
+            "a named capability. Use illo_submit when the action should be decided by Illo."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "intent": {"type": "string", "description": "Natural-language reason for the action."},
-                "action": {
+                "capability": {
                     "type": "string",
-                    "description": "Optional action hint, for example create_thread, post_message, notify, or trigger_illo.",
+                    "description": "Action capability name, such as thread.create, thread.post_message, domain.record.write, or capabilities.",
                 },
-                "target": {
+                "arguments": {
                     "type": "object",
-                    "description": "Optional target descriptor such as a Thread, teammate, project, or workspace entity.",
+                    "description": "Capability-specific arguments.",
                     "default": {},
                 },
-                "content": {
-                    "description": "Action-specific body, message, or structured payload.",
-                },
-                "artifacts": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": "Optional structured artifacts, links, or files to attach.",
-                    "default": [],
-                },
-                "teammate_user_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional Illo user ids to notify.",
-                    "default": [],
-                },
-                "constraints": {
-                    "type": "object",
-                    "description": "Optional privacy, urgency, visibility, or notification boundaries.",
-                    "default": {},
-                },
-                "correlation": {
-                    "type": "object",
-                    "description": "Optional correlation such as thread_id, external_session_id, or prior result id.",
-                    "default": {},
-                },
+                "reason": {"type": "string", "description": "Optional natural-language reason for audit/provenance."},
                 "idempotency_key": {"type": "string", "description": "Optional dedupe key."},
                 "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
             },
-            "required": ["intent"],
+            "required": ["capability"],
         },
     },
     TOOL_GET_RESULT: {
@@ -542,14 +471,12 @@ TOOLS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "result_id": {"type": "string", "description": "Result, receipt, task, or operation id to retrieve."},
-                "wait_ms": {
-                    "type": "integer",
-                    "description": "Optional long-poll wait time in milliseconds.",
-                    "default": 0,
-                },
-                "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
+                "event_id": {"type": "string", "description": "Inbound event id returned by illo_submit."},
+                "submission_id": {"type": "string", "description": "Alias for event_id."},
+                "include_payload": {"type": "boolean", "description": "Whether to include stored payloads.", "default": True},
+                "limit": {"type": "integer", "description": "Maximum decision receipts to return.", "default": 25},
             },
-            "required": ["result_id"],
+            "required": [],
         },
     },
 }

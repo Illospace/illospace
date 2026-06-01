@@ -18,7 +18,7 @@ MCP Tools Exposed:
     skill_asset(name, path)           — load a versioned skill bundle asset
     brain_encode(content, type, salience?) — record a memory
     vault_inventory()                 — list safe vault metadata for agent reasoning
-    brain_vault(key)                  — retrieve a secret from the vault
+    brain_vault(key)                  — request a vault secret reference
     vault_secret_prompt(key_name)     — open a guided vault prompt for missing keys
 
 Public release note: internal issue links were removed from source comments.
@@ -1038,76 +1038,21 @@ async def tool_brain_vault(
     project_slugs: list[str] | tuple[str, ...] | set[str] | None = None,
     target_registry_id: int | None = None,
 ) -> dict:
-    """Retrieve a secret from the vault."""
-    from brain.systems.cortex.events import publish_safe
-    from brain.systems.vault import authorize_agent_secret_read, get_secret
-    if not user_id:
-        return {"error": "Vault access requires an authenticated user context"}
-    target_user_id = str(user_id).strip()
-    if not target_user_id:
-        return {"error": "Vault access requires an authenticated user context"}
-    authorization = await authorize_agent_secret_read(
+    """Request a safe secret reference from the vault."""
+    from brain.systems.vault.agent_access import request_agent_secret_reference
+
+    return await request_agent_secret_reference(
         key,
-        actor_user_id=target_user_id,
+        reason=reason,
+        user_id=user_id,
         org_id=org_id,
         run_id=run_id,
-        reason=reason,
+        idea_id=idea_id,
         requested_by=requested_by,
         project_slug=project_slug,
         project_slugs=project_slugs,
         target_registry_id=target_registry_id,
     )
-    if not authorization.get("allowed"):
-        grant = _json_safe(authorization.get("grant") or {})
-        grant_user_id = str(grant.get("requested_by_user_id") or target_user_id).strip() or target_user_id
-        if authorization.get("status") == "pending":
-            normalized_idea_id = (str(idea_id).strip() if idea_id else "") or None
-            prompt = None
-            if normalized_idea_id:
-                prompt = {
-                    "id": f"vault-grant-{grant.get('id') or run_id or 'thread'}",
-                    "idea_id": normalized_idea_id,
-                    "org_id": org_id,
-                    "target_user_id": grant_user_id,
-                    "run_id": grant.get("run_id") or run_id,
-                    "grant_id": grant.get("id"),
-                    "key_name": grant.get("key_name") or key,
-                    "requested_by": grant.get("requested_by") or requested_by,
-                    "reason": grant.get("reason") or reason,
-                    "requested_at": grant.get("requested_at"),
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-                publish_safe("vault_agent_grant_prompt", {
-                    "idea_id": normalized_idea_id,
-                    "org_id": org_id,
-                    "target_user_id": grant_user_id,
-                    "run_id": grant.get("run_id") or run_id,
-                    "grant": grant,
-                    "prompt": prompt,
-                })
-            response = {
-                "error": "Vault grant required before this agent can read the secret",
-                "grant_id": grant.get("id"),
-                "key_name": grant.get("key_name") or key,
-                "reason": grant.get("reason") or reason,
-                "requested_by": grant.get("requested_by") or requested_by,
-                "run_id": grant.get("run_id") or run_id,
-                "status": "pending",
-                "target_user_id": grant_user_id,
-            }
-            if prompt:
-                response["prompt"] = prompt
-            return response
-        return {"error": authorization.get("reason") or "Vault grant denied"}
-    value = await get_secret(
-        key,
-        actor_user_id=target_user_id,
-        org_id=org_id,
-        accessed_by="agent",
-    )
-    if value is None:
-        return {"error": f"Secret '{key}' not found in vault"}
-    return {"key": key, "value": value}
 
 
 _VAULT_PROMPT_CATEGORIES = {
@@ -1198,8 +1143,9 @@ async def tool_vault_inventory(
         "count": len(secrets),
         "metadata_only": True,
         "guidance": (
-            "Use these names/descriptions/categories to decide which exact key to request with brain_vault. "
-            "If no suitable key exists, ask the user or call vault_secret_prompt."
+            "Use these names/descriptions/categories to choose exact Vault keys for secret_env mounts. "
+            "Call brain_vault only to check/request access to a reference. If no suitable key exists, "
+            "ask the user or call vault_secret_prompt."
         ),
     }
 
@@ -1305,6 +1251,100 @@ async def tool_runtime_settings(
             org_id=org_id,
             provider=provider,
         )
+
+
+async def tool_manage_deployment(
+    action: str = "status",
+    build_no_cache: bool = False,
+    worker_drain_timeout_seconds: int | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict:
+    """Inspect or start the running server's self-update flow."""
+    from brain.platform.db.models.org import User
+    from brain.systems.runtime_settings.self_update import (
+        async_get_runtime_update_status,
+        async_start_runtime_update,
+    )
+
+    normalized_action = str(action or "status").strip().lower()
+    if normalized_action not in {"status", "start_update"}:
+        raise ValueError("manage_deployment action must be 'status' or 'start_update'.")
+
+    async with UnitOfWork() as uow:
+        user = await uow.session.get(User, user_id) if user_id else None
+        if user is None:
+            return {
+                "action": normalized_action,
+                "status": "denied",
+                "available": False,
+                "detail": "Deployment updates require an authenticated workspace user.",
+            }
+        if org_id and str(getattr(user, "org_id", "")) != str(org_id):
+            return {
+                "action": normalized_action,
+                "status": "denied",
+                "available": False,
+                "detail": "Deployment updates require a user in the active organization.",
+            }
+
+        if normalized_action == "start_update":
+            update = await async_start_runtime_update(
+                uow.session,
+                requested_by=str(user.id),
+                build_no_cache=bool(build_no_cache),
+                worker_drain_timeout_seconds=worker_drain_timeout_seconds,
+            )
+        else:
+            update = await async_get_runtime_update_status(uow.session)
+
+    payload = update.model_dump(mode="json")
+    payload["action"] = normalized_action
+    return payload
+
+
+async def tool_manage_runtime_services(
+    action: str = "list",
+    services: list[str] | str | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict:
+    """Inspect or restart known Illospace runtime services through the host controller."""
+    from brain.platform.db.models.org import User
+    from brain.systems.runtime_settings.runtime_services import (
+        async_get_runtime_services_status,
+        async_restart_runtime_services,
+    )
+
+    normalized_action = str(action or "list").strip().lower()
+    if normalized_action not in {"list", "status", "restart"}:
+        raise ValueError("manage_runtime_services action must be 'list', 'status', or 'restart'.")
+
+    async with UnitOfWork() as uow:
+        user = await uow.session.get(User, user_id) if user_id else None
+        if user is None:
+            return {
+                "action": normalized_action,
+                "status": "denied",
+                "available": False,
+                "detail": "Runtime service management requires an authenticated workspace user.",
+            }
+        if org_id and str(getattr(user, "org_id", "")) != str(org_id):
+            return {
+                "action": normalized_action,
+                "status": "denied",
+                "available": False,
+                "detail": "Runtime service management requires a user in the active organization.",
+            }
+
+        if normalized_action == "restart":
+            service_status = await async_restart_runtime_services(services, requested_by=str(user.id))
+        else:
+            service_status = await async_get_runtime_services_status()
+
+    payload = service_status.model_dump(mode="json")
+    payload["action"] = normalized_action
+    return payload
 
 
 # ── MCP Protocol Layer ───────────────────────────────────────
@@ -1433,7 +1473,10 @@ TOOLS = {
     },
     "brain_vault": {
         "function": tool_brain_vault,
-        "description": "Request task-scoped access to a secret from the encrypted vault.",
+        "description": (
+            "Request task-scoped access to a Vault secret reference. Raw secret values are not "
+            "returned to agents; use exec_command/run_script secret_env to mount a Vault key for one tool call."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1488,6 +1531,58 @@ TOOLS = {
                     "description": "Optional provider to focus on; defaults to the effective provider.",
                 },
             },
+        },
+    },
+    "manage_deployment": {
+        "function": tool_manage_deployment,
+        "description": (
+            "Check or start the Illospace self-update deployment flow. Owner/admin only; "
+            "use when the user explicitly asks Illo to update, deploy, redeploy, or pull latest main."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["status", "start_update"],
+                    "default": "status",
+                    "description": "Use status to inspect progress, or start_update to queue the updater sidecar.",
+                },
+                "build_no_cache": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "For start_update, rebuild app images without Docker cache when cache staleness is suspected.",
+                },
+                "worker_drain_timeout_seconds": {
+                    "type": "integer",
+                    "description": "For start_update, optional positive timeout for active worker drain before leaving old worker to finish.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+    "manage_runtime_services": {
+        "function": tool_manage_runtime_services,
+        "description": (
+            "List, inspect, or restart known Illospace runtime services through the host controller. "
+            "Use list first when choosing services; restart accepts one or more returned service ids, or all."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "status", "restart"],
+                    "default": "list",
+                    "description": "Use list/status to inspect service management, or restart to queue a service restart.",
+                },
+                "services": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "For restart, one or more service ids returned by list, or all.",
+                },
+            },
+            "required": ["action"],
         },
     },
 }

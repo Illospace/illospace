@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -666,6 +668,83 @@ def test_tool_execution_limit_one_keeps_handlers_on_current_thread(monkeypatch):
 
     assert [item["tool_use_id"] for item in results] == ["a", "b"]
     assert seen_threads == [main_thread_id, main_thread_id]
+
+
+def test_agent_execution_context_is_task_local_for_parallel_tools():
+    from brain.systems.runs.execution_context import _agent_context, bind_agent_context
+
+    async def observe(label):
+        with bind_agent_context({"idea_id": label}):
+            await asyncio.sleep(0)
+            return _agent_context.idea_id
+
+    async def run():
+        with bind_agent_context({"idea_id": "parent"}):
+            observed = await asyncio.gather(observe("first"), observe("second"))
+            return observed, _agent_context.idea_id
+
+    observed, parent_idea_id = asyncio.run(run())
+
+    assert sorted(observed) == ["first", "second"]
+    assert parent_idea_id == "parent"
+
+
+def test_async_tool_execution_keeps_parallel_tool_contexts_isolated():
+    from brain.systems.runs.direct_loop.gates import GateState, check_gate_violations
+    from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
+    from brain.systems.runs.execution_context import _agent_context, bind_agent_context
+
+    started = []
+
+    async def handler(value):
+        _agent_context.tool_marker = value
+        _agent_context.execution_metadata["shared"].append(value)
+        started.append(value)
+        while len(started) < 2:
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return {
+            "marker": _agent_context.tool_marker,
+            "shared": list(_agent_context.execution_metadata["shared"]),
+        }
+
+    async def run():
+        response = SimpleNamespace(
+            content=[
+                SimpleNamespace(type="tool_use", id="a", name="read_file", input={"value": "first"}),
+                SimpleNamespace(type="tool_use", id="b", name="read_file", input={"value": "second"}),
+            ]
+        )
+        with bind_agent_context({"idea_id": "parent", "execution_metadata": {"shared": []}}):
+            results = await async_execute_tool_calls(
+                response,
+                {"read_file": handler},
+                [],
+                GateState(brain=True),
+                None,
+                None,
+                None,
+                "test",
+                agent_context=_agent_context,
+                brain_tool_names=frozenset(),
+                gated_tool_names=frozenset(),
+                research_tool_names=frozenset(),
+                research_budget=6,
+                parallel_safe_tool_names=frozenset({"read_file"}),
+                max_parallel_tool_calls=2,
+                check_gate_violations=check_gate_violations,
+            )
+            return results, list(_agent_context.execution_metadata["shared"])
+
+    results, parent_shared = asyncio.run(run())
+
+    payloads = [json.loads(item["content"]) for item in results]
+    assert [item["tool_use_id"] for item in results] == ["a", "b"]
+    assert payloads == [
+        {"marker": "first", "shared": ["first"]},
+        {"marker": "second", "shared": ["second"]},
+    ]
+    assert parent_shared == []
 
 
 

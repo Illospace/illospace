@@ -490,6 +490,67 @@ async def test_hosted_mcp_filters_tools_by_bridge_token_scope():
     assert names == {"illo_read"}
 
 
+async def test_hosted_mcp_read_thread_get_accepts_canonical_thread_url():
+    session = _AsyncSession()
+    thread_id = "77777777-7777-4777-8777-777777777777"
+    captured: dict[str, object] = {}
+
+    async def fake_get_thread(db, principal, *, idea_id, limit):
+        captured["db"] = db
+        captured["principal"] = principal
+        captured["idea_id"] = idea_id
+        captured["limit"] = limit
+        return {
+            "idea": {"id": idea_id, "thread_id": idea_id},
+            "thread_reference": {
+                "type": "thread_reference",
+                "object_type": "thread",
+                "object_id": idea_id,
+                "thread_id": idea_id,
+                "thread_route": f"/threads/{idea_id}",
+                "thread_url": f"https://illo.example.com/threads/{idea_id}",
+                "status": "available",
+                "title": "Shared thread",
+            },
+            "messages": [],
+        }
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp.external_agents.get_thread",
+        new=AsyncMock(side_effect=fake_get_thread),
+    ):
+        response = await _request(
+            "POST",
+            "/mcp",
+            session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_read",
+                    "arguments": {
+                        "capability": "thread.get",
+                        "arguments": {
+                            "thread_url": f"https://illo.example.com/threads/{thread_id}",
+                            "limit": 7,
+                        },
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert captured["idea_id"] == thread_id
+    assert captured["limit"] == 7
+    assert payload["thread_reference"]["thread_route"] == f"/threads/{thread_id}"
+
+
 async def test_hosted_mcp_submit_builds_submission_envelope():
     session = _AsyncSession()
     captured: dict[str, object] = {}

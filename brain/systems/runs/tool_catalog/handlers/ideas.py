@@ -61,8 +61,21 @@ async def _require_idea_for_actor(session, idea_id: str, actor: dict[str, Any]):
     return await _a_require_idea_for_user(session, idea_id, actor)
 
 
-def _target_idea_id(idea_id: str | None, thread_id: str | None, context_idea_id: str | None) -> str | None:
-    return str(idea_id or thread_id or context_idea_id).strip() or None
+def _target_idea_id(
+    idea_id: str | None,
+    thread_id: str | None,
+    thread_url: str | None,
+    url: str | None,
+    thread_route: str | None,
+    context_idea_id: str | None,
+) -> str | None:
+    from brain.systems.cortex.thread_links import thread_id_from_reference
+
+    for value in (thread_url, url, thread_route, idea_id, thread_id, context_idea_id):
+        parsed = thread_id_from_reference(value, allow_raw_id=True)
+        if parsed:
+            return parsed
+    return None
 
 
 async def _serialize_idea(idea, session) -> dict[str, Any]:
@@ -206,7 +219,7 @@ def _scoped_ideas_stmt(org_id: str | None, actor_user_id: str | None):
         return stmt.where(Idea.org_id == org_id)
     if actor_user_id:
         return stmt.where(Idea.user_id == actor_user_id)
-    raise ValueError("manage_idea requires an org-scoped or user-scoped run")
+    raise ValueError("manage_idea could not access this workspace or user context")
 
 
 async def _list_ideas(
@@ -396,6 +409,9 @@ async def _handle_manage_idea(
     operation: str | None = None,
     idea_id: str | None = None,
     thread_id: str | None = None,
+    thread_url: str | None = None,
+    url: str | None = None,
+    thread_route: str | None = None,
     title: str | None = None,
     thread_message: str | None = None,
     start_run: bool | None = None,
@@ -426,7 +442,7 @@ async def _handle_manage_idea(
 
     org_id, actor_user_id, context_idea_id = _idea_tool_context()
     actor = _idea_actor(org_id=org_id, actor_user_id=actor_user_id)
-    target_idea_id = _target_idea_id(idea_id, thread_id, context_idea_id)
+    target_idea_id = _target_idea_id(idea_id, thread_id, thread_url, url, thread_route, context_idea_id)
     event: tuple[str, dict[str, Any]] | None = None
 
     try:
@@ -445,7 +461,7 @@ async def _handle_manage_idea(
 
             if normalized_action == "create":
                 if not actor_user_id:
-                    return json.dumps({"error": "create requires a user-scoped run"})
+                    return json.dumps({"error": "create requires user context"})
                 if not title:
                     return json.dumps({"error": "create requires: title"})
                 requested_status = status or "emerged"
