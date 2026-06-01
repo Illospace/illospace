@@ -7,6 +7,7 @@ import threading
 from typing import Any
 
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.systems.runs.domain import (
@@ -41,6 +42,7 @@ _DEFERRED_RUN_ACTIVE_STATUS_VALUES = frozenset({
     RunStatus.PAUSED.value,
     RunStatus.VERIFYING.value,
 })
+_SOURCE_IDEMPOTENCY_METADATA_KEYS = ("idempotency_key", "idempotencyKey")
 
 
 _EVENT_LOCKS_GUARD = threading.Lock()
@@ -103,6 +105,31 @@ def _deferred_run_target_id(row: AgentRunRow) -> int | None:
     return None
 
 
+def _source_idempotency_parts(request: AgentRunRequest) -> tuple[str | None, str | None]:
+    metadata = dict(request.metadata or {})
+    key = ""
+    for metadata_key in _SOURCE_IDEMPOTENCY_METADATA_KEYS:
+        key = str(metadata.get(metadata_key) or "").strip()
+        if key:
+            break
+    if not key:
+        return None, None
+    # Slack can deliver one human mention through multiple event shapes and even
+    # duplicate connector rows. Lock the canonical Slack message identity at the
+    # run boundary without changing idempotency semantics for unrelated sources.
+    if not key.startswith("slack:"):
+        return None, None
+
+    work_intake = metadata.get("work_intake")
+    source = ""
+    if isinstance(work_intake, dict):
+        source = str(work_intake.get("source") or "").strip()
+    source = source or str(metadata.get("source") or "").strip()
+    if source.startswith("trigger:"):
+        source = source.split(":", 1)[1].strip()
+    return (source or "unknown")[:80], key
+
+
 async def _reconcile_inbound_triage_run_if_needed(session: AsyncSession, row: AgentRunRow) -> None:
     metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
     inbound_event = metadata.get("inbound_event")
@@ -120,9 +147,39 @@ class AsyncAgentRunStore:
         self.session = session
         self.auto_commit = bool(auto_commit)
 
+    async def _run_for_source_idempotency(
+        self,
+        *,
+        org_id: str | None,
+        scope: str | None,
+        key: str | None,
+    ) -> AgentRunRow | None:
+        if not org_id or not scope or not key:
+            return None
+        stmt = (
+            select(AgentRunRow)
+            .where(
+                AgentRunRow.org_id == str(org_id),
+                AgentRunRow.source_idempotency_scope == str(scope),
+                AgentRunRow.source_idempotency_key == str(key),
+            )
+            .order_by(AgentRunRow.id.asc())
+            .limit(1)
+        )
+        return (await self.session.scalars(stmt)).first()
+
     async def create_run(self, request: AgentRunRequest) -> AgentRun:
         profile = request.normalized_profile
         recipe = request.normalized_recipe
+        source_idempotency_scope, source_idempotency_key = _source_idempotency_parts(request)
+        existing = await self._run_for_source_idempotency(
+            org_id=request.org_id,
+            scope=source_idempotency_scope,
+            key=source_idempotency_key,
+        )
+        if existing is not None:
+            return to_domain(existing)
+
         row = AgentRunRow(
             org_id=request.org_id,
             user_id=request.user_id,
@@ -137,13 +194,26 @@ class AsyncAgentRunStore:
             workspace_ref=dict(request.workspace_ref or {}),
             model_policy=dict(request.model_policy or {}),
             metadata_=dict(request.metadata or {}),
+            source_idempotency_scope=source_idempotency_scope,
+            source_idempotency_key=source_idempotency_key,
         )
-        self.session.add(row)
-        await self.session.flush()
-        row.trace_id = trace_id_for_run_id(row.id)
-        if row.root_run_id is None:
-            row.root_run_id = row.id
-        await self.session.flush()
+        try:
+            async with self.session.begin_nested():
+                self.session.add(row)
+                await self.session.flush()
+                row.trace_id = trace_id_for_run_id(row.id)
+                if row.root_run_id is None:
+                    row.root_run_id = row.id
+                await self.session.flush()
+        except IntegrityError:
+            existing = await self._run_for_source_idempotency(
+                org_id=request.org_id,
+                scope=source_idempotency_scope,
+                key=source_idempotency_key,
+            )
+            if existing is not None:
+                return to_domain(existing)
+            raise
         await self.append_event(
             run_event(
                 row.id,

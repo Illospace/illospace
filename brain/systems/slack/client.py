@@ -79,6 +79,23 @@ class SlackWebClient:
             payload["thread_ts"] = thread_ts
         return await self.api_call("chat.postEphemeral", payload)
 
+    async def set_assistant_status(
+        self,
+        *,
+        channel_id: str,
+        thread_ts: str,
+        status: str,
+        loading_messages: list[str] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+            "status": status,
+        }
+        if loading_messages:
+            payload["loading_messages"] = loading_messages[:10]
+        return await self.api_call("assistant.threads.setStatus", payload)
+
     async def open_conversation(self, *, users: str) -> dict[str, Any]:
         return await self.api_call("conversations.open", {"users": users})
 
