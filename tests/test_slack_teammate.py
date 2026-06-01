@@ -981,6 +981,67 @@ def test_socket_mode_ack_payload_uses_envelope_id():
     assert socket_mode_ack({"envelope_id": "env-1"}) == {"envelope_id": "env-1"}
 
 
+@pytest.mark.asyncio
+async def test_slack_connector_registers_connection_before_first_socket_event(session, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from brain.systems.slack.connector import SlackConnectorConfig, run_socket_mode_loop
+
+    session.add(Org(id=ORG_ID, name="Test Org", slug="test-org"))
+    session.add(User(id=USER_ID, org_id=ORG_ID, name="Reda", email="reda@example.com"))
+    await session.flush()
+
+    async def auth_test(_client):
+        return {"team_id": "T789", "user_id": "BILLO", "team": "Test Slack"}
+
+    class _SessionFactory:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        def __call__(self):
+            return self
+
+    class _Socket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    monkeypatch.setattr("brain.systems.slack.connector.SlackWebClient.auth_test", auth_test)
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=lambda _url: _Socket()))
+
+    await run_socket_mode_loop(
+        config=SlackConnectorConfig(
+            bot_token="xoxb-test",
+            app_token="xapp-test",
+            org_id=ORG_ID,
+            owner_user_id=USER_ID,
+            socket_mode_url="wss://socket.test",
+        ),
+        session_factory=_SessionFactory(),
+    )
+
+    connection = (await session.scalars(select(ExternalAgentConnectionRow))).one()
+    assert connection.agent_kind == "slack"
+    assert connection.transport == "slack_socket_mode"
+    assert connection.remote_agent_id == "T789"
+    assert connection.status == "connected"
+    assert connection.last_seen_at is not None
+    assert connection.metadata_["slack"]["team_id"] == "T789"
+    assert connection.metadata_["slack"]["bot_user_id"] == "BILLO"
+
+
 def test_slack_tools_are_available_on_normal_illo_tool_surface():
     from brain.systems.runs.tool_definitions import CHAT_TOOLS
 
