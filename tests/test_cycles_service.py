@@ -970,6 +970,29 @@ async def test_execute_cycle_run_ignores_non_queued_rows(monkeypatch):
     assert run.status == "running"
 
 
+async def test_cycle_busy_thread_detection_uses_agent_run_open_statuses():
+    class _CaptureExecuteSession:
+        def __init__(self):
+            self.statement = None
+
+        async def execute(self, statement):
+            self.statement = statement
+            return _FirstResult(None)
+
+    session = _CaptureExecuteSession()
+
+    assert await cycle_execution._async_idea_has_active_run(session, "idea-1") is False
+
+    compiled_params = session.statement.compile().params
+    status_values = next(
+        value
+        for value in compiled_params.values()
+        if isinstance(value, (list, tuple, set)) and "queued" in value
+    )
+    assert set(status_values) == {"queued", "starting", "running", "paused", "verifying"}
+    assert "pending_approval" not in status_values
+
+
 def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
     agent_run = AgentRun()
     agent_run.metadata_ = {"source": "cycle", "cycle_run_id": 12}
@@ -985,6 +1008,7 @@ def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
         "scheduled_review_window": {"start_at": "2026-04-27T20:20:00+00:00"},
         "result_contract": {"kind": "autonomous_cycle_run_result"},
         "evidence_health": {"status": "pending"},
+        "launch_receipts": [{"kind": "cycle_launch_receipt", "cycle_run_id": 12}],
     }
 
     cycle = Cycle()
@@ -1012,6 +1036,9 @@ def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
     assert evaluation.details["scheduled_review_window"]["start_at"] == "2026-04-27T20:20:00+00:00"
     assert evaluation.details["result_contract"]["kind"] == "autonomous_cycle_run_result"
     assert evaluation.details["evidence_health"]["status"] == "pending"
+    assert evaluation.details["launch_receipts"] == [
+        {"kind": "cycle_launch_receipt", "cycle_run_id": 12}
+    ]
 
 
 def test_finalize_cycle_run_from_run_ignores_non_cycle_run(monkeypatch):

@@ -28,6 +28,7 @@ from brain.systems.runs.direct_agent import (
     _required_openai_auth_mode,
     _agent_context,
 )
+from brain.systems.runs.execution_context import snapshot_agent_context
 from brain.systems.runs.direct_loop.telemetry import async_record_api_call as _async_record_api_call
 from brain.systems.runs.direct_loop.tool_execution import async_invoke_tool_handler
 from brain.platform.providers.model_policy import (
@@ -1038,7 +1039,7 @@ def invoke_predict_rlm_agent(
     from predict_rlm.rlm_skills import Skill
 
     start_time = time.time()
-    threadlocal_context = vars(_agent_context).copy()
+    threadlocal_context = snapshot_agent_context()
     tool_calls_made: list[str] = []
     llm_call_counter: dict[str, Any] = {"turn": 0}
     llm_usage_totals: dict[str, int] = {

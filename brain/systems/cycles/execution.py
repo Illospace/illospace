@@ -15,7 +15,7 @@ from brain.systems.cortex.thought_lifecycle import (
     transition_thought_status,
 )
 from brain.systems.cycles.access import cycle_target_idea_scope_condition
-from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUSES
+from brain.systems.runs.status import OPEN_RUN_STATUS_VALUES
 
 
 @dataclass(frozen=True)
@@ -111,7 +111,7 @@ async def _async_idea_has_active_run(session, idea_id: str) -> bool:
         select(AgentRun.id)
         .where(
             AgentRun.thread_id == idea_id,
-            AgentRun.status.in_(CYCLE_RUN_ACTIVE_STATUSES),
+            AgentRun.status.in_(OPEN_RUN_STATUS_VALUES),
         )
         .limit(1)
     )

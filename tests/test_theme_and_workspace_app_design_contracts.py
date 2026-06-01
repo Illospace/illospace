@@ -178,6 +178,19 @@ def test_generated_app_host_styles_use_theme_tokens():
     assert offenders == []
 
 
+def test_generated_structured_ui_host_has_definite_scroll_area():
+    source = (
+        REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/GeneratedUiRenderer.svelte"
+    ).read_text()
+    style = _last_style_block(source)
+    body_rule = style.split(".generated-ui__body {", 1)[1].split("}", 1)[0]
+
+    assert "height: min(820px, calc(100vh - 112px));" in style
+    assert "height: calc(100vh - 96px);" in style
+    assert "height: 100%;" in body_rule
+    assert "overflow: auto;" in body_rule
+
+
 def test_app_capsule_runtime_uses_new_bridge_and_responsive_surface():
     dispatcher = (
         REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/GeneratedAppRenderer.svelte"

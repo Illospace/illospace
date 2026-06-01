@@ -698,11 +698,15 @@ def test_async_tool_execution_keeps_parallel_tool_contexts_isolated():
 
     async def handler(value):
         _agent_context.tool_marker = value
+        _agent_context.execution_metadata["shared"].append(value)
         started.append(value)
         while len(started) < 2:
             await asyncio.sleep(0)
         await asyncio.sleep(0)
-        return {"marker": _agent_context.tool_marker}
+        return {
+            "marker": _agent_context.tool_marker,
+            "shared": list(_agent_context.execution_metadata["shared"]),
+        }
 
     async def run():
         response = SimpleNamespace(
@@ -711,8 +715,8 @@ def test_async_tool_execution_keeps_parallel_tool_contexts_isolated():
                 SimpleNamespace(type="tool_use", id="b", name="read_file", input={"value": "second"}),
             ]
         )
-        with bind_agent_context({"idea_id": "parent"}):
-            return await async_execute_tool_calls(
+        with bind_agent_context({"idea_id": "parent", "execution_metadata": {"shared": []}}):
+            results = await async_execute_tool_calls(
                 response,
                 {"read_file": handler},
                 [],
@@ -730,12 +734,17 @@ def test_async_tool_execution_keeps_parallel_tool_contexts_isolated():
                 max_parallel_tool_calls=2,
                 check_gate_violations=check_gate_violations,
             )
+            return results, list(_agent_context.execution_metadata["shared"])
 
-    results = asyncio.run(run())
+    results, parent_shared = asyncio.run(run())
 
     payloads = [json.loads(item["content"]) for item in results]
     assert [item["tool_use_id"] for item in results] == ["a", "b"]
-    assert payloads == [{"marker": "first"}, {"marker": "second"}]
+    assert payloads == [
+        {"marker": "first", "shared": ["first"]},
+        {"marker": "second", "shared": ["second"]},
+    ]
+    assert parent_shared == []
 
 
 

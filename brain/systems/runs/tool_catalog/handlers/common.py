@@ -29,6 +29,7 @@ from brain.systems.runs.execution_artifacts import (
 from brain.systems.runs.execution_context import (
     _agent_context,
     bind_agent_context,
+    snapshot_agent_context,
 )
 from brain.systems.runs.project_execution_env import (
     _canonical_project_token_slug,

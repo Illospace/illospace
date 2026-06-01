@@ -22,6 +22,23 @@ def _state() -> dict[str, object]:
     return state
 
 
+def _clone_context_value(value: object) -> object:
+    """Clone ordinary mutable containers without copying live runtime objects."""
+    if isinstance(value, dict):
+        return {key: _clone_context_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clone_context_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_context_value(item) for item in value)
+    if isinstance(value, set):
+        return {_clone_context_value(item) for item in value}
+    return value
+
+
+def clone_agent_context_mapping(mapping: Mapping[str, object]) -> dict[str, object]:
+    return {key: _clone_context_value(value) for key, value in dict(mapping).items()}
+
+
 class _AgentContext:
     """A small namespace proxy backed by ContextVar state.
 
@@ -50,7 +67,7 @@ class _AgentContext:
             raise AttributeError(name) from exc
 
     def _copy(self) -> dict[str, object]:
-        return dict(_state())
+        return clone_agent_context_mapping(_state())
 
 
 _agent_context = _AgentContext()
@@ -114,7 +131,7 @@ def bind_agent_context(
     attrs.update(overrides)
 
     next_state = _agent_context._copy()
-    next_state.update(attrs)
+    next_state.update(clone_agent_context_mapping(attrs))
     token = _context_state.set(next_state)
     try:
         yield _agent_context
@@ -125,6 +142,7 @@ def bind_agent_context(
 __all__ = [
     "AgentExecutionContext",
     "bind_agent_context",
+    "clone_agent_context_mapping",
     "current_agent_context",
     "get_agent_context_value",
     "snapshot_agent_context",

@@ -1800,11 +1800,12 @@ def _workspace_query_scope(
 ) -> dict[str, Any]:
     run = getattr(_agent_context, "run", None)
     execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
-    scoped_idea_id = _optional_text(idea_id)
-    if scoped_idea_id is None and default_current_idea:
+    if idea_id is None and default_current_idea:
         scoped_idea_id = _optional_text(
             getattr(_agent_context, "idea_id", None) or execution_metadata.get("idea_id")
         )
+    else:
+        scoped_idea_id = _optional_text(idea_id)
     return {
         "idea_id": scoped_idea_id,
         "domain_id": domain_id,

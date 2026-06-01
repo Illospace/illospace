@@ -298,6 +298,7 @@ async def record_cycle_run_evaluation(
         skip_reason=skip_reason,
     )
     run.self_review_summary = summary
+    context_snapshot = json_dict(getattr(run, "context_snapshot", None))
     session.add(
         CycleRunEvaluation(
             cycle_id=cycle.id,
@@ -312,15 +313,10 @@ async def record_cycle_run_evaluation(
                 "skip_reason": skip_reason,
                 "agent_run_id": run.run_id,
                 "idea_id": string_or_none(run.idea_id),
-                "scheduled_review_window": json_dict(getattr(run, "context_snapshot", None)).get(
-                    "scheduled_review_window"
-                ),
-                "result_contract": json_dict(getattr(run, "context_snapshot", None)).get(
-                    "result_contract"
-                ),
-                "evidence_health": json_dict(getattr(run, "context_snapshot", None)).get(
-                    "evidence_health"
-                ),
+                "scheduled_review_window": context_snapshot.get("scheduled_review_window"),
+                "result_contract": context_snapshot.get("result_contract"),
+                "evidence_health": context_snapshot.get("evidence_health"),
+                "launch_receipts": context_snapshot.get("launch_receipts", []),
             },
         )
     )

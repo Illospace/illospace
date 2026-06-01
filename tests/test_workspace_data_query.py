@@ -201,18 +201,32 @@ async def test_workspace_data_blank_postgres_idea_id_is_unscoped(monkeypatch):
     assert session.rollbacks == 0
 
 
-def test_workspace_query_scope_blank_idea_defaults_to_current_thread(monkeypatch):
+def test_workspace_query_scope_blank_idea_is_explicitly_unscoped():
     from brain.systems.runs.tool_catalog.handlers import workspace_data
+    from brain.systems.runs.execution_context import bind_agent_context
 
-    monkeypatch.setattr(workspace_data._agent_context, "idea_id", "current-idea", raising=False)
-    monkeypatch.setattr(workspace_data._agent_context, "user_id", " user-1 ", raising=False)
-    monkeypatch.setattr(workspace_data._agent_context, "org_id", " org-1 ", raising=False)
+    with bind_agent_context({"idea_id": "current-idea", "user_id": " user-1 ", "org_id": " org-1 "}):
+        scope = workspace_data._workspace_query_scope(
+            idea_id="",
+            object_key="  ",
+            default_current_idea=True,
+        )
 
-    scope = workspace_data._workspace_query_scope(
-        idea_id="",
-        object_key="  ",
-        default_current_idea=True,
-    )
+    assert scope["idea_id"] is None
+    assert scope["object_key"] is None
+    assert scope["user_id"] == "user-1"
+    assert scope["org_id"] == "org-1"
+
+
+def test_workspace_query_scope_omitted_idea_defaults_to_current_thread():
+    from brain.systems.runs.tool_catalog.handlers import workspace_data
+    from brain.systems.runs.execution_context import bind_agent_context
+
+    with bind_agent_context({"idea_id": "current-idea", "user_id": " user-1 ", "org_id": " org-1 "}):
+        scope = workspace_data._workspace_query_scope(
+            object_key="  ",
+            default_current_idea=True,
+        )
 
     assert scope["idea_id"] == "current-idea"
     assert scope["object_key"] is None

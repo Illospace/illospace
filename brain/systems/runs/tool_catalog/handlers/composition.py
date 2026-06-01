@@ -555,7 +555,7 @@ def _get_tool_handlers(
                 return {"error": f"operations[{idx}].args must be an object"}
             normalized_ops.append((idx, tool_name, args))
 
-        threadlocal_context = vars(_agent_context).copy()
+        threadlocal_context = snapshot_agent_context()
         parallelism = max(1, min(
             max_parallel or len(normalized_ops),
             len(normalized_ops),
