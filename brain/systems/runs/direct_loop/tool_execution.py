@@ -10,6 +10,7 @@ import logging
 import os
 from typing import Any, Callable
 
+from brain.systems.runs.execution_context import bind_agent_context
 from brain.systems.runs.tool_catalog.registry import output_budget_chars_for_tool
 
 logger = logging.getLogger("agent")
@@ -164,24 +165,18 @@ def run_tool_awaitable(result):
 
 class _BoundAgentContext:
     def __init__(self, agent_context, threadlocal_context: dict | None):
-        self.agent_context = agent_context
         self.threadlocal_context = threadlocal_context
-        self.previous_context = None
+        self.context_manager = None
 
     def __enter__(self):
-        if self.agent_context is not None and self.threadlocal_context is not None:
-            self.previous_context = vars(self.agent_context).copy()
-            for key in list(vars(self.agent_context).keys()):
-                delattr(self.agent_context, key)
-            for key, value in self.threadlocal_context.items():
-                setattr(self.agent_context, key, value)
+        if self.threadlocal_context is not None:
+            self.context_manager = bind_agent_context(self.threadlocal_context)
+            return self.context_manager.__enter__()
+        return None
 
     def __exit__(self, exc_type, exc, tb):
-        if self.agent_context is not None and self.previous_context is not None:
-            for key in list(vars(self.agent_context).keys()):
-                delattr(self.agent_context, key)
-            for key, value in self.previous_context.items():
-                setattr(self.agent_context, key, value)
+        if self.context_manager is not None:
+            return self.context_manager.__exit__(exc_type, exc, tb)
         return False
 
 

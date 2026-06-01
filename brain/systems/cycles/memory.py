@@ -20,6 +20,12 @@ from brain.systems.cycles.common import (
     string_or_none,
     validate_nonempty_trimmed,
 )
+from brain.systems.cycles.contracts import (
+    cycle_launch_receipt,
+    cycle_result_contract,
+    cycle_scheduled_review_window,
+    pending_evidence_health_receipt,
+)
 from brain.systems.cycles.serializers import (
     serialize_cycle_guidance,
     serialize_cycle_output_target,
@@ -161,6 +167,16 @@ async def async_prepare_cycle_run_memory_snapshot(session, cycle: Cycle, run: Cy
         "revision": serialize_cycle_revision(revision),
         "workspace_id": string_or_none(cycle.org_id),
         "owner_user_id": string_or_none(cycle.user_id),
+        "scheduled_review_window": cycle_scheduled_review_window(run.scheduled_for),
+        "result_contract": cycle_result_contract(),
+        "evidence_health": pending_evidence_health_receipt(run.scheduled_for),
+        "launch_receipts": [
+            cycle_launch_receipt(
+                cycle_id=cycle.id,
+                cycle_run_id=run.id,
+                scheduled_for=run.scheduled_for,
+            )
+        ],
         **creator_payload(cycle),
     }
 
@@ -296,6 +312,15 @@ async def record_cycle_run_evaluation(
                 "skip_reason": skip_reason,
                 "agent_run_id": run.run_id,
                 "idea_id": string_or_none(run.idea_id),
+                "scheduled_review_window": json_dict(getattr(run, "context_snapshot", None)).get(
+                    "scheduled_review_window"
+                ),
+                "result_contract": json_dict(getattr(run, "context_snapshot", None)).get(
+                    "result_contract"
+                ),
+                "evidence_health": json_dict(getattr(run, "context_snapshot", None)).get(
+                    "evidence_health"
+                ),
             },
         )
     )

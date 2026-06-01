@@ -996,7 +996,7 @@
 </script>
 
 <GeneratedAppChrome
-  className="generated-html-app"
+  className="generated-html-app generated-app-shell"
   title={app.name}
   eyebrow="Generated app"
   accent={appAccent}

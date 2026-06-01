@@ -111,6 +111,24 @@
 </WorkspaceStageShell>
 
 <style>
+  .thread-stage-shell {
+    --thread-stage-frame-width: clamp(1040px, 78vw, 1760px);
+    z-index: 25;
+  }
+
+  :global(.thread-stage-shell) {
+    --thread-stage-frame-width: clamp(1040px, 78vw, 1760px);
+    z-index: 25;
+  }
+
+  :global(.thread-stage-shell.entering) {
+    animation: thread-shell-presence 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  :global(.thread-stage-shell .thread-stage-frame) {
+    width: min(100%, var(--thread-stage-frame-width));
+  }
+
   .thread-periphery-layer {
     position: absolute;
     inset: 0;
@@ -277,6 +295,15 @@
     }
     50% {
       opacity: 0.46;
+    }
+  }
+
+  @keyframes thread-shell-presence {
+    0% {
+      opacity: 0;
+    }
+    100% {
+      opacity: 1;
     }
   }
 

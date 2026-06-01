@@ -292,7 +292,7 @@
 </script>
 
 <GeneratedAppChrome
-  className="app-capsule"
+  className="app-capsule generated-app-shell"
   title={app.name}
   accent={appAccent}
   {surface}

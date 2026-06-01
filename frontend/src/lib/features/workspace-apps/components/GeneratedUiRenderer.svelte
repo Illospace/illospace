@@ -759,7 +759,7 @@
 </script>
 
 <GeneratedAppChrome
-  className={`generated-ui ${hasBoardView ? 'has-board' : ''}`}
+  className={`generated-ui generated-app-shell ${hasBoardView ? 'has-board' : ''}`}
   title={spec?.title || app.name}
   description={spec?.description || app.description}
   eyebrow="Generated UI"

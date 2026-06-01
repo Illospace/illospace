@@ -1,14 +1,59 @@
-"""Thread-local execution context for live AgentRun tool calls."""
+"""Task-local execution context for live AgentRun tool calls."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
+import contextvars
 from dataclasses import dataclass, field, fields
-import threading
 from typing import Iterator, Mapping
 
 
-_agent_context = threading.local()
+_context_state: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
+    "illo_agent_execution_context",
+    default=None,
+)
+
+
+def _state() -> dict[str, object]:
+    state = _context_state.get()
+    if state is None:
+        state = {}
+        _context_state.set(state)
+    return state
+
+
+class _AgentContext:
+    """A small namespace proxy backed by ContextVar state.
+
+    Agent tools read and write attributes on this object. ContextVar storage keeps
+    concurrent async tool calls from mutating the same logical context while still
+    letting worker threads start with their own empty context.
+    """
+
+    def __getattribute__(self, name: str):
+        if name in {"__class__", "__dict__", "_copy"}:
+            if name == "__dict__":
+                return _state()
+            return object.__getattribute__(self, name)
+        try:
+            return _state()[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name: str, value: object) -> None:
+        _state()[name] = value
+
+    def __delattr__(self, name: str) -> None:
+        try:
+            del _state()[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def _copy(self) -> dict[str, object]:
+        return dict(_state())
+
+
+_agent_context = _AgentContext()
 
 
 @dataclass
@@ -40,18 +85,18 @@ class AgentExecutionContext:
 
 
 def current_agent_context():
-    """Return the thread-local AgentRun execution context object."""
+    """Return the task-local AgentRun execution context object."""
     return _agent_context
 
 
 def get_agent_context_value(name: str, default=None):
-    """Read a single value from the current thread's AgentRun context."""
+    """Read a single value from the current task's AgentRun context."""
     return getattr(_agent_context, name, default)
 
 
 def snapshot_agent_context() -> dict:
-    """Capture the current thread's bound AgentRun context attributes."""
-    return vars(_agent_context).copy()
+    """Capture the current task's bound AgentRun context attributes."""
+    return _agent_context._copy()
 
 
 @contextmanager
@@ -59,7 +104,7 @@ def bind_agent_context(
     context: AgentExecutionContext | Mapping[str, object] | None = None,
     **overrides,
 ) -> Iterator[object]:
-    """Bind AgentRun context attributes for the current thread, then restore them."""
+    """Bind AgentRun context attributes for the current task, then restore them."""
     attrs: dict[str, object] = {}
     if context is not None:
         if isinstance(context, AgentExecutionContext):
@@ -68,22 +113,13 @@ def bind_agent_context(
             attrs.update(dict(context))
     attrs.update(overrides)
 
-    sentinel = object()
-    previous = {
-        key: getattr(_agent_context, key, sentinel)
-        for key in attrs
-    }
+    next_state = _agent_context._copy()
+    next_state.update(attrs)
+    token = _context_state.set(next_state)
     try:
-        for key, value in attrs.items():
-            setattr(_agent_context, key, value)
         yield _agent_context
     finally:
-        for key, value in previous.items():
-            if value is sentinel:
-                if hasattr(_agent_context, key):
-                    delattr(_agent_context, key)
-            else:
-                setattr(_agent_context, key, value)
+        _context_state.reset(token)
 
 
 __all__ = [
