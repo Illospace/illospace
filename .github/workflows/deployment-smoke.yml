@@ -4,13 +4,16 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "brain/**"
-      - "frontend/**"
       - "deploy/**"
       - "requirements.txt"
       - "requirements-production.txt"
+      - "requirements-gpu.txt"
       - "pyproject.toml"
       - "alembic.ini"
+      - "brain/platform/db/**"
+      - "brain/app/api/main.py"
+      - "brain/app/api/config.py"
+      - "brain/app/api/deps.py"
       - ".github/workflows/deployment-smoke.yml"
   workflow_dispatch:
 

@@ -48,8 +48,8 @@ class EventVisibility(StrEnum):
 class AgentRunRequest:
     thread_id: str
     message: str
+    org_id: str
     user_id: str | None = None
-    org_id: str | None = None
     profile: RunProfile | str = RunProfile.FAST
     recipe: RunRecipe | str | None = None
     parent_run_id: int | None = None
@@ -58,6 +58,12 @@ class AgentRunRequest:
     workspace_ref: dict[str, Any] = field(default_factory=dict)
     model_policy: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        org_id = str(self.org_id or "").strip()
+        if not org_id:
+            raise ValueError("AgentRun requires workspace org_id")
+        object.__setattr__(self, "org_id", org_id)
 
     @property
     def normalized_profile(self) -> RunProfile:

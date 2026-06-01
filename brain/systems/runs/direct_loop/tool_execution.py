@@ -18,6 +18,9 @@ logger = logging.getLogger("agent")
 _DEFAULT_TOOL_TIMEOUT_SECONDS = 180.0
 _DEFAULT_TOOL_TIMEOUT_GRACE_SECONDS = 5.0
 _DEFAULT_TOOL_TIMEOUT_MAX_SECONDS = 900.0
+_RECENT_TOOL_RESULT_LIMIT = 8
+_RECENT_TOOL_RESULT_PREVIEW_CHARS = 1200
+_RECENT_TOOL_ARGS_PREVIEW_CHARS = 400
 
 
 @dataclass(frozen=True)
@@ -135,6 +138,38 @@ def _extract_model_visible_tool_content(result: Any) -> tuple[Any, Any | None]:
     cleaned = dict(result)
     model_content = cleaned.pop("_tool_result_content", None)
     return cleaned, model_content
+
+
+def _record_agent_tool_result(agent_context, resolved: ResolvedToolCall, result_text: str) -> None:
+    if agent_context is None:
+        return
+    try:
+        tool_log = getattr(agent_context, "tool_calls_log", None)
+        if not isinstance(tool_log, list):
+            tool_log = []
+        tool_log.append(resolved.tool_name)
+        setattr(agent_context, "tool_calls_log", tool_log)
+
+        try:
+            args_preview = json.dumps(resolved.tool_input, sort_keys=True, default=str)
+        except Exception:
+            args_preview = str(resolved.tool_input)
+
+        recent = getattr(agent_context, "recent_tool_results", None)
+        if not isinstance(recent, list):
+            recent = []
+        recent.append({
+            "tool_name": resolved.tool_name,
+            "args_preview": _truncate_middle_text(args_preview, _RECENT_TOOL_ARGS_PREVIEW_CHARS),
+            "is_error": bool(resolved.is_error),
+            "result_preview": _truncate_middle_text(
+                str(result_text or ""),
+                _RECENT_TOOL_RESULT_PREVIEW_CHARS,
+            ),
+        })
+        setattr(agent_context, "recent_tool_results", recent[-_RECENT_TOOL_RESULT_LIMIT:])
+    except Exception:
+        logger.debug("Failed to record recent tool result for final-reply context", exc_info=True)
 
 
 def _run_sync_boundary(awaitable: Any, *, name: str) -> Any:
@@ -370,6 +405,8 @@ def emit_resolved_tool_call(
     run_id,
     idea_id,
     tool_call_source: str,
+    *,
+    agent_context=None,
 ) -> str:
     """Append tool_result content and record side effects in block order."""
     tool_results.append({
@@ -381,6 +418,7 @@ def emit_resolved_tool_call(
     callback_result_text = resolved.result_text
     if resolved.tool_name == "brain_vault":
         callback_result_text = "[secret redacted]"
+    _record_agent_tool_result(agent_context, resolved, callback_result_text)
     if on_tool_call:
         on_tool_call(resolved.tool_name, resolved.tool_input, callback_result_text)
     return callback_result_text
@@ -393,6 +431,8 @@ async def async_emit_resolved_tool_call(
     run_id,
     idea_id,
     tool_call_source: str,
+    *,
+    agent_context=None,
 ) -> None:
     """Append a tool result and persist its trace through the async event log."""
     callback_result_text = emit_resolved_tool_call(
@@ -402,6 +442,7 @@ async def async_emit_resolved_tool_call(
         None,
         None,
         tool_call_source,
+        agent_context=agent_context,
     )
     if run_id and idea_id:
         from brain.systems.runs.events import async_record_tool_call
@@ -444,6 +485,7 @@ def execute_parallel_tool_batch(
             run_id,
             idea_id,
             tool_call_source,
+            agent_context=agent_context,
         )
 
 
@@ -476,6 +518,7 @@ async def async_execute_parallel_tool_batch(
                 run_id,
                 idea_id,
                 tool_call_source,
+                agent_context=agent_context,
             )
         return
 
@@ -514,6 +557,7 @@ async def async_execute_parallel_tool_batch(
                     run_id,
                     idea_id,
                     tool_call_source,
+                    agent_context=agent_context,
                 )
         finally:
             for _, task in tasks:
@@ -647,6 +691,7 @@ def execute_tool_calls(
             run_id,
             idea_id,
             tool_call_source,
+            agent_context=agent_context,
         )
 
     flush_parallel_batch()
@@ -764,6 +809,7 @@ async def async_execute_tool_calls(
             run_id,
             idea_id,
             tool_call_source,
+            agent_context=agent_context,
         )
 
     await flush_parallel_batch()

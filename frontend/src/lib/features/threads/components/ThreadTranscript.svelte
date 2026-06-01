@@ -8,7 +8,6 @@
   } from '$lib/components/constellation';
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
   import AttachmentPreviewDialog from '$lib/components/chat/AttachmentPreviewDialog.svelte';
-  import type { ConstellationIconName } from '$lib/components/constellation/ConstellationIcon.svelte';
   import {
     attachmentDetail,
     attachmentKindLabel,
@@ -16,19 +15,14 @@
     attachmentPreviewKind,
     attachmentUrl,
     normalizeServerUploadPreviewUrl,
-    type AttachmentPreviewKind,
   } from '$lib/utils/attachmentPreview';
-  import { LIVE_RUN_STATUSES, OPEN_AGENT_RUN_STATUSES } from '$lib/constants/statuses';
-  import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
   import StreamVisualBlock from '$lib/features/threads/components/StreamVisualBlock.svelte';
   import ThreadAuthorMark from '$lib/features/threads/components/ThreadAuthorMark.svelte';
 
   import {
-    getCortexThreadRunStepTone,
     getCortexThreadRunStatusGlyph,
     getCortexThreadRunStatusLabel,
     getCortexThreadStepStatusGlyph,
-    type CortexThreadStageAttachmentItem,
     type CortexThreadStageFileAttachment,
     type CortexThreadStageImageAttachment,
     normalizeCortexThreadLiveLine,
@@ -36,16 +30,44 @@
     summarizeCortexThreadRunSteps,
     type CortexThreadStageRunItem,
     type ThreadTranscriptProps,
-    type CortexThreadStageMessageItem,
-    type CortexThreadStageThinkingItem,
-    type CortexThreadStageTone,
-    type CortexThreadStageTranscriptItem,
-    type CortexThreadStageWorkTimelineItem,
   } from '$lib/features/threads/domain/threadTranscriptAdapter';
-
-  const RUN_INLINE_SECTIONS = ['graph', 'tools', 'evidence'] as const;
-  type RunInlineSection = (typeof RUN_INLINE_SECTIONS)[number];
-  const THINKING_STATUS_LABEL = 'Thinking';
+  import {
+    RUN_INLINE_SECTIONS,
+    attachmentIconName,
+    attachmentPreviewLabel,
+    attachmentPreviewType,
+    getAttachmentKey,
+    getMessageTone,
+    getMessageClass,
+    getRunClass,
+    getRunDefaultExpanded,
+    getRunKey,
+    getRunLiveCueLabel,
+    getRunLiveCueWorkIndex,
+    getRunSectionKey,
+    getStepToneClass,
+    getThinkingStatusLabel,
+    getThinkingSteps,
+    getThreadHeaderStatusLabel,
+    getThreadHeaderStatusState,
+    getTimelineToolDetail,
+    getTimelineToolLabel,
+    getTimelineToolTarget,
+    getTimelineToolTitle,
+    getToolCallDetail,
+    getToolCallLabel,
+    getUserPresenceStyle,
+    getWorkThoughtClass,
+    getWorkThoughtHtml,
+    hasMessageSupplementalMeta,
+    hasVisibleLiveWorkItems,
+    isIlloMessage,
+    isRunActiveStatus,
+    isRunLiveWorkStream,
+    shouldRenderLiveWorkItem,
+    shouldShowTimelineToolArgs,
+    type RunInlineSection,
+  } from '$lib/features/threads/domain/threadTranscriptPresentation';
 
   let {
     header = null,
@@ -82,65 +104,10 @@
   const previewAttachmentLabel = $derived(previewAttachment ? attachmentPreviewLabel(previewAttachment) : '');
   const previewAttachmentDetail = $derived(previewAttachment?.kind === 'file' ? (previewAttachment.detail ?? '') : '');
   const previewAttachmentKind = $derived(previewAttachment ? attachmentPreviewType(previewAttachment) : 'file');
-  function getMessageTone(item: CortexThreadStageMessageItem): CortexThreadStageTone {
-    return item.tone ?? 'spectral';
-  }
-
-  function getStepToneClass(item: CortexThreadStageRunItem) {
-    return getCortexThreadRunStepTone(item.runSteps ?? []);
-  }
-
-  function getRunClass(item: CortexThreadStageRunItem) {
-    return [
-      'run-insert',
-      `run-${item.status}`,
-      item.workItems?.length ? 'run-with-work-timeline' : '',
-    ].filter(Boolean).join(' ');
-  }
-
-  function getRunKey(item: CortexThreadStageRunItem, index: number) {
-    return String(item.id ?? `run-${index}`);
-  }
-
-  function getRunDefaultExpanded(item: CortexThreadStageRunItem) {
-    return item.defaultExpanded ?? Boolean(item.requiresApproval || isRunActiveStatus(item.status));
-  }
-
-  function isRunActiveStatus(status: string | undefined) {
-    return Boolean(status && (LIVE_RUN_STATUSES as readonly string[]).includes(status));
-  }
-
-  function isRunLiveWorkStream(item: CortexThreadStageRunItem) {
-    if (item.requiresApproval || item.status === 'pending_approval') return false;
-    return (OPEN_AGENT_RUN_STATUSES as readonly string[]).includes(item.status);
-  }
-
-  function getHeaderStatusState() {
-    if (header?.statusState) return header.statusState;
-
-    const status = header?.statusLabel?.toLowerCase() ?? '';
-    const runStatus = header?.runStatus?.toLowerCase() ?? '';
-    if (status.includes('working') || OPEN_AGENT_RUN_STATUSES.some((value) => runStatus.includes(value))) {
-      return 'working';
-    }
-    if (status.includes('unread') || status.includes('done')) return 'unread';
-    return 'idle';
-  }
-
-  function getHeaderStatusLabel() {
-    const state = getHeaderStatusState();
-    if (state === 'working') return 'Illo is working';
-    if (state === 'unread') return 'Unread thread';
-    return 'Idle thread';
-  }
 
   function isRunExpanded(item: CortexThreadStageRunItem, index: number) {
     const key = getRunKey(item, index);
     return runExpandedByKey[key] ?? getRunDefaultExpanded(item);
-  }
-
-  function getRunSectionKey(runKey: string, section: RunInlineSection) {
-    return `${runKey}:${section}`;
   }
 
   function isRunSectionExpanded(
@@ -176,237 +143,6 @@
       ...runSectionExpandedByKey,
       [getRunSectionKey(runKey, section)]: details.open,
     };
-  }
-
-  function parseTimelineToolArgs(args: string | undefined): Record<string, any> | null {
-    if (!args) return null;
-    try {
-      const parsed = JSON.parse(args);
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-    } catch {
-      return null;
-    }
-  }
-
-  function compactTimelineTarget(value: unknown): string | undefined {
-    if (typeof value !== 'string') return undefined;
-    const text = value.trim();
-    if (!text) return undefined;
-    return text.length > 96 ? `...${text.slice(-93)}` : text;
-  }
-
-  function getTimelineToolTarget(item: Extract<CortexThreadStageWorkTimelineItem, { kind: 'tool' }>) {
-    const displayTarget = typeof item.display?.target === 'string' ? item.display.target.trim() : '';
-    if (displayTarget) return compactTimelineTarget(displayTarget);
-    const args = parseTimelineToolArgs(item.args);
-    if (!args) return undefined;
-    return compactTimelineTarget(
-      args.path ??
-        args.file_path ??
-        args.filename ??
-        args.cwd ??
-        args.url ??
-        args.query ??
-        args.command ??
-        args.cmd,
-    );
-  }
-
-  function getTimelineToolLabel(item: Extract<CortexThreadStageWorkTimelineItem, { kind: 'tool' }>) {
-    const displayLabel = typeof item.display?.label === 'string' ? item.display.label.trim() : '';
-    if (displayLabel) return displayLabel;
-    const tool = item.tool.trim() || 'tool';
-    const target = getTimelineToolTarget(item);
-    const normalized = tool.toLowerCase();
-
-    if (/(edit|patch|update)/.test(normalized) && target) return `Editing ${target}`;
-    if (/(write|create|save)/.test(normalized) && target) return `Writing ${target}`;
-    if (/(read|view|open|load)/.test(normalized) && target) return `Reading ${target}`;
-    if (/(exec|command|shell|terminal|bash)/.test(normalized)) return target ? `Ran ${target}` : 'Ran command';
-    if (target) return `${tool} ${target}`;
-    return item.status === 'running' ? `Using ${tool}` : `Used ${tool}`;
-  }
-
-  function getRunLiveCueWorkIndex(item: CortexThreadStageRunItem) {
-    const workItems = item.workItems ?? [];
-    for (let index = workItems.length - 1; index >= 0; index -= 1) {
-      const workItem = workItems[index];
-      if (workItem.kind === 'tool' && workItem.status === 'running') return index;
-    }
-    return -1;
-  }
-
-  function getRunLiveCueLabel(item: CortexThreadStageRunItem, cueIndex = getRunLiveCueWorkIndex(item)) {
-    if (cueIndex >= 0) {
-      const workItem = item.workItems?.[cueIndex];
-      if (workItem?.kind === 'tool') return getTimelineToolLabel(workItem);
-    }
-
-    return THINKING_STATUS_LABEL;
-  }
-
-  function shouldRenderLiveWorkItem(workIndex: number, cueIndex: number) {
-    return workIndex !== cueIndex;
-  }
-
-  function hasVisibleLiveWorkItems(item: CortexThreadStageRunItem, cueIndex: number) {
-    return Boolean(item.workItems?.some((_workItem, workIndex) => shouldRenderLiveWorkItem(workIndex, cueIndex)));
-  }
-
-  function getTimelineToolTitle(item: Extract<CortexThreadStageWorkTimelineItem, { kind: 'tool' }>) {
-    const parts = [getTimelineToolLabel(item), item.tool, item.status, item.time].filter(Boolean);
-    return parts.join(' · ');
-  }
-
-  function getTimelineToolDetail(item: Extract<CortexThreadStageWorkTimelineItem, { kind: 'tool' }>) {
-    return typeof item.display?.detail === 'string' ? item.display.detail.trim() : '';
-  }
-
-  function shouldShowTimelineToolArgs(item: Extract<CortexThreadStageWorkTimelineItem, { kind: 'tool' }>) {
-    return Boolean(item.args && !item.display?.label && !getTimelineToolTarget(item));
-  }
-
-  function stripReflectionPrefix(text: string) {
-    return text.trim().replace(/^Reflecting:\s*/i, '').trim();
-  }
-
-  function getWorkThoughtText(text: string) {
-    const cleaned = stripReflectionPrefix(text) || text.trim();
-    const boldMatch = cleaned.match(/^\*\*([^*]+)\*\*\s*([\s\S]*)$/);
-    if (!boldMatch) return cleaned;
-
-    const title = boldMatch[1]?.trim();
-    const tail = (boldMatch[2] ?? '').trim();
-    if (!title) return cleaned;
-    if (!tail || tail.length < 12 || /^[A-Za-z][.,;:]?$/.test(tail)) return `**${title}**`;
-    return cleaned;
-  }
-
-  function getToolCallDisplay(call: NonNullable<CortexThreadStageRunItem['toolCalls']>[number]) {
-    return call.display && typeof call.display === 'object' ? call.display : null;
-  }
-
-  function getToolCallLabel(call: NonNullable<CortexThreadStageRunItem['toolCalls']>[number]) {
-    const display = getToolCallDisplay(call);
-    const label = typeof display?.label === 'string' ? display.label.trim() : '';
-    if (label) return label;
-    return call.tool;
-  }
-
-  function getToolCallDetail(call: NonNullable<CortexThreadStageRunItem['toolCalls']>[number]) {
-    const display = getToolCallDisplay(call);
-    const detail = typeof display?.detail === 'string' ? display.detail.trim() : '';
-    if (detail) return detail;
-    return call.args;
-  }
-
-  function getWorkThoughtHtml(text: string) {
-    return renderReadableMarkdown(getWorkThoughtText(text));
-  }
-
-  function getWorkThoughtClass(text: string) {
-    return [
-      'run-work-item',
-      'run-work-thought',
-      /^Reflecting:/i.test(text.trim()) ? 'run-work-reflection' : '',
-    ].filter(Boolean).join(' ');
-  }
-
-  function getThinkingStatusLabel(item: CortexThreadStageThinkingItem) {
-    const latestStep = item.steps?.at(-1)?.label?.trim();
-    return latestStep || item.label || THINKING_STATUS_LABEL;
-  }
-
-  function getThinkingSteps(item: CortexThreadStageThinkingItem) {
-    const steps = [...(item.steps ?? [])];
-    const latestStep = steps.at(-1);
-    if (latestStep?.label?.trim() && latestStep.label.trim() === getThinkingStatusLabel(item)) {
-      return steps.slice(0, -1);
-    }
-    return steps;
-  }
-
-  function getMessageClass(item: CortexThreadStageMessageItem) {
-    const role = item.role ?? 'illo';
-    const tone = getMessageTone(item);
-
-    return [
-      'thread-message',
-      role === 'user' ? 'thread-message-user' : 'thread-message-illo',
-      role === 'user' ? `thread-message-${tone}` : '',
-      item.inlineWithWork ? 'thread-message-inline-work' : '',
-    ]
-      .filter(Boolean)
-      .join(' ');
-  }
-
-  function isIlloMessage(item: CortexThreadStageMessageItem) {
-    return (item.role ?? 'illo') === 'illo';
-  }
-
-  function hasMessageSupplementalMeta(item: CortexThreadStageMessageItem) {
-    return Boolean(item.timestamp || item.tag);
-  }
-
-  function normalizeHexColor(value: string | null | undefined): string | null {
-    if (typeof value !== 'string') return null;
-    const trimmed = value.trim();
-    if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(trimmed)) return null;
-    if (trimmed.length === 4) {
-      return `#${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}${trimmed[3]}${trimmed[3]}`;
-    }
-    return trimmed;
-  }
-
-  function getUserPresenceStyle(item: CortexThreadStageMessageItem) {
-    if ((item.role ?? 'illo') !== 'user') return undefined;
-    const accent = normalizeHexColor(item.accentColor);
-    const core = normalizeHexColor(item.coreColor);
-    const owner = normalizeHexColor(item.ownerColor);
-    if (!accent) return undefined;
-
-    const seedCore =
-      core ??
-      `color-mix(in srgb, ${accent} var(--constellation-presence-seed-user-core-accent-strength, 52%), var(--constellation-presence-seed-user-core-base, #050910))`;
-    const seedOwner =
-      owner ??
-      `color-mix(in srgb, ${accent} var(--constellation-presence-seed-user-owner-accent-strength, 18%), var(--constellation-presence-seed-user-owner-base, #f0f0fa))`;
-
-    return [
-      `--seed-accent:${accent}`,
-      `--seed-core:${seedCore}`,
-      `--seed-owner:${seedOwner}`,
-    ].join('; ');
-  }
-
-  function getAttachmentKey(attachment: CortexThreadStageAttachmentItem, index: number) {
-    if (attachment.kind === 'visual') {
-      return attachment.block.title || `${attachment.block.type}-${index}`;
-    }
-
-    return attachment.url || `${attachment.kind}-${index}`;
-  }
-
-  function attachmentPreviewLabel(attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment) {
-    return attachment.kind === 'image' ? attachment.alt : attachment.label;
-  }
-
-  function attachmentPreviewType(
-    attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment,
-  ): AttachmentPreviewKind {
-    return attachment.kind === 'image' ? 'image' : (attachment.previewKind ?? 'file');
-  }
-
-  function attachmentIconName(attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment): ConstellationIconName {
-    const kind = attachmentPreviewType(attachment);
-    if (kind === 'image') return 'image';
-    if (kind === 'video') return 'video';
-    if (kind === 'pdf') return 'pdf';
-    if (kind === 'link') return 'link';
-    if (kind === 'archive') return 'archive';
-    if (kind === 'text') return 'code';
-    if (kind === 'file') return 'file';
-    return 'document';
   }
 
   function openAttachmentPreview(attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment) {
@@ -543,8 +279,8 @@
     <header class="thread-panel-header thread-column">
       <div class="thread-header-title-row">
         <ConstellationSignalStatusIndicator
-          state={getHeaderStatusState()}
-          label={getHeaderStatusLabel()}
+          state={getThreadHeaderStatusState(header)}
+          label={getThreadHeaderStatusLabel(header)}
           className="thread-header-status-indicator"
         />
         <h1 class="thread-header-title" title={header.title}>{header.title}</h1>
@@ -618,20 +354,17 @@
             {@const isIllo = isIlloMessage(item)}
             {@const hasSupplementalMeta = hasMessageSupplementalMeta(item)}
             <article class={getMessageClass(item)}>
-              <header class="thread-message-header">
-                <ThreadAuthorMark
-                  author={item.author}
-                  role={item.role}
-                  tone={getMessageTone(item)}
-                  {isIllo}
-                  presenceStyle={getUserPresenceStyle(item)}
-                />
+              {#if !isIllo}
+                <header class="thread-message-header">
+                  <ThreadAuthorMark
+                    author={item.author}
+                    role={item.role}
+                    tone={getMessageTone(item)}
+                    presenceStyle={getUserPresenceStyle(item)}
+                  />
 
-                {#if !isIllo || hasSupplementalMeta}
                   <div class="thread-message-meta">
-                    {#if !isIllo}
-                      <span class="thread-message-author">{item.author}</span>
-                    {/if}
+                    <span class="thread-message-author">{item.author}</span>
 
                     {#if hasSupplementalMeta}
                       <span class="thread-message-meta-supplemental">
@@ -649,8 +382,8 @@
                       </span>
                     {/if}
                   </div>
-                {/if}
-              </header>
+                </header>
+              {/if}
 
               <div class="thread-message-content">
                 {#if item.html}
@@ -1544,6 +1277,10 @@
     position: relative;
     display: grid;
     gap: 10px;
+    /* Own these box metrics so legacy global .thread-message styles cannot indent Illo replies. */
+    margin-bottom: 0;
+    padding: 0;
+    border-radius: 0;
     color: var(--thread-color-text-primary);
   }
 
@@ -1563,9 +1300,6 @@
   }
 
   .thread-message-inline-work.thread-message-illo {
-    --thread-inline-work-outdent: 16px;
-    width: min(calc(100% + var(--thread-inline-work-outdent)), 776px);
-    margin-inline-start: calc(var(--thread-inline-work-outdent) * -1);
     gap: 8px;
   }
 
@@ -1655,6 +1389,10 @@
     font-family: var(--thread-font-sans);
     font-size: 14px;
     line-height: 1.58;
+  }
+
+  .thread-message-illo .thread-message-content {
+    color: var(--thread-message-body);
   }
 
   .thread-message-content > * {
@@ -3091,10 +2829,6 @@
     .message-stack {
       gap: 14px;
       padding-bottom: 22px;
-    }
-
-    .thread-message-inline-work.thread-message-illo {
-      --thread-inline-work-outdent: 0px;
     }
 
     .thread-composer-dock {

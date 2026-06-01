@@ -85,7 +85,11 @@
     clearOwnerOrbitLayout,
     createOrbitNodeFromIdea,
     orbitNodeCoords,
+    sceneNodeSnapshotChanged,
+    sceneNodeSnapshotFromIdea,
     type OrbitNode,
+    type WorkspaceSceneIdeaSnapshot,
+    type WorkspaceSceneNodeSnapshot,
   } from '../domain/workspaceSceneState';
   import {
     birthRenderPosition,
@@ -569,7 +573,7 @@
     });
   }
 
-  function computeQueuePositions(ideas: any[]): Map<string, number> {
+  function computeQueuePositions(_ideas: WorkspaceSceneIdeaSnapshot[]): Map<string, number> {
     return new Map<string, number>();
   }
 
@@ -817,13 +821,13 @@
     return `translate(${x},${y})`;
   }
 
-  function mergeIdeaIntoSceneNode(node: OrbitNode, idea: any) {
+  function mergeIdeaIntoSceneNode(node: OrbitNode, idea: WorkspaceSceneIdeaSnapshot) {
     applyIdeaSnapshotToSceneNode(node, idea, {
       usePersistedCoordsWhenUnpositioned: orbitAnchors.length === 0,
     });
   }
 
-  function createSceneNode(idea: any, totalIdeas: number): OrbitNode {
+  function createSceneNode(idea: WorkspaceSceneIdeaSnapshot, totalIdeas: number): OrbitNode {
     const persistedCoords = orbitAnchors.length === 0
       ? orbitNodeCoords({
           x: idea.position_x ?? undefined,
@@ -843,7 +847,11 @@
     beginBirthLifecycle(node, birthFrom, orbitPoint);
   }
 
-  function ensureSceneNode(idea: any, totalIdeas: number, options: { birth?: boolean } = {}) {
+  function ensureSceneNode(
+    idea: WorkspaceSceneIdeaSnapshot,
+    totalIdeas: number,
+    options: { birth?: boolean } = {},
+  ) {
     let node = orbitSceneNodesById.get(idea.id);
     const isNew = !node;
 
@@ -863,11 +871,11 @@
     return node;
   }
 
-  function syncSceneNodes(ideas: any[]) {
-    const visibleIdeas = ideas.filter((idea: any) => !idea?.archived_at);
+  function syncSceneNodes(ideas: WorkspaceSceneIdeaSnapshot[]) {
+    const visibleIdeas = ideas.filter((idea) => !idea?.archived_at);
     applyClusterMetrics(visibleIdeas as any[]);
     const nextIds = new Set<string>();
-    const nodes = visibleIdeas.map((idea: any) => {
+    const nodes = visibleIdeas.map((idea) => {
       const node = ensureSceneNode(idea, visibleIdeas.length);
       nextIds.add(node.id);
       return node;
@@ -3823,12 +3831,12 @@
   let renderedIds = new Set<string>();
   let initialIdeaHydrationComplete = false;
 
-  function seedRenderedIdeaTracking(ideas: any[]) {
+  function seedRenderedIdeaTracking(ideas: WorkspaceSceneIdeaSnapshot[]) {
     renderedIds = new Set();
     nodeSnapshotMap = new Map();
     for (const idea of ideas) {
       renderedIds.add(idea.id);
-      nodeSnapshotMap.set(idea.id, ideaSnapshot(idea));
+      nodeSnapshotMap.set(idea.id, sceneNodeSnapshotFromIdea(idea));
     }
   }
 
@@ -3836,10 +3844,10 @@
    * Add a single new bubble to the existing SVG with birth animation from core.
    * Called reactively when cortex.ideas changes.
    */
-  function addBubbleBirth(idea: any) {
+  function addBubbleBirth(idea: WorkspaceSceneIdeaSnapshot) {
     if (!g || !simulation) return;
 
-    const totalIdeas = cortex.filteredIdeas.filter((entry: any) => !entry?.archived_at).length;
+    const totalIdeas = (cortex.filteredIdeas as WorkspaceSceneIdeaSnapshot[]).filter((entry) => !entry?.archived_at).length;
     const sceneNode = ensureSceneNode(idea, totalIdeas, { birth: true });
 
     const nodes = simulation.nodes() as OrbitNode[];
@@ -4118,47 +4126,10 @@
   });
 
   // Track node properties for change detection
-  let nodeSnapshotMap = new Map<string, {
-    status: string;
-    title: string;
-    display_title?: string;
-    salience_score: number;
-    attachments_count: number;
-    thread_count: number;
-    user_id?: string;
-    orbit_anchor_type?: string | null;
-    orbit_anchor_id?: string | null;
-    author_name?: string;
-    author_color?: string;
-    user_color?: string;
-  }>();
-
-  function ideaSnapshot(idea: any) {
-    return {
-      status: idea.status, title: idea.title, display_title: idea.display_title,
-      salience_score: idea.salience_score || 5,
-      attachments_count: (idea.attachments || []).length,
-      thread_count: idea.thread_count || 0, user_id: idea.user_id,
-      orbit_anchor_type: idea.orbit_anchor_type ?? null,
-      orbit_anchor_id: idea.orbit_anchor_id ?? null,
-      author_name: idea.author_name,
-      author_color: idea.author_color,
-      user_color: idea.user_color,
-    };
-  }
-
-  function snapshotChanged(a: any, b: any): boolean {
-    return a.status !== b.status || a.title !== b.title || a.display_title !== b.display_title
-      || a.salience_score !== b.salience_score
-      || a.attachments_count !== b.attachments_count
-      || a.thread_count !== b.thread_count || a.user_id !== b.user_id
-      || a.orbit_anchor_type !== b.orbit_anchor_type || a.orbit_anchor_id !== b.orbit_anchor_id
-      || a.author_name !== b.author_name || a.author_color !== b.author_color
-      || a.user_color !== b.user_color;
-  }
+  let nodeSnapshotMap = new Map<string, WorkspaceSceneNodeSnapshot>();
 
   $effect(() => {
-    const ideas = cortex.filteredIdeas.filter((idea: any) => !idea?.archived_at);
+    const ideas = (cortex.filteredIdeas as WorkspaceSceneIdeaSnapshot[]).filter((idea) => !idea?.archived_at);
 
     if (!initialIdeaHydrationComplete && cortex.loading && renderedIds.size === 0) {
       return;
@@ -4173,21 +4144,21 @@
       }
     }
 
-    const currentIds = new Set(ideas.map((i: any) => i.id));
+    const currentIds = new Set(ideas.map((idea) => idea.id));
     syncSceneNodes(ideas);
     const queuePosMap = computeQueuePositions(ideas);
 
     for (const idea of ideas) {
       if (!renderedIds.has(idea.id)) {
         renderedIds.add(idea.id);
-        nodeSnapshotMap.set(idea.id, ideaSnapshot(idea));
+        nodeSnapshotMap.set(idea.id, sceneNodeSnapshotFromIdea(idea));
         addBubbleBirth(idea);
       } else {
         const sceneNode = ensureSceneNode(idea, ideas.length);
         const prevSnap = nodeSnapshotMap.get(idea.id);
-        const currSnap = ideaSnapshot(idea);
+        const currSnap = sceneNodeSnapshotFromIdea(idea);
 
-        if (prevSnap && snapshotChanged(prevSnap, currSnap)) {
+        if (prevSnap && sceneNodeSnapshotChanged(prevSnap, currSnap)) {
           nodeSnapshotMap.set(idea.id, currSnap);
           if (
             prevSnap.orbit_anchor_type !== currSnap.orbit_anchor_type

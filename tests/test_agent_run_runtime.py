@@ -1668,16 +1668,102 @@ async def test_runtime_tool_executor_records_public_events_and_redacted_artifact
     assert _stream_has(runtime.stream.messages, "run.tool_completed", completed.payload | {"run_id": 42})
 
 
+async def test_agent_execution_context_is_isolated_between_parallel_tool_tasks():
+    from brain.systems.runs.execution_context import bind_agent_context, current_agent_context
+
+    async def worker(org_id: str, delay: float):
+        with bind_agent_context({"org_id": org_id}):
+            await asyncio.sleep(delay)
+            return getattr(current_agent_context(), "org_id", None)
+
+    assert await asyncio.gather(
+        worker("org-a", 0.01),
+        worker("org-b", 0.02),
+    ) == ["org-a", "org-b"]
+
+
+async def test_runtime_tool_executor_binds_run_workspace_context_for_handler():
+    from brain.systems.runs.execution_context import bind_agent_context, current_agent_context
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+
+    runtime = _runtime("worker")
+    runtime.store.runs[42] = replace(runtime.run, user_id=None)
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
+
+    def handler(**_kwargs):
+        context = current_agent_context()
+        metadata = getattr(context, "execution_metadata", {}) or {}
+        return {
+            "org_id": getattr(context, "org_id", None),
+            "user_id": getattr(context, "user_id", None),
+            "run_id": getattr(context, "run_id", None),
+            "idea_id": getattr(context, "idea_id", None),
+            "metadata_org_id": metadata.get("org_id"),
+            "metadata_user_id": metadata.get("user_id"),
+            "metadata_other": metadata.get("other"),
+        }
+
+    with bind_agent_context(
+        {
+            "org_id": "stale-org",
+            "user_id": "stale-user",
+            "execution_metadata": {
+                "org_id": "stale-org",
+                "user_id": "stale-user",
+                "other": "keep",
+            },
+        }
+    ):
+        result = await executor.execute(
+            42,
+            ToolExecution(name="manage_slack", args={}, handler=handler),
+            root_run_id=42,
+        )
+
+    assert result == {
+        "org_id": "org-1",
+        "user_id": None,
+        "run_id": 42,
+        "idea_id": "idea-1",
+        "metadata_org_id": "org-1",
+        "metadata_user_id": None,
+        "metadata_other": "keep",
+    }
+
+
+async def test_runtime_tool_executor_fails_when_run_context_cannot_load():
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+
+    runtime = _runtime("worker")
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
+
+    async def missing_run(_run_id):
+        raise LookupError("run vanished")
+
+    runtime.store.require_run = missing_run
+
+    with pytest.raises(LookupError, match="run vanished"):
+        await executor.execute(
+            42,
+            ToolExecution(name="manage_slack", args={}, handler=lambda: "should not run"),
+            root_run_id=42,
+        )
+
+
 async def test_runtime_tool_executor_resolves_secret_env_mount_without_public_value(monkeypatch):
     from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
 
     secret_value = "ghp-secret-value"
     vault_calls = []
 
+    async def fake_get_secret_record(key, actor_user_id, *, org_id):
+        return object() if key == "DataForSeoLogin" else None
+
     async def fake_runtime_secret_read(key, **kwargs):
         vault_calls.append({"key": key, **kwargs})
         return {"key": key, "value": secret_value}
 
+    monkeypatch.setattr("brain.systems.vault.async_get_secret_record", fake_get_secret_record)
     monkeypatch.setattr("brain.systems.vault.agent_access.read_agent_secret_for_runtime", fake_runtime_secret_read)
 
     runtime = _runtime("worker")
@@ -1695,9 +1781,9 @@ async def test_runtime_tool_executor_resolves_secret_env_mount_without_public_va
             args={
                 "command": "gh api user",
                 "secret_env": {
-                    "GH_TOKEN": {
-                        "vault_key": "GITHUB_TOKEN",
-                        "reason": "Check the token identity without exposing it.",
+                    "DATAFORSEO_LOGIN": {
+                        "vault_key": "DataForSeoLogin",
+                        "reason": "Run a bounded DataForSEO SERP check without exposing the login.",
                     },
                 },
             },
@@ -1707,10 +1793,10 @@ async def test_runtime_tool_executor_resolves_secret_env_mount_without_public_va
     )
 
     assert result["exit_code"] == 0
-    assert seen["kwargs"]["_resolved_secret_env"] == {"GH_TOKEN": secret_value}
+    assert seen["kwargs"]["_resolved_secret_env"] == {"DATAFORSEO_LOGIN": secret_value}
     assert vault_calls == [{
-        "key": "GITHUB_TOKEN",
-        "reason": "Check the token identity without exposing it.",
+        "key": "DataForSeoLogin",
+        "reason": "Run a bounded DataForSEO SERP check without exposing the login.",
         "user_id": "user-1",
         "org_id": "org-1",
         "run_id": 42,

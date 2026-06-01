@@ -97,6 +97,25 @@ def _build_final_reply_check_context() -> str:
             compact = str(artifact)
         lines.append(f"Artifact {idx}: {compact[:350]}")
 
+    recent_tool_results = list(getattr(_agent_context, "recent_tool_results", []) or [])
+    for idx, tool_result in enumerate(recent_tool_results[-5:], 1):
+        if not isinstance(tool_result, dict):
+            continue
+        try:
+            compact = json.dumps(
+                {
+                    "tool_name": tool_result.get("tool_name"),
+                    "args_preview": tool_result.get("args_preview"),
+                    "is_error": tool_result.get("is_error"),
+                    "result_preview": tool_result.get("result_preview"),
+                },
+                default=str,
+                sort_keys=True,
+            )
+        except Exception:
+            compact = str(tool_result)
+        lines.append(f"Recent tool result {idx}: {compact[:650]}")
+
     return "\n".join(lines)[:2500]
 
 

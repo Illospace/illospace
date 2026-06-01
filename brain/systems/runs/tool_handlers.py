@@ -11,6 +11,7 @@ from brain.systems.runs.tool_catalog.handlers import composition as _composition
 from brain.systems.runs.tool_catalog.handlers.browser import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.common import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.activity import *  # noqa: F401,F403
+from brain.systems.runs.tool_catalog.handlers.capabilities import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.chat import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.cortex_reply import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.cycles import *  # noqa: F401,F403
@@ -19,7 +20,9 @@ from brain.systems.runs.tool_catalog.handlers.files import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.inbound import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.projects import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.session_tools import *  # noqa: F401,F403
+from brain.systems.runs.tool_catalog.handlers.self_context import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.skills import *  # noqa: F401,F403
+from brain.systems.runs.tool_catalog.handlers.voice import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.web import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.workers import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.workspace_data import *  # noqa: F401,F403
@@ -47,6 +50,8 @@ _COMPOSITION_PATCH_NAMES = (
     "_handle_browser_type",
     "_handle_browser_upload_attachment",
     "_handle_browser_wait",
+    "_handle_read_capabilities",
+    "_handle_read_self_context",
     "_handle_cortex_reply",
     "_handle_cortex_visual_reply",
     "_handle_post_ai_timeline_message",
@@ -75,6 +80,7 @@ _COMPOSITION_PATCH_NAMES = (
     "_handle_session_read",
     "_handle_session_write",
     "_handle_my_activity",
+    "_handle_transcribe_audio_attachment",
     "_handle_spawn_worker",
     "_handle_query_workspace_data",
     "_handle_read_cycles",

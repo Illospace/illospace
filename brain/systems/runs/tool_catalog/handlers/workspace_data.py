@@ -1735,7 +1735,7 @@ async def query_workspace_data(
         if not org_id and not user_id:
             payload["warnings"].append({
                 "source": "scope",
-                "error": "query_workspace_data requires user_id or org_id for DB-backed workspace sources",
+                "error": "query_workspace_data could not access this workspace or user context",
             })
             adapters = _source_adapters()
             source_names = [source for source in source_names if not adapters[source].db_backed]

@@ -17,6 +17,7 @@ from brain.app.api.routers.agent_bridge import (
     _run_trigger_if_requested,
     _thread_payload,
 )
+from brain.app.api.routers.agent_mcp_domains import DOMAIN_MCP_TOOLS, DOMAIN_TOOL_HANDLERS
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.mentions import classify_mention_intent
 from brain.systems.external_agents import service as external_agents
@@ -52,9 +53,11 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 "Submit ordered context from a personal agent to Illo, the user's team agent. "
                 "Use this when the user wants Illo or the team to have the current AI thread, "
                 "trace, artifacts, files, links, diffs, or other source material. The personal "
-                "agent supplies context and provenance; Illo coordinates the team workspace. "
-                "Do not encode a workflow such as decision request here. Use correlation when "
-                "attaching to a known Thread; otherwise IlloSpace may create one and return thread_url."
+                "agent supplies context and provenance; IlloSpace records it without starting "
+                "an Illo run or creating a visible Thread. Use "
+                "correlation when attaching to a known Thread; otherwise IlloSpace stores the "
+                "context as an inbound event. When correlation attaches context to a Thread, "
+                "the result includes thread_url. Do not encode a workflow such as a decision request here."
             ),
             {
                 "intent": {
@@ -153,6 +156,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
         ),
         "scope": external_agents.SCOPE_WORKSPACE_READ,
     },
+    **DOMAIN_MCP_TOOLS,
     "illo_create_thread": {
         **_tool_schema(
             (
@@ -624,6 +628,7 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "illo_search_workspace": _tool_search_workspace,
     "illo_get_thread": _tool_get_thread,
     "illo_get_team_members": _tool_get_team_members,
+    **DOMAIN_TOOL_HANDLERS,
     "illo_create_thread": _tool_create_thread,
     "illo_post_thread_message": _tool_post_thread_message,
     "illo_ask": _tool_ask,
@@ -724,6 +729,8 @@ async def _handle_mcp_request(
         except Exception as exc:
             raise_external_agent_http_error(exc)
         if spec.get("mutates_inbound"):
+            await db.commit()
+        if spec.get("mutates_domain"):
             await db.commit()
         if spec.get("mutates_thread"):
             await _add_thread_trigger_result_if_needed(

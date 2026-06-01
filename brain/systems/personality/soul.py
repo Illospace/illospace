@@ -217,7 +217,7 @@ def manage_agent_soul(
     if normalized_action == "read":
         return json.dumps({"soul": read_agent_soul(include_default=True).to_payload()}, default=str)
     if normalized_action in {"replace", "reset"} and not actor_user_id:
-        return json.dumps({"error": "manage_soul mutations require a user-scoped run"})
+        return json.dumps({"error": "manage_soul mutations require user context"})
     if normalized_action == "replace":
         try:
             normalized_content = _normalize_content(content)

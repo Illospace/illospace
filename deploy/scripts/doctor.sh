@@ -237,7 +237,9 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
       check_db_provider_credentials
     fi
 
-    if command -v curl >/dev/null 2>&1; then
+    if [ "${ILLO_DOCTOR_SKIP_LOCAL_HTTP_PROBES:-0}" = "1" ]; then
+      warn "skipping local HTTP probes; this doctor is running outside the host network namespace"
+    elif command -v curl >/dev/null 2>&1; then
       api_port="${ILLO_API_PORT:-8000}"
       web_port="${ILLO_WEB_PORT:-8080}"
       if curl -fsS "http://127.0.0.1:${api_port}/api/health/live" >/dev/null; then

@@ -420,6 +420,8 @@ async def test_hosted_mcp_lists_tools_for_scoped_bridge_token():
     assert "illo_create_thread" in names
     assert "illo_ask" in names
     assert "illo_search_workspace" in names
+    assert "illo_inspect_domains" in names
+    assert "illo_write_domain_record" in names
 
 
 async def test_hosted_mcp_invalid_token_returns_json_rpc_error():
@@ -490,7 +492,12 @@ async def test_hosted_mcp_filters_tools_by_bridge_token_scope():
         )
 
     names = {tool["name"] for tool in response.json()["result"]["tools"]}
-    assert names == {"illo_search_workspace", "illo_get_thread", "illo_get_team_members"}
+    assert names == {
+        "illo_search_workspace",
+        "illo_get_thread",
+        "illo_get_team_members",
+        "illo_inspect_domains",
+    }
 
 
 async def test_hosted_mcp_submit_context_builds_shared_envelope():
@@ -507,13 +514,9 @@ async def test_hosted_mcp_submit_context_builds_shared_envelope():
             "event_id": "evt-1",
             "confidence": 0.9,
             "ilo_outcome": {
-                "operation": "created",
-                "thread_id": "idea-1",
-                "thread_url": "https://illo.example.com/cortex?idea=idea-1",
-                "thread_route": "/cortex?idea=idea-1",
-                "url": "https://illo.example.com/cortex?idea=idea-1",
-                "message": "Context accepted and a Thread was created.",
-                "context_submission_id": "sub-1",
+                "operation": "stored",
+                "event_id": "evt-1",
+                "message": "Context accepted and stored.",
             },
         }
 
@@ -555,11 +558,13 @@ async def test_hosted_mcp_submit_context_builds_shared_envelope():
     payload = json.loads(response.json()["result"]["content"][0]["text"])
     assert payload["status"] == "processed"
     assert payload["event_id"] == "evt-1"
-    assert payload["thread_id"] == "idea-1"
-    assert payload["thread_url"] == "https://illo.example.com/cortex?idea=idea-1"
-    assert payload["thread_route"] == "/cortex?idea=idea-1"
-    assert payload["url"] == payload["thread_url"]
-    assert payload["context_submission_id"] == "sub-1"
+    assert payload["operation"] == "stored"
+    assert payload["message"] == "Context accepted and stored."
+    assert payload["thread_id"] is None
+    assert payload["thread_url"] is None
+    assert payload["thread_route"] is None
+    assert payload["url"] is None
+    assert payload["context_submission_id"] is None
     submit.assert_awaited_once()
     assert captured["db"] is session
     assert captured["connection"] == {

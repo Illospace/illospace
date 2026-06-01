@@ -66,7 +66,11 @@ _default_runner_concurrency = 4
 _max_runner_concurrency = 32
 _default_heartbeat_interval_sec = 10.0
 _default_stale_run_sec = 300.0
+_default_queued_watchdog_after_sec = 15.0
+_queued_watchdog_interval_sec = 5.0
 _last_stale_reconcile_monotonic = 0.0
+_last_queued_watchdog_monotonic = 0.0
+_queued_watchdog_tasks: set[asyncio.Task[int]] = set()
 
 _PROCESS_ACTIVE_STATUS_VALUES = PROCESSING_RUN_STATUS_VALUES
 
@@ -109,6 +113,14 @@ def _stale_run_seconds() -> float:
     )
 
 
+def _queued_watchdog_after_seconds() -> float:
+    return _coerce_float(
+        os.getenv("ILLO_AGENT_RUN_QUEUED_WATCHDOG_SECONDS"),
+        default=_default_queued_watchdog_after_sec,
+        minimum=1.0,
+    )
+
+
 def _runner_concurrency() -> int:
     return _coerce_concurrency(
         os.getenv("ILLO_AGENT_RUNNER_CONCURRENCY"),
@@ -119,6 +131,17 @@ def _runner_concurrency() -> int:
 def _active_runner_count() -> int:
     with _runner_lock:
         return sum(1 for task, stop_event in _runner_slots if not task.done() and not stop_event.is_set())
+
+
+def runner_health_snapshot() -> dict[str, int | bool]:
+    supervisor_alive = bool(_runner_supervisor_thread and _runner_supervisor_thread.is_alive())
+    active_runner_count = _active_runner_count()
+    return {
+        "runner_running": supervisor_alive and active_runner_count > 0,
+        "supervisor_alive": supervisor_alive,
+        "active_runner_count": active_runner_count,
+        "configured_concurrency": _runner_concurrency(),
+    }
 
 
 def _int_value(value: Any) -> int | None:
@@ -772,6 +795,76 @@ async def _reap_stale_runs_if_due_async(*, force: bool = False) -> int:
         return 0
 
 
+async def _queued_backlog_snapshot_async() -> tuple[int, datetime | None, int]:
+    async with _unit_of_work_factory()() as uow:
+        queued_result = await uow.session.execute(
+            select(func.count(AgentRunRow.id), func.min(AgentRunRow.created_at)).where(
+                AgentRunRow.status == RunStatus.QUEUED.value
+            )
+        )
+        queued_count, oldest_created_at = queued_result.one()
+        active_count = await uow.session.scalar(
+            select(func.count(AgentRunRow.id)).where(
+                AgentRunRow.status.in_(_PROCESS_ACTIVE_STATUS_VALUES)
+            )
+        )
+    return int(queued_count or 0), _normalize_datetime(oldest_created_at), int(active_count or 0)
+
+
+def _forget_queued_watchdog_task(task: asyncio.Task[int]) -> None:
+    _queued_watchdog_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        processed = task.result()
+    except Exception:
+        logger.exception("agent_run_queued_watchdog_failed")
+        return
+    if processed:
+        logger.info("agent_run_queued_watchdog_processed", extra={"processed": processed})
+
+
+async def _nudge_stale_queued_runs_if_due_async(*, force: bool = False) -> bool:
+    global _last_queued_watchdog_monotonic
+    now_monotonic = time.monotonic()
+    if not force and now_monotonic - _last_queued_watchdog_monotonic < _queued_watchdog_interval_sec:
+        return False
+    _last_queued_watchdog_monotonic = now_monotonic
+
+    if any(not task.done() for task in _queued_watchdog_tasks):
+        return False
+
+    try:
+        queued_count, oldest_queued_at, active_count = await _queued_backlog_snapshot_async()
+    except Exception:
+        logger.exception("agent_run_queued_watchdog_snapshot_failed")
+        return False
+    if queued_count <= 0 or oldest_queued_at is None:
+        return False
+    if active_count >= _runner_concurrency():
+        return False
+
+    age_seconds = (datetime.now(timezone.utc) - oldest_queued_at).total_seconds()
+    if age_seconds < _queued_watchdog_after_seconds():
+        return False
+
+    logger.warning(
+        "agent_run_queued_watchdog_nudge",
+        extra={
+            "queued": queued_count,
+            "oldest_queued_age_seconds": int(age_seconds),
+            "active_runs": active_count,
+        },
+    )
+    task = asyncio.create_task(
+        _run_queued_once_async(limit=1),
+        name="agent-runner-queued-watchdog",
+    )
+    _queued_watchdog_tasks.add(task)
+    task.add_done_callback(_forget_queued_watchdog_task)
+    return True
+
+
 async def _async_materialize_project_context(run_id: int) -> tuple[bool, dict[str, Any] | None]:
     async with _unit_of_work_factory()() as uow:
         run = await uow.session.get(AgentRunRow, int(run_id))
@@ -986,6 +1079,7 @@ async def _supervisor_async_loop() -> None:
             try:
                 reconcile_runner_pool(allow_start=True)
                 await _reap_stale_runs_if_due_async(force=first_reconcile)
+                await _nudge_stale_queued_runs_if_due_async(force=first_reconcile)
                 first_reconcile = False
             except Exception:
                 logger.exception("agent_run_runner_reconcile_failed")
@@ -1014,6 +1108,20 @@ async def _supervisor_async_loop() -> None:
             for task in done:
                 with suppress(asyncio.CancelledError, Exception):
                     await task
+        queued_watchdogs = [task for task in _queued_watchdog_tasks if not task.done()]
+        for task in queued_watchdogs:
+            task.cancel()
+        if queued_watchdogs:
+            done, pending = await asyncio.wait(queued_watchdogs, timeout=1.0)
+            for task in pending:
+                logger.warning(
+                    "agent_run_queued_watchdog_shutdown_timeout",
+                    extra={"task": task.get_name()},
+                )
+            for task in done:
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
+        _queued_watchdog_tasks.clear()
         with _runner_lock:
             _runner_slots.clear()
 
@@ -1079,6 +1187,7 @@ __all__ = [
     "queue_status",
     "queue_status_async",
     "reap_stale_active_runs",
+    "runner_health_snapshot",
     "run_queued_once",
     "start_runner",
     "stop_runner",

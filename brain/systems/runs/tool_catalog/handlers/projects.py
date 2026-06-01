@@ -309,7 +309,7 @@ async def _handle_manage_project(
 
     org_id, user_id, context_idea_id = _project_tool_context()
     if not org_id:
-        return json.dumps({"error": "manage_project requires an org-scoped run"})
+        return json.dumps({"error": "manage_project could not access this workspace context"})
     actor = {
         "id": user_id,
         "org_id": org_id,

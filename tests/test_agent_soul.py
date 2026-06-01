@@ -145,7 +145,7 @@ def test_manage_soul_mutations_require_user_scope(monkeypatch, tmp_path):
         content="# Soul\nBe direct, warm, and concrete.",
     ))
 
-    assert payload == {"error": "manage_soul mutations require a user-scoped run"}
+    assert payload == {"error": "manage_soul mutations require user context"}
     assert not (tmp_path / "SOUL.md").exists()
 
 

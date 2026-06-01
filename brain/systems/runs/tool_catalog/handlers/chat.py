@@ -177,7 +177,7 @@ async def _handle_post_chat_message(
     actor_user_id = str(getattr(_agent_context, "user_id", "") or "").strip()
     org_id = str(getattr(_agent_context, "org_id", "") or "").strip()
     if not actor_user_id or not org_id:
-        return json.dumps({"error": "post_chat_message requires a user-scoped org run"})
+        return json.dumps({"error": "post_chat_message could not access this workspace user context"})
 
     async with UnitOfWork() as uow:
         message, publish = await ChatService(
@@ -237,7 +237,7 @@ async def _handle_post_thread_discussion_reply(
 
     org_id = str(getattr(_agent_context, "org_id", "") or "").strip()
     if not org_id:
-        return json.dumps({"error": "post_thread_discussion_reply requires an org-scoped run"})
+        return json.dumps({"error": "post_thread_discussion_reply could not access this workspace context"})
 
     target_reply_to_comment_id = (
         _coerce_comment_id(reply_to_comment_id)
@@ -300,7 +300,7 @@ async def _handle_post_ai_timeline_message(
 
     org_id = str(getattr(_agent_context, "org_id", "") or "").strip()
     if not org_id:
-        return json.dumps({"error": "post_ai_timeline_message requires an org-scoped run"})
+        return json.dumps({"error": "post_ai_timeline_message could not access this workspace context"})
 
     trigger = _current_discussion_trigger()
     response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
@@ -365,7 +365,7 @@ async def _handle_read_thread_discussion(
         return json.dumps({"error": "read_thread_discussion requires a Thread id or an active Thread run"})
     org_id = str(getattr(_agent_context, "org_id", "") or "").strip()
     if not org_id:
-        return json.dumps({"error": "read_thread_discussion requires an org-scoped run"})
+        return json.dumps({"error": "read_thread_discussion could not access this workspace context"})
     capped_limit = max(1, min(int(limit or 50), 200))
 
     async with UnitOfWork() as uow:

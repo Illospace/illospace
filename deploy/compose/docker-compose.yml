@@ -33,6 +33,10 @@ x-illo-env: &illo-env
   ILLO_SELF_UPDATE_STATUS_FILE: /data/private/self-update/status.json
   ILLO_SELF_UPDATE_HEARTBEAT_FILE: /data/private/self-update/heartbeat.json
   ILLO_SELF_UPDATE_LOG_PATH: /data/private/logs/illo-self-update.log
+  ILLO_RUNTIME_SERVICES_REQUEST_FILE: /data/private/runtime-services/request.json
+  ILLO_RUNTIME_SERVICES_STATUS_FILE: /data/private/runtime-services/status.json
+  ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE: /data/private/runtime-services/heartbeat.json
+  ILLO_RUNTIME_SERVICES_LOG_PATH: /data/private/logs/illo-runtime-services.log
 
 x-backend-service: &backend-service
   image: ${ILLO_API_IMAGE:-ghcr.io/illospace/api:latest}
@@ -111,6 +115,7 @@ services:
       CORTEX_MAX_RUNTIME: ${CORTEX_MAX_RUNTIME:-600}
       CORTEX_EMBEDDING_READY_TIMEOUT_SECONDS: ${CORTEX_EMBEDDING_READY_TIMEOUT_SECONDS:-300}
       ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS: ${ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS:-infinity}
+      ILLO_DB_NULLPOOL: "1"
       ILLO_WORKER_ENABLE_CYCLE_SCHEDULER: "1"
       ILLO_WORKER_DISABLE_CYCLE_SCHEDULER: "0"
     depends_on:
@@ -136,6 +141,24 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  slack-connector:
+    <<: *backend-service
+    profiles: ["slack"]
+    command: ["python", "-m", "brain.app.cli.slack_connector"]
+    environment:
+      <<: *illo-env
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
+      SLACK_TEAM_ID: ${SLACK_TEAM_ID:-}
+      SLACK_BOT_USER_ID: ${SLACK_BOT_USER_ID:-}
+      ILLO_SLACK_ORG_ID: ${ILLO_SLACK_ORG_ID:-}
+      ILLO_SLACK_OWNER_USER_ID: ${ILLO_SLACK_OWNER_USER_ID:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
   updater:
     image: ${ILLO_UPDATER_IMAGE:-ghcr.io/illospace/updater:latest}
     build:
@@ -148,6 +171,10 @@ services:
       ILLO_SELF_UPDATE_STATUS_FILE: /data/private/self-update/status.json
       ILLO_SELF_UPDATE_HEARTBEAT_FILE: /data/private/self-update/heartbeat.json
       ILLO_SELF_UPDATE_LOG_PATH: /data/private/logs/illo-self-update.log
+      ILLO_RUNTIME_SERVICES_REQUEST_FILE: /data/private/runtime-services/request.json
+      ILLO_RUNTIME_SERVICES_STATUS_FILE: /data/private/runtime-services/status.json
+      ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE: /data/private/runtime-services/heartbeat.json
+      ILLO_RUNTIME_SERVICES_LOG_PATH: /data/private/logs/illo-runtime-services.log
       ILLO_COMPOSE_ENV_FILE: /repo/deploy/compose/.env
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-illospace}
     volumes:

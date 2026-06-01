@@ -36,7 +36,7 @@
 </script>
 
 <section
-  class={`generated-app-chrome generated-app-shell ${className}`}
+  class={`generated-app-chrome ${className}`}
   class:is-dock={surface === 'dock'}
   class:is-stage={surface === 'stage'}
   aria-label={title}

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from sqlalchemy import func, select
 
+from brain.kernel.common.serialization import jsonable
 from brain.platform.db.models.cycle import (
     Cycle,
     CycleGuidance,
@@ -154,30 +155,59 @@ async def async_prepare_cycle_run_memory_snapshot(session, cycle: Cycle, run: Cy
     revision = await _async_latest_cycle_revision(session, cycle.id)
     guidance_rows = await _async_active_cycle_guidance(session, cycle.id)
     target_rows = await _async_active_cycle_output_targets(session, cycle.id)
+    snapshot = _build_cycle_run_memory_snapshot(
+        cycle,
+        run=run,
+        revision=revision,
+        guidance_rows=guidance_rows,
+        target_rows=target_rows,
+    )
 
-    if revision is not None:
-        run.revision_id = revision.id
+    if snapshot["revision_id"] is not None:
+        run.revision_id = snapshot["revision_id"]
 
+    run.guidance_snapshot = snapshot["guidance_snapshot"]
+    run.output_targets_snapshot = snapshot["output_targets_snapshot"]
+    run.context_snapshot = snapshot["context_snapshot"]
+
+
+def _build_cycle_run_memory_snapshot(
+    cycle: Cycle,
+    *,
+    run: CycleRun | None = None,
+    revision: CycleRevision | None,
+    guidance_rows: list[CycleGuidance],
+    target_rows: list[CycleOutputTarget],
+) -> dict:
     output_targets = [serialize_cycle_output_target(target) for target in target_rows]
     _ensure_default_output_targets(cycle, output_targets)
+    scheduled_for = getattr(run, "scheduled_for", None)
+    cycle_run_id = getattr(run, "id", None)
 
-    run.guidance_snapshot = [serialize_cycle_guidance(row) for row in guidance_rows]
-    run.output_targets_snapshot = output_targets
-    run.context_snapshot = {
-        "revision": serialize_cycle_revision(revision),
-        "workspace_id": string_or_none(cycle.org_id),
-        "owner_user_id": string_or_none(cycle.user_id),
-        "scheduled_review_window": cycle_scheduled_review_window(run.scheduled_for),
-        "result_contract": cycle_result_contract(),
-        "evidence_health": pending_evidence_health_receipt(run.scheduled_for),
-        "launch_receipts": [
-            cycle_launch_receipt(
-                cycle_id=cycle.id,
-                cycle_run_id=run.id,
-                scheduled_for=run.scheduled_for,
-            )
-        ],
-        **creator_payload(cycle),
+    return {
+        "revision_id": revision.id if revision is not None else None,
+        "guidance_snapshot": jsonable(
+            [serialize_cycle_guidance(row) for row in guidance_rows]
+        ),
+        "output_targets_snapshot": jsonable(output_targets),
+        "context_snapshot": jsonable(
+            {
+                "revision": serialize_cycle_revision(revision),
+                "workspace_id": string_or_none(cycle.org_id),
+                "owner_user_id": string_or_none(cycle.user_id),
+                "scheduled_review_window": cycle_scheduled_review_window(scheduled_for),
+                "result_contract": cycle_result_contract(),
+                "evidence_health": pending_evidence_health_receipt(scheduled_for),
+                "launch_receipts": [
+                    cycle_launch_receipt(
+                        cycle_id=cycle.id,
+                        cycle_run_id=cycle_run_id,
+                        scheduled_for=scheduled_for,
+                    )
+                ],
+                **creator_payload(cycle),
+            }
+        ),
     }
 
 
@@ -210,7 +240,7 @@ def append_cycle_run_output_target_snapshot(
             "is_active": True,
         }
     )
-    run.output_targets_snapshot = output_targets
+    run.output_targets_snapshot = jsonable(output_targets)
 
 
 async def finalize_cycle_run(

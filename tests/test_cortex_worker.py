@@ -43,6 +43,22 @@ def test_shutdown_drain_timeout_accepts_numeric_override(monkeypatch):
     assert _shutdown_drain_timeout_seconds() == 42.5
 
 
+def test_runner_health_grace_accepts_numeric_override(monkeypatch):
+    from brain.systems.cortex.worker import _runner_health_grace_seconds
+
+    monkeypatch.setenv("ILLO_AGENT_RUNNER_HEALTH_GRACE_SECONDS", "3.5")
+
+    assert _runner_health_grace_seconds() == 3.5
+
+
+def test_runner_health_grace_has_safe_minimum(monkeypatch):
+    from brain.systems.cortex.worker import _runner_health_grace_seconds
+
+    monkeypatch.setenv("ILLO_AGENT_RUNNER_HEALTH_GRACE_SECONDS", "0")
+
+    assert _runner_health_grace_seconds() == 1.0
+
+
 def test_cycle_scheduler_can_be_disabled_for_handoff_worker(monkeypatch):
     from brain.systems.cortex.worker import _cycle_scheduler_enabled
 

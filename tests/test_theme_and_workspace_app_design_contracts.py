@@ -376,6 +376,36 @@ def test_thread_stage_expands_while_reading_column_stays_bounded():
     assert "--thread-column-max: var(--thread-stage-thread-max);" not in stage_screen
 
 
+def test_thread_stage_right_dock_does_not_auto_open_from_loaded_thread_state():
+    source = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadStageScreen.svelte").read_text()
+    idea_change_body = source.split("const currentIdeaId = idea?.id ?? null;", 1)[1].split(
+        "$effect(() => {\n    if (!idea) return;",
+        1,
+    )[0]
+
+    assert "onBrowserOpenChange?.(false);" in idea_change_body
+    assert "sidePanelTabs = createDefaultThreadSidePanelTabs();" in idea_change_body
+    assert "lastAutoOpenedBrowserSessionId" not in source
+    assert "lastAutoOpenedVaultPromptId" not in source
+    assert "lastAutoOpenedVaultGrantPromptId" not in source
+    assert "lastAutoOpenedCycleSignal" not in source
+    assert "lastAutoOpenedCodeReviewSignature" not in source
+    assert "lastAutoSelectedAppId" not in source
+
+
+def test_thread_transcript_keeps_illo_mark_without_illo_message_meta_header():
+    source = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadTranscript.svelte").read_text()
+    message_block = source.split("{:else if item.kind === 'message'}", 1)[1].split(
+        "{:else if item.kind === 'visual'}",
+        1,
+    )[0]
+
+    assert "<ThreadAuthorMark" in message_block
+    assert "{#if !isIllo}" in message_block
+    assert "{#if !isIllo || hasSupplementalMeta}" not in message_block
+    assert ".thread-message-illo .thread-message-content" in source
+
+
 def test_thread_stage_dismiss_preserves_mounted_workspace_scene():
     source = (REPO_ROOT / "frontend/src/lib/features/cortex/components/CortexWorkspaceRoute.svelte").read_text()
     dismiss_body = source.split("function handleThreadStageDismiss()", 1)[1].split(

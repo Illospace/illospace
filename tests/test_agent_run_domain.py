@@ -6,15 +6,22 @@ import pytest
 def test_agent_run_request_normalizes_profile_and_recipe():
     from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
 
-    fast = AgentRunRequest(thread_id="thread-1", message="Read README")
-    deep = AgentRunRequest(thread_id="thread-1", message="Build it", profile="deep")
-    worker = AgentRunRequest(thread_id="thread-1", message="Do slice", recipe="worker")
+    fast = AgentRunRequest(org_id="org-1", thread_id="thread-1", message="Read README")
+    deep = AgentRunRequest(org_id="org-1", thread_id="thread-1", message="Build it", profile="deep")
+    worker = AgentRunRequest(org_id="org-1", thread_id="thread-1", message="Do slice", recipe="worker")
 
     assert fast.normalized_profile == RunProfile.FAST
     assert fast.normalized_recipe == RunRecipe.FAST
     assert deep.normalized_profile == RunProfile.DEEP
     assert deep.normalized_recipe == RunRecipe.DEEP
     assert worker.normalized_recipe == RunRecipe.WORKER
+
+
+def test_agent_run_request_requires_workspace_org_id():
+    from brain.systems.runs.domain import AgentRunRequest
+
+    with pytest.raises(ValueError, match="workspace org_id"):
+        AgentRunRequest(thread_id="thread-1", message="Read README", org_id=" ")
 
 
 def test_run_status_transitions_are_single_source_of_truth():

@@ -25,6 +25,7 @@ from brain.systems.runs.tool_catalog.handlers.browser import (
     _handle_browser_upload_attachment,
     _handle_browser_wait,
 )
+from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
 from brain.systems.runs.tool_catalog.handlers.cortex_reply import (
     _build_final_reply_check_context,
     _handle_cortex_reply,
@@ -60,7 +61,14 @@ from brain.systems.runs.tool_catalog.handlers.session_tools import (
     _handle_session_read,
     _handle_session_write,
 )
+from brain.systems.runs.tool_catalog.handlers.self_context import _handle_read_self_context
+from brain.systems.runs.tool_catalog.handlers.slack import (
+    _handle_manage_slack,
+    _handle_post_slack_reply,
+    _handle_read_slack_conversation,
+)
 from brain.systems.runs.tool_catalog.handlers.activity import _handle_my_activity
+from brain.systems.runs.tool_catalog.handlers.voice import _handle_transcribe_audio_attachment
 from brain.systems.runs.tool_catalog.handlers.web import _handle_web_fetch, _handle_web_search
 from brain.systems.runs.tool_catalog.handlers.workers import _handle_spawn_worker
 from brain.systems.runs.tool_catalog.handlers.workspace_data import (
@@ -149,8 +157,27 @@ def _get_tool_handlers(
         tool_vault_inventory,
         tool_vault_secret_prompt,
         tool_runtime_settings,
+        tool_manage_deployment,
+        tool_manage_runtime_services,
     )
     from brain.systems.personality import manage_agent_soul
+
+    def _manage_deployment(action="status", build_no_cache=False, worker_drain_timeout_seconds=None):
+        return tool_manage_deployment(
+            action=action,
+            build_no_cache=build_no_cache,
+            worker_drain_timeout_seconds=worker_drain_timeout_seconds,
+            user_id=getattr(_agent_context, "user_id", None),
+            org_id=getattr(_agent_context, "org_id", None),
+        )
+
+    def _manage_runtime_services(action="list", services=None):
+        return tool_manage_runtime_services(
+            action=action,
+            services=services,
+            user_id=getattr(_agent_context, "user_id", None),
+            org_id=getattr(_agent_context, "org_id", None),
+        )
 
     handlers = {
         # Brain tools (workspace-independent — always hit shared DB)
@@ -194,6 +221,14 @@ def _get_tool_handlers(
             user_id=getattr(_agent_context, "user_id", None),
             org_id=getattr(_agent_context, "org_id", None),
         ),
+        "read_self_context": _handle_read_self_context,
+        "read_capabilities": _handle_read_capabilities,
+        "manage_deployment": _manage_deployment,
+        "manage_runtime_services": _manage_runtime_services,
+        "transcribe_audio_attachment": lambda **kw: _patched_private(
+            "_handle_transcribe_audio_attachment",
+            _handle_transcribe_audio_attachment,
+        )(**kw),
         "manage_soul": lambda action, content=None, reason=None: manage_agent_soul(
             action,
             content=content,
@@ -213,6 +248,10 @@ def _get_tool_handlers(
             "_handle_post_chat_message",
             _handle_post_chat_message,
         )(**kw),
+        "post_slack_reply": lambda **kw: _patched_private(
+            "_handle_post_slack_reply",
+            _handle_post_slack_reply,
+        )(**kw),
         "post_thread_discussion_reply": lambda **kw: _patched_private(
             "_handle_post_thread_discussion_reply",
             _handle_post_thread_discussion_reply,
@@ -224,6 +263,14 @@ def _get_tool_handlers(
         "read_thread_discussion": lambda **kw: _patched_private(
             "_handle_read_thread_discussion",
             _handle_read_thread_discussion,
+        )(**kw),
+        "read_slack_conversation": lambda **kw: _patched_private(
+            "_handle_read_slack_conversation",
+            _handle_read_slack_conversation,
+        )(**kw),
+        "manage_slack": lambda **kw: _patched_private(
+            "_handle_manage_slack",
+            _handle_manage_slack,
         )(**kw),
         "manage_cycle": lambda **kw: _patched_private("_handle_manage_cycle", _handle_manage_cycle)(**kw),
         "manage_domain": lambda **kw: _patched_private("_handle_manage_domain", _handle_manage_domain)(**kw),

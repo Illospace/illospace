@@ -130,10 +130,13 @@ Build during upgrade when release images are unavailable:
 ./illo deploy upgrade --build --no-pull
 ```
 
-Owners/admins can also start the same update flow from System/Update Illospace.
-In Compose, the API queues the request in the private data volume and the
-`updater` sidecar runs `./illo update --mode compose` from the host checkout.
-The sidecar mounts the Docker socket, so keep this stack on trusted hosts only.
+Owners/admins can also start the same update flow from System/Update Illospace
+or by asking Illo to update the deployment. In Compose, the API queues the
+request in the private data volume and the `updater` sidecar runs
+`./illo update --mode compose` from the host checkout. That syncs `origin/main`,
+builds app images, runs migrations before runtime restart, and force-recreates
+runtime services so rebuilt same-tag images are picked up. The sidecar mounts
+the Docker socket, so keep this stack on trusted hosts only.
 
 ## Advanced Paths
 

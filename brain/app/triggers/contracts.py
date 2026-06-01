@@ -24,6 +24,7 @@ ILLO_NATIVE_SOURCES = frozenset({
     "product",
     "internal",
     "chat",
+    "slack",
 })
 
 ILLO_NATIVE_EVENTS = frozenset({
@@ -40,6 +41,8 @@ ILLO_NATIVE_EVENTS = frozenset({
     "internal.manual",
     "chat.room_message_mention",
     "chat.room_thread_mention",
+    "slack.app_mention",
+    "slack.direct_message",
 })
 
 

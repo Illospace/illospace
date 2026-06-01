@@ -165,7 +165,7 @@ async def _handle_manage_workspace_app(
 
     org_id, user_id = _workspace_app_context()
     if not org_id:
-        return json.dumps({"error": "manage_workspace_app requires an org-scoped run"})
+        return json.dumps({"error": "manage_workspace_app could not access this workspace context"})
 
     actor_id = str(user_id) if user_id else None
 

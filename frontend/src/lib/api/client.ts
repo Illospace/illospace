@@ -1,3 +1,5 @@
+import type { RuntimeSettings, RuntimeVoiceSession } from '$lib/types/runtimeSettings';
+
 const BASE = '';
 const DEFAULT_API_TIMEOUT_MS = 20_000;
 const PROJECT_CONTEXT_UPLOAD_TIMEOUT_MS = 30_000;
@@ -132,6 +134,26 @@ export interface ChatParticipant {
   email: string | null;
 }
 
+export interface ChatAttachmentPayload {
+  id?: string;
+  kind?: string;
+  type?: string;
+  content_type?: string;
+  contentType?: string;
+  mime_type?: string;
+  label?: string;
+  title?: string;
+  filename?: string;
+  name?: string;
+  url?: string;
+  href?: string;
+  previewUrl?: string;
+  download_url?: string;
+  downloadUrl?: string;
+  size?: number;
+  [key: string]: unknown;
+}
+
 export interface ChatMessage {
   id: number;
   conversation_id: string;
@@ -144,7 +166,7 @@ export interface ChatMessage {
   client_generated_id: string | null;
   thread_root_message_id: number | null;
   reply_to_message_id: number | null;
-  attachments: any[];
+  attachments: ChatAttachmentPayload[];
   metadata: Record<string, any> | null;
   conversation_seq: number;
   reply_count: number;
@@ -210,14 +232,14 @@ export interface ThreadDiscussionComment {
   author_name: string | null;
   author_color: string | null;
   body: string;
-  attachments: any[];
+  attachments: ChatAttachmentPayload[];
   metadata: Record<string, any> | null;
   created_at: string | null;
 }
 
 export interface ThreadDiscussionCreateInput {
   body: string;
-  attachments?: any[];
+  attachments?: ChatAttachmentPayload[];
   metadata?: Record<string, any> | null;
 }
 
@@ -304,7 +326,7 @@ export interface ChatMessageCreateInput {
   body: string;
   body_format?: 'markdown' | 'plain';
   client_generated_id?: string | null;
-  attachments?: any[];
+  attachments?: ChatAttachmentPayload[];
   reply_to_message_id?: number | null;
   metadata?: Record<string, any> | null;
 }
@@ -1168,7 +1190,7 @@ export const api = {
         ? `/api/cortex/ideas/${ideaId}/unified-stream?include_debug=true`
         : `/api/cortex/ideas/${ideaId}/unified-stream`
     ),
-  addThreadMessage: (ideaId: string, data: { content: string; role?: string; attachments?: any[]; metadata?: Record<string, any> }) =>
+  addThreadMessage: (ideaId: string, data: { content: string; role?: string; attachments?: ChatAttachmentPayload[]; metadata?: Record<string, any> }) =>
     fetchJson<any>(`/api/cortex/ideas/${ideaId}/thread`, { method: 'POST', body: JSON.stringify(data) }),
   updatePosition: (ideaId: string, x: number, y: number) =>
     fetchJson<any>(`/api/cortex/ideas/${ideaId}/position`, { method: 'PATCH', body: JSON.stringify({ position_x: x, position_y: y }) }),
@@ -1237,7 +1259,7 @@ export const api = {
     fetchJson<any>(`/api/cortex/ideas/${ideaId}/split`, { method: 'POST', body: JSON.stringify(data) }),
   timelineData: (limit?: number) =>
     fetchJson<any>(withQuery('/api/cortex/timeline-data', { limit })),
-  uploadFile: (file: File) => {
+  uploadFile: (file: File): Promise<ChatAttachmentPayload> => {
     const form = new FormData();
     form.append('file', file);
     return fetch('/api/cortex/upload', { method: 'POST', body: form }).then(r => {
@@ -1601,7 +1623,7 @@ export const api = {
 
   // System
   systemInfo: () => fetchJson<any>('/api/system'),
-  runtimeSettings: () => fetchJson<any>('/api/runtime-settings'),
+  runtimeSettings: () => fetchJson<RuntimeSettings>('/api/runtime-settings'),
   runtimeUpdateStatus: () => fetchJson<any>('/api/runtime-settings/update'),
   startRuntimeUpdate: () =>
     fetchJson<any>('/api/runtime-settings/update', { method: 'POST' }),
@@ -1625,8 +1647,15 @@ export const api = {
     fetchJson<any>('/api/runtime-settings/models', { method: 'PATCH', body: JSON.stringify(data) }),
   updateRuntimeMemory: (data: { embedder: string; embedding_model?: string | null; reranker?: string }) =>
     fetchJson<any>('/api/runtime-settings/memory', { method: 'PATCH', body: JSON.stringify(data) }),
+  updateRuntimeVoice: (data: { provider: string; language: string }) =>
+    fetchJson<RuntimeSettings['voice']>('/api/runtime-settings/voice', {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
   checkRuntimeMemory: () =>
     fetchJson<any>('/api/runtime-settings/memory/check', { method: 'POST' }),
+  createRuntimeVoiceSession: () =>
+    fetchJson<RuntimeVoiceSession>('/api/runtime-settings/voice/session', { method: 'POST' }),
 
   // Onboarding
   runtimeReadyIntroDraft: () =>

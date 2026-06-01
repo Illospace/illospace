@@ -390,6 +390,94 @@ BRAIN_TOOLS = [
         },
     },
     {
+        "name": "read_self_context",
+        "description": (
+            "Read verified identity, source, and runtime self-context for Illo. Use this for "
+            "questions about who Illo is, what Illospace is, where this open-source install/source "
+            "can be inspected, current git/source facts, or whether code/file inspection tools are "
+            "available. This is not the capability index; use read_capabilities for what Illo can do."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "include_paths": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Include verified local source-root and documentation path facts.",
+                },
+                "include_git": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Include current git branch, commit, and remote facts when available.",
+                },
+            },
+        },
+    },
+    {
+        "name": "read_capabilities",
+        "description": (
+            "Read machine-readable capability manifests for Illo's runtime and installed/custom capabilities. "
+            "Use this before answering setup, connect, install, integration, connector, plugin, tool, "
+            "or 'can you do X?' questions. Capability manifests and tool schemas are the source of truth "
+            "for setup modes, status checks, credential stores, and agent actions. Pass the user's natural "
+            "language request as query; do not invent capability keys or categories. Auto expands single matches."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The user's natural-language capability/setup question, such as 'help me set up Slack'.",
+                },
+                "include_setup_guide": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "When true, include a registered setup guide for a single matched capability.",
+                },
+                "detail_level": {
+                    "type": "string",
+                    "enum": ["auto", "summary", "tools", "full"],
+                    "default": "auto",
+                    "description": "Use summary for compact capability lists, tools for tool names, or full for exact setup/tool metadata. Auto expands only narrow matches.",
+                },
+            },
+        },
+    },
+    {
+        "name": "transcribe_audio_attachment",
+        "description": (
+            "Transcribe an audio attachment from the current thread or an uploaded file using "
+            "the Voice Runtime's selected transcription provider. Use this for Slack voice notes, "
+            "recorded messages, or audio files when the spoken content is needed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {
+                    "type": "string",
+                    "description": (
+                        "Attachment id from the current thread attachment context. "
+                        "Optional if there is exactly one audio attachment."
+                    ),
+                },
+                "attachment_url": {
+                    "type": "string",
+                    "description": "Uploaded attachment URL, such as /static/uploads/voice.webm.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Backend storage path for an uploaded audio attachment.",
+                },
+                "language": {
+                    "type": "string",
+                    "enum": ["auto", "en", "fr"],
+                    "default": "auto",
+                    "description": "Optional language hint. Use auto for bilingual English/French audio.",
+                },
+            },
+        },
+    },
+    {
         "name": "read_thread_messages",
         "description": (
             "Read or search raw stored messages from this agent run's persistent LLM session when "
@@ -496,8 +584,8 @@ BRAIN_TOOLS = [
         "name": "read_workspace_overview",
         "description": (
             "Read a curated overview of the current Illospace workspace before introducing Illo, "
-            "answering broad setup questions, or explaining what context is available. Returns team members, "
-            "active/recent Cortex thoughts, recent agent runs/messages, Project Context profiles and attachments, "
+            "answering broad workspace setup questions, or explaining what context is available. "
+            "Returns team members, active/recent Cortex thoughts, recent agent runs/messages, Project Context profiles and attachments, "
             "Domains/records, workspace apps, Cycles, and setup gaps. Use this first for 'what is this workspace?', "
             "'what can you see?', and onboarding setup guidance. "
             f"{WORKSPACE_OVERVIEW_SPARSE_GUIDANCE}"
@@ -888,7 +976,7 @@ INBOUND_TOOLS = [
             "event logs, and decision receipts. Use this when a user asks Illo to set up or adjust "
             "webhooks, MCP personal-tool signals, Jira/GitHub/Stripe-style sources, routing rules, "
             "or deterministic storage into Domains. External tools should submit signals through "
-            "hosted MCP or POST /webhooks; this tool is Illo's chat-based admin/configuration surface. "
+            "hosted MCP or POST /webhooks; this tool is Illo's chat-based configuration surface. "
             "Use action='help' or action='schema' with operation before mutating unfamiliar configs."
         ),
         "input_schema": {
@@ -944,7 +1032,7 @@ INBOUND_TOOLS = [
                 "remote_agent_id": {"type": "string", "description": "Optional source-side agent or app id."},
                 "remote_agent_card": {"type": "object", "description": "Optional source card/metadata."},
                 "capabilities": {"type": "object", "description": "Source capability metadata."},
-                "metadata": {"type": "object", "description": "Operator notes or structured metadata."},
+                "metadata": {"type": "object", "description": "Setup notes or structured metadata."},
                 "status": {"type": "string", "description": "Connection status override."},
                 "include_disabled": {"type": "boolean", "default": False},
                 "include_revoked": {
@@ -1220,6 +1308,43 @@ CHAT_TOOLS = [
         },
     },
     {
+        "name": "post_slack_reply",
+        "description": (
+            "Post an Illo-authored reply into Slack. Use this when a run was "
+            "triggered by a Slack mention or DM and the visible answer belongs "
+            "back in Slack. Defaults to the originating Slack channel, existing "
+            "thread, or DM; top-level mentions and DMs are not threaded."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "string",
+                    "description": "Concise Slack markdown message to post as Illo.",
+                },
+                "channel_id": {
+                    "type": "string",
+                    "description": "Optional Slack channel or DM id. Defaults to the triggering surface.",
+                },
+                "thread_ts": {
+                    "type": "string",
+                    "description": "Optional Slack thread timestamp. Defaults to the triggering response target; omit for top-level channel replies and DMs.",
+                },
+                "visibility": {
+                    "type": "string",
+                    "enum": ["public", "ephemeral"],
+                    "description": "Whether to post publicly or ephemerally. Defaults to public.",
+                    "default": "public",
+                },
+                "user_id": {
+                    "type": "string",
+                    "description": "Slack user id required for ephemeral replies outside a Slack-triggered run.",
+                },
+            },
+            "required": ["body"],
+        },
+    },
+    {
         "name": "post_ai_timeline_message",
         "description": (
             "Post an Illo-authored message into the linked Thread AI Timeline. "
@@ -1264,6 +1389,74 @@ CHAT_TOOLS = [
                     "default": 50,
                 },
             },
+        },
+    },
+    {
+        "name": "read_slack_conversation",
+        "description": (
+            "Read bounded Slack context for the current Slack-triggered run. "
+            "Use this intentionally when the triggering message is not enough. "
+            "Slack channel history is not automatically included in every prompt."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "enum": ["triggering_message", "thread", "recent_channel"],
+                    "description": "Which Slack context to read. Defaults to the triggering thread.",
+                    "default": "thread",
+                },
+                "channel_id": {
+                    "type": "string",
+                    "description": "Optional Slack channel or DM id. Defaults to the triggering surface.",
+                },
+                "thread_ts": {
+                    "type": "string",
+                    "description": "Optional Slack thread timestamp. Defaults to the triggering thread.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum Slack messages to return.",
+                    "default": 50,
+                },
+            },
+        },
+    },
+    {
+        "name": "manage_slack",
+        "description": (
+            "Inspect Slack connection health and Slack-to-Illospace identity mappings. "
+            "Use action='status' to check whether Slack is connected, and use "
+            "identity mapping actions to link Slack users to Illospace users."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "status",
+                        "list_mappings",
+                        "link_identity",
+                        "unlink_identity",
+                    ],
+                    "description": "Slack management action.",
+                },
+                "connection_id": {
+                    "type": "string",
+                    "description": "Slack source connection id. Optional when only one Slack connection exists.",
+                },
+                "slack_user_id": {
+                    "type": "string",
+                    "description": "Slack user id, required for link_identity and unlink_identity.",
+                },
+                "user_id": {
+                    "type": "string",
+                    "description": "Illospace user id, required for link_identity.",
+                },
+            },
+            "required": ["action"],
         },
     }
 ]
@@ -2348,6 +2541,69 @@ LIFECYCLE_TOOLS = [
     },
 ]
 
+# ── Deployment Tools ─────────────────────────────────────────
+# Coordinator-only because deployments can restart Illospace itself.
+
+DEPLOYMENT_TOOLS = [
+    {
+        "name": "manage_deployment",
+        "description": (
+            "Check or start the Illospace self-update flow for the running server. "
+            "Use this only when an authenticated workspace user explicitly asks Illo "
+            "to update, deploy, redeploy, or pull latest main for this Illospace instance. "
+            "The update flow syncs origin/main, rebuilds the Compose app images, runs "
+            "database migrations, and restarts runtime services through the updater sidecar "
+            "when available."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["status", "start_update"],
+                    "default": "status",
+                    "description": "Use status to inspect availability/progress, or start_update to queue a deployment.",
+                },
+                "build_no_cache": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "For start_update, rebuild app images without Docker cache when cache staleness is suspected.",
+                },
+                "worker_drain_timeout_seconds": {
+                    "type": "integer",
+                    "description": "For start_update, optional positive timeout for active worker drain before leaving old worker to finish.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "manage_runtime_services",
+        "description": (
+            "List, inspect, or restart known Illospace runtime services through the host controller. "
+            "Use list before choosing targets. Use restart when an authenticated workspace user asks "
+            "Illo to restart one, many, or all services in this Illospace installation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "status", "restart"],
+                    "default": "list",
+                    "description": "Use list/status to inspect service management, or restart to queue a service restart.",
+                },
+                "services": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "For restart, one or more service ids returned by list, or all.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+]
+
 # ── Composite Tool Lists ─────────────────────────────────────
 
 # Worker tools = normal workspace/product capabilities. Harness orchestration
@@ -2383,6 +2639,7 @@ COORDINATOR_TOOLS = (
     + EXEC_TOOLS
     + SESSION_TOOLS
     + LIFECYCLE_TOOLS
+    + DEPLOYMENT_TOOLS
     + WORKER_SPAWN_TOOLS
     + [
         CORTEX_REPLY_TOOL,
@@ -2397,7 +2654,7 @@ COORDINATOR_TOOLS = (
 # Brain gate: these tool names satisfy the "brain context accessed" requirement
 _BRAIN_TOOL_NAMES = frozenset({
     "brain_recall", "brain_guardrails", "brain_skills", "skill_view", "skill_asset",
-    "brain_encode", "runtime_settings", "query_workspace_data", "read_workspace_overview",
+    "brain_encode", "runtime_settings", "read_self_context", "read_capabilities", "query_workspace_data", "read_workspace_overview",
     "read_team_activity", "read_project_contexts", "read_team_members", "read_workspace_records",
     "read_cycles", "read_workspace_apps",
 })

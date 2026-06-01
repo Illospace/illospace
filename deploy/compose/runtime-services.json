@@ -1,0 +1,35 @@
+{
+  "services": [
+    {
+      "id": "api",
+      "compose_service": "api",
+      "name": "Illospace API",
+      "description": "HTTP API and backend request handling."
+    },
+    {
+      "id": "worker",
+      "compose_service": "worker",
+      "name": "Agent worker",
+      "description": "Background AgentRun worker for Illo tasks."
+    },
+    {
+      "id": "scheduler",
+      "compose_service": "scheduler",
+      "name": "Scheduler",
+      "description": "Recurring work and scheduled run materialization."
+    },
+    {
+      "id": "web",
+      "compose_service": "web",
+      "name": "Web app",
+      "description": "Illospace browser interface."
+    },
+    {
+      "id": "slack_connector",
+      "compose_service": "slack-connector",
+      "name": "Slack connector",
+      "description": "Socket Mode bridge between Slack conversations and Illospace.",
+      "optional": true
+    }
+  ]
+}

@@ -1406,6 +1406,100 @@ async def test_workspace_app_action_generic_http_request_returns_compact_respons
     assert result["result"] == {"response": {"id": "abc", "ok": True}}
 
 
+async def test_workspace_app_action_generic_http_auth_uses_runtime_secret_resolver(session, monkeypatch):
+    domain = await _todo_domain(session)
+    manifest = _manifest_with_action(
+        domain.id,
+        {
+            "kind": "connector",
+            "effects": ["external.write"],
+            "executor": {"type": "registered", "key": "generic.http"},
+            "connector_spec": {
+                "kind": "http_request",
+                "auth": {"source": "vault_key", "vault_key": "TICKETING_TOKEN", "type": "bearer"},
+                "request": {
+                    "method": "POST",
+                    "url": "https://api.example.test/issues",
+                    "json": {"title": "{title}"},
+                },
+            },
+        },
+    )
+    app = await a_create_app(
+        session,
+        org_id=ORG_ID,
+        key="generic-http-auth",
+        name="Generic HTTP Auth",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(VALID_GENERATED_UI_SPEC),
+        manifest=manifest,
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+    calls = []
+
+    async def read_runtime_secret(key_name, *, context, reason, requested_by, access, allow_env_fallback):
+        calls.append(
+            {
+                "key_name": key_name,
+                "actor_user_id": context.actor_user_id,
+                "org_id": context.org_id,
+                "reason": reason,
+                "requested_by": requested_by,
+                "access": access,
+                "allow_env_fallback": allow_env_fallback,
+            }
+        )
+        return "vault-ticketing-token"
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, headers=None, params=None, json=None):
+            assert headers == {"Authorization": "Bearer vault-ticketing-token"}
+            return type(
+                "_Response",
+                (),
+                {
+                    "is_success": True,
+                    "status_code": 200,
+                    "content": b'{"id":"abc","ok":true}',
+                    "json": lambda self: {"id": "abc", "ok": True},
+                },
+            )()
+
+    monkeypatch.setattr("brain.systems.vault.runtime_secrets.read_runtime_secret", read_runtime_secret)
+    monkeypatch.setattr("brain.systems.workspace_apps.generic_http.async_http_client", lambda **kwargs: _Client())
+
+    result = await async_run_workspace_app_action(
+        session,
+        org_id=ORG_ID,
+        app_id=app.id,
+        action_key="tickets.syncExternal",
+        payload={"title": "Ship it"},
+        user_id=USER_ID,
+    )
+
+    assert result["ok"] is True
+    assert result["result"] == {"response": {"id": "abc", "ok": True}}
+    assert calls == [
+        {
+            "key_name": "TICKETING_TOKEN",
+            "actor_user_id": USER_ID,
+            "org_id": ORG_ID,
+            "reason": "Run workspace app connector action tickets.syncExternal.",
+            "requested_by": "workspace_app_connector",
+            "access": "service",
+            "allow_env_fallback": False,
+        }
+    ]
+
+
 async def test_workspace_app_action_generic_http_rejects_invalid_mapping_at_save(session):
     domain = await _todo_domain(session)
 

@@ -516,6 +516,7 @@ class AsyncDomainService:
         actor_kind: str = "human",
         run_id: int | None = None,
         idea_id: str | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         record = await self.get_record(org_id, domain_id, record_id)
         before = await self.serialize_record(record)
@@ -536,6 +537,7 @@ class AsyncDomainService:
                 idea_id=idea_id,
                 before=before,
                 after=await self.serialize_record(record),
+                reason=reason,
             )
             return {"id": record_id, "mode": "archive", "archived": True}
         if mode == "delete":
@@ -549,6 +551,7 @@ class AsyncDomainService:
                 run_id=run_id,
                 idea_id=idea_id,
                 before=before,
+                reason=reason,
             )
             await self.session.delete(record)
             await self.session.flush()

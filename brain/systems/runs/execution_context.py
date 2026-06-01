@@ -1,4 +1,4 @@
-"""Task-local execution context for live AgentRun tool calls."""
+"""Context-local execution context for live AgentRun tool calls."""
 
 from __future__ import annotations
 
@@ -6,20 +6,6 @@ from contextlib import contextmanager
 import contextvars
 from dataclasses import dataclass, field, fields
 from typing import Iterator, Mapping
-
-
-_context_state: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
-    "illo_agent_execution_context",
-    default=None,
-)
-
-
-def _state() -> dict[str, object]:
-    state = _context_state.get()
-    if state is None:
-        state = {}
-        _context_state.set(state)
-    return state
 
 
 def _clone_context_value(value: object) -> object:
@@ -39,38 +25,49 @@ def clone_agent_context_mapping(mapping: Mapping[str, object]) -> dict[str, obje
     return {key: _clone_context_value(value) for key, value in dict(mapping).items()}
 
 
-class _AgentContext:
-    """A small namespace proxy backed by ContextVar state.
+_context_values: contextvars.ContextVar[dict[str, object]] = contextvars.ContextVar(
+    "agent_execution_context",
+    default={},
+)
 
-    Agent tools read and write attributes on this object. ContextVar storage keeps
-    concurrent async tool calls from mutating the same logical context while still
-    letting worker threads start with their own empty context.
+
+class _AgentContextProxy:
+    """Context-local attribute proxy for live AgentRun tool calls.
+
+    Agent runs execute tool calls concurrently in the same event-loop thread. A
+    plain ``threading.local`` lets parallel async tasks overwrite each other's
+    workspace/user context, which can make workspace-bound tools believe they
+    are outside a workspace. ``contextvars`` gives every task its own view
+    while preserving the attribute-style API the tool handlers use.
     """
 
-    def __getattribute__(self, name: str):
-        if name in {"__class__", "__dict__", "_copy"}:
-            if name == "__dict__":
-                return _state()
-            return object.__getattribute__(self, name)
-        try:
-            return _state()[name]
-        except KeyError as exc:
-            raise AttributeError(name) from exc
+    @property
+    def __dict__(self) -> dict[str, object]:
+        return _context_values.get()
+
+    def __getattr__(self, name: str):
+        values = _context_values.get()
+        if name in values:
+            return values[name]
+        raise AttributeError(name)
 
     def __setattr__(self, name: str, value: object) -> None:
-        _state()[name] = value
+        values = dict(_context_values.get())
+        values[name] = value
+        _context_values.set(values)
 
     def __delattr__(self, name: str) -> None:
-        try:
-            del _state()[name]
-        except KeyError as exc:
-            raise AttributeError(name) from exc
+        values = dict(_context_values.get())
+        if name not in values:
+            raise AttributeError(name)
+        del values[name]
+        _context_values.set(values)
 
     def _copy(self) -> dict[str, object]:
-        return clone_agent_context_mapping(_state())
+        return clone_agent_context_mapping(_context_values.get())
 
 
-_agent_context = _AgentContext()
+_agent_context = _AgentContextProxy()
 
 
 @dataclass
@@ -89,6 +86,7 @@ class AgentExecutionContext:
     start_time: float | None = None
     reply_contents: list[str] = field(default_factory=list)
     tool_calls_log: list[str] = field(default_factory=list)
+    recent_tool_results: list[dict] = field(default_factory=list)
     execution_artifacts: list[dict] = field(default_factory=list)
     execution_metadata: dict | None = None
     intent_satisfaction: dict | None = None
@@ -96,7 +94,7 @@ class AgentExecutionContext:
     resource_summary: dict | None = None
     slash_skill_refs: list[str] = field(default_factory=list)
 
-    def to_threadlocal_attrs(self) -> dict:
+    def to_context_attrs(self) -> dict:
         """Return a shallow attr mapping without deep-copying live run objects."""
         return {field.name: getattr(self, field.name) for field in fields(self)}
 
@@ -125,18 +123,18 @@ def bind_agent_context(
     attrs: dict[str, object] = {}
     if context is not None:
         if isinstance(context, AgentExecutionContext):
-            attrs.update(context.to_threadlocal_attrs())
+            attrs.update(context.to_context_attrs())
         else:
             attrs.update(dict(context))
     attrs.update(overrides)
 
-    next_state = _agent_context._copy()
-    next_state.update(clone_agent_context_mapping(attrs))
-    token = _context_state.set(next_state)
+    next_values = clone_agent_context_mapping(_context_values.get())
+    next_values.update(clone_agent_context_mapping(attrs))
+    token = _context_values.set(next_values)
     try:
         yield _agent_context
     finally:
-        _context_state.reset(token)
+        _context_values.reset(token)
 
 
 __all__ = [

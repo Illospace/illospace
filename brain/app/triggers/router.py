@@ -13,7 +13,8 @@ _CORTEX_TRIGGER_EVENTS = {
     "cortex.thread_discussion_mention",
 }
 _CHAT_TRIGGER_EVENTS = {"chat.room_message_mention", "chat.room_thread_mention"}
-_RUN_TRIGGER_EVENTS = _CORTEX_TRIGGER_EVENTS | _CHAT_TRIGGER_EVENTS
+_SLACK_TRIGGER_EVENTS = {"slack.app_mention", "slack.direct_message"}
+_RUN_TRIGGER_EVENTS = _CORTEX_TRIGGER_EVENTS | _CHAT_TRIGGER_EVENTS | _SLACK_TRIGGER_EVENTS
 
 
 async def _async_route_run_trigger(trigger: IlloTrigger, *, session: Any | None = None) -> TriggerRouteResult:

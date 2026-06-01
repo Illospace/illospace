@@ -1,5 +1,6 @@
 import {
   api,
+  type ChatAttachmentPayload,
   type ChatBootstrap,
   type ChatConversationPage as ChatConversationPageResponse,
   type ChatConversationSummary,
@@ -777,7 +778,7 @@ class ChatStore {
     body?: string,
     options: {
       bodyFormat?: 'markdown' | 'plain';
-      attachments?: any[];
+      attachments?: ChatAttachmentPayload[];
       replyToMessageId?: number | null;
       metadata?: Record<string, any> | null;
     } = {},
@@ -795,7 +796,7 @@ class ChatStore {
     body?: string,
     options: {
       bodyFormat?: 'markdown' | 'plain';
-      attachments?: any[];
+      attachments?: ChatAttachmentPayload[];
       metadata?: Record<string, any> | null;
     } = {},
   ) {
@@ -854,7 +855,7 @@ class ChatStore {
     body?: string,
     options: {
       bodyFormat?: 'markdown' | 'plain';
-      attachments?: any[];
+      attachments?: ChatAttachmentPayload[];
       replyToMessageId?: number | null;
       metadata?: Record<string, any> | null;
     } = {},
@@ -1365,7 +1366,7 @@ class ChatStore {
     conversationId: string;
     body: string;
     bodyFormat: 'markdown' | 'plain';
-    attachments: any[];
+    attachments: ChatAttachmentPayload[];
     metadata: Record<string, any> | null;
     clientGeneratedId: string;
     threadRootMessageId: number | null;
