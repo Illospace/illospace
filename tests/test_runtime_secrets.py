@@ -31,7 +31,7 @@ async def test_agent_tool_runtime_secret_uses_central_agent_access(monkeypatch):
     )
 
     value = await read_runtime_secret(
-        "github_token",
+        "GITHUB_TOKEN",
         context=RuntimeSecretContext(
             actor_user_id="user-1",
             org_id="org-1",
@@ -205,3 +205,124 @@ def test_first_party_runtime_integrations_use_runtime_secret_resolver_for_vault_
                     offenders.append(f"{path.relative_to(ROOT)}:{node.lineno} imports direct Vault secret reads")
 
     assert offenders == []
+
+
+def test_clean_key_name_preserves_vault_key_case():
+    from brain.systems.vault.runtime_secrets import _clean_key_name
+
+    assert _clean_key_name("DataForSeoLogin") == "DataForSeoLogin"
+
+
+def test_vault_key_candidates_preserve_exact_key_before_uppercase_alias():
+    from brain.systems.vault.runtime_secrets import _vault_key_candidates
+
+    assert _vault_key_candidates("DataForSeoLogin") == ("DataForSeoLogin", "DATAFORSEOLOGIN")
+    assert _vault_key_candidates("GITHUB_TOKEN") == ("GITHUB_TOKEN",)
+
+
+def test_clean_env_names_includes_uppercase_fallback_without_changing_key():
+    from brain.systems.vault.runtime_secrets import _clean_env_names
+
+    assert _clean_env_names("DataForSeoLogin", None) == ("DataForSeoLogin", "DATAFORSEOLOGIN")
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_runtime_secret_falls_back_to_uppercase_legacy_key_when_exact_missing(monkeypatch):
+    from brain.systems.vault.runtime_secrets import RuntimeSecretContext, read_runtime_secret
+
+    record_calls = []
+    read_calls = []
+
+    async def async_get_secret_record(key_name, actor_user_id, *, org_id):
+        record_calls.append((key_name, actor_user_id, org_id))
+        return object() if key_name == "DATAFORSEOLOGIN" else None
+
+    async def read_agent_secret_for_runtime(key_name, **kwargs):
+        read_calls.append(key_name)
+        return {"key": key_name, "value": "legacy-uppercase-value"}
+
+    monkeypatch.setattr("brain.systems.vault.async_get_secret_record", async_get_secret_record)
+    monkeypatch.setattr(
+        "brain.systems.vault.agent_access.read_agent_secret_for_runtime",
+        read_agent_secret_for_runtime,
+    )
+
+    value = await read_runtime_secret(
+        "DataForSeoLogin",
+        context=RuntimeSecretContext(actor_user_id="user-1", org_id="org-1", run_id=42),
+        reason="Run a bounded DataForSEO SERP check.",
+        requested_by="secret_env_mount",
+        access="agent_tool",
+    )
+
+    assert value == "legacy-uppercase-value"
+    assert record_calls == [
+        ("DataForSeoLogin", "user-1", "org-1"),
+        ("DATAFORSEOLOGIN", "user-1", "org-1"),
+    ]
+    assert read_calls == ["DATAFORSEOLOGIN"]
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_runtime_secret_does_not_fall_back_on_permission_error(monkeypatch):
+    from brain.systems.vault.runtime_secrets import RuntimeSecretContext, RuntimeSecretUnavailable, read_runtime_secret
+
+    calls = []
+
+    async def async_get_secret_record(key_name, actor_user_id, *, org_id):
+        return object() if key_name == "DataForSeoLogin" else None
+
+    async def read_agent_secret_for_runtime(key_name, **kwargs):
+        calls.append(key_name)
+        return {"error": "secret is marked manual and cannot be auto-read by agents"}
+
+    monkeypatch.setattr("brain.systems.vault.async_get_secret_record", async_get_secret_record)
+    monkeypatch.setattr(
+        "brain.systems.vault.agent_access.read_agent_secret_for_runtime",
+        read_agent_secret_for_runtime,
+    )
+
+    with pytest.raises(RuntimeSecretUnavailable, match="marked manual"):
+        await read_runtime_secret(
+            "DataForSeoLogin",
+            context=RuntimeSecretContext(actor_user_id="user-1", org_id="org-1", run_id=42),
+            reason="Run a bounded DataForSEO SERP check.",
+            requested_by="secret_env_mount",
+            access="agent_tool",
+        )
+
+    assert calls == ["DataForSeoLogin"]
+
+
+@pytest.mark.asyncio
+async def test_service_runtime_secret_falls_back_to_uppercase_legacy_vault_key(monkeypatch):
+    from brain.systems.vault.runtime_secrets import RuntimeSecretContext, read_runtime_secret
+
+    record_calls = []
+    calls = []
+
+    async def async_get_secret_record(key_name, actor_user_id, *, org_id):
+        record_calls.append((key_name, actor_user_id, org_id))
+        return object() if key_name == "SERVICE_TOKEN" else None
+
+    async def get_secret(key_name, actor_user_id, *, org_id, accessed_by):
+        calls.append((key_name, actor_user_id, org_id, accessed_by))
+        return "legacy-service-token" if key_name == "SERVICE_TOKEN" else None
+
+    monkeypatch.setattr("brain.systems.vault.async_get_secret_record", async_get_secret_record)
+    monkeypatch.setattr("brain.systems.vault.get_secret", get_secret)
+
+    value = await read_runtime_secret(
+        "service_token",
+        context=RuntimeSecretContext(actor_user_id="user-1", org_id="org-1"),
+        reason="Call a configured first-party integration.",
+        requested_by="service_tool",
+        access="service",
+    )
+
+    assert value == "legacy-service-token"
+    assert record_calls == [
+        ("service_token", "user-1", "org-1"),
+        ("SERVICE_TOKEN", "user-1", "org-1"),
+    ]
+    assert calls == [("SERVICE_TOKEN", "user-1", "org-1", "service_tool")]

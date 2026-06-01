@@ -26,15 +26,34 @@ class RuntimeSecretContext:
 
 
 def _clean_key_name(key_name: str) -> str:
-    key = str(key_name or "").strip().upper()
+    key = str(key_name or "").strip()
     if not key:
         raise RuntimeSecretUnavailable("Vault secret key name is required")
     return key
 
 
+def _vault_key_candidates(key_name: str) -> tuple[str, ...]:
+    """Return Vault lookup candidates, preserving exact keys before legacy uppercase aliases."""
+
+    key = _clean_key_name(key_name)
+    candidates = [key]
+    upper_key = key.upper()
+    if upper_key != key:
+        candidates.append(upper_key)
+    return tuple(dict.fromkeys(candidates))
+
+
 def _clean_env_names(key_name: str, env_names: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
-    names = tuple(str(name or "").strip() for name in (env_names or (key_name,)))
-    return tuple(name for name in names if name)
+    raw_names = tuple(str(name or "").strip() for name in (env_names or (key_name,)))
+    names: list[str] = []
+    for name in raw_names:
+        if not name:
+            continue
+        names.append(name)
+        upper_name = name.upper()
+        if upper_name != name:
+            names.append(upper_name)
+    return tuple(dict.fromkeys(names))
 
 
 def _env_secret(env_names: tuple[str, ...]) -> str | None:
@@ -43,6 +62,30 @@ def _env_secret(env_names: tuple[str, ...]) -> str | None:
         if value:
             return value
     return None
+
+
+async def _select_existing_vault_key_candidate(
+    candidates: tuple[str, ...],
+    *,
+    actor_user_id: str,
+    org_id: str,
+) -> str:
+    """Choose an existing Vault key without recording false missing-key requests."""
+
+    if len(candidates) <= 1:
+        return candidates[0]
+
+    from brain.systems.vault import async_get_secret_record
+
+    for candidate in candidates:
+        secret = await async_get_secret_record(
+            candidate,
+            actor_user_id=actor_user_id,
+            org_id=org_id,
+        )
+        if secret is not None:
+            return candidate
+    return candidates[0]
 
 
 async def read_runtime_secret(
@@ -58,6 +101,7 @@ async def read_runtime_secret(
     """Resolve a secret for trusted runtime code without exposing it to the agent."""
 
     key = _clean_key_name(key_name)
+    key_candidates = _vault_key_candidates(key)
     env_candidates = _clean_env_names(key, env_names)
 
     actor_user_id = str(context.actor_user_id or "").strip()
@@ -67,8 +111,13 @@ async def read_runtime_secret(
         if actor_user_id and org_id:
             from brain.systems.vault import get_secret
 
+            candidate = await _select_existing_vault_key_candidate(
+                key_candidates,
+                actor_user_id=actor_user_id,
+                org_id=org_id,
+            )
             value = await get_secret(
-                key,
+                candidate,
                 actor_user_id=actor_user_id,
                 org_id=org_id,
                 accessed_by=requested_by,
@@ -93,8 +142,13 @@ async def read_runtime_secret(
 
     from brain.systems.vault.agent_access import read_agent_secret_for_runtime
 
+    candidate = await _select_existing_vault_key_candidate(
+        key_candidates,
+        actor_user_id=actor_user_id,
+        org_id=org_id,
+    )
     response = await read_agent_secret_for_runtime(
-        key,
+        candidate,
         reason=reason,
         user_id=actor_user_id,
         org_id=org_id,
@@ -106,12 +160,12 @@ async def read_runtime_secret(
         target_registry_id=context.target_registry_id,
     )
     if not isinstance(response, dict):
-        raise RuntimeSecretUnavailable(f"Vault secret '{key}' could not be read")
+        raise RuntimeSecretUnavailable(f"Vault secret '{candidate}' could not be read")
     if response.get("error"):
         raise RuntimeSecretUnavailable(str(response.get("error")))
     value = response.get("value")
     if value is None:
-        raise RuntimeSecretUnavailable(f"Vault secret '{key}' did not return a value")
+        raise RuntimeSecretUnavailable(f"Vault secret '{candidate}' did not return a value")
     return str(value)
 
 
