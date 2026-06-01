@@ -101,12 +101,24 @@ class IlloClient:
             payload={"error": error, "payload": {}},
         )
 
-    def ask_illo(self, question: str, *, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    def submit_to_illo(self, message: str, *, source: dict[str, Any] | None = None) -> dict[str, Any]:
         return _json_request(
             "POST",
-            self._url("/api/agent-bridge/illo/ask"),
+            self._url("/api/mcp"),
             token=self.token,
-            payload={"question": question, "context": context or {}},
+            payload={
+                "jsonrpc": "2.0",
+                "id": "personal-agent-bridge-submit",
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_submit",
+                    "arguments": {
+                        "message": message,
+                        "origin": "personal_agent_bridge.submit",
+                        "source": source or {"source_tool": "personal-agent-bridge"},
+                    },
+                },
+            },
         )
 
 
@@ -349,13 +361,13 @@ def run_once(client: IlloClient, adapter, *, max_tasks: int) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the Illo personal-agent bridge.")
-    parser.add_argument("command", choices=["once", "run", "heartbeat", "ask"])
+    parser.add_argument("command", choices=["once", "run", "heartbeat", "submit"])
     parser.add_argument("--illo-base-url", default=os.environ.get("ILLO_BASE_URL", "http://localhost:8000"))
     parser.add_argument("--token", default=os.environ.get("ILLO_BRIDGE_TOKEN", ""))
     parser.add_argument("--adapter", default=os.environ.get("PERSONAL_AGENT_ADAPTER", "fake"))
     parser.add_argument("--max-tasks", type=int, default=int(os.environ.get("ILLO_BRIDGE_MAX_TASKS", "1")))
     parser.add_argument("--interval", type=float, default=float(os.environ.get("ILLO_BRIDGE_POLL_INTERVAL", "5")))
-    parser.add_argument("--question", default="")
+    parser.add_argument("--message", default="")
     args = parser.parse_args(argv)
 
     if not args.token:
@@ -367,10 +379,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "heartbeat":
         print(json.dumps(client.heartbeat(capabilities={"adapter": adapter.name}), indent=2))
         return 0
-    if args.command == "ask":
-        if not args.question:
-            raise BridgeError("--question is required for ask")
-        print(json.dumps(client.ask_illo(args.question), indent=2))
+    if args.command == "submit":
+        if not args.message:
+            raise BridgeError("--message is required for submit")
+        print(json.dumps(client.submit_to_illo(args.message), indent=2))
         return 0
     if args.command == "once":
         run_once(client, adapter, max_tasks=args.max_tasks)

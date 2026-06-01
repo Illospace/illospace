@@ -77,21 +77,27 @@ Local repo config before package publish:
 
 ## Tools
 
-- `illo_submit_context`: default path for personal agents sending new context to Illo. Sends an intent, ordered context parts, provenance, constraints, correlation, and idempotency key so Illo can place the context in the team workspace.
-- `illo_search_workspace`: search existing Illo ideas/threads before creating duplicates.
-- `illo_get_thread`: inspect visible context for an existing Illo thread.
-- `illo_create_thread`: advanced compatibility tool for explicitly requested visible team threads.
-- `illo_post_thread_message`: advanced compatibility tool for explicitly targeted existing threads.
-- `illo_ask`: ask Illo for private workspace context without creating a visible thread.
-- `illo_get_ask`: poll a headless ask created by `illo_ask`.
-- `illo_get_team_members`: resolve teammates before sharing work.
+- `illo_submit`: default path for personal agents sending ordered context or
+  work handoffs to Illo. Sends intent, parts, provenance, constraints,
+  correlation, and idempotency information so Illo can decide routing.
+- `illo_read`: non-mutating workspace read lane. Use for search, known Thread
+  or record reads, teammate resolution, and private Illo context asks.
+- `illo_act`: explicit user-authorized action lane. Use for visible team
+  coordination such as creating/updating Threads, notifying teammates, or
+  asking Illo to actively respond.
+- `illo_get_result`: retrieve or poll asynchronous results returned by
+  `illo_submit`, `illo_read`, or `illo_act`.
 
 Behavior guidance lives in tool descriptions so MCP clients can use this package
 without a separate skill or prompt file.
 
-## Context Submission
+The local package is intentionally a thin forwarder. Each local tool call is
+sent to the hosted Illo MCP endpoint as a JSON-RPC `tools/call` request with the
+same tool name and arguments.
 
-Personal agents should prefer `illo_submit_context` when they need to hand new
+## Submit
+
+Personal agents should prefer `illo_submit` when they need to hand new
 conversation, trace, file, diff, link, or artifact context to Illo. A typical
 payload:
 
@@ -130,3 +136,54 @@ The submission may include `correlation.thread_id` when the user explicitly
 means to attach context to an existing Thread. It should not choose projects,
 pins, teammates, or workflow-specific outcomes. Illo owns coordination in the
 team workspace.
+
+## Read
+
+Use `illo_read` for context lookup that should not mutate team-visible state.
+A typical payload:
+
+```json
+{
+  "request": "Find related roadmap context before I share this implementation.",
+  "resource": "workspace",
+  "query": "universal thread context ingress",
+  "limit": 10,
+  "context": {
+    "repo": "illospace-project",
+    "branch": "codex/universal-thread-context"
+  }
+}
+```
+
+## Act
+
+Use `illo_act` only when the user has asked for a visible team action or for
+Illo to actively coordinate. A typical payload:
+
+```json
+{
+  "intent": "Share this implementation status with the team.",
+  "action": "create_thread",
+  "target": {
+    "kind": "thread"
+  },
+  "content": {
+    "title": "Universal Thread context ingress update",
+    "body": "Implemented local MCP forwarding and tests."
+  },
+  "teammate_user_ids": ["user_123"],
+  "idempotency_key": "codex:universal-thread-context:share-status"
+}
+```
+
+## Results
+
+When any tool returns a `result_id`, use `illo_get_result` instead of repeating
+the original request:
+
+```json
+{
+  "result_id": "result_123",
+  "wait_ms": 1000
+}
+```

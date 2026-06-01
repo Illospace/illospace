@@ -26,21 +26,16 @@ def test_tool_catalog_contains_behavior_guidance():
     response = module.handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = {tool["name"]: tool for tool in response["result"]["tools"]}
 
-    assert {
-        "illo_submit_context",
-        "illo_search_workspace",
-        "illo_get_thread",
-        "illo_create_thread",
-        "illo_post_thread_message",
-        "illo_ask",
-        "illo_get_ask",
-        "illo_get_team_members",
-    } == set(tools)
-    assert "team agent" in tools["illo_submit_context"]["description"]
-    assert "thread_url" in tools["illo_submit_context"]["description"]
-    assert "before creating a new thread" in tools["illo_search_workspace"]["description"]
-    assert "without creating a visible thread" in tools["illo_ask"]["description"]
-    assert "Advanced compatibility tool" in tools["illo_create_thread"]["description"]
+    assert {"illo_submit", "illo_read", "illo_act", "illo_get_result"} == set(tools)
+    assert "team agent" in tools["illo_submit"]["description"]
+    assert "thread_url" in tools["illo_submit"]["description"]
+    assert tools["illo_submit"]["inputSchema"]["required"] == ["intent"]
+    assert "without mutating" in tools["illo_read"]["description"]
+    assert tools["illo_read"]["inputSchema"]["required"] == ["request"]
+    assert "user-authorized action" in tools["illo_act"]["description"]
+    assert tools["illo_act"]["inputSchema"]["required"] == ["intent"]
+    assert "result_id" in tools["illo_get_result"]["description"]
+    assert tools["illo_get_result"]["inputSchema"]["required"] == ["result_id"]
 
 
 def test_client_routes_and_auth_header_are_stable(monkeypatch):
@@ -49,70 +44,66 @@ def test_client_routes_and_auth_header_are_stable(monkeypatch):
 
     def fake_json_request(method, url, **kwargs):
         calls.append({"method": method, "url": url, **kwargs})
-        if url == "https://illo.test/api/mcp":
-            return {
-                "result": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": json.dumps(
-                                {
-                                    "thread_id": "idea-1",
-                                    "thread_url": "https://illo.test/cortex?idea=idea-1",
-                                    "thread_route": "/cortex?idea=idea-1",
-                                    "url": "https://illo.test/cortex?idea=idea-1",
-                                }
-                            ),
-                        }
-                    ]
+        tool_name = kwargs["payload"]["params"]["name"]
+        payload = {"tool": tool_name, "result_id": f"{tool_name}-result"}
+        if tool_name == "illo_submit":
+            payload.update(
+                {
+                    "thread_id": "idea-1",
+                    "thread_url": "https://illo.test/cortex?idea=idea-1",
+                    "thread_route": "/cortex?idea=idea-1",
+                    "url": "https://illo.test/cortex?idea=idea-1",
                 }
-            }
-        return {"ok": True}
+            )
+        return {"result": {"content": [{"type": "text", "text": json.dumps(payload)}]}}
 
     monkeypatch.setattr(module, "_json_request", fake_json_request)
     client = module.IlloBridgeClient(module.IlloBridgeConfig("https://illo.test", "bridge-token", 12))
 
-    client.search_workspace("roadmap", limit=5)
-    submit_result = client.submit_context(
+    submit_result = client.submit(
         "Ask the team to review the implementation context",
-        parts=[{"type": "text", "text": "Implemented context submission"}],
+        parts=[{"type": "text", "text": "Implemented MCP submission"}],
         repo="illospace-project",
         branch="codex/mcp-submit-context",
         files_touched=[" brain/app/api/routers/agent_mcp.py ", ""],
         metadata={"source": "test"},
     )
-    client.get_thread("idea 1", limit=9)
-    client.get_team_members()
-    client.create_thread(
-        "Status",
-        "Work shipped",
+    read_result = client.read(
+        "Find existing roadmap context",
+        resource="workspace",
+        query="roadmap",
+        limit=5,
+        context={"topic": "roadmap"},
+    )
+    act_result = client.act(
+        "Share the shipped status with the team",
+        action="create_thread",
+        target={"kind": "thread"},
+        content={"title": "Status", "body": "Work shipped"},
         teammate_user_ids=[" user-1 ", ""],
-        trigger_illo=True,
         metadata={"source": "test"},
     )
-    client.post_thread_message("idea/2", "Follow-up")
-    client.ask_illo("What context exists?", context={"topic": "roadmap"})
-    client.get_ask("ask 1")
+    result = client.get_result("result 1", wait_ms=250)
 
     assert [(call["method"], call["url"]) for call in calls] == [
-        ("POST", "https://illo.test/api/agent-bridge/workspace/search"),
         ("POST", "https://illo.test/api/mcp"),
-        ("GET", "https://illo.test/api/agent-bridge/workspace/threads/idea%201?limit=9"),
-        ("GET", "https://illo.test/api/agent-bridge/workspace/team-members"),
-        ("POST", "https://illo.test/api/agent-bridge/illo/threads"),
-        ("POST", "https://illo.test/api/agent-bridge/illo/threads/idea%2F2/messages"),
-        ("POST", "https://illo.test/api/agent-bridge/illo/ask"),
-        ("GET", "https://illo.test/api/agent-bridge/illo/ask/ask%201"),
+        ("POST", "https://illo.test/api/mcp"),
+        ("POST", "https://illo.test/api/mcp"),
+        ("POST", "https://illo.test/api/mcp"),
     ]
     assert {call["token"] for call in calls} == {"bridge-token"}
     assert {call["timeout"] for call in calls} == {12}
-    assert calls[0]["payload"] == {"query": "roadmap", "limit": 5}
-    context_payload = calls[1]["payload"]
+    assert [call["payload"]["params"]["name"] for call in calls] == [
+        "illo_submit",
+        "illo_read",
+        "illo_act",
+        "illo_get_result",
+    ]
+    context_payload = calls[0]["payload"]
     assert context_payload["method"] == "tools/call"
-    assert context_payload["params"]["name"] == "illo_submit_context"
     assert context_payload["params"]["arguments"]["intent"] == "Ask the team to review the implementation context"
     assert context_payload["params"]["arguments"]["parts"] == [
-        {"type": "text", "text": "Implemented context submission"}
+        {"type": "text", "text": "Implemented MCP submission"}
     ]
     assert context_payload["params"]["arguments"]["files_touched"] == [
         "brain/app/api/routers/agent_mcp.py"
@@ -120,26 +111,39 @@ def test_client_routes_and_auth_header_are_stable(monkeypatch):
     assert submit_result["thread_url"] == "https://illo.test/cortex?idea=idea-1"
     assert submit_result["url"] == submit_result["thread_url"]
     assert submit_result["thread_route"] == "/cortex?idea=idea-1"
-    assert calls[4]["payload"]["teammate_user_ids"] == ["user-1"]
-    assert calls[4]["payload"]["trigger_illo"] is True
-    assert calls[6]["payload"]["context"] == {"topic": "roadmap"}
+    read_arguments = calls[1]["payload"]["params"]["arguments"]
+    assert read_arguments["request"] == "Find existing roadmap context"
+    assert read_arguments["resource"] == "workspace"
+    assert read_arguments["query"] == "roadmap"
+    assert read_arguments["limit"] == 5
+    assert read_arguments["context"] == {"topic": "roadmap"}
+    assert read_result["tool"] == "illo_read"
+    act_arguments = calls[2]["payload"]["params"]["arguments"]
+    assert act_arguments["action"] == "create_thread"
+    assert act_arguments["target"] == {"kind": "thread"}
+    assert act_arguments["content"] == {"title": "Status", "body": "Work shipped"}
+    assert act_arguments["teammate_user_ids"] == ["user-1"]
+    assert act_result["tool"] == "illo_act"
+    result_arguments = calls[3]["payload"]["params"]["arguments"]
+    assert result_arguments == {"result_id": "result 1", "wait_ms": 250}
+    assert result["tool"] == "illo_get_result"
 
 
 def test_handle_request_invokes_tool_and_returns_json_text():
     module = _load_mcp_module()
-    original = module.TOOLS["illo_search_workspace"]["function"]
-    module.TOOLS["illo_search_workspace"]["function"] = lambda **_kwargs: {"results": [{"title": "Roadmap"}]}
+    original = module.TOOLS["illo_read"]["function"]
+    module.TOOLS["illo_read"]["function"] = lambda **_kwargs: {"results": [{"title": "Roadmap"}]}
     try:
         response = module.handle_request(
             {
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
-                "params": {"name": "illo_search_workspace", "arguments": {"query": "roadmap"}},
+                "params": {"name": "illo_read", "arguments": {"request": "Find roadmap context"}},
             }
         )
     finally:
-        module.TOOLS["illo_search_workspace"]["function"] = original
+        module.TOOLS["illo_read"]["function"] = original
 
     payload = json.loads(response["result"]["content"][0]["text"])
     assert payload == {"results": [{"title": "Roadmap"}]}
@@ -155,7 +159,7 @@ def test_handle_request_reports_missing_config(monkeypatch):
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": {"name": "illo_get_team_members", "arguments": {}},
+            "params": {"name": "illo_get_result", "arguments": {"result_id": "result-1"}},
         }
     )
 
@@ -170,6 +174,6 @@ def test_live_illo_personal_agent_mcp_smoke(monkeypatch):
         pytest.skip("Set ILLO_LIVE_MCP_SMOKE=1 with ILLO_BASE_URL and ILLO_BRIDGE_TOKEN to run live MCP smoke.")
 
     monkeypatch.setenv("ILLO_MCP_TIMEOUT", "60")
-    result = module.tool_illo_get_team_members()
+    result = module.tool_illo_read(request="List visible Illo team members", resource="team_members")
 
     assert isinstance(result, dict)

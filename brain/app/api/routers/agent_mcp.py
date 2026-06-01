@@ -20,12 +20,16 @@ from brain.app.api.routers.agent_bridge import (
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.mentions import classify_mention_intent
 from brain.systems.external_agents import service as external_agents
+from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
 
 
 router = APIRouter(tags=["agent-mcp"], dependencies=[Depends(rate_limit)])
 
-CONTEXT_TOOL_NAME = "illo_submit_context"
+SUBMIT_TOOL_NAME = "illo_submit"
+READ_TOOL_NAME = "illo_read"
+ACT_TOOL_NAME = "illo_act"
+RESULT_TOOL_NAME = "illo_get_result"
 
 
 ToolHandler = Callable[
@@ -46,45 +50,47 @@ def _tool_schema(description: str, properties: dict[str, Any], required: list[st
 
 
 MCP_TOOLS: dict[str, dict[str, Any]] = {
-    CONTEXT_TOOL_NAME: {
+    SUBMIT_TOOL_NAME: {
         **_tool_schema(
             (
-                "Submit ordered context from a personal agent to Illo, the user's team agent. "
-                "Use this when the user wants Illo or the team to have the current AI thread, "
-                "trace, artifacts, files, links, diffs, or other source material. The personal "
-                "agent supplies context and provenance; Illo coordinates the team workspace. "
-                "Do not encode a workflow such as decision request here. Use correlation when "
-                "attaching to a known Thread; otherwise IlloSpace may create one and return thread_url."
+                "Submit instructions, context, traces, decisions, or work material to Illo. "
+                "Use this when the request needs Illo's judgment, memory, or coordination. "
+                "The call is async-first: Illo stores an inbound event, queues headless handling, "
+                f"and returns an event id that can be read with {RESULT_TOOL_NAME}."
             ),
             {
-                "intent": {
+                "message": {
                     "type": "string",
-                    "description": "Natural-language reason this context is being submitted.",
+                    "description": "Natural-language instruction or context for Illo to handle.",
                 },
                 "origin": {
                     "type": "string",
-                    "description": "Stable source event name, for example codex.context.",
-                    "default": "codex.context",
+                    "description": "Stable source event name, for example codex.submit or slack.request.",
                 },
                 "parts": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "Ordered source context parts: text, json, link, file, trace, conversation, diff, screenshot, or artifact.",
+                    "description": "Ordered context parts such as text, json, link, file, trace, conversation, diff, screenshot, or artifact.",
                     "default": [],
                 },
                 "source": {
                     "type": "object",
-                    "description": "Optional provenance about the personal agent, repo, branch, model, session, or external source.",
+                    "description": "Optional provenance about the external agent, repo, branch, model, session, or service.",
                     "default": {},
                 },
                 "constraints": {
                     "type": "object",
-                    "description": "Optional boundaries such as privacy, urgency, visibility, or notification preferences.",
+                    "description": "Optional boundaries such as privacy, urgency, visibility, budget, or notification preferences.",
                     "default": {},
                 },
                 "correlation": {
                     "type": "object",
-                    "description": "Optional correlation such as thread_id, external_session_id, or previous submission reference.",
+                    "description": "Optional correlation such as thread_id, external_session_id, delivery_id, or previous submission reference.",
+                    "default": {},
+                },
+                "response": {
+                    "type": "object",
+                    "description": "Optional response hints, including callback or webhook routing metadata.",
                     "default": {},
                 },
                 "idempotency_key": {
@@ -93,8 +99,8 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 },
                 "source_tool": {
                     "type": "string",
-                    "description": "Personal tool name, for example codex, claude-code, or opencode.",
-                    "default": "codex",
+                    "description": "External tool or service name, for example codex, slack, claude-code, or opencode.",
+                    "default": "external",
                 },
                 "repo": {"type": "string", "description": "Repository or workspace hint."},
                 "branch": {"type": "string", "description": "Branch/worktree hint."},
@@ -105,160 +111,90 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                     "description": "Files or paths touched during the work session.",
                     "default": [],
                 },
-                "session_id": {"type": "string", "description": "Optional personal-tool session id."},
-                "run_id": {"type": "string", "description": "Optional personal-tool run id."},
+                "session_id": {"type": "string", "description": "Optional external-tool session id."},
+                "run_id": {"type": "string", "description": "Optional external-tool run id."},
                 "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
             },
-            ["intent"],
+            ["message"],
         ),
         "scope": external_agents.SCOPE_SIGNAL_SUBMIT,
         "mutates_inbound": True,
     },
-    "illo_search_workspace": {
+    READ_TOOL_NAME: {
         **_tool_schema(
             (
-                "Search the Illo workspace for related ideas, threads, and shared work. "
-                "Use this before creating a new thread when the user asks to share work, "
-                "continue prior work, or avoid duplicating an existing Illo discussion."
+                "Read deterministic Illo workspace information through a named capability. "
+                "Use this for direct lookup and search; use illo_submit when the request needs "
+                "Illo's interpretation or decision."
             ),
             {
-                "query": {"type": "string", "description": "Search terms for Illo workspace context."},
-                "limit": {"type": "integer", "description": "Maximum results to return, 1-25.", "default": 10},
-            },
-            ["query"],
-        ),
-        "scope": external_agents.SCOPE_WORKSPACE_READ,
-    },
-    "illo_get_thread": {
-        **_tool_schema(
-            (
-                "Read messages from an existing Illo idea/thread. Use this before posting "
-                "an update so replies preserve team context and avoid repeating prior work."
-            ),
-            {
-                "idea_id": {"type": "string", "description": "Illo idea/thread id."},
-                "limit": {"type": "integer", "description": "Maximum messages to return.", "default": 100},
-            },
-            ["idea_id"],
-        ),
-        "scope": external_agents.SCOPE_WORKSPACE_READ,
-    },
-    "illo_get_team_members": {
-        **_tool_schema(
-            (
-                "List visible Illo team members. Use before sharing work with named "
-                "teammates so thread tools can notify the right user ids."
-            ),
-            {},
-        ),
-        "scope": external_agents.SCOPE_WORKSPACE_READ,
-    },
-    "illo_create_thread": {
-        **_tool_schema(
-            (
-                "Advanced compatibility tool for creating a visible Illo thread from "
-                "personal-agent work. Use only when the user explicitly asks to share work "
-                "with teammates, publish findings into Illo, or start a team-visible "
-                "discussion. For automatic hooks and routine progress, prefer "
-                f"{CONTEXT_TOOL_NAME} so IloSpace can route the context. Set trigger_illo "
-                "only when the user wants Illo to actively respond or the message explicitly "
-                "mentions Illo."
-            ),
-            {
-                "title": {"type": "string", "description": "Thread title visible in Illo."},
-                "body": {"type": "string", "description": "Thread body/message visible to the team."},
-                "teammate_user_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional Illo user ids to notify.",
-                    "default": [],
+                "capability": {
+                    "type": "string",
+                    "description": "Read capability name, such as workspace.search, thread.get, team.members.list, or capabilities.",
                 },
-                "artifacts": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": "Optional structured artifacts, links, or files to attach.",
-                    "default": [],
-                },
-                "trigger_illo": {
-                    "type": "boolean",
-                    "description": "Whether Illo should actively respond to this new thread.",
-                    "default": False,
-                },
-                "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
-            },
-            ["title", "body"],
-        ),
-        "scope": external_agents.SCOPE_ILLO_THREAD_CREATE,
-        "mutates_thread": True,
-    },
-    "illo_post_thread_message": {
-        **_tool_schema(
-            (
-                "Advanced compatibility tool for posting a visible update into an existing "
-                "Illo thread. Use only when the user explicitly names or provides the thread "
-                "destination. For automatic hooks and routine progress, prefer "
-                f"{CONTEXT_TOOL_NAME} so IloSpace can route the context."
-            ),
-            {
-                "idea_id": {"type": "string", "description": "Existing Illo idea/thread id."},
-                "body": {"type": "string", "description": "Message body to post into the thread."},
-                "teammate_user_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional Illo user ids to notify.",
-                    "default": [],
-                },
-                "artifacts": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": "Optional structured artifacts, links, or files to attach.",
-                    "default": [],
-                },
-                "trigger_illo": {
-                    "type": "boolean",
-                    "description": "Whether Illo should actively respond to this message.",
-                    "default": False,
-                },
-                "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
-            },
-            ["idea_id", "body"],
-        ),
-        "scope": external_agents.SCOPE_ILLO_THREAD_WRITE,
-        "mutates_thread": True,
-    },
-    "illo_ask": {
-        **_tool_schema(
-            (
-                "Ask Illo for private workspace context without creating a visible thread. "
-                "Use when the personal agent needs Illo's workspace knowledge, team memory, "
-                "or project context before doing work. This is read/context mode, not "
-                "team-visible coordination; create or post to a visible thread with "
-                "trigger_illo=true when Illo should coordinate or hand off work. Poll "
-                "with illo_get_ask."
-            ),
-            {
-                "question": {"type": "string", "description": "Question for Illo's headless context agent."},
-                "context": {
+                "arguments": {
                     "type": "object",
-                    "description": "Optional context about the current personal-agent task.",
+                    "description": "Capability-specific arguments.",
                     "default": {},
                 },
-                "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
             },
-            ["question"],
+            ["capability"],
         ),
-        "scope": external_agents.SCOPE_ILLO_ASK,
+        "scope": external_agents.SCOPE_WORKSPACE_READ,
     },
-    "illo_get_ask": {
+    ACT_TOOL_NAME: {
         **_tool_schema(
             (
-                "Poll a headless Illo ask created by illo_ask. Use this to retrieve "
-                "status, events, and final answer artifacts without creating team-visible noise."
+                "Execute a deterministic external-agent action as the user's delegate through "
+                "a named capability. Use illo_submit when the action should be decided by Illo."
             ),
-            {"ask_id": {"type": "string", "description": "Task id returned by illo_ask."}},
-            ["ask_id"],
+            {
+                "capability": {
+                    "type": "string",
+                    "description": "Action capability name, such as thread.create, thread.post_message, or capabilities.",
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Capability-specific arguments.",
+                    "default": {},
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional natural-language reason for audit/provenance.",
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Optional stable key supplied by the external agent.",
+                },
+                "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
+            },
+            ["capability"],
         ),
-        "scope": external_agents.SCOPE_ILLO_ASK,
+        "scope": external_agents.SCOPE_ILLO_ACT,
+    },
+    RESULT_TOOL_NAME: {
+        **_tool_schema(
+            (
+                "Read the current status and receipts for an async Illo submission. "
+                "Prefer webhook callbacks when configured; this tool is the polling fallback."
+            ),
+            {
+                "event_id": {"type": "string", "description": "Inbound event id returned by illo_submit."},
+                "submission_id": {"type": "string", "description": "Alias for event_id."},
+                "result_id": {"type": "string", "description": "Alias for event_id."},
+                "include_payload": {
+                    "type": "boolean",
+                    "description": "Whether to include stored raw and normalized event payloads.",
+                    "default": True,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum decision receipts to return.",
+                    "default": 25,
+                },
+            },
+        ),
+        "scope": external_agents.SCOPE_SIGNAL_SUBMIT,
     },
 }
 
@@ -292,7 +228,7 @@ def _tool_metadata(arguments: dict[str, Any], *, tool_name: str, trigger_illo: b
     return metadata
 
 
-_FORBIDDEN_CONTEXT_TARGET_FIELDS = frozenset(
+_FORBIDDEN_SUBMIT_TARGET_FIELDS = frozenset(
     {
         "idea_id",
         "thread_id",
@@ -311,7 +247,7 @@ def _clean_optional_string(value: Any) -> str | None:
     return text or None
 
 
-def _context_source(arguments: dict[str, Any]) -> dict[str, Any]:
+def _submission_source(arguments: dict[str, Any]) -> dict[str, Any]:
     source = _clean_dict(arguments.get("source"))
     for key in ("source_tool", "repo", "branch", "task_title", "session_id", "run_id"):
         value = _clean_optional_string(arguments.get(key))
@@ -323,11 +259,11 @@ def _context_source(arguments: dict[str, Any]) -> dict[str, Any]:
     return source
 
 
-def _clean_context_parts(value: Any) -> list[dict[str, Any]]:
+def _clean_submit_parts(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
     if not isinstance(value, list):
-        raise ValueError(f"{CONTEXT_TOOL_NAME} parts must be an array")
+        raise ValueError(f"{SUBMIT_TOOL_NAME} parts must be an array")
     parts: list[dict[str, Any]] = []
     for item in value:
         if isinstance(item, dict):
@@ -337,43 +273,48 @@ def _clean_context_parts(value: Any) -> list[dict[str, Any]]:
     return parts
 
 
-def _build_context_envelope(arguments: dict[str, Any]) -> dict[str, Any]:
-    forbidden = sorted(_FORBIDDEN_CONTEXT_TARGET_FIELDS.intersection(arguments))
+def _build_submit_envelope(arguments: dict[str, Any]) -> dict[str, Any]:
+    forbidden = sorted(_FORBIDDEN_SUBMIT_TARGET_FIELDS.intersection(arguments))
     if forbidden:
         raise ValueError(
-            f"{CONTEXT_TOOL_NAME} accepts context and optional correlation, not direct workspace targets. "
+            f"{SUBMIT_TOOL_NAME} accepts instructions, context, and optional correlation, not direct workspace targets. "
             f"Move Thread ids under correlation and remove top-level field(s): {', '.join(forbidden)}"
         )
-    intent = _clean_optional_string(arguments.get("intent") or arguments.get("summary"))
-    if not intent:
-        raise ValueError(f"{CONTEXT_TOOL_NAME} requires a non-empty intent")
-    origin = _clean_optional_string(arguments.get("origin")) or "codex.context"
-    source = _context_source(arguments)
+    message = _clean_optional_string(arguments.get("message"))
+    if not message:
+        raise ValueError(f"{SUBMIT_TOOL_NAME} requires a non-empty message")
+    source = _submission_source(arguments)
+    source_tool = _clean_optional_string(source.get("source_tool")) or "external"
+    source.setdefault("source_tool", source_tool)
+    origin = _clean_optional_string(arguments.get("origin")) or f"{source_tool}.submit"
     constraints = _clean_dict(arguments.get("constraints"))
     correlation = _clean_dict(arguments.get("correlation"))
-    parts = _clean_context_parts(arguments.get("parts"))
+    response = _clean_dict(arguments.get("response"))
+    parts = _clean_submit_parts(arguments.get("parts"))
     payload = {
-        "intent": intent,
+        "message": message,
         "parts": parts,
         "source": source,
         "constraints": constraints,
         "correlation": correlation,
+        "response": response,
     }
     return {
-        "kind": "context",
+        "kind": "submission",
         "origin": origin,
         "payload": payload,
-        "summary": _clean_optional_string(arguments.get("summary")) or intent,
-        "intent": intent,
+        "summary": message,
+        "message": message,
         "parts": parts,
         "source": source,
         "constraints": constraints,
         "correlation": correlation,
+        "response": response,
         "idempotency_key": _clean_optional_string(arguments.get("idempotency_key")),
     }
 
 
-def _context_connection(principal: external_agents.AgentBridgePrincipal) -> dict[str, Any]:
+def _submission_connection(principal: external_agents.AgentBridgePrincipal) -> dict[str, Any]:
     return {
         "id": principal.connection_id,
         "org_id": principal.org_id,
@@ -382,11 +323,11 @@ def _context_connection(principal: external_agents.AgentBridgePrincipal) -> dict
         "display_name": principal.connection_display_name,
         "agent_kind": principal.agent_kind,
         "source_type": "personal_tool",
-        "capabilities": ["submit_context"],
+        "capabilities": [SUBMIT_TOOL_NAME, READ_TOOL_NAME, ACT_TOOL_NAME, RESULT_TOOL_NAME],
     }
 
 
-def _context_source_actor(principal: external_agents.AgentBridgePrincipal) -> dict[str, Any]:
+def _external_source_actor(principal: external_agents.AgentBridgePrincipal) -> dict[str, Any]:
     return {
         "kind": "external_source_connection",
         "connection_id": principal.connection_id,
@@ -395,14 +336,14 @@ def _context_source_actor(principal: external_agents.AgentBridgePrincipal) -> di
     }
 
 
-def _context_ingress_context(
+def _submission_ingress_context(
     principal: external_agents.AgentBridgePrincipal,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "surface": "mcp_personal_tool",
-        "tool_name": CONTEXT_TOOL_NAME,
-        "source_actor": _context_source_actor(principal),
+        "tool_name": SUBMIT_TOOL_NAME,
+        "source_actor": _external_source_actor(principal),
         "authority_principal": {
             "kind": "user",
             "user_id": principal.owner_user_id,
@@ -412,7 +353,7 @@ def _context_ingress_context(
             "token_id": principal.token_id,
             "scopes": sorted(principal.scopes),
         },
-        "metadata": _tool_metadata(arguments, tool_name=CONTEXT_TOOL_NAME),
+        "metadata": _tool_metadata(arguments, tool_name=SUBMIT_TOOL_NAME),
     }
 
 
@@ -458,140 +399,305 @@ def _list_tools(principal: external_agents.AgentBridgePrincipal) -> list[dict[st
     return tools
 
 
-def _context_tool_response(result: dict[str, Any]) -> dict[str, Any]:
+def _submit_tool_response(result: dict[str, Any]) -> dict[str, Any]:
     outcome = dict(result.get("ilo_outcome") or {})
+    handling = dict(outcome.get("handling") or {})
+    event_id = str(result.get("event_id") or "")
     return {
         **result,
-        "thread_id": outcome.get("thread_id"),
-        "thread_url": outcome.get("thread_url") or outcome.get("url"),
-        "thread_route": outcome.get("thread_route"),
-        "url": outcome.get("url") or outcome.get("thread_url"),
-        "message": outcome.get("message"),
+        "submission_id": event_id or None,
+        "result_id": event_id or None,
         "operation": outcome.get("operation"),
-        "context_submission_id": outcome.get("context_submission_id"),
+        "message": outcome.get("message"),
+        "handling": handling or None,
+        "run_id": handling.get("run_id"),
+        "handling_status": handling.get("status"),
     }
 
 
-async def _tool_submit_context(
+async def _tool_submit(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    envelope = _build_context_envelope(arguments)
+    envelope = _build_submit_envelope(arguments)
     result = await submit_inbound_envelope(
         db,
-        connection=_context_connection(principal),
+        connection=_submission_connection(principal),
         envelope=envelope,
-        ingress_context=_context_ingress_context(principal, arguments),
+        ingress_context=_submission_ingress_context(principal, arguments),
     )
-    return _context_tool_response(result)
+    return _submit_tool_response(result)
 
 
-async def _tool_search_workspace(
+READ_CAPABILITIES: dict[str, dict[str, Any]] = {
+    "workspace.search": {
+        "description": "Search the Illo workspace for related ideas, threads, and shared work.",
+        "arguments": {"query": "string", "limit": "integer"},
+    },
+    "thread.get": {
+        "description": "Read messages from an existing Illo idea/thread.",
+        "arguments": {"idea_id": "string", "limit": "integer"},
+    },
+    "team.members.list": {
+        "description": "List visible Illo team members.",
+        "arguments": {},
+    },
+}
+
+
+ACT_CAPABILITIES: dict[str, dict[str, Any]] = {
+    "thread.create": {
+        "description": "Create a visible Illo thread as the user's external-agent delegate.",
+        "arguments": {
+            "title": "string",
+            "body": "string",
+            "teammate_user_ids": "string[]",
+            "artifacts": "object[]",
+            "trigger_illo": "boolean",
+        },
+    },
+    "thread.post_message": {
+        "description": "Post a visible message into an existing Illo thread as the user's external-agent delegate.",
+        "arguments": {
+            "idea_id": "string",
+            "body": "string",
+            "teammate_user_ids": "string[]",
+            "artifacts": "object[]",
+            "trigger_illo": "boolean",
+        },
+    },
+}
+
+
+def _capability_catalog_payload(catalog: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "capabilities": [
+            {"name": name, **details}
+            for name, details in sorted(catalog.items())
+        ]
+    }
+
+
+def _capability_name(arguments: dict[str, Any], *, tool_name: str) -> str:
+    capability = _clean_optional_string(arguments.get("capability"))
+    if not capability:
+        raise ValueError(f"{tool_name} requires a non-empty capability")
+    return capability
+
+
+def _capability_arguments(arguments: dict[str, Any], *, tool_name: str) -> dict[str, Any]:
+    value = arguments.get("arguments")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{tool_name} arguments must be an object")
+    return dict(value)
+
+
+def _required_capability_string(arguments: dict[str, Any], key: str, *, capability: str) -> str:
+    value = _clean_optional_string(arguments.get(key))
+    if not value:
+        raise ValueError(f"{capability} requires a non-empty {key}")
+    return value
+
+
+async def _tool_read(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    return await external_agents.search_workspace(
-        db,
-        principal,
-        query=str(arguments.get("query") or ""),
-        limit=int(arguments.get("limit") or 10),
-    )
+    capability = _capability_name(arguments, tool_name=READ_TOOL_NAME)
+    capability_arguments = _capability_arguments(arguments, tool_name=READ_TOOL_NAME)
+    if capability == "capabilities":
+        return _capability_catalog_payload(READ_CAPABILITIES)
+    if capability == "workspace.search":
+        return await external_agents.search_workspace(
+            db,
+            principal,
+            query=_required_capability_string(capability_arguments, "query", capability=capability),
+            limit=int(capability_arguments.get("limit") or 10),
+        )
+    if capability == "thread.get":
+        return await external_agents.get_thread(
+            db,
+            principal,
+            idea_id=(
+                _clean_optional_string(capability_arguments.get("idea_id"))
+                or _required_capability_string(capability_arguments, "thread_id", capability=capability)
+            ),
+            limit=int(capability_arguments.get("limit") or 100),
+        )
+    if capability == "team.members.list":
+        return await external_agents.get_team_members(db, principal)
+    raise ValueError(f"Unknown {READ_TOOL_NAME} capability: {capability}")
 
 
-async def _tool_get_thread(
-    db: AsyncSession,
-    principal: external_agents.AgentBridgePrincipal,
+def _action_metadata(
     arguments: dict[str, Any],
+    capability_arguments: dict[str, Any],
+    *,
+    capability: str,
+    trigger_illo: bool | None = None,
 ) -> dict[str, Any]:
-    return await external_agents.get_thread(
-        db,
-        principal,
-        idea_id=str(arguments.get("idea_id") or ""),
-        limit=int(arguments.get("limit") or 100),
+    metadata = {
+        **_clean_dict(capability_arguments.get("metadata")),
+        **_clean_dict(arguments.get("metadata")),
+        "mcp_tool": ACT_TOOL_NAME,
+        "mcp_capability": capability,
+    }
+    reason = _clean_optional_string(arguments.get("reason"))
+    if reason:
+        metadata["reason"] = reason
+    idempotency_key = _clean_optional_string(arguments.get("idempotency_key"))
+    if idempotency_key:
+        metadata["idempotency_key"] = idempotency_key
+    if trigger_illo is not None:
+        metadata["trigger_illo"] = trigger_illo
+    return metadata
+
+
+async def _act_create_thread(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    capability_arguments: dict[str, Any],
+    *,
+    original_arguments: dict[str, Any],
+) -> dict[str, Any]:
+    body = _required_capability_string(capability_arguments, "body", capability="thread.create")
+    should_trigger = bool(
+        capability_arguments.get("trigger_illo")
+        or classify_mention_intent(body).should_invoke_illo
     )
-
-
-async def _tool_get_team_members(
-    db: AsyncSession,
-    principal: external_agents.AgentBridgePrincipal,
-    _arguments: dict[str, Any],
-) -> dict[str, Any]:
-    return await external_agents.get_team_members(db, principal)
-
-
-async def _tool_create_thread(
-    db: AsyncSession,
-    principal: external_agents.AgentBridgePrincipal,
-    arguments: dict[str, Any],
-) -> dict[str, Any]:
-    body = str(arguments.get("body") or "")
-    should_trigger = bool(arguments.get("trigger_illo") or classify_mention_intent(body).should_invoke_illo)
-    metadata = _tool_metadata(arguments, tool_name="illo_create_thread", trigger_illo=should_trigger)
+    metadata = _action_metadata(
+        original_arguments,
+        capability_arguments,
+        capability="thread.create",
+        trigger_illo=should_trigger,
+    )
     idea, message, notified = await external_agents.create_thread_from_agent(
         db,
         principal,
-        title=str(arguments.get("title") or ""),
+        title=_required_capability_string(capability_arguments, "title", capability="thread.create"),
         body=body,
-        teammate_user_ids=_clean_string_list(arguments.get("teammate_user_ids")),
-        artifacts=_clean_artifacts(arguments.get("artifacts")),
+        teammate_user_ids=_clean_string_list(capability_arguments.get("teammate_user_ids")),
+        artifacts=_clean_artifacts(capability_arguments.get("artifacts")),
         trigger_illo=should_trigger,
         metadata=metadata,
     )
     result = _thread_payload(idea, message, notified)
+    result["_mutates_thread"] = True
     result["_trigger_idea"] = idea
+    result["_trigger_body"] = body
+    result["_trigger_metadata"] = metadata
     return result
 
 
-async def _tool_post_thread_message(
+async def _act_post_thread_message(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
-    arguments: dict[str, Any],
+    capability_arguments: dict[str, Any],
+    *,
+    original_arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    body = str(arguments.get("body") or "")
-    should_trigger = bool(arguments.get("trigger_illo") or classify_mention_intent(body).should_invoke_illo)
-    metadata = _tool_metadata(arguments, tool_name="illo_post_thread_message", trigger_illo=should_trigger)
+    body = _required_capability_string(capability_arguments, "body", capability="thread.post_message")
+    should_trigger = bool(
+        capability_arguments.get("trigger_illo")
+        or classify_mention_intent(body).should_invoke_illo
+    )
+    metadata = _action_metadata(
+        original_arguments,
+        capability_arguments,
+        capability="thread.post_message",
+        trigger_illo=should_trigger,
+    )
     idea, message, notified = await external_agents.post_thread_message_from_agent(
         db,
         principal,
-        idea_id=str(arguments.get("idea_id") or ""),
+        idea_id=(
+            _clean_optional_string(capability_arguments.get("idea_id"))
+            or _required_capability_string(capability_arguments, "thread_id", capability="thread.post_message")
+        ),
         body=body,
-        teammate_user_ids=_clean_string_list(arguments.get("teammate_user_ids")),
-        artifacts=_clean_artifacts(arguments.get("artifacts")),
+        teammate_user_ids=_clean_string_list(capability_arguments.get("teammate_user_ids")),
+        artifacts=_clean_artifacts(capability_arguments.get("artifacts")),
         trigger_illo=should_trigger,
         metadata=metadata,
     )
     result = _thread_payload(idea, message, notified)
+    result["_mutates_thread"] = True
     result["_trigger_idea"] = idea
+    result["_trigger_body"] = body
+    result["_trigger_metadata"] = metadata
     return result
 
 
-async def _tool_ask(
+async def _tool_act(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    task = await external_agents.create_headless_ask(
-        db,
-        principal,
-        question=str(arguments.get("question") or ""),
-        context=_clean_dict(arguments.get("context")),
-        metadata=_tool_metadata(arguments, tool_name="illo_ask"),
-    )
-    return await external_agents.serialize_task(task, include_events=True, session=db)
+    capability = _capability_name(arguments, tool_name=ACT_TOOL_NAME)
+    capability_arguments = _capability_arguments(arguments, tool_name=ACT_TOOL_NAME)
+    if capability == "capabilities":
+        return _capability_catalog_payload(ACT_CAPABILITIES)
+    if capability == "thread.create":
+        return await _act_create_thread(
+            db,
+            principal,
+            capability_arguments,
+            original_arguments=arguments,
+        )
+    if capability == "thread.post_message":
+        return await _act_post_thread_message(
+            db,
+            principal,
+            capability_arguments,
+            original_arguments=arguments,
+        )
+    raise ValueError(f"Unknown {ACT_TOOL_NAME} capability: {capability}")
 
 
-async def _tool_get_ask(
+async def _tool_get_result(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    return await external_agents.get_headless_ask(
-        db,
-        principal,
-        ask_id=str(arguments.get("ask_id") or ""),
+    event_id = (
+        _clean_optional_string(arguments.get("event_id"))
+        or _clean_optional_string(arguments.get("submission_id"))
+        or _clean_optional_string(arguments.get("result_id"))
     )
+    if not event_id:
+        raise ValueError(f"{RESULT_TOOL_NAME} requires event_id, submission_id, or result_id")
+    event = await inbound_admin.require_event_for_org(db, org_id=principal.org_id, event_id=event_id)
+    if str(event.connection_id) != str(principal.connection_id):
+        raise ValueError("Inbound event not found")
+    receipts = await inbound_admin.list_receipts(
+        db,
+        org_id=principal.org_id,
+        event_id=str(event.id),
+        limit=int(arguments.get("limit") or 25),
+    )
+    receipt_payloads = [inbound_admin.serialize_receipt(receipt) for receipt in receipts]
+    event_payload = inbound_admin.serialize_event(
+        event,
+        include_payload=bool(arguments.get("include_payload", True)),
+    )
+    action_result = dict(event.action_result or {})
+    handling = dict(action_result.get("handling") or {})
+    latest_receipt = receipt_payloads[0] if receipt_payloads else None
+    return {
+        "event_id": str(event.id),
+        "submission_id": str(event.id),
+        "result_id": str(event.id),
+        "status": event.status,
+        "handling_status": handling.get("status"),
+        "run_id": handling.get("run_id"),
+        "event": event_payload,
+        "latest_receipt": latest_receipt,
+        "receipts": receipt_payloads,
+    }
 
 
 async def _add_thread_trigger_result_if_needed(
@@ -602,14 +708,11 @@ async def _add_thread_trigger_result_if_needed(
     tool_payload: dict[str, Any],
     principal: external_agents.AgentBridgePrincipal,
 ) -> None:
-    if tool_name not in {"illo_create_thread", "illo_post_thread_message"}:
-        return
     trigger_idea = tool_payload.pop("_trigger_idea", None)
     if trigger_idea is None:
         return
-    body = str(arguments.get("body") or "")
-    should_trigger = bool(arguments.get("trigger_illo") or classify_mention_intent(body).should_invoke_illo)
-    metadata = _tool_metadata(arguments, tool_name=tool_name, trigger_illo=should_trigger)
+    body = str(tool_payload.pop("_trigger_body", "") or "")
+    metadata = dict(tool_payload.pop("_trigger_metadata", None) or _tool_metadata(arguments, tool_name=tool_name))
     tool_payload["trigger"] = await _run_trigger_if_requested(
         db,
         idea=trigger_idea,
@@ -620,14 +723,10 @@ async def _add_thread_trigger_result_if_needed(
 
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
-    CONTEXT_TOOL_NAME: _tool_submit_context,
-    "illo_search_workspace": _tool_search_workspace,
-    "illo_get_thread": _tool_get_thread,
-    "illo_get_team_members": _tool_get_team_members,
-    "illo_create_thread": _tool_create_thread,
-    "illo_post_thread_message": _tool_post_thread_message,
-    "illo_ask": _tool_ask,
-    "illo_get_ask": _tool_get_ask,
+    SUBMIT_TOOL_NAME: _tool_submit,
+    READ_TOOL_NAME: _tool_read,
+    ACT_TOOL_NAME: _tool_act,
+    RESULT_TOOL_NAME: _tool_get_result,
 }
 
 
@@ -725,7 +824,8 @@ async def _handle_mcp_request(
             raise_external_agent_http_error(exc)
         if spec.get("mutates_inbound"):
             await db.commit()
-        if spec.get("mutates_thread"):
+        mutates_thread = bool(spec.get("mutates_thread") or tool_payload.pop("_mutates_thread", False))
+        if mutates_thread:
             await _add_thread_trigger_result_if_needed(
                 db,
                 tool_name=tool_name,

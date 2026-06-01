@@ -17,7 +17,11 @@ from typing import Any, Callable
 
 logger = logging.getLogger("illo_personal_agent_mcp")
 DEFAULT_TIMEOUT_SECONDS = 60.0
-CONTEXT_TOOL_NAME = "illo_submit_context"
+TOOL_SUBMIT = "illo_submit"
+TOOL_READ = "illo_read"
+TOOL_ACT = "illo_act"
+TOOL_GET_RESULT = "illo_get_result"
+TOOL_NAMES = (TOOL_SUBMIT, TOOL_READ, TOOL_ACT, TOOL_GET_RESULT)
 
 
 class IlloBridgeError(RuntimeError):
@@ -136,24 +140,22 @@ class IlloBridgeClient:
             timeout=self.config.timeout_seconds,
         )
 
-    def search_workspace(self, query: str, limit: int = 10) -> dict[str, Any]:
-        return self._request(
+    def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if tool_name not in TOOL_NAMES:
+            raise IlloBridgeError(f"Unsupported Illo tool: {tool_name}")
+        response = self._request(
             "POST",
-            "/api/agent-bridge/workspace/search",
-            payload={"query": str(query), "limit": int(limit)},
+            "/api/mcp",
+            payload={
+                "jsonrpc": "2.0",
+                "id": tool_name,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": _drop_empty(arguments)},
+            },
         )
+        return _decode_mcp_tool_result(response)
 
-    def get_thread(self, idea_id: str, limit: int = 100) -> dict[str, Any]:
-        return self._request(
-            "GET",
-            f"/api/agent-bridge/workspace/threads/{urllib.parse.quote(str(idea_id), safe='')}",
-            query={"limit": int(limit)},
-        )
-
-    def get_team_members(self) -> dict[str, Any]:
-        return self._request("GET", "/api/agent-bridge/workspace/team-members")
-
-    def submit_context(
+    def submit(
         self,
         intent: str,
         *,
@@ -171,9 +173,12 @@ class IlloBridgeClient:
         session_id: str | None = None,
         run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        **extra: Any,
     ) -> dict[str, Any]:
-        arguments = _drop_empty(
+        return self.call_tool(
+            TOOL_SUBMIT,
             {
+                **extra,
                 "intent": str(intent),
                 "origin": str(origin or "codex.context"),
                 "parts": list(parts or []),
@@ -189,86 +194,87 @@ class IlloBridgeClient:
                 "session_id": session_id,
                 "run_id": run_id,
                 "metadata": _clean_metadata(metadata),
-            }
-        )
-        response = self._request(
-            "POST",
-            "/api/mcp",
-            payload={
-                "jsonrpc": "2.0",
-                "id": CONTEXT_TOOL_NAME,
-                "method": "tools/call",
-                "params": {"name": CONTEXT_TOOL_NAME, "arguments": arguments},
-            },
-        )
-        return _decode_mcp_tool_result(response)
-
-    def create_thread(
-        self,
-        title: str,
-        body: str,
-        *,
-        teammate_user_ids: list[str] | None = None,
-        artifacts: list[dict[str, Any]] | None = None,
-        trigger_illo: bool = False,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            "/api/agent-bridge/illo/threads",
-            payload={
-                "title": str(title),
-                "body": str(body),
-                "teammate_user_ids": _clean_string_list(teammate_user_ids),
-                "artifacts": list(artifacts or []),
-                "trigger_illo": bool(trigger_illo),
-                "metadata": _clean_metadata(metadata),
             },
         )
 
-    def post_thread_message(
+    def read(
         self,
-        idea_id: str,
-        body: str,
+        request: str,
         *,
-        teammate_user_ids: list[str] | None = None,
-        artifacts: list[dict[str, Any]] | None = None,
-        trigger_illo: bool = False,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            f"/api/agent-bridge/illo/threads/{urllib.parse.quote(str(idea_id), safe='')}/messages",
-            payload={
-                "body": str(body),
-                "teammate_user_ids": _clean_string_list(teammate_user_ids),
-                "artifacts": list(artifacts or []),
-                "trigger_illo": bool(trigger_illo),
-                "metadata": _clean_metadata(metadata),
-            },
-        )
-
-    def ask_illo(
-        self,
-        question: str,
-        *,
+        resource: str | None = None,
+        query: str | None = None,
+        target_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
         context: dict[str, Any] | None = None,
+        constraints: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        **extra: Any,
     ) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            "/api/agent-bridge/illo/ask",
-            payload={
-                "question": str(question),
+        return self.call_tool(
+            TOOL_READ,
+            {
+                **extra,
+                "request": str(request),
+                "resource": resource,
+                "query": query,
+                "target_id": target_id,
+                "limit": limit,
+                "cursor": cursor,
                 "context": dict(context or {}),
+                "constraints": dict(constraints or {}),
                 "metadata": _clean_metadata(metadata),
             },
         )
 
-    def get_ask(self, ask_id: str) -> dict[str, Any]:
-        return self._request(
-            "GET",
-            f"/api/agent-bridge/illo/ask/{urllib.parse.quote(str(ask_id), safe='')}",
+    def act(
+        self,
+        intent: str,
+        *,
+        action: str | None = None,
+        target: dict[str, Any] | None = None,
+        content: Any | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
+        teammate_user_ids: list[str] | None = None,
+        constraints: dict[str, Any] | None = None,
+        correlation: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            TOOL_ACT,
+            {
+                **extra,
+                "intent": str(intent),
+                "action": action,
+                "target": dict(target or {}),
+                "content": content,
+                "artifacts": list(artifacts or []),
+                "teammate_user_ids": _clean_string_list(teammate_user_ids),
+                "constraints": dict(constraints or {}),
+                "correlation": dict(correlation or {}),
+                "idempotency_key": idempotency_key,
+                "metadata": _clean_metadata(metadata),
+            },
+        )
+
+    def get_result(
+        self,
+        result_id: str,
+        *,
+        wait_ms: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            TOOL_GET_RESULT,
+            {
+                **extra,
+                "result_id": str(result_id),
+                "wait_ms": wait_ms,
+                "metadata": _clean_metadata(metadata),
+            },
         )
 
 
@@ -276,19 +282,7 @@ def _client() -> IlloBridgeClient:
     return IlloBridgeClient(IlloBridgeConfig.from_env())
 
 
-def tool_illo_search_workspace(query: str, limit: int = 10) -> dict[str, Any]:
-    return _client().search_workspace(query=query, limit=limit)
-
-
-def tool_illo_get_thread(idea_id: str, limit: int = 100) -> dict[str, Any]:
-    return _client().get_thread(idea_id=idea_id, limit=limit)
-
-
-def tool_illo_get_team_members() -> dict[str, Any]:
-    return _client().get_team_members()
-
-
-def tool_illo_submit_context(
+def tool_illo_submit(
     intent: str,
     origin: str = "codex.context",
     parts: list[dict[str, Any]] | None = None,
@@ -304,8 +298,9 @@ def tool_illo_submit_context(
     session_id: str | None = None,
     run_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    **extra: Any,
 ) -> dict[str, Any]:
-    return _client().submit_context(
+    return _client().submit(
         intent=intent,
         origin=origin,
         parts=parts,
@@ -321,69 +316,85 @@ def tool_illo_submit_context(
         session_id=session_id,
         run_id=run_id,
         metadata=metadata,
+        **extra,
     )
 
 
-def tool_illo_create_thread(
-    title: str,
-    body: str,
-    teammate_user_ids: list[str] | None = None,
-    artifacts: list[dict[str, Any]] | None = None,
-    trigger_illo: bool = False,
-    metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return _client().create_thread(
-        title=title,
-        body=body,
-        teammate_user_ids=teammate_user_ids,
-        artifacts=artifacts,
-        trigger_illo=trigger_illo,
-        metadata=metadata,
-    )
-
-
-def tool_illo_post_thread_message(
-    idea_id: str,
-    body: str,
-    teammate_user_ids: list[str] | None = None,
-    artifacts: list[dict[str, Any]] | None = None,
-    trigger_illo: bool = False,
-    metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return _client().post_thread_message(
-        idea_id=idea_id,
-        body=body,
-        teammate_user_ids=teammate_user_ids,
-        artifacts=artifacts,
-        trigger_illo=trigger_illo,
-        metadata=metadata,
-    )
-
-
-def tool_illo_ask(
-    question: str,
+def tool_illo_read(
+    request: str,
+    resource: str | None = None,
+    query: str | None = None,
+    target_id: str | None = None,
+    limit: int | None = None,
+    cursor: str | None = None,
     context: dict[str, Any] | None = None,
+    constraints: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
+    **extra: Any,
 ) -> dict[str, Any]:
-    return _client().ask_illo(question=question, context=context, metadata=metadata)
+    return _client().read(
+        request=request,
+        resource=resource,
+        query=query,
+        target_id=target_id,
+        limit=limit,
+        cursor=cursor,
+        context=context,
+        constraints=constraints,
+        metadata=metadata,
+        **extra,
+    )
 
 
-def tool_illo_get_ask(ask_id: str) -> dict[str, Any]:
-    return _client().get_ask(ask_id=ask_id)
+def tool_illo_act(
+    intent: str,
+    action: str | None = None,
+    target: dict[str, Any] | None = None,
+    content: Any | None = None,
+    artifacts: list[dict[str, Any]] | None = None,
+    teammate_user_ids: list[str] | None = None,
+    constraints: dict[str, Any] | None = None,
+    correlation: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    return _client().act(
+        intent=intent,
+        action=action,
+        target=target,
+        content=content,
+        artifacts=artifacts,
+        teammate_user_ids=teammate_user_ids,
+        constraints=constraints,
+        correlation=correlation,
+        idempotency_key=idempotency_key,
+        metadata=metadata,
+        **extra,
+    )
+
+
+def tool_illo_get_result(
+    result_id: str,
+    wait_ms: int | None = None,
+    metadata: dict[str, Any] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    return _client().get_result(result_id=result_id, wait_ms=wait_ms, metadata=metadata, **extra)
 
 
 ToolFunction = Callable[..., dict[str, Any]]
 
 
 TOOLS: dict[str, dict[str, Any]] = {
-    CONTEXT_TOOL_NAME: {
-        "function": tool_illo_submit_context,
+    TOOL_SUBMIT: {
+        "function": tool_illo_submit,
         "description": (
-            "Submit ordered context from a personal agent to Illo, the user's team agent. "
-            "Use this when the user wants Illo or the team to have the current AI thread, "
-            "trace, artifacts, files, links, diffs, or other source material. The personal "
-            "agent supplies context and provenance; Illo coordinates the team workspace "
-            "and returns thread_url when routed to a Thread."
+            "Submit ordered context or a work handoff from a personal agent to Illo, the user's "
+            "team agent. Use this when Illo or the team should receive the current thread, trace, "
+            "artifacts, files, links, diffs, or other source material. The personal agent supplies "
+            "context and provenance; Illo decides routing and may return a receipt, result_id, or "
+            "thread_url."
         ),
         "inputSchema": {
             "type": "object",
@@ -432,156 +443,114 @@ TOOLS: dict[str, dict[str, Any]] = {
             "required": ["intent"],
         },
     },
-    "illo_search_workspace": {
-        "function": tool_illo_search_workspace,
+    TOOL_READ: {
+        "function": tool_illo_read,
         "description": (
-            "Search the Illo workspace for related ideas, threads, and shared work. "
-            "Use this before creating a new thread when the user asks to share work, "
-            "continue prior work, or avoid duplicating an existing Illo discussion."
+            "Read Illo workspace context without mutating team-visible state. Use this for "
+            "searching workspace context, reading a known Thread or record, resolving teammates, "
+            "or asking Illo for private context before deciding whether to act. If the read runs "
+            "asynchronously, poll the returned result_id with illo_get_result."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search terms for Illo workspace context."},
-                "limit": {"type": "integer", "description": "Maximum results to return, 1-25.", "default": 10},
-            },
-            "required": ["query"],
-        },
-    },
-    "illo_get_thread": {
-        "function": tool_illo_get_thread,
-        "description": (
-            "Read messages from an existing Illo idea/thread. Use this before posting "
-            "an update so replies preserve team context and avoid repeating prior work."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "idea_id": {"type": "string", "description": "Illo idea/thread id."},
-                "limit": {"type": "integer", "description": "Maximum messages to return.", "default": 100},
-            },
-            "required": ["idea_id"],
-        },
-    },
-    "illo_create_thread": {
-        "function": tool_illo_create_thread,
-        "description": (
-            "Advanced compatibility tool for creating a visible Illo thread from "
-            "personal-agent work. Use only when the user explicitly asks to share work "
-            "with teammates, publish findings into Illo, or start a team-visible "
-            "discussion. For automatic hooks and routine progress, prefer "
-            f"{CONTEXT_TOOL_NAME} so IloSpace can route the context. Set trigger_illo "
-            "only when the user wants Ilo to actively respond or the message explicitly "
-            "mentions Ilo."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "description": "Thread title visible in Illo."},
-                "body": {"type": "string", "description": "Thread body/message visible to the team."},
-                "teammate_user_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional Illo user ids to notify.",
-                    "default": [],
+                "request": {"type": "string", "description": "Natural-language read request."},
+                "resource": {
+                    "type": "string",
+                    "description": "Optional resource hint, for example workspace, thread, team_members, project, or memory.",
                 },
-                "artifacts": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": "Optional structured artifacts, links, or files to attach.",
-                    "default": [],
-                },
-                "trigger_illo": {
-                    "type": "boolean",
-                    "description": "Whether Illo should actively respond to this new thread.",
-                    "default": False,
-                },
-                "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
-            },
-            "required": ["title", "body"],
-        },
-    },
-    "illo_post_thread_message": {
-        "function": tool_illo_post_thread_message,
-        "description": (
-            "Advanced compatibility tool for posting a visible update into an existing "
-            "Illo thread. Use only when the user explicitly names or provides the thread "
-            "destination. For automatic hooks and routine progress, prefer "
-            f"{CONTEXT_TOOL_NAME} so IloSpace can route the context."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "idea_id": {"type": "string", "description": "Existing Illo idea/thread id."},
-                "body": {"type": "string", "description": "Message body to post into the thread."},
-                "teammate_user_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional Illo user ids to notify.",
-                    "default": [],
-                },
-                "artifacts": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": "Optional structured artifacts, links, or files to attach.",
-                    "default": [],
-                },
-                "trigger_illo": {
-                    "type": "boolean",
-                    "description": "Whether Illo should actively respond to this message.",
-                    "default": False,
-                },
-                "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
-            },
-            "required": ["idea_id", "body"],
-        },
-    },
-    "illo_ask": {
-        "function": tool_illo_ask,
-        "description": (
-            "Ask Illo for private workspace context without creating a visible thread. "
-            "Use when the personal agent needs Illo's workspace knowledge, team memory, "
-            "or project context before doing work. This is read/context mode, not "
-            "team-visible coordination; create or post to a visible thread with "
-            "trigger_illo=true when Illo should coordinate or hand off work. Poll "
-            "with illo_get_ask."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "question": {"type": "string", "description": "Question for Illo's headless context agent."},
+                "query": {"type": "string", "description": "Optional search terms or filter text."},
+                "target_id": {"type": "string", "description": "Optional Thread, project, teammate, task, or result id."},
+                "limit": {"type": "integer", "description": "Optional maximum records to return."},
+                "cursor": {"type": "string", "description": "Optional pagination cursor."},
                 "context": {
                     "type": "object",
-                    "description": "Optional context about the current personal-agent task.",
+                    "description": "Optional current task context to help Illo answer privately.",
+                    "default": {},
+                },
+                "constraints": {
+                    "type": "object",
+                    "description": "Optional privacy, scope, freshness, or visibility boundaries.",
                     "default": {},
                 },
                 "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
             },
-            "required": ["question"],
+            "required": ["request"],
         },
     },
-    "illo_get_ask": {
-        "function": tool_illo_get_ask,
+    TOOL_ACT: {
+        "function": tool_illo_act,
         "description": (
-            "Poll a headless Illo ask created by illo_ask. Use this to retrieve "
-            "status, events, and final answer artifacts without creating team-visible noise."
+            "Ask Illo to take an explicit, user-authorized action in the team workspace. "
+            "Use this for visible coordination such as creating or updating a Thread, notifying "
+            "teammates, or asking Illo to actively respond. For passive context handoff use "
+            "illo_submit; for non-mutating context lookup use illo_read. Long-running actions may "
+            "return result_id for illo_get_result."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "ask_id": {"type": "string", "description": "Task id returned by illo_ask."},
+                "intent": {"type": "string", "description": "Natural-language reason for the action."},
+                "action": {
+                    "type": "string",
+                    "description": "Optional action hint, for example create_thread, post_message, notify, or trigger_illo.",
+                },
+                "target": {
+                    "type": "object",
+                    "description": "Optional target descriptor such as a Thread, teammate, project, or workspace entity.",
+                    "default": {},
+                },
+                "content": {
+                    "description": "Action-specific body, message, or structured payload.",
+                },
+                "artifacts": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Optional structured artifacts, links, or files to attach.",
+                    "default": [],
+                },
+                "teammate_user_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional Illo user ids to notify.",
+                    "default": [],
+                },
+                "constraints": {
+                    "type": "object",
+                    "description": "Optional privacy, urgency, visibility, or notification boundaries.",
+                    "default": {},
+                },
+                "correlation": {
+                    "type": "object",
+                    "description": "Optional correlation such as thread_id, external_session_id, or prior result id.",
+                    "default": {},
+                },
+                "idempotency_key": {"type": "string", "description": "Optional dedupe key."},
+                "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
             },
-            "required": ["ask_id"],
+            "required": ["intent"],
         },
     },
-    "illo_get_team_members": {
-        "function": tool_illo_get_team_members,
+    TOOL_GET_RESULT: {
+        "function": tool_illo_get_result,
         "description": (
-            "List visible Illo team members. Use before sharing work with named "
-            "teammates so illo_create_thread or illo_post_thread_message can notify "
-            "the right user ids."
+            "Retrieve or poll the outcome of an asynchronous Illo operation returned by "
+            "illo_submit, illo_read, or illo_act. Use this for result_id receipts instead of "
+            "repeating the original request."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "result_id": {"type": "string", "description": "Result, receipt, task, or operation id to retrieve."},
+                "wait_ms": {
+                    "type": "integer",
+                    "description": "Optional long-poll wait time in milliseconds.",
+                    "default": 0,
+                },
+                "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
+            },
+            "required": ["result_id"],
+        },
     },
 }
 

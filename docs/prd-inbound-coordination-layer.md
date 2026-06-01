@@ -19,11 +19,12 @@ The PRD intentionally describes a broader product direction: external tools send
 - Origin policy matching for configured webhook/source policies.
 - Raw inbound event storage, status tracking, and idempotency behavior.
 - Domain Projection execution for configured projections that create/update existing IloSpace Domain records.
-- Hosted MCP `illo_submit_signal` tool for Codex-like personal tools.
-- MCP signal envelope construction with summary, origin, payload, hints, desired outcome, repo/branch/task/files/session metadata, and idempotency key.
-- MCP scope gate for signal submission using `signal:submit`.
+- Hosted MCP `illo_submit` tool for Codex-like personal tools.
+- MCP submit envelope construction with summary, origin, payload, hints, desired outcome, repo/branch/task/files/session metadata, and idempotency key.
+- MCP submit scope gate using the legacy implementation scope
+  `signal:submit`.
 - Existing direct thread MCP tools preserved as advanced/compatibility surfaces and described as non-default for routine progress hooks.
-- Tests for webhook receipt, auth/scope behavior, origin policy matching, idempotency, Domain Projection, MCP signal envelope construction, MCP tool descriptions, async DB boundaries, models, migrations, and deploy safety.
+- Tests for webhook receipt, auth/scope behavior, origin policy matching, idempotency, Domain Projection, MCP submit envelope construction, MCP tool descriptions, async DB boundaries, models, migrations, and deploy safety.
 - Local real Docker smoke test covering webhook receipt, MCP-style signal receipt, idempotent replay, and Domain Projection before deployment.
 
 ### Shipped In `codex/illo-inbound-admin-tools`
@@ -48,10 +49,10 @@ The PRD intentionally describes a broader product direction: external tools send
 - The triage thread message carries the signal reason, source identity, origin, summary, desired outcome, policy instructions when present, hints, and a bounded payload preview.
 - The inbound service admits an Illo Cortex run through the shared `work_intake` API instead of writing to the run store directly.
 - Decision receipts for ambiguous events now persist the triage target (`cortex_idea`) and tool-use handoff (`illo_triage`) with run id when admission succeeds.
-- Webhook and MCP signals share the same triage path when no source policy matches.
+- Webhook and MCP submissions share the same triage path when no source policy matches.
 - Matched policies without a deterministic projection, and policies whose projection action is not allowed, route into Illo triage instead of stopping as passive store-only review.
 - Projection validation failures configured as `review_required` route into Illo triage; `quarantined` and `failed` outcomes remain terminal.
-- Tests prove ambiguous webhook/MCP signals queue triage runs, create thread context, persist receipt target/tool-use metadata, and preserve the work-intake architecture boundary.
+- Tests prove ambiguous webhook/MCP submissions queue triage runs, create thread context, persist receipt target/tool-use metadata, and preserve the work-intake architecture boundary.
 
 ### Latest Progress In This Branch
 
@@ -98,7 +99,7 @@ The PRD intentionally describes a broader product direction: external tools send
 
 ### Shipped In E2E Follow-Up Fix Slice
 
-- Hosted MCP `illo_submit_signal` now backfills `payload.checkpoint` for `origin=codex.progress`/Codex sources when callers only provide a top-level summary and hints. Explicit caller payload fields are preserved.
+- Hosted MCP `illo_submit` now backfills `payload.checkpoint` for `origin=codex.progress`/Codex sources when callers only provide a top-level summary and hints. Explicit caller payload fields are preserved.
 - Inbound schema validation now supports top-level `desired_outcome` paths, so policies can require `desired_outcome` without forcing callers to duplicate it inside `payload`.
 - Successful bridge-token authentication now updates token `last_used_at`, connection `last_seen_at`, clears `last_error`, and moves a `pending` connection to `configured`. This resolves the deployed E2E caveat where a connection processed live traffic while still appearing pending.
 - Terminal Illo triage reconciliation now records compact observed-outcome attribution on the Decision Receipt tool use and copies it into the inbound event triage result.
@@ -149,16 +150,16 @@ The PRD intentionally describes a broader product direction: external tools send
    - Ask Illo to create or inspect a source connection.
    - Ask Illo to mint a `signal:submit` token.
    - Ask Illo to create a policy and Domain Projection for a known test payload.
-   - Send a webhook or MCP signal through the configured lane.
+   - Send a webhook or MCP submission through the configured lane.
    - Ask Illo to inspect the event and receipt.
 3. **Run one real ambiguous-signal smoke test**:
-   - Send a webhook or MCP signal that has no matching deterministic policy.
+   - Send a webhook or MCP submission that has no matching deterministic policy.
    - Confirm the inbound event stores `review_required`.
    - Confirm a Cortex Idea/thread/run is created for Illo triage.
    - Let the run processor act and inspect what Illo decides.
-4. **Deploy the token backfill/reconciliation slice** and confirm the existing Codex MCP token can call `illo_submit_signal` without rotation.
+4. **Deploy the token backfill/reconciliation slice** and confirm the existing Codex MCP token can call `illo_submit` without rotation.
 5. **Deploy the replay harness + source-card slice** and ask Illo to replay a few real inbound events, refresh the source card for the tested MCP/webhook connection, and explain what it learned.
-6. **Deploy and retest the E2E follow-up fixes**: Codex MCP signal against the existing `codex.progress` policy, pending-to-configured connection state after live token traffic, and source-card observed outcome summaries after a completed Illo triage run.
+6. **Deploy and retest the E2E follow-up fixes**: Codex MCP submit against the existing `codex.progress` policy, pending-to-configured connection state after live token traffic, and source-card observed outcome summaries after a completed Illo triage run.
 7. **Design the next observability layer** only after the deployed retest: persisted replay reports, richer source monitors, or a lightweight inbound activity app.
 
 ### Next Implementation Slice: Minimal Illo Action Attribution
@@ -205,7 +206,7 @@ This section is the running ledger for post-deploy validation. Keep failures her
 
 | Test | Status | Result | Notes |
 | --- | --- | --- | --- |
-| MCP signal from Codex session | Passed after post-deploy retest | Hosted MCP accepted the active Codex token and stored events. Unique-origin signal `e778f9f5-7298-4845-bbe7-86ec27894c8d` returned `review_required`, created Cortex idea `4f03ebb8-2980-46bf-b3aa-33657660e233`, thread message `249`, and Illo run `214`. Post-fix `codex.progress` retest event `61eeea43-4ade-4806-a720-9ed5287dbd6c` matched policy `856ae76a-2974-4b6c-8fc0-d3fd5d557276`, generated `payload.checkpoint`, preserved top-level `desired_outcome=team_update`, queued Illo run `238`, and reconciled to `processed`. | The previous `codex.progress` quarantine caveat is fixed in production. The default ambiguous MCP path still works, and the live policy path no longer requires callers to duplicate checkpoint or desired-outcome fields manually. |
+| MCP submit from Codex session | Passed after post-deploy retest | Hosted MCP accepted the active Codex token and stored events. Unique-origin submission `e778f9f5-7298-4845-bbe7-86ec27894c8d` returned `review_required`, created Cortex idea `4f03ebb8-2980-46bf-b3aa-33657660e233`, thread message `249`, and Illo run `214`. Post-fix `codex.progress` retest event `61eeea43-4ade-4806-a720-9ed5287dbd6c` matched policy `856ae76a-2974-4b6c-8fc0-d3fd5d557276`, generated `payload.checkpoint`, preserved top-level `desired_outcome=team_update`, queued Illo run `238`, and reconciled to `processed`. | The previous `codex.progress` quarantine caveat is fixed in production. The default ambiguous MCP path still works, and the live policy path no longer requires callers to duplicate checkpoint or desired-outcome fields manually. |
 | Webhook ambiguous signal | Passed | `POST /webhooks` returned `202` with event `849a179f-a787-4c7c-b8a2-9a5689ce1437`, `review_required`, no matched policy, Cortex idea `39798b40-84f3-42fb-ad78-88f3a0dedaab`, thread message `250`, and Illo run `215`. | Illo later inspected the event with `manage_inbound.get_event(include_receipts=true)` and confirmed reconciliation succeeded: event status `processed`, receipt `1b6c48ed-81e5-4940-838f-9b27f29b7504` status `processed`, run `215` completed, final answer `Triaged as no-op / resolved`, and `reconciled_at=2026-05-19T19:38:17.805159+00:00`. |
 | Webhook deterministic Domain Projection | Passed after post-deploy retest | Illo configured policy `5e3f3b57-3765-4c04-93da-adea55541c80` and projection `63115940-b7a2-4139-92d3-495fce54ea3e` on connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b`, domain `11`, object key `ticket`. Webhook create event `82405008-04a3-469a-bb05-857bcc989809` processed and created Domain record `220`. Idempotency event `7d7a3de8-db39-4e9d-bd06-fc55900e2af3` replayed with `idempotent_replay=true` and reused record `221`. Update event `fce1281f-7bf0-4806-84c3-cf8c2b23d345` processed and updated record `221` to version `2`. | Illo setup used `manage_inbound` plus Domain tools and returned dry-run success. The connection-status caveat is fixed in production: live Codex and Jira traffic now marks connections `configured`, updates `last_seen_at`, updates token `last_used_at`, and clears `last_error`. |
 | Realistic Jira workflow configured by Illo | Passed | Headless Illo configured connection `303d8e60-b200-4a1b-9d18-b8b62279ab8e`, token `5f55c2a4-9825-4ea2-b7cf-036c68c5a297`, policy `707c62e9-cced-4d91-8154-b9df52a2cde7`, and Domain `12` / object `ticket` for `Jira Routing E2E 2026-05-19`. Dry-run for `jira.issue_created` matched the policy and predicted `review_required`. | Illo deliberately chose no deterministic projection because the workflow needed synthesis, possible solutions, owner routing, Cortex follow-up creation, and unknown-repo caution. That is the right behavior for this test; projection-only remains valid for simpler storage workflows. |
@@ -219,7 +220,7 @@ This section is the running ledger for post-deploy validation. Keep failures her
 
 Post-deploy conclusion:
 
-- Core deployed E2E is green across hosted MCP signal submission, webhook ambiguous triage, deterministic Domain Projection create/update/idempotency, realistic Illo-configured Jira routing, replay/source-card inspection, source-card observed outcomes, token status reconciliation, and MCP auth hardening.
+- Core deployed E2E is green across hosted MCP submit, webhook ambiguous triage, deterministic Domain Projection create/update/idempotency, realistic Illo-configured Jira routing, replay/source-card inspection, source-card observed outcomes, token status reconciliation, and MCP auth hardening.
 - The active `codex.progress` policy caveat is fixed in production: live event `61eeea43-4ade-4806-a720-9ed5287dbd6c` generated checkpoint data, preserved top-level `desired_outcome`, matched the policy, queued Illo, and reconciled to `processed`.
 - The reused source connection `pending` caveat is fixed in production: live Codex and Jira token traffic marked connections `configured`, updated `last_seen_at`, updated token `last_used_at`, and cleared `last_error`.
 - Realistic Jira routing shows the intended product shape: Illo can configure the source, choose an Illo-handled policy instead of projection when reasoning is needed, create Domain records, summarize/solution issues, route known repos to Axel, avoid guessing unknown repos, and safely no-op a completely new origin.
@@ -356,7 +357,7 @@ This runbook is intentionally Illo-chat-first. It documents the operations Illo 
 
 Current state is **architecture validated, not broad-rollout ready**.
 
-The current readiness branch handles malformed MCP JSON, provider-shaped delivery-id idempotency, source-card attention/failure wording, connection-scope spoofing regression coverage, stuck-event listing for Illo recovery, and the minimal operator runbook. The remaining broad-rollout work is a final live smoke using a simulated provider delivery plus one Codex MCP signal, and then an intentional beta rollout decision.
+The current readiness branch handles malformed MCP JSON, provider-shaped delivery-id idempotency, source-card attention/failure wording, connection-scope spoofing regression coverage, stuck-event listing for Illo recovery, and the minimal operator runbook. The remaining broad-rollout work is a final live smoke using a simulated provider delivery plus one Codex MCP submit, and then an intentional beta rollout decision.
 
 ### Trace-Based Follow-Up
 
@@ -385,7 +386,7 @@ At the same time, routing every incoming event through a full Illo reasoning loo
 
 The product needs a bare but strong foundation for inbound coordination:
 
-- external tools submit signals and intent into IloSpace;
+- external tools submit context and intent into IloSpace;
 - IloSpace records, authenticates, normalizes, dedupes, and applies known policy deterministically;
 - Illo handles ambiguity and chooses what to do using its skills and tools when the deterministic layer cannot safely shortcut;
 - repeated Illo handling decisions become decision receipts and observed handling patterns that Illo can use as context before it chooses whether to configure deterministic shortcuts;
@@ -393,29 +394,46 @@ The product needs a bare but strong foundation for inbound coordination:
 
 ## Solution
 
-Build a generalized **External Source Connection + Inbound Signal** layer in IloSpace.
+Build a generalized **External Source Connection + Inbound Submission/Event**
+layer in IloSpace.
 
 Every outside system is represented as an External Source Connection with identity, auth, scopes, and capabilities. A connection may be a personal agent, a coding tool, a webhook app, a design tool, a code host, or a custom script. The important distinction is not the product name; it is what the connection can do.
 
 Connections can have capabilities such as:
 
-- submit inbound signals;
+- submit inbound context or signals through `illo_submit`;
 - receive external tasks from IloSpace;
 - report task events and task results;
-- ask Illo for private workspace context;
-- submit explicit requests for Illo to consider, when strongly scoped and explicitly targeted.
+- ask Illo for private workspace context through `illo_read`;
+- submit explicit requests for Illo to consider through `illo_act`, when
+  strongly scoped and explicitly targeted;
+- retrieve asynchronous results through `illo_get_result`.
 
-The default inbound API/MCP/webhook primitive should be signal submission, not direct workspace mutation. External tools should generally say:
+The default inbound API/MCP/webhook primitive should be context and intent
+submission, not direct workspace mutation. External tools should generally say:
 
-> “Here is something that happened; IloSpace should decide what to do with it.”
+> “Here is context and intent; IloSpace should decide what to do with it.”
 
 They should not generally say:
 
 > “Post this to that thread and trigger Illo.”
 
-IloSpace should route incoming envelopes through deterministic preflight first. If the signal has an explicit task binding, explicit approved target, source rule, or idempotency match, IloSpace can resolve the envelope without invoking Illo. If the signal is ambiguous, Illo handles it directly: it reasons over the signal, uses its available tools and skills, chooses whether anything should happen, and records a Decision Receipt. Over time, repeated receipts become observed handling patterns that help Illo understand the source faster. Illo may then choose to configure a deterministic shortcut using its tools, but the system should not silently promote rules behind Illo's back.
+IloSpace should route incoming envelopes through deterministic preflight first.
+If an envelope has an explicit task binding, explicit approved target, source
+rule, or idempotency match, IloSpace can resolve it without invoking Illo. If
+the envelope is ambiguous, Illo handles it directly: it reasons over the
+context, uses its available tools and skills, chooses whether anything should
+happen, and records a Decision Receipt. Over time, repeated receipts become
+observed handling patterns that help Illo understand the source faster. Illo
+may then choose to configure a deterministic shortcut using its tools, but the
+system should not silently promote rules behind Illo's back.
 
-Existing Hermes/OpenClaw work remains valuable. It becomes the first implemented specialization of this broader model: a personal-agent connection that can receive outbound tasks and report results. Jira/GitHub/Figma-style sources are connections that mostly submit inbound signals. Codex can be either: a normal session may only submit signals, while a long-running Codex daemon could also receive tasks.
+Existing Hermes/OpenClaw work remains valuable. It becomes the first
+implemented specialization of this broader model: a personal-agent connection
+that can receive outbound tasks and report results. Jira/GitHub/Figma-style
+sources are connections that mostly submit inbound events. Codex can be either:
+a normal session may only call `illo_submit`, while a long-running Codex daemon
+could also receive tasks.
 
 ## Illo-First Configuration Principle
 
@@ -527,27 +545,33 @@ For V1 webhook outcomes:
 
 Webhook integrations have a **source actor identity** and an **authority principal**. The source actor identifies the external system that sent the event. The authority principal is the user who configured, requested, or owns that source connection. Illo acts and permissions are checked under the authority principal, while provenance still shows the external source actor. Both must be scoped to one IloSpace workspace/org and must never imply cross-org global write access.
 
-### MCP / Personal Tool Signal Workstream
+### MCP / Personal Tool Coordination Workstream
 
-This is the Codex/personal-tool lane. It should implement a hosted MCP tool that submits the same Inbound Envelope shape through the same foundation service.
+This is the Codex/personal-tool lane. It should implement hosted MCP tools that
+use the same Inbound Envelope shape and foundation service.
 
 MCP V1 owns:
 
-- Hosted MCP tool conceptually named `submit signal` or `illo_submit_signal`.
-- Tool description that clearly tells coding agents and personal tools not to pick threads or mutate workspace state by default.
-- Input shape aligned with the shared envelope.
+- Hosted MCP tools named `illo_submit`, `illo_read`, `illo_act`, and
+  `illo_get_result`.
+- Tool descriptions that clearly tell coding agents and personal tools not to
+  pick threads or mutate workspace state by default.
+- Submit input shape aligned with the shared envelope.
 - Good defaults for coding-session updates: progress summary, repo/branch hints, files touched, task title, source tool, and desired outcome.
-- Codex hook guidance showing when a personal tool should submit a signal.
+- Codex hook guidance showing when a personal tool should call `illo_submit`.
 - Examples for Codex, Claude Code, OpenCode, and other personal work tools.
-- Regression tests ensuring default MCP guidance points clients toward signal submission rather than direct thread mutation.
+- Regression tests ensuring default MCP guidance points clients toward
+  submit/read/act/result coordination rather than direct thread mutation.
 
 The MCP lane should treat direct `create_thread` / `post_thread_message` style tools as advanced or compatibility tools, not the default path. The default path is:
 
 ```text
-Personal tool -> hosted MCP submit signal -> Inbound Envelope -> Source Policy -> deterministic preflight or Illo action runtime -> Illo Outcome
+Personal tool -> hosted MCP illo_submit -> Inbound Envelope -> Source Policy -> deterministic preflight or Illo action runtime -> Illo Outcome
 ```
 
-The MCP lane should not block on webhook observability surfaces. It only needs the shared foundation service and a connection/token with `can_submit_signals`.
+The MCP lane should not block on webhook observability surfaces. It only needs
+the shared foundation service and a connection/token with the appropriate
+submit/read/act capabilities.
 
 ### Existing Hermes/OpenClaw Compatibility Workstream
 
@@ -562,7 +586,7 @@ For now:
 Later:
 
 - Task events and task results can be represented as bound Inbound Envelopes.
-- Hermes/OpenClaw can also use `submit signal` for free-form progress outside a delegated task.
+- Hermes/OpenClaw can also use `illo_submit` for free-form progress outside a delegated task.
 
 ### First Shared Milestone
 
@@ -577,7 +601,7 @@ payload = {...}
 and:
 
 ```text
-MCP submit signal
+MCP illo_submit
 origin = codex.progress
 payload/summary = {...}
 ```
@@ -638,16 +662,19 @@ JB should not own in this PR:
 - Personal-tool examples.
 - Changing the existing Hermes/OpenClaw task lifecycle except where needed for shared connection compatibility.
 
-### Reda PR: MCP / Personal Tool Signal Lane
+### Reda PR: MCP / Personal Tool Coordination Lane
 
 Reda owns the personal-tool lane: how Codex-like tools submit work progress and intent into IloSpace without choosing workspace destinations themselves.
 
 Reda implementation scope:
 
-- Hosted MCP tool conceptually named `illo_submit_signal` or the final agreed equivalent.
+- Hosted MCP tools named `illo_submit`, `illo_read`, `illo_act`, and
+  `illo_get_result`.
 - MCP tool schema aligned with the shared Inbound Envelope contract.
-- Tool description that tells personal tools to submit signals, not pick threads or mutate workspace state by default.
-- Auth/scope checks for MCP signal submission using the existing external-agent or connection-token pattern where possible.
+- Tool descriptions that tell personal tools to submit context and intent, not
+  pick threads or mutate workspace state by default.
+- Auth/scope checks for MCP submit/read/act/result calls using the existing
+  external-agent or connection-token pattern where possible.
 - Envelope construction for coding-session updates: source tool, repo, branch, task title, summary, files touched, run/session hints, desired outcome, and idempotency key.
 - Codex hook guidance and examples for Codex, Claude Code, OpenCode, and similar tools.
 - Compatibility review of existing `create_thread` / `post_thread_message` style MCP tools so they are advanced/compatibility surfaces rather than the default automatic-hook path.
@@ -658,7 +685,8 @@ Reda independently testable before merge:
 - MCP tool rejects or refuses unsupported direct workspace mutation behavior.
 - MCP tool calls the shared `submit_inbound_envelope` contract with the expected envelope.
 - Tests may mock `submit_inbound_envelope` until JB's foundation branch is merged.
-- Tool descriptions and examples steer agents toward signal submission rather than deterministic thread selection.
+- Tool descriptions and examples steer agents toward submit/read/act/result
+  coordination rather than deterministic thread selection.
 
 Reda should not own in this PR:
 
@@ -671,7 +699,7 @@ Reda should not own in this PR:
 
 The original split expected these tests to be blocked until the webhook/MCP foundation and admin surface were merged together. Current status:
 
-- Real MCP `illo_submit_signal` persists through JB's real `submit_inbound_envelope` service: shipped in PR #113 and covered by tests.
+- Real MCP `illo_submit` persists through JB's real `submit_inbound_envelope` service: shipped in PR #113 and covered by tests.
 - Webhook and MCP inputs produce the same internal record types and status transitions: shipped in PR #113 and covered by tests.
 - `origin = jira.ticket_created` and `origin = codex.progress` both exercise the same Inbound Event store and Decision Receipt path: shipped in PR #113 and covered by tests.
 - Illo can configure a source policy / Domain Projection, then a webhook event uses that configuration without per-event Illo reasoning: implemented in `codex/illo-inbound-admin-tools` and covered by tests.
@@ -715,11 +743,12 @@ flowchart LR
 flowchart TD
     Conn["External Source Connection<br/>identity, auth, scopes, capabilities"]
 
-    Conn --> Signals["can_submit_signals"]
+    Conn --> Signals["can_submit"]
     Conn --> Tasks["can_receive_tasks"]
     Conn --> TaskEvents["can_report_task_events"]
-    Conn --> Context["can_ask_context"]
-    Conn --> Requests["can_submit_requests<br/>advanced / tightly scoped"]
+    Conn --> Context["can_read"]
+    Conn --> Requests["can_act<br/>advanced / tightly scoped"]
+    Conn --> Results["can_get_result"]
 
     Signals --> S1["Codex session progress"]
     Signals --> S2["Jira issue event"]
@@ -852,7 +881,7 @@ flowchart TD
 
     Webhook["Webhook Integrations V1<br/>POST /webhooks<br/>origin rules<br/>Illo-configured schema<br/>instructions<br/>logs/replay"]
 
-    MCP["MCP / Personal Tool V1<br/>hosted submit signal tool<br/>Codex hook guidance<br/>personal tool examples"]
+    MCP["MCP / Personal Tool V1<br/>illo_submit / illo_read / illo_act / illo_get_result<br/>Codex hook guidance<br/>personal tool examples"]
 
     Agents["Existing Personal Agent Lane<br/>Hermes/OpenClaw task lifecycle<br/>claim/events/artifacts/complete/fail"]
 
@@ -874,7 +903,7 @@ flowchart TD
 7. As a teammate using GitHub, I want pull request and issue activity to enter IloSpace as signals, so that engineering changes can be connected to threads, projects, and pins.
 8. As a designer using Figma, I want design updates to enter IloSpace as signals, so that design work can be coordinated with engineering and product threads.
 9. As an authorized teammate chatting with Illo, I want Illo to register an External Source Connection, so that each outside source has identity, auth, scopes, and capabilities without me using a settings UI.
-10. As an authorized teammate chatting with Illo, I want Illo to configure whether a connection can submit signals, receive tasks, report task events, ask for context, or submit explicit requests for Illo to consider, so that each source has the minimum required power.
+10. As an authorized teammate chatting with Illo, I want Illo to configure whether a connection can submit context, receive tasks, report task events, read context, or ask Illo to act, so that each source has the minimum required power.
 11. As an authorized teammate chatting with Illo, I want Illo to configure source-specific webhook policies, so that common payloads can be normalized and routed cheaply.
 12. As an authorized teammate chatting with Illo, I want Illo to create scoped, revocable, auditable connection tokens, so that external sources never need broad internal service credentials.
 13. As an authorized teammate chatting with Illo, I want Illo to surface repeated source behavior as observed patterns, so that IloSpace becomes faster and cheaper without hiding how decisions are made.
@@ -893,9 +922,9 @@ flowchart TD
 26. As a teammate reading a thread, I want external updates to show their source and provenance, so that I understand where the information came from.
 27. As a teammate reading a thread, I want task results from Hermes/OpenClaw/future workers to appear in the right thread automatically, so that delegated work closes the loop.
 28. As a teammate reading a project, I want related external signals to be linked or summarized, so that project context includes work happening outside IloSpace.
-29. As a teammate, I want the system to distinguish factual signal submission from explicit requests to Illo, so that personal agents do not accidentally take over coordination decisions.
+29. As a teammate, I want the system to distinguish factual submission from explicit requests to Illo, so that personal agents do not accidentally take over coordination decisions.
 30. As a teammate, I want to explicitly ask Illo through an external tool for a known outcome when needed, so that precise human-directed requests are still possible without making the external tool own coordination.
-31. As a coding agent, I want a simple `submit signal` tool, so that I do not need to search the workspace, pick a thread, and decide whether to trigger Illo.
+31. As a coding agent, I want a simple `illo_submit` tool, so that I do not need to search the workspace, pick a thread, and decide whether to trigger Illo.
 32. As a coding agent, I want tool descriptions to make the default behavior clear, so that I submit intent instead of mutating workspace state directly.
 33. As a webhook integration, I want a stable ingestion endpoint, so that events can enter IloSpace without pretending to be personal agents.
 34. As a webhook integration, I want payload normalization recipes, so that repeated payload shapes become typed signals.
@@ -913,7 +942,7 @@ flowchart TD
 46. As a product builder, I want a replay harness for old signals and receipts, so that routing policy changes can be tested against real historical examples.
 47. As a product builder, I want source cards that summarize connection behavior, common payloads, configured rules, and observed outcomes, so that integration behavior is understandable at a glance.
 48. As a teammate, I want IloSpace to coordinate among personal agents rather than compete with them, so that I can keep my preferred tools while the team gains shared context.
-49. As a webhook integration builder, I want my `POST /webhooks` implementation to call the same inbound envelope service as MCP signal submission, so that the webhook lane does not drift into a separate architecture.
+49. As a webhook integration builder, I want my `POST /webhooks` implementation to call the same inbound envelope service as MCP submission, so that the webhook lane does not drift into a separate architecture.
 50. As an MCP integration builder, I want my hosted MCP tool to call the same inbound envelope service as webhooks, so that Codex-style progress updates and Jira-style webhook events become comparable system inputs.
 51. As a product builder, I want a clear foundation workstream, webhook workstream, and MCP workstream, so that multiple people can build in parallel without stepping on each other.
 52. As a webhook integration builder, I want ad hoc Domain writes to start as review/dry-run, so that ambiguous payload handling cannot silently invent structured records.
@@ -945,8 +974,12 @@ flowchart TD
 - Treat `signal` as the default for external observations: progress updates, webhook events, design updates, ticket changes, and code host activity.
 - Treat `request` as an external source asking IloSpace to consider doing something, without assuming the source gets to mutate the workspace directly.
 - Treat `task_event` and `task_result` as deterministic updates tied to an existing External Task created by IloSpace.
-- Add a default MCP/API/webhook entrypoint for signal submission. The preferred public tool should be conceptually named `submit signal`, even if the final code-level prefix follows existing naming conventions.
-- Keep direct workspace mutation tools as internal Illo tools, not the default external integration surface. Automatic hooks and general personal-agent MCP guidance should prefer signal/request submission.
+- Add a default MCP/API/webhook entrypoint for external context and intent
+  submission. The preferred public MCP tool is `illo_submit`.
+- Keep direct workspace mutation tools as internal Illo tools, not the default
+  external integration surface. Automatic hooks and general personal-agent MCP
+  guidance should prefer `illo_submit`, `illo_read`, `illo_act`, and
+  `illo_get_result`.
 - Route all inbound envelopes through IloSpace. The system may bypass Illo reasoning through deterministic preflight, but external sources should not perform fuzzy routing themselves.
 - Add a deterministic preflight layer before Illo reasoning. It handles auth, scopes, validation, dedupe, idempotency, redaction, explicit task binding, explicit approved targets, and Illo-configured source rules.
 - Add Illo handling only for ambiguous cases or cases where policy requires agent judgment.
@@ -962,14 +995,17 @@ flowchart TD
 - Keep personal-agent connection tokens and scoped auth as the template for future connection security. Do not use broad internal service tokens for external sources.
 - Add connection capabilities rather than separate tables per source type wherever practical. Capabilities should make Codex, Hermes, OpenClaw, Jira, GitHub, and Figma differ by behavior, not by bespoke architecture.
 - For personal agents that can receive tasks, the existing outbound bridge model remains valid: IloSpace creates an External Task; the worker claims or receives it; task events and results return as bound inbound envelopes.
-- For sources that only send events, the source only needs signal submission capability.
-- For Codex, support both modes conceptually: ordinary sessions submit signals; future long-running Codex workers may receive tasks.
+- For sources that only send events, the source only needs submit capability.
+- For Codex, support both modes conceptually: ordinary sessions call
+  `illo_submit`; future long-running Codex workers may receive tasks.
 - For Jira/GitHub/Figma, start with inbound-only signal connections and source policies.
 - For webhook V1, support origin matching with explicit priority/order. The first active integration/policy whose rules match the authenticated source and origin wins.
 - For webhook V1, support an Illo-configurable schema field model that compiles to internal validation. Do not require users to hand-author raw JSON Schema and do not require a schema-builder UI in V1.
 - For webhook V1, support dry-run and replay before expecting broad auto-execution.
 - For webhook V1, define initial guardrails for Illo tool use around opening Cortex threads, creating memory, ad hoc Domain write review, and configured Domain Projection execution. These are seed permissions for the Jira/webhook slice, not the global taxonomy of everything Illo can do.
-- For MCP V1, add one default signal submission tool and update tool descriptions/guidance so coding agents understand that fuzzy routing belongs to IloSpace.
+- For MCP V1, add the default coordination tools and update tool
+  descriptions/guidance so coding agents understand that fuzzy routing belongs
+  to IloSpace.
 - For MCP V1, keep direct thread tools as compatibility/advanced tools only if still needed. They must not be the recommended path for automatic progress hooks.
 - For explicit user-directed commands, allow deterministic execution only when the target and permission are explicit. Example: a result tied to an existing task id can be posted back deterministically because IloSpace already knows the destination.
 - Do not require every inbound signal to trigger a visible workspace update. Possible outcomes include store only, ignore as noise, ask human, use a tool, summarize, schedule follow-up, or trigger an Illo run. This list is illustrative, not a boundary on Illo's capabilities.
@@ -1028,18 +1064,20 @@ Deliverables:
 - Source cards for source purpose, configured rules, sampled payload shapes, observed outcomes, recent failures, and source health summary.
 - Jira-like fixture proving ticket handling into a configured Tickets Domain, review, or an Illo-created thread depending on policy.
 
-#### Package C: MCP / Personal Tool Signals V1
+#### Package C: MCP / Personal Tool Coordination V1
 
-Build the hosted MCP signal lane on top of Package A.
+Build the hosted MCP coordination lane on top of Package A.
 
 Deliverables:
 
-- Hosted MCP `submit signal` tool.
+- Hosted MCP `illo_submit`, `illo_read`, `illo_act`, and `illo_get_result`
+  tools.
 - Tool schema aligned with the shared envelope.
 - Tool description optimized for coding agents and personal work tools.
 - Codex hook guidance.
 - Examples for Codex-style progress updates.
-- Tests proving MCP signal submission creates the same internal records as webhook submission.
+- Tests proving MCP submit calls create the same internal records as webhook
+  submission.
 - Compatibility review of existing `create_thread` / `post_thread_message` tools so they are not the default recommendation.
 
 #### Package D: Existing Personal-Agent Compatibility
@@ -1056,14 +1094,17 @@ Deliverables:
 
 - Tests should focus on observable behavior: accepted/rejected envelopes, stored raw payloads, normalized signal shape, deterministic preflight decisions, receipts, Illo outcomes, task updates, and permission failures.
 - Avoid tests that assert internal prompt wording or implementation details of Illo’s LLM reasoning.
-- Add contract tests for the signal submission API/MCP/webhook entrypoints: auth, scope checks, idempotency, validation, redaction, and response shape.
+- Add contract tests for the submission API/MCP/webhook entrypoints: auth,
+  scope checks, idempotency, validation, redaction, and response shape.
 - Add model/service tests for connection capabilities: a connection with only signal capability cannot claim tasks or bypass Illo with direct workspace mutation.
 - Add policy engine tests for deterministic bypass: explicit task result, explicit approved target, source rule, known fingerprint, unknown signal requiring Illo handling.
 - Add decision receipt tests: ambiguous signals produce receipts with outcome, confidence, target/tool use when relevant, and minimal observed outcome metadata.
 - Add observed outcome summarizer tests: completed Illo triage runs produce compact summaries, open tags, tool names, and target references without a hard outcome enum or automatic rule promotion.
 - Add tool/runtime guardrail tests: deterministic preflight and Illo decisions create or update the correct workspace projection without requiring the external source to call direct mutation tools.
 - Add external task compatibility tests: existing Hermes/OpenClaw task claim, event, artifact, complete, and fail flows still work.
-- Add regression tests around hosted MCP tool descriptions: default guidance should steer general clients toward signal submission, not direct thread mutation.
+- Add regression tests around hosted MCP tool descriptions: default guidance
+  should steer general clients toward submit/read/act/result coordination, not
+  direct thread mutation.
 - Add webhook integration tests for at least one Jira-like source payload: raw payload stored, normalized signal created, idempotency applied, and routing policy evaluated.
 - Add MCP integration tests for at least one Codex-like progress signal: raw/normalized signal stored, hints preserved, policy evaluated, and same service path used as webhook.
 - Add shared-path tests proving webhook and MCP inputs both produce Inbound Envelope/Event records and Decision Receipts/results through the same foundation service.
@@ -1094,12 +1135,12 @@ Deliverables:
 
 The most important product principle is:
 
-> External tools submit signals and intent. IloSpace owns coordination. Illo handles ambiguity. Deterministic policy handles the repeated and obvious.
+> External tools submit context and intent. IloSpace owns coordination. Illo handles ambiguity. Deterministic policy handles the repeated and obvious.
 
 This lets IloSpace become the team coordination layer without competing with personal agents. Hermes, OpenClaw, Codex, Figma, Jira, GitHub, and future tools can keep doing their local work. IloSpace turns their outputs into shared context, durable memory, team-visible progress, and actionable coordination.
 
-The existing personal-agent MVP already proved useful pieces: scoped connection tokens, external task lifecycle, task events, artifacts, hosted MCP, bridge-first delegation, and public/private interaction modes. The new inbound coordination layer should reuse those lessons while introducing the missing primitive: a durable Inbound Signal that Illo can handle through deterministic preflight or agent reasoning.
+The existing personal-agent MVP already proved useful pieces: scoped connection tokens, external task lifecycle, task events, artifacts, hosted MCP, bridge-first delegation, and public/private interaction modes. The new inbound coordination layer should reuse those lessons while introducing the missing primitive: a durable inbound submission that Illo can handle through deterministic preflight or agent reasoning.
 
-Direct thread creation/posting should be treated as internal Illo tool use, not the default external surface shown to hooks, webhooks, or autonomous personal agents. The default external surface should be signal/request submission into IloSpace.
+Direct thread creation/posting should be treated as internal Illo tool use, not the default external surface shown to hooks, webhooks, or autonomous personal agents. The default external surface should be submit/read/act/result coordination with IloSpace.
 
 The architecture should intentionally support a future where IloSpace has many repeated information flows. Illo should not spend tokens rediscovering the same payload forever. Illo handling should leave receipts; receipts should produce observed patterns; observed patterns should make future handling cheaper by giving Illo better context. When a deterministic shortcut is useful, Illo should configure it explicitly through its tools.

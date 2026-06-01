@@ -416,10 +416,7 @@ async def test_hosted_mcp_lists_tools_for_scoped_bridge_token():
 
     assert response.status_code == 200
     names = {tool["name"] for tool in response.json()["result"]["tools"]}
-    assert "illo_submit_context" in names
-    assert "illo_create_thread" in names
-    assert "illo_ask" in names
-    assert "illo_search_workspace" in names
+    assert names == {"illo_submit", "illo_read", "illo_act", "illo_get_result"}
 
 
 async def test_hosted_mcp_invalid_token_returns_json_rpc_error():
@@ -490,10 +487,10 @@ async def test_hosted_mcp_filters_tools_by_bridge_token_scope():
         )
 
     names = {tool["name"] for tool in response.json()["result"]["tools"]}
-    assert names == {"illo_search_workspace", "illo_get_thread", "illo_get_team_members"}
+    assert names == {"illo_read"}
 
 
-async def test_hosted_mcp_submit_context_builds_shared_envelope():
+async def test_hosted_mcp_submit_builds_submission_envelope():
     session = _AsyncSession()
     captured: dict[str, object] = {}
 
@@ -503,17 +500,17 @@ async def test_hosted_mcp_submit_context_builds_shared_envelope():
         captured["envelope"] = envelope
         captured["ingress_context"] = ingress_context
         return {
-            "status": "processed",
+            "status": "review_required",
             "event_id": "evt-1",
-            "confidence": 0.9,
+            "confidence": None,
             "ilo_outcome": {
-                "operation": "created",
-                "thread_id": "idea-1",
-                "thread_url": "https://illo.example.com/cortex?idea=idea-1",
-                "thread_route": "/cortex?idea=idea-1",
-                "url": "https://illo.example.com/cortex?idea=idea-1",
-                "message": "Context accepted and a Thread was created.",
-                "context_submission_id": "sub-1",
+                "operation": "queued",
+                "message": "Illo handling queued.",
+                "handling": {
+                    "status": "queued",
+                    "event_id": "evt-1",
+                    "run_id": "run-1",
+                },
             },
         }
 
@@ -534,16 +531,17 @@ async def test_hosted_mcp_submit_context_builds_shared_envelope():
                 "id": 11,
                 "method": "tools/call",
                 "params": {
-                    "name": "illo_submit_context",
+                    "name": "illo_submit",
                     "arguments": {
-                        "intent": "Ask the team to review the implementation context.",
-                        "origin": "codex.context",
+                        "message": "Ask Illo to review the implementation context and decide next steps.",
+                        "origin": "codex.submit",
                         "source_tool": "codex",
                         "repo": "illospace-project",
-                        "branch": "codex/mcp-submit-context",
-                        "task_title": "MCP context lane",
+                        "branch": "codex/mcp-submit",
+                        "task_title": "MCP submit lane",
                         "files_touched": ["brain/app/api/routers/agent_mcp.py"],
-                        "parts": [{"type": "text", "text": "Implemented the submit context tool."}],
+                        "parts": [{"type": "text", "text": "Implemented the submit tool."}],
+                        "response": {"mode": "webhook"},
                         "idempotency_key": "codex:run-1",
                         "metadata": {"hook": "post-message"},
                     },
@@ -553,13 +551,13 @@ async def test_hosted_mcp_submit_context_builds_shared_envelope():
 
     assert response.status_code == 200
     payload = json.loads(response.json()["result"]["content"][0]["text"])
-    assert payload["status"] == "processed"
+    assert payload["status"] == "review_required"
     assert payload["event_id"] == "evt-1"
-    assert payload["thread_id"] == "idea-1"
-    assert payload["thread_url"] == "https://illo.example.com/cortex?idea=idea-1"
-    assert payload["thread_route"] == "/cortex?idea=idea-1"
-    assert payload["url"] == payload["thread_url"]
-    assert payload["context_submission_id"] == "sub-1"
+    assert payload["submission_id"] == "evt-1"
+    assert payload["result_id"] == "evt-1"
+    assert payload["operation"] == "queued"
+    assert payload["run_id"] == "run-1"
+    assert payload["handling_status"] == "queued"
     submit.assert_awaited_once()
     assert captured["db"] is session
     assert captured["connection"] == {
@@ -570,36 +568,38 @@ async def test_hosted_mcp_submit_context_builds_shared_envelope():
         "display_name": "Hermes",
         "agent_kind": "hermes",
         "source_type": "personal_tool",
-        "capabilities": ["submit_context"],
+        "capabilities": ["illo_submit", "illo_read", "illo_act", "illo_get_result"],
     }
     assert captured["envelope"] == {
-        "kind": "context",
-        "origin": "codex.context",
+        "kind": "submission",
+        "origin": "codex.submit",
         "payload": {
-            "intent": "Ask the team to review the implementation context.",
-            "parts": [{"type": "text", "text": "Implemented the submit context tool."}],
+            "message": "Ask Illo to review the implementation context and decide next steps.",
+            "parts": [{"type": "text", "text": "Implemented the submit tool."}],
             "source": {
                 "source_tool": "codex",
                 "repo": "illospace-project",
-                "branch": "codex/mcp-submit-context",
-                "task_title": "MCP context lane",
+                "branch": "codex/mcp-submit",
+                "task_title": "MCP submit lane",
                 "files_touched": ["brain/app/api/routers/agent_mcp.py"],
             },
             "constraints": {},
             "correlation": {},
+            "response": {"mode": "webhook"},
         },
-        "summary": "Ask the team to review the implementation context.",
-        "intent": "Ask the team to review the implementation context.",
-        "parts": [{"type": "text", "text": "Implemented the submit context tool."}],
+        "summary": "Ask Illo to review the implementation context and decide next steps.",
+        "message": "Ask Illo to review the implementation context and decide next steps.",
+        "parts": [{"type": "text", "text": "Implemented the submit tool."}],
         "source": {
             "source_tool": "codex",
             "repo": "illospace-project",
-            "branch": "codex/mcp-submit-context",
-            "task_title": "MCP context lane",
+            "branch": "codex/mcp-submit",
+            "task_title": "MCP submit lane",
             "files_touched": ["brain/app/api/routers/agent_mcp.py"],
         },
         "constraints": {},
         "correlation": {},
+        "response": {"mode": "webhook"},
         "idempotency_key": "codex:run-1",
     }
     ingress_context = captured["ingress_context"]
@@ -611,10 +611,10 @@ async def test_hosted_mcp_submit_context_builds_shared_envelope():
         "org_id": "org-1",
     }
     assert ingress_context["metadata"]["hook"] == "post-message"
-    assert ingress_context["metadata"]["mcp_tool"] == "illo_submit_context"
+    assert ingress_context["metadata"]["mcp_tool"] == "illo_submit"
 
 
-async def test_hosted_mcp_submit_context_commits_before_later_batch_rollback():
+async def test_hosted_mcp_submit_commits_before_later_batch_rollback():
     order: list[str] = []
     session = _AsyncSession(order)
 
@@ -643,8 +643,8 @@ async def test_hosted_mcp_submit_context_commits_before_later_batch_rollback():
                     "id": 21,
                     "method": "tools/call",
                     "params": {
-                        "name": "illo_submit_context",
-                        "arguments": {"intent": "Context should be durable before batch failure."},
+                        "name": "illo_submit",
+                        "arguments": {"message": "Submission should be durable before batch failure."},
                     },
                 },
                 {
@@ -652,8 +652,11 @@ async def test_hosted_mcp_submit_context_commits_before_later_batch_rollback():
                     "id": 22,
                     "method": "tools/call",
                     "params": {
-                        "name": "illo_get_thread",
-                        "arguments": {"idea_id": "idea-missing"},
+                        "name": "illo_read",
+                        "arguments": {
+                            "capability": "thread.get",
+                            "arguments": {"idea_id": "idea-missing"},
+                        },
                     },
                 },
             ],
@@ -667,7 +670,7 @@ async def test_hosted_mcp_submit_context_commits_before_later_batch_rollback():
     assert order == ["context-write", "commit", "rollback"]
 
 
-async def test_hosted_mcp_submit_context_requires_signal_scope():
+async def test_hosted_mcp_submit_requires_signal_scope():
     principal = external_agents.AgentBridgePrincipal(
         connection_id="conn-1",
         org_id="org-1",
@@ -694,8 +697,8 @@ async def test_hosted_mcp_submit_context_requires_signal_scope():
                 "id": 12,
                 "method": "tools/call",
                 "params": {
-                    "name": "illo_submit_context",
-                    "arguments": {"intent": "Share context with Illo."},
+                    "name": "illo_submit",
+                    "arguments": {"message": "Share context with Illo."},
                 },
             },
         )
@@ -707,7 +710,7 @@ async def test_hosted_mcp_submit_context_requires_signal_scope():
     submit.assert_not_called()
 
 
-async def test_hosted_mcp_submit_context_rejects_direct_workspace_targets():
+async def test_hosted_mcp_submit_rejects_direct_workspace_targets():
     with patch(
         "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
         return_value=_principal(),
@@ -724,9 +727,9 @@ async def test_hosted_mcp_submit_context_rejects_direct_workspace_targets():
                 "id": 13,
                 "method": "tools/call",
                 "params": {
-                    "name": "illo_submit_context",
+                    "name": "illo_submit",
                     "arguments": {
-                        "intent": "Please post this context.",
+                        "message": "Please post this context.",
                         "idea_id": "idea-1",
                     },
                 },
@@ -738,6 +741,59 @@ async def test_hosted_mcp_submit_context_rejects_direct_workspace_targets():
     assert result["isError"] is True
     assert "direct workspace targets" in result["content"][0]["text"]
     submit.assert_not_called()
+
+
+async def test_hosted_mcp_get_result_reads_inbound_event_and_receipts():
+    event = SimpleNamespace(
+        id="evt-1",
+        org_id="org-1",
+        connection_id="conn-1",
+        status="review_required",
+        action_result={"handling": {"status": "queued", "run_id": "run-1"}},
+    )
+    receipt = SimpleNamespace(id="receipt-1")
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp.inbound_admin.require_event_for_org",
+        new=AsyncMock(return_value=event),
+    ) as require_event, patch(
+        "brain.app.api.routers.agent_mcp.inbound_admin.list_receipts",
+        new=AsyncMock(return_value=[receipt]),
+    ) as list_receipts, patch(
+        "brain.app.api.routers.agent_mcp.inbound_admin.serialize_event",
+        return_value={"id": "evt-1", "status": "review_required"},
+    ), patch(
+        "brain.app.api.routers.agent_mcp.inbound_admin.serialize_receipt",
+        return_value={"id": "receipt-1", "status": "review_required"},
+    ):
+        response = await _request(
+            "POST",
+            "/mcp",
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 14,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_get_result",
+                    "arguments": {"event_id": "evt-1"},
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert payload["event_id"] == "evt-1"
+    assert payload["submission_id"] == "evt-1"
+    assert payload["status"] == "review_required"
+    assert payload["handling_status"] == "queued"
+    assert payload["run_id"] == "run-1"
+    assert payload["latest_receipt"] == {"id": "receipt-1", "status": "review_required"}
+    require_event.assert_awaited_once()
+    list_receipts.assert_awaited_once()
 
 
 async def test_hosted_mcp_create_thread_commits_before_broadcasting():
@@ -788,8 +844,11 @@ async def test_hosted_mcp_create_thread_commits_before_broadcasting():
                 "id": 7,
                 "method": "tools/call",
                 "params": {
-                    "name": "illo_create_thread",
-                    "arguments": {"title": "Shared work", "body": "Shared from Hermes"},
+                    "name": "illo_act",
+                    "arguments": {
+                        "capability": "thread.create",
+                        "arguments": {"title": "Shared work", "body": "Shared from Hermes"},
+                    },
                 },
             },
         )
@@ -854,11 +913,14 @@ async def test_hosted_mcp_create_thread_routes_trigger_when_requested():
                 "id": 8,
                 "method": "tools/call",
                 "params": {
-                    "name": "illo_create_thread",
+                    "name": "illo_act",
                     "arguments": {
-                        "title": "Coordinate setup",
-                        "body": "Please coordinate with JB and Axel",
-                        "trigger_illo": True,
+                        "capability": "thread.create",
+                        "arguments": {
+                            "title": "Coordinate setup",
+                            "body": "Please coordinate with JB and Axel",
+                            "trigger_illo": True,
+                        },
                     },
                 },
             },
@@ -927,11 +989,14 @@ async def test_hosted_mcp_create_thread_rolls_back_when_trigger_fails():
                 "id": 9,
                 "method": "tools/call",
                 "params": {
-                    "name": "illo_create_thread",
+                    "name": "illo_act",
                     "arguments": {
-                        "title": "Dead message",
-                        "body": "This should not persist without a trigger",
-                        "trigger_illo": True,
+                        "capability": "thread.create",
+                        "arguments": {
+                            "title": "Dead message",
+                            "body": "This should not persist without a trigger",
+                            "trigger_illo": True,
+                        },
                     },
                 },
             },
