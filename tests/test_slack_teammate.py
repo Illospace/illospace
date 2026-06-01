@@ -99,6 +99,7 @@ def test_self_hosted_slack_manifest_supports_illo_teammate_loop():
         "channels:history",
         "channels:read",
         "chat:write",
+        "chat:write.public",
         "files:read",
         "files:write",
         "groups:history",
@@ -198,7 +199,7 @@ def test_socket_mode_app_mention_normalizes_to_slack_surface_envelope():
     assert envelope is not None
     assert envelope["kind"] == "slack_message"
     assert envelope["origin"] == "slack.app_mention"
-    assert envelope["idempotency_key"] == "slack:T789:Ev222"
+    assert envelope["idempotency_key"] == "slack:T789:C456:1716900000.000100"
     assert envelope["payload"]["team_id"] == "T789"
     assert envelope["payload"]["channel_id"] == "C456"
     assert envelope["payload"]["channel_type"] == "channel"
@@ -209,7 +210,7 @@ def test_socket_mode_app_mention_normalizes_to_slack_surface_envelope():
     assert envelope["hints"]["surface"]["kind"] == "slack"
     assert envelope["hints"]["response_target"] == {
         "channel_id": "C456",
-        "thread_ts": "1716900000.000100",
+        "thread_ts": None,
         "visibility": "public",
     }
 
@@ -226,6 +227,68 @@ def test_socket_mode_ignores_non_dm_messages_without_illo_mention():
     )
 
     assert ignored is None
+
+
+def test_socket_mode_thread_mention_keeps_thread_reply_target():
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    envelope = normalize_slack_socket_event(
+        _socket_mode_app_mention(thread_ts="1716899999.000001"),
+        bot_user_id="BILLO",
+    )
+
+    assert envelope is not None
+    assert envelope["payload"]["surface"] == "slack_thread"
+    assert envelope["hints"]["response_target"] == {
+        "channel_id": "C456",
+        "thread_ts": "1716899999.000001",
+        "visibility": "public",
+    }
+
+
+def test_socket_mode_dm_response_target_never_threads():
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    envelope = normalize_slack_socket_event(
+        _socket_mode_app_mention(
+            type="message",
+            channel="D123",
+            channel_type="im",
+            text="can you help?",
+            thread_ts="1716899999.000001",
+        ),
+        bot_user_id="BILLO",
+    )
+
+    assert envelope is not None
+    assert envelope["origin"] == "slack.direct_message"
+    assert envelope["payload"]["surface"] == "slack_dm"
+    assert envelope["hints"]["response_target"] == {
+        "channel_id": "D123",
+        "thread_ts": None,
+        "visibility": "public",
+    }
+
+
+def test_socket_mode_duplicate_slack_events_share_message_idempotency_key():
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    app_mention = normalize_slack_socket_event(
+        _socket_mode_app_mention(event_id="Ev-app-mention"),
+        bot_user_id="BILLO",
+    )
+    message_event = normalize_slack_socket_event(
+        _socket_mode_app_mention(
+            type="message",
+            event_id="Ev-message-channel",
+        ),
+        bot_user_id="BILLO",
+    )
+
+    assert app_mention is not None
+    assert message_event is not None
+    assert app_mention["idempotency_key"] == message_event["idempotency_key"]
+    assert app_mention["idempotency_key"] == "slack:T789:C456:1716900000.000100"
 
 
 def test_slack_adapter_builds_teammate_trigger():
@@ -264,7 +327,7 @@ def test_slack_adapter_builds_teammate_trigger():
     assert trigger.payload["metadata"]["inbound_event"]["event_id"] == "inbound-1"
     assert trigger.payload["metadata"]["slack_trigger"]["response_target"] == {
         "channel_id": "C456",
-        "thread_ts": "1716900000.000100",
+        "thread_ts": None,
         "visibility": "public",
     }
     assert "normal Illospace tools" in trigger.payload["run_message"]
@@ -400,6 +463,112 @@ async def test_post_slack_reply_tool_posts_to_triggering_thread(monkeypatch):
             "channel": "C456",
             "text": "On it.",
             "thread_ts": "1716900000.000100",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_slack_reply_tool_posts_top_level_mentions_to_channel(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
+
+    calls = []
+
+    class _SlackClient:
+        async def post_message(self, **kwargs):
+            calls.append(kwargs)
+            return {"ok": True, "ts": "1716900200.000300", "channel": kwargs["channel"]}
+
+    async def slack_client():
+        return _SlackClient()
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    with bind_agent_context(
+        {
+            "org_id": ORG_ID,
+            "run_id": 9,
+            "slack_trigger": {
+                "channel_id": "C456",
+                "channel_type": "channel",
+                "message_ts": "1716900000.000100",
+                "response_target": {
+                    "channel_id": "C456",
+                    "thread_ts": None,
+                    "visibility": "public",
+                },
+            },
+        }
+    ):
+        result = json.loads(
+            await _handle_post_slack_reply(
+                body="On it.",
+                thread_ts="1716900000.000100",
+            )
+        )
+
+    assert result["ok"] is True
+    assert calls == [
+        {
+            "channel": "C456",
+            "text": "On it.",
+            "thread_ts": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_slack_reply_tool_never_threads_originating_dm(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
+
+    calls = []
+
+    class _SlackClient:
+        async def post_message(self, **kwargs):
+            calls.append(kwargs)
+            return {"ok": True, "ts": "1716900200.000300", "channel": kwargs["channel"]}
+
+    async def slack_client():
+        return _SlackClient()
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    with bind_agent_context(
+        {
+            "org_id": ORG_ID,
+            "run_id": 9,
+            "slack_trigger": {
+                "channel_id": "D123",
+                "channel_type": "im",
+                "message_ts": "1716900100.000200",
+                "response_target": {
+                    "channel_id": "D123",
+                    "thread_ts": None,
+                    "visibility": "public",
+                },
+            },
+        }
+    ):
+        result = json.loads(
+            await _handle_post_slack_reply(
+                body="Hi.",
+                thread_ts="1716900100.000200",
+            )
+        )
+
+    assert result["ok"] is True
+    assert calls == [
+        {
+            "channel": "D123",
+            "text": "Hi.",
+            "thread_ts": None,
         }
     ]
 

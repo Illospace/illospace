@@ -8,7 +8,8 @@ public Slack Events API endpoint.
 
 1. Create a Slack app from `deploy/slack/illo-self-hosted-manifest.yml`.
 2. Enable Socket Mode in Slack.
-3. Install the app to your Slack workspace.
+3. Install the app to your Slack workspace. Existing installations should be
+   reinstalled after manifest scope changes so `chat:write.public` is granted.
 4. Save `SLACK_BOT_TOKEN` to Illospace Vault, or set it as an environment
    variable for the connector process.
 5. Save `SLACK_APP_TOKEN` to Illospace Vault, or set it as an environment
@@ -41,6 +42,8 @@ Optional Slack hints:
 ## Runtime Behavior
 
 - `app_mention` events and every DM are actionable.
+- Top-level channel mentions reply as normal channel messages; mentions inside
+  Slack threads reply back into that thread; DMs reply as normal DM messages.
 - Regular channel messages without an Illo mention are ignored.
 - Socket Mode envelopes are acknowledged before durable inbound processing.
 - Actionable Slack events are stored as inbound events with kind

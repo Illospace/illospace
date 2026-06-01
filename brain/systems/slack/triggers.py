@@ -131,30 +131,54 @@ def slack_surface(payload: Mapping[str, Any]) -> str:
 
 def slack_response_target(payload: Mapping[str, Any]) -> dict[str, Any]:
     existing = payload.get("response_target")
-    if isinstance(existing, Mapping):
-        return {
-            "channel_id": _clean(existing.get("channel_id") or payload.get("channel_id")),
-            "thread_ts": existing.get("thread_ts"),
-            "visibility": _clean(existing.get("visibility")) or "public",
-        }
     channel_type = _clean(payload.get("channel_type"))
     message_ts = _clean(payload.get("message_ts"))
+    if isinstance(existing, Mapping):
+        thread_ts = _response_thread_ts(
+            channel_type,
+            _clean(existing.get("thread_ts")),
+            message_ts,
+        )
+        return {
+            "channel_id": _clean(existing.get("channel_id") or payload.get("channel_id")),
+            "thread_ts": thread_ts,
+            "visibility": _clean(existing.get("visibility")) or "public",
+        }
     thread_ts = _clean(payload.get("thread_ts") or message_ts)
     return {
         "channel_id": _clean(payload.get("channel_id")),
-        "thread_ts": None if channel_type == "im" and thread_ts == message_ts else thread_ts,
+        "thread_ts": _response_thread_ts(channel_type, thread_ts, message_ts),
         "visibility": "public",
     }
+
+
+def _response_thread_ts(channel_type: str, thread_ts: str, message_ts: str) -> str | None:
+    if channel_type == "im":
+        return None
+    if thread_ts and thread_ts != message_ts:
+        return thread_ts
+    return None
 
 
 def slack_run_message(payload: Mapping[str, Any], slack_trigger_payload: Mapping[str, Any]) -> str:
     text = _clean(payload.get("text"))[:2000]
     surface = _clean(slack_trigger_payload.get("surface"))
+    response_target = slack_trigger_payload.get("response_target")
+    response_target = response_target if isinstance(response_target, Mapping) else {}
+    reply_thread_ts = _clean(response_target.get("thread_ts"))
+    channel_type = _clean(slack_trigger_payload.get("channel_type"))
+    if channel_type == "im":
+        reply_mode = "Slack DM normal message; do not pass thread_ts."
+    elif reply_thread_ts:
+        reply_mode = f"Slack thread reply using thread_ts {reply_thread_ts}."
+    else:
+        reply_mode = "Top-level Slack channel message; do not pass thread_ts."
     lines = [
         "A teammate invoked Illo from Slack.",
         "Slack is the triggering conversation surface; use normal Illospace tools for the work.",
         f"After acting, reply in Slack with {SLACK_REPLY_TOOL} when a visible response fits.",
         "Use read_slack_conversation if more Slack context is needed.",
+        f"Default Slack reply target: {reply_mode}",
         "",
         f"Slack surface: {surface}",
         f"Team: {slack_trigger_payload.get('team_id')}",

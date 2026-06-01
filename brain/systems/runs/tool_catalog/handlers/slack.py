@@ -93,6 +93,15 @@ async def _handle_post_slack_reply(
     target_thread_ts = thread_ts if thread_ts is not None else response_target.get("thread_ts")
     if target_thread_ts is not None:
         target_thread_ts = str(target_thread_ts or "").strip() or None
+    trigger_channel_id = str(trigger.get("channel_id") or "").strip()
+    trigger_message_ts = str(trigger.get("message_ts") or "").strip()
+    trigger_channel_type = str(trigger.get("channel_type") or "").strip()
+    response_target_thread_ts = response_target.get("thread_ts")
+    if target_channel == trigger_channel_id:
+        if trigger_channel_type == "im":
+            target_thread_ts = None
+        elif not response_target_thread_ts and target_thread_ts == trigger_message_ts:
+            target_thread_ts = None
     target_visibility = str(visibility or response_target.get("visibility") or "public").strip().lower()
     if target_visibility not in {"public", "ephemeral"}:
         return json.dumps({"error": "post_slack_reply visibility must be public or ephemeral"})
