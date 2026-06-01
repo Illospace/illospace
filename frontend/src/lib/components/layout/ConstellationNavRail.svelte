@@ -74,6 +74,7 @@
       return activeWorkspacePageModalId === workspacePageId || pathname.startsWith(href);
     }
     if (href === '/cortex' && activeWorkspacePageModalId) return false;
+    if (href === '/cortex' && pathname.startsWith('/threads')) return true;
     if (href === '/') return pathname === '/';
     return pathname === href || pathname.startsWith(`${href}/`);
   }
@@ -88,7 +89,7 @@
     <a
       href={buildCortexHrefWithoutWorkspacePage(sourceParamsForNav())}
       class="constellation-nav-rail-brand"
-      aria-current={$page.url.pathname.startsWith('/cortex') && !activeWorkspacePageModalId ? 'page' : undefined}
+      aria-current={($page.url.pathname.startsWith('/cortex') || $page.url.pathname.startsWith('/threads')) && !activeWorkspacePageModalId ? 'page' : undefined}
       aria-label={`Go to ${brandLabel}`}
       title={brandLabel}
     >

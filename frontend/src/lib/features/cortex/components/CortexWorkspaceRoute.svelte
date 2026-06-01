@@ -50,6 +50,13 @@
     isWorkspacePageModalId,
     type WorkspacePageModalId,
   } from '$lib/features/cortex/domain/workspacePageModal';
+  import {
+    buildCortexHrefWithoutThread,
+    buildCortexThreadHref,
+    CORTEX_THREAD_PARAM,
+    isThreadRoutePathname,
+    threadIdFromUrl,
+  } from '$lib/features/threads/domain/threadLinks';
 
   const RUNTIME_READY_ONBOARDING_PARAM = 'runtime-ready';
   const WORKSPACE_ARRIVAL_DURATION_MS = 1320;
@@ -88,8 +95,9 @@
   let workspacePageLoading = $state(false);
   let workspacePageLoadToken = 0;
   let lastRequestedIdeaId = $state<string | null>(null);
-  let initialDirectThreadIdeaId = $state<string | null>($page.url.searchParams.get('idea'));
-  let directThreadUrlPending = $state(Boolean($page.url.searchParams.get('idea')));
+  let initialDirectThreadIdeaId = $state<string | null>(threadIdFromUrl($page.url));
+  let directThreadUrlPending = $state(Boolean(threadIdFromUrl($page.url)));
+  let lastSyncedThreadUrlIdeaId = $state<string | null>(threadIdFromUrl($page.url));
   let lastAutoOpenedAppId = $state<string | null>(null);
   let threadStagePrewarmQueued = false;
   let CortexArchiveBinMenuComponent = $state<typeof import('$lib/features/cortex/components/ArchiveBinMenu.svelte').default | null>(null);
@@ -138,7 +146,7 @@
   }
 
   function runtimeReadyIntroIsDeferred() {
-    return isRuntimeReadyOnboardingUrl() && !$page.url.searchParams.get('idea');
+    return isRuntimeReadyOnboardingUrl() && !$page.url.searchParams.get(CORTEX_THREAD_PARAM);
   }
 
   function runtimeReadyIntroOpenExisting() {
@@ -150,7 +158,7 @@
     if (!browser || !isRuntimeReadyOnboardingUrl()) return;
     if (requireIntroIdea && !isRuntimeReadyIntroIdea(cortex.selectedIdea)) return;
     const url = new URL(window.location.href);
-    url.searchParams.delete('idea');
+    url.searchParams.delete(CORTEX_THREAD_PARAM);
     url.searchParams.delete('onboarding');
     url.searchParams.delete('open_existing');
     const nextPath = `${url.pathname}${url.search}${url.hash}`;
@@ -674,6 +682,43 @@
   );
   const workspaceArrivalReady = $derived(cortexSurfaceReady && workspaceVisualReady);
 
+  function sameCortexHref(targetHref: string) {
+    return `${$page.url.pathname}${$page.url.search}` === targetHref;
+  }
+
+  async function replaceCortexHref(targetHref: string) {
+    if (sameCortexHref(targetHref)) return;
+    await goto(targetHref, { keepFocus: true, noScroll: true, replaceState: true });
+  }
+
+  function syncThreadUrlToStage() {
+    if (!browser || directThreadUrlPending) return;
+
+    const urlIdeaId = threadIdFromUrl($page.url);
+    const selectedIdeaId = cortex.panelOpen ? cortex.selectedIdeaId : null;
+    if (selectedIdeaId) {
+      if (urlIdeaId && urlIdeaId !== selectedIdeaId) return;
+      lastSyncedThreadUrlIdeaId = selectedIdeaId;
+      void replaceCortexHref(buildCortexThreadHref(selectedIdeaId, $page.url.searchParams));
+      return;
+    }
+
+    if (
+      urlIdeaId
+      && (
+        urlIdeaId === lastSyncedThreadUrlIdeaId
+        || isThreadRoutePathname($page.url.pathname)
+      )
+    ) {
+      lastSyncedThreadUrlIdeaId = null;
+      void replaceCortexHref(buildCortexHrefWithoutThread($page.url.searchParams));
+    }
+  }
+
+  $effect(() => {
+    syncThreadUrlToStage();
+  });
+
   $effect(() => {
     if (!browser || workspaceArrivalSettled || !workspaceArrivalReady) return;
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
@@ -880,8 +925,13 @@
   }
 
   async function maybeSelectIdeaFromUrl() {
-    const requestedIdeaId = $page.url.searchParams.get('idea');
+    const requestedIdeaId = threadIdFromUrl($page.url);
     if (!requestedIdeaId) {
+      directThreadUrlPending = false;
+      return;
+    }
+    if (cortex.panelOpen && cortex.selectedIdea?.id === requestedIdeaId) {
+      lastRequestedIdeaId = requestedIdeaId;
       directThreadUrlPending = false;
       return;
     }
@@ -960,7 +1010,7 @@
   });
 
   onMount(() => {
-    const requestedIdeaId = $page.url.searchParams.get('idea');
+    const requestedIdeaId = threadIdFromUrl($page.url);
     initialDirectThreadIdeaId = requestedIdeaId;
     directThreadUrlPending = Boolean(requestedIdeaId);
     cortex.setupWs();
