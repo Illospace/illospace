@@ -234,6 +234,21 @@ def test_workspace_query_scope_omitted_idea_defaults_to_current_thread():
     assert scope["org_id"] == "org-1"
 
 
+def test_workspace_query_scope_accepts_thread_url():
+    from brain.systems.runs.tool_catalog.handlers import workspace_data
+    from brain.systems.runs.execution_context import bind_agent_context
+
+    with bind_agent_context({"idea_id": "current-idea", "user_id": "user-1", "org_id": "org-1"}):
+        scope = workspace_data._workspace_query_scope(
+            thread_url="https://illo.example.com/threads/shared-thread-1",
+            default_current_idea=True,
+        )
+
+    assert scope["idea_id"] == "shared-thread-1"
+    assert scope["user_id"] == "user-1"
+    assert scope["org_id"] == "org-1"
+
+
 async def test_workspace_data_runs_include_latest_final_answer_artifact():
     from brain.systems.runs.tool_catalog.handlers import workspace_data
 
@@ -290,6 +305,8 @@ async def test_workspace_data_runs_include_latest_final_answer_artifact():
         payload["sources"]["runs"][0]["output"]
         == "Alex has been actively polishing the Cortex thread flow."
     )
+    assert payload["sources"]["runs"][0]["thread_url"].endswith("/threads/idea-1")
+    assert payload["sources"]["runs"][0]["thread_reference"]["title"] == "Current planning"
 
 
 def test_workspace_data_activity_items_sort_newest_signals_first():
@@ -314,7 +331,16 @@ def test_workspace_data_activity_items_sort_newest_signals_first():
                     "type": "thread_message",
                     "created_at": "2026-05-06T18:00:00+00:00",
                     "idea_id": "idea-2",
+                    "thread_id": "idea-2",
                     "idea_title": "Live Cortex polish",
+                    "thread_url": "https://illo.example.com/threads/idea-2",
+                    "thread_route": "/threads/idea-2",
+                    "thread_reference": {
+                        "type": "thread_reference",
+                        "thread_id": "idea-2",
+                        "title": "Live Cortex polish",
+                        "thread_url": "https://illo.example.com/threads/idea-2",
+                    },
                     "content": "Let's fix the current thread activity answer.",
                     "user_id": "user-1",
                     "user_name": "Alex",
@@ -329,3 +355,5 @@ def test_workspace_data_activity_items_sort_newest_signals_first():
     assert [item["source"] for item in items] == ["threads", "workspace_apps"]
     assert items[0]["title"] == "Live Cortex polish"
     assert items[0]["summary"] == "Let's fix the current thread activity answer."
+    assert items[0]["thread_url"] == "https://illo.example.com/threads/idea-2"
+    assert items[0]["thread_reference"]["thread_id"] == "idea-2"
