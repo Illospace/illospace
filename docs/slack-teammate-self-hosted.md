@@ -44,7 +44,15 @@ Optional Slack hints:
 - `app_mention` events and every DM are actionable.
 - Top-level channel mentions reply as normal channel messages; mentions inside
   Slack threads reply back into that thread; DMs reply as normal DM messages.
+- Illo sets a best-effort Slack working status while a Slack-origin run is
+  being admitted, so teammates can see that the request was accepted. This uses
+  the existing `chat:write` scope and Slack clears the status on reply or after
+  its short timeout.
 - Regular channel messages without an Illo mention are ignored.
+- The default manifest subscribes to `app_mention` and `message.im` only. It
+  keeps channel history scopes for context reads, but avoids generic channel
+  message events as trigger sources because Slack can also deliver the same
+  human mention as `app_mention`.
 - Socket Mode envelopes are acknowledged before durable inbound processing.
 - Actionable Slack events are stored as inbound events with kind
   `slack_message`.

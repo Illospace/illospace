@@ -86,6 +86,26 @@ async def _seed_slack_connection(session):
     return connection
 
 
+async def _seed_second_slack_connection(session):
+    connection = ExternalAgentConnectionRow(
+        id="44444444-4444-4444-8444-444444444444",
+        org_id=ORG_ID,
+        owner_user_id=USER_ID,
+        display_name="Slack duplicate connector",
+        agent_kind="slack",
+        transport="slack_socket_mode",
+        status="online",
+        remote_agent_id="T789",
+        remote_agent_card={},
+        capabilities={"slack": {"socket_mode": True}},
+        auth_metadata={"bot_token_ref": "env:SLACK_BOT_TOKEN", "app_token_ref": "env:SLACK_APP_TOKEN"},
+        metadata_={"slack": {"team_id": "T789", "bot_user_id": "BILLO"}},
+    )
+    session.add(connection)
+    await session.flush()
+    return connection
+
+
 def test_self_hosted_slack_manifest_supports_illo_teammate_loop():
     manifest = yaml.safe_load(MANIFEST_PATH.read_text())
 
@@ -111,12 +131,9 @@ def test_self_hosted_slack_manifest_supports_illo_teammate_loop():
     }.issubset(bot_scopes)
 
     bot_events = {event["type"] for event in manifest["settings"]["event_subscriptions"]["bot_events"]}
-    assert {
-        "app_mention",
-        "message.channels",
-        "message.groups",
-        "message.im",
-    }.issubset(bot_events)
+    assert {"app_mention", "message.im"} <= bot_events
+    assert "message.channels" not in bot_events
+    assert "message.groups" not in bot_events
 
     features = manifest["features"]
     assert features["bot_user"]["display_name"] == "Illo"
@@ -423,6 +440,142 @@ async def test_slack_inbound_envelope_records_event_and_admits_slack_run(session
 
 
 @pytest.mark.asyncio
+async def test_duplicate_slack_events_across_connection_rows_share_one_run(session):
+    from brain.systems.inbound.service import submit_inbound_envelope
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    first_connection = await _seed_slack_connection(session)
+    second_connection = await _seed_second_slack_connection(session)
+    app_mention = normalize_slack_socket_event(
+        _socket_mode_app_mention(event_id="Ev-app-mention"),
+        bot_user_id="BILLO",
+    )
+    message_event = normalize_slack_socket_event(
+        _socket_mode_app_mention(
+            type="message",
+            event_id="Ev-message-channel",
+        ),
+        bot_user_id="BILLO",
+    )
+
+    first = await submit_inbound_envelope(
+        session,
+        connection=first_connection,
+        envelope=app_mention,
+        ingress_context={"transport": "slack_socket_mode", "envelope_id": "env-1"},
+    )
+    second = await submit_inbound_envelope(
+        session,
+        connection=second_connection,
+        envelope=message_event,
+        ingress_context={"transport": "slack_socket_mode", "envelope_id": "env-2"},
+    )
+
+    runs = (await session.scalars(select(AgentRunRow).order_by(AgentRunRow.id.asc()))).all()
+    events = (await session.scalars(select(InboundEventRow).order_by(InboundEventRow.created_at.asc()))).all()
+
+    assert len(events) == 2
+    assert len(runs) == 1
+    assert runs[0].source_idempotency_scope == "slack"
+    assert runs[0].source_idempotency_key == "slack:T789:C456:1716900000.000100"
+    assert first["ilo_outcome"]["run_id"] == runs[0].id
+    assert second["ilo_outcome"]["run_id"] == runs[0].id
+
+
+@pytest.mark.asyncio
+async def test_slack_connector_sets_processing_status_for_actionable_payload(session, monkeypatch):
+    from brain.systems.slack import connector
+
+    connection = await _seed_slack_connection(session)
+    calls = []
+
+    class _SlackClient:
+        def __init__(self, token, **_kwargs):
+            calls.append(("init", token))
+
+        async def set_assistant_status(self, **kwargs):
+            calls.append(("status", kwargs))
+            return {"ok": True}
+
+    monkeypatch.setattr(connector, "SlackWebClient", _SlackClient, raising=False)
+
+    await connector.process_socket_payload(
+        session,
+        connection=connection,
+        socket_payload=_socket_mode_app_mention(),
+        config=connector.SlackConnectorConfig(
+            bot_token="xoxb-test",
+            app_token="xapp-test",
+            bot_user_id="BILLO",
+        ),
+    )
+
+    assert calls == [
+        ("init", "xoxb-test"),
+        (
+            "status",
+            {
+                "channel_id": "C456",
+                "thread_ts": "1716900000.000100",
+                "status": "is working on it...",
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_slack_connector_does_not_reset_status_for_existing_duplicate_run(session, monkeypatch):
+    from brain.systems.slack import connector
+
+    first_connection = await _seed_slack_connection(session)
+    second_connection = await _seed_second_slack_connection(session)
+    calls = []
+
+    class _SlackClient:
+        def __init__(self, token, **_kwargs):
+            calls.append(("init", token))
+
+        async def set_assistant_status(self, **kwargs):
+            calls.append(("status", kwargs))
+            return {"ok": True}
+
+    monkeypatch.setattr(connector, "SlackWebClient", _SlackClient, raising=False)
+
+    await connector.process_socket_payload(
+        session,
+        connection=first_connection,
+        socket_payload=_socket_mode_app_mention(event_id="Ev-app-mention"),
+        config=connector.SlackConnectorConfig(
+            bot_token="xoxb-test",
+            app_token="xapp-test",
+            bot_user_id="BILLO",
+        ),
+    )
+    await connector.process_socket_payload(
+        session,
+        connection=second_connection,
+        socket_payload=_socket_mode_app_mention(type="message", event_id="Ev-message-channel"),
+        config=connector.SlackConnectorConfig(
+            bot_token="xoxb-test",
+            app_token="xapp-test",
+            bot_user_id="BILLO",
+        ),
+    )
+
+    assert calls == [
+        ("init", "xoxb-test"),
+        (
+            "status",
+            {
+                "channel_id": "C456",
+                "thread_ts": "1716900000.000100",
+                "status": "is working on it...",
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_post_slack_reply_tool_posts_to_triggering_thread(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
@@ -517,6 +670,70 @@ async def test_post_slack_reply_tool_posts_top_level_mentions_to_channel(monkeyp
             "text": "On it.",
             "thread_ts": None,
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_slack_reply_tool_clears_processing_status(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
+
+    calls = []
+
+    class _SlackClient:
+        async def post_message(self, **kwargs):
+            calls.append(("post", kwargs))
+            return {"ok": True, "ts": "1716900200.000300", "channel": kwargs["channel"]}
+
+        async def set_assistant_status(self, **kwargs):
+            calls.append(("status", kwargs))
+            return {"ok": True}
+
+    async def slack_client():
+        return _SlackClient()
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    with bind_agent_context(
+        {
+            "org_id": ORG_ID,
+            "run_id": 9,
+            "slack_trigger": {
+                "channel_id": "C456",
+                "channel_type": "channel",
+                "message_ts": "1716900000.000100",
+                "thread_ts": "1716900000.000100",
+                "response_target": {
+                    "channel_id": "C456",
+                    "thread_ts": None,
+                    "visibility": "public",
+                },
+            },
+        }
+    ):
+        result = json.loads(await _handle_post_slack_reply(body="Done."))
+
+    assert result["ok"] is True
+    assert calls == [
+        (
+            "post",
+            {
+                "channel": "C456",
+                "text": "Done.",
+                "thread_ts": None,
+            },
+        ),
+        (
+            "status",
+            {
+                "channel_id": "C456",
+                "thread_ts": "1716900000.000100",
+                "status": "",
+            },
+        ),
     ]
 
 

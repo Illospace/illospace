@@ -74,6 +74,20 @@ async def _resolve_post_channel(client, channel_id: str, visibility: str) -> str
     return resolved or channel_id
 
 
+async def _clear_processing_status(client: Any, trigger: dict[str, Any]) -> None:
+    set_status = getattr(client, "set_assistant_status", None)
+    if not callable(set_status):
+        return
+    channel_id = str(trigger.get("channel_id") or "").strip()
+    thread_ts = str(trigger.get("thread_ts") or trigger.get("message_ts") or "").strip()
+    if not channel_id or not thread_ts:
+        return
+    try:
+        await set_status(channel_id=channel_id, thread_ts=thread_ts, status="")
+    except Exception:
+        return
+
+
 async def _handle_post_slack_reply(
     body: str,
     channel_id: str | None = None,
@@ -127,6 +141,7 @@ async def _handle_post_slack_reply(
                 text=text,
                 thread_ts=target_thread_ts,
             )
+        await _clear_processing_status(client, trigger)
     except Exception as exc:
         return json.dumps({"error": str(exc)})
 
