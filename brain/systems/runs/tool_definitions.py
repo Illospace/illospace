@@ -574,6 +574,7 @@ BRAIN_TOOLS = [
                 "end_at": {"type": "string", "description": "ISO timestamp for custom upper bound."},
                 "limit": {"type": "integer", "description": "Max records per source (default 20)", "default": 20},
                 "idea_id": {"type": "string", "description": "Optional Cortex idea/thread id filter."},
+                "thread_url": {"type": "string", "description": "Optional canonical Illo Thread URL or /threads/{id} route filter."},
                 "domain_id": {"type": "integer", "description": "Optional Domain id filter."},
                 "object_key": {"type": "string", "description": "Optional Domain object key filter."},
                 "include_archived": {"type": "boolean", "default": False},
@@ -606,7 +607,9 @@ BRAIN_TOOLS = [
             "Read recent human and Illo activity in this workspace: Cortex thread messages, ideas, agent runs, "
             "tool-call summaries, Domain events, Project Context attachments, workspace app updates, and Cycle runs. "
             "Use before answering questions like 'what happened?', 'what is the team working on?', "
-            "'what did Illo do?', or 'what changed recently?'."
+            "'what did Illo do?', 'did someone work on this?', or 'what changed recently?'. "
+            "Thread and idea results include thread_url/thread_reference; cite the Thread title plus thread_url "
+            "when pointing a teammate to prior work."
         ),
         "input_schema": {
             "type": "object",
@@ -622,6 +625,7 @@ BRAIN_TOOLS = [
                 "end_at": {"type": "string", "description": "ISO timestamp for custom upper bound."},
                 "limit": {"type": "integer", "description": "Max records per source (default 20)", "default": 20},
                 "idea_id": {"type": "string", "description": "Optional Cortex idea/thread id filter."},
+                "thread_url": {"type": "string", "description": "Optional canonical Illo Thread URL or /threads/{id} route filter."},
             },
         },
     },
@@ -1172,7 +1176,9 @@ CORTEX_IDEA_TOOLS = [
             "'archive this thread', 'rename this thought', 'mark this resolved', or "
             "'restore that idea'. This is the action/exact-thread tool. For recent team-wide thread "
             "activity, prefer read_team_activity first. idea_id defaults to the current Cortex "
-            "thread/idea when one is bound. Use action='help' or action='schema' with operation to inspect "
+            "thread/idea when one is bound. For exact-thread actions, pass idea_id, thread_id, "
+            "thread_url, or thread_route. Results include thread_url; share it when the user needs "
+            "to open or hand off the Thread. Use action='help' or action='schema' with operation to inspect "
             "arguments before mutating."
         ),
         "input_schema": {
@@ -1205,6 +1211,18 @@ CORTEX_IDEA_TOOLS = [
                 "thread_id": {
                     "type": "string",
                     "description": "Alias for idea_id, for user wording that says thread.",
+                },
+                "thread_url": {
+                    "type": "string",
+                    "description": "Canonical Illo Thread URL identifying the target thread.",
+                },
+                "thread_route": {
+                    "type": "string",
+                    "description": "Canonical /threads/{id} route identifying the target thread.",
+                },
+                "url": {
+                    "type": "string",
+                    "description": "Alias for thread_url when a Thread link is passed as a generic URL.",
                 },
                 "title": {"type": "string", "description": "Raw idea title for create/update."},
                 "thread_message": {

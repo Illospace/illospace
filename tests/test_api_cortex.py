@@ -565,7 +565,24 @@ def test_manage_idea_tool_is_available_to_agents():
     tool = next(item for item in WORKER_TOOLS if item["name"] == "manage_idea")
 
     assert "archive this thread" in tool["description"]
+    assert "thread_url" in tool["input_schema"]["properties"]
     assert "manage_idea" in _get_tool_handlers()
+
+
+def test_manage_idea_target_accepts_thread_url():
+    from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
+
+    assert (
+        idea_tools._target_idea_id(
+            idea_id=None,
+            thread_id=None,
+            thread_url="https://illo.example.com/threads/idea-1",
+            url=None,
+            thread_route=None,
+            context_idea_id="current-idea",
+        )
+        == "idea-1"
+    )
 
 
 async def test_manage_idea_archive_defaults_to_current_thread(monkeypatch):
