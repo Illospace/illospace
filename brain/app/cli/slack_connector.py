@@ -8,7 +8,11 @@ import json
 import logging
 import sys
 
-from brain.systems.slack.connector import SlackConnectorConfig, run_forever
+from brain.systems.slack.connector import (
+    SlackConnectorConfig,
+    run_forever,
+    validate_slack_connector_tokens,
+)
 
 
 def _redacted(value: str) -> str:
@@ -34,8 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
 async def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    config = await SlackConnectorConfig.from_runtime()
     if args.check:
+        config = await SlackConnectorConfig.from_runtime()
+        validate_slack_connector_tokens(
+            bot_token=config.bot_token,
+            app_token=config.app_token,
+        )
         print(
             json.dumps(
                 {
