@@ -42,6 +42,11 @@ from brain.platform.db.repositories.chat import (
 )
 from brain.platform.db.repositories.notifications import NotificationEventRepository
 from brain.platform.db.repositories.team import TeamRepository
+from brain.systems.cortex.object_references import (
+    SOURCE_CHAT_MESSAGE,
+    merge_object_reference_metadata,
+    store_object_references_for_source,
+)
 
 ILLO_NAME = "Illo"
 ILLO_COLOR = "#5ea898"
@@ -173,6 +178,7 @@ class _ChatSerializationMixin:
             sender_name = sender_user.name if sender_user else "Unknown"
             sender_color = sender_user.color if sender_user else None
 
+        metadata = message.metadata_ if isinstance(message.metadata_, dict) else {}
         return ChatMessageRead(
             id=message.id,
             conversation_id=str(message.conversation_id),
@@ -187,6 +193,8 @@ class _ChatSerializationMixin:
             reply_to_message_id=message.reply_to_message_id,
             attachments=message.attachments or [],
             metadata=message.metadata_,
+            object_references=metadata.get("object_references") or [],
+            thread_references=metadata.get("thread_references") or [],
             conversation_seq=message.conversation_seq,
             reply_count=message.reply_count or 0,
             last_reply_at=message.last_reply_at,
@@ -338,6 +346,7 @@ class ChatService(_ChatSerializationMixin):
             attachments=attachments,
             metadata=dict(body.metadata or {}),
         )
+        await self._store_object_references(message)
         members = list(await self.conversation_repo.a_list_member_users(conversation.id))
         created_notifications = await self._store_mentions_and_notifications(
             conversation=conversation,
@@ -469,6 +478,7 @@ class ChatService(_ChatSerializationMixin):
             thread_root_message_id=root_message.id,
             reply_to_message_id=body.reply_to_message_id,
         )
+        await self._store_object_references(reply)
         members = list(await self.conversation_repo.a_list_member_users(conversation.id))
         created_notifications = await self._store_mentions_and_notifications(
             conversation=conversation,
@@ -530,6 +540,7 @@ class ChatService(_ChatSerializationMixin):
             },
             thread_root_message_id=root_message.id if root_message is not None else None,
         )
+        await self._store_object_references(message)
         members = list(await self.conversation_repo.a_list_member_users(conversation.id))
         created_notifications = await self._store_mentions_and_notifications(
             conversation=conversation,
@@ -1010,6 +1021,18 @@ class ChatService(_ChatSerializationMixin):
             )
 
         return notifications
+
+    async def _store_object_references(self, message: ChatMessage) -> None:
+        references = await store_object_references_for_source(
+            self.db,
+            source_type=SOURCE_CHAT_MESSAGE,
+            source_id=message.id,
+            org_id=self.org_id,
+            text=message.body,
+            user_id=self.viewer_user_id if message.sender_user_id else None,
+        )
+        if references:
+            message.metadata_ = merge_object_reference_metadata(message.metadata_, references)
 
     async def _validate_reply_target_or_400(
         self,

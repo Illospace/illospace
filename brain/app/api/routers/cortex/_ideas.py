@@ -47,6 +47,7 @@ from brain.systems.cortex.thought_lifecycle import (
     transition_thought_status,
 )
 from brain.systems.cortex.project_context.resolution import merge_project_context_metadata
+from brain.systems.cortex.thread_links import thread_link_payload
 from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
 
 
@@ -118,6 +119,28 @@ def _project_context_for_idea(idea) -> dict[str, Any] | None:
         return None
     project_context = details.get("project_context") or details.get("project_context_snapshot")
     return project_context if isinstance(project_context, dict) else None
+
+
+def _apply_thread_link_fields(payload: dict[str, Any], idea_id: Any) -> None:
+    links = thread_link_payload(idea_id)
+    payload["thread_route"] = links["thread_route"]
+    payload["thread_url"] = links["thread_url"]
+
+
+def _thread_message_read_payload(message: IdeaThread) -> dict[str, Any]:
+    metadata = message.metadata_ if isinstance(message.metadata_, dict) else {}
+    return {
+        "id": message.id,
+        "idea_id": str(message.idea_id) if message.idea_id else None,
+        "role": message.role,
+        "content": message.content,
+        "attachments": message.attachments or [],
+        "metadata": metadata,
+        "object_references": metadata.get("object_references") or [],
+        "thread_references": metadata.get("thread_references") or [],
+        "user_id": str(message.user_id) if message.user_id else None,
+        "created_at": message.created_at,
+    }
 
 
 def _product_event_org_id(idea, user: dict[str, Any]) -> str | None:
@@ -262,6 +285,7 @@ async def _idea_read_with_author(
     presentation hint and intentionally can differ from owner after a handoff.
     """
     payload = IdeaRead.model_validate(idea).model_dump()
+    _apply_thread_link_fields(payload, getattr(idea, "id", ""))
     payload["project_context"] = _project_context_for_idea(idea)
     if author_hint_loaded:
         _apply_author_hint(payload, author_hint)
@@ -717,7 +741,8 @@ async def list_threads(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     await _require_idea_for_user(db, idea_id, user)
-    return await IdeaThreadRepository(db).a_list_by_idea(idea_id)
+    messages = await IdeaThreadRepository(db).a_list_by_idea(idea_id)
+    return [ThreadMessageRead.model_validate(_thread_message_read_payload(message)) for message in messages]
 
 
 @router.get("/ideas/{idea_id}/visual-blocks", response_model=list[VisualBlockRead])
@@ -760,7 +785,7 @@ async def create_thread_message(
         ),
     )
     message_payload = result.message_payload
-    response = ThreadMessageRead.model_validate(result.message)
+    response = ThreadMessageRead.model_validate(message_payload)
     event_org_id = _product_event_org_id(idea, user)
     await db.commit()
     await ws_manager.broadcast_product_event(

@@ -16,6 +16,7 @@
   import AttachmentPreviewDialog from '$lib/components/chat/AttachmentPreviewDialog.svelte';
   import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
+  import ThreadLinkPreviewCard from '$lib/features/threads/components/ThreadLinkPreviewCard.svelte';
   import type { ChatAttachmentItem, ChatAttachmentKind } from '$lib/components/chat/chatTypes';
   import {
     CONVERSATION_SCROLL_BOTTOM_THRESHOLD,
@@ -1560,6 +1561,7 @@
                 {/if}
 
                 {@render messageLinkAttachmentList(message.body, message.attachments)}
+                {@render threadPreviewCards(message)}
               </article>
             {/each}
           {/if}
@@ -1701,6 +1703,7 @@
                 {/if}
 
                 {@render messageLinkAttachmentList(message.body, message.attachments)}
+                {@render threadPreviewCards(message)}
 
                 {#if shouldShowThreadSummary(message)}
                   <footer class="chat-thread-summary">
@@ -1847,6 +1850,7 @@
               {/if}
 
               {@render messageLinkAttachmentList(activeThreadRoot.body, activeThreadRoot.attachments)}
+              {@render threadPreviewCards(activeThreadRoot)}
             </article>
 
             {#if threadPage.hasMore}
@@ -1910,6 +1914,7 @@
                   {/if}
 
                   {@render messageLinkAttachmentList(reply.body, reply.attachments)}
+                  {@render threadPreviewCards(reply)}
                 </article>
               {/each}
             {/if}
@@ -1986,6 +1991,7 @@
     {/if}
 
     {@render messageLinkAttachmentList(message.body, message.attachments)}
+    {@render threadPreviewCards(message)}
   </article>
 {/snippet}
 
@@ -2069,6 +2075,16 @@
     <div class="chat-attachments chat-link-attachments">
       {#each linkAttachments as attachment (attachment.url)}
         {@render attachmentCard(attachment)}
+      {/each}
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet threadPreviewCards(message: ChatMessage)}
+  {#if message.thread_references?.length}
+    <div class="chat-thread-link-previews">
+      {#each message.thread_references as reference (`${message.id}-${reference.thread_id ?? reference.original_ref ?? reference.url}`)}
+        <ThreadLinkPreviewCard {reference} compact />
       {/each}
     </div>
   {/if}
@@ -2178,6 +2194,12 @@
   --chat-drop-overlay-shadow:
     0 18px 42px rgba(0, 0, 0, 0.26),
     inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.chat-thread-link-previews {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .chat-dock-shell {

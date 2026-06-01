@@ -48,6 +48,7 @@
     type ThreadStageRightDockTab,
   } from '$lib/features/threads/controllers/threadSidePanelController';
   import { threadStreamController } from '$lib/features/threads/controllers/threadStreamController';
+  import { threadUrl } from '$lib/features/threads/domain/threadLinks';
   import {
     findSlashCommandToken,
     replaceSlashCommandToken,
@@ -175,6 +176,7 @@
   let threadStageGutterPx = $state(24);
   let titleGenerating = $state(false);
   let threadArchiving = $state(false);
+  let threadLinkCopying = $state(false);
 
   const THREAD_STAGE_MIN_THREAD_WIDTH = 380;
   const THREAD_STAGE_DEFAULT_GUTTER = 24;
@@ -302,6 +304,9 @@
       title: ideaDisplayTitle(selectedIdea),
       statusLabel,
       statusState: headerStatusState,
+      linkActionLabel: threadLinkCopying ? 'Thread link copied' : 'Copy thread link',
+      linkActionLoading: threadLinkCopying,
+      onLinkAction: () => void copyThreadLink(),
       titleActionLabel: titleGenerating ? 'Generating a new thread title' : 'Generate a new thread title',
       titleActionLoading: titleGenerating,
       onTitleAction: () => void regenerateThreadTitle(),
@@ -418,6 +423,23 @@
       ui.toast(err?.detail || err?.message || 'Failed to refresh thread title', 'error');
     } finally {
       titleGenerating = false;
+    }
+  }
+
+  async function copyThreadLink() {
+    const selectedIdea = idea;
+    if (!selectedIdea?.id || threadLinkCopying) return;
+    const value = selectedIdea.thread_url || threadUrl(selectedIdea.id);
+    threadLinkCopying = true;
+    try {
+      await navigator.clipboard.writeText(value);
+      ui.toast('Thread link copied', 'success');
+    } catch {
+      ui.toast(value, 'info');
+    } finally {
+      window.setTimeout(() => {
+        threadLinkCopying = false;
+      }, 900);
     }
   }
 

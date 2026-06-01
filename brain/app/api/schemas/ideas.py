@@ -46,6 +46,11 @@ class IdeaRead(_UUIDMixin, BaseModel):
     author_name: str | None = None
     author_color: str | None = None
     project_context: dict | None = None
+    preview_summary: str | None = None
+    preview_source: str | None = None
+    preview_updated_at: datetime | None = None
+    thread_route: str | None = None
+    thread_url: str | None = None
     thread_count: int | None = 0
     active_agents: int = 0
     agent_details: Any = None
@@ -59,6 +64,10 @@ class IdeaRead(_UUIDMixin, BaseModel):
         "orbit_anchor_id",
         "author_name",
         "author_color",
+        "preview_summary",
+        "preview_source",
+        "thread_route",
+        "thread_url",
         mode="before",
     )
     @classmethod
@@ -120,8 +129,22 @@ class ThreadMessageRead(_UUIDMixin, BaseModel):
     idea_id: str | UUID | None = None
     role: str
     content: str
+    attachments: list[Any] = Field(default_factory=list)
+    metadata: dict[str, Any] | None = None
+    object_references: list[dict[str, Any]] = Field(default_factory=list)
+    thread_references: list[dict[str, Any]] = Field(default_factory=list)
     user_id: str | UUID | None = None
     created_at: datetime
+
+    @field_validator("attachments", "object_references", "thread_references", mode="before")
+    @classmethod
+    def coerce_optional_lists(cls, value):
+        return value if isinstance(value, list) else []
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def coerce_optional_metadata(cls, value):
+        return value if isinstance(value, dict) else None
 
 class ThreadMessageCreate(BaseModel):
     content: str = Field(min_length=1)

@@ -20,6 +20,7 @@ from brain.app.api.routers.agent_bridge import (
 from brain.app.api.routers.agent_mcp_domains import DOMAIN_MCP_TOOLS, DOMAIN_TOOL_HANDLERS
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.mentions import classify_mention_intent
+from brain.systems.cortex.thread_links import thread_id_from_reference
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
 
@@ -87,7 +88,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 },
                 "correlation": {
                     "type": "object",
-                    "description": "Optional correlation such as thread_id, external_session_id, or previous submission reference.",
+                    "description": "Optional correlation such as thread_id, thread_url, external_session_id, or previous submission reference.",
                     "default": {},
                 },
                 "idempotency_key": {
@@ -139,10 +140,11 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 "an update so replies preserve team context and avoid repeating prior work."
             ),
             {
-                "idea_id": {"type": "string", "description": "Illo idea/thread id."},
+                "idea_id": {"type": "string", "description": "Illo idea/thread id or canonical Thread URL."},
+                "thread_url": {"type": "string", "description": "Optional canonical Illo Thread URL."},
                 "limit": {"type": "integer", "description": "Maximum messages to return.", "default": 100},
             },
-            ["idea_id"],
+            [],
         ),
         "scope": external_agents.SCOPE_WORKSPACE_READ,
     },
@@ -204,7 +206,8 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 f"{CONTEXT_TOOL_NAME} so IloSpace can route the context."
             ),
             {
-                "idea_id": {"type": "string", "description": "Existing Illo idea/thread id."},
+                "idea_id": {"type": "string", "description": "Existing Illo idea/thread id or canonical Thread URL."},
+                "thread_url": {"type": "string", "description": "Optional canonical Illo Thread URL."},
                 "body": {"type": "string", "description": "Message body to post into the thread."},
                 "teammate_user_ids": {
                     "type": "array",
@@ -225,7 +228,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 },
                 "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
             },
-            ["idea_id", "body"],
+            ["body"],
         ),
         "scope": external_agents.SCOPE_ILLO_THREAD_WRITE,
         "mutates_thread": True,
@@ -476,6 +479,14 @@ def _context_tool_response(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _thread_argument_id(arguments: dict[str, Any]) -> str:
+    for key in ("thread_url", "url", "thread_route", "idea_id", "thread_id"):
+        thread_id = thread_id_from_reference(arguments.get(key), allow_raw_id=key in {"idea_id", "thread_id"})
+        if thread_id:
+            return thread_id
+    return str(arguments.get("idea_id") or arguments.get("thread_id") or "")
+
+
 async def _tool_submit_context(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
@@ -512,7 +523,7 @@ async def _tool_get_thread(
     return await external_agents.get_thread(
         db,
         principal,
-        idea_id=str(arguments.get("idea_id") or ""),
+        idea_id=_thread_argument_id(arguments),
         limit=int(arguments.get("limit") or 100),
     )
 
@@ -559,7 +570,7 @@ async def _tool_post_thread_message(
     idea, message, notified = await external_agents.post_thread_message_from_agent(
         db,
         principal,
-        idea_id=str(arguments.get("idea_id") or ""),
+        idea_id=_thread_argument_id(arguments),
         body=body,
         teammate_user_ids=_clean_string_list(arguments.get("teammate_user_ids")),
         artifacts=_clean_artifacts(arguments.get("artifacts")),

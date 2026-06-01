@@ -110,6 +110,8 @@ function cloneUnreadSummary(summary?: Partial<ChatUnreadSummary> | null): ChatUn
 function normalizeMessage(message: ChatMessageRecord): ChatMessage {
   return {
     ...message,
+    object_references: Array.isArray(message.object_references) ? message.object_references : [],
+    thread_references: Array.isArray(message.thread_references) ? message.thread_references : [],
     optimistic: false,
     failed: false,
     error: null,
@@ -1388,6 +1390,8 @@ class ChatStore {
       reply_to_message_id: input.replyToMessageId,
       attachments: input.attachments,
       metadata: input.metadata,
+      object_references: [],
+      thread_references: [],
       conversation_seq: lastSequence + 1,
       reply_count: 0,
       last_reply_at: null,

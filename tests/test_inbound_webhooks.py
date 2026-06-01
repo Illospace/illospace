@@ -914,9 +914,9 @@ async def test_context_envelope_attaches_to_correlated_thread_and_replays_idempo
 
     assert first["ilo_outcome"]["operation"] == "attached"
     assert first["ilo_outcome"]["thread_id"] == str(thread.id)
-    assert first["ilo_outcome"]["thread_url"] == f"https://illo.example.com/cortex?idea={thread.id}"
+    assert first["ilo_outcome"]["thread_url"] == f"https://illo.example.com/threads/{thread.id}"
     assert first["ilo_outcome"]["url"] == first["ilo_outcome"]["thread_url"]
-    assert first["ilo_outcome"]["thread_route"] == f"/cortex?idea={thread.id}"
+    assert first["ilo_outcome"]["thread_route"] == f"/threads/{thread.id}"
     assert replay["idempotent_replay"] is True
     assert replay["ilo_outcome"]["thread_url"] == first["ilo_outcome"]["thread_url"]
     assert replay["ilo_outcome"]["thread_route"] == first["ilo_outcome"]["thread_route"]

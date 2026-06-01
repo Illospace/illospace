@@ -154,6 +154,22 @@ export interface ChatAttachmentPayload {
   [key: string]: unknown;
 }
 
+export interface ObjectReferencePayload {
+  object_type: 'thread' | string;
+  status?: 'available' | 'unavailable' | string;
+  thread_id?: string | null;
+  title?: string | null;
+  preview_summary?: string | null;
+  preview_source?: string | null;
+  preview_updated_at?: string | null;
+  thread_route?: string | null;
+  thread_url?: string | null;
+  url?: string | null;
+  original_ref?: string | null;
+  handoff?: Record<string, any> | null;
+  [key: string]: unknown;
+}
+
 export interface ChatMessage {
   id: number;
   conversation_id: string;
@@ -168,6 +184,8 @@ export interface ChatMessage {
   reply_to_message_id: number | null;
   attachments: ChatAttachmentPayload[];
   metadata: Record<string, any> | null;
+  object_references: ObjectReferencePayload[];
+  thread_references: ObjectReferencePayload[];
   conversation_seq: number;
   reply_count: number;
   last_reply_at: string | null;
@@ -234,6 +252,8 @@ export interface ThreadDiscussionComment {
   body: string;
   attachments: ChatAttachmentPayload[];
   metadata: Record<string, any> | null;
+  object_references?: ObjectReferencePayload[];
+  thread_references?: ObjectReferencePayload[];
   created_at: string | null;
 }
 
@@ -969,6 +989,11 @@ export const api = {
   markAllNotificationsRead: () =>
     fetchJson<AppNotificationSummary>('/api/notifications/read-all', {
       method: 'POST',
+    }),
+  resolveLinkPreviews: (urls: string[]) =>
+    fetchJson<{ previews: ObjectReferencePayload[] }>('/api/link-previews/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ urls }),
     }),
 
   // Cortex

@@ -28,6 +28,8 @@ class ChatMessageRead(BaseModel):
     reply_to_message_id: int | None = None
     attachments: list[Any] = Field(default_factory=list)
     metadata: dict[str, Any] | None = None
+    object_references: list[dict[str, Any]] = Field(default_factory=list)
+    thread_references: list[dict[str, Any]] = Field(default_factory=list)
     conversation_seq: int
     reply_count: int = 0
     last_reply_at: datetime | None = None

@@ -30,6 +30,7 @@ export const CORTEX_REALTIME_EVENT_TYPES = [
   'idea_created',
   'idea_upserted',
   'title_generated',
+  'thread_read_model_updated',
   'budget_approval_needed',
   'mention',
   'thought_split',
@@ -103,6 +104,16 @@ export type CortexRealtimePayloadByType = {
   idea_created: { idea_id?: string };
   idea_upserted: { idea?: Idea };
   title_generated: { idea_id?: string; title?: string };
+  thread_read_model_updated: {
+    idea_id?: string;
+    thread_id?: string;
+    title?: string | null;
+    preview_summary?: string | null;
+    preview_source?: string | null;
+    preview_updated_at?: string | null;
+    thread_route?: string | null;
+    thread_url?: string | null;
+  };
   budget_approval_needed: { summary?: string };
   mention: { idea_title?: string };
   thought_split: { children?: Idea[] };
