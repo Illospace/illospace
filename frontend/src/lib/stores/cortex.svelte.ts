@@ -1193,9 +1193,6 @@ class CortexStore {
         throw new Error('Incomplete cortex direct-thread bootstrap');
       }
       const selectedIdea = this._normalizeIdea(bootstrap.selected_idea);
-      if (selectedIdea.archived_at) {
-        throw { status: 410, detail: 'Thread is archived' };
-      }
       const remainingIdeas = this.ideas.filter((idea) => idea.id !== selectedIdea.id);
       this.ideas = [selectedIdea, ...remainingIdeas];
       if (!this.teamMembersLoaded) {
@@ -1204,12 +1201,25 @@ class CortexStore {
       }
       this._applyLoadedStream(id, version, bootstrap.direct_thread.stream);
     } catch {
-      await this._load({ loadTeamMembers: false });
-      const activeIdea = this.ideas.find((idea) => idea.id === id && !idea.archived_at);
-      if (activeIdea) {
-        await this.selectIdea(id);
-      } else if (this.selectedIdeaId === id) {
-        await this.selectIdea(null);
+      try {
+        const [selectedIdeaRaw, stream] = await Promise.all([
+          api.getIdea(id),
+          api.unifiedStream(id),
+        ]);
+        this._upsertIdea(this._normalizeIdea(selectedIdeaRaw));
+        if (!this.teamMembersLoaded) {
+          this.teamMembers = this._normalizeTeamMembers(this.teamMembers);
+          this.teamMembersLoaded = true;
+        }
+        this._applyLoadedStream(id, version, stream);
+      } catch {
+        await this._load({ loadTeamMembers: false });
+        const activeIdea = this.ideas.find((idea) => idea.id === id && !idea.archived_at);
+        if (activeIdea) {
+          await this.selectIdea(id);
+        } else if (this.selectedIdeaId === id) {
+          await this.selectIdea(null);
+        }
       }
     } finally {
       this.loading = false;

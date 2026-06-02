@@ -953,20 +953,13 @@
       return;
     }
     if (requestedIdeaId === lastRequestedIdeaId) {
-      if (cortex.selectedIdea?.id === requestedIdeaId) directThreadUrlPending = false;
+      if (cortex.selectedIdeaId === requestedIdeaId) directThreadUrlPending = false;
       return;
     }
     lastRequestedIdeaId = requestedIdeaId;
-    if (!cortex.ideas.some((idea) => idea.id === requestedIdeaId)) {
-      await cortex.load();
-    }
-    if (cortex.ideas.some((idea) => idea.id === requestedIdeaId)) {
-      await cortex.selectIdea(requestedIdeaId);
-      if (cortex.selectedIdeaId === requestedIdeaId) {
-        syncCanonicalThreadUrl(requestedIdeaId);
-      } else {
-        cleanupUnresolvedThreadUrl(requestedIdeaId);
-      }
+    await cortex.loadDirectThread(requestedIdeaId);
+    if (cortex.selectedIdeaId === requestedIdeaId) {
+      syncCanonicalThreadUrl(requestedIdeaId);
     } else {
       cleanupUnresolvedThreadUrl(requestedIdeaId);
     }
