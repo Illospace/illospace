@@ -15,6 +15,17 @@ class SlackConfigurationError(RuntimeError):
 class SlackApiError(RuntimeError):
     """Raised when Slack Web API returns an error."""
 
+    def __init__(self, error: str, *, response_metadata: dict[str, Any] | None = None) -> None:
+        self.error = error
+        self.response_metadata = dict(response_metadata or {})
+        messages = self.response_metadata.get("messages")
+        details = (
+            "; ".join(str(message) for message in messages if message)
+            if isinstance(messages, list)
+            else ""
+        )
+        super().__init__(f"{error}: {details}" if details else error)
+
 
 class SlackWebClient:
     def __init__(
@@ -31,7 +42,16 @@ class SlackWebClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    async def api_call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _coerce_response(self, data: dict[str, Any]) -> dict[str, Any]:
+        if not data.get("ok"):
+            metadata = data.get("response_metadata")
+            raise SlackApiError(
+                str(data.get("error") or "slack_api_error"),
+                response_metadata=metadata if isinstance(metadata, dict) else None,
+            )
+        return dict(data)
+
+    async def _post(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         async with async_http_client(timeout=self.timeout) as client:
             response = await client.post(
                 f"{self.base_url}/{method}",
@@ -43,9 +63,18 @@ class SlackWebClient:
             )
             response.raise_for_status()
             data = response.json()
-        if not data.get("ok"):
-            raise SlackApiError(str(data.get("error") or "slack_api_error"))
-        return dict(data)
+        return self._coerce_response(dict(data))
+
+    async def _get(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        async with async_http_client(timeout=self.timeout) as client:
+            response = await client.get(
+                f"{self.base_url}/{method}",
+                headers={"Authorization": f"Bearer {self.bot_token}"},
+                params=params,
+            )
+            response.raise_for_status()
+            data = response.json()
+        return self._coerce_response(dict(data))
 
     async def post_message(
         self,
@@ -60,7 +89,7 @@ class SlackWebClient:
         }
         if thread_ts:
             payload["thread_ts"] = thread_ts
-        return await self.api_call("chat.postMessage", payload)
+        return await self._post("chat.postMessage", payload)
 
     async def post_ephemeral(
         self,
@@ -77,7 +106,7 @@ class SlackWebClient:
         }
         if thread_ts:
             payload["thread_ts"] = thread_ts
-        return await self.api_call("chat.postEphemeral", payload)
+        return await self._post("chat.postEphemeral", payload)
 
     async def set_assistant_status(
         self,
@@ -94,10 +123,10 @@ class SlackWebClient:
         }
         if loading_messages:
             payload["loading_messages"] = loading_messages[:10]
-        return await self.api_call("assistant.threads.setStatus", payload)
+        return await self._post("assistant.threads.setStatus", payload)
 
     async def open_conversation(self, *, users: str) -> dict[str, Any]:
-        return await self.api_call("conversations.open", {"users": users})
+        return await self._post("conversations.open", {"users": users})
 
     async def conversation_replies(
         self,
@@ -106,7 +135,7 @@ class SlackWebClient:
         thread_ts: str,
         limit: int = 50,
     ) -> dict[str, Any]:
-        return await self.api_call(
+        return await self._get(
             "conversations.replies",
             {
                 "channel": channel,
@@ -129,10 +158,10 @@ class SlackWebClient:
         if latest:
             payload["latest"] = latest
             payload["inclusive"] = True
-        return await self.api_call("conversations.history", payload)
+        return await self._post("conversations.history", payload)
 
     async def auth_test(self) -> dict[str, Any]:
-        return await self.api_call("auth.test", {})
+        return await self._post("auth.test", {})
 
 
 def slack_bot_token_from_env() -> str:
