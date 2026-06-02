@@ -13,6 +13,7 @@ oauth_config:
       - channels:history
       - channels:read
       - chat:write
+      - chat:write.public
       - files:read
       - files:write
       - groups:history
@@ -20,6 +21,8 @@ oauth_config:
       - im:history
       - im:read
       - im:write
+      - mpim:history
+      - mpim:read
       - users:read
 settings:
   event_subscriptions:

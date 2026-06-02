@@ -1425,9 +1425,11 @@ CHAT_TOOLS = [
     {
         "name": "manage_slack",
         "description": (
-            "Inspect Slack connection health and Slack-to-Illospace identity mappings. "
-            "Use action='status' to check whether Slack is connected, and use "
-            "identity mapping actions to link Slack users to Illospace users."
+            "Inspect Slack connection health, list Slack conversations visible to Illo's bot, "
+            "and manage Slack-to-Illospace identity mappings. Use action='status' to check "
+            "whether Slack is connected, action='list_channels' to see channels/DMs the "
+            "configured bot token can enumerate, and identity mapping actions to link Slack users "
+            "to Illospace users."
         ),
         "input_schema": {
             "type": "object",
@@ -1436,6 +1438,7 @@ CHAT_TOOLS = [
                     "type": "string",
                     "enum": [
                         "status",
+                        "list_channels",
                         "list_mappings",
                         "link_identity",
                         "unlink_identity",
@@ -1453,6 +1456,27 @@ CHAT_TOOLS = [
                 "user_id": {
                     "type": "string",
                     "description": "Illospace user id, required for link_identity.",
+                },
+                "channel_types": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                    "description": "Conversation types for list_channels: public_channel, private_channel, mpim, im. Defaults to all supported types.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum Slack conversations to return for list_channels, up to Slack's page limit.",
+                    "default": 200,
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Slack pagination cursor for list_channels.",
+                },
+                "include_archived": {
+                    "type": "boolean",
+                    "description": "Include archived Slack conversations in list_channels results.",
+                    "default": False,
                 },
             },
             "required": ["action"],

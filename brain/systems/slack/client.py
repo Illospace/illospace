@@ -114,6 +114,23 @@ class SlackWebClient:
             payload["inclusive"] = True
         return await self.api_call("conversations.history", payload)
 
+    async def conversations_list(
+        self,
+        *,
+        types: str = "public_channel,private_channel,mpim,im",
+        limit: int = 200,
+        cursor: str | None = None,
+        exclude_archived: bool = True,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "types": types,
+            "limit": max(1, min(int(limit or 200), 1000)),
+            "exclude_archived": bool(exclude_archived),
+        }
+        if cursor:
+            payload["cursor"] = cursor
+        return await self.api_call("conversations.list", payload)
+
     async def auth_test(self) -> dict[str, Any]:
         return await self.api_call("auth.test", {})
 
