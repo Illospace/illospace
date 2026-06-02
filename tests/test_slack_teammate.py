@@ -759,10 +759,23 @@ async def test_manage_slack_list_channels_returns_bot_visible_conversations(sess
     async def slack_client():
         return _SlackClient()
 
+    class _UnitOfWork:
+        def __init__(self):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, _exc, _tb):
+            if exc_type is None:
+                await session.flush()
+            return None
+
     monkeypatch.setattr(
         "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
         slack_client,
     )
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
 
     with bind_agent_context({"org_id": ORG_ID}):
         result = json.loads(
