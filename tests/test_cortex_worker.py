@@ -59,6 +59,47 @@ def test_runner_health_grace_has_safe_minimum(monkeypatch):
     assert _runner_health_grace_seconds() == 1.0
 
 
+def test_queue_health_check_interval_accepts_numeric_override(monkeypatch):
+    from brain.systems.cortex.worker import _queue_health_check_interval_seconds
+
+    monkeypatch.setenv("ILLO_AGENT_RUN_QUEUE_HEALTH_CHECK_SECONDS", "2.5")
+
+    assert _queue_health_check_interval_seconds() == 2.5
+
+
+def test_queue_stall_grace_has_safe_minimum(monkeypatch):
+    from brain.systems.cortex.worker import _queue_stall_grace_seconds
+
+    monkeypatch.setenv("ILLO_AGENT_RUN_QUEUE_STALL_GRACE_SECONDS", "0")
+
+    assert _queue_stall_grace_seconds() == 5.0
+
+
+def test_queue_stall_monitor_checks_on_interval():
+    from brain.systems.runs.cortex.queue_health import QueueStallMonitor
+
+    monitor = QueueStallMonitor(check_interval_seconds=5.0, stall_grace_seconds=10.0)
+
+    assert monitor.should_check(now=4.0) is False
+    assert monitor.should_check(now=5.0) is True
+    monitor.observe({"stale_queued_backlog": False}, now=5.0)
+    assert monitor.should_check(now=9.0) is False
+    assert monitor.should_check(now=10.0) is True
+
+
+def test_queue_stall_monitor_tracks_stale_backlog():
+    from brain.systems.runs.cortex.queue_health import QueueStallMonitor
+
+    monitor = QueueStallMonitor(check_interval_seconds=5.0, stall_grace_seconds=10.0)
+
+    assert monitor.observe({"stale_queued_backlog": True}, now=10.0) is None
+    assert monitor.stale_since == 10.0
+    assert monitor.observe({"stale_queued_backlog": True}, now=19.0) is None
+    assert monitor.observe({"stale_queued_backlog": True}, now=20.0) == 10
+    assert monitor.observe({"stale_queued_backlog": False}, now=21.0) is None
+    assert monitor.stale_since is None
+
+
 def test_cycle_scheduler_can_be_disabled_for_handoff_worker(monkeypatch):
     from brain.systems.cortex.worker import _cycle_scheduler_enabled
 

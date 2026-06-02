@@ -153,6 +153,44 @@ def test_runner_health_snapshot_requires_supervisor_and_slots(monkeypatch):
     assert runner.runner_health_snapshot()["runner_running"] is False
 
 
+async def test_queued_backlog_health_snapshot_marks_stale_queue(monkeypatch):
+    from brain.systems.runs.cortex import queue_health
+
+    oldest = datetime.now(timezone.utc) - timedelta(seconds=60)
+
+    async def fake_snapshot():
+        return 2, oldest, 0
+
+    monkeypatch.setattr(queue_health, "queued_backlog_snapshot_async", fake_snapshot)
+    monkeypatch.setattr(queue_health, "queued_watchdog_after_seconds", lambda: 10)
+    monkeypatch.setattr(queue_health, "runner_concurrency", lambda: 4)
+
+    health = await queue_health.queued_backlog_health_snapshot_async()
+
+    assert health["queued"] == 2
+    assert health["active_runs"] == 0
+    assert health["stale_queued_backlog"] is True
+
+
+async def test_queued_backlog_health_snapshot_respects_full_capacity(monkeypatch):
+    from brain.systems.runs.cortex import queue_health
+
+    oldest = datetime.now(timezone.utc) - timedelta(seconds=60)
+
+    async def fake_snapshot():
+        return 2, oldest, 4
+
+    monkeypatch.setattr(queue_health, "queued_backlog_snapshot_async", fake_snapshot)
+    monkeypatch.setattr(queue_health, "queued_watchdog_after_seconds", lambda: 10)
+    monkeypatch.setattr(queue_health, "runner_concurrency", lambda: 4)
+
+    health = await queue_health.queued_backlog_health_snapshot_async()
+
+    assert health["queued"] == 2
+    assert health["active_runs"] == 4
+    assert health["stale_queued_backlog"] is False
+
+
 async def test_supervisor_starts_runner_slots_before_stale_reconcile_finishes(monkeypatch):
     from brain.systems.runs.cortex import runner
 
