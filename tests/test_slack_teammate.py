@@ -127,6 +127,8 @@ def test_self_hosted_slack_manifest_supports_illo_teammate_loop():
         "im:history",
         "im:read",
         "im:write",
+        "mpim:history",
+        "mpim:read",
         "users:read",
     }.issubset(bot_scopes)
 
@@ -1138,7 +1140,7 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
     actions = tool["input_schema"]["properties"]["action"]["enum"]
     serialized_tool = json.dumps(tool)
 
-    assert actions == ["status", "list_mappings", "link_identity", "unlink_identity"]
+    assert actions == ["status", "list_channels", "list_mappings", "link_identity", "unlink_identity"]
     assert "setup_instructions" not in serialized_tool
     assert "SLACK_" not in serialized_tool
     assert "docker" not in serialized_tool
@@ -1199,6 +1201,151 @@ async def test_manage_slack_status_returns_connection_facts_not_setup_guidance(m
     assert "server secret store" not in serialized
     invented_surface = "Illospace Slack " + "connection setup"
     assert invented_surface not in serialized
+
+
+@pytest.mark.asyncio
+async def test_slack_web_client_lists_conversations_with_safe_defaults(monkeypatch):
+    from brain.systems.slack.client import SlackWebClient
+
+    calls = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "channels": []}
+
+    class _AsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        async def post(self, url, *, headers, json):
+            calls.append({"url": url, "headers": headers, "json": json})
+            return _Response()
+
+    monkeypatch.setattr("httpx.AsyncClient", _AsyncClient)
+
+    client = SlackWebClient("xoxb-test")
+    await client.conversations_list(
+        types="public_channel,private_channel",
+        limit=5000,
+        cursor="cursor-1",
+        exclude_archived=True,
+    )
+
+    assert calls == [
+        {
+            "url": "https://slack.com/api/conversations.list",
+            "headers": {
+                "Authorization": "Bearer xoxb-test",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            "json": {
+                "types": "public_channel,private_channel",
+                "limit": 1000,
+                "exclude_archived": True,
+                "cursor": "cursor-1",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_manage_slack_list_channels_returns_bot_visible_conversations(session, monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_manage_slack
+
+    connection = await _seed_slack_connection(session)
+    calls = []
+
+    class _SlackClient:
+        async def conversations_list(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "ok": True,
+                "channels": [
+                    {
+                        "id": "C456",
+                        "name": "team",
+                        "is_channel": True,
+                        "is_private": False,
+                        "is_member": True,
+                        "is_archived": False,
+                        "num_members": 12,
+                    }
+                ],
+                "response_metadata": {"next_cursor": "next-1"},
+            }
+
+    async def slack_client():
+        return _SlackClient()
+
+    class _UnitOfWork:
+        def __init__(self):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, _exc, _tb):
+            if exc_type is None:
+                await session.flush()
+            return None
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
+
+    with bind_agent_context({"org_id": ORG_ID}):
+        result = json.loads(
+            await _handle_manage_slack(
+                action="list_channels",
+                connection_id=str(connection.id),
+                channel_types=["public_channel", "bogus", "private_channel"],
+                limit=5000,
+                cursor="cursor-1",
+                include_archived=False,
+            )
+        )
+
+    assert calls == [
+        {
+            "types": "public_channel,private_channel",
+            "limit": 1000,
+            "cursor": "cursor-1",
+            "exclude_archived": True,
+        }
+    ]
+    assert result["ok"] is True
+    assert result["connection"]["id"] == str(connection.id)
+    assert result["count"] == 1
+    assert result["channels"] == [
+        {
+            "id": "C456",
+            "name": "team",
+            "is_channel": True,
+            "is_group": None,
+            "is_im": None,
+            "is_mpim": None,
+            "is_private": False,
+            "is_member": True,
+            "is_archived": False,
+            "num_members": 12,
+            "topic": None,
+            "purpose": None,
+        }
+    ]
+    assert result["next_cursor"] == "next-1"
+    assert "visible to the configured bot token" in result["visibility_note"]
 
 
 @pytest.mark.asyncio

@@ -73,3 +73,8 @@ Slack connection owner as the authority user while preserving Slack provenance.
 When identity matters, Illo can use `manage_slack` to inspect connection health
 and link a Slack user id to an Illospace user id. Once linked, later Slack runs
 from that Slack user are attributed to the mapped Illospace user.
+
+
+## Channel inventory
+
+Illo can list Slack conversations through `manage_slack(action="list_channels")`. The result is bounded by Slack itself: public channels require `channels:read`, private channels require `groups:read` and may only appear when the app/bot can see them, MPIMs require `mpim:read`, and DMs require `im:read`. Posting into public channels the bot has not joined requires `chat:write.public`; private channels still require inviting the bot.

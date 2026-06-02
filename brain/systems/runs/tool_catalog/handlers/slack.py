@@ -46,6 +46,56 @@ def _coerce_slack_limit(value: Any, default: int = 50) -> int:
         return default
 
 
+def _coerce_slack_list_limit(value: Any, default: int = 200) -> int:
+    try:
+        return max(1, min(int(value or default), 1000))
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
+def _normalize_slack_channel_types(value: Any) -> str:
+    allowed = {"public_channel", "private_channel", "mpim", "im"}
+    if value is None:
+        requested = ["public_channel", "private_channel", "mpim", "im"]
+    elif isinstance(value, str):
+        requested = [part.strip() for part in value.split(",")]
+    else:
+        requested = [str(part).strip() for part in value]
+    normalized = [part for part in requested if part in allowed]
+    return ",".join(dict.fromkeys(normalized)) or "public_channel,private_channel,mpim,im"
+
+
+def _slack_channel_payload(channel: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": channel.get("id"),
+        "name": channel.get("name") or channel.get("user"),
+        "is_channel": channel.get("is_channel"),
+        "is_group": channel.get("is_group"),
+        "is_im": channel.get("is_im"),
+        "is_mpim": channel.get("is_mpim"),
+        "is_private": channel.get("is_private"),
+        "is_member": channel.get("is_member"),
+        "is_archived": channel.get("is_archived"),
+        "num_members": channel.get("num_members"),
+        "topic": channel.get("topic") if isinstance(channel.get("topic"), dict) else None,
+        "purpose": channel.get("purpose") if isinstance(channel.get("purpose"), dict) else None,
+    }
+
+
 async def _slack_client_from_runtime():
     from brain.systems.slack.client import SlackWebClient
     from brain.systems.vault.runtime_secrets import read_runtime_secret
@@ -256,6 +306,10 @@ async def _handle_manage_slack(
     connection_id: str | None = None,
     slack_user_id: str | None = None,
     user_id: str | None = None,
+    channel_types: str | list[str] | None = None,
+    limit: int = 200,
+    cursor: str | None = None,
+    include_archived: bool = False,
 ) -> str:
     """Inspect Slack connection health and manage minimal identity mappings."""
 
@@ -314,6 +368,38 @@ async def _handle_manage_slack(
         if error:
             return json.dumps({"error": error})
 
+        if normalized_action == "list_channels":
+            try:
+                client = await _slack_client_from_runtime()
+                response = await client.conversations_list(
+                    types=_normalize_slack_channel_types(channel_types),
+                    limit=_coerce_slack_list_limit(limit),
+                    cursor=str(cursor or "").strip() or None,
+                    exclude_archived=not _coerce_bool(include_archived, default=False),
+                )
+            except Exception as exc:
+                return json.dumps({"error": str(exc)})
+            channels = [
+                _slack_channel_payload(channel)
+                for channel in list(response.get("channels") or [])
+                if isinstance(channel, dict)
+            ]
+            metadata = response.get("response_metadata") if isinstance(response.get("response_metadata"), dict) else {}
+            return json.dumps(
+                {
+                    "ok": True,
+                    "connection": _slack_connection_payload(connection),
+                    "count": len(channels),
+                    "channels": channels,
+                    "next_cursor": str(metadata.get("next_cursor") or "") or None,
+                    "visibility_note": (
+                        "Slack only returns conversations visible to the configured bot token; "
+                        "private channels may require the bot to be invited and the app to have the right scopes."
+                    ),
+                },
+                default=str,
+            )
+
         if normalized_action == "list_mappings":
             mappings = await list_slack_identity_mappings(
                 uow.session,
@@ -339,7 +425,7 @@ async def _handle_manage_slack(
             )
             return json.dumps({"ok": True, "mapping": mapping}, default=str)
 
-    return json.dumps({"error": "manage_slack action must be status, list_mappings, link_identity, or unlink_identity"})
+    return json.dumps({"error": "manage_slack action must be status, list_channels, list_mappings, link_identity, or unlink_identity"})
 
 
 __all__ = [
