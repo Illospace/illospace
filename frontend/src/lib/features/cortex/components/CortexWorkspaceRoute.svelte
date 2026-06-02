@@ -707,6 +707,13 @@
     await goto(targetHref, { keepFocus: true, noScroll: true, replaceState: true });
   }
 
+  function cleanupUnresolvedThreadUrl(requestedIdeaId: string | null | undefined) {
+    if (!browser || !requestedIdeaId || requestedThreadIdeaIdFromPage() !== requestedIdeaId) return;
+    lastSyncedThreadRoute = null;
+    initialDirectThreadIdeaId = null;
+    void replaceCortexHref(buildCortexHrefWithoutThread($page.url.searchParams));
+  }
+
   function syncThreadUrlToStage() {
     if (!browser || directThreadUrlPending) return;
 
@@ -718,7 +725,7 @@
       return;
     }
 
-    if (urlIdeaId && (lastSyncedThreadRoute || isThreadStageUrl())) {
+    if (urlIdeaId && lastSyncedThreadRoute) {
       lastSyncedThreadRoute = null;
       initialDirectThreadIdeaId = null;
       void replaceCortexHref(buildCortexHrefWithoutThread($page.url.searchParams));
@@ -957,7 +964,11 @@
       await cortex.selectIdea(requestedIdeaId);
       if (cortex.selectedIdeaId === requestedIdeaId) {
         syncCanonicalThreadUrl(requestedIdeaId);
+      } else {
+        cleanupUnresolvedThreadUrl(requestedIdeaId);
       }
+    } else {
+      cleanupUnresolvedThreadUrl(requestedIdeaId);
     }
     clearRuntimeReadyOnboardingUrl();
     directThreadUrlPending = false;
@@ -1072,6 +1083,8 @@
         await cortex.loadDirectThread(requestedIdeaId);
         if (cortex.selectedIdeaId === requestedIdeaId) {
           syncCanonicalThreadUrl(requestedIdeaId);
+        } else {
+          cleanupUnresolvedThreadUrl(requestedIdeaId);
         }
         clearRuntimeReadyOnboardingUrl();
         directThreadUrlPending = false;
