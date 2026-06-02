@@ -294,6 +294,15 @@
     }
   }
 
+  @keyframes thread-shell-presence {
+    0% {
+      opacity: 0;
+    }
+    100% {
+      opacity: 1;
+    }
+  }
+
   @media (max-width: 900px) {
     .thread-edge-signal.side-left,
     .thread-edge-signal.side-right {

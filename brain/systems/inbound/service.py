@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import importlib
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -26,6 +24,15 @@ from brain.platform.db.models.inbound import (
     InboundSourcePolicyRow,
 )
 from brain.systems.external_agents import service as external_agents
+from brain.systems.cortex.thread_links import (
+    thread_id_from_reference,
+    thread_link_payload,
+)
+from brain.systems.cortex.thread_read_model import (
+    deterministic_preview_summary,
+    refresh_thread_read_model,
+    thread_reference_payload,
+)
 from brain.systems.inbound.status import (
     STATUS_FAILED,
     STATUS_PROCESSED,
@@ -57,7 +64,6 @@ MAX_INBOUND_KIND_LENGTH = 40
 MAX_INBOUND_ORIGIN_LENGTH = 240
 MAX_TRIAGE_MESSAGE_CHARS = 8000
 MAX_TRIAGE_PAYLOAD_CHARS = 5000
-DEFAULT_PUBLIC_APP_URL = "http://localhost:8080"
 
 
 class InboundValidationError(ValueError):
@@ -1183,14 +1189,28 @@ async def _attach_context_to_thread(
     session.add(thread_message)
     await session.flush()
 
-    thread_url = _thread_url(thread)
-    thread_route = _thread_route(thread)
+    links = thread_link_payload(thread.id)
+    if not getattr(thread, "preview_summary", None):
+        preview = deterministic_preview_summary(
+            title=getattr(thread, "title", None),
+            intent=normalized.get("intent") or normalized.get("summary"),
+            source_tool=context.source_kind or context.display_name,
+        )
+        if preview:
+            await refresh_thread_read_model(
+                session,
+                thread,
+                preview_summary=preview,
+                preview_source="deterministic",
+            )
+    thread_ref = await thread_reference_payload(session, thread, include_handoff=True)
     action_result = {
         "operation": operation,
         "thread_id": str(thread.id),
-        "thread_url": thread_url,
-        "thread_route": thread_route,
-        "url": thread_url,
+        "thread_url": links["thread_url"],
+        "thread_route": links["thread_route"],
+        "url": links["thread_url"],
+        "thread_reference": thread_ref,
         "context_submission_id": str(submission.id),
         "thread_message_id": thread_message.id,
         "event_id": str(event.id),
@@ -1222,13 +1242,24 @@ async def _correlated_thread(
     context: _ConnectionContext,
     correlation: Mapping[str, Any],
 ) -> Idea | None:
-    thread_id = _clean_optional(correlation.get("thread_id") or correlation.get("idea_id"))
+    thread_id = _thread_id_from_correlation(correlation)
     if not thread_id:
         return None
     thread = await session.get(Idea, thread_id)
     if thread is None or str(thread.org_id) != str(context.org_id):
         raise InboundValidationError("correlation.thread_id does not match an accessible Thread")
     return thread
+
+
+def _thread_id_from_correlation(correlation: Mapping[str, Any]) -> str | None:
+    for key in ("thread_url", "url", "thread_route"):
+        thread_id = thread_id_from_reference(correlation.get(key))
+        if thread_id:
+            return thread_id
+    return thread_id_from_reference(
+        correlation.get("thread_id") or correlation.get("idea_id"),
+        allow_raw_id=True,
+    )
 
 
 def _context_timeline_preview(
@@ -1275,50 +1306,15 @@ def _context_part_preview(part: Any) -> str:
     return " - ".join(bits)
 
 
-def _public_app_base_url() -> str:
-    raw = (
-        os.environ.get("ILLO_PUBLIC_URL")
-        or os.environ.get("ILLO_DASHBOARD_URL")
-        or DEFAULT_PUBLIC_APP_URL
-    ).strip()
-    parsed = urlsplit(raw)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return DEFAULT_PUBLIC_APP_URL
-    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
-
-
-def _thread_route_for_id(thread_id: Any) -> str:
-    return f"/cortex?idea={thread_id}"
-
-
-def _thread_url_for_route(route: str) -> str:
-    return f"{_public_app_base_url()}{route}"
-
-
-def _thread_route(thread: Idea) -> str:
-    return _thread_route_for_id(thread.id)
-
-
-def _thread_url(thread: Idea) -> str:
-    return _thread_url_for_route(_thread_route(thread))
-
-
 def _with_thread_links(outcome: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(outcome or {})
     thread_id = _clean_optional(result.get("thread_id") or result.get("idea_id"))
     if not thread_id:
         return result
-    route = _clean_optional(result.get("thread_route"))
-    existing_url = _clean_optional(result.get("url"))
-    if route is None and existing_url and existing_url.startswith("/"):
-        route = existing_url
-    route = route or _thread_route_for_id(thread_id)
-    thread_url = _clean_optional(result.get("thread_url"))
-    if thread_url is None or thread_url.startswith("/"):
-        thread_url = _thread_url_for_route(route)
-    result["thread_route"] = route
-    result["thread_url"] = thread_url
-    result["url"] = thread_url
+    links = thread_link_payload(thread_id)
+    result["thread_route"] = links["thread_route"]
+    result["thread_url"] = links["thread_url"]
+    result["url"] = links["thread_url"]
     return result
 
 

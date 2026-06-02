@@ -29,6 +29,7 @@ from brain.systems.runs.execution_artifacts import (
 from brain.systems.runs.execution_context import (
     _agent_context,
     bind_agent_context,
+    snapshot_agent_context,
 )
 from brain.systems.runs.project_execution_env import (
     _canonical_project_token_slug,
@@ -404,21 +405,21 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
     },
     "manage_idea": {
         "list": {"required": [], "optional": ["status", "search", "include_archived", "limit"], "effect": "read Cortex thoughts"},
-        "get": {"required": ["idea_id unless a current thread is bound"], "optional": [], "effect": "read one thought"},
+        "get": {"required": ["idea_id/thread_url unless a current thread is bound"], "optional": [], "effect": "read one thought"},
         "create": {
             "required": ["title"],
             "optional": ["thread_message", "description", "status", "start_run", "parent_id", "user_id"],
             "effect": "create a Cortex thought with an Illo-authored seed message; user_id assigns the owner",
         },
         "update": {
-            "required": ["idea_id unless a current thread is bound", "at least one changed field"],
+            "required": ["idea_id/thread_url unless a current thread is bound", "at least one changed field"],
             "optional": ["title", "display_title", "description", "status", "position_x", "position_y", "user_id"],
             "effect": "update thought metadata",
         },
-        "archive": {"required": ["idea_id unless a current thread is bound"], "optional": [], "effect": "archive a thought"},
-        "restore": {"required": ["idea_id"], "optional": [], "effect": "restore an archived thought"},
-        "set_status": {"required": ["idea_id unless a current thread is bound", "status"], "optional": [], "effect": "change status"},
-        "mark_read": {"required": ["idea_id unless a current thread is bound"], "optional": [], "effect": "mark a thought read"},
+        "archive": {"required": ["idea_id/thread_url unless a current thread is bound"], "optional": [], "effect": "archive a thought"},
+        "restore": {"required": ["idea_id/thread_url"], "optional": [], "effect": "restore an archived thought"},
+        "set_status": {"required": ["idea_id/thread_url unless a current thread is bound", "status"], "optional": [], "effect": "change status"},
+        "mark_read": {"required": ["idea_id/thread_url unless a current thread is bound"], "optional": [], "effect": "mark a thought read"},
     },
     "manage_project": {
         "list": {"required": [], "optional": ["query", "limit", "include_inactive"], "effect": "read project context profiles, optionally filtered by project name, description, aliases, or resources"},

@@ -10,6 +10,7 @@ import logging
 import os
 from typing import Any, Callable
 
+from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
 from brain.systems.runs.tool_catalog.registry import output_budget_chars_for_tool
 
 logger = logging.getLogger("agent")
@@ -197,26 +198,26 @@ def run_tool_awaitable(result):
     return _run_sync_boundary(result, name="run_tool_awaitable")
 
 
+def _snapshot_threadlocal_context(agent_context) -> dict | None:
+    if agent_context is None:
+        return None
+    return clone_agent_context_mapping(vars(agent_context))
+
+
 class _BoundAgentContext:
     def __init__(self, agent_context, threadlocal_context: dict | None):
-        self.agent_context = agent_context
         self.threadlocal_context = threadlocal_context
-        self.previous_context = None
+        self.context_manager = None
 
     def __enter__(self):
-        if self.agent_context is not None and self.threadlocal_context is not None:
-            self.previous_context = vars(self.agent_context).copy()
-            for key in list(vars(self.agent_context).keys()):
-                delattr(self.agent_context, key)
-            for key, value in self.threadlocal_context.items():
-                setattr(self.agent_context, key, value)
+        if self.threadlocal_context is not None:
+            self.context_manager = bind_agent_context(self.threadlocal_context)
+            return self.context_manager.__enter__()
+        return None
 
     def __exit__(self, exc_type, exc, tb):
-        if self.agent_context is not None and self.previous_context is not None:
-            for key in list(vars(self.agent_context).keys()):
-                delattr(self.agent_context, key)
-            for key, value in self.previous_context.items():
-                setattr(self.agent_context, key, value)
+        if self.context_manager is not None:
+            return self.context_manager.__exit__(exc_type, exc, tb)
         return False
 
 
@@ -471,7 +472,7 @@ def execute_parallel_tool_batch(
     if not pending:
         return
 
-    threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
+    threadlocal_context = _snapshot_threadlocal_context(agent_context)
     for request in pending:
         emit_resolved_tool_call(
             resolve_tool_call(
@@ -503,7 +504,7 @@ async def async_execute_parallel_tool_batch(
     if not pending:
         return
 
-    threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
+    threadlocal_context = _snapshot_threadlocal_context(agent_context)
     if max_parallel_tool_calls <= 1:
         for request in pending:
             await async_emit_resolved_tool_call(
@@ -601,7 +602,7 @@ def execute_tool_calls(
 
     tool_results: list[dict] = []
     pending_parallel: list[PendingToolCall] = []
-    threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
+    threadlocal_context = _snapshot_threadlocal_context(agent_context)
 
     def flush_parallel_batch() -> None:
         nonlocal pending_parallel
@@ -719,7 +720,7 @@ async def async_execute_tool_calls(
     """Execute all tool calls from async runtime code."""
     tool_results: list[dict] = []
     pending_parallel: list[PendingToolCall] = []
-    threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
+    threadlocal_context = _snapshot_threadlocal_context(agent_context)
 
     async def flush_parallel_batch() -> None:
         nonlocal pending_parallel

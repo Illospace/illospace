@@ -16,24 +16,59 @@ function threadQueryParams(sourceParams?: URLSearchParams): URLSearchParams {
   return params;
 }
 
-export function threadIdFromThreadPathname(pathname: string): string | null {
-  const prefix = `${THREAD_ROUTE_PREFIX}/`;
-  if (!pathname.startsWith(prefix)) return null;
-  const encoded = pathname.slice(prefix.length).split('/', 1)[0];
-  if (!encoded) return null;
+function browserOrigin(): string | null {
+  return typeof window === 'undefined' ? null : window.location.origin;
+}
+
+export function encodeThreadId(threadId: string | number): string {
+  return encodeURIComponent(String(threadId));
+}
+
+export function threadRoute(threadId: string | number): string {
+  return `${THREAD_ROUTE_PREFIX}/${encodeThreadId(threadId)}`;
+}
+
+export function threadUrl(threadId: string | number): string {
+  const route = threadRoute(threadId);
+  const origin = browserOrigin();
+  if (!origin) return route;
+  return `${origin}${route}`;
+}
+
+export function threadIdFromPath(pathname: string): string | null {
+  const match = /^\/threads\/([^/?#]+)/.exec(pathname || '');
+  if (!match) return null;
   try {
-    return decodeURIComponent(encoded);
+    return decodeURIComponent(match[1]);
   } catch {
-    return encoded;
+    return match[1];
   }
 }
 
+export function threadIdFromThreadPathname(pathname: string): string | null {
+  return threadIdFromPath(pathname);
+}
+
 export function threadIdFromUrl(url: Pick<URL, 'pathname' | 'searchParams'>): string | null {
-  return threadIdFromThreadPathname(url.pathname) || url.searchParams.get(CORTEX_THREAD_PARAM);
+  return threadIdFromPath(url.pathname) || url.searchParams.get(CORTEX_THREAD_PARAM);
+}
+
+export function threadIdFromReference(value: string | null | undefined): string | null {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  try {
+    const parsed = new URL(text, browserOrigin() ?? 'http://illo.local');
+    const threadId = threadIdFromPath(parsed.pathname);
+    if (threadId) return threadId;
+    if (parsed.pathname === '/cortex') return parsed.searchParams.get(CORTEX_THREAD_PARAM);
+  } catch {
+    if (text.startsWith(`${THREAD_ROUTE_PREFIX}/`)) return threadIdFromPath(text);
+  }
+  return null;
 }
 
 export function isThreadRoutePathname(pathname: string): boolean {
-  return Boolean(threadIdFromThreadPathname(pathname));
+  return Boolean(threadIdFromPath(pathname));
 }
 
 export function buildThreadHref(
@@ -42,7 +77,7 @@ export function buildThreadHref(
 ): string {
   const params = threadQueryParams(sourceParams);
   const query = params.toString();
-  return `${THREAD_ROUTE_PREFIX}/${encodeURIComponent(threadId)}${query ? `?${query}` : ''}`;
+  return `${threadRoute(threadId)}${query ? `?${query}` : ''}`;
 }
 
 export function buildCortexThreadHref(

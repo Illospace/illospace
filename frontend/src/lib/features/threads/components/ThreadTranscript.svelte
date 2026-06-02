@@ -18,6 +18,7 @@
   } from '$lib/utils/attachmentPreview';
   import StreamVisualBlock from '$lib/features/threads/components/StreamVisualBlock.svelte';
   import ThreadAuthorMark from '$lib/features/threads/components/ThreadAuthorMark.svelte';
+  import ThreadLinkPreviewCard from '$lib/features/threads/components/ThreadLinkPreviewCard.svelte';
 
   import {
     getCortexThreadRunStatusGlyph,
@@ -285,6 +286,18 @@
         />
         <h1 class="thread-header-title" title={header.title}>{header.title}</h1>
 
+        {#if header.onLinkAction}
+          <ConstellationIconButton
+            label={header.linkActionLabel ?? 'Copy thread link'}
+            title={header.linkActionLabel ?? 'Copy thread link'}
+            className={`thread-header-action-button thread-link-action-button ${header.linkActionLoading ? 'is-loading' : ''}`}
+            disabled={header.linkActionLoading}
+            onclick={header.onLinkAction}
+          >
+            <ConstellationIcon name="link" size={13} stroke={1.9} />
+          </ConstellationIconButton>
+        {/if}
+
         {#if header.onTitleAction}
           <ConstellationIconButton
             label={header.titleActionLabel ?? 'Generate a new thread title'}
@@ -459,6 +472,14 @@
                           </span>
                         </button>
                       {/if}
+                    {/each}
+                  </div>
+                {/if}
+
+                {#if item.threadReferences && item.threadReferences.length > 0}
+                  <div class="thread-message-thread-previews">
+                    {#each item.threadReferences as reference (`${reference.thread_id ?? reference.original_ref ?? reference.url}`)}
+                      <ThreadLinkPreviewCard {reference} />
                     {/each}
                   </div>
                 {/if}
@@ -1391,6 +1412,10 @@
     line-height: 1.58;
   }
 
+  .thread-message-illo .thread-message-content {
+    color: var(--thread-message-body);
+  }
+
   .thread-message-content > * {
     margin: 0;
   }
@@ -1426,6 +1451,11 @@
   .thread-message-attachments {
     display: grid;
     gap: 10px;
+  }
+
+  .thread-message-thread-previews {
+    display: grid;
+    gap: 8px;
   }
 
   .thread-message-image-button {

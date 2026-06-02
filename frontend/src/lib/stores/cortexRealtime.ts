@@ -52,6 +52,7 @@ export interface CortexRealtimeStoreBindings {
   _handleVaultSecretPrompt(msg: any): void;
   _handleVaultAgentGrantPrompt(msg: any): void;
   _upsertIdea(idea: Idea): void;
+  _setIdeaReadModelPatch(id: string, patch: Partial<Idea>): void;
   _registerArchivedIdea(idea: Pick<Idea, 'id' | 'user_id'> | null | undefined): void;
   _rememberArchivedIdea(idea: Idea | null | undefined): void;
 }
@@ -325,6 +326,21 @@ export function setupCortexRealtimeBindings(options: {
           i.id === msg.idea_id ? { ...i, display_title: msg.title } : i,
         );
       }
+    }),
+  );
+
+  unsubs.push(
+    wsClient.on('thread_read_model_updated', (msg) => {
+      const ideaId = String(msg.idea_id ?? msg.thread_id ?? '').trim();
+      if (!ideaId) return;
+      store._setIdeaReadModelPatch(ideaId, {
+        ...(msg.title ? { display_title: msg.title } : {}),
+        preview_summary: msg.preview_summary ?? null,
+        preview_source: msg.preview_source ?? null,
+        preview_updated_at: msg.preview_updated_at ?? null,
+        thread_route: msg.thread_route ?? undefined,
+        thread_url: msg.thread_url ?? undefined,
+      });
     }),
   );
 

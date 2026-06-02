@@ -26,8 +26,6 @@ settings:
   event_subscriptions:
     bot_events:
       - type: app_mention
-      - type: message.channels
-      - type: message.groups
       - type: message.im
   interactivity:
     is_enabled: true

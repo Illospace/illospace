@@ -2,10 +2,27 @@
 
 from __future__ import annotations
 
-import contextvars
 from contextlib import contextmanager
+import contextvars
 from dataclasses import dataclass, field, fields
 from typing import Iterator, Mapping
+
+
+def _clone_context_value(value: object) -> object:
+    """Clone ordinary mutable containers without copying live runtime objects."""
+    if isinstance(value, dict):
+        return {key: _clone_context_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clone_context_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_context_value(item) for item in value)
+    if isinstance(value, set):
+        return {_clone_context_value(item) for item in value}
+    return value
+
+
+def clone_agent_context_mapping(mapping: Mapping[str, object]) -> dict[str, object]:
+    return {key: _clone_context_value(value) for key, value in dict(mapping).items()}
 
 
 _context_values: contextvars.ContextVar[dict[str, object]] = contextvars.ContextVar(
@@ -46,6 +63,9 @@ class _AgentContextProxy:
         del values[name]
         _context_values.set(values)
 
+    def _copy(self) -> dict[str, object]:
+        return clone_agent_context_mapping(_context_values.get())
+
 
 _agent_context = _AgentContextProxy()
 
@@ -80,18 +100,18 @@ class AgentExecutionContext:
 
 
 def current_agent_context():
-    """Return the thread-local AgentRun execution context object."""
+    """Return the task-local AgentRun execution context object."""
     return _agent_context
 
 
 def get_agent_context_value(name: str, default=None):
-    """Read a single value from the current thread's AgentRun context."""
+    """Read a single value from the current task's AgentRun context."""
     return getattr(_agent_context, name, default)
 
 
 def snapshot_agent_context() -> dict:
-    """Capture the current thread's bound AgentRun context attributes."""
-    return vars(_agent_context).copy()
+    """Capture the current task's bound AgentRun context attributes."""
+    return _agent_context._copy()
 
 
 @contextmanager
@@ -99,7 +119,7 @@ def bind_agent_context(
     context: AgentExecutionContext | Mapping[str, object] | None = None,
     **overrides,
 ) -> Iterator[object]:
-    """Bind AgentRun context attributes for the current thread, then restore them."""
+    """Bind AgentRun context attributes for the current task, then restore them."""
     attrs: dict[str, object] = {}
     if context is not None:
         if isinstance(context, AgentExecutionContext):
@@ -108,8 +128,8 @@ def bind_agent_context(
             attrs.update(dict(context))
     attrs.update(overrides)
 
-    next_values = dict(_context_values.get())
-    next_values.update(attrs)
+    next_values = clone_agent_context_mapping(_context_values.get())
+    next_values.update(clone_agent_context_mapping(attrs))
     token = _context_values.set(next_values)
     try:
         yield _agent_context
@@ -120,6 +140,7 @@ def bind_agent_context(
 __all__ = [
     "AgentExecutionContext",
     "bind_agent_context",
+    "clone_agent_context_mapping",
     "current_agent_context",
     "get_agent_context_value",
     "snapshot_agent_context",

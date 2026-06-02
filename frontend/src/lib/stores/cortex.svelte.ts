@@ -623,6 +623,10 @@ class CortexStore {
     this.ideas = patchIdeaById(this.ideas, id, patch);
   }
 
+  _setIdeaReadModelPatch(id: string, patch: Partial<Idea>) {
+    this._setIdeaPatch(id, patch);
+  }
+
   private _upsertIdea(idea: Idea) {
     const normalized = this._normalizeIdea(idea);
     if (normalized.archived_at) this._registerArchivedIdea(normalized);

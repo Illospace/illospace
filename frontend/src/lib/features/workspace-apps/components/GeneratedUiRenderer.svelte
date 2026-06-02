@@ -1033,6 +1033,7 @@
 <style>
 :global(.generated-app-chrome.generated-ui) {
   width: min(760px, calc(100vw - 28px));
+  height: min(820px, calc(100vh - 112px));
   max-height: min(820px, calc(100vh - 112px));
   border-radius: 18px;
 }
@@ -1043,6 +1044,7 @@
 
 :global(.generated-app-chrome.generated-ui.is-dock) {
   width: 100%;
+  height: 100%;
   max-height: none;
   min-height: 100%;
   border-radius: 0;
@@ -1143,6 +1145,7 @@
 }
 
 .generated-ui__body {
+  height: 100%;
   min-height: 0;
   overflow: auto;
   scrollbar-color: color-mix(in srgb, var(--constellation-color-spectral) 28%, transparent) transparent;
@@ -1506,6 +1509,7 @@
 @media (max-width: 680px) {
   :global(.generated-app-chrome.generated-ui) {
     width: calc(100vw - 20px);
+    height: calc(100vh - 96px);
     max-height: calc(100vh - 96px);
   }
 

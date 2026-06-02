@@ -29,3 +29,4 @@ from brain.platform.db.models.external_agent import *  # noqa
 from brain.platform.db.models.inbound import *  # noqa
 from brain.platform.db.models.workspace_app import *  # noqa
 from brain.platform.db.models.workspace_pin import *  # noqa
+from brain.platform.db.models.object_reference import *  # noqa

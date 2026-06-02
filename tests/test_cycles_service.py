@@ -675,9 +675,31 @@ async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeyp
     assert admissions[0]["metadata"]["launch_envelope"]["origin"] == "scheduled_cycle"
     assert admissions[0]["metadata"]["launch_envelope"]["launch_mode"] == "background_cycle_run"
     assert admissions[0]["metadata"]["launch_envelope"]["active_instruction_source"] == "cycle.prompt"
+    assert admissions[0]["metadata"]["launch_envelope"]["scheduled_review_window"] == {
+        "anchor": "cycle_run.scheduled_for",
+        "duration_hours": 24,
+        "start_at": "2026-04-27T20:20:00+00:00",
+        "end_at": "2026-04-28T20:20:00+00:00",
+        "recommendation": (
+            "For daily review cycles, inspect [start_at, end_at) instead of a moving "
+            "last_24h window based on execution time."
+        ),
+    }
+    assert admissions[0]["metadata"]["contract"]["result"]["kind"] == "autonomous_cycle_run_result"
+    assert admissions[0]["metadata"]["evidence_health"]["status"] == "pending"
+    assert (
+        admissions[0]["metadata"]["launch_receipt"]["scheduled_review_window"]["start_at"]
+        == "2026-04-27T20:20:00+00:00"
+    )
     assert admissions[0]["metadata"]["context_policy"]["prior_thread_role"] == "context_only"
     assert "tool_policy" not in admissions[0]["metadata"]
+    assert run.context_snapshot["result_contract"]["kind"] == "autonomous_cycle_run_result"
+    assert run.context_snapshot["evidence_health"]["status"] == "pending"
+    assert run.context_snapshot["scheduled_review_window"]["end_at"] == "2026-04-28T20:20:00+00:00"
     assert "Scheduled Prompt Launch" in admissions[0]["message"]
+    assert "Scheduled evidence window: 2026-04-27T20:20:00+00:00 to 2026-04-28T20:20:00+00:00 UTC." in admissions[0]["message"]
+    assert "Result Contract" in admissions[0]["message"]
+    assert "Report evidence health explicitly" in admissions[0]["message"]
     assert "Thread messages are output/context surfaces" in admissions[0]["message"]
 
 
@@ -947,6 +969,29 @@ async def test_execute_cycle_run_ignores_non_queued_rows(monkeypatch):
     assert run.status == "running"
 
 
+async def test_cycle_busy_thread_detection_uses_agent_run_open_statuses():
+    class _CaptureExecuteSession:
+        def __init__(self):
+            self.statement = None
+
+        async def execute(self, statement):
+            self.statement = statement
+            return _FirstResult(None)
+
+    session = _CaptureExecuteSession()
+
+    assert await cycle_execution._async_idea_has_active_run(session, "idea-1") is False
+
+    compiled_params = session.statement.compile().params
+    status_values = next(
+        value
+        for value in compiled_params.values()
+        if isinstance(value, (list, tuple, set)) and "queued" in value
+    )
+    assert set(status_values) == {"queued", "starting", "running", "paused", "verifying"}
+    assert "pending_approval" not in status_values
+
+
 def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
     agent_run = AgentRun()
     agent_run.metadata_ = {"source": "cycle", "cycle_run_id": 12}
@@ -958,6 +1003,12 @@ def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
     cycle_run.completed_at = None
     cycle_run.error = None
     cycle_run.skip_reason = None
+    cycle_run.context_snapshot = {
+        "scheduled_review_window": {"start_at": "2026-04-27T20:20:00+00:00"},
+        "result_contract": {"kind": "autonomous_cycle_run_result"},
+        "evidence_health": {"status": "pending"},
+        "launch_receipts": [{"kind": "cycle_launch_receipt", "cycle_run_id": 12}],
+    }
 
     cycle = Cycle()
     cycle.id = 5
@@ -965,12 +1016,11 @@ def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
     cycle.last_error = "old"
     cycle.last_run_at = None
 
+    fake_session = _AsyncFakeSession(agent_run=agent_run, run=cycle_run, cycle=cycle)
     monkeypatch.setattr(
         service,
         "UnitOfWork",
-        _AsyncUnitOfWorkFactory([
-            _AsyncFakeSession(agent_run=agent_run, run=cycle_run, cycle=cycle)
-        ]),
+        _AsyncUnitOfWorkFactory([fake_session]),
     )
 
     service.finalize_cycle_run_from_run(44, status="completed")
@@ -981,6 +1031,13 @@ def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
     assert cycle.last_status == "completed"
     assert cycle.last_error is None
     assert cycle.last_run_at is not None
+    evaluation = fake_session.added[0]
+    assert evaluation.details["scheduled_review_window"]["start_at"] == "2026-04-27T20:20:00+00:00"
+    assert evaluation.details["result_contract"]["kind"] == "autonomous_cycle_run_result"
+    assert evaluation.details["evidence_health"]["status"] == "pending"
+    assert evaluation.details["launch_receipts"] == [
+        {"kind": "cycle_launch_receipt", "cycle_run_id": 12}
+    ]
 
 
 def test_finalize_cycle_run_from_run_ignores_non_cycle_run(monkeypatch):
