@@ -32,7 +32,7 @@
       || isOnboardingPage
       || (currentPath.startsWith('/cortex') && workspacePageModalId === 'system'),
   );
-  let isCortexPage = $derived(currentPath.startsWith('/cortex'));
+  let isCortexPage = $derived(currentPath.startsWith('/cortex') || currentPath.startsWith('/threads'));
   let isVaultPreviewPage = $derived(
     dev && currentPath === '/vault' && $page.url.searchParams.get('preview') === '1',
   );
