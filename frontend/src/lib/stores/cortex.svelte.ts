@@ -1199,7 +1199,8 @@ class CortexStore {
         this.teamMembers = this._normalizeTeamMembers(this.teamMembers);
         this.teamMembersLoaded = true;
       }
-      return this._applyLoadedStream(id, version, bootstrap.direct_thread.stream);
+      const applied = this._applyLoadedStream(id, version, bootstrap.direct_thread.stream);
+      return applied || this.selectedIdeaId === id;
     } catch {
       await this._load({ loadTeamMembers: false });
       const activeIdea = this.ideas.find((idea) => idea.id === id && !idea.archived_at);
