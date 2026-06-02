@@ -47,7 +47,7 @@ and outcomes without forcing every submission into a narrow workflow.
 ## Solution
 
 Introduce **Universal Thread** as the product-facing collaboration object and
-introduce `illo_submit_context` as the canonical personal-agent-to-Illo ingress
+introduce `illo_submit` as the canonical personal-agent-to-Illo ingress
 primitive.
 
 The relationship model is:
@@ -61,15 +61,19 @@ The relationship model is:
 - The frontend renders persisted Thread state generically. It does not encode
   workflow policy.
 
-The two high-level MCP primitives are:
+The canonical external/MCP tool set is:
 
-- `illo_ask`: private query to Illo for information Illo already has or can
-  reason over. This is not team-visible by default and may run asynchronously
-  behind `illo_get_ask`.
-- `illo_submit_context`: universal ingress for new context from a personal
-  agent to Illo. It acknowledges receipt quickly, records the context through
-  inbound coordination, and returns an absolute Thread URL only when the
-  submission is explicitly correlated with an existing Thread.
+- `illo_submit`: universal ingress for new context, traces, artifacts, progress,
+  instructions, or reflections from an external agent/service to Illo. It
+  acknowledges receipt quickly, records the submission through inbound
+  coordination, and queues Illo headlessly when judgment is needed.
+- `illo_read`: non-mutating read/query access to information Illo already has
+  or can reason over. This is not team-visible by default.
+- `illo_act`: an explicit, human-directed request for Illo to coordinate or
+  take action. Illo interprets the request and uses internal tools/surfaces; the
+  external caller does not pick workspace mutations directly.
+- `illo_get_result`: result retrieval for asynchronous `illo_submit`,
+  `illo_read`, or `illo_act` calls.
 
 Universal Thread product vocabulary:
 
@@ -138,29 +142,30 @@ loop is out of scope unless explicitly pulled in.
 11. As Illo, I want submitted context to arrive through the existing inbound
     coordination layer, so that webhooks, MCP, and personal agents share one
     routing foundation.
-12. As a personal agent, I want one universal context submission tool, so that I
-    do not need to choose among many scenario-specific Illo tools.
+12. As a personal agent, I want one submit tool plus a small read/act/result
+    vocabulary, so that I do not need to choose among many scenario-specific
+    Illo tools.
 13. As a personal agent, I want the MCP tool description to explain my
     relationship to Illo, so that I know I submit context while Illo coordinates
     the team workspace.
 14. As a personal agent, I want to include ordered context parts, so that I can
     send text, JSON, links, artifacts, traces, diffs, or files without inventing
     a new tool for each type.
-15. As a personal agent, I want `illo_submit_context` to acknowledge quickly, so
+15. As a personal agent, I want `illo_submit` to acknowledge quickly, so
     that long Illo reasoning does not risk MCP timeout failures.
-16. As a personal agent, I want `illo_ask` to remain a private query primitive,
+16. As a personal agent, I want `illo_read` to remain a private query primitive,
     so that I can ask Illo for existing workspace knowledge without creating a
     visible Thread.
-17. As a user, I want submitted context to be immutable once recorded, so that
+17. As a user, I want submitted material to be immutable once recorded, so that
     the team can trust the original source material.
 18. As a user, I want Illo to generate summaries or previews as derived views,
     so that raw context remains available while the default view stays readable.
-19. As a user, I want multiple context submissions to be attachable to the same
-    Thread, so that follow-up Codex sessions or later traces can stay with the
-    same shared work.
-20. As a user, I want a submitted context result to say what happened in plain
-    terms, so that Codex can report whether Illo accepted, created, or attached
-    the context.
+19. As a user, I want multiple submissions to correlate to the same Thread, so
+    that follow-up Codex sessions or later traces can stay with the same shared
+    work when Illo decides to act there.
+20. As a user, I want a submitted result to say what happened in plain terms, so
+    that Codex can report whether Illo queued, completed, failed, or acted on
+    the request.
 21. As a product builder, I want Universal Thread rendering to be source-agnostic,
     so that Codex, Claude Code, OpenClaw, Hermes, and future agents can all use
     the same Thread surface.
@@ -168,11 +173,11 @@ loop is out of scope unless explicitly pulled in.
     so that we can learn from usage before redesigning the whole page.
 23. As a product builder, I want "Thread" to become the user-facing language, so
     that legacy "idea" terminology does not leak into the product direction.
-24. As an operator, I want every submitted context envelope recorded durably, so
+24. As an operator, I want every submitted envelope recorded durably, so
     that routing decisions, idempotency, and debugging remain inspectable.
-25. As an operator, I want context submissions without a Thread to remain inbound
-    events, so that the Thread model is not polluted by source events that Illo
-    chose not to surface.
+25. As an operator, I want submissions without a Thread to remain inbound events,
+    so that the Thread model is not polluted by source events that Illo chose not
+    to surface.
 26. As a future Slack integration user, I want Slack previews to link back to the
     Illo Thread, so that Slack distributes awareness without becoming the source
     of collaboration truth.
@@ -194,14 +199,19 @@ loop is out of scope unless explicitly pulled in.
 - Use the existing inbound coordination layer as the routing boundary. This PRD
   is an evolution from inbound signals to inbound context, not a second routing
   system.
-- Add or rename the canonical MCP ingress tool to `illo_submit_context`. Because
-  the product has not launched, there is no compatibility requirement to keep
-  `illo_submit_signal` as the primary name.
-- Keep `illo_ask` as a separate private query primitive. `illo_submit_context`
-  is for new context entering Illo; `illo_ask` is for retrieving or reasoning
-  over context Illo already has.
-- Define the context envelope as generic and source-agnostic:
-  - `intent`: natural-language reason the personal agent is submitting context.
+- Add or rename the canonical MCP ingress tool to `illo_submit`. Because the
+  product has not launched, there is no compatibility requirement to keep
+  earlier context/signal submit names.
+- Keep `illo_read` as a separate private query primitive. `illo_submit` is for
+  new context entering Illo; `illo_read` is for retrieving or reasoning over
+  context Illo already has.
+- Keep `illo_act` as the explicit request/action primitive. It carries a
+  human-directed ask to Illo while preserving the boundary that Illo owns team
+  routing and workspace tool use.
+- Keep `illo_get_result` as the async result primitive for submit, read, and
+  act calls that cannot settle inside one MCP request.
+- Define the submission envelope as generic and source-agnostic:
+  - `message`: natural-language instruction or context for Illo to handle.
   - `parts`: ordered context parts.
   - `source`: provenance about the personal agent, user, session, model, repo,
     branch, or external origin.
@@ -209,53 +219,33 @@ loop is out of scope unless explicitly pulled in.
     notification preferences.
   - `correlation`: optional existing Thread URL/id, external session id, or
     previous submission reference.
+  - `response`: optional webhook/callback or delivery hints.
   - `idempotency_key`: optional stable dedupe key.
 - Treat part types as content types, not product workflows. Examples include
   `text`, `json`, `link`, `file`, `trace`, `conversation`, `diff`,
   `screenshot`, and `artifact`.
-- Extend inbound envelope handling to accept a new kind such as `context`. The
+- Extend inbound envelope handling to accept `kind=submission`. The
   existing inbound event table and decision receipt table remain the audit and
   result spine.
-- Add routing results that can describe passive context outcomes clearly, such
-  as `thread.attached`, `accepted`, `stored`, or `needs_clarification`. Visible
-  Thread creation remains the job of explicit Thread tools.
-- Keep `illo_submit_context` async-safe. The tool should acknowledge quickly,
-  return any immediately available `thread_id`, internal route/path, and
-  user-facing absolute `thread_url` when context attaches to a known Thread,
-  and avoid creating empty visible Threads for passive context submissions.
-- The MCP result must not depend on the personal agent reconstructing a URL from
-  a relative route. A relative path can remain useful for clients inside
-  Illospace, but Codex and other personal agents need a complete URL they can
-  show directly to the user.
+- Add decision receipts that describe the queued headless handling result,
+  including `event_id`, `run_id`, and the inbound submission target.
+- Keep `illo_submit` async-safe. The tool should acknowledge quickly, return
+  `event_id`/`submission_id`/`result_id` plus any queued `run_id`, and let
+  Illo reasoning continue through normal AgentRun state.
+- Prefer webhook callbacks for result delivery when configured. Keep
+  `illo_get_result` as a deterministic polling fallback over inbound events and
+  decision receipts.
 - Reuse the existing `ideas` table as the physical Thread table for MVP. "Idea"
   remains a legacy storage/API name until a later rename.
 - Introduce a Thread read/domain model that presents `ideas` as Threads to new
   product surfaces, docs, and MCP descriptions.
-- Add a `thread_context_submissions` table for immutable submitted context that
-  attaches to a Thread when Illo creates or selects one.
-- Store submitted context parts as JSONB on `thread_context_submissions` for MVP.
-  Normalize into child rows only after real querying/rendering needs appear.
-- Suggested `thread_context_submissions` fields:
-  - `id`
-  - `thread_id`
-  - `org_id`
-  - `source_connection_id`
-  - `submitted_by_user_id`
-  - `inbound_event_id`
-  - `intent`
-  - `source`
-  - `constraints`
-  - `correlation`
-  - `parts`
-  - `routing_result`
-  - `created_at`
-- Persist every context submission first as an inbound event. If it attaches to
-  a Thread, also persist it as a `thread_context_submissions` row. If no Thread
-  exists, keep it as an inbound event/source record only.
+- Persist every submission first as an inbound event. If Illo later creates or
+  attaches to a Thread, that workspace mutation is recorded through normal
+  AgentRun/tool attribution and inbound receipt reconciliation.
 - Preserve raw submitted trace/context as the canonical source artifact. Any
   summaries, previews, extracted decisions, or timeline cards are derived views.
-- Allow multiple context submissions to attach to the same Thread when
-  correlation is explicit or Illo confidently routes them there.
+- Allow multiple submissions to correlate to the same Thread when correlation is
+  explicit or Illo confidently routes them there.
 - Do not inject Discussion into every Illo run prompt. Discussion is available
   through explicit surface tools when needed.
 - Include the triggering `@illo` Discussion comment and its surface metadata
@@ -295,33 +285,26 @@ loop is out of scope unless explicitly pulled in.
 This implementation pass delivered the first thin vertical slice of the proof
 loop and left a few product/technical decisions explicit for future review:
 
-- `illo_submit_context` replaces `illo_submit_signal` in hosted and local MCP
-  tool catalogs. No compatibility alias was kept because the product has not
-  launched and the canonical primitive should not carry the old "signal"
-  framing.
+- `illo_submit` is the canonical name in hosted and local MCP tool catalogs. No
+  compatibility alias is required before launch, and new docs should not carry
+  the old context/signal framing.
 - The hosted MCP tool still uses the existing `signal:submit` token scope for
   this slice. That avoids bridge-token churn and keeps the authorization path
   small, but the scope name is now legacy implementation debt. A later cleanup
   should rename or alias it to a context-oriented scope once token migration is
   worth paying for.
-- Context ingress is deterministic in the MVP hot path. If the caller supplies
-  `correlation.thread_id` or `correlation.idea_id`, the context attaches to that
-  Thread when it belongs to the user's org. Otherwise, IlloSpace stores the
-  context as an inbound event without creating a visible Thread. This keeps MCP
-  acknowledgement quick, avoids a long Illo routing run inside the tool call,
-  and prevents passive submissions from appearing as empty AI Timeline blobs.
-- The deterministic context path still enters through
-  `submit_inbound_envelope`; it is not a parallel ingress stack. Context simply
-  gets its own envelope normalization and routing branch before the older signal
-  source-policy flow.
-- `thread_context_submissions` now stores immutable submitted context rows
-  attached to Threads when a Thread exists. Parts remain JSONB for now, matching
-  the PRD's bias toward preserving raw submitted material before optimizing for
-  querying every possible trace shape.
-- Context previews in the AI Timeline are compact `IdeaThread` messages tagged
-  as context submissions. The rich raw-trace inspector is intentionally not
-  solved yet; the durable submission row is the source of truth for expanding
-  that UI later.
+- Submission ingress is async-first in the MVP hot path. IlloSpace records the
+  inbound event, writes a decision receipt, queues a headless AgentRun, and
+  returns the event/run references immediately.
+- The submission path still enters through `submit_inbound_envelope`; it is not
+  a parallel ingress stack. `kind=submission` gets its own envelope
+  normalization and run-admission branch before the older signal source-policy
+  flow.
+- Raw submitted material stays on the inbound event. If Illo later decides to
+  create or update Thread state, that mutation is performed by normal tools and
+  captured through run attribution plus receipt reconciliation.
+- Any Thread preview, summary, extracted decision, or timeline card is a derived
+  view created by Illo's later action, not a deterministic submit-side mutation.
 - Discussion is implemented as `thread_discussion_comments`, a dedicated
   Thread-attached comment table, not the existing general chat/room system. This
   keeps Discussion closer to a comment section and avoids polluting team chat
@@ -358,7 +341,7 @@ loop and left a few product/technical decisions explicit for future review:
 The follow-up implementation pass addressed the first deployed slice's three
 largest product gaps:
 
-- `illo_submit_context` now treats `thread_url` as the canonical user-facing
+- `illo_submit` now treats `thread_url` as the canonical user-facing
   absolute URL. `url` remains populated for existing callers and now also points
   to the absolute URL. `thread_route` preserves the relative `/cortex?idea=...`
   route for internal/programmatic clients.
@@ -407,14 +390,17 @@ Good tests should validate external behavior and durable contracts rather than
 implementation details. The important behaviors are:
 
 - Context envelopes are accepted, normalized, stored, and idempotently replayed.
-- `illo_submit_context` uses the same inbound coordination service as webhooks
+- `illo_submit` uses the same inbound coordination service as webhooks
   and hosted MCP.
 - Inbound events preserve source actor, authority user, ingress metadata,
-  envelope kind, intent, source, constraints, correlation, and parts.
-- Routing can attach context submissions to an existing Thread and return an
-  absolute user-facing URL plus stable IDs/routes for programmatic clients.
-- Routing can store a context submission without a Thread while preserving the
-  inbound event/receipt.
+  envelope kind, message, source, constraints, correlation, response hints, and
+  parts.
+- Submissions queue a headless Illo run and return stable event/result ids plus
+  any queued `run_id`.
+- `illo_get_result` can read the inbound event and decision receipts for the
+  submission.
+- Illo can later create or attach a Thread through normal tools, with that work
+  captured by run attribution and receipt reconciliation.
 - Raw submitted context remains available after derived previews are generated.
 - Discussion comments do not automatically trigger Illo.
 - `@illo` in Discussion triggers a surface-aware Illo run linked to the Thread.
@@ -426,16 +412,17 @@ implementation details. The important behaviors are:
 - Illo can answer in Discussion, run headlessly, or use a separate explicit
   action/tool when the user's ask should affect the AI Timeline.
 - The existing Thread UI continues to open, stream, reply, and render normal
-  Illo messages after context preview blocks are added.
+  Illo messages for workspace state created after submission handling.
 
 Recommended test modules:
 
-- Inbound service tests for `kind=context` normalization, idempotency, receipts,
-  and routing results.
-- Hosted MCP route tests for `illo_submit_context` schema, scope checks, and
+- Inbound service tests for `kind=submission` normalization, idempotency,
+  receipts, and queued headless run admission.
+- Hosted MCP route tests for `illo_submit` schema, scope checks, and
   quick acknowledgement shape.
-- Context submission persistence tests for immutable JSONB envelope storage.
-- Thread service/read-model tests for rendering context submission previews.
+- Result lookup tests for `illo_get_result` over inbound event/receipt storage.
+- Thread service/read-model tests for workspace state Illo creates after a
+  submission chooses to act.
 - Discussion API/service tests for right-panel comment behavior, mention
   triggering, and Discussion-targeted Illo acknowledgements/replies.
 - Agent tool tests for explicit Discussion inspection and Discussion replies.
@@ -444,21 +431,19 @@ Recommended test modules:
   Discussion run conversation, and never displays its final answer in the AI
   Timeline.
 - Frontend component tests or Playwright smoke tests for opening an existing
-  Thread with a submitted context preview and Discussion panel available, using
-  the same chat primitives/tokens as the general team room.
+  Thread with Discussion panel available, using the same chat primitives/tokens
+  as the general team room.
 
 Coverage added in this implementation pass:
 
-- Inbound tests for `kind=context` thread creation, context submission
-  persistence, compact timeline preview creation, explicit Thread correlation,
-  and idempotent replay.
-- Hosted MCP route tests for the `illo_submit_context` tool schema, shared
-  envelope construction, commit/rollback boundaries, scope checks, and rejection
-  of direct workspace target fields outside `correlation`.
-- Local MCP package tests for the `illo_submit_context` catalog and client
+- Inbound tests for `kind=submission` queueing, receipt creation, explicit
+  correlation preservation, and idempotent replay.
+- Hosted MCP route tests for the `illo_submit` tool schema, shared
+  envelope construction, commit/rollback boundaries, scope checks, rejection of
+  direct workspace target fields outside `correlation`, and result lookup.
+- Local MCP package tests for the `illo_submit` catalog and client
   payload.
-- Model metadata coverage for `thread_context_submissions` and
-  `thread_discussion_comments`.
+- Model metadata coverage for `thread_discussion_comments`.
 - Discussion API coverage for normal comments not triggering Illo, explicit
   `@illo` comments triggering the dedicated Discussion event, and
   commit-before-broadcast ordering.
@@ -471,7 +456,7 @@ Coverage added in this implementation pass:
 Useful prior art in the codebase:
 
 - Existing inbound webhook/MCP tests for `submit_inbound_envelope`.
-- Existing external agent route tests for hosted MCP and `illo_ask`.
+- Existing external agent route tests for hosted MCP and `illo_read`.
 - Existing Cortex Thread tests for opening, posting, notifying, and run history.
 - Existing chat tests for threaded room comments, mentions, and notifications.
 - Existing trace export tests for bounded trace projections.

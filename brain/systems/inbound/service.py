@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.domain import DomainRecord
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
-from brain.platform.db.models.idea import Idea, IdeaThread, ThreadContextSubmission
+from brain.platform.db.models.idea import Idea, IdeaThread
 from brain.platform.db.models.inbound import (
     InboundDecisionReceiptRow,
     InboundDomainProjectionKeyRow,
@@ -24,15 +24,7 @@ from brain.platform.db.models.inbound import (
     InboundSourcePolicyRow,
 )
 from brain.systems.external_agents import service as external_agents
-from brain.systems.cortex.thread_links import (
-    thread_id_from_reference,
-    thread_link_payload,
-)
-from brain.systems.cortex.thread_read_model import (
-    deterministic_preview_summary,
-    refresh_thread_read_model,
-    thread_reference_payload,
-)
+from brain.systems.cortex.thread_links import thread_link_payload
 from brain.systems.inbound.status import (
     STATUS_FAILED,
     STATUS_PROCESSED,
@@ -46,9 +38,8 @@ from brain.systems.user_domains.service import AsyncDomainService, DomainError, 
 ACTION_STORE_ONLY = "store_only"
 ACTION_DOMAIN_PROJECTION_UPSERT = "domain_projection.upsert"
 ACTION_ILO_REQUIRED = "ilo_required"
-ACTION_THREAD_ATTACHED = "thread.attached"
-ACTION_CONTEXT_ACCEPTED = "accepted"
-CONTEXT_ENVELOPE_KIND = "context"
+SUBMISSION_ENVELOPE_KIND = "submission"
+ACTION_ILLO_SUBMIT_QUEUED = "illo.submit_queued"
 SPECIAL_ENVELOPE_HANDLER_PATHS = {
     "slack_message": "brain.systems.slack.inbound:process_slack_message_envelope",
 }
@@ -205,8 +196,8 @@ async def submit_inbound_envelope(
     policy: InboundSourcePolicyRow | None = None
     projection: InboundDomainProjectionRow | None = None
     try:
-        if normalized["kind"] == CONTEXT_ENVELOPE_KIND:
-            return await _process_context_envelope(
+        if normalized["kind"] == SUBMISSION_ENVELOPE_KIND:
+            return await _process_submission_envelope(
                 session,
                 context=context,
                 event=event,
@@ -462,18 +453,19 @@ def _normalize_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:
         "desired_outcome": _clean_optional(data.get("desired_outcome")),
         "idempotency_key": _clean_optional(data.get("idempotency_key")),
     }
-    if kind == CONTEXT_ENVELOPE_KIND:
-        normalized.update(_normalize_context_fields(data, normalized["payload"]))
+    if kind == SUBMISSION_ENVELOPE_KIND:
+        normalized.update(_normalize_submission_fields(data, normalized["payload"]))
     if normalized["idempotency_key"] and len(str(normalized["idempotency_key"])) > 160:
         raise InboundValidationError("idempotency_key must be 160 characters or fewer")
     return normalized
 
 
-def _normalize_context_fields(data: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
-    intent = _clean_optional(data.get("intent")) or _clean_optional(payload.get("intent"))
+def _normalize_submission_fields(data: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
+    message = _clean_optional(data.get("message")) or _clean_optional(payload.get("message"))
     source = data.get("source", payload.get("source", {}))
     constraints = data.get("constraints", payload.get("constraints", {}))
     correlation = data.get("correlation", payload.get("correlation", {}))
+    response = data.get("response", payload.get("response", {}))
     parts = data.get("parts", payload.get("parts", []))
     if source is None:
         source = {}
@@ -481,6 +473,8 @@ def _normalize_context_fields(data: Mapping[str, Any], payload: Mapping[str, Any
         constraints = {}
     if correlation is None:
         correlation = {}
+    if response is None:
+        response = {}
     if parts is None:
         parts = []
     if not isinstance(source, dict):
@@ -489,15 +483,18 @@ def _normalize_context_fields(data: Mapping[str, Any], payload: Mapping[str, Any
         raise InboundValidationError("constraints must be an object")
     if not isinstance(correlation, dict):
         raise InboundValidationError("correlation must be an object")
+    if not isinstance(response, dict):
+        raise InboundValidationError("response must be an object")
     if not isinstance(parts, list):
         raise InboundValidationError("parts must be an array")
-    if not intent and not parts and not _clean_optional(data.get("summary")):
-        raise InboundValidationError("context envelope requires intent, summary, or parts")
+    if not message:
+        raise InboundValidationError("submission envelope requires message")
     return {
-        "intent": intent,
+        "message": message,
         "source": dict(source),
         "constraints": dict(constraints),
         "correlation": dict(correlation),
+        "response": dict(response),
         "parts": list(parts),
     }
 
@@ -1050,260 +1047,164 @@ def _triage_tool_use(triage: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _process_context_envelope(
+async def _process_submission_envelope(
     session: AsyncSession,
     *,
     context: _ConnectionContext,
     event: InboundEventRow,
     normalized: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Store submitted personal-agent context without starting Illo work."""
+    """Queue headless Illo handling for an external coordination submission."""
 
-    if not context.owner_user_id:
-        return await _store_context_event(
-            session,
-            context=context,
-            event=event,
-            normalized=normalized,
-            reason="missing_authority_user",
-            message="Context accepted and stored as an inbound event because no authority user was available.",
-        )
-
-    correlation = dict(normalized.get("correlation") or {})
-    thread = await _correlated_thread(session, context=context, correlation=correlation)
-    if thread is None:
-        return await _store_context_event(
-            session,
-            context=context,
-            event=event,
-            normalized=normalized,
-            reason="no_correlated_thread",
-            message=(
-                "Context accepted and stored. No visible Thread was created because "
-                "the submission was not correlated with an existing Thread."
-            ),
-        )
-
-    return await _attach_context_to_thread(
+    handling = await _queue_illo_submission(
         session,
         context=context,
         event=event,
         normalized=normalized,
-        correlation=correlation,
-        thread=thread,
     )
-
-
-async def _store_context_event(
-    session: AsyncSession,
-    *,
-    context: _ConnectionContext,
-    event: InboundEventRow,
-    normalized: Mapping[str, Any],
-    reason: str,
-    message: str,
-) -> dict[str, Any]:
-    parts = list(normalized.get("parts") or [])
-    action_result = {
-        "operation": "stored",
-        "reason": reason,
-        "event_id": str(event.id),
-        "origin": normalized.get("origin"),
-        "part_count": len(parts),
-        "message": message,
-    }
     return await _complete_event(
         session,
         event,
         policy=None,
-        status=STATUS_PROCESSED,
-        action_type=ACTION_CONTEXT_ACCEPTED,
-        action_result=action_result,
-        confidence=1.0,
-        target={"kind": "inbound_event", "event_id": str(event.id)},
-        tool_use={"type": "illo_submit_context", "operation": "stored"},
-        reasoning_summary=message,
-        reusable_pattern_candidate={
-            "kind": CONTEXT_ENVELOPE_KIND,
-            "origin": normalized.get("origin"),
-            "source_kind": context.source_kind,
-        },
-    )
-
-
-async def _attach_context_to_thread(
-    session: AsyncSession,
-    *,
-    context: _ConnectionContext,
-    event: InboundEventRow,
-    normalized: Mapping[str, Any],
-    correlation: Mapping[str, Any],
-    thread: Idea,
-) -> dict[str, Any]:
-    operation = "attached"
-
-    source = dict(normalized.get("source") or {})
-    constraints = dict(normalized.get("constraints") or {})
-    parts = list(normalized.get("parts") or [])
-    intent = _clean_optional(normalized.get("intent")) or _clean_optional(normalized.get("summary"))
-
-    submission = ThreadContextSubmission(
-        thread_id=str(thread.id),
-        org_id=context.org_id,
-        source_connection_id=context.connection_id,
-        submitted_by_user_id=context.owner_user_id,
-        inbound_event_id=str(event.id),
-        intent=intent,
-        source=source,
-        constraints=constraints,
-        correlation=correlation,
-        parts=_json_safe(parts),
-        routing_result={},
-    )
-    session.add(submission)
-    await session.flush()
-
-    thread_message = IdeaThread(
-        idea_id=str(thread.id),
-        role="user",
-        content=_context_timeline_preview(
-            context=context,
-            normalized=normalized,
-            submission_id=str(submission.id),
-        ),
-        attachments=[],
-        metadata_={
-            "source": "inbound.context",
+        status=STATUS_REVIEW_REQUIRED,
+        action_type=ACTION_ILLO_SUBMIT_QUEUED,
+        action_result={
+            "operation": "queued",
+            "message": "Submission accepted and queued for Illo handling.",
             "event_id": str(event.id),
-            "context_submission_id": str(submission.id),
-            "origin": normalized.get("origin"),
-            "operation": operation,
-            "connection_id": context.connection_id,
-            "source_connection_display_name": context.display_name,
-            "source_kind": context.source_kind,
-            "part_count": len(parts),
+            "handling": handling,
         },
-        message_type="context_submission",
-        user_id=context.owner_user_id,
-    )
-    session.add(thread_message)
-    await session.flush()
-
-    links = thread_link_payload(thread.id)
-    if not getattr(thread, "preview_summary", None):
-        preview = deterministic_preview_summary(
-            title=getattr(thread, "title", None),
-            intent=normalized.get("intent") or normalized.get("summary"),
-            source_tool=context.source_kind or context.display_name,
-        )
-        if preview:
-            await refresh_thread_read_model(
-                session,
-                thread,
-                preview_summary=preview,
-                preview_source="deterministic",
-            )
-    thread_ref = await thread_reference_payload(session, thread, include_handoff=True)
-    action_result = {
-        "operation": operation,
-        "thread_id": str(thread.id),
-        "thread_url": links["thread_url"],
-        "thread_route": links["thread_route"],
-        "url": links["thread_url"],
-        "thread_reference": thread_ref,
-        "context_submission_id": str(submission.id),
-        "thread_message_id": thread_message.id,
-        "event_id": str(event.id),
-        "message": "Context accepted and attached to an existing Thread.",
-    }
-    submission.routing_result = dict(action_result)
-    return await _complete_event(
-        session,
-        event,
-        policy=None,
-        status=STATUS_PROCESSED,
-        action_type=ACTION_THREAD_ATTACHED,
-        action_result=action_result,
-        confidence=1.0,
-        target={"kind": "cortex_idea", "idea_id": str(thread.id)},
-        tool_use={"type": "illo_submit_context", "operation": operation},
-        reasoning_summary="Context ingress was routed deterministically by explicit correlation.",
+        confidence=None,
+        target=_submission_target(handling, event=event),
+        tool_use=_submission_tool_use(handling),
+        reasoning_summary="External coordination submission was queued for headless Illo handling.",
         reusable_pattern_candidate={
-            "kind": CONTEXT_ENVELOPE_KIND,
+            "kind": SUBMISSION_ENVELOPE_KIND,
             "origin": normalized.get("origin"),
             "source_kind": context.source_kind,
         },
     )
 
 
-async def _correlated_thread(
+async def _queue_illo_submission(
     session: AsyncSession,
     *,
     context: _ConnectionContext,
-    correlation: Mapping[str, Any],
-) -> Idea | None:
-    thread_id = _thread_id_from_correlation(correlation)
-    if not thread_id:
-        return None
-    thread = await session.get(Idea, thread_id)
-    if thread is None or str(thread.org_id) != str(context.org_id):
-        raise InboundValidationError("correlation.thread_id does not match an accessible Thread")
-    return thread
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not context.owner_user_id:
+        return {"status": "skipped", "reason": "missing_authority_user", "event_id": str(event.id)}
 
-
-def _thread_id_from_correlation(correlation: Mapping[str, Any]) -> str | None:
-    for key in ("thread_url", "url", "thread_route"):
-        thread_id = thread_id_from_reference(correlation.get(key))
-        if thread_id:
-            return thread_id
-    return thread_id_from_reference(
-        correlation.get("thread_id") or correlation.get("idea_id"),
-        allow_raw_id=True,
+    source_name = context.display_name or context.source_kind or "external source"
+    message = _submission_prompt(context=context, event=event, normalized=normalized)
+    result = await admit_work(
+        session,
+        WorkIntakeEvent(
+            source="inbound",
+            event_type="inbound.submission_received",
+            org_id=context.org_id,
+            actor={
+                "id": context.owner_user_id,
+                "org_id": context.org_id,
+                "principal_type": "external_source_authority",
+                "name": source_name,
+            },
+            target={
+                "kind": "inbound_submission",
+                "event_id": str(event.id),
+                "connection_id": context.connection_id,
+                "thread_id": f"inbound:{context.connection_id}:{event.id}",
+            },
+            payload={
+                "message": message,
+                "workspace_ref": {"source": "inbound", "mode": "headless_submission"},
+                "metadata": {
+                    "execution_profile": "fast",
+                    "origin": normalized.get("origin"),
+                    "inbound_event": _inbound_event_metadata(context, event, normalized, None),
+                    "submission": {
+                        "message": normalized.get("message"),
+                        "source": dict(normalized.get("source") or {}),
+                        "constraints": dict(normalized.get("constraints") or {}),
+                        "correlation": dict(normalized.get("correlation") or {}),
+                        "response": dict(normalized.get("response") or {}),
+                        "part_count": len(list(normalized.get("parts") or [])),
+                    },
+                },
+            },
+            policy={
+                "producer": "inbound",
+                "idempotency_key": f"inbound:submission:{event.id}",
+                "run_event": "inbound_submission_received",
+            },
+        ),
     )
+    handling = {
+        "status": "queued" if result.ok else "run_admission_failed",
+        "event_id": str(event.id),
+    }
+    if result.run_id is not None:
+        handling["run_id"] = result.run_id
+    if result.skipped_reason:
+        handling["error"] = result.skipped_reason
+    return handling
 
 
-def _context_timeline_preview(
+def _submission_prompt(
     *,
     context: _ConnectionContext,
+    event: InboundEventRow,
     normalized: Mapping[str, Any],
-    submission_id: str,
 ) -> str:
-    source_name = context.display_name or context.source_kind or "personal agent"
-    parts = list(normalized.get("parts") or [])
+    source_name = context.display_name or context.source_kind or "external source"
     lines = [
-        f"Context submitted from {source_name}.",
+        "Handle this external coordination submission.",
         "",
-        f"Submission: {submission_id}",
+        f"Inbound event: {event.id}",
+        f"Origin: {normalized.get('origin') or event.origin}",
+        f"Source: {source_name}",
+        "",
+        "Message:",
+        str(normalized.get("message") or normalized.get("summary") or ""),
     ]
-    if normalized.get("intent"):
-        lines.append(f"Intent: {normalized.get('intent')}")
-    if normalized.get("summary") and normalized.get("summary") != normalized.get("intent"):
-        lines.append(f"Summary: {normalized.get('summary')}")
-    if normalized.get("origin"):
-        lines.append(f"Origin: {normalized.get('origin')}")
+    parts = list(normalized.get("parts") or [])
     if parts:
-        lines.extend(["", f"Context parts: {len(parts)}"])
-        for index, part in enumerate(parts[:8], start=1):
-            lines.append(f"{index}. {_context_part_preview(part)}")
-        if len(parts) > 8:
-            lines.append(f"... plus {len(parts) - 8} more part(s).")
-    if normalized.get("source"):
-        lines.extend(["", f"Source: {_json_preview(normalized.get('source'), limit=600)}"])
+        lines.extend(["", f"Context parts: {len(parts)}", _json_preview(parts, limit=MAX_TRIAGE_PAYLOAD_CHARS)])
+    for label, key in (
+        ("Source metadata", "source"),
+        ("Constraints", "constraints"),
+        ("Correlation", "correlation"),
+        ("Response hints", "response"),
+    ):
+        value = normalized.get(key)
+        if value:
+            lines.extend(["", f"{label}:", _json_preview(value, limit=1200)])
+    lines.extend(
+        [
+            "",
+            "Use Illo's memory, team preferences, and available tools to decide the appropriate outcome. "
+            "You may answer privately, create or update workspace state, delegate work, ask follow-up, or no-op when that is best. "
+            "Record a clear final answer describing what you decided and what happened.",
+        ]
+    )
     return _truncate("\n".join(lines), MAX_TRIAGE_MESSAGE_CHARS)
 
 
-def _context_part_preview(part: Any) -> str:
-    if not isinstance(part, dict):
-        return _truncate(part, 180)
-    part_type = _clean_optional(part.get("type") or part.get("kind")) or "part"
-    title = _clean_optional(part.get("title") or part.get("name") or part.get("label"))
-    text = _clean_optional(part.get("text") or part.get("content") or part.get("url") or part.get("uri"))
-    bits = [part_type]
-    if title:
-        bits.append(title)
-    if text:
-        bits.append(_truncate(text, 140))
-    return " - ".join(bits)
+def _submission_target(handling: Mapping[str, Any], *, event: InboundEventRow) -> dict[str, Any]:
+    return {
+        "kind": "inbound_submission",
+        "event_id": str(event.id),
+        **({"run_id": handling.get("run_id")} if handling.get("run_id") is not None else {}),
+    }
+
+
+def _submission_tool_use(handling: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "illo_submit",
+        "status": handling.get("status"),
+        **({"run_id": handling.get("run_id")} if handling.get("run_id") is not None else {}),
+    }
 
 
 def _with_thread_links(outcome: Mapping[str, Any]) -> dict[str, Any]:

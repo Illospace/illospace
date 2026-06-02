@@ -15,6 +15,16 @@ MVP deliverable is hosted MCP for personal-agent -> Illo collaboration. The
 outbound bridge remains proven for Hermes task delegation, but OpenClaw adapter
 work is intentionally deferred.
 
+Hosted MCP exposes the canonical external coordination tools:
+
+- `illo_submit`: submit context, traces, artifacts, progress, or handoff
+  material to Illo without choosing workspace destinations directly.
+- `illo_read`: read or ask for information Illo already has without creating
+  team-visible work by default.
+- `illo_act`: ask Illo to coordinate or take an explicit action while Illo owns
+  routing and workspace tool use.
+- `illo_get_result`: retrieve asynchronous submit, read, or act results.
+
 Hosted MCP client config:
 
 Create the bearer token from Illo Vault -> Personal agents -> New token. The
@@ -52,6 +62,8 @@ These tests cover:
 - Hermes `/v1/chat/completions` request contract
 - Hermes `/v1/runs` polling contract
 - hosted Illo MCP tool descriptions and route/auth contracts
+- canonical `illo_submit`, `illo_read`, `illo_act`, and `illo_get_result`
+  catalog guidance
 - Illo bridge routes and fanout commit ordering
 - fresh Alembic baseline replay for external-agent tables
 

@@ -25,7 +25,7 @@ from brain.platform.db.models.external_agent import (
     ExternalAgentConnectionRow,
     ExternalAgentConnectionTokenRow,
 )
-from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread, ThreadContextSubmission
+from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
 from brain.platform.db.models.inbound import (
     InboundDecisionReceiptRow,
     InboundDomainProjectionKeyRow,
@@ -104,7 +104,6 @@ async def session(async_sqlite_session_factory):
             InboundDomainProjectionKeyRow.__table__,
             InboundEventRow.__table__,
             InboundDecisionReceiptRow.__table__,
-            ThreadContextSubmission.__table__,
         ]
     )
 
@@ -131,7 +130,12 @@ async def _seed_connection(
         transport="webhook",
         status=status,
         remote_agent_card={},
-        capabilities={"submit_context": True},
+        capabilities={
+            "illo_submit": True,
+            "illo_read": True,
+            "illo_act": True,
+            "illo_get_result": True,
+        },
         auth_metadata={},
         metadata_={},
     )
@@ -223,6 +227,25 @@ async def _assert_queued_triage(session, outcome: dict, *, reason: str) -> dict:
     assert run.metadata_["producer"] == "inbound"
     assert run.metadata_["inbound_event"]["event_id"] == triage["event_id"]
     return triage
+
+
+async def _assert_queued_submission(session, outcome: dict) -> dict:
+    assert outcome["operation"] == "queued"
+    assert outcome["message"] == "Submission accepted and queued for Illo handling."
+    handling = outcome["handling"]
+    assert handling["status"] == "queued"
+    assert handling["event_id"]
+    assert handling["run_id"]
+
+    run = await session.get(AgentRunRow, handling["run_id"])
+    assert run is not None
+    assert run.thread_id == f"inbound:{CONNECTION_ID}:{handling['event_id']}"
+    assert run.status == "queued"
+    assert run.metadata_["producer"] == "inbound"
+    assert run.target_ref["kind"] == "inbound_submission"
+    assert run.target_ref["event_id"] == handling["event_id"]
+    assert run.metadata_["submission"]["message"]
+    return handling
 
 
 async def _queue_unmatched_webhook_triage(
@@ -330,7 +353,7 @@ async def test_authenticated_source_traffic_marks_pending_connection_configured(
     assert token.last_used_at is not None
 
 
-async def test_webhook_and_mcp_context_share_inbound_event_path(session, monkeypatch):
+async def test_webhook_and_mcp_submit_share_inbound_event_path(session, monkeypatch):
     monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com/app")
     await _seed_connection(session)
 
@@ -351,10 +374,10 @@ async def test_webhook_and_mcp_context_share_inbound_event_path(session, monkeyp
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "illo_submit_context",
+                "name": "illo_submit",
                 "arguments": {
-                    "intent": "Ask the team to review inbound coordination.",
-                    "origin": "codex.context",
+                    "message": "Ask Illo to review inbound coordination and decide what the team should do.",
+                    "origin": "codex.submit",
                     "source_tool": "codex",
                     "repo": "illospace-project",
                     "branch": "codex/inbound-coordination-e2e",
@@ -372,28 +395,29 @@ async def test_webhook_and_mcp_context_share_inbound_event_path(session, monkeyp
     assert mcp_response.status_code == 200
     mcp_payload = json.loads(mcp_response.json()["result"]["content"][0]["text"])
     assert webhook_response.json()["status"] == "review_required"
-    assert mcp_payload["status"] == "processed"
+    assert mcp_payload["status"] == "review_required"
     assert mcp_payload["matched_policy_id"] is None
-    assert mcp_payload["operation"] == "stored"
-    assert mcp_payload["thread_id"] is None
-    assert mcp_payload["thread_url"] is None
-    assert mcp_payload["url"] is None
-    assert mcp_payload["thread_route"] is None
+    assert mcp_payload["submission_id"] == mcp_payload["event_id"]
+    assert mcp_payload["result_id"] == mcp_payload["event_id"]
+    assert mcp_payload["operation"] == "queued"
     webhook_triage = await _assert_queued_triage(
         session,
         webhook_response.json()["ilo_outcome"],
         reason="no_matching_source_policy",
     )
+    mcp_handling = await _assert_queued_submission(session, mcp_payload["ilo_outcome"])
 
     events = (await session.scalars(select(InboundEventRow).order_by(InboundEventRow.created_at))).all()
-    assert [event.origin for event in events] == ["jira.ticket_created", "codex.context"]
-    assert [event.status for event in events] == ["review_required", "processed"]
-    assert [event.action_type for event in events] == ["ilo_required", "accepted"]
+    assert [event.origin for event in events] == ["jira.ticket_created", "codex.submit"]
+    assert [event.status for event in events] == ["review_required", "review_required"]
+    assert [event.action_type for event in events] == ["ilo_required", "illo.submit_queued"]
     assert all(event.connection_id == CONNECTION_ID for event in events)
     assert all(event.authority_user_id == USER_ID for event in events)
     assert events[0].ingress_context["surface"] == "webhook"
     assert events[1].ingress_context["surface"] == "mcp_personal_tool"
-    assert events[1].normalized_payload["intent"] == "Ask the team to review inbound coordination."
+    assert events[1].normalized_payload["message"] == (
+        "Ask Illo to review inbound coordination and decide what the team should do."
+    )
     assert events[1].normalized_payload["source"]["source_tool"] == "codex"
     assert events[1].normalized_payload["source"]["files_touched"] == [
         "brain/app/api/routers/agent_mcp.py"
@@ -410,11 +434,12 @@ async def test_webhook_and_mcp_context_share_inbound_event_path(session, monkeyp
     assert [receipt.event_id for receipt in receipts] == [str(event.id) for event in events]
     assert receipts[0].outcome["reason"] == "no_matching_source_policy"
     assert receipts[0].outcome["triage"]["status"] == "queued"
-    assert receipts[1].outcome["operation"] == "stored"
+    assert receipts[1].outcome["operation"] == "queued"
+    assert receipts[1].outcome["handling"]["run_id"] == mcp_handling["run_id"]
     assert receipts[0].target["kind"] == "cortex_idea"
-    assert receipts[1].target["kind"] == "inbound_event"
+    assert receipts[1].target["kind"] == "inbound_submission"
     assert receipts[0].tool_use["type"] == "illo_triage"
-    assert receipts[1].tool_use["type"] == "illo_submit_context"
+    assert receipts[1].tool_use["type"] == "illo_submit"
 
 
 async def test_malformed_mcp_json_fails_without_creating_event(session):
@@ -436,7 +461,7 @@ async def test_malformed_mcp_json_fails_without_creating_event(session):
     assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 0
 
 
-async def test_mcp_context_ignores_signal_policy_and_stores_without_thread(session, monkeypatch):
+async def test_mcp_submit_ignores_signal_policy_and_queues_illo(session, monkeypatch):
     monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
     await _seed_connection(session)
     await inbound.create_source_policy(
@@ -456,10 +481,10 @@ async def test_mcp_context_ignores_signal_policy_and_stores_without_thread(sessi
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "illo_submit_context",
+                "name": "illo_submit",
                 "arguments": {
-                    "intent": "Ask the team to review inbound follow-up fixes.",
-                    "origin": "codex.context",
+                    "message": "Ask Illo to review inbound follow-up fixes.",
+                    "origin": "codex.submit",
                     "source_tool": "codex",
                     "repo": "illospace-project",
                     "branch": "codex/inbound-followups",
@@ -475,23 +500,20 @@ async def test_mcp_context_ignores_signal_policy_and_stores_without_thread(sessi
     body = json.loads(response.json()["result"]["content"][0]["text"])
     event = (await session.scalars(select(InboundEventRow))).one()
     assert response.status_code == 200
-    assert body["status"] == "processed"
-    assert body["operation"] == "stored"
-    assert body["thread_id"] is None
-    assert body["thread_url"] is None
-    assert body["url"] is None
-    assert body["thread_route"] is None
+    assert body["status"] == "review_required"
+    assert body["operation"] == "queued"
     assert body["matched_policy_id"] is None
     assert body["error"] is None
-    assert event.status == "processed"
-    assert event.action_type == "accepted"
-    assert event.kind == "context"
-    assert event.raw_payload["intent"] == "Ask the team to review inbound follow-up fixes."
+    assert await _assert_queued_submission(session, body["ilo_outcome"])
+    assert event.status == "review_required"
+    assert event.kind == "submission"
+    assert event.action_type == "illo.submit_queued"
+    assert event.raw_payload["message"] == "Ask Illo to review inbound follow-up fixes."
     assert event.normalized_payload["source"]["source_tool"] == "codex"
     assert await session.scalar(select(func.count()).select_from(Idea)) == 0
 
 
-async def test_mcp_context_requires_non_empty_intent(session):
+async def test_mcp_submit_requires_non_empty_message(session):
     await _seed_connection(session)
 
     response = await _post_mcp(
@@ -502,7 +524,7 @@ async def test_mcp_context_requires_non_empty_intent(session):
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "illo_submit_context",
+                "name": "illo_submit",
                 "arguments": {
                     "source_tool": "codex",
                     "repo": "illospace-project",
@@ -518,7 +540,7 @@ async def test_mcp_context_requires_non_empty_intent(session):
     body = response.json()["result"]
     assert response.status_code == 200
     assert body["isError"] is True
-    assert "intent" in body["content"][0]["text"]
+    assert "message" in body["content"][0]["text"]
     assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 0
 
 
@@ -664,7 +686,7 @@ async def test_inbound_triage_receipt_reconciles_when_illo_run_fails(session):
     assert receipt.tool_use["status"] == "failed"
 
 
-async def test_mcp_context_rejects_overlong_origin_before_inbound_processing(session):
+async def test_mcp_submit_rejects_overlong_origin_before_inbound_processing(session):
     await _seed_connection(session)
 
     response = await _post_mcp(
@@ -675,9 +697,9 @@ async def test_mcp_context_rejects_overlong_origin_before_inbound_processing(ses
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "illo_submit_context",
+                "name": "illo_submit",
                 "arguments": {
-                    "intent": "This should not reach persistence.",
+                    "message": "This should not reach persistence.",
                     "origin": "x" * 241,
                 },
             },
@@ -830,97 +852,58 @@ async def test_idempotent_insert_integrity_error_returns_existing_replay(session
     assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 1
 
 
-async def test_context_envelope_stores_without_uncorrelated_thread(session, monkeypatch):
-    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
+async def test_submission_envelope_queues_headless_illo_and_replays_idempotently(session):
     principal = await _seed_connection(session)
-
-    result = await inbound.submit_inbound_envelope(
-        session,
-        connection=principal,
-        envelope={
-            "kind": "context",
-            "origin": "codex.context",
-            "intent": "Ask the team to review the agent trace",
-            "parts": [
-                {"type": "conversation", "title": "Codex thread", "text": "User asked; Codex replied."},
-                {"type": "diff", "title": "Implementation diff", "text": "+ new behavior"},
-            ],
-            "source": {"source_tool": "codex", "repo": "illospace-project"},
-            "idempotency_key": "codex:context:1",
-        },
-        ingress_context={"surface": "test"},
-    )
-
-    assert result["status"] == "processed"
-    assert result["matched_policy_id"] is None
-    assert result["ilo_outcome"]["operation"] == "stored"
-    assert result["ilo_outcome"]["reason"] == "no_correlated_thread"
-    assert result["ilo_outcome"]["part_count"] == 2
-    assert "No visible Thread was created" in result["ilo_outcome"]["message"]
-    assert "thread_id" not in result["ilo_outcome"]
-    assert await session.scalar(select(func.count()).select_from(Idea)) == 0
-    assert await session.scalar(select(func.count()).select_from(IdeaThread)) == 0
-    assert await session.scalar(select(func.count()).select_from(ThreadContextSubmission)) == 0
-
-
-async def test_context_envelope_attaches_to_correlated_thread_and_replays_idempotently(session, monkeypatch):
-    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
-    principal = await _seed_connection(session)
-    thread = Idea(
-        id="77777777-7777-4777-8777-777777777777",
-        title="Existing shared thread",
-        status="emerged",
-        origin="user_created",
-        user_id=USER_ID,
-        org_id=ORG_ID,
-    )
-    session.add(thread)
-    await session.flush()
+    envelope = {
+        "kind": "submission",
+        "origin": "codex.submit",
+        "message": "Review the agent trace and decide what the team should do.",
+        "parts": [
+            {"type": "conversation", "title": "Codex thread", "text": "User asked; Codex replied."},
+            {"type": "diff", "title": "Implementation diff", "text": "+ new behavior"},
+        ],
+        "source": {"source_tool": "codex", "repo": "illospace-project"},
+        "correlation": {"thread_id": "77777777-7777-4777-8777-777777777777"},
+        "response": {"mode": "webhook"},
+        "idempotency_key": "codex:submission:1",
+    }
 
     first = await inbound.submit_inbound_envelope(
         session,
         connection=principal,
-        envelope={
-            "kind": "context",
-            "origin": "codex.context",
-            "intent": "Attach follow-up trace",
-            "parts": [{"type": "trace", "text": "tool calls"}],
-            "correlation": {"thread_id": str(thread.id)},
-            "idempotency_key": "codex:context:attach",
-        },
+        envelope=envelope,
+        ingress_context={"surface": "test"},
     )
-    event = await session.get(InboundEventRow, first["event_id"])
-    assert event is not None
-    event.action_result = {
-        "operation": "attached",
-        "thread_id": str(thread.id),
-        "url": f"/cortex?idea={thread.id}",
-        "context_submission_id": first["ilo_outcome"]["context_submission_id"],
-        "message": first["ilo_outcome"]["message"],
-    }
-    await session.flush()
     replay = await inbound.submit_inbound_envelope(
         session,
         connection=principal,
-        envelope={
-            "kind": "context",
-            "origin": "codex.context",
-            "intent": "Attach follow-up trace",
-            "parts": [{"type": "trace", "text": "tool calls"}],
-            "correlation": {"thread_id": str(thread.id)},
-            "idempotency_key": "codex:context:attach",
-        },
+        envelope=envelope,
+        ingress_context={"surface": "test"},
     )
 
-    assert first["ilo_outcome"]["operation"] == "attached"
-    assert first["ilo_outcome"]["thread_id"] == str(thread.id)
-    assert first["ilo_outcome"]["thread_url"] == f"https://illo.example.com/threads/{thread.id}"
-    assert first["ilo_outcome"]["url"] == first["ilo_outcome"]["thread_url"]
-    assert first["ilo_outcome"]["thread_route"] == f"/threads/{thread.id}"
+    assert first["status"] == "review_required"
+    assert first["matched_policy_id"] is None
+    handling = await _assert_queued_submission(session, first["ilo_outcome"])
     assert replay["idempotent_replay"] is True
-    assert replay["ilo_outcome"]["thread_url"] == first["ilo_outcome"]["thread_url"]
-    assert replay["ilo_outcome"]["thread_route"] == first["ilo_outcome"]["thread_route"]
-    assert await session.scalar(select(func.count()).select_from(ThreadContextSubmission)) == 1
+    assert replay["event_id"] == first["event_id"]
+    assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 1
+    assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 1
+
+    event = await session.get(InboundEventRow, first["event_id"])
+    assert event is not None
+    assert event.kind == "submission"
+    assert event.status == "review_required"
+    assert event.action_type == "illo.submit_queued"
+    assert event.normalized_payload["message"] == "Review the agent trace and decide what the team should do."
+    assert event.normalized_payload["source"]["source_tool"] == "codex"
+    assert event.normalized_payload["correlation"]["thread_id"] == "77777777-7777-4777-8777-777777777777"
+    assert event.normalized_payload["response"]["mode"] == "webhook"
+
+    receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
+    assert receipt.event_id == str(event.id)
+    assert receipt.target["kind"] == "inbound_submission"
+    assert receipt.target["run_id"] == handling["run_id"]
+    assert receipt.tool_use["type"] == "illo_submit"
 
 
 async def test_source_policy_matching_uses_connection_scope_and_priority(session):

@@ -529,6 +529,16 @@ def _external_agent_headless_thread_id(target: dict[str, Any]) -> str:
     raise ValueError("External agent headless ask requires thread_id or connection/task ids")
 
 
+def _inbound_submission_thread_id(target: dict[str, Any]) -> str:
+    thread_id = str(target.get("thread_id") or "")
+    if thread_id:
+        return thread_id
+    event_id = str(target.get("event_id") or "")
+    if event_id:
+        return f"inbound:{event_id}"
+    raise ValueError("Inbound submission requires event_id or thread_id")
+
+
 def _build_external_agent_headless_request(
     event: WorkIntakeEvent,
     *,
@@ -544,6 +554,38 @@ def _build_external_agent_headless_request(
         org_id=_event_org_id(event),
         user_id=_event_actor_user_id(event),
         thread_id=_external_agent_headless_thread_id(target),
+        message=message,
+        profile=profile,
+        recipe=recipe_for_profile(profile, metadata),
+        target_ref=target,
+        workspace_ref=_event_workspace_ref(event),
+        model_policy=_event_model_policy(event, metadata),
+        metadata={
+            **metadata,
+            "event": _event_run_event(event),
+            "priority": priority,
+            "source": event.source,
+            "producer": producer,
+            "idempotency_key": idempotency_key,
+        },
+    )
+
+
+def _build_inbound_submission_request(
+    event: WorkIntakeEvent,
+    *,
+    target: dict[str, Any],
+    metadata: dict[str, Any],
+    message: str,
+    producer: str,
+    idempotency_key: str | None,
+    priority: int,
+) -> AgentRunRequest:
+    profile = profile_from_metadata(metadata)
+    return AgentRunRequest(
+        org_id=_event_org_id(event),
+        user_id=_event_actor_user_id(event),
+        thread_id=_inbound_submission_thread_id(target),
         message=message,
         profile=profile,
         recipe=recipe_for_profile(profile, metadata),
@@ -675,6 +717,17 @@ async def build_agent_run_request(
 
     if target.get("kind") == "external_agent_headless_ask":
         return _build_external_agent_headless_request(
+            event,
+            target=target,
+            metadata=metadata,
+            message=message,
+            producer=producer,
+            idempotency_key=idempotency_key,
+            priority=priority,
+        )
+
+    if target.get("kind") == "inbound_submission":
+        return _build_inbound_submission_request(
             event,
             target=target,
             metadata=metadata,

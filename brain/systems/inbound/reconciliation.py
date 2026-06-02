@@ -104,7 +104,7 @@ async def _latest_final_answer(session: AsyncSession, run_id: int) -> str | None
     return text or None
 
 
-async def _triage_receipt_for_run(
+async def _inbound_receipt_for_run(
     session: AsyncSession,
     *,
     event_id: str,
@@ -120,7 +120,7 @@ async def _triage_receipt_for_run(
     for row in rows:
         tool_use = _json_dict(row.tool_use)
         target = _json_dict(row.target)
-        if tool_use.get("type") != "illo_triage":
+        if tool_use.get("type") not in {"illo_triage", "illo_submit"}:
             continue
         if str(tool_use.get("run_id") or target.get("run_id") or "") == str(run_id):
             return row
@@ -156,7 +156,7 @@ async def reconcile_inbound_triage_run(
         return None
 
     run_id = int(getattr(row, "id"))
-    receipt = await _triage_receipt_for_run(session, event_id=event_id, run_id=run_id)
+    receipt = await _inbound_receipt_for_run(session, event_id=event_id, run_id=run_id)
     if receipt is None:
         return None
 
@@ -174,15 +174,16 @@ async def reconcile_inbound_triage_run(
     )
 
     outcome = _json_dict(receipt.outcome)
-    triage = _json_dict(outcome.get("triage"))
-    outcome["triage"] = {
-        **triage,
+    tool_use = _json_dict(receipt.tool_use)
+    outcome_key = "handling" if tool_use.get("type") == "illo_submit" else "triage"
+    handling = _json_dict(outcome.get(outcome_key))
+    outcome[outcome_key] = {
+        **handling,
         **triage_terminal,
         "result": _triage_result(status, final_answer),
         "attribution": attribution,
     }
 
-    tool_use = _json_dict(receipt.tool_use)
     receipt.status = terminal_status
     receipt.outcome = outcome
     receipt.tool_use = {
@@ -198,7 +199,7 @@ async def reconcile_inbound_triage_run(
     event.status = terminal_status
     event.action_result = {
         **_json_dict(event.action_result),
-        "triage": outcome["triage"],
+        outcome_key: outcome[outcome_key],
     }
     event.processed_at = event.processed_at or now
     if status == RunStatus.COMPLETED:
