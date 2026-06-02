@@ -34,6 +34,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0013_cycle_memory_primitives.py",
     # Downgrade removes only the object-reference table introduced by this migration.
     "0016_thread_urls_object_references.py",
+    # Downgrade removes only the launch handoff table introduced by this migration.
+    "0017_launch_handoffs.py",
 }
 
 

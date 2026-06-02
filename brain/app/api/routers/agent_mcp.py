@@ -17,6 +17,7 @@ from brain.app.api.routers.agent_bridge import (
     _run_trigger_if_requested,
     _thread_payload,
 )
+from brain.app.api.routers import agent_mcp_handoffs
 from brain.app.api.routers.agent_mcp_domains import DOMAIN_TOOL_HANDLERS
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.mentions import classify_mention_intent
@@ -132,7 +133,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             {
                 "capability": {
                     "type": "string",
-                    "description": "Read capability name, such as workspace.search, thread.get, team.members.list, domain.inspect, or capabilities.",
+                    "description": "Read capability name, such as workspace.search, thread.get, handoff.get, team.members.list, domain.inspect, or capabilities.",
                 },
                 "arguments": {
                     "type": "object",
@@ -153,7 +154,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             {
                 "capability": {
                     "type": "string",
-                    "description": "Action capability name, such as thread.create, thread.post_message, domain.record.write, or capabilities.",
+                    "description": "Action capability name, such as thread.create, thread.post_message, handoff.create, domain.record.write, or capabilities.",
                 },
                 "arguments": {
                     "type": "object",
@@ -449,6 +450,7 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
         "description": "Read messages from an existing Illo idea/thread.",
         "arguments": {"idea_id": "string", "limit": "integer"},
     },
+    **agent_mcp_handoffs.READ_CAPABILITIES,
     "team.members.list": {
         "description": "List visible Illo team members.",
         "arguments": {},
@@ -493,6 +495,7 @@ ACT_CAPABILITIES: dict[str, dict[str, Any]] = {
             "trigger_illo": "boolean",
         },
     },
+    **agent_mcp_handoffs.ACT_CAPABILITIES,
     "domain.record.write": {
         "description": "Create, update, or archive records in Illo Domains as the user's external-agent delegate.",
         "arguments": {
@@ -566,6 +569,8 @@ async def _tool_read(
             idea_id=_thread_argument_id(capability_arguments),
             limit=int(capability_arguments.get("limit") or 100),
         )
+    if capability == "handoff.get":
+        return await agent_mcp_handoffs.read_handoff(db, principal, capability_arguments)
     if capability == "team.members.list":
         return await external_agents.get_team_members(db, principal)
     if capability == "domain.inspect":
@@ -691,6 +696,14 @@ async def _tool_act(
             principal,
             capability_arguments,
             original_arguments=arguments,
+        )
+    if capability == "handoff.create":
+        return await agent_mcp_handoffs.create_handoff(
+            db,
+            principal,
+            capability_arguments,
+            metadata=_action_metadata(arguments, capability_arguments, capability="handoff.create"),
+            idempotency_key=_clean_optional_string(arguments.get("idempotency_key")),
         )
     if capability == "domain.record.write":
         result = await DOMAIN_TOOL_HANDLERS["illo_write_domain_record"](db, principal, capability_arguments)
@@ -866,6 +879,8 @@ async def _handle_mcp_request(
         if spec.get("mutates_inbound"):
             await db.commit()
         if tool_payload.pop("_mutates_domain", False):
+            await db.commit()
+        if tool_payload.pop("_mutates_handoff", False):
             await db.commit()
         mutates_thread = bool(spec.get("mutates_thread") or tool_payload.pop("_mutates_thread", False))
         if mutates_thread:

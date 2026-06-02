@@ -1,0 +1,342 @@
+"""Launch handoff service, URL helpers, and object-reference payloads."""
+
+from __future__ import annotations
+
+import re
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from brain.platform.db.models.launch_handoff import LaunchHandoff
+from brain.systems.cortex.thread_links import public_app_base_url
+
+LAUNCH_HANDOFF_OBJECT_TYPE = "launch_handoff"
+TARGET_CODEX = "codex"
+CODEX_HANDOFF_ROUTE_PREFIX = "/codex/handoffs"
+LAUNCH_HANDOFF_ROUTE_PREFIX = "/handoffs"
+API_LAUNCH_HANDOFF_ROUTE_PREFIX = "/launch-handoffs"
+
+_HANDOFF_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
+_URL_CANDIDATE_RE = re.compile(
+    r"https?://[^\s<>'\"\]\)]+|/(?:codex/handoffs/|handoffs/|launch-handoffs/)[^\s<>'\"\]\)]+",
+    re.IGNORECASE,
+)
+_TRAILING_PUNCTUATION = ".,;:!?"
+
+
+class LaunchHandoffError(ValueError):
+    """Base error for launch handoff service failures."""
+
+
+class LaunchHandoffNotFound(LaunchHandoffError):
+    """Raised when a handoff is missing or outside the caller's org."""
+
+
+@dataclass(frozen=True)
+class LaunchHandoffCreateInput:
+    org_id: str
+    created_by_user_id: str | None
+    title: str
+    instructions: str
+    target_tool: str = TARGET_CODEX
+    summary: str | None = None
+    source_surface: str = "illo"
+    source_ref: dict[str, Any] = field(default_factory=dict)
+    context_parts: list[dict[str, Any]] = field(default_factory=list)
+    acceptance_criteria: list[Any] = field(default_factory=list)
+    repo_origin_url: str | None = None
+    branch_hint: str | None = None
+    idempotency_key: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def _iso(value: Any) -> str | None:
+    return value.isoformat() if hasattr(value, "isoformat") else (str(value) if value else None)
+
+
+def _clean_optional_string(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _required_string(value: Any, field_name: str) -> str:
+    text = _clean_optional_string(value)
+    if not text:
+        raise LaunchHandoffError(f"Launch handoff requires {field_name}")
+    return text
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _json_list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _json_object_list(value: Any) -> list[dict[str, Any]]:
+    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _uuid_or_none(value: Any) -> str | None:
+    text = _clean_optional_string(value)
+    if not text:
+        return None
+    try:
+        return str(uuid.UUID(text))
+    except ValueError:
+        return None
+
+
+def _strip_candidate(value: Any) -> str:
+    cleaned = str(value or "").strip()
+    while cleaned and cleaned[-1] in _TRAILING_PUNCTUATION:
+        cleaned = cleaned[:-1]
+    return cleaned
+
+
+def _clean_handoff_id(value: Any) -> str | None:
+    text = unquote(str(value or "")).strip().rstrip(_TRAILING_PUNCTUATION)
+    if not text:
+        return None
+    return text if _HANDOFF_ID_RE.match(text) else None
+
+
+def handoff_id_from_reference(value: Any, *, allow_raw_id: bool = False) -> str | None:
+    text = _strip_candidate(value)
+    if not text:
+        return None
+    if allow_raw_id and not any(part in text for part in ("/", "?", "#", "://")):
+        return _clean_handoff_id(text)
+
+    parts = urlsplit(text)
+    path = parts.path or text
+    for prefix in (CODEX_HANDOFF_ROUTE_PREFIX, LAUNCH_HANDOFF_ROUTE_PREFIX, API_LAUNCH_HANDOFF_ROUTE_PREFIX):
+        if path.startswith(f"{prefix}/"):
+            tail = path[len(prefix) + 1:]
+            return _clean_handoff_id(tail.split("/", 1)[0])
+    if path == LAUNCH_HANDOFF_ROUTE_PREFIX:
+        return _clean_handoff_id(parse_qs(parts.query).get("handoff_id", [None])[0])
+    return None
+
+
+def extract_launch_handoff_reference_values(text: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for match in _URL_CANDIDATE_RE.finditer(str(text or "")):
+        candidate = _strip_candidate(match.group(0))
+        if not candidate or candidate in seen:
+            continue
+        if handoff_id_from_reference(candidate):
+            values.append(candidate)
+            seen.add(candidate)
+    return values
+
+
+def launch_handoff_route_for_id(handoff_id: Any, *, target_tool: str = TARGET_CODEX) -> str:
+    target = str(target_tool or TARGET_CODEX).strip().lower()
+    if target == TARGET_CODEX:
+        return f"{CODEX_HANDOFF_ROUTE_PREFIX}/{quote(str(handoff_id), safe='')}"
+    return f"{LAUNCH_HANDOFF_ROUTE_PREFIX}/{quote(str(handoff_id), safe='')}/launch?target={quote(target, safe='')}"
+
+
+def launch_handoff_url_for_id(handoff_id: Any, *, target_tool: str = TARGET_CODEX) -> str:
+    return f"{public_app_base_url()}{launch_handoff_route_for_id(handoff_id, target_tool=target_tool)}"
+
+
+def codex_prompt_for_handoff(row: LaunchHandoff) -> str:
+    title = str(row.title or "Illo launch handoff").strip()
+    return (
+        f"Pick up Illo launch handoff {row.id}: {title}\n\n"
+        "Use the Illo MCP `illo_read` tool with capability `handoff.get` and "
+        f"arguments {{\"handoff_id\":\"{row.id}\"}} to fetch the full context, "
+        "source references, instructions, and acceptance criteria before changing code."
+    )
+
+
+def codex_deep_link_for_handoff(row: LaunchHandoff) -> str:
+    params: dict[str, str] = {"prompt": codex_prompt_for_handoff(row)}
+    repo_origin_url = _clean_optional_string(row.repo_origin_url)
+    if repo_origin_url:
+        params["originUrl"] = repo_origin_url
+    return f"codex://threads/new?{urlencode(params)}"
+
+
+async def create_launch_handoff(
+    session: AsyncSession,
+    handoff_input: LaunchHandoffCreateInput,
+) -> LaunchHandoff:
+    clean_org_id = _required_string(handoff_input.org_id, "org_id")
+    clean_title = _required_string(handoff_input.title, "title")
+    clean_instructions = _required_string(handoff_input.instructions, "instructions")
+    clean_target_tool = (_clean_optional_string(handoff_input.target_tool) or TARGET_CODEX).lower()
+    clean_idempotency_key = _clean_optional_string(handoff_input.idempotency_key)
+    if clean_idempotency_key:
+        existing = await session.scalar(
+            select(LaunchHandoff).where(
+                LaunchHandoff.org_id == clean_org_id,
+                LaunchHandoff.idempotency_key == clean_idempotency_key,
+            )
+        )
+        if existing is not None:
+            return existing
+
+    row = LaunchHandoff(
+        org_id=clean_org_id,
+        created_by_user_id=_uuid_or_none(handoff_input.created_by_user_id),
+        source_surface=_clean_optional_string(handoff_input.source_surface) or "illo",
+        source_ref=_json_dict(handoff_input.source_ref),
+        target_tool=clean_target_tool,
+        title=clean_title,
+        summary=_clean_optional_string(handoff_input.summary),
+        instructions=clean_instructions,
+        acceptance_criteria=_json_list(handoff_input.acceptance_criteria),
+        context_parts=_json_object_list(handoff_input.context_parts),
+        repo_origin_url=_clean_optional_string(handoff_input.repo_origin_url),
+        branch_hint=_clean_optional_string(handoff_input.branch_hint),
+        idempotency_key=clean_idempotency_key,
+        metadata_=_json_dict(handoff_input.metadata),
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def get_launch_handoff(
+    session: AsyncSession,
+    handoff_id: str,
+    *,
+    org_id: str | None = None,
+) -> LaunchHandoff | None:
+    row = await session.get(LaunchHandoff, str(handoff_id))
+    if row is None:
+        return None
+    if org_id is not None and str(row.org_id) != str(org_id):
+        return None
+    return row
+
+
+async def require_launch_handoff(
+    session: AsyncSession,
+    handoff_id: str,
+    *,
+    org_id: str | None = None,
+) -> LaunchHandoff:
+    row = await get_launch_handoff(session, handoff_id, org_id=org_id)
+    if row is None:
+        raise LaunchHandoffNotFound("Launch handoff not found")
+    return row
+
+
+async def mark_launch_handoff_launched(
+    session: AsyncSession,
+    row: LaunchHandoff,
+    *,
+    launched_by_user_id: str | None = None,
+) -> LaunchHandoff:
+    row.launch_count = int(row.launch_count or 0) + 1
+    row.last_launched_at = datetime.now(timezone.utc)
+    launched_by = _uuid_or_none(launched_by_user_id)
+    if launched_by:
+        row.last_launched_by_user_id = launched_by
+    if row.status == "open":
+        row.status = "launched"
+    await session.flush()
+    return row
+
+
+def serialize_launch_handoff(row: LaunchHandoff, *, include_context: bool = True) -> dict[str, Any]:
+    data = {
+        "id": str(row.id),
+        "org_id": str(row.org_id),
+        "created_by_user_id": str(row.created_by_user_id) if row.created_by_user_id else None,
+        "source_surface": row.source_surface,
+        "source_ref": _json_dict(row.source_ref),
+        "target_tool": row.target_tool,
+        "title": row.title,
+        "summary": row.summary,
+        "repo_origin_url": row.repo_origin_url,
+        "branch_hint": row.branch_hint,
+        "status": row.status,
+        "launch_count": int(row.launch_count or 0),
+        "last_launched_by_user_id": str(row.last_launched_by_user_id) if row.last_launched_by_user_id else None,
+        "last_launched_at": _iso(row.last_launched_at),
+        "expires_at": _iso(row.expires_at),
+        "idempotency_key": row.idempotency_key,
+        "metadata": _json_dict(row.metadata_),
+        "route": launch_handoff_route_for_id(row.id, target_tool=row.target_tool),
+        "url": launch_handoff_url_for_id(row.id, target_tool=row.target_tool),
+        "launch_url": launch_handoff_url_for_id(row.id, target_tool=row.target_tool),
+        "created_at": _iso(row.created_at),
+        "updated_at": _iso(row.updated_at),
+    }
+    if include_context:
+        data["instructions"] = row.instructions
+        data["acceptance_criteria"] = _json_list(row.acceptance_criteria)
+        data["context_parts"] = _json_object_list(row.context_parts)
+    return data
+
+
+def launch_handoff_reference_payload(
+    row: LaunchHandoff,
+    *,
+    original_ref: str | None = None,
+) -> dict[str, Any]:
+    summary = _clean_optional_string(row.summary) or _clean_optional_string(row.instructions)
+    return {
+        "type": "launch_handoff_reference",
+        "object_type": LAUNCH_HANDOFF_OBJECT_TYPE,
+        "object_id": str(row.id),
+        "launch_handoff_id": str(row.id),
+        "target_tool": row.target_tool,
+        "handoff_status": row.status,
+        "status": "available",
+        "title": row.title,
+        "preview_summary": summary,
+        "source_surface": row.source_surface,
+        "repo_origin_url": row.repo_origin_url,
+        "branch_hint": row.branch_hint,
+        "route": launch_handoff_route_for_id(row.id, target_tool=row.target_tool),
+        "url": launch_handoff_url_for_id(row.id, target_tool=row.target_tool),
+        "launch_url": launch_handoff_url_for_id(row.id, target_tool=row.target_tool),
+        "original_ref": original_ref,
+    }
+
+
+def unavailable_launch_handoff_reference(
+    *,
+    original_ref: str,
+    handoff_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "type": "launch_handoff_reference",
+        "object_type": LAUNCH_HANDOFF_OBJECT_TYPE,
+        "object_id": handoff_id,
+        "launch_handoff_id": handoff_id,
+        "status": "unavailable",
+        "title": None,
+        "preview_summary": None,
+        "url": None,
+        "launch_url": None,
+        "original_ref": original_ref,
+    }
+
+
+async def resolve_launch_handoff_reference(
+    session: AsyncSession,
+    reference: str,
+    *,
+    org_id: str,
+) -> dict[str, Any]:
+    handoff_id = handoff_id_from_reference(reference, allow_raw_id=True)
+    if not handoff_id:
+        return unavailable_launch_handoff_reference(original_ref=str(reference or ""))
+    row = await get_launch_handoff(session, handoff_id, org_id=org_id)
+    if row is None:
+        return unavailable_launch_handoff_reference(original_ref=reference, handoff_id=handoff_id)
+    return launch_handoff_reference_payload(row, original_ref=reference)

@@ -270,6 +270,14 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         "tools": ("manage_inbound",),
     },
     {
+        "key": "launch_handoffs",
+        "name": "Launch Handoffs",
+        "category": "integration_foundation",
+        "summary": "Illo can prepare durable handoff links that let teammates open coding tasks in local agents such as Codex.",
+        "aliases": ("handoff", "launch handoff", "codex handoff", "open in codex", "local coding agent"),
+        "tools": ("create_launch_handoff",),
+    },
+    {
         "key": "slack",
         "name": "Slack",
         "category": "external_surface",

@@ -47,6 +47,35 @@ def _principal() -> external_agents.AgentBridgePrincipal:
     )
 
 
+def _handoff_row(**overrides):
+    data = {
+        "id": "88888888-8888-4888-8888-888888888888",
+        "org_id": "org-1",
+        "created_by_user_id": "11111111-1111-4111-8111-111111111111",
+        "source_surface": "slack",
+        "source_ref": {"channel_id": "C1"},
+        "target_tool": "codex",
+        "title": "Launch in Codex",
+        "summary": "A prepared Codex handoff.",
+        "instructions": "Fetch the full context from Illo and implement the task.",
+        "acceptance_criteria": ["Works from Slack and webapp."],
+        "context_parts": [{"type": "text", "text": "Relevant context."}],
+        "repo_origin_url": "git@github.com:uwear-ai/illospace-project.git",
+        "branch_hint": None,
+        "status": "open",
+        "launch_count": 0,
+        "last_launched_by_user_id": None,
+        "last_launched_at": None,
+        "expires_at": None,
+        "idempotency_key": None,
+        "metadata_": {},
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
 async def _request(method: str, path: str, *, user: dict | None = None, session: _AsyncSession | None = None, **kwargs):
     overrides = dict(app.dependency_overrides)
     app.dependency_overrides[get_db] = lambda: session or _AsyncSession()
@@ -551,6 +580,77 @@ async def test_hosted_mcp_read_thread_get_accepts_canonical_thread_url():
     assert payload["thread_reference"]["thread_route"] == f"/threads/{thread_id}"
 
 
+async def test_launch_handoff_redirects_to_codex_deep_link():
+    row = _handoff_row()
+
+    with patch(
+        "brain.app.api.routers.launch_handoffs.launch_handoffs.require_launch_handoff",
+        new=AsyncMock(return_value=row),
+    ) as require_handoff, patch(
+        "brain.app.api.routers.launch_handoffs.launch_handoffs.mark_launch_handoff_launched",
+        new=AsyncMock(return_value=row),
+    ) as mark_launched, patch(
+        "brain.app.api.routers.launch_handoffs.launch_handoffs.codex_deep_link_for_handoff",
+        return_value="codex://threads/new?prompt=handoff",
+    ):
+        response = await _request(
+            "GET",
+            f"/codex/handoffs/{row.id}",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "codex://threads/new?prompt=handoff"
+    require_handoff.assert_awaited_once()
+    assert require_handoff.await_args.kwargs["org_id"] == "org-1"
+    mark_launched.assert_awaited_once()
+    assert mark_launched.await_args.kwargs["launched_by_user_id"] == "user-1"
+
+
+async def test_launch_handoff_redirect_requires_org_context():
+    overrides = dict(app.dependency_overrides)
+    app.dependency_overrides[get_db] = lambda: _AsyncSession()
+    app.dependency_overrides[get_current_user] = lambda: {"id": "user-1", "role": "member"}
+    app.dependency_overrides[rate_limit] = lambda: None
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get(
+                "/codex/handoffs/88888888-8888-4888-8888-888888888888",
+                follow_redirects=False,
+            )
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(overrides)
+
+    assert response.status_code == 403
+
+
+async def test_launch_handoff_api_create_returns_launch_url():
+    row = _handoff_row()
+
+    with patch(
+        "brain.app.api.routers.launch_handoffs.launch_handoffs.create_launch_handoff",
+        new=AsyncMock(return_value=row),
+    ) as create:
+        response = await _request(
+            "POST",
+            "/api/launch-handoffs",
+            json={
+                "title": "Launch in Codex",
+                "instructions": "Fetch context and implement.",
+                "source_surface": "webapp",
+                "repo_origin_url": "git@github.com:uwear-ai/illospace-project.git",
+            },
+        )
+
+    assert response.status_code == 201
+    payload = response.json()["handoff"]
+    assert payload["id"] == row.id
+    assert payload["launch_url"].endswith(f"/codex/handoffs/{row.id}")
+    create.assert_awaited_once()
+
+
 async def test_hosted_mcp_submit_builds_submission_envelope():
     session = _AsyncSession()
     captured: dict[str, object] = {}
@@ -855,6 +955,86 @@ async def test_hosted_mcp_get_result_reads_inbound_event_and_receipts():
     assert payload["latest_receipt"] == {"id": "receipt-1", "status": "review_required"}
     require_event.assert_awaited_once()
     list_receipts.assert_awaited_once()
+
+
+async def test_hosted_mcp_read_handoff_get_returns_context():
+    row = _handoff_row()
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp_handoffs.launch_handoffs.require_launch_handoff",
+        new=AsyncMock(return_value=row),
+    ) as require_handoff:
+        response = await _request(
+            "POST",
+            "/mcp",
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_read",
+                    "arguments": {
+                        "capability": "handoff.get",
+                        "arguments": {"url": f"https://illo.example.com/codex/handoffs/{row.id}"},
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert payload["handoff"]["id"] == row.id
+    assert payload["handoff"]["instructions"] == row.instructions
+    require_handoff.assert_awaited_once()
+
+
+async def test_hosted_mcp_create_handoff_commits_and_returns_launch_url():
+    order: list[str] = []
+    session = _AsyncSession(order)
+    row = _handoff_row()
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp_handoffs.launch_handoffs.create_launch_handoff",
+        new=AsyncMock(return_value=row),
+    ) as create:
+        response = await _request(
+            "POST",
+            "/mcp",
+            session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 16,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_act",
+                    "arguments": {
+                        "capability": "handoff.create",
+                        "arguments": {
+                            "title": "Launch in Codex",
+                            "instructions": "Fetch context and implement.",
+                            "repo_origin_url": "git@github.com:uwear-ai/illospace-project.git",
+                            "source_surface": "slack",
+                            "source_ref": {"channel_id": "C1"},
+                        },
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert payload["handoff"]["id"] == row.id
+    assert payload["launch_url"].endswith(f"/codex/handoffs/{row.id}")
+    assert order == ["commit"]
+    create.assert_awaited_once()
 
 
 async def test_hosted_mcp_create_thread_commits_before_broadcasting():

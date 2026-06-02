@@ -41,6 +41,7 @@ from brain.systems.runs.tool_catalog.handlers.cycles import _handle_manage_cycle
 from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
 from brain.systems.runs.tool_catalog.handlers.inbound import _handle_manage_inbound
 from brain.systems.runs.tool_catalog.handlers.ideas import _handle_manage_idea
+from brain.systems.runs.tool_catalog.handlers.launch_handoffs import _handle_create_launch_handoff
 from brain.systems.runs.tool_catalog.handlers.projects import _handle_manage_project
 from brain.systems.runs.tool_catalog.handlers.skills import _handle_manage_skill
 from brain.systems.runs.tool_catalog.handlers.files import (
@@ -259,6 +260,10 @@ def _get_tool_handlers(
         "post_ai_timeline_message": lambda **kw: _patched_private(
             "_handle_post_ai_timeline_message",
             _handle_post_ai_timeline_message,
+        )(**kw),
+        "create_launch_handoff": lambda **kw: _patched_private(
+            "_handle_create_launch_handoff",
+            _handle_create_launch_handoff,
         )(**kw),
         "read_thread_discussion": lambda **kw: _patched_private(
             "_handle_read_thread_discussion",

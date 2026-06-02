@@ -428,7 +428,7 @@ TOOLS: dict[str, dict[str, Any]] = {
             "properties": {
                 "capability": {
                     "type": "string",
-                    "description": "Read capability name, such as workspace.search, thread.get, team.members.list, domain.inspect, or capabilities.",
+                    "description": "Read capability name, such as workspace.search, thread.get, handoff.get, team.members.list, domain.inspect, or capabilities.",
                 },
                 "arguments": {"type": "object", "description": "Capability-specific arguments.", "default": {}},
             },
@@ -446,7 +446,7 @@ TOOLS: dict[str, dict[str, Any]] = {
             "properties": {
                 "capability": {
                     "type": "string",
-                    "description": "Action capability name, such as thread.create, thread.post_message, domain.record.write, or capabilities.",
+                    "description": "Action capability name, such as thread.create, thread.post_message, handoff.create, domain.record.write, or capabilities.",
                 },
                 "arguments": {
                     "type": "object",
