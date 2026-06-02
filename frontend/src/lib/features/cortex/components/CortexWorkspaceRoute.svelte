@@ -280,10 +280,11 @@
     void ensureWorkspacePageComponent(modalId);
   });
 
-  function handleThreadOpen(origin: { x: number; y: number; id: string }) {
+  async function handleThreadOpen(origin: { x: number; y: number; id: string }) {
     workspaceOverlay.closeWorkspaceApp();
     workspaceOverlay.closeWorkspaceAndPinMenus();
     threadStage.setOriginFromClient(workspaceEl, origin.x, origin.y);
+    await openDirectThreadAndSyncUrl(origin.id);
   }
 
   function handleArchiveDragState(state: { active: boolean; over: boolean }) {
@@ -962,28 +963,43 @@
     if (decision.action === 'skip-repeat') return;
 
     lastRequestedIdeaId = decision.ideaId;
-    const opened = await cortex.loadDirectThread(decision.ideaId);
-    if (opened) {
-      syncCanonicalThreadUrl(decision.ideaId);
-    } else {
-      cleanupUnresolvedThreadUrl(decision.ideaId);
-    }
+    await openDirectThreadAndSyncUrl(decision.ideaId);
     clearRuntimeReadyOnboardingUrl();
-    directThreadUrlPending = false;
   }
 
-  function syncCanonicalThreadUrl(ideaId: string | null | undefined) {
-    if (!browser || !ideaId) return;
+  async function openDirectThreadAndSyncUrl(ideaId: string): Promise<boolean> {
+    directThreadUrlPending = true;
+    const opened = await cortex.loadDirectThread(ideaId);
+    if (opened) {
+      const navigationStarted = syncCanonicalThreadUrl(ideaId);
+      if (!navigationStarted) directThreadUrlPending = false;
+      return true;
+    }
+
+    directThreadUrlPending = false;
+    cleanupUnresolvedThreadUrl(ideaId);
+    return false;
+  }
+
+  function syncCanonicalThreadUrl(ideaId: string | null | undefined): boolean {
+    if (!browser || !ideaId) return false;
     const nextRoute = threadRoute(ideaId);
     const current = `${$page.url.pathname}${$page.url.search}${$page.url.hash}`;
     lastSyncedThreadRoute = nextRoute;
-    if (current === nextRoute) return;
+    if (current === nextRoute) return false;
     const replaceState = $page.url.pathname.startsWith('/threads/') || Boolean($page.url.searchParams.get('idea'));
+    directThreadUrlPending = true;
     void goto(nextRoute, {
       replaceState,
       keepFocus: true,
       noScroll: true,
+    }).catch(() => {
+      if (lastSyncedThreadRoute === nextRoute) {
+        lastSyncedThreadRoute = null;
+        directThreadUrlPending = false;
+      }
     });
+    return true;
   }
 
   function ensureWorkspacePinsWs() {
@@ -1078,14 +1094,8 @@
     void (async () => {
       if (requestedIdeaId) {
         lastRequestedIdeaId = requestedIdeaId;
-        const opened = await cortex.loadDirectThread(requestedIdeaId);
-        if (opened) {
-          syncCanonicalThreadUrl(requestedIdeaId);
-        } else {
-          cleanupUnresolvedThreadUrl(requestedIdeaId);
-        }
+        await openDirectThreadAndSyncUrl(requestedIdeaId);
         clearRuntimeReadyOnboardingUrl();
-        directThreadUrlPending = false;
       } else {
         await loadWorkspaceSceneSidecars();
         await maybeSelectIdeaFromUrl();

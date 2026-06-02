@@ -1645,20 +1645,23 @@
     });
   }
 
+  function openWorkspaceThread(id: string, x: number, y: number) {
+    if (isPreviewIdeaId(id)) return;
+    if (onthreadopen) {
+      onthreadopen({ x, y, id });
+      return;
+    }
+    void cortex.selectIdea(id);
+  }
+
   function activatePrimitiveBlob(blob: PrimitiveBlobVisual, event?: MouseEvent | PointerEvent) {
     event?.stopPropagation();
     if (primitiveDragState?.moved) return;
-    if (isPreviewIdeaId(blob.id)) return;
     const node = orbitSceneNodesById.get(blob.id);
     const position = node ? renderedIdeaPosition(node) : { x: blob.x, y: blob.y };
     const rect = containerEl?.getBoundingClientRect();
     const [localX, localY] = currentZoomTransform.apply([position.x, position.y]);
-    onthreadopen?.({
-      x: (rect?.left ?? 0) + localX,
-      y: (rect?.top ?? 0) + localY,
-      id: blob.id,
-    });
-    cortex.selectIdea(blob.id);
+    openWorkspaceThread(blob.id, (rect?.left ?? 0) + localX, (rect?.top ?? 0) + localY);
   }
 
   function refreshShadowBubbleTitle(node: OrbitNode) {
@@ -3669,10 +3672,8 @@
       bubbleSel
         .on('click', (e: Event, d: any) => {
           e.stopPropagation();
-          if (isPreviewIdeaId(d?.id)) return;
           const mouse = e as MouseEvent;
-          onthreadopen?.({ x: mouse.clientX, y: mouse.clientY, id: d.id });
-          cortex.selectIdea(d.id);
+          openWorkspaceThread(d.id, mouse.clientX, mouse.clientY);
         })
         .on('mouseover', function(e: any, d: any) {
           d3.select(this).raise();
@@ -3900,10 +3901,8 @@
     bubble
       .on('click', (e: Event) => {
         e.stopPropagation();
-        if (isPreviewIdeaId(sceneNode?.id)) return;
         const mouse = e as MouseEvent;
-        onthreadopen?.({ x: mouse.clientX, y: mouse.clientY, id: sceneNode.id });
-        cortex.selectIdea(sceneNode.id);
+        openWorkspaceThread(sceneNode.id, mouse.clientX, mouse.clientY);
       })
       .on('mouseover', function(e: any) {
         d3.select(this).raise();
