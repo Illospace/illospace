@@ -1,6 +1,7 @@
 <script lang="ts">
   import ConstellationIcon, { type ConstellationIconName } from './ConstellationIcon.svelte';
   import ConstellationSignalStatusIndicator from './ConstellationSignalStatusIndicator.svelte';
+  import { signalBlobPointerUpAction } from './signalBlobActivation';
   import type {
     ConstellationScale,
     ConstellationShape,
@@ -70,7 +71,7 @@
     badge?: boolean;
     animated?: boolean;
     interactive?: boolean;
-    activate?: () => void;
+    activate?: (event: MouseEvent | PointerEvent) => void;
     edit?: () => void;
     longPress?: () => void;
     longPressThresholdMs?: number;
@@ -139,7 +140,9 @@
       suppressNextActivate = false;
       return;
     }
-    activate?.();
+    event.preventDefault();
+    event.stopPropagation();
+    activate?.(event);
   }
 
   function handleEdit(event: MouseEvent) {
@@ -214,11 +217,24 @@
   function handlePointerUp(event: PointerEvent) {
     if (activePointerId !== event.pointerId) return;
     clearLongPressTimer();
-    const didMove = endDrag?.(event) || pointerMoved;
-    if (didMove) {
+    const dragMoved = Boolean(endDrag?.(event));
+    const action = signalBlobPointerUpAction({
+      dragMoved,
+      pointerMoved,
+      canActivate: Boolean(activate),
+    });
+    if (action === 'suppress-click') {
       suppressNextActivate = true;
       event.preventDefault();
       event.stopPropagation();
+      window.setTimeout(() => {
+        suppressNextActivate = false;
+      }, 0);
+    } else if (action === 'activate') {
+      suppressNextActivate = true;
+      event.preventDefault();
+      event.stopPropagation();
+      activate?.(event);
       window.setTimeout(() => {
         suppressNextActivate = false;
       }, 0);

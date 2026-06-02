@@ -1645,7 +1645,8 @@
     });
   }
 
-  function activatePrimitiveBlob(blob: PrimitiveBlobVisual) {
+  function activatePrimitiveBlob(blob: PrimitiveBlobVisual, event?: MouseEvent | PointerEvent) {
+    event?.stopPropagation();
     if (primitiveDragState?.moved) return;
     if (isPreviewIdeaId(blob.id)) return;
     const node = orbitSceneNodesById.get(blob.id);
