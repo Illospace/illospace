@@ -50,6 +50,7 @@
     isWorkspacePageModalId,
     type WorkspacePageModalId,
   } from '$lib/features/cortex/domain/workspacePageModal';
+  import { decideThreadRouteSelection } from '$lib/features/cortex/domain/threadRouteOpening';
   import {
     buildCortexHrefWithoutThread,
     CORTEX_THREAD_PARAM,
@@ -942,33 +943,30 @@
   }
 
   async function maybeSelectIdeaFromUrl() {
-    const requestedIdeaId = requestedThreadIdeaIdFromPage();
-    if (!requestedIdeaId) {
+    const decision = decideThreadRouteSelection({
+      requestedIdeaId: requestedThreadIdeaIdFromPage(),
+      selectedIdeaId: cortex.selectedIdeaId,
+      panelOpen: cortex.panelOpen,
+      lastRequestedIdeaId,
+    });
+    if (decision.action === 'idle') {
+      lastRequestedIdeaId = null;
       directThreadUrlPending = false;
       return;
     }
-    if (cortex.panelOpen && cortex.selectedIdea?.id === requestedIdeaId) {
-      lastRequestedIdeaId = requestedIdeaId;
+    if (decision.action === 'already-open') {
+      lastRequestedIdeaId = decision.ideaId;
       directThreadUrlPending = false;
       return;
     }
-    if (requestedIdeaId === lastRequestedIdeaId) {
-      if (cortex.selectedIdea?.id === requestedIdeaId) directThreadUrlPending = false;
-      return;
-    }
-    lastRequestedIdeaId = requestedIdeaId;
-    if (!cortex.ideas.some((idea) => idea.id === requestedIdeaId)) {
-      await cortex.load();
-    }
-    if (cortex.ideas.some((idea) => idea.id === requestedIdeaId)) {
-      await cortex.selectIdea(requestedIdeaId);
-      if (cortex.selectedIdeaId === requestedIdeaId) {
-        syncCanonicalThreadUrl(requestedIdeaId);
-      } else {
-        cleanupUnresolvedThreadUrl(requestedIdeaId);
-      }
+    if (decision.action === 'skip-repeat') return;
+
+    lastRequestedIdeaId = decision.ideaId;
+    const opened = await cortex.loadDirectThread(decision.ideaId);
+    if (opened) {
+      syncCanonicalThreadUrl(decision.ideaId);
     } else {
-      cleanupUnresolvedThreadUrl(requestedIdeaId);
+      cleanupUnresolvedThreadUrl(decision.ideaId);
     }
     clearRuntimeReadyOnboardingUrl();
     directThreadUrlPending = false;
@@ -1080,8 +1078,8 @@
     void (async () => {
       if (requestedIdeaId) {
         lastRequestedIdeaId = requestedIdeaId;
-        await cortex.loadDirectThread(requestedIdeaId);
-        if (cortex.selectedIdeaId === requestedIdeaId) {
+        const opened = await cortex.loadDirectThread(requestedIdeaId);
+        if (opened) {
           syncCanonicalThreadUrl(requestedIdeaId);
         } else {
           cleanupUnresolvedThreadUrl(requestedIdeaId);

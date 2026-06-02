@@ -16,7 +16,7 @@ export interface ThreadStoreLike {
   denyRun(runId: number): Promise<void> | void;
   sendMessage(content: string, attachments?: any[], options?: any): Promise<void> | void;
   selectIdea(id: string | null): Promise<void> | void;
-  loadDirectThread?(id: string): Promise<void> | void;
+  loadDirectThread?(id: string): Promise<boolean | void> | boolean | void;
   cancelAll?(): Promise<void> | void;
 }
 
