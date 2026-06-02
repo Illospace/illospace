@@ -88,7 +88,7 @@
     beginAppDrag: (app: PrimitiveAppVisual, event: PointerEvent) => void;
     moveAppDrag: (app: PrimitiveAppVisual, event: PointerEvent) => void;
     endAppDrag: (app: PrimitiveAppVisual, event: PointerEvent) => void;
-    activateBlob: (blob: PrimitiveBlobVisual) => void;
+    activateBlob: (blob: PrimitiveBlobVisual, event: MouseEvent | PointerEvent) => void;
     editBlob: (blob: PrimitiveBlobVisual) => void;
     popBlob: (id: string) => void;
     hoverBlob: (blob: PrimitiveBlobVisual) => void;
@@ -209,7 +209,7 @@
     animated={true}
     interactive={true}
     dataId={blob.id}
-    activate={() => activateBlob(blob)}
+    activate={(event) => activateBlob(blob, event)}
     edit={() => editBlob(blob)}
     longPress={() => popBlob(blob.id)}
     longPressThresholdMs={blob.state === 'done' ? 500 : 1000}
