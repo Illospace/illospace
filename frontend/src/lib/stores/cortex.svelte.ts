@@ -1153,10 +1153,10 @@ class CortexStore {
     return true;
   }
 
-  async loadDirectThread(id: string) {
+  async loadDirectThread(id: string): Promise<boolean> {
     if (this._isLocalPreviewIdeaId(id)) {
       await this.selectIdea(id);
-      return;
+      return this.selectedIdeaId === id;
     }
 
     if (!this._initialLoadDone) this.loading = true;
@@ -1199,28 +1199,16 @@ class CortexStore {
         this.teamMembers = this._normalizeTeamMembers(this.teamMembers);
         this.teamMembersLoaded = true;
       }
-      this._applyLoadedStream(id, version, bootstrap.direct_thread.stream);
+      return this._applyLoadedStream(id, version, bootstrap.direct_thread.stream);
     } catch {
-      try {
-        const [selectedIdeaRaw, stream] = await Promise.all([
-          api.getIdea(id),
-          api.unifiedStream(id),
-        ]);
-        this._upsertIdea(this._normalizeIdea(selectedIdeaRaw));
-        if (!this.teamMembersLoaded) {
-          this.teamMembers = this._normalizeTeamMembers(this.teamMembers);
-          this.teamMembersLoaded = true;
-        }
-        this._applyLoadedStream(id, version, stream);
-      } catch {
-        await this._load({ loadTeamMembers: false });
-        const activeIdea = this.ideas.find((idea) => idea.id === id && !idea.archived_at);
-        if (activeIdea) {
-          await this.selectIdea(id);
-        } else if (this.selectedIdeaId === id) {
-          await this.selectIdea(null);
-        }
+      await this._load({ loadTeamMembers: false });
+      const activeIdea = this.ideas.find((idea) => idea.id === id && !idea.archived_at);
+      if (activeIdea) {
+        await this.selectIdea(id);
+        return this.selectedIdeaId === id;
       }
+      if (this.selectedIdeaId === id) await this.selectIdea(null);
+      return false;
     } finally {
       this.loading = false;
       this._initialLoadDone = true;
