@@ -16,7 +16,7 @@
   import AttachmentPreviewDialog from '$lib/components/chat/AttachmentPreviewDialog.svelte';
   import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
-  import ThreadLinkPreviewCard from '$lib/features/threads/components/ThreadLinkPreviewCard.svelte';
+  import ObjectReferencePreviewList from '$lib/features/threads/components/ObjectReferencePreviewList.svelte';
   import type { ChatAttachmentItem, ChatAttachmentKind } from '$lib/components/chat/chatTypes';
   import {
     CONVERSATION_SCROLL_BOTTOM_THRESHOLD,
@@ -2081,13 +2081,13 @@
 {/snippet}
 
 {#snippet threadPreviewCards(message: ChatMessage)}
-  {#if message.thread_references?.length}
-    <div class="chat-thread-link-previews">
-      {#each message.thread_references as reference (`${message.id}-${reference.thread_id ?? reference.original_ref ?? reference.url}`)}
-        <ThreadLinkPreviewCard {reference} compact />
-      {/each}
-    </div>
-  {/if}
+  <ObjectReferencePreviewList
+    objectReferences={message.object_references}
+    threadReferences={message.thread_references}
+    compact
+    containerClass="chat-thread-link-previews"
+    keyPrefix={String(message.id)}
+  />
 {/snippet}
 
 {#if previewAttachment && previewAttachmentUrl}
@@ -2194,12 +2194,6 @@
   --chat-drop-overlay-shadow:
     0 18px 42px rgba(0, 0, 0, 0.26),
     inset 0 0 0 1px rgba(255, 255, 255, 0.04);
-}
-
-.chat-thread-link-previews {
-  display: grid;
-  gap: 8px;
-  margin-top: 8px;
 }
 
 .chat-dock-shell {

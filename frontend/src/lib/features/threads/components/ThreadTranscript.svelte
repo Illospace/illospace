@@ -16,9 +16,9 @@
     attachmentUrl,
     normalizeServerUploadPreviewUrl,
   } from '$lib/utils/attachmentPreview';
+  import ObjectReferencePreviewList from '$lib/features/threads/components/ObjectReferencePreviewList.svelte';
   import StreamVisualBlock from '$lib/features/threads/components/StreamVisualBlock.svelte';
   import ThreadAuthorMark from '$lib/features/threads/components/ThreadAuthorMark.svelte';
-  import ThreadLinkPreviewCard from '$lib/features/threads/components/ThreadLinkPreviewCard.svelte';
 
   import {
     getCortexThreadRunStatusGlyph,
@@ -476,13 +476,12 @@
                   </div>
                 {/if}
 
-                {#if item.threadReferences && item.threadReferences.length > 0}
-                  <div class="thread-message-thread-previews">
-                    {#each item.threadReferences as reference (`${reference.thread_id ?? reference.original_ref ?? reference.url}`)}
-                      <ThreadLinkPreviewCard {reference} />
-                    {/each}
-                  </div>
-                {/if}
+                <ObjectReferencePreviewList
+                  objectReferences={item.objectReferences}
+                  threadReferences={item.threadReferences}
+                  containerClass="thread-message-thread-previews"
+                  keyPrefix={`${item.kind}-${item.id ?? index}`}
+                />
               </div>
             </article>
           {:else if item.kind === 'visual'}
@@ -1451,11 +1450,6 @@
   .thread-message-attachments {
     display: grid;
     gap: 10px;
-  }
-
-  .thread-message-thread-previews {
-    display: grid;
-    gap: 8px;
   }
 
   .thread-message-image-button {

@@ -55,6 +55,14 @@ EXTERNAL_AGENT_TASK_TERMINAL_STATUS_VALUES = (
     "canceled",
 )
 
+LAUNCH_HANDOFF_STATUS_VALUES = (
+    "open",
+    "launched",
+    "claimed",
+    "expired",
+    "archived",
+)
+
 
 class RunStatus(StrEnum):
     QUEUED = "queued"

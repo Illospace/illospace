@@ -12,9 +12,11 @@
   } = $props();
 
   const available = $derived(reference?.status !== 'unavailable');
+  const objectType = $derived(String(reference?.object_type || 'thread'));
+  const isLaunchHandoff = $derived(objectType === 'launch_handoff');
   const title = $derived(
     available
-      ? String(reference?.title || 'Untitled thread')
+      ? String(reference?.title || (isLaunchHandoff ? 'Untitled handoff' : 'Untitled thread'))
       : '',
   );
   const summary = $derived(
@@ -24,10 +26,18 @@
   );
   const href = $derived(
     available
-      ? String(reference?.thread_route || reference?.url || (reference?.thread_id ? threadRoute(reference.thread_id) : '#'))
+      ? String(
+        reference?.route
+        || reference?.launch_url
+        || reference?.thread_route
+        || reference?.url
+        || (reference?.thread_id ? threadRoute(reference.thread_id) : '#'),
+      )
       : '#',
   );
   const threadId = $derived(String(reference?.thread_id || '').trim());
+  const objectId = $derived(String(reference?.launch_handoff_id || reference?.object_id || threadId || '').trim());
+  const kicker = $derived(isLaunchHandoff ? 'Codex handoff' : 'Thread');
   const cardClass = $derived(
     ['thread-link-preview-card', compact ? 'is-compact' : '', available ? 'is-available' : 'is-unavailable']
       .filter(Boolean)
@@ -36,12 +46,12 @@
 </script>
 
 {#if available}
-  <a class={cardClass} href={href} data-thread-id={threadId}>
+  <a class={cardClass} href={href} data-thread-id={threadId} data-object-type={objectType} data-object-id={objectId}>
     <span class="thread-link-preview-icon" aria-hidden="true">
       <ConstellationIcon name="link" size={14} stroke={1.9} />
     </span>
     <span class="thread-link-preview-copy">
-      <span class="thread-link-preview-kicker">Thread</span>
+      <span class="thread-link-preview-kicker">{kicker}</span>
       <strong>{title}</strong>
       {#if summary}
         <span>{summary}</span>
@@ -57,7 +67,7 @@
       <ConstellationIcon name="link" size={14} stroke={1.9} />
     </span>
     <span class="thread-link-preview-copy">
-      <span class="thread-link-preview-kicker">Thread</span>
+      <span class="thread-link-preview-kicker">{kicker}</span>
       <span class="thread-link-preview-unavailable">Unavailable</span>
     </span>
   </div>

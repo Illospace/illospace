@@ -1479,6 +1479,83 @@ CHAT_TOOLS = [
     }
 ]
 
+# ── Launch Handoff Tools ─────────────────────────────────────
+# Surface-agnostic handoffs that bridge Illo coordination into local coding agents.
+
+LAUNCH_HANDOFF_TOOLS = [
+    {
+        "name": "create_launch_handoff",
+        "description": (
+            "Prepare a durable launch handoff link for opening a task in a teammate's local coding agent. "
+            "Use this when a user asks to open, launch, send, or hand off coding work to Codex. "
+            "The returned HTTPS launch_url is surface-agnostic and can be posted in Slack, chat, or Thread Discussion."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short task title for the handoff card and Codex starter prompt.",
+                },
+                "instructions": {
+                    "type": "string",
+                    "description": "What the coding agent should do after fetching full context from Illo.",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Optional compact preview summary for Slack/web cards.",
+                },
+                "target_tool": {
+                    "type": "string",
+                    "enum": ["codex"],
+                    "description": "Local agent surface to launch. Currently codex.",
+                    "default": "codex",
+                },
+                "repo_origin_url": {
+                    "type": "string",
+                    "description": "Git remote/origin URL so any teammate's Codex can match their local project.",
+                },
+                "branch_hint": {
+                    "type": "string",
+                    "description": "Optional branch or worktree hint for the person picking up the task.",
+                },
+                "source_surface": {
+                    "type": "string",
+                    "description": "Where this request came from, such as slack, webapp, thread, or chat.",
+                    "default": "illo_run",
+                },
+                "source_ref": {
+                    "type": "object",
+                    "description": "Surface-specific provenance, for example Slack channel/thread/permalink or Thread ids.",
+                    "default": {},
+                },
+                "context_parts": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Ordered context parts Codex can fetch later through Illo MCP.",
+                    "default": [],
+                },
+                "acceptance_criteria": {
+                    "type": "array",
+                    "items": {},
+                    "description": "Success criteria for the coding task.",
+                    "default": [],
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Optional stable key to avoid duplicate handoffs for one source event.",
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Optional machine-readable metadata.",
+                    "default": {},
+                },
+            },
+            "required": ["title", "instructions"],
+        },
+    },
+]
+
 # ── Project Tools ─────────────────────────────────────────────
 # Durable reusable folders/context bundles for Cortex threads.
 
@@ -2632,6 +2709,7 @@ WORKER_TOOLS = (
     + INBOUND_TOOLS
     + CORTEX_IDEA_TOOLS
     + CHAT_TOOLS
+    + LAUNCH_HANDOFF_TOOLS
     + PROJECT_TOOLS
     + WORKSPACE_APP_TOOLS
     + EXEC_TOOLS
@@ -2652,6 +2730,7 @@ COORDINATOR_TOOLS = (
     + INBOUND_TOOLS
     + CORTEX_IDEA_TOOLS
     + CHAT_TOOLS
+    + LAUNCH_HANDOFF_TOOLS
     + PROJECT_TOOLS
     + WORKSPACE_APP_TOOLS
     + EXEC_TOOLS

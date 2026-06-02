@@ -4,7 +4,7 @@
   import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
   import ChatStateView from '$lib/components/chat/ChatStateView.svelte';
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
-  import ThreadLinkPreviewCard from '$lib/features/threads/components/ThreadLinkPreviewCard.svelte';
+  import ObjectReferencePreviewList from '$lib/features/threads/components/ObjectReferencePreviewList.svelte';
   import {
     CONVERSATION_SCROLL_BOTTOM_THRESHOLD,
     conversationIsNearBottom,
@@ -485,13 +485,13 @@
                 {/if}
               {/each}
             </p>
-            {#if comment.thread_references?.length}
-              <div class="discussion-thread-link-previews">
-                {#each comment.thread_references as reference (`${comment.id}-${reference.thread_id ?? reference.original_ref ?? reference.url}`)}
-                  <ThreadLinkPreviewCard {reference} compact />
-                {/each}
-              </div>
-            {/if}
+            <ObjectReferencePreviewList
+              objectReferences={comment.object_references}
+              threadReferences={comment.thread_references}
+              compact
+              containerClass="discussion-thread-link-previews"
+              keyPrefix={String(comment.id)}
+            />
           </article>
         {/each}
       </div>
@@ -668,11 +668,6 @@
     line-height: 1.6;
     white-space: pre-wrap;
     word-break: break-word;
-  }
-
-  .discussion-thread-link-previews {
-    display: grid;
-    gap: 8px;
   }
 
   .chat-mention {

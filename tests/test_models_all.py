@@ -50,6 +50,7 @@ EXPECTED_TABLES = {
     "inbound_domain_projections",
     "inbound_events",
     "inbound_source_policies",
+    "launch_handoffs",
     "idea_connections",
     "idea_project_attachments",
     "idea_state_log",

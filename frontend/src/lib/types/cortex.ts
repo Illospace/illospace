@@ -35,12 +35,18 @@ export interface ObjectReferencePayload {
   object_type: 'thread' | string;
   status?: 'available' | 'unavailable' | string;
   thread_id?: string | null;
+  launch_handoff_id?: string | null;
+  object_id?: string | null;
+  target_tool?: string | null;
+  handoff_status?: string | null;
   title?: string | null;
   preview_summary?: string | null;
   preview_source?: string | null;
   preview_updated_at?: string | null;
   thread_route?: string | null;
   thread_url?: string | null;
+  launch_url?: string | null;
+  route?: string | null;
   url?: string | null;
   original_ref?: string | null;
   handoff?: Record<string, any> | null;

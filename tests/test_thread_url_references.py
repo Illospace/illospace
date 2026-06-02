@@ -14,9 +14,18 @@ from brain.systems.cortex.thread_read_model import (
     unavailable_thread_reference,
 )
 from brain.systems.cortex.object_references import store_object_references_for_source
+from brain.systems.launch_handoffs import (
+    codex_deep_link_for_handoff,
+    extract_launch_handoff_reference_values,
+    handoff_id_from_reference,
+    launch_handoff_reference_payload,
+    launch_handoff_route_for_id,
+    launch_handoff_url_for_id,
+)
 
 
 THREAD_ID = "77777777-7777-4777-8777-777777777777"
+HANDOFF_ID = "88888888-8888-4888-8888-888888888888"
 
 
 def test_thread_link_payload_uses_canonical_thread_route(monkeypatch):
@@ -61,6 +70,58 @@ def test_extract_thread_reference_values_finds_embedded_urls():
         f"https://illo.example.com/threads/{THREAD_ID}",
         f"/cortex?idea={THREAD_ID}",
     ]
+
+
+def test_launch_handoff_links_use_codex_route_and_origin_url(monkeypatch):
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com/app")
+
+    assert launch_handoff_route_for_id(HANDOFF_ID) == f"/codex/handoffs/{HANDOFF_ID}"
+    assert launch_handoff_url_for_id(HANDOFF_ID) == f"https://illo.example.com/codex/handoffs/{HANDOFF_ID}"
+    assert handoff_id_from_reference(f"https://illo.example.com/codex/handoffs/{HANDOFF_ID}") == HANDOFF_ID
+    assert handoff_id_from_reference(f"/handoffs/{HANDOFF_ID}/launch?target=codex") == HANDOFF_ID
+    assert handoff_id_from_reference(HANDOFF_ID) is None
+    assert handoff_id_from_reference(HANDOFF_ID, allow_raw_id=True) == HANDOFF_ID
+    assert extract_launch_handoff_reference_values(
+        f"Open https://illo.example.com/codex/handoffs/{HANDOFF_ID}."
+    ) == [f"https://illo.example.com/codex/handoffs/{HANDOFF_ID}"]
+
+
+def test_launch_handoff_preview_and_codex_prompt_are_compact(monkeypatch):
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
+
+    class Row:
+        id = HANDOFF_ID
+        org_id = "org-1"
+        created_by_user_id = None
+        source_surface = "slack"
+        source_ref = {"channel_id": "C1"}
+        target_tool = "codex"
+        title = "Wire launch handoffs"
+        summary = "Create a generic handoff link for Codex."
+        instructions = "Fetch the context from Illo and implement the handoff."
+        acceptance_criteria = []
+        context_parts = []
+        repo_origin_url = "git@github.com:uwear-ai/illospace-project.git"
+        branch_hint = None
+        status = "open"
+        launch_count = 0
+        last_launched_by_user_id = None
+        last_launched_at = None
+        expires_at = None
+        idempotency_key = None
+        metadata_ = {}
+        created_at = None
+        updated_at = None
+
+    payload = launch_handoff_reference_payload(Row(), original_ref=f"/codex/handoffs/{HANDOFF_ID}")
+    deep_link = codex_deep_link_for_handoff(Row())
+
+    assert payload["object_type"] == "launch_handoff"
+    assert payload["launch_url"] == f"https://illo.example.com/codex/handoffs/{HANDOFF_ID}"
+    assert payload["preview_summary"] == "Create a generic handoff link for Codex."
+    assert "codex://threads/new?" in deep_link
+    assert "originUrl=git%40github.com" in deep_link
+    assert "handoff.get" in deep_link
 
 
 def test_preview_summary_from_handoff_compacts_runtime_checkpoint():
