@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import subprocess
 import tomllib
 from typing import Any
 
+from brain.platform.async_io import run_subprocess_sync
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
 from brain.systems.runs.tool_catalog.registry import all_tool_registrations
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
@@ -28,7 +28,7 @@ _SOURCE_INSPECTION_TOOLS = (
 
 def _safe_git(*args: str) -> str | None:
     try:
-        result = subprocess.run(
+        result = run_subprocess_sync(
             ["git", "-C", str(_REPO_ROOT), *args],
             check=False,
             capture_output=True,

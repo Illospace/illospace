@@ -1,10 +1,10 @@
 """Cortex display-title generation."""
 from __future__ import annotations
-
-import asyncio
 import logging
 import re
 from dataclasses import dataclass
+
+from brain.platform.async_io import run_blocking
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +174,7 @@ async def _async_generate_with_provider_title_model(
             provider=provider,
         )
         provider_client = get_provider(llm.provider, llm.client)
-        response = await asyncio.to_thread(
+        response = await run_blocking(
             provider_client.create,
             LLMRequest(
                 model=_strip_provider_prefix(model),
@@ -262,7 +262,7 @@ async def async_generate_display_title(
         return None
 
     if is_local_title_model(model):
-        return await asyncio.to_thread(_generate_with_local_title_model, raw_text)
+        return await run_blocking(_generate_with_local_title_model, raw_text)
 
     return await _async_generate_with_provider_title_model(
         raw_text,

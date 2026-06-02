@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import httpx
+from brain.platform.async_io import async_http_client
 
 
 class SlackConfigurationError(RuntimeError):
@@ -32,7 +32,7 @@ class SlackWebClient:
         self.timeout = timeout
 
     async def api_call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with async_http_client(timeout=self.timeout) as client:
             response = await client.post(
                 f"{self.base_url}/{method}",
                 headers={
