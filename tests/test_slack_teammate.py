@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 import json
 import re
@@ -637,6 +638,108 @@ async def test_post_slack_reply_tool_posts_to_triggering_thread(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_post_slack_reply_tool_uploads_image_to_triggering_thread(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
+
+    calls = []
+
+    class _SlackClient:
+        async def upload_file(self, **kwargs):
+            calls.append(kwargs)
+            return {"ok": True, "files": [{"id": "F123", "title": kwargs["title"]}]}
+
+    async def slack_client():
+        return _SlackClient()
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    image_data = "data:image/png;base64," + base64.b64encode(b"png-bytes").decode("ascii")
+    with bind_agent_context(
+        {
+            "org_id": ORG_ID,
+            "run_id": 9,
+            "slack_trigger": {
+                "response_target": {
+                    "channel_id": "C456",
+                    "thread_ts": "1716900000.000100",
+                    "visibility": "public",
+                }
+            },
+        }
+    ):
+        result = json.loads(
+            await _handle_post_slack_reply(
+                body="Here is the chart.",
+                image_data=image_data,
+                image_filename="weekly-active-users.png",
+                image_title="Weekly active users",
+                image_alt="Line chart of weekly active users",
+            )
+        )
+
+    assert result["ok"] is True
+    assert result["uploaded_image"] is True
+    assert calls == [
+        {
+            "channel": "C456",
+            "file_bytes": b"png-bytes",
+            "filename": "weekly-active-users.png",
+            "title": "Weekly active users",
+            "initial_comment": "Here is the chart.",
+            "thread_ts": "1716900000.000100",
+            "alt_txt": "Line chart of weekly active users",
+            "content_type": "image/png",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_slack_reply_tool_uploads_image_without_body(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
+
+    calls = []
+
+    class _SlackClient:
+        async def upload_file(self, **kwargs):
+            calls.append(kwargs)
+            return {"ok": True, "files": [{"id": "F123", "title": kwargs["title"]}]}
+
+    async def slack_client():
+        return _SlackClient()
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    image_data = "data:image/png;base64," + base64.b64encode(b"png-bytes").decode("ascii")
+    with bind_agent_context(
+        {
+            "org_id": ORG_ID,
+            "run_id": 9,
+            "slack_trigger": {
+                "response_target": {
+                    "channel_id": "C456",
+                    "thread_ts": "1716900000.000100",
+                    "visibility": "public",
+                }
+            },
+        }
+    ):
+        result = json.loads(await _handle_post_slack_reply(image_data=image_data, image_title="Graph"))
+
+    assert result["ok"] is True
+    assert result["uploaded_image"] is True
+    assert calls[0]["initial_comment"] is None
+    assert calls[0]["filename"] == "Graph.png"
+
+
+@pytest.mark.asyncio
 async def test_post_slack_reply_tool_posts_top_level_mentions_to_channel(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
@@ -1145,6 +1248,15 @@ def test_slack_tools_are_available_on_normal_illo_tool_surface():
 
     names = {tool["name"] for tool in CHAT_TOOLS}
     assert {"post_slack_reply", "read_slack_conversation", "manage_slack"} <= names
+    slack_reply = next(tool for tool in CHAT_TOOLS if tool["name"] == "post_slack_reply")
+    properties = slack_reply["input_schema"]["properties"]
+    assert {"image_data", "image_filename", "image_title", "image_alt"} <= set(properties)
+    assert "data:image/png;base64" in properties["image_data"]["description"]
+    assert slack_reply["input_schema"]["anyOf"] == [
+        {"required": ["body"]},
+        {"required": ["image_data"]},
+    ]
+    assert "required" not in slack_reply["input_schema"]
 
 
 def test_manage_slack_tool_definition_has_no_operator_setup_action():

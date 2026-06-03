@@ -6,6 +6,7 @@ import pytest
 
 from brain.systems.slack import client as slack_client_module
 from brain.systems.slack.client import SlackApiError, SlackWebClient
+from brain.systems.slack.uploads import slack_image_upload_from_data_url
 
 
 class _Response:
@@ -38,6 +39,26 @@ def _patch_http_client(
 
     monkeypatch.setattr(slack_client_module, "async_http_client", lambda **_kwargs: _HttpClient())
     return calls
+
+
+def test_slack_image_upload_normalizes_data_url_payload():
+    upload = slack_image_upload_from_data_url(
+        "data:image/svg+xml;base64,PHN2Zy8+",
+        filename="weekly active users",
+        title="Weekly active users",
+    )
+
+    assert upload is not None
+    assert upload.file_bytes == b"<svg/>"
+    assert upload.content_type == "image/svg+xml"
+    assert upload.filename == "weekly-active-users.svg"
+    assert upload.title == "Weekly active users"
+    assert upload.alt_txt == "Weekly active users"
+
+
+def test_slack_image_upload_rejects_invalid_data_url_payload():
+    with pytest.raises(ValueError, match="base64 data:image URL"):
+        slack_image_upload_from_data_url("https://example.com/graph.png")
 
 
 @pytest.mark.asyncio
@@ -94,3 +115,65 @@ async def test_slack_client_surfaces_response_metadata_errors(monkeypatch):
             "[ERROR] missing required field: ts",
         ]
     }
+
+
+@pytest.mark.asyncio
+async def test_slack_client_uploads_file_with_external_upload_flow(monkeypatch):
+    calls: list[tuple[str, str, dict[str, str], dict[str, Any] | bytes]] = []
+
+    class _HttpClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc) -> None:
+            return None
+
+        async def post(self, url: str, *, headers: dict[str, str], json=None, content=None):
+            calls.append(("post", url, headers, json if json is not None else content))
+            if url.endswith("/files.getUploadURLExternal"):
+                return _Response({"ok": True, "upload_url": "https://files.slack.test/upload", "file_id": "F123"})
+            if url == "https://files.slack.test/upload":
+                return _Response({"ok": True})
+            if url.endswith("/files.completeUploadExternal"):
+                return _Response({"ok": True, "files": [{"id": "F123", "title": "Graph"}]})
+            return _Response({"ok": False, "error": "unexpected_url"})
+
+    monkeypatch.setattr(slack_client_module, "async_http_client", lambda **_kwargs: _HttpClient())
+
+    result = await SlackWebClient("xoxb-test").upload_file(
+        channel="C456",
+        file_bytes=b"png-bytes",
+        filename="graph.png",
+        title="Graph",
+        initial_comment="Here is the graph.",
+        thread_ts="1716900000.000100",
+        alt_txt="Line chart",
+        content_type="image/png",
+    )
+
+    assert result == {"ok": True, "files": [{"id": "F123", "title": "Graph"}]}
+    assert calls == [
+        (
+            "post",
+            "https://slack.com/api/files.getUploadURLExternal",
+            {"Authorization": "Bearer xoxb-test", "Content-Type": "application/json; charset=utf-8"},
+            {"filename": "graph.png", "length": 9, "alt_txt": "Line chart"},
+        ),
+        (
+            "post",
+            "https://files.slack.test/upload",
+            {"Content-Type": "image/png"},
+            b"png-bytes",
+        ),
+        (
+            "post",
+            "https://slack.com/api/files.completeUploadExternal",
+            {"Authorization": "Bearer xoxb-test", "Content-Type": "application/json; charset=utf-8"},
+            {
+                "files": [{"id": "F123", "title": "Graph"}],
+                "channel_id": "C456",
+                "initial_comment": "Here is the graph.",
+                "thread_ts": "1716900000.000100",
+            },
+        ),
+    ]

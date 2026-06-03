@@ -270,7 +270,7 @@ export function mapThreadAttachment(att: any): CortexThreadStageAttachmentItem |
   const downloadUrl = attachmentDownloadUrl(att);
 
   const kind = att.content_type || att.type || '';
-  if (['diff', 'chart', 'preview', 'diagram', 'html', 'code', 'markdown', 'screenshot'].includes(kind)) {
+  if (['diff', 'chart', 'preview', 'diagram', 'html', 'code', 'image', 'markdown', 'screenshot'].includes(kind)) {
     return {
       kind: 'visual',
       block: {
