@@ -175,10 +175,7 @@ class SlackWebClient:
         }
         if cursor:
             payload["cursor"] = cursor
-        post = getattr(self, "_post", None)
-        if callable(post):
-            return await post("conversations.list", payload)
-        return await self.api_call("conversations.list", payload)
+        return await self._get("conversations.list", payload)
 
     async def auth_test(self) -> dict[str, Any]:
         return await self._post("auth.test", {})

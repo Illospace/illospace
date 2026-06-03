@@ -1444,10 +1444,12 @@ CHAT_TOOLS = [
     {
         "name": "manage_slack",
         "description": (
-            "Inspect Slack connection health, list Slack conversations visible to Illo's bot, "
+            "Inspect Slack connection health, list Slack conversations visible to Illo's bot or observed from "
+            "Slack-origin mentions, "
             "and manage Slack-to-Illospace identity mappings. Use action='status' to check "
             "whether Slack is connected, action='list_channels' to see channels/DMs the "
-            "configured bot token can enumerate, and identity mapping actions to link Slack users "
+            "configured bot token can enumerate plus Slack surfaces Illo has already seen, "
+            "and identity mapping actions to link Slack users "
             "to Illospace users."
         ),
         "input_schema": {
