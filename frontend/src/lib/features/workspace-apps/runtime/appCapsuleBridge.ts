@@ -48,6 +48,58 @@ export function appCapsuleBridgeScript(app: AppCapsuleRuntimeApp) {
         document.documentElement.style.colorScheme = mode;
       }
 
+      function normalizeWheelDelta(event, axis) {
+        const raw = axis === 'x' ? event.deltaX : event.deltaY;
+        if (!raw) return 0;
+        if (event.deltaMode === 1) return raw * 16;
+        if (event.deltaMode === 2) {
+          return raw * Math.max(window.innerHeight || 0, document.documentElement.clientHeight || 0, 1);
+        }
+        return raw;
+      }
+
+      function canScrollElement(element, deltaX, deltaY, allowsX, allowsY) {
+        const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
+        const maxLeft = Math.max(0, element.scrollWidth - element.clientWidth);
+        return (
+          (allowsY && deltaY < 0 && element.scrollTop > 0) ||
+          (allowsY && deltaY > 0 && element.scrollTop < maxTop) ||
+          (allowsX && deltaX < 0 && element.scrollLeft > 0) ||
+          (allowsX && deltaX > 0 && element.scrollLeft < maxLeft)
+        );
+      }
+
+      function wheelScrollTarget(start, deltaX, deltaY) {
+        let element = start && start.nodeType === Node.ELEMENT_NODE ? start : start && start.parentElement;
+        while (element && element !== document.body && element !== document.documentElement) {
+          const style = window.getComputedStyle(element);
+          const allowsY = style.overflowY !== 'visible' && style.overflowY !== 'hidden' && style.overflowY !== 'clip';
+          const allowsX = style.overflowX !== 'visible' && style.overflowX !== 'hidden' && style.overflowX !== 'clip';
+          if (canScrollElement(element, deltaX, deltaY, allowsX, allowsY)) return element;
+          element = element.parentElement;
+        }
+        const root = document.scrollingElement || document.documentElement || document.body;
+        return root && canScrollElement(root, deltaX, deltaY, true, true) ? root : null;
+      }
+
+      function installWheelScrollBridge() {
+        window.addEventListener('wheel', (event) => {
+          if (event.defaultPrevented || event.ctrlKey) return;
+          const deltaX = normalizeWheelDelta(event, 'x');
+          const deltaY = normalizeWheelDelta(event, 'y');
+          if (!deltaX && !deltaY) return;
+          const target = wheelScrollTarget(event.target, deltaX, deltaY);
+          if (!target) return;
+          const previousTop = target.scrollTop;
+          const previousLeft = target.scrollLeft;
+          target.scrollTop += deltaY;
+          target.scrollLeft += deltaX;
+          if (target.scrollTop !== previousTop || target.scrollLeft !== previousLeft) {
+            event.preventDefault();
+          }
+        }, { passive: false });
+      }
+
       function binding(alias) {
         const normalizedAlias = String(alias || '').trim();
         if (!normalizedAlias) throw new Error('window.illo.data(alias) requires an alias');
@@ -161,6 +213,7 @@ export function appCapsuleBridgeScript(app: AppCapsuleRuntimeApp) {
       } else {
         setTimeout(ready, 0);
       }
+      installWheelScrollBridge();
     })();
   <\/script>`;
 }
