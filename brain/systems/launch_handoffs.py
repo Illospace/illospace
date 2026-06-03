@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,13 +17,11 @@ from brain.systems.cortex.thread_links import public_app_base_url
 
 LAUNCH_HANDOFF_OBJECT_TYPE = "launch_handoff"
 TARGET_CODEX = "codex"
-CODEX_HANDOFF_ROUTE_PREFIX = "/codex/handoffs"
-LAUNCH_HANDOFF_ROUTE_PREFIX = "/handoffs"
-API_LAUNCH_HANDOFF_ROUTE_PREFIX = "/launch-handoffs"
+LAUNCH_HANDOFF_ROUTE_PREFIX = "/api/launch-handoffs"
 
 _HANDOFF_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
 _URL_CANDIDATE_RE = re.compile(
-    r"https?://[^\s<>'\"\]\)]+|/(?:codex/handoffs/|handoffs/|launch-handoffs/)[^\s<>'\"\]\)]+",
+    r"https?://[^\s<>'\"\]\)]+|/api/launch-handoffs/[^\s<>'\"\]\)]+",
     re.IGNORECASE,
 )
 _TRAILING_PUNCTUATION = ".,;:!?"
@@ -116,12 +114,9 @@ def handoff_id_from_reference(value: Any, *, allow_raw_id: bool = False) -> str 
 
     parts = urlsplit(text)
     path = parts.path or text
-    for prefix in (CODEX_HANDOFF_ROUTE_PREFIX, LAUNCH_HANDOFF_ROUTE_PREFIX, API_LAUNCH_HANDOFF_ROUTE_PREFIX):
-        if path.startswith(f"{prefix}/"):
-            tail = path[len(prefix) + 1:]
-            return _clean_handoff_id(tail.split("/", 1)[0])
-    if path == LAUNCH_HANDOFF_ROUTE_PREFIX:
-        return _clean_handoff_id(parse_qs(parts.query).get("handoff_id", [None])[0])
+    if path.startswith(f"{LAUNCH_HANDOFF_ROUTE_PREFIX}/"):
+        tail = path[len(LAUNCH_HANDOFF_ROUTE_PREFIX) + 1:]
+        return _clean_handoff_id(tail.split("/", 1)[0])
     return None
 
 
@@ -140,8 +135,6 @@ def extract_launch_handoff_reference_values(text: str) -> list[str]:
 
 def launch_handoff_route_for_id(handoff_id: Any, *, target_tool: str = TARGET_CODEX) -> str:
     target = str(target_tool or TARGET_CODEX).strip().lower()
-    if target == TARGET_CODEX:
-        return f"{CODEX_HANDOFF_ROUTE_PREFIX}/{quote(str(handoff_id), safe='')}"
     return f"{LAUNCH_HANDOFF_ROUTE_PREFIX}/{quote(str(handoff_id), safe='')}/launch?target={quote(target, safe='')}"
 
 

@@ -75,15 +75,15 @@ def test_extract_thread_reference_values_finds_embedded_urls():
 def test_launch_handoff_links_use_codex_route_and_origin_url(monkeypatch):
     monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com/app")
 
-    assert launch_handoff_route_for_id(HANDOFF_ID) == f"/codex/handoffs/{HANDOFF_ID}"
-    assert launch_handoff_url_for_id(HANDOFF_ID) == f"https://illo.example.com/codex/handoffs/{HANDOFF_ID}"
-    assert handoff_id_from_reference(f"https://illo.example.com/codex/handoffs/{HANDOFF_ID}") == HANDOFF_ID
-    assert handoff_id_from_reference(f"/handoffs/{HANDOFF_ID}/launch?target=codex") == HANDOFF_ID
+    launch_route = f"/api/launch-handoffs/{HANDOFF_ID}/launch?target=codex"
+    assert launch_handoff_route_for_id(HANDOFF_ID) == launch_route
+    assert launch_handoff_url_for_id(HANDOFF_ID) == f"https://illo.example.com{launch_route}"
+    assert handoff_id_from_reference(f"https://illo.example.com{launch_route}") == HANDOFF_ID
     assert handoff_id_from_reference(HANDOFF_ID) is None
     assert handoff_id_from_reference(HANDOFF_ID, allow_raw_id=True) == HANDOFF_ID
     assert extract_launch_handoff_reference_values(
-        f"Open https://illo.example.com/codex/handoffs/{HANDOFF_ID}."
-    ) == [f"https://illo.example.com/codex/handoffs/{HANDOFF_ID}"]
+        f"Open https://illo.example.com{launch_route}."
+    ) == [f"https://illo.example.com{launch_route}"]
 
 
 def test_launch_handoff_preview_and_codex_prompt_are_compact(monkeypatch):
@@ -113,11 +113,14 @@ def test_launch_handoff_preview_and_codex_prompt_are_compact(monkeypatch):
         created_at = None
         updated_at = None
 
-    payload = launch_handoff_reference_payload(Row(), original_ref=f"/codex/handoffs/{HANDOFF_ID}")
+    payload = launch_handoff_reference_payload(
+        Row(),
+        original_ref=f"/api/launch-handoffs/{HANDOFF_ID}/launch?target=codex",
+    )
     deep_link = codex_deep_link_for_handoff(Row())
 
     assert payload["object_type"] == "launch_handoff"
-    assert payload["launch_url"] == f"https://illo.example.com/codex/handoffs/{HANDOFF_ID}"
+    assert payload["launch_url"] == f"https://illo.example.com/api/launch-handoffs/{HANDOFF_ID}/launch?target=codex"
     assert payload["preview_summary"] == "Create a generic handoff link for Codex."
     assert "codex://threads/new?" in deep_link
     assert "originUrl=git%40github.com" in deep_link

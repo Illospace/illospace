@@ -96,17 +96,8 @@ async def _redirect_to_handoff_target(
     return RedirectResponse(launch_handoffs.codex_deep_link_for_handoff(row), status_code=302)
 
 
-@router.get("/codex/handoffs/{handoff_id}")
-async def redirect_codex_handoff(
-    handoff_id: str,
-    db: AsyncSession = Depends(get_db),
-    user: dict = Depends(get_current_user),
-) -> RedirectResponse:
-    return await _redirect_to_handoff_target(handoff_id, target=launch_handoffs.TARGET_CODEX, db=db, user=user)
-
-
-@router.get("/handoffs/{handoff_id}/launch")
-async def redirect_launch_handoff(
+@router.get("/api/launch-handoffs/{handoff_id}/launch")
+async def redirect_api_launch_handoff(
     handoff_id: str,
     target: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
