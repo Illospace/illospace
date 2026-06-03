@@ -1378,10 +1378,6 @@ CHAT_TOOLS = [
                     "description": "Optional alt text for image_data, used by Slack for screen readers.",
                 },
             },
-            "anyOf": [
-                {"required": ["body"]},
-                {"required": ["image_data"]},
-            ],
         },
     },
     {
