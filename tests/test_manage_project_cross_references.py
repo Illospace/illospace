@@ -15,6 +15,7 @@ async def test_manage_project_schema_exposes_cross_project_reference_actions():
 
     assert "search_files" in actions
     assert "mount_reference" in actions
+    assert "profile_id" in tool["input_schema"]["properties"]
     assert "query" in tool["input_schema"]["properties"]
     assert "paths" in tool["input_schema"]["properties"]
     assert "mount_path" in tool["input_schema"]["properties"]
@@ -120,7 +121,13 @@ async def test_manage_project_search_files_finds_paths_and_content_without_loadi
     _patch_project_profiles(monkeypatch, [profile])
 
     with bind_agent_context({"org_id": "org-1", "user_id": "user-1", "workspace_root": str(tmp_path / "ideas" / "thread-1")}):
-        content_payload = json.loads(await projects._handle_manage_project(action="search_files", query="stripe"))
+        content_payload = json.loads(
+            await projects._handle_manage_project(
+                action="search_files",
+                profile_id="project-payments",
+                query="stripe",
+            )
+        )
         path_payload = json.loads(await projects._handle_manage_project(action="search_files", query="onboarding pdf"))
 
     assert content_payload["results"][0]["path"] == "analysis/summary.md"

@@ -447,7 +447,7 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         },
         "search_files": {
             "required": ["query"],
-            "optional": ["project_id", "paths", "glob", "limit"],
+            "optional": ["project_id/profile_id", "paths", "glob", "limit"],
             "effect": "search files in visible Projects without loading all Project contents",
             "parameters": {
                 "query": "Search text to match in files across visible Projects.",

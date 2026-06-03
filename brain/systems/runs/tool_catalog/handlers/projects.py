@@ -216,6 +216,7 @@ async def _handle_manage_project(
     action: str,
     operation: str | None = None,
     project_id: str | None = None,
+    profile_id: str | None = None,
     slug: str | None = None,
     name: str | None = None,
     description: str | None = None,
@@ -316,7 +317,7 @@ async def _handle_manage_project(
         "role": "owner",
         "principal_type": "human",
     }
-    selected_project_id = project_id
+    selected_project_id = project_id or profile_id
 
     try:
         async with UnitOfWork() as uow:
