@@ -333,7 +333,9 @@
         min-width: 0;
         min-height: 100%;
         margin: 0;
-        overflow-x: hidden;
+        overflow-x: hidden !important;
+        overflow-y: auto !important;
+        overscroll-behavior-y: contain;
         background: transparent;
         color: var(--illo-text);
       }

@@ -31,6 +31,10 @@ def _last_style_block(source: str) -> str:
     return style_blocks[-1]
 
 
+def _css_rule(source: str, selector: str) -> str:
+    return source.split(selector, 1)[1].split("}", 1)[0]
+
+
 def test_thread_markdown_uses_readable_prose_primitive():
     components_css = (REPO_ROOT / "frontend/src/lib/styles/components.css").read_text()
     transcript = (
@@ -189,6 +193,23 @@ def test_generated_structured_ui_host_has_definite_scroll_area():
     assert "height: calc(100vh - 96px);" in style
     assert "height: 100%;" in body_rule
     assert "overflow: auto;" in body_rule
+
+
+def test_iframe_generated_app_runtime_allows_vertical_scroll():
+    html_runtime = (
+        REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/GeneratedHtmlAppRuntime.svelte"
+    ).read_text()
+    capsule_runtime = (
+        REPO_ROOT / "frontend/src/lib/features/workspace-apps/runtime/appCapsuleStyle.ts"
+    ).read_text()
+
+    html_document_rule = _css_rule(html_runtime, "html,\n      body {")
+    capsule_document_rule = _css_rule(capsule_runtime, "html,\n    body {")
+
+    for rule in [html_document_rule, capsule_document_rule]:
+        assert "overflow-x: hidden !important;" in rule
+        assert "overflow-y: auto !important;" in rule
+        assert "overflow: hidden;" not in rule
 
 
 def test_app_capsule_runtime_uses_new_bridge_and_responsive_surface():
