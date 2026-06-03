@@ -595,7 +595,7 @@ async def test_launch_handoff_redirects_to_codex_deep_link():
     ):
         response = await _request(
             "GET",
-            f"/codex/handoffs/{row.id}",
+            f"/api/launch-handoffs/{row.id}/launch?target=codex",
             follow_redirects=False,
         )
 
@@ -616,7 +616,7 @@ async def test_launch_handoff_redirect_requires_org_context():
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get(
-                "/codex/handoffs/88888888-8888-4888-8888-888888888888",
+                "/api/launch-handoffs/88888888-8888-4888-8888-888888888888/launch?target=codex",
                 follow_redirects=False,
             )
     finally:
@@ -647,7 +647,7 @@ async def test_launch_handoff_api_create_returns_launch_url():
     assert response.status_code == 201
     payload = response.json()["handoff"]
     assert payload["id"] == row.id
-    assert payload["launch_url"].endswith(f"/codex/handoffs/{row.id}")
+    assert payload["launch_url"].endswith(f"/api/launch-handoffs/{row.id}/launch?target=codex")
     create.assert_awaited_once()
 
 
@@ -979,7 +979,7 @@ async def test_hosted_mcp_read_handoff_get_returns_context():
                     "name": "illo_read",
                     "arguments": {
                         "capability": "handoff.get",
-                        "arguments": {"url": f"https://illo.example.com/codex/handoffs/{row.id}"},
+                        "arguments": {"url": f"https://illo.example.com/api/launch-handoffs/{row.id}/launch?target=codex"},
                     },
                 },
             },
@@ -1032,7 +1032,7 @@ async def test_hosted_mcp_create_handoff_commits_and_returns_launch_url():
     assert response.status_code == 200
     payload = json.loads(response.json()["result"]["content"][0]["text"])
     assert payload["handoff"]["id"] == row.id
-    assert payload["launch_url"].endswith(f"/codex/handoffs/{row.id}")
+    assert payload["launch_url"].endswith(f"/api/launch-handoffs/{row.id}/launch?target=codex")
     assert order == ["commit"]
     create.assert_awaited_once()
 
