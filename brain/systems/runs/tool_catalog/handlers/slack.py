@@ -96,6 +96,97 @@ def _slack_channel_payload(channel: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _slack_connection_online(connection: Any) -> bool:
+    return str(getattr(connection, "status", "") or "").strip().lower() in {"connected", "online"}
+
+
+def _slack_event_type_to_channel_type(channel_type: str, channel_id: str = "") -> str:
+    normalized = str(channel_type or "").strip().lower()
+    if normalized in {"public_channel", "private_channel", "mpim", "im"}:
+        return normalized
+    if normalized == "channel":
+        return "public_channel"
+    if normalized == "group":
+        return "private_channel"
+    if normalized:
+        return normalized
+    if channel_id.startswith("D"):
+        return "im"
+    if channel_id.startswith("G"):
+        return "private_channel"
+    return "public_channel"
+
+
+def _observed_slack_channel_payload(event: Any) -> dict[str, Any] | None:
+    payload = getattr(event, "raw_payload", None)
+    if not isinstance(payload, dict):
+        return None
+    channel_id = str(payload.get("channel_id") or "").strip()
+    if not channel_id:
+        return None
+    channel_type = str(payload.get("channel_type") or "").strip()
+    slack_channel_type = _slack_event_type_to_channel_type(channel_type, channel_id)
+    is_private_channel = slack_channel_type == "private_channel"
+    observed_at = getattr(event, "created_at", None)
+    return {
+        "id": channel_id,
+        "name": str(payload.get("channel_name") or "").strip() or None,
+        "is_channel": slack_channel_type in {"public_channel", "private_channel"},
+        "is_group": is_private_channel,
+        "is_im": slack_channel_type == "im",
+        "is_mpim": slack_channel_type == "mpim",
+        "is_private": is_private_channel,
+        "is_member": True,
+        "is_archived": None,
+        "num_members": None,
+        "topic": None,
+        "purpose": None,
+        "source": "observed_slack_event",
+        "channel_type": channel_type or None,
+        "slack_channel_type": slack_channel_type,
+        "permalink": payload.get("permalink") or None,
+        "observed_at": observed_at.isoformat() if observed_at else None,
+    }
+
+
+async def _observed_slack_channels_for_connection(
+    session,
+    *,
+    org_id: str,
+    connection_id: str,
+    requested_types: set[str],
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    from sqlalchemy import select
+
+    from brain.platform.db.models.inbound import InboundEventRow
+
+    stmt = (
+        select(InboundEventRow)
+        .where(
+            InboundEventRow.org_id == str(org_id),
+            InboundEventRow.connection_id == str(connection_id),
+            InboundEventRow.kind == "slack_message",
+        )
+        .order_by(InboundEventRow.created_at.desc(), InboundEventRow.id.desc())
+        .limit(max(1, min(int(limit or 100), 500)))
+    )
+    observed: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for event in list((await session.scalars(stmt)).all()):
+        channel = _observed_slack_channel_payload(event)
+        if not channel:
+            continue
+        channel_id = str(channel.get("id") or "")
+        if channel_id in seen_ids:
+            continue
+        if str(channel.get("slack_channel_type") or "") not in requested_types:
+            continue
+        seen_ids.add(channel_id)
+        observed.append(channel)
+    return observed
+
+
 async def _slack_client_from_runtime():
     from brain.systems.slack.client import SlackWebClient
     from brain.systems.vault.runtime_secrets import read_runtime_secret
@@ -285,6 +376,9 @@ async def _slack_connection_for_tool(session, *, org_id: str, connection_id: str
     if not rows:
         return None, "Slack connection not found"
     if not connection_id and len(rows) > 1:
+        online_rows = [row for row in rows if _slack_connection_online(row)]
+        if len(online_rows) == 1:
+            return online_rows[0], None
         return None, "connection_id is required when multiple Slack connections exist"
     return rows[0], None
 
@@ -371,8 +465,9 @@ async def _handle_manage_slack(
         if normalized_action == "list_channels":
             try:
                 client = await _slack_client_from_runtime()
+                normalized_channel_types = _normalize_slack_channel_types(channel_types)
                 response = await client.conversations_list(
-                    types=_normalize_slack_channel_types(channel_types),
+                    types=normalized_channel_types,
                     limit=_coerce_slack_list_limit(limit),
                     cursor=str(cursor or "").strip() or None,
                     exclude_archived=not _coerce_bool(include_archived, default=False),
@@ -384,6 +479,19 @@ async def _handle_manage_slack(
                 for channel in list(response.get("channels") or [])
                 if isinstance(channel, dict)
             ]
+            observed_channels = await _observed_slack_channels_for_connection(
+                uow.session,
+                org_id=org_id,
+                connection_id=str(connection.id),
+                requested_types={part for part in normalized_channel_types.split(",") if part},
+            )
+            existing_channel_ids = {str(channel.get("id") or "") for channel in channels}
+            observed_channels = [
+                channel
+                for channel in observed_channels
+                if str(channel.get("id") or "") and str(channel.get("id") or "") not in existing_channel_ids
+            ]
+            channels.extend(observed_channels)
             metadata = response.get("response_metadata") if isinstance(response.get("response_metadata"), dict) else {}
             return json.dumps(
                 {
@@ -391,10 +499,13 @@ async def _handle_manage_slack(
                     "connection": _slack_connection_payload(connection),
                     "count": len(channels),
                     "channels": channels,
+                    "requested_channel_types": normalized_channel_types,
+                    "observed_channel_count": len(observed_channels),
                     "next_cursor": str(metadata.get("next_cursor") or "") or None,
                     "visibility_note": (
                         "Slack only returns conversations visible to the configured bot token; "
-                        "private channels may require the bot to be invited and the app to have the right scopes."
+                        "private channels may require the bot to be invited and the app to have the right scopes. "
+                        "Slack-origin mentions are also surfaced as observed_slack_event channels when Slack listing omits them."
                     ),
                 },
                 default=str,

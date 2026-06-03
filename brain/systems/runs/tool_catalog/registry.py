@@ -382,7 +382,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "side_effect_class": "inbound_configuration",
         "reversibility": "variable",
         "action_manifest": True,
-        "expected_effect": "inspect Slack connection health, list bot-visible Slack conversations, or update Slack-to-Illospace identity mappings",
+        "expected_effect": "inspect Slack connection health, list bot-visible or observed Slack conversations, or update Slack-to-Illospace identity mappings",
         "output_budget_chars": 12_000,
     },
     "manage_project": {

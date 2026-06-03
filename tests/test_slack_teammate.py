@@ -86,7 +86,7 @@ async def _seed_slack_connection(session):
     return connection
 
 
-async def _seed_second_slack_connection(session):
+async def _seed_second_slack_connection(session, *, status: str = "online"):
     connection = ExternalAgentConnectionRow(
         id="44444444-4444-4444-8444-444444444444",
         org_id=ORG_ID,
@@ -94,7 +94,7 @@ async def _seed_second_slack_connection(session):
         display_name="Slack duplicate connector",
         agent_kind="slack",
         transport="slack_socket_mode",
-        status="online",
+        status=status,
         remote_agent_id="T789",
         remote_agent_card={},
         capabilities={"slack": {"socket_mode": True}},
@@ -232,6 +232,20 @@ def test_socket_mode_app_mention_normalizes_to_slack_surface_envelope():
         "thread_ts": None,
         "visibility": "public",
     }
+
+
+def test_socket_mode_preserves_channel_name_when_present():
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    envelope = normalize_slack_socket_event(
+        _socket_mode_app_mention(channel="G456", channel_name="4_software", channel_type="group"),
+        bot_user_id="BILLO",
+    )
+
+    assert envelope is not None
+    assert envelope["payload"]["channel_id"] == "G456"
+    assert envelope["payload"]["channel_name"] == "4_software"
+    assert envelope["hints"]["surface"]["channel_name"] == "4_software"
 
 
 def test_socket_mode_ignores_non_dm_messages_without_illo_mention():
@@ -1226,8 +1240,8 @@ async def test_slack_web_client_lists_conversations_with_safe_defaults(monkeypat
         async def __aexit__(self, *_exc):
             return None
 
-        async def post(self, url, *, headers, json):
-            calls.append({"url": url, "headers": headers, "json": json})
+        async def get(self, url, *, headers, params):
+            calls.append({"url": url, "headers": headers, "params": params})
             return _Response()
 
     monkeypatch.setattr("httpx.AsyncClient", _AsyncClient)
@@ -1245,9 +1259,8 @@ async def test_slack_web_client_lists_conversations_with_safe_defaults(monkeypat
             "url": "https://slack.com/api/conversations.list",
             "headers": {
                 "Authorization": "Bearer xoxb-test",
-                "Content-Type": "application/json; charset=utf-8",
             },
-            "json": {
+            "params": {
                 "types": "public_channel,private_channel",
                 "limit": 1000,
                 "exclude_archived": True,
@@ -1345,7 +1358,153 @@ async def test_manage_slack_list_channels_returns_bot_visible_conversations(sess
         }
     ]
     assert result["next_cursor"] == "next-1"
+    assert result["requested_channel_types"] == "public_channel,private_channel"
+    assert result["observed_channel_count"] == 0
     assert "visible to the configured bot token" in result["visibility_note"]
+
+
+@pytest.mark.asyncio
+async def test_manage_slack_list_channels_auto_selects_single_live_connection(session, monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_manage_slack
+
+    live_connection = await _seed_slack_connection(session)
+    await _seed_second_slack_connection(session, status="error")
+    calls = []
+
+    class _SlackClient:
+        async def conversations_list(self, **kwargs):
+            calls.append(kwargs)
+            return {"ok": True, "channels": [], "response_metadata": {}}
+
+    async def slack_client():
+        return _SlackClient()
+
+    class _UnitOfWork:
+        def __init__(self):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, _exc, _tb):
+            if exc_type is None:
+                await session.flush()
+            return None
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
+
+    with bind_agent_context({"org_id": ORG_ID}):
+        result = json.loads(await _handle_manage_slack(action="list_channels"))
+
+    assert result["ok"] is True
+    assert result["connection"]["id"] == str(live_connection.id)
+    assert calls == [
+        {
+            "types": "public_channel,private_channel,mpim,im",
+            "limit": 200,
+            "cursor": None,
+            "exclude_archived": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_manage_slack_list_channels_includes_observed_private_slack_surfaces(session, monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_manage_slack
+
+    connection = await _seed_slack_connection(session)
+    session.add(
+        InboundEventRow(
+            org_id=ORG_ID,
+            connection_id=str(connection.id),
+            kind="slack_message",
+            origin="slack.app_mention",
+            idempotency_key="slack:T789:G4SOFTWARE:1716901111.000100",
+            raw_payload={
+                "team_id": "T789",
+                "channel_id": "G4SOFTWARE",
+                "channel_name": "4_software",
+                "channel_type": "group",
+                "message_ts": "1716901111.000100",
+                "permalink": "https://example.slack.com/archives/G4SOFTWARE/p1716901111000100",
+            },
+            normalized_payload={},
+            envelope={},
+            ingress_context={},
+            source_actor={},
+            authority_user_id=USER_ID,
+            status="processed",
+        )
+    )
+    await session.flush()
+
+    calls = []
+
+    class _SlackClient:
+        async def conversations_list(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "ok": True,
+                "channels": [],
+                "response_metadata": {},
+            }
+
+    async def slack_client():
+        return _SlackClient()
+
+    class _UnitOfWork:
+        def __init__(self):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, _exc, _tb):
+            if exc_type is None:
+                await session.flush()
+            return None
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
+
+    with bind_agent_context({"org_id": ORG_ID}):
+        result = json.loads(await _handle_manage_slack(action="list_channels", channel_types="private_channel"))
+
+    assert calls[0]["types"] == "private_channel"
+    assert result["count"] == 1
+    assert result["observed_channel_count"] == 1
+    observed_channel = result["channels"][0]
+    assert observed_channel.pop("observed_at")
+    assert result["channels"] == [
+        {
+            "id": "G4SOFTWARE",
+            "name": "4_software",
+            "is_channel": True,
+            "is_group": True,
+            "is_im": False,
+            "is_mpim": False,
+            "is_private": True,
+            "is_member": True,
+            "is_archived": None,
+            "num_members": None,
+            "topic": None,
+            "purpose": None,
+            "source": "observed_slack_event",
+            "channel_type": "group",
+            "slack_channel_type": "private_channel",
+            "permalink": "https://example.slack.com/archives/G4SOFTWARE/p1716901111000100",
+        }
+    ]
+    assert "observed_slack_event" in result["visibility_note"]
 
 
 @pytest.mark.asyncio

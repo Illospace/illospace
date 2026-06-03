@@ -77,4 +77,4 @@ from that Slack user are attributed to the mapped Illospace user.
 
 ## Channel inventory
 
-Illo can list Slack conversations through `manage_slack(action="list_channels")`. The result is bounded by Slack itself: public channels require `channels:read`, private channels require `groups:read` and may only appear when the app/bot can see them, MPIMs require `mpim:read`, and DMs require `im:read`. Posting into public channels the bot has not joined requires `chat:write.public`; private channels still require inviting the bot.
+Illo can list Slack conversations through `manage_slack(action="list_channels")`. The result includes Slack API inventory plus Slack-origin channels Illo has already observed from mentions or DMs. Slack API inventory is bounded by Slack itself: public channels require `channels:read`, private channels require `groups:read` and may only appear when the app/bot can see them, MPIMs require `mpim:read`, and DMs require `im:read`. Posting into public channels the bot has not joined requires `chat:write.public`; private channels still require inviting the bot, but an observed private channel can still expose the channel id needed for posting.

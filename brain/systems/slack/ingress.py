@@ -115,6 +115,7 @@ def normalize_slack_socket_event(
     team_id = str(payload.get("team_id") or event.get("team") or "").strip()
     enterprise_id = str(payload.get("enterprise_id") or event.get("enterprise") or "").strip() or None
     channel_id = str(event.get("channel") or "").strip()
+    channel_name = str(event.get("channel_name") or event.get("channel_name_normalized") or "").strip() or None
     channel_type = str(event.get("channel_type") or "").strip()
     message_ts = str(event.get("ts") or event.get("event_ts") or "").strip()
     thread_ts = str(event.get("thread_ts") or message_ts).strip()
@@ -140,6 +141,7 @@ def normalize_slack_socket_event(
         "team_id": team_id,
         "enterprise_id": enterprise_id,
         "channel_id": channel_id,
+        "channel_name": channel_name,
         "channel_type": channel_type,
         "message_ts": message_ts,
         "thread_ts": thread_ts,
@@ -164,6 +166,7 @@ def normalize_slack_socket_event(
                 "surface": surface,
                 "team_id": team_id,
                 "channel_id": channel_id,
+                "channel_name": channel_name,
                 "channel_type": channel_type,
                 "message_ts": message_ts,
                 "thread_ts": thread_ts,
