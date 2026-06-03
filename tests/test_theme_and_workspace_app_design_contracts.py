@@ -202,6 +202,9 @@ def test_iframe_generated_app_runtime_allows_vertical_scroll():
     capsule_runtime = (
         REPO_ROOT / "frontend/src/lib/features/workspace-apps/runtime/appCapsuleStyle.ts"
     ).read_text()
+    capsule_bridge = (
+        REPO_ROOT / "frontend/src/lib/features/workspace-apps/runtime/appCapsuleBridge.ts"
+    ).read_text()
 
     html_document_rule = _css_rule(html_runtime, "html,\n      body {")
     capsule_document_rule = _css_rule(capsule_runtime, "html,\n    body {")
@@ -210,6 +213,12 @@ def test_iframe_generated_app_runtime_allows_vertical_scroll():
         assert "overflow-x: hidden !important;" in rule
         assert "overflow-y: auto !important;" in rule
         assert "overflow: hidden;" not in rule
+
+    for runtime_source in [html_runtime, capsule_bridge]:
+        assert "function installWheelScrollBridge()" in runtime_source
+        assert "window.addEventListener('wheel'" in runtime_source
+        assert "{ passive: false }" in runtime_source
+        assert "target.scrollTop += deltaY" in runtime_source
 
 
 def test_app_capsule_runtime_uses_new_bridge_and_responsive_surface():
