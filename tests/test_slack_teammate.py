@@ -740,6 +740,15 @@ async def test_post_slack_reply_tool_uploads_image_without_body(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_post_slack_reply_tool_requires_body_or_image_data():
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
+
+    result = json.loads(await _handle_post_slack_reply())
+
+    assert result == {"error": "post_slack_reply requires body or image_data"}
+
+
+@pytest.mark.asyncio
 async def test_post_slack_reply_tool_posts_top_level_mentions_to_channel(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
@@ -1252,10 +1261,8 @@ def test_slack_tools_are_available_on_normal_illo_tool_surface():
     properties = slack_reply["input_schema"]["properties"]
     assert {"image_data", "image_filename", "image_title", "image_alt"} <= set(properties)
     assert "data:image/png;base64" in properties["image_data"]["description"]
-    assert slack_reply["input_schema"]["anyOf"] == [
-        {"required": ["body"]},
-        {"required": ["image_data"]},
-    ]
+    for keyword in ("anyOf", "oneOf", "allOf", "not", "enum"):
+        assert keyword not in slack_reply["input_schema"]
     assert "required" not in slack_reply["input_schema"]
 
 
