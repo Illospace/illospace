@@ -30,7 +30,9 @@ export function appCapsuleRuntimeStyle(themeMode: 'dark' | 'light', accent: stri
       min-width: 0;
       min-height: 100%;
       margin: 0;
-      overflow: hidden;
+      overflow-x: hidden !important;
+      overflow-y: auto !important;
+      overscroll-behavior-y: contain;
       background: transparent;
       color: var(--illo-text);
     }
