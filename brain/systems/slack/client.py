@@ -76,6 +76,15 @@ class SlackWebClient:
             data = response.json()
         return self._coerce_response(dict(data))
 
+    async def _post_bytes(self, url: str, *, data: bytes, content_type: str) -> None:
+        async with async_http_client(timeout=self.timeout) as client:
+            response = await client.post(
+                url,
+                headers={"Content-Type": content_type or "application/octet-stream"},
+                content=data,
+            )
+            response.raise_for_status()
+
     async def post_message(
         self,
         *,
@@ -107,6 +116,44 @@ class SlackWebClient:
         if thread_ts:
             payload["thread_ts"] = thread_ts
         return await self._post("chat.postEphemeral", payload)
+
+    async def upload_file(
+        self,
+        *,
+        channel: str,
+        file_bytes: bytes,
+        filename: str,
+        title: str | None = None,
+        initial_comment: str | None = None,
+        thread_ts: str | None = None,
+        alt_txt: str | None = None,
+        content_type: str = "application/octet-stream",
+    ) -> dict[str, Any]:
+        """Upload bytes through Slack's external upload flow and share the file."""
+
+        upload_request: dict[str, Any] = {
+            "filename": filename,
+            "length": len(file_bytes),
+        }
+        if alt_txt:
+            upload_request["alt_txt"] = alt_txt[:1000]
+        upload = await self._post("files.getUploadURLExternal", upload_request)
+        upload_url = str(upload.get("upload_url") or "").strip()
+        file_id = str(upload.get("file_id") or "").strip()
+        if not upload_url or not file_id:
+            raise SlackApiError("slack_upload_ticket_missing")
+
+        await self._post_bytes(upload_url, data=file_bytes, content_type=content_type)
+
+        complete_request: dict[str, Any] = {
+            "files": [{"id": file_id, "title": title or filename}],
+            "channel_id": channel,
+        }
+        if initial_comment:
+            complete_request["initial_comment"] = initial_comment
+        if thread_ts:
+            complete_request["thread_ts"] = thread_ts
+        return await self._post("files.completeUploadExternal", complete_request)
 
     async def set_assistant_status(
         self,

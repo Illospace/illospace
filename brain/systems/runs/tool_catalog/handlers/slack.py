@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _current_runtime_secret_context
+from brain.systems.slack.uploads import slack_image_upload_from_data_url
 
 
 def _execution_metadata() -> dict[str, Any]:
@@ -230,17 +231,30 @@ async def _clear_processing_status(client: Any, trigger: dict[str, Any]) -> None
 
 
 async def _handle_post_slack_reply(
-    body: str,
+    body: str = "",
     channel_id: str | None = None,
     thread_ts: str | None = None,
     visibility: str | None = None,
     user_id: str | None = None,
+    image_data: str | None = None,
+    image_filename: str | None = None,
+    image_title: str | None = None,
+    image_alt: str | None = None,
 ) -> str:
     """Post an Illo-authored reply to the originating Slack surface."""
 
     text = str(body or "").strip()
-    if not text:
-        return json.dumps({"error": "post_slack_reply requires body"})
+    try:
+        image_upload = slack_image_upload_from_data_url(
+            image_data,
+            filename=image_filename,
+            title=image_title,
+            alt_txt=image_alt,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    if not text and image_upload is None:
+        return json.dumps({"error": "post_slack_reply requires body or image_data"})
 
     trigger = _current_slack_trigger()
     response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
@@ -260,13 +274,26 @@ async def _handle_post_slack_reply(
     target_visibility = str(visibility or response_target.get("visibility") or "public").strip().lower()
     if target_visibility not in {"public", "ephemeral"}:
         return json.dumps({"error": "post_slack_reply visibility must be public or ephemeral"})
+    if image_upload is not None and target_visibility == "ephemeral":
+        return json.dumps({"error": "post_slack_reply image uploads must be public"})
     if not target_channel:
         return json.dumps({"error": "post_slack_reply requires channel_id outside a Slack-triggered run"})
 
     try:
         client = await _slack_client_from_runtime()
         target_channel = await _resolve_post_channel(client, target_channel, target_visibility)
-        if target_visibility == "ephemeral":
+        if image_upload is not None:
+            response = await client.upload_file(
+                channel=target_channel,
+                file_bytes=image_upload.file_bytes,
+                filename=image_upload.filename,
+                title=image_upload.title,
+                initial_comment=text or None,
+                thread_ts=target_thread_ts,
+                alt_txt=image_upload.alt_txt,
+                content_type=image_upload.content_type,
+            )
+        elif target_visibility == "ephemeral":
             target_user = str(user_id or trigger.get("slack_user_id") or "").strip()
             if not target_user:
                 return json.dumps({"error": "ephemeral Slack replies require a Slack user id"})
@@ -292,6 +319,7 @@ async def _handle_post_slack_reply(
             "channel_id": target_channel,
             "thread_ts": target_thread_ts,
             "visibility": target_visibility,
+            "uploaded_image": image_upload is not None,
             "slack": response,
         },
         default=str,

@@ -1338,7 +1338,7 @@ CHAT_TOOLS = [
             "properties": {
                 "body": {
                     "type": "string",
-                    "description": "Concise Slack markdown message to post as Illo.",
+                    "description": "Concise Slack markdown message to post as Illo. When image_data is provided, this becomes the image's initial comment.",
                 },
                 "channel_id": {
                     "type": "string",
@@ -1358,8 +1358,30 @@ CHAT_TOOLS = [
                     "type": "string",
                     "description": "Slack user id required for ephemeral replies outside a Slack-triggered run.",
                 },
+                "image_data": {
+                    "type": "string",
+                    "description": (
+                        "Optional base64 data:image URL to upload and share as a Slack image file, "
+                        "for generated graphs or charts. Prefer data:image/png;base64 for reliable Slack previews."
+                    ),
+                },
+                "image_filename": {
+                    "type": "string",
+                    "description": "Optional filename for image_data, e.g. graph.png.",
+                },
+                "image_title": {
+                    "type": "string",
+                    "description": "Optional Slack file title for image_data.",
+                },
+                "image_alt": {
+                    "type": "string",
+                    "description": "Optional alt text for image_data, used by Slack for screen readers.",
+                },
             },
-            "required": ["body"],
+            "anyOf": [
+                {"required": ["body"]},
+                {"required": ["image_data"]},
+            ],
         },
     },
     {
@@ -2169,7 +2191,7 @@ CORTEX_VISUAL_REPLY_TOOL = {
     "name": "cortex_visual_reply",
     "description": (
         "Render compact static visual content in the Cortex workspace. Use for diffs, "
-        "charts, diagrams, markdown summaries, and screenshots. For interactive or "
+        "charts, diagrams, images, markdown summaries, and screenshots. For interactive or "
         "recordful generated UI, create or update a workspace app instead."
     ),
     "input_schema": {
@@ -2177,7 +2199,7 @@ CORTEX_VISUAL_REPLY_TOOL = {
         "properties": {
             "content_type": {
                 "type": "string",
-                "enum": ["diff", "chart", "diagram", "markdown", "screenshot"],
+                "enum": ["diff", "chart", "diagram", "image", "markdown", "screenshot"],
                 "description": "Type of visual content",
             },
             "title": {
@@ -2189,7 +2211,7 @@ CORTEX_VISUAL_REPLY_TOOL = {
                 "description": (
                     "The visual content. For diff: unified diff string. "
                     "For chart: JSON {type: 'bar'|'line'|'pie'|'scatter', data: [{label, value}], title?, xlabel?, ylabel?}. "
-                    "For diagram: SVG or Mermaid syntax. For markdown: markdown string. "
+                    "For diagram: SVG or Mermaid syntax. For image: HTTP URL, data:image URL, or inert SVG markup. For markdown: markdown string. "
                     "For screenshot: an image URL or data:image URL."
                 ),
             },

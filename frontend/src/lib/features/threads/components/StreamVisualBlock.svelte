@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import DOMPurify from 'dompurify';
+  import { safeVisualImageSrc } from '$lib/utils/visualImageSource';
 
   let { block }: { block: { type: string; content: string; title?: string; language?: string } } = $props();
 
@@ -114,14 +115,6 @@
   function safeHref(url: string): string {
     const trimmed = url.trim();
     if (/^https?:\/\//i.test(trimmed) || /^mailto:/i.test(trimmed)) return trimmed;
-    return '';
-  }
-
-  function safeImageSrc(url: string): string {
-    const trimmed = url.trim();
-    if (/^https?:\/\//i.test(trimmed) || /^data:image\//i.test(trimmed) || /^blob:/i.test(trimmed)) {
-      return trimmed;
-    }
     return '';
   }
 
@@ -422,12 +415,12 @@
             {@html renderMarkdown(block.content)}
           </div>
 
-        <!-- ═══ SCREENSHOT ═══ -->
-        {:else if block.type === 'screenshot'}
-          {@const imageSrc = safeImageSrc(block.content)}
+        <!-- ═══ IMAGE / SCREENSHOT ═══ -->
+        {:else if block.type === 'image' || block.type === 'screenshot'}
+          {@const imageSrc = safeVisualImageSrc(block.content)}
           {#if imageSrc}
             <figure class="screenshot-view">
-              <img src={imageSrc} alt={block.title || 'Screenshot'} />
+              <img src={imageSrc} alt={block.title || (block.type === 'image' ? 'Image' : 'Screenshot')} />
             </figure>
           {:else}
             <pre class="code-view"><code>{block.content}</code></pre>

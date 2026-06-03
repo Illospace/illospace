@@ -29,14 +29,16 @@ def test_cortex_visual_reply_schema_preserves_supported_content_types():
     schema = CORTEX_VISUAL_REPLY_TOOL["input_schema"]
     content_types = schema["properties"]["content_type"]["enum"]
 
-    assert content_types == ["diff", "chart", "diagram", "markdown", "screenshot"]
+    assert content_types == ["diff", "chart", "diagram", "image", "markdown", "screenshot"]
     assert schema["properties"]["display"]["enum"] == ["inline", "canvas"]
     assert schema["required"] == ["content_type", "title", "content"]
 
 
 async def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
     import sys
+    import brain.platform.db.models.idea as idea_models
     import brain.systems.runs.tool_catalog.handlers.cortex_reply as cortex_reply
+    from brain.systems.runs.execution_context import bind_agent_context
 
     now = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
     added_blocks = []
@@ -71,22 +73,20 @@ async def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypa
             return False
 
     run = SimpleNamespace(run_id=123)
-    monkeypatch.setattr(cortex_reply._agent_context, "idea_id", "idea-1", raising=False)
-    monkeypatch.setattr(cortex_reply._agent_context, "run", run, raising=False)
 
     fake_events = SimpleNamespace(publish_safe=lambda event, payload: published.append((event, payload)))
     fake_uow_mod = SimpleNamespace(UnitOfWork=FakeUnitOfWork, open_unit_of_work=lambda factory: factory())
-    fake_idea_mod = SimpleNamespace(VisualBlock=FakeVisualBlock)
     monkeypatch.setitem(sys.modules, "brain.systems.cortex.events", fake_events)
     monkeypatch.setitem(sys.modules, "brain.platform.db.repositories.unit_of_work", fake_uow_mod)
-    monkeypatch.setitem(sys.modules, "brain.platform.db.models.idea", fake_idea_mod)
+    monkeypatch.setattr(idea_models, "VisualBlock", FakeVisualBlock)
 
-    result = await cortex_reply._handle_cortex_visual_reply(
-        content_type="chart",
-        title="Build health",
-        content='{"type":"bar","data":[{"label":"passed","value":3}]}',
-        display="canvas",
-    )
+    with bind_agent_context(idea_id="idea-1", run=run):
+        result = await cortex_reply._handle_cortex_visual_reply(
+            content_type="chart",
+            title="Build health",
+            content='{"type":"bar","data":[{"label":"passed","value":3}]}',
+            display="canvas",
+        )
 
     assert result == {
         "posted": True,
