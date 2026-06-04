@@ -56,6 +56,45 @@ def _project_context(source_dir, draft_dir, *, manifest_mounts=True):
     }
 
 
+def _root_and_repo_context(project_root, repo_root):
+    manifest = {
+        "workspace_root": str(repo_root),
+        "resolved_workspace_root": str(repo_root),
+        "workspaces": [
+            {"name": "/", "path": str(project_root)},
+            {"name": "/uwear-ai/uwear-backend", "path": str(repo_root)},
+        ],
+        "mounts": [
+            {
+                "id": "/",
+                "resource_id": "project-root",
+                "kind": "project_root",
+                "mount_path": "/",
+                "workspace_path": str(project_root),
+                "resource_path": str(project_root),
+            },
+            {
+                "id": "/uwear-ai/uwear-backend",
+                "resource_id": "uwear-backend",
+                "kind": "repo",
+                "mount_path": "/uwear-ai/uwear-backend",
+                "workspace_path": str(repo_root),
+                "resource_path": str(repo_root),
+            },
+        ],
+    }
+    workspace_ref = {
+        "workspace_root": str(repo_root),
+        "resolved_workspace_root": str(repo_root),
+        "workspaces": manifest["workspaces"],
+        "project_workspace_manifest": manifest,
+    }
+    return {
+        "workspace_ref": workspace_ref,
+        "run": SimpleNamespace(id=456, workspace_ref=workspace_ref, target_ref={}, metadata_={}),
+    }
+
+
 def test_read_file_resolves_project_mount_path_to_draft_workspace(tmp_path):
     source_dir = tmp_path / "source" / "reports"
     draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
@@ -73,6 +112,60 @@ def test_read_file_resolves_project_mount_path_to_draft_workspace(tmp_path):
     assert result["path"] == str(draft_dir / "brief.md")
     assert "draft copy" in result["content"]
     assert "source copy" not in result["content"]
+
+
+def test_read_file_relative_path_uses_selected_repo_workspace_when_root_mount_exists(tmp_path):
+    project_root = tmp_path / "thread" / ".illo-project-context" / "local" / "project-root"
+    repo_root = tmp_path / "thread" / ".illo-project-context" / "github" / "uwear-ai" / "uwear-backend"
+    project_file = project_root / "api" / "src" / "uwear_api" / "models" / "ai_model.py"
+    repo_file = repo_root / "api" / "src" / "uwear_api" / "models" / "ai_model.py"
+    project_file.parent.mkdir(parents=True)
+    repo_file.parent.mkdir(parents=True)
+    project_file.write_text("project root copy\n", encoding="utf-8")
+    repo_file.write_text("backend repo copy\n", encoding="utf-8")
+
+    with bind_agent_context(_root_and_repo_context(project_root, repo_root)):
+        relative_result = files._handle_read_file(
+            "api/src/uwear_api/models/ai_model.py",
+            _workspace=str(repo_root),
+        )
+        absolute_result = files._handle_read_file(str(repo_file), _workspace=str(repo_root))
+        mounted_result = files._handle_read_file(
+            "/uwear-ai/uwear-backend/api/src/uwear_api/models/ai_model.py",
+            _workspace=str(project_root),
+        )
+        write_result = files._handle_write_file(
+            "api/src/uwear_api/models/new_model.py",
+            "backend write\n",
+            _workspace=str(repo_root),
+        )
+
+    assert "error" not in relative_result
+    assert relative_result["path"] == str(repo_file)
+    assert "backend repo copy" in relative_result["content"]
+    assert "project root copy" not in relative_result["content"]
+    assert "backend repo copy" in absolute_result["content"]
+    assert mounted_result["path"] == str(repo_file)
+    assert "backend repo copy" in mounted_result["content"]
+    assert write_result["path"] == str(repo_root / "api" / "src" / "uwear_api" / "models" / "new_model.py")
+    assert (repo_root / "api" / "src" / "uwear_api" / "models" / "new_model.py").read_text(encoding="utf-8") == "backend write\n"
+    assert not (project_root / "api" / "src" / "uwear_api" / "models" / "new_model.py").exists()
+
+
+def test_root_mount_only_resolves_against_selected_project_root_workspace(tmp_path):
+    project_root = tmp_path / "thread" / ".illo-project-context" / "local" / "project-root"
+    repo_root = tmp_path / "thread" / ".illo-project-context" / "github" / "uwear-ai" / "uwear-backend"
+    project_root.mkdir(parents=True)
+    repo_root.mkdir(parents=True)
+    (project_root / "README.md").write_text("project readme\n", encoding="utf-8")
+
+    with bind_agent_context(_root_and_repo_context(project_root, repo_root)):
+        project_result = files._handle_read_file("/README.md", _workspace=str(project_root))
+        repo_result = files._handle_read_file("/README.md", _workspace=str(repo_root))
+
+    assert "project readme" in project_result["content"]
+    assert "error" in repo_result
+    assert "Path escapes workspace" in repo_result["error"]
 
 
 def test_write_file_resolves_project_mount_path_to_draft_workspace(tmp_path):

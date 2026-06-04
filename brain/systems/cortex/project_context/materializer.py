@@ -392,6 +392,24 @@ def _workspace_entry_from_resource(resource: dict[str, Any], path: Path | str) -
     return {"name": _resource_workspace_name(resource, workspace_path), "path": str(workspace_path)}
 
 
+def _default_workspace_path(
+    workspaces: list[dict[str, str]],
+    *,
+    root_workspace: dict[str, str],
+    root_empty: bool,
+) -> str | None:
+    root_path = _clean_text(root_workspace.get("path"))
+    if root_empty:
+        for workspace in workspaces:
+            path = _clean_text(workspace.get("path"))
+            if path and path != root_path:
+                return path
+    return root_path or next(
+        (_clean_text(workspace.get("path")) for workspace in workspaces if _clean_text(workspace.get("path"))),
+        None,
+    )
+
+
 def _repo_workspace_path(resource: dict[str, Any], repo_path: Path) -> tuple[Path | None, str | None]:
     subpath = _github_subpath_from_resource(resource)
     if not subpath:
@@ -837,7 +855,8 @@ async def materialize_project_context_workspaces(
     workspaces.append(root_workspace)
     result.resources_checked += 1
     root_materialization = root_resource.get("materialization") if isinstance(root_resource.get("materialization"), dict) else {}
-    result.empty_project = bool(root_materialization.get("root_empty", True))
+    root_empty = bool(root_materialization.get("root_empty", True))
+    result.empty_project = root_empty
 
     for resource in resources:
         if _is_project_root_resource(resource):
@@ -867,6 +886,14 @@ async def materialize_project_context_workspaces(
         thread_workspace_root=root,
     )
     workspace_manifest_payload = workspace_manifest.to_dict()
+    default_workspace = _default_workspace_path(
+        workspaces,
+        root_workspace=root_workspace,
+        root_empty=root_empty,
+    )
+    if default_workspace:
+        workspace_manifest_payload["workspace_root"] = default_workspace
+        workspace_manifest_payload["resolved_workspace_root"] = default_workspace
     snapshot["project_workspace_manifest"] = workspace_manifest_payload
     result.workspaces = workspaces
     status = "materialized" if not result.errors else "failed"
@@ -910,8 +937,7 @@ async def materialize_project_context_workspaces(
         current_workspace_payload["project_context_permission_scope"] = permission_scope
         current_workspace_payload["project_workspace_manifest"] = workspace_manifest_payload
         current_workspace_payload["workspaces"] = _merge_workspaces(current_workspace_payload.get("workspaces"), workspaces)
-        if workspaces:
-            default_workspace = workspaces[0]["path"]
+        if default_workspace:
             current_workspace_payload["workspace_root"] = default_workspace
             current_workspace_payload["resolved_workspace_root"] = default_workspace
         current_workspace_payload["project_context_materialization"] = project_context_materialization

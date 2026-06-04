@@ -589,11 +589,16 @@ async def test_materialize_agent_run_workspace_ref_project_context_updates_works
     result = await materialize_project_context_workspaces(44, workspace_root=str(tmp_path), user_id="user-1")
 
     assert result.ok
-    assert result.workspaces
-    assert run.workspace_ref["workspace_root"] == result.workspaces[0]["path"]
-    assert run.workspace_ref["resolved_workspace_root"] == result.workspaces[0]["path"]
+    assert len(result.workspaces) == 2
+    assert result.workspaces[0]["name"] == "/"
+    assert result.workspaces[1]["name"] == "example-org/example-backend"
+    assert run.workspace_ref["workspace_root"] == result.workspaces[1]["path"]
+    assert run.workspace_ref["resolved_workspace_root"] == result.workspaces[1]["path"]
+    assert run.workspace_ref["project_workspace_manifest"]["workspace_root"] == result.workspaces[1]["path"]
     assert run.workspace_ref["project_context_snapshot"]["resources"][0]["path"] == result.workspaces[0]["path"]
+    assert run.workspace_ref["project_context_snapshot"]["resources"][1]["path"] == result.workspaces[1]["path"]
     assert run.target_ref["project_context_snapshot"]["resources"][0]["path"] == result.workspaces[0]["path"]
+    assert run.target_ref["project_context_snapshot"]["resources"][1]["path"] == result.workspaces[1]["path"]
 
 
 async def test_materialize_reuses_existing_thread_checkout_without_reclone(tmp_path, monkeypatch):

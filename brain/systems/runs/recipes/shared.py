@@ -109,7 +109,14 @@ def project_runtime_workspace_from_ref(workspace_ref: dict[str, Any]) -> Project
                     item.get("name"),
                     item.get("label"),
                 )
-        workspace_root = _workspace_directory_path(workspace_manifest.get("workspace_root"))
+        workspace_root = None
+        for key in _WORKSPACE_ROOT_KEYS:
+            path = _workspace_directory_path(workspace_ref.get(key))
+            if path:
+                workspace_root = path
+                break
+        if workspace_root is None:
+            workspace_root = _workspace_directory_path(workspace_manifest.get("workspace_root"))
         if workspace_root is None and allowed_workspaces:
             workspace_root = allowed_workspaces[0]["path"]
         if workspace_root is not None:

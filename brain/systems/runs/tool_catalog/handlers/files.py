@@ -172,13 +172,22 @@ def _current_project_workspace_manifest() -> ProjectWorkspaceManifest | None:
     return _first_project_workspace_manifest(workspace_payloads, include_workspace_entries=True)
 
 
-def _project_mount_resolution(path: str) -> tuple[str, object] | None:
+def _project_mount_resolution(path: str, *, base: str | None = None) -> tuple[str, object] | None:
+    if not isinstance(path, str) or not path.startswith("/"):
+        return None
+    if os.path.isabs(path) and os.path.exists(os.path.expanduser(path)):
+        return None
     manifest = _current_project_workspace_manifest()
     if manifest is None:
         return None
     mount = manifest.mount_for_agent_path(path)
     if mount is None:
         return None
+    if getattr(mount, "mount_path", None) == "/":
+        workspace_real = os.path.realpath(getattr(mount, "workspace_path", "") or "")
+        base_real = os.path.realpath(base) if base else ""
+        if not workspace_real or not base_real or not _path_is_within(base_real, workspace_real):
+            return None
     resolved = mount.resolve_agent_path(path)
     if not resolved:
         return None
@@ -304,7 +313,7 @@ def _resolve_path(path: str, working_dir: str | None = None, *, for_write: bool 
         working_dir: Override workspace root (used by worktree isolation).
     """
     base = os.path.realpath(working_dir or _patched_workspace_root())
-    project_resolution = _project_mount_resolution(path)
+    project_resolution = _project_mount_resolution(path, base=base)
     if project_resolution is not None:
         resolved, _mount = project_resolution
         _block_project_internal_path(resolved)

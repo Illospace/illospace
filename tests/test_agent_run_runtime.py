@@ -819,6 +819,24 @@ def test_workspace_root_from_ref_uses_thread_project_context_snapshot():
         {"name": "/reports", "path": "/tmp/projects/p1/reports-a"},
         {"name": "/reports-2", "path": "/tmp/projects/p1/reports-b"},
     ]
+    runtime_workspace = project_runtime_workspace_from_ref(
+        {
+            "workspace_root": "/tmp/projects/p1/repos/backend",
+            "resolved_workspace_root": "/tmp/projects/p1/repos/backend",
+            "project_workspace_manifest": {
+                "workspace_root": "/tmp/projects/p1/project-root",
+                "workspaces": [
+                    {"name": "/", "path": "/tmp/projects/p1/project-root"},
+                    {"name": "/uwear-ai/uwear-backend", "path": "/tmp/projects/p1/repos/backend"},
+                ],
+            },
+        }
+    )
+    assert runtime_workspace.workspace_root == "/tmp/projects/p1/repos/backend"
+    assert runtime_workspace.allowed_workspaces == [
+        {"name": "/", "path": "/tmp/projects/p1/project-root"},
+        {"name": "/uwear-ai/uwear-backend", "path": "/tmp/projects/p1/repos/backend"},
+    ]
 
 
 async def test_fast_recipe_infers_workspace_root_from_project_context_snapshot(monkeypatch):

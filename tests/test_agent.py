@@ -1440,6 +1440,28 @@ class TestExecToolHandlers:
         result = handlers["read_file"]("app.ts", workspace="frontend")
         assert "FRONTEND" in result["content"]
 
+    def test_workspace_selector_preserves_allowed_name_for_default_workspace(self, tmp_path):
+        from brain.systems.runs.tool_handlers import _get_tool_handlers
+
+        project_root = tmp_path / "project-root"
+        backend = tmp_path / "github" / "uwear-ai" / "uwear-backend"
+        project_root.mkdir(parents=True)
+        backend.mkdir(parents=True)
+        (backend / "api.py").write_text("BACKEND = True\n")
+
+        handlers = _get_tool_handlers(
+            workspace_root=str(backend),
+            allowed_workspaces=[
+                {"name": "/", "path": str(project_root)},
+                {"name": "/uwear-ai/uwear-backend", "path": str(backend)},
+            ],
+        )
+
+        without_slash = handlers["read_file"]("api.py", workspace="uwear-ai/uwear-backend")
+        with_slash = handlers["read_file"]("api.py", workspace="/uwear-ai/uwear-backend")
+        assert "BACKEND" in without_slash["content"]
+        assert "BACKEND" in with_slash["content"]
+
     def test_workspace_selector_accepts_project_mount_path(self, tmp_path):
         from brain.systems.runs.tool_handlers import _get_tool_handlers
 

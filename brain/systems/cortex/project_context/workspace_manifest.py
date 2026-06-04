@@ -172,6 +172,8 @@ def _normalise_agent_path(path: Any) -> str | None:
     text = _clean_text(path)
     if not text:
         return None
+    if not text.startswith("/"):
+        return None
     return _normalise_mount_path(text, fallback="/")
 
 

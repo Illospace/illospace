@@ -715,13 +715,20 @@ def _build_workspace_registry(
     """Return a deduplicated list of accessible workspace roots."""
     registry: list[dict[str, str]] = []
     seen_paths: set[str] = set()
+    entries_by_path: dict[str, dict[str, str]] = {}
 
     for raw in ([workspace_root] if workspace_root else []) + list(allowed_workspaces or []):
         item = _normalize_workspace_entry(raw)
-        if not item or item["path"] in seen_paths:
+        if not item:
+            continue
+        if item["path"] in seen_paths:
+            existing = entries_by_path.get(item["path"])
+            if existing and isinstance(raw, dict):
+                existing["name"] = item["name"]
             continue
         registry.append(item)
         seen_paths.add(item["path"])
+        entries_by_path[item["path"]] = item
 
     return registry
 
@@ -745,7 +752,16 @@ def _select_workspace(
     if path_matches:
         return path_matches[0]["path"]
 
-    name_matches = [item for item in registry if item["name"] == requested or os.path.basename(item["path"]) == requested]
+    def name_candidates(item: dict[str, str]) -> set[str]:
+        name = item["name"]
+        candidates = {name, os.path.basename(item["path"])}
+        if name != "/" and name.startswith("/"):
+            candidates.add(name.lstrip("/"))
+        elif "/" in name:
+            candidates.add("/" + name.lstrip("/"))
+        return {candidate for candidate in candidates if candidate}
+
+    name_matches = [item for item in registry if requested in name_candidates(item)]
     if len(name_matches) == 1:
         return name_matches[0]["path"]
     if len(name_matches) > 1:
