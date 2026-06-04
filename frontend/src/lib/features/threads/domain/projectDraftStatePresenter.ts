@@ -93,6 +93,15 @@ export type ProjectFileBrowserView = {
   truncatedCount: number;
 };
 
+export type ProjectFilePathMatchKind = 'exact' | 'suffix';
+
+export type ProjectFilePathResolution = {
+  file: ProjectExplorerFile | null;
+  candidates: ProjectExplorerFile[];
+  ambiguous: boolean;
+  matchKind: ProjectFilePathMatchKind | null;
+};
+
 export type ProjectTextDiffLine = {
   kind: 'context' | 'removed' | 'added';
   text: string;
@@ -703,6 +712,52 @@ export function joinProjectDisplayPath(mountPath: unknown, filePath: unknown): s
   if (!path) return mount;
   if (mount === '/') return `/${path}`;
   return `${mount.replace(/\/+$/, '')}/${path}`;
+}
+
+export function projectFilePathMatchKind(
+  file: ProjectExplorerFile,
+  rawPath: unknown,
+): ProjectFilePathMatchKind | null {
+  const focusedPath = cleanProjectPath(rawPath);
+  if (!focusedPath) return null;
+  const path = cleanProjectPath(file.path);
+  const displayPath = cleanProjectPath(file.displayPath);
+  if (path === focusedPath || displayPath === focusedPath) return 'exact';
+  if (displayPath.endsWith(`/${focusedPath}`)) return 'suffix';
+  return null;
+}
+
+export function resolveProjectFileDisplayPath(
+  files: ProjectExplorerFile[],
+  rawPath: unknown,
+): ProjectFilePathResolution {
+  const focusedPath = cleanProjectPath(rawPath);
+  if (!focusedPath) return { file: null, candidates: [], ambiguous: false, matchKind: null };
+
+  const exactMatches = files.filter((file) => projectFilePathMatchKind(file, focusedPath) === 'exact');
+  if (exactMatches.length === 1) {
+    return { file: exactMatches[0], candidates: exactMatches, ambiguous: false, matchKind: 'exact' };
+  }
+  if (exactMatches.length > 1) {
+    return { file: null, candidates: exactMatches, ambiguous: true, matchKind: 'exact' };
+  }
+
+  const suffixMatches = files.filter((file) => projectFilePathMatchKind(file, focusedPath) === 'suffix');
+  if (suffixMatches.length === 1) {
+    return { file: suffixMatches[0], candidates: suffixMatches, ambiguous: false, matchKind: 'suffix' };
+  }
+  if (suffixMatches.length > 1) {
+    return { file: null, candidates: suffixMatches, ambiguous: true, matchKind: 'suffix' };
+  }
+
+  return { file: null, candidates: [], ambiguous: false, matchKind: null };
+}
+
+export function projectFileMatchesDisplayPath(
+  file: ProjectExplorerFile,
+  rawPath: unknown,
+): boolean {
+  return projectFilePathMatchKind(file, rawPath) === 'exact';
 }
 
 export function projectFileStatusLabel(status: unknown): string {

@@ -7,22 +7,39 @@ export type ThreadStageRightDockTabKind =
   | 'app'
   | 'vault'
   | 'cycles'
+  | 'file-preview'
   | 'preview'
   | 'code-review';
 
-export type ThreadStageRightDockDynamicKind = 'browser' | 'app';
+export type ThreadStageRightDockDynamicKind = 'browser' | 'app' | 'file-preview';
 export type ThreadStageRightDockSingletonKind = Exclude<
   ThreadStageRightDockTabKind,
   ThreadStageRightDockDynamicKind
 >;
 
-export type ThreadStageRightDockTab = {
+type ThreadStageRightDockBaseTab<K extends ThreadStageRightDockTabKind> = {
   id: string;
   label: string;
-  kind: ThreadStageRightDockTabKind;
-  appId?: string | null;
+  kind: K;
   closeable?: boolean;
 };
+
+export type ThreadStageRightDockSingletonTab =
+  ThreadStageRightDockBaseTab<ThreadStageRightDockSingletonKind>;
+export type ThreadStageRightDockBrowserTab = ThreadStageRightDockBaseTab<'browser'>;
+export type ThreadStageRightDockAppTab = ThreadStageRightDockBaseTab<'app'> & {
+  appId: string;
+};
+export type ThreadStageRightDockFilePreviewTab = ThreadStageRightDockBaseTab<'file-preview'> & {
+  filePath: string;
+  runId?: string | number | null;
+};
+
+export type ThreadStageRightDockTab =
+  | ThreadStageRightDockSingletonTab
+  | ThreadStageRightDockBrowserTab
+  | ThreadStageRightDockAppTab
+  | ThreadStageRightDockFilePreviewTab;
 
 export type ThreadStageRightDockAddMenuItem = {
   id: string;
@@ -157,6 +174,7 @@ export function threadSidePanelDefinitionForKind(
 export function threadSidePanelIconForKind(kind: ThreadStageRightDockTabKind) {
   if (kind === 'browser') return 'preview';
   if (kind === 'app') return 'code';
+  if (kind === 'file-preview') return 'document';
   return threadSidePanelDefinitionForKind(kind).icon;
 }
 
@@ -188,9 +206,7 @@ export function buildThreadSidePanelAddMenuItems(
   const browserCount = tabs.filter((tab) => tab.kind === 'browser').length;
   const openKinds = new Set(tabs.map((tab) => tab.kind));
   const openAppIds = new Set(
-    tabs
-      .filter((tab) => tab.kind === 'app' && tab.appId)
-      .map((tab) => String(tab.appId)),
+    tabs.flatMap((tab) => (tab.kind === 'app' ? [tab.appId] : [])),
   );
   const items: ThreadStageRightDockAddMenuItem[] = [
     {
@@ -285,12 +301,13 @@ export function openAppThreadSidePanelTab(
   appId: string | null | undefined,
   app?: ThreadSidePanelAppLike | null,
 ): ThreadSidePanelTabState {
-  if (!appId) return state;
+  const resolvedAppId = String(appId ?? '').trim();
+  if (!resolvedAppId) return state;
 
-  const existing = state.tabs.find((tab) => tab.kind === 'app' && tab.appId === appId);
+  const existing = state.tabs.find((tab) => tab.kind === 'app' && tab.appId === resolvedAppId);
   if (existing) return { ...state, activeTabId: existing.id };
 
-  const id = `app-${appId}`;
+  const id = `app-${resolvedAppId}`;
   return {
     ...state,
     tabs: [
@@ -298,8 +315,49 @@ export function openAppThreadSidePanelTab(
       {
         id,
         kind: 'app',
-        appId,
+        appId: resolvedAppId,
         label: app?.name || app?.key || 'App',
+        closeable: true,
+      },
+    ],
+    activeTabId: id,
+  };
+}
+
+export function filePreviewThreadSidePanelTabId(
+  filePath: string,
+  runId: string | number | null = null,
+): string {
+  const runKey = runId == null ? 'current' : String(runId).trim() || 'current';
+  return `file-preview:${encodeURIComponent(runKey)}:${encodeURIComponent(filePath.trim())}`;
+}
+
+function filePreviewThreadSidePanelTabLabel(filePath: string): string {
+  return filePath.trim().split('/').filter(Boolean).at(-1) || 'File preview';
+}
+
+export function openFilePreviewThreadSidePanelTab(
+  state: ThreadSidePanelTabState,
+  filePath: string | null | undefined,
+  runId: string | number | null = null,
+): ThreadSidePanelTabState {
+  const path = filePath?.trim();
+  if (!path) return state;
+
+  const id = filePreviewThreadSidePanelTabId(path, runId);
+  const existing = state.tabs.find((tab) => tab.id === id);
+  if (existing) return { ...state, activeTabId: existing.id };
+
+  return {
+    ...state,
+    tabs: [
+      ...state.tabs,
+      {
+        id,
+        kind: 'file-preview',
+        filePath: path,
+        runId,
+        label: filePreviewThreadSidePanelTabLabel(path),
         closeable: true,
       },
     ],

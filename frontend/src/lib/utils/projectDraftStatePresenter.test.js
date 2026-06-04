@@ -7,12 +7,14 @@ import {
   buildProjectTextDiff,
   joinProjectDisplayPath,
   normaliseProjectPreviewText,
+  projectFileMatchesDisplayPath,
   projectFileLayerLabel,
   projectFileKind,
   projectFileKindLabel,
   projectFileStatusTone,
   projectSpreadsheetPreviewRows,
   publishOperationPath,
+  resolveProjectFileDisplayPath,
   resourceMeta,
   resourceTitle,
   visibleProjectExplorerRows,
@@ -115,12 +117,52 @@ test('project draft presenter respects explicit publish plan summaries', () => {
 
 test('project file presenter formats status, layer, and mounted paths', () => {
   assert.equal(joinProjectDisplayPath('/reports', 'analysis/summary.md'), '/reports/analysis/summary.md');
+  const file = {
+    path: 'analysis/summary.md',
+    displayPath: '/reports/analysis/summary.md',
+  };
+  assert.equal(projectFileMatchesDisplayPath(file, 'analysis/summary.md'), true);
+  assert.equal(projectFileMatchesDisplayPath(file, '/reports/analysis/summary.md'), true);
+  assert.equal(projectFileMatchesDisplayPath(file, 'reports/analysis/summary.md'), true);
+  assert.equal(projectFileMatchesDisplayPath(file, 'brief.md'), false);
   assert.equal(projectFileStatusTone('out_of_date'), 'warning');
   assert.equal(projectFileLayerLabel({ path: 'new.md', has_draft: true, has_root: false }), 'new draft file');
   assert.equal(projectFileKind({ path: 'deck.pdf' }), 'pdf');
   assert.equal(projectFileKind({ path: 'finance.xlsx' }), 'spreadsheet');
   assert.equal(projectFileKind({ path: 'diagram.mmd' }), 'graph');
   assert.equal(projectFileKindLabel({ path: 'analysis.ipynb' }), 'Code');
+});
+
+test('project file path resolver surfaces ambiguous path matches', () => {
+  const files = [
+    {
+      key: 'app',
+      path: 'docs/README.md',
+      displayPath: '/app/docs/README.md',
+    },
+    {
+      key: 'web',
+      path: 'docs/README.md',
+      displayPath: '/web/docs/README.md',
+    },
+    {
+      key: 'guide',
+      path: 'guides/README.md',
+      displayPath: '/guides/README.md',
+    },
+  ];
+
+  const exact = resolveProjectFileDisplayPath(files, '/app/docs/README.md');
+  const ambiguous = resolveProjectFileDisplayPath(files, 'docs/README.md');
+  const suffix = resolveProjectFileDisplayPath([files[2]], 'README.md');
+
+  assert.equal(exact.ambiguous, false);
+  assert.equal(exact.file?.key, 'app');
+  assert.equal(ambiguous.ambiguous, true);
+  assert.equal(ambiguous.file, null);
+  assert.deepEqual(ambiguous.candidates.map((file) => file.key), ['app', 'web']);
+  assert.equal(suffix.ambiguous, false);
+  assert.equal(suffix.file?.key, 'guide');
 });
 
 test('project spreadsheet previews parse escaped rows and quoted cells', () => {

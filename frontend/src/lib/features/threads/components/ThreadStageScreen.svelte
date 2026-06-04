@@ -11,6 +11,7 @@
     hasLiveFastReply as streamHasLiveFastReply,
     isActiveRun,
     isFastRun,
+    type CodeReviewFile,
   } from '$lib/utils/cortexRunPresentation';
   import {
     buildProjectContextMessageAttachment,
@@ -41,6 +42,7 @@
     createDefaultThreadSidePanelTabs,
     isThreadSidePanelSingletonKind,
     openAppThreadSidePanelTab,
+    openFilePreviewThreadSidePanelTab,
     openSingletonThreadSidePanelTab,
     type ThreadSidePanelTabState,
     type ThreadStageRightDockAddMenuItem,
@@ -74,6 +76,7 @@
   import ThreadAttachmentPreviewPane from '$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte';
   import ThreadCodeReviewPane from '$lib/features/threads/components/ThreadCodeReviewPane.svelte';
   import ProjectDraftStatePanel from '$lib/features/threads/components/ProjectDraftStatePanel.svelte';
+  import ThreadProjectFilePreviewPane from '$lib/features/threads/components/ThreadProjectFilePreviewPane.svelte';
   import ThreadDiscussionPane from '$lib/features/threads/components/ThreadDiscussionPane.svelte';
   import ThreadStageShell, { type ThreadPeripherySignal } from '$lib/features/threads/components/ThreadStageShell.svelte';
   import ThreadUtilityContent from '$lib/features/threads/components/ThreadUtilityContent.svelte';
@@ -220,6 +223,9 @@
     const id = run?.run_id ?? run?.id ?? null;
     return id === '' ? null : id;
   });
+  const activeFilePreviewTab = $derived(activeSidePanelTab?.kind === 'file-preview' ? activeSidePanelTab : null);
+  const activeFilePreviewPath = $derived(activeFilePreviewTab?.filePath ?? '');
+  const activeFilePreviewRunId = $derived(activeFilePreviewTab?.runId ?? null);
   const selectedThreadApp = $derived(
     activeSidePanelTab?.kind === 'app' && activeSidePanelTab.appId
       ? workspaceApps.appById(activeSidePanelTab.appId)
@@ -874,6 +880,10 @@
     openSingletonTab('preview');
   }
 
+  function openCodeReviewFilePreview(file: CodeReviewFile) {
+    applySidePanelState(openFilePreviewThreadSidePanelTab(sidePanelState(), file.path, file.runId ?? null));
+  }
+
   function openAppTab(appId: string | null | undefined) {
     applySidePanelState(openAppThreadSidePanelTab(sidePanelState(), appId, workspaceApps.appById(appId ?? '')));
   }
@@ -1200,7 +1210,19 @@
   {/snippet}
 
   {#snippet codeReviewPane()}
-    <ThreadCodeReviewPane files={codeReviewFiles} latestRunStatus={latestRun?.status ?? null} />
+    <ThreadCodeReviewPane
+      files={codeReviewFiles}
+      latestRunStatus={latestRun?.status ?? null}
+      onPreviewFile={openCodeReviewFilePreview}
+    />
+  {/snippet}
+
+  {#snippet filePreviewPane()}
+    <ThreadProjectFilePreviewPane
+      {idea}
+      runId={activeFilePreviewRunId ?? projectDraftRunId}
+      filePath={activeFilePreviewPath}
+    />
   {/snippet}
 
   {#snippet vaultPane()}
@@ -1297,6 +1319,7 @@
               appsPane={appsPane}
               vaultPane={vaultPane}
               cyclesPane={cyclesPane}
+              filePreviewPane={filePreviewPane}
               codeReviewPane={codeReviewPane}
             />
           </div>

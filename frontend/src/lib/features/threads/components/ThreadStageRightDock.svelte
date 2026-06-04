@@ -25,6 +25,7 @@
     app: 'Generated apps',
     vault: 'Vault',
     cycles: 'Cycles',
+    'file-preview': 'File preview',
     'code-review': 'Review changed files',
   } satisfies Record<ThreadStageRightDockTabKind, string>;
 
@@ -62,6 +63,7 @@
     appsPane,
     vaultPane,
     cyclesPane,
+    filePreviewPane,
     codeReviewPane,
     empty,
   }: {
@@ -86,6 +88,7 @@
     appsPane?: Snippet;
     vaultPane?: Snippet;
     cyclesPane?: Snippet;
+    filePreviewPane?: Snippet;
     codeReviewPane?: Snippet;
     empty?: Snippet;
   } = $props();
@@ -100,6 +103,7 @@
     app: appsPane,
     vault: vaultPane,
     cycles: cyclesPane,
+    'file-preview': filePreviewPane,
     'code-review': codeReviewPane,
   });
   const availableTabs = $derived(tabs.filter((tab) => Boolean(paneByKind[tab.kind])));
