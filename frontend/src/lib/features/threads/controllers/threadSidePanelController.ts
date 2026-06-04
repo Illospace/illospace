@@ -324,8 +324,12 @@ export function openAppThreadSidePanelTab(
   };
 }
 
-export function filePreviewThreadSidePanelTabId(filePath: string): string {
-  return `file-preview:${encodeURIComponent(filePath.trim())}`;
+export function filePreviewThreadSidePanelTabId(
+  filePath: string,
+  runId: string | number | null = null,
+): string {
+  const runKey = runId == null ? 'current' : String(runId).trim() || 'current';
+  return `file-preview:${encodeURIComponent(runKey)}:${encodeURIComponent(filePath.trim())}`;
 }
 
 function filePreviewThreadSidePanelTabLabel(filePath: string): string {
@@ -340,19 +344,9 @@ export function openFilePreviewThreadSidePanelTab(
   const path = filePath?.trim();
   if (!path) return state;
 
-  const id = filePreviewThreadSidePanelTabId(path);
+  const id = filePreviewThreadSidePanelTabId(path, runId);
   const existing = state.tabs.find((tab) => tab.id === id);
-  if (existing) {
-    return {
-      ...state,
-      tabs: state.tabs.map((tab) =>
-        tab.id === id && tab.kind === 'file-preview'
-          ? { ...tab, filePath: path, runId }
-          : tab,
-      ),
-      activeTabId: existing.id,
-    };
-  }
+  if (existing) return { ...state, activeTabId: existing.id };
 
   return {
     ...state,

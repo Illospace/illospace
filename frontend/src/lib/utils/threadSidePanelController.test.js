@@ -49,7 +49,7 @@ test('closed singleton tabs are restored from the side panel add menu', () => {
   assert.ok(next.tabs.some((tab) => tab.kind === 'handoff-summary' && tab.label === 'Handoff'));
 });
 
-test('file preview tabs are dynamic and reused by path', () => {
+test('file preview tabs are dynamic and scoped by path and run', () => {
   const state = {
     tabs: createDefaultThreadSidePanelTabs(),
     activeTabId: 'activity',
@@ -58,18 +58,18 @@ test('file preview tabs are dynamic and reused by path', () => {
 
   const first = openFilePreviewThreadSidePanelTab(state, 'docs/diagrams/current-generation-architecture.puml', 101);
   const second = openFilePreviewThreadSidePanelTab(first, 'docs/GENERATION_DISPATCHER_PRD.md');
-  const reused = openFilePreviewThreadSidePanelTab(second, 'docs/diagrams/current-generation-architecture.puml', 202);
+  const sameRun = openFilePreviewThreadSidePanelTab(second, 'docs/diagrams/current-generation-architecture.puml', 101);
+  const otherRun = openFilePreviewThreadSidePanelTab(sameRun, 'docs/diagrams/current-generation-architecture.puml', 202);
 
-  assert.equal(first.activeTabId, filePreviewThreadSidePanelTabId('docs/diagrams/current-generation-architecture.puml'));
+  assert.equal(first.activeTabId, filePreviewThreadSidePanelTabId('docs/diagrams/current-generation-architecture.puml', 101));
   assert.equal(first.tabs.at(-1).kind, 'file-preview');
   assert.equal(first.tabs.at(-1).label, 'current-generation-architecture.puml');
   assert.equal(first.tabs.at(-1).filePath, 'docs/diagrams/current-generation-architecture.puml');
   assert.equal(first.tabs.at(-1).runId, 101);
   assert.equal(second.tabs.filter((tab) => tab.kind === 'file-preview').length, 2);
-  assert.equal(reused.tabs.filter((tab) => tab.kind === 'file-preview').length, 2);
-  assert.equal(reused.activeTabId, first.activeTabId);
-  assert.equal(
-    reused.tabs.find((tab) => tab.id === first.activeTabId).runId,
-    202,
-  );
+  assert.equal(sameRun.tabs.filter((tab) => tab.kind === 'file-preview').length, 2);
+  assert.equal(sameRun.activeTabId, first.activeTabId);
+  assert.equal(otherRun.tabs.filter((tab) => tab.kind === 'file-preview').length, 3);
+  assert.notEqual(otherRun.activeTabId, first.activeTabId);
+  assert.equal(otherRun.tabs.find((tab) => tab.id === otherRun.activeTabId).runId, 202);
 });

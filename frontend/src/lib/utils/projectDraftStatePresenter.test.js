@@ -14,6 +14,7 @@ import {
   projectFileStatusTone,
   projectSpreadsheetPreviewRows,
   publishOperationPath,
+  resolveProjectFileDisplayPath,
   resourceMeta,
   resourceTitle,
   visibleProjectExplorerRows,
@@ -130,6 +131,38 @@ test('project file presenter formats status, layer, and mounted paths', () => {
   assert.equal(projectFileKind({ path: 'finance.xlsx' }), 'spreadsheet');
   assert.equal(projectFileKind({ path: 'diagram.mmd' }), 'graph');
   assert.equal(projectFileKindLabel({ path: 'analysis.ipynb' }), 'Code');
+});
+
+test('project file path resolver surfaces ambiguous path matches', () => {
+  const files = [
+    {
+      key: 'app',
+      path: 'docs/README.md',
+      displayPath: '/app/docs/README.md',
+    },
+    {
+      key: 'web',
+      path: 'docs/README.md',
+      displayPath: '/web/docs/README.md',
+    },
+    {
+      key: 'guide',
+      path: 'guides/README.md',
+      displayPath: '/guides/README.md',
+    },
+  ];
+
+  const exact = resolveProjectFileDisplayPath(files, '/app/docs/README.md');
+  const ambiguous = resolveProjectFileDisplayPath(files, 'docs/README.md');
+  const suffix = resolveProjectFileDisplayPath([files[2]], 'README.md');
+
+  assert.equal(exact.ambiguous, false);
+  assert.equal(exact.file?.key, 'app');
+  assert.equal(ambiguous.ambiguous, true);
+  assert.equal(ambiguous.file, null);
+  assert.deepEqual(ambiguous.candidates.map((file) => file.key), ['app', 'web']);
+  assert.equal(suffix.ambiguous, false);
+  assert.equal(suffix.file?.key, 'guide');
 });
 
 test('project spreadsheet previews parse escaped rows and quoted cells', () => {
