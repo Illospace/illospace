@@ -664,6 +664,30 @@ def test_fast_discussion_origin_surface_keeps_timeline_reply_tools_hidden(monkey
     ]
 
 
+def test_fast_timeline_origin_hides_discussion_reply_tool(monkeypatch):
+    from brain.systems.runs.recipes.fast import _agent_tools_for_runtime
+
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.fast.build_agent_tools",
+        lambda role: [
+            {"name": "post_thread_discussion_reply"},
+            {"name": "post_ai_timeline_message"},
+        ],
+    )
+
+    runtime = SimpleNamespace(
+        request=SimpleNamespace(
+            thread_id="idea-1",
+            metadata={},
+            target_ref={"originating_surface": "ai_timeline"},
+        )
+    )
+
+    assert [tool["name"] for tool in _agent_tools_for_runtime(runtime)] == [
+        "post_ai_timeline_message",
+    ]
+
+
 def test_discussion_origin_run_does_not_auto_mirror_final_answer_to_timeline():
     from brain.systems.runs.cortex.runner import _run_should_mirror_final_answer_to_timeline
 
@@ -2635,7 +2659,7 @@ async def test_runner_does_not_duplicate_final_answer_thread_message():
     run = SimpleNamespace(id=45, parent_run_id=None, thread_id=idea_id, status="completed")
     idea = SimpleNamespace(id=idea_id, status="unread_reply", updated_at=None)
     final_artifact = SimpleNamespace(id=100, run_id=45, artifact_type="final_answer", text="Already visible")
-    existing_message = SimpleNamespace(metadata_={"run_id": 45})
+    existing_message = SimpleNamespace(message_type="agent_response", metadata_={"run_id": 45})
     added = []
     scalar_calls = 0
 
@@ -2661,6 +2685,62 @@ async def test_runner_does_not_duplicate_final_answer_thread_message():
             pass
 
     assert await _settle_idea_for_terminal_root_run_async(FakeSession(), 45) is None
+    assert not any(isinstance(obj, IdeaThread) for obj in added)
+
+
+async def test_runner_does_not_mirror_after_same_run_ai_timeline_tool_message():
+    from sqlalchemy.sql import visitors
+
+    from brain.systems.runs.cortex.runner import _settle_idea_for_terminal_root_run_async
+    from brain.platform.db.models.agent_run import AgentRunRow
+    from brain.platform.db.models.idea import Idea, IdeaThread
+
+    idea_id = str(uuid.uuid4())
+    run = SimpleNamespace(id=48, parent_run_id=None, thread_id=idea_id, status="completed")
+    idea = SimpleNamespace(id=idea_id, status="unread_reply", updated_at=None)
+    final_artifact = SimpleNamespace(id=103, run_id=48, artifact_type="final_answer", text="Already posted")
+    existing_message = SimpleNamespace(
+        message_type="message",
+        metadata_={"created_by_run_id": 48, "surface": "ai_timeline"},
+    )
+    added = []
+    scalar_calls = 0
+
+    def _filters_on_message_type(stmt) -> bool:
+        found = False
+
+        def visit_binary(binary):
+            nonlocal found
+            if "message_type" in str(getattr(binary, "left", "")):
+                found = True
+
+        visitors.traverse(stmt, {}, {"binary": visit_binary})
+        return found
+
+    class FakeSession:
+        async def get(self, model, key):
+            if model is AgentRunRow and int(key) == 48:
+                return run
+            if model is Idea and str(key) == idea_id:
+                return idea
+            return None
+
+        def add(self, obj):
+            added.append(obj)
+
+        async def scalars(self, stmt):
+            nonlocal scalar_calls
+            scalar_calls += 1
+            if scalar_calls == 1:
+                return _ScalarRows([final_artifact])
+            if scalar_calls == 2 and not _filters_on_message_type(stmt):
+                return _ScalarRows([existing_message])
+            return _ScalarRows([])
+
+        async def flush(self):
+            pass
+
+    assert await _settle_idea_for_terminal_root_run_async(FakeSession(), 48) is None
     assert not any(isinstance(obj, IdeaThread) for obj in added)
 
 
@@ -2786,3 +2866,80 @@ async def test_runner_settles_discussion_origin_run_into_discussion_not_timeline
     }
     assert published[0][0] == "thread_discussion_comment"
     assert published[0][1]["idea_id"] == "idea-1"
+
+
+async def test_runner_carries_same_run_discussion_attachments_into_timeline_final_answer(monkeypatch):
+    from brain.systems.runs.cortex.runner import _settle_idea_for_terminal_root_run_async
+    from brain.systems.cortex.thought_lifecycle import TerminalRunSettlementCommand
+    from brain.platform.db.models.agent_run import AgentRunRow
+    from brain.platform.db.models.idea import Idea
+
+    thread_id = "550e8400-e29b-41d4-a716-446655440000"
+    run = SimpleNamespace(
+        id=47,
+        parent_run_id=None,
+        thread_id=thread_id,
+        status="completed",
+        target_ref={"originating_surface": "ai_timeline"},
+        metadata_={},
+    )
+    idea = SimpleNamespace(
+        id=thread_id,
+        status="working",
+        org_id="org-1",
+        user_id="owner-1",
+        agent_details=None,
+    )
+    final_artifact = SimpleNamespace(
+        id=102,
+        run_id=47,
+        artifact_type="final_answer",
+        text="Done - I attached both PNGs in the thread.",
+    )
+    attachment = {
+        "url": f"/static/uploads/thread-assets/{thread_id}/diagram.png",
+        "kind": "image",
+        "content_type": "image/png",
+    }
+    same_run_comment = SimpleNamespace(
+        id=28,
+        thread_id=thread_id,
+        author_kind="illo",
+        body="Corrected version",
+        attachments=[attachment],
+        metadata_={"created_by_run_id": 47},
+    )
+    scalar_calls = 0
+    captured_command = None
+
+    class FakeSession:
+        async def get(self, model, key):
+            if model is AgentRunRow and int(key) == 47:
+                return run
+            if model is Idea and str(key) == thread_id:
+                return idea
+            return None
+
+        async def scalars(self, _stmt):
+            nonlocal scalar_calls
+            scalar_calls += 1
+            if scalar_calls == 1:
+                return _ScalarRows([final_artifact])
+            if scalar_calls == 2:
+                return _ScalarRows([])
+            if scalar_calls == 3:
+                return _ScalarRows([same_run_comment])
+            return _ScalarRows([])
+
+    async def fake_settle_terminal_run(_session, *, idea, command, publish=None):
+        nonlocal captured_command
+        captured_command = command
+        return SimpleNamespace(status_change={"ok": True})
+
+    monkeypatch.setattr("brain.systems.runs.cortex.runner.settle_terminal_run", fake_settle_terminal_run)
+
+    payload = await _settle_idea_for_terminal_root_run_async(FakeSession(), 47)
+
+    assert payload == {"ok": True}
+    assert isinstance(captured_command, TerminalRunSettlementCommand)
+    assert captured_command.attachments == [attachment]

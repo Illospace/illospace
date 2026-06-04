@@ -41,6 +41,9 @@ Runtime rules:
 """
 
 _FAST_HIDDEN_TOOL_NAMES = {"cortex_reply", "cortex_visual_reply"}
+_THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
+_THREAD_DISCUSSION_SURFACE = "thread_discussion"
+_THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
 
 
 def build_fast_system_prompt(prompt_context: str = "") -> str:
@@ -58,8 +61,35 @@ def _disabled_tool_names(runtime: RunRuntime) -> set[str]:
     return disabled_tool_names_from_metadata(runtime.request.metadata)
 
 
+def _runtime_context_maps(runtime: RunRuntime):
+    for container in (
+        getattr(runtime.request, "metadata", None),
+        getattr(runtime.request, "target_ref", None),
+    ):
+        if isinstance(container, dict):
+            yield container
+
+
+def _runtime_originated_from_thread_discussion(runtime: RunRuntime) -> bool:
+    for container in _runtime_context_maps(runtime):
+        if container.get("kind") == _THREAD_DISCUSSION_SURFACE:
+            return True
+        if container.get("originating_surface") == _THREAD_DISCUSSION_SURFACE:
+            return True
+        if container.get("triggering_surface") == _THREAD_DISCUSSION_SURFACE:
+            return True
+        if container.get("source_surface") == _THREAD_DISCUSSION_SURFACE:
+            return True
+        if isinstance(container.get("discussion_trigger"), dict):
+            return True
+    thread_id = str(getattr(runtime.request, "thread_id", "") or "")
+    return thread_id.startswith(_THREAD_DISCUSSION_THREAD_PREFIX)
+
+
 def _agent_tools_for_runtime(runtime: RunRuntime) -> list[dict]:
     hidden = _FAST_HIDDEN_TOOL_NAMES | _disabled_tool_names(runtime)
+    if not _runtime_originated_from_thread_discussion(runtime):
+        hidden.add(_THREAD_DISCUSSION_REPLY_TOOL)
     return [
         tool
         for tool in build_agent_tools("coordinator")

@@ -283,7 +283,93 @@ def _message_belongs_to_run(message: IdeaThread, run_id: int) -> bool:
     metadata = getattr(message, "metadata_", None)
     if not isinstance(metadata, dict):
         return False
-    return str(metadata.get("run_id") or "") == str(run_id)
+    return str(metadata.get("run_id") or metadata.get("created_by_run_id") or "") == str(run_id)
+
+
+def _message_surface(message: IdeaThread) -> str:
+    metadata = getattr(message, "metadata_", None)
+    if not isinstance(metadata, dict):
+        return ""
+    surface = metadata.get("surface") or metadata.get("target_surface")
+    return str(surface or "").strip()
+
+
+def _message_is_visible_run_timeline_output(message: IdeaThread, run_id: int) -> bool:
+    if not _message_belongs_to_run(message, run_id):
+        return False
+    if str(getattr(message, "message_type", "") or "") == "agent_response":
+        return True
+    return _message_surface(message) in _AI_TIMELINE_SURFACES
+
+
+def _attachment_key(attachment: dict[str, Any]) -> str:
+    return str(
+        attachment.get("url")
+        or attachment.get("download_url")
+        or attachment.get("public_url")
+        or attachment.get("filename")
+        or ""
+    )
+
+
+def _append_unique_attachments(target: list[dict[str, Any]], attachments: Any, seen: set[str]) -> None:
+    if not isinstance(attachments, list):
+        return
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        key = _attachment_key(attachment)
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        target.append(dict(attachment))
+
+
+async def _same_run_visible_attachments(session, *, run: AgentRunRow, thread_id: str) -> list[dict[str, Any]]:
+    """Carry attachments created by tools in this run into the mirrored final answer."""
+    if not hasattr(session, "scalars"):
+        return []
+
+    run_id = int(run.id)
+    attachments: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    try:
+        comments_result = await session.scalars(
+            select(ThreadDiscussionComment)
+            .where(
+                ThreadDiscussionComment.thread_id == str(thread_id),
+                ThreadDiscussionComment.author_kind == "illo",
+            )
+            .order_by(ThreadDiscussionComment.created_at.desc(), ThreadDiscussionComment.id.desc())
+            .limit(100)
+        )
+        comments = list(comments_result.all())
+    except Exception:
+        comments = []
+    for comment in comments:
+        if _comment_belongs_to_run(comment, run_id):
+            _append_unique_attachments(attachments, getattr(comment, "attachments", None), seen)
+
+    try:
+        messages_result = await session.scalars(
+            select(IdeaThread)
+            .where(
+                IdeaThread.idea_id == str(thread_id),
+                IdeaThread.role.in_(("illo", "assistant")),
+            )
+            .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
+            .limit(100)
+        )
+        messages = list(messages_result.all())
+    except Exception:
+        messages = []
+    for message in messages:
+        if _message_belongs_to_run(message, run_id):
+            _append_unique_attachments(attachments, getattr(message, "attachments", None), seen)
+
+    return attachments
 
 
 async def _latest_final_answer_artifact(session, *, run: AgentRunRow) -> tuple[str | None, int | None]:
@@ -314,11 +400,12 @@ async def _latest_unmirrored_final_answer(session, *, run: AgentRunRow, idea: Id
             .where(
                 IdeaThread.idea_id == str(idea.id),
                 IdeaThread.role.in_(("illo", "assistant")),
-                IdeaThread.message_type == "agent_response",
             )
+            .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
+            .limit(100)
         )
     ).all()
-    if any(_message_belongs_to_run(message, int(run.id)) for message in recent_responses):
+    if any(_message_is_visible_run_timeline_output(message, int(run.id)) for message in recent_responses):
         return None, None
     return text, artifact_id
 
@@ -481,6 +568,7 @@ async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict
     if old_status in PROTECTED_IDEA_STATUSES:
         return None
     final_answer, artifact_id = await _latest_unmirrored_final_answer(session, run=run, idea=idea)
+    attachments = await _same_run_visible_attachments(session, run=run, thread_id=str(idea.id))
     settlement = await settle_terminal_run(
         session,
         idea=idea,
@@ -489,6 +577,7 @@ async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict
             run_status=str(run.status or ""),
             final_answer=final_answer,
             artifact_id=artifact_id,
+            attachments=attachments,
         ),
     )
     return settlement.status_change

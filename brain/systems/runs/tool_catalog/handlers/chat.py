@@ -125,6 +125,24 @@ def _current_ai_timeline_thread_id(explicit_thread_id: str | None = None) -> str
     return _thread_id_from_discussion_conversation(parent_thread_id)
 
 
+def _discussion_reply_allowed() -> bool:
+    if _current_discussion_trigger():
+        return True
+    for container in (_execution_metadata(), _current_target_ref()):
+        if container.get("kind") == THREAD_DISCUSSION_SURFACE:
+            return True
+        if container.get("originating_surface") == THREAD_DISCUSSION_SURFACE:
+            return True
+        if container.get("triggering_surface") == THREAD_DISCUSSION_SURFACE:
+            return True
+        if container.get("source_surface") == THREAD_DISCUSSION_SURFACE:
+            return True
+        if isinstance(container.get("discussion_trigger"), dict):
+            return True
+    current_thread_id = str(_current_thread_id() or "").strip()
+    return current_thread_id.startswith(THREAD_DISCUSSION_CONVERSATION_PREFIX)
+
+
 def _discussion_comment_payload(comment: Any) -> dict[str, Any]:
     return {
         "id": comment.id,
@@ -265,15 +283,25 @@ async def _handle_post_thread_discussion_reply(
     text = str(body or "").strip()
     if not text:
         return json.dumps({"error": "post_thread_discussion_reply requires body"})
+    if not _discussion_reply_allowed():
+        return json.dumps(
+            {
+                "error": (
+                    "post_thread_discussion_reply is only available for Thread "
+                    "Discussion-triggered runs; use post_ai_timeline_message for "
+                    "the Thread AI Timeline."
+                )
+            }
+        )
 
     trigger = _current_discussion_trigger()
     response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
-    target_thread_id = _first_nonempty(
+    target_thread_id = _thread_id_from_discussion_conversation(_first_nonempty(
         thread_id,
         response_target.get("thread_id"),
         trigger.get("thread_id"),
         _current_thread_id(),
-    )
+    ))
     if not target_thread_id:
         return json.dumps({"error": "post_thread_discussion_reply requires a Thread id or active Thread run"})
 

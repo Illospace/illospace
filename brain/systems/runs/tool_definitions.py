@@ -1336,10 +1336,10 @@ CHAT_TOOLS = [
         "name": "post_thread_discussion_reply",
         "description": (
             "Post an Illo-authored reply into the current Thread Discussion. "
-            "Use this when a run was summoned from Discussion, or when the natural "
-            "answer belongs in Discussion rather than the AI Timeline. This does not "
-            "post to the AI Timeline. Discussion and AI Timeline are separate "
-            "conversation surfaces linked by Thread context."
+            "Use this only when the run was summoned from Thread Discussion. "
+            "This does not post to the AI Timeline, and non-Discussion-origin "
+            "runs must use post_ai_timeline_message for visible Thread output. "
+            "Discussion is a team comment surface, not the default response channel."
         ),
         "input_schema": {
             "type": "object",
