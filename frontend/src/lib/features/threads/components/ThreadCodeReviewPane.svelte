@@ -5,9 +5,11 @@
   let {
     files = [],
     latestRunStatus = '',
+    onPreviewFile,
   }: {
     files?: CodeReviewFile[];
     latestRunStatus?: string | null;
+    onPreviewFile?: (file: CodeReviewFile) => void;
   } = $props();
 
   const changedCount = $derived(files.length);
@@ -20,6 +22,10 @@
   function sourceLabel(file: CodeReviewFile): string {
     if (file.source === 'artifact') return 'artifact';
     return file.tool || 'tool call';
+  }
+
+  function previewFile(file: CodeReviewFile) {
+    onPreviewFile?.(file);
   }
 </script>
 
@@ -47,21 +53,32 @@
   {#if changedCount}
     <div class="code-review-list" role="list" aria-label="Files to review">
       {#each files as file, index (file.path + '-' + index)}
-        <article class="code-review-file" role="listitem">
-          <div class="code-review-file-main">
-            <span class="code-review-file-icon" aria-hidden="true">
-              <ConstellationIcon name="file" size={15} stroke={1.8} />
-            </span>
-            <code title={file.path}>{file.path}</code>
-          </div>
-          <div class="code-review-file-meta">
-            <span>{operationLabel(file)}</span>
-            <span>{sourceLabel(file)}</span>
-            {#if file.status}
-              <span>{file.status}</span>
-            {/if}
-          </div>
-        </article>
+        <div role="listitem">
+          <button
+            type="button"
+            class="code-review-file"
+            disabled={!onPreviewFile}
+            title={`Open ${file.path} preview`}
+            onclick={() => previewFile(file)}
+          >
+            <div class="code-review-file-main">
+              <span class="code-review-file-icon" aria-hidden="true">
+                <ConstellationIcon name="file" size={15} stroke={1.8} />
+              </span>
+              <code title={file.path}>{file.path}</code>
+              <span class="code-review-file-open" aria-hidden="true">
+                <ConstellationIcon name="chevron-right" size={14} stroke={1.9} />
+              </span>
+            </div>
+            <div class="code-review-file-meta">
+              <span>{operationLabel(file)}</span>
+              <span>{sourceLabel(file)}</span>
+              {#if file.status}
+                <span>{file.status}</span>
+              {/if}
+            </div>
+          </button>
+        </div>
       {/each}
     </div>
   {:else}
@@ -135,16 +152,50 @@
   }
 
   .code-review-file {
+    width: 100%;
     min-width: 0;
     padding: 11px 12px;
     border-radius: 14px;
     border: 1px solid var(--constellation-card-border, rgba(255, 255, 255, 0.08));
     background: rgba(255, 255, 255, 0.045);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition:
+      border-color 140ms ease,
+      background 140ms ease,
+      transform 140ms ease;
+  }
+
+  .code-review-file:hover,
+  .code-review-file:focus-visible {
+    border-color: color-mix(in srgb, var(--thread-accent, #57cfa0) 34%, transparent);
+    background: color-mix(in srgb, var(--thread-accent, #57cfa0) 9%, rgba(255, 255, 255, 0.055));
+  }
+
+  .code-review-file:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--thread-accent, #57cfa0) 42%, transparent);
+    outline-offset: 2px;
+  }
+
+  .code-review-file:active {
+    transform: translateY(1px);
+  }
+
+  .code-review-file:disabled {
+    cursor: default;
+    opacity: 0.72;
+  }
+
+  .code-review-file:disabled:hover {
+    border-color: var(--constellation-card-border, rgba(255, 255, 255, 0.08));
+    background: rgba(255, 255, 255, 0.045);
   }
 
   .code-review-file-main {
     display: grid;
-    grid-template-columns: 18px minmax(0, 1fr);
+    grid-template-columns: 18px minmax(0, 1fr) 16px;
     align-items: center;
     gap: 8px;
     min-width: 0;
@@ -164,6 +215,22 @@
     font-family: var(--constellation-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 12px;
     background: transparent;
+  }
+
+  .code-review-file-open {
+    color: var(--text-3, rgba(244, 246, 250, 0.54));
+    opacity: 0.7;
+    transition:
+      color 140ms ease,
+      opacity 140ms ease,
+      transform 140ms ease;
+  }
+
+  .code-review-file:hover .code-review-file-open,
+  .code-review-file:focus-visible .code-review-file-open {
+    color: var(--thread-accent, #57cfa0);
+    opacity: 1;
+    transform: translateX(2px);
   }
 
   .code-review-file-meta {

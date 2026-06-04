@@ -7,6 +7,7 @@ import {
   buildProjectTextDiff,
   joinProjectDisplayPath,
   normaliseProjectPreviewText,
+  projectFileMatchesDisplayPath,
   projectFileLayerLabel,
   projectFileKind,
   projectFileKindLabel,
@@ -115,6 +116,14 @@ test('project draft presenter respects explicit publish plan summaries', () => {
 
 test('project file presenter formats status, layer, and mounted paths', () => {
   assert.equal(joinProjectDisplayPath('/reports', 'analysis/summary.md'), '/reports/analysis/summary.md');
+  const file = {
+    path: 'analysis/summary.md',
+    displayPath: '/reports/analysis/summary.md',
+  };
+  assert.equal(projectFileMatchesDisplayPath(file, 'analysis/summary.md'), true);
+  assert.equal(projectFileMatchesDisplayPath(file, '/reports/analysis/summary.md'), true);
+  assert.equal(projectFileMatchesDisplayPath(file, 'reports/analysis/summary.md'), true);
+  assert.equal(projectFileMatchesDisplayPath(file, 'brief.md'), false);
   assert.equal(projectFileStatusTone('out_of_date'), 'warning');
   assert.equal(projectFileLayerLabel({ path: 'new.md', has_draft: true, has_root: false }), 'new draft file');
   assert.equal(projectFileKind({ path: 'deck.pdf' }), 'pdf');

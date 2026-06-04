@@ -705,6 +705,17 @@ export function joinProjectDisplayPath(mountPath: unknown, filePath: unknown): s
   return `${mount.replace(/\/+$/, '')}/${path}`;
 }
 
+export function projectFileMatchesDisplayPath(
+  file: ProjectExplorerFile,
+  rawPath: unknown,
+): boolean {
+  const focusedPath = cleanProjectPath(rawPath);
+  if (!focusedPath) return false;
+  const path = cleanProjectPath(file.path);
+  const displayPath = cleanProjectPath(file.displayPath);
+  return path === focusedPath || displayPath === focusedPath || displayPath.endsWith(`/${focusedPath}`);
+}
+
 export function projectFileStatusLabel(status: unknown): string {
   const value = normaliseProjectFileStatus(status);
   if (value === 'out_of_date') return 'out of date';
