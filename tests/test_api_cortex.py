@@ -1600,6 +1600,29 @@ async def test_post_thread_discussion_reply_tool_writes_illo_comment(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_post_thread_discussion_reply_tool_rejects_timeline_origin(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.chat import _handle_post_thread_discussion_reply
+
+    class _UnitOfWork:
+        async def __aenter__(self):
+            raise AssertionError("timeline-origin run must not write to Thread Discussion")
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
+
+    with bind_agent_context({"org_id": "test-org", "run_id": 42, "idea_id": "some-id"}):
+        raw = await _handle_post_thread_discussion_reply("This belongs in the main thread.")
+
+    payload = json.loads(raw)
+    assert "error" in payload
+    assert "Thread Discussion-triggered" in payload["error"]
+    assert "post_ai_timeline_message" in payload["error"]
+
+
+@pytest.mark.asyncio
 async def test_post_thread_discussion_reply_tool_infers_upload_attachments(monkeypatch, tmp_path):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers.chat import _handle_post_thread_discussion_reply
@@ -1638,7 +1661,24 @@ async def test_post_thread_discussion_reply_tool_infers_upload_attachments(monke
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
     monkeypatch.setattr("brain.systems.cortex.events.publish_safe", published)
 
-    with bind_agent_context({"org_id": "test-org", "run_id": 42, "idea_id": "some-id"}):
+    with bind_agent_context(
+        {
+            "org_id": "test-org",
+            "run_id": 42,
+            "target_ref": {
+                "discussion_trigger": {
+                    "surface": "thread_discussion",
+                    "thread_id": "some-id",
+                    "comment_id": 7,
+                    "response_target": {
+                        "surface": "thread_discussion",
+                        "thread_id": "some-id",
+                        "reply_to_comment_id": 7,
+                    },
+                }
+            },
+        }
+    ):
         raw = await _handle_post_thread_discussion_reply(
             f"Here it is:\n\n![Diagram]({url})",
         )

@@ -79,6 +79,7 @@ class TerminalRunSettlementCommand:
     run_status: str
     final_answer: str | None = None
     artifact_id: int | str | None = None
+    attachments: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -598,6 +599,19 @@ def _final_answer_metadata(command: TerminalRunSettlementCommand) -> dict[str, A
     }
 
 
+def _visible_final_answer_attachments(command: TerminalRunSettlementCommand) -> list[dict[str, Any]]:
+    attachments = [dict(attachment) for attachment in command.attachments or [] if isinstance(attachment, dict)]
+    try:
+        from brain.systems.cortex.thread_assets import infer_thread_asset_attachments_from_body
+
+        return infer_thread_asset_attachments_from_body(
+            str(command.final_answer or ""),
+            existing_attachments=attachments,
+        )
+    except Exception:
+        return attachments
+
+
 async def mirror_run_final_answer(
     session: Any,
     *,
@@ -612,7 +626,7 @@ async def mirror_run_final_answer(
         idea_id=str(getattr(idea, "id", "") or ""),
         role="illo",
         content=text,
-        attachments=[],
+        attachments=_visible_final_answer_attachments(command),
         metadata=_final_answer_metadata(command),
         user_id=None,
         message_type="agent_response",

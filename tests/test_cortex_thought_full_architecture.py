@@ -219,6 +219,52 @@ async def test_terminal_run_settlement_mirrors_final_answer_once_and_transitions
 
 
 @pytest.mark.asyncio
+async def test_terminal_run_settlement_promotes_static_upload_links_to_attachments(monkeypatch, tmp_path):
+    from brain.systems.cortex.thought_lifecycle import (
+        TerminalRunSettlementCommand,
+        settle_terminal_run,
+    )
+    from brain.systems.cortex import thread_assets
+
+    upload_file = tmp_path / "thread-assets" / "idea-1" / "architecture.png"
+    upload_file.parent.mkdir(parents=True)
+    upload_file.write_bytes(b"png")
+    monkeypatch.setattr(thread_assets, "UPLOAD_DIR", tmp_path)
+
+    session = _Session()
+    idea = _idea(status="working")
+    body = (
+        "Here is the diagram:\n\n"
+        "![Architecture](/static/uploads/thread-assets/idea-1/architecture.png)"
+    )
+
+    result = await settle_terminal_run(
+        session,
+        idea=idea,
+        command=TerminalRunSettlementCommand(
+            run_id=18,
+            run_status="completed",
+            final_answer=body,
+            artifact_id=902,
+        ),
+    )
+
+    assert result.thread_message_payload is not None
+    assert result.thread_message_payload["attachments"] == [
+        {
+            "url": "/static/uploads/thread-assets/idea-1/architecture.png",
+            "download_url": "/static/uploads/thread-assets/idea-1/architecture.png",
+            "filename": "architecture.png",
+            "label": "architecture.png",
+            "kind": "image",
+            "content_type": "image/png",
+            "mime_type": "image/png",
+            "size": 3,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_thought_status_transition_is_the_only_status_log_writer():
     from brain.systems.cortex.thought_lifecycle import (
         ThoughtStatusCommand,
