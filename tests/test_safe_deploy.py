@@ -299,6 +299,7 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
     assert 'ILLO_WORKER_ENABLE_CYCLE_SCHEDULER: "1"' in compose
     assert 'ILLO_WORKER_DISABLE_CYCLE_SCHEDULER: "0"' in compose
     assert "deploy/docker/updater.Dockerfile" in compose
+    assert 'command: ["bash", "/repo/deploy/scripts/self-update-daemon.sh"]' in compose
     assert "illo-self-update-healthcheck" in compose
     assert "/var/run/docker.sock:/var/run/docker.sock" in compose
     assert "../..:/repo" in compose

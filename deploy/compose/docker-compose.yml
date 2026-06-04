@@ -169,6 +169,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/updater.Dockerfile
+    command: ["bash", "/repo/deploy/scripts/self-update-daemon.sh"]
     restart: unless-stopped
     environment:
       ILLO_SELF_UPDATE_REPO: /repo
