@@ -1298,6 +1298,34 @@ CHAT_TOOLS = [
         },
     },
     {
+        "name": "publish_thread_asset",
+        "description": (
+            "Publish a generated local artifact, such as an SVG, PNG, PDF, or text file, "
+            "as a previewable Thread asset under /static/uploads. Use this when a user asks "
+            "to see or download an artifact that exists only as a local file path. The tool "
+            "returns markdown and an attachment object; include both in post_thread_discussion_reply "
+            "or post_ai_timeline_message so the asset is visible in the Thread."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute local path to a generated artifact under an allowed artifact root.",
+                },
+                "thread_id": {
+                    "type": "string",
+                    "description": "Optional Thread id. Defaults to the triggering/current Thread.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Optional human-readable label or alt text for the asset.",
+                },
+            },
+            "required": ["file_path"],
+        },
+    },
+    {
         "name": "post_thread_discussion_reply",
         "description": (
             "Post an Illo-authored reply into the current Thread Discussion. "
@@ -1320,6 +1348,14 @@ CHAT_TOOLS = [
                 "reply_to_comment_id": {
                     "type": "integer",
                     "description": "Optional Discussion comment id being acknowledged. Defaults to the triggering comment.",
+                },
+                "attachments": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Optional visible attachments. For generated assets, pass the attachment object "
+                        "returned by publish_thread_asset."
+                    ),
                 },
             },
             "required": ["body"],
@@ -1400,6 +1436,14 @@ CHAT_TOOLS = [
                 "thread_id": {
                     "type": "string",
                     "description": "Optional Thread id. Defaults to the linked/current Thread.",
+                },
+                "attachments": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Optional visible attachments. For generated assets, pass the attachment object "
+                        "returned by publish_thread_asset."
+                    ),
                 },
             },
             "required": ["body"],

@@ -212,8 +212,8 @@ def test_thread_attachment_context_promotes_text_image_and_audio(tmp_path, monke
     note.write_text("hello attachment", encoding="utf-8")
     config = upload_dir / "config.yaml"
     config.write_text("feature: enabled", encoding="utf-8")
-    image = upload_dir / "screenshot.png"
-    image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    image = upload_dir / "screenshot.svg"
+    image.write_text("<svg></svg>", encoding="utf-8")
     audio = upload_dir / "voice.webm"
     audio.write_bytes(b"webm audio")
     monkeypatch.setattr(thread_attachments, "UPLOAD_DIR", upload_dir)
@@ -221,7 +221,7 @@ def test_thread_attachment_context_promotes_text_image_and_audio(tmp_path, monke
     context = thread_attachments.build_thread_attachment_context([
         {"url": "/static/uploads/note.md", "filename": "note.md", "type": "text/markdown"},
         {"url": "/static/uploads/config.yaml", "filename": "config.yaml", "type": "application/x-yaml"},
-        {"url": "/static/uploads/screenshot.png", "filename": "screenshot.png", "type": "image/png"},
+        {"url": "/static/uploads/screenshot.svg", "filename": "screenshot.svg", "type": "image/svg+xml"},
         {"url": "/static/uploads/voice.webm", "filename": "voice.webm", "type": "audio/webm"},
     ])
     blocks = thread_attachments.initial_user_content_blocks("Read these", context)
@@ -236,7 +236,7 @@ def test_thread_attachment_context_promotes_text_image_and_audio(tmp_path, monke
     assert "feature: enabled" in blocks[0]["text"]
     assert "voice.webm" in blocks[0]["text"]
     assert blocks[1]["type"] == "image"
-    assert blocks[1]["source"]["media_type"] == "image/png"
+    assert blocks[1]["source"]["media_type"] == "image/svg+xml"
 
 
 def test_project_context_merge_into_idea_agent_details():
@@ -1572,17 +1572,27 @@ async def test_post_thread_discussion_reply_tool_writes_illo_comment(monkeypatch
             },
         }
     ):
-        raw = await _handle_post_thread_discussion_reply("Got it, I will carry that forward.")
+        attachment = {
+            "url": "/static/uploads/thread-assets/some-id/diagram.svg",
+            "filename": "diagram.svg",
+            "content_type": "image/svg+xml",
+        }
+        raw = await _handle_post_thread_discussion_reply(
+            "Got it, I will carry that forward.",
+            attachments=[attachment],
+        )
 
     payload = json.loads(raw)
     assert payload["ok"] is True
     assert payload["comment"]["body"] == "Got it, I will carry that forward."
     assert payload["comment"]["author_kind"] == "illo"
+    assert payload["comment"]["attachments"] == [attachment]
     assert payload["comment"]["metadata"]["created_by_run_id"] == 42
     assert payload["comment"]["metadata"]["reply_to_comment_id"] == 7
     assert created[0].thread_id == "some-id"
     assert created[0].org_id == "test-org"
     assert created[0].author_user_id is None
+    assert created[0].attachments == [attachment]
     published.assert_called_once_with(
         "thread_discussion_comment",
         {"idea_id": "some-id", "org_id": "test-org", "comment": payload["comment"]},

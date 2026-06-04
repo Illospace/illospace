@@ -35,6 +35,7 @@ from brain.systems.runs.tool_catalog.handlers.chat import (
     _handle_post_ai_timeline_message,
     _handle_post_chat_message,
     _handle_post_thread_discussion_reply,
+    _handle_publish_thread_asset,
     _handle_read_thread_discussion,
 )
 from brain.systems.runs.tool_catalog.handlers.cycles import _handle_manage_cycle
@@ -257,6 +258,10 @@ def _get_tool_handlers(
         "post_thread_discussion_reply": lambda **kw: _patched_private(
             "_handle_post_thread_discussion_reply",
             _handle_post_thread_discussion_reply,
+        )(**kw),
+        "publish_thread_asset": lambda **kw: _patched_private(
+            "_handle_publish_thread_asset",
+            _handle_publish_thread_asset,
         )(**kw),
         "post_ai_timeline_message": lambda **kw: _patched_private(
             "_handle_post_ai_timeline_message",

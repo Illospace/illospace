@@ -239,6 +239,27 @@
   text-decoration: underline;
 }
 
+.constellation-prose .md-readable-image-link {
+  display: block;
+  max-width: 100%;
+  width: fit-content;
+}
+
+.constellation-prose .md-readable-image-link:hover {
+  text-decoration: none;
+}
+
+.constellation-prose .md-readable-image {
+  display: block;
+  width: auto;
+  max-width: min(100%, 720px);
+  max-height: 520px;
+  border: 1px solid var(--constellation-thread-message-image-border, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+  background: var(--constellation-thread-message-image-background, rgba(8, 12, 19, 0.72));
+  object-fit: contain;
+}
+
 .constellation-prose blockquote {
   border-left: 3px solid color-mix(in srgb, var(--constellation-prose-accent) 72%, transparent);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;

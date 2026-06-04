@@ -141,6 +141,12 @@ def _discussion_comment_payload(comment: Any) -> dict[str, Any]:
     }
 
 
+def _clean_visible_attachments(attachments: list[Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(attachments, list):
+        return []
+    return [dict(attachment) for attachment in attachments if isinstance(attachment, dict)]
+
+
 async def _publish_chat_events(publish, summaries: dict[str, dict[str, Any]]) -> None:
     from brain.app.api.routers.chat import (
         _publish_message_events,
@@ -210,10 +216,32 @@ async def _handle_post_chat_message(
     return json.dumps({"ok": True, "message": message_payload}, default=str)
 
 
+async def _handle_publish_thread_asset(
+    file_path: str,
+    thread_id: str | None = None,
+    title: str | None = None,
+) -> str:
+    """Publish a generated local artifact as a previewable Thread attachment."""
+    from brain.systems.cortex.thread_assets import publish_thread_asset
+
+    target_thread_id = _first_nonempty(thread_id, _current_ai_timeline_thread_id(), _current_thread_id())
+    try:
+        result = publish_thread_asset(
+            file_path,
+            thread_id=target_thread_id or None,
+            title=title,
+        )
+        return json.dumps(result, default=str)
+    except Exception as exc:
+        logger.warning("publish_thread_asset failed: %s", exc)
+        return json.dumps({"error": str(exc)}, default=str)
+
+
 async def _handle_post_thread_discussion_reply(
     body: str,
     thread_id: str | None = None,
     reply_to_comment_id: int | None = None,
+    attachments: list[Any] | None = None,
 ) -> str:
     """Post an Illo-authored reply to a Thread's Discussion surface."""
     from brain.platform.db.models.idea import Idea, ThreadDiscussionComment
@@ -244,6 +272,7 @@ async def _handle_post_thread_discussion_reply(
         if reply_to_comment_id is not None
         else _coerce_comment_id(response_target.get("reply_to_comment_id") or trigger.get("comment_id"))
     )
+    visible_attachments = _clean_visible_attachments(attachments)
 
     async with UnitOfWork() as uow:
         idea = await uow.session.get(Idea, target_thread_id)
@@ -266,7 +295,7 @@ async def _handle_post_thread_discussion_reply(
             author_user_id=None,
             author_kind="illo",
             body=text,
-            attachments=[],
+            attachments=visible_attachments,
             metadata_=metadata,
         )
         uow.session.add(comment)
@@ -283,6 +312,7 @@ async def _handle_post_thread_discussion_reply(
 async def _handle_post_ai_timeline_message(
     body: str,
     thread_id: str | None = None,
+    attachments: list[Any] | None = None,
 ) -> str:
     """Post an Illo-authored message to a Thread's AI Timeline surface."""
     from brain.platform.db.models.idea import Idea
@@ -305,6 +335,7 @@ async def _handle_post_ai_timeline_message(
     trigger = _current_discussion_trigger()
     response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
     reply_to_comment_id = _coerce_comment_id(response_target.get("reply_to_comment_id") or trigger.get("comment_id"))
+    visible_attachments = _clean_visible_attachments(attachments)
 
     async with UnitOfWork() as uow:
         idea = await uow.session.get(Idea, target_thread_id)
@@ -330,6 +361,7 @@ async def _handle_post_ai_timeline_message(
                 role="illo",
                 content=text,
                 actor={"org_id": org_id},
+                attachments=visible_attachments,
                 metadata=metadata,
             ),
             lifecycle_trigger="agent_tool_ai_timeline_message",
@@ -409,6 +441,7 @@ async def _handle_read_thread_discussion(
 __all__ = [
     "_handle_post_chat_message",
     "_handle_post_ai_timeline_message",
+    "_handle_publish_thread_asset",
     "_handle_post_thread_discussion_reply",
     "_handle_read_thread_discussion",
 ]

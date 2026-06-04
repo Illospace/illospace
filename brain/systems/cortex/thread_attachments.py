@@ -25,7 +25,7 @@ READABLE_TEXT_MIME_TYPES = {
     "text/xml",
     "text/yaml",
 }
-IMAGE_EXTENSIONS = {"avif", "gif", "jpeg", "jpg", "png", "webp"}
+IMAGE_EXTENSIONS = {"avif", "gif", "jpeg", "jpg", "png", "svg", "webp"}
 AUDIO_EXTENSIONS = {
     "aac",
     "aif",

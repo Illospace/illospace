@@ -23,7 +23,7 @@ from brain.platform.db.repositories.skills import SkillRepository
 logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = Path(__file__).resolve().parents[4] / "uploads"
-IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "avif"}
+IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "avif", "svg"}
 VIDEO_EXTENSIONS = {"mp4", "m4v", "mov", "webm"}
 TEXT_EXTENSIONS = {"txt", "md", "csv", "json", "log", "text", "tsv", "xml", "yaml", "yml"}
 DOCUMENT_EXTENSIONS = {"doc", "docx", "odt", "pdf", "ppt", "pptx", "rtf", "xls", "xlsx"}
@@ -58,6 +58,7 @@ UPLOAD_FALLBACK_CONTENT_TYPES = {
     "ppt": "application/vnd.ms-powerpoint",
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "rar": "application/vnd.rar",
+    "svg": "image/svg+xml",
     "rtf": "application/rtf",
     "text": "text/plain",
     "tsv": "text/tab-separated-values",
