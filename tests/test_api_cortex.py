@@ -646,6 +646,19 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
     session = MagicMock()
     added = []
     published = []
+    seed_markdown = "\n".join(
+        [
+            "## Summary",
+            "",
+            "We need final feedback on the dispatcher PRD.",
+            "",
+            "## What we want feedback on",
+            "",
+            "- Current architecture",
+            "- [PRD link](/static/uploads/thread-assets/idea/prd.md)",
+            "- ![Dispatcher diagram](/static/uploads/thread-assets/idea/dispatcher.png)",
+        ]
+    )
 
     def add(obj):
         added.append(obj)
@@ -686,6 +699,7 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
                 action="create",
                 title="Check vault state",
                 description="Inspect vault and AWS credential handoff path.",
+                thread_message=seed_markdown,
                 status="needs_input",
                 parent_id="parent-idea",
                 origin_ref="parent-idea",
@@ -701,7 +715,8 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
     assert thread_rows[0].role == "illo"
     assert thread_rows[0].user_id is None
     assert thread_rows[0].message_type == "agent_response"
-    assert thread_rows[0].content == "Inspect vault and AWS credential handoff path."
+    assert thread_rows[0].content == seed_markdown
+    assert "\n\n## What we want feedback on\n\n- Current architecture" in thread_rows[0].content
     assert thread_rows[0].metadata_["source"] == "manage_idea.create"
     assert thread_rows[0].metadata_["author"] == "illo"
     assert thread_rows[0].metadata_["requested_by_user_id"] == "user-1"
