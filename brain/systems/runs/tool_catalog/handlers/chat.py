@@ -147,6 +147,20 @@ def _clean_visible_attachments(attachments: list[Any] | None) -> list[dict[str, 
     return [dict(attachment) for attachment in attachments if isinstance(attachment, dict)]
 
 
+def _visible_attachments_for_body(body: str, attachments: list[Any] | None) -> list[dict[str, Any]]:
+    visible_attachments = _clean_visible_attachments(attachments)
+    try:
+        from brain.systems.cortex.thread_assets import infer_thread_asset_attachments_from_body
+
+        return infer_thread_asset_attachments_from_body(
+            body,
+            existing_attachments=visible_attachments,
+        )
+    except Exception as exc:
+        logger.warning("thread_asset_attachment_inference_failed: %s", exc)
+        return visible_attachments
+
+
 async def _publish_chat_events(publish, summaries: dict[str, dict[str, Any]]) -> None:
     from brain.app.api.routers.chat import (
         _publish_message_events,
@@ -272,7 +286,7 @@ async def _handle_post_thread_discussion_reply(
         if reply_to_comment_id is not None
         else _coerce_comment_id(response_target.get("reply_to_comment_id") or trigger.get("comment_id"))
     )
-    visible_attachments = _clean_visible_attachments(attachments)
+    visible_attachments = _visible_attachments_for_body(text, attachments)
 
     async with UnitOfWork() as uow:
         idea = await uow.session.get(Idea, target_thread_id)
@@ -335,7 +349,7 @@ async def _handle_post_ai_timeline_message(
     trigger = _current_discussion_trigger()
     response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
     reply_to_comment_id = _coerce_comment_id(response_target.get("reply_to_comment_id") or trigger.get("comment_id"))
-    visible_attachments = _clean_visible_attachments(attachments)
+    visible_attachments = _visible_attachments_for_body(text, attachments)
 
     async with UnitOfWork() as uow:
         idea = await uow.session.get(Idea, target_thread_id)

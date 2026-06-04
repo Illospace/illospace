@@ -1303,15 +1303,22 @@ CHAT_TOOLS = [
             "Publish a generated local artifact, such as an SVG, PNG, PDF, or text file, "
             "as a previewable Thread asset under /static/uploads. Use this when a user asks "
             "to see or download an artifact that exists only as a local file path. The tool "
-            "returns markdown and an attachment object; include both in post_thread_discussion_reply "
-            "or post_ai_timeline_message so the asset is visible in the Thread."
+            "also accepts an existing /static/uploads/... URL returned by this tool and will "
+            "return the same attachment object idempotently. It returns markdown and an "
+            "attachment object. To show the asset in a Thread, write the returned markdown "
+            "or /static/uploads/... route in post_thread_discussion_reply or "
+            "post_ai_timeline_message; those tools persist visible attachments from valid "
+            "upload routes automatically."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "Absolute local path to a generated artifact under an allowed artifact root.",
+                    "description": (
+                        "Absolute local path to a generated artifact under an allowed artifact root, "
+                        "or an existing /static/uploads/... URL for an already-published asset."
+                    ),
                 },
                 "thread_id": {
                     "type": "string",
@@ -1353,8 +1360,8 @@ CHAT_TOOLS = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Optional visible attachments. For generated assets, pass the attachment object "
-                        "returned by publish_thread_asset."
+                        "Optional visible attachments. Valid /static/uploads/... links in body are "
+                        "also promoted to visible attachments automatically."
                     ),
                 },
             },
@@ -1441,8 +1448,8 @@ CHAT_TOOLS = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Optional visible attachments. For generated assets, pass the attachment object "
-                        "returned by publish_thread_asset."
+                        "Optional visible attachments. Valid /static/uploads/... links in body are "
+                        "also promoted to visible attachments automatically."
                     ),
                 },
             },

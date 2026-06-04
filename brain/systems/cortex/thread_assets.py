@@ -8,7 +8,12 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from brain.systems.cortex.upload_preview import public_static_upload_url, static_upload_url_for
+from brain.systems.cortex.upload_preview import (
+    normalize_static_upload_url,
+    public_static_upload_url,
+    resolve_static_upload_path,
+    static_upload_url_for,
+)
 
 UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads"
 MAX_THREAD_ASSET_SIZE = 10 * 1024 * 1024
@@ -51,6 +56,7 @@ CONTENT_TYPE_BY_EXTENSION = {
 
 DEFAULT_SOURCE_ROOTS = ("/workspaces/artifacts",)
 THREAD_ASSET_PREFIX = "thread-assets"
+STATIC_UPLOAD_LINK_PATTERN = re.compile(r"(?:https?://[^\s<>\"')]+)?/static/uploads/[^\s<>\"')]+")
 
 
 def _resolved_roots(source_roots: Iterable[str | Path] | None = None) -> list[Path]:
@@ -101,6 +107,36 @@ def _content_type(path: Path, extension: str) -> str:
     return mimetypes.guess_type(path.name)[0] or CONTENT_TYPE_BY_EXTENSION.get(extension, "application/octet-stream")
 
 
+def _asset_attachment_from_upload(
+    value: str,
+    *,
+    title: str | None = None,
+    upload_dir: Path | None = None,
+) -> tuple[Path, str, dict[str, Any]]:
+    target_upload_dir = upload_dir or UPLOAD_DIR
+    path = resolve_static_upload_path(value, upload_dir=target_upload_dir)
+    extension = path.suffix.lower().lstrip(".")
+    if extension not in VIEWER_EXTENSIONS:
+        raise ValueError(f"Thread asset type .{extension or '(none)'} is not previewable")
+
+    url = normalize_static_upload_url(value)
+    size = path.stat().st_size
+    content_type = _content_type(path, extension)
+    kind = "image" if content_type.startswith("image/") or extension in IMAGE_EXTENSIONS else "file"
+    label = str(title or path.name).strip() or path.name
+    attachment = {
+        "kind": kind,
+        "url": url,
+        "download_url": public_static_upload_url(url),
+        "filename": path.name,
+        "label": label,
+        "content_type": content_type,
+        "mime_type": content_type,
+        "size": size,
+    }
+    return path, url, attachment
+
+
 def _asset_markdown(*, label: str, url: str, kind: str) -> str:
     clean_label = label.replace("[", "").replace("]", "").strip() or "Thread asset"
     if kind == "image":
@@ -113,11 +149,40 @@ def publish_thread_asset(
     *,
     thread_id: str | None = None,
     title: str | None = None,
-    upload_dir: Path = UPLOAD_DIR,
+    upload_dir: Path | None = None,
     source_roots: Iterable[str | Path] | None = None,
     max_bytes: int = MAX_THREAD_ASSET_SIZE,
 ) -> dict[str, Any]:
     """Copy a generated artifact into static uploads and return a chat attachment."""
+
+    target_upload_dir = upload_dir or UPLOAD_DIR
+    raw_file_path = str(file_path or "").strip()
+    if raw_file_path:
+        try:
+            published_path, url, attachment = _asset_attachment_from_upload(
+                raw_file_path,
+                title=title,
+                upload_dir=target_upload_dir,
+            )
+            return {
+                "ok": True,
+                "source_path": str(published_path),
+                "published_path": str(published_path),
+                "url": url,
+                "public_url": attachment["download_url"],
+                "markdown": _asset_markdown(label=attachment["label"], url=url, kind=attachment["kind"]),
+                "attachment": attachment,
+                "already_published": True,
+                "instruction": (
+                    "To show this in a Thread, write the returned markdown or /static/uploads route "
+                    "in post_thread_discussion_reply or post_ai_timeline_message. Valid upload routes "
+                    "are promoted to visible attachments automatically."
+                ),
+            }
+        except ValueError:
+            pass
+        except FileNotFoundError:
+            pass
 
     source = _source_path(file_path, source_roots=source_roots)
     extension = source.suffix.lower().lstrip(".")
@@ -132,8 +197,8 @@ def publish_thread_asset(
     stem = _safe_segment(source.stem, "asset")
     thread_segment = _safe_segment(thread_id or "shared", "shared")
     filename = f"{stem}-{digest}.{extension}"
-    destination_dir = (upload_dir / THREAD_ASSET_PREFIX / thread_segment).resolve()
-    upload_root = upload_dir.resolve()
+    destination_dir = (target_upload_dir / THREAD_ASSET_PREFIX / thread_segment).resolve()
+    upload_root = target_upload_dir.resolve()
     if not _is_within(destination_dir, upload_root):
         raise ValueError("Thread asset destination escapes upload root")
     destination_dir.mkdir(parents=True, exist_ok=True)
@@ -164,10 +229,71 @@ def publish_thread_asset(
         "markdown": _asset_markdown(label=label, url=url, kind=kind),
         "attachment": attachment,
         "instruction": (
-            "To show this in Thread Discussion, call post_thread_discussion_reply with the returned "
-            "markdown in body and include the returned attachment in attachments."
+            "To show this in a Thread, write the returned markdown or /static/uploads route "
+            "in post_thread_discussion_reply or post_ai_timeline_message. Valid upload routes "
+            "are promoted to visible attachments automatically."
         ),
     }
 
 
-__all__ = ["publish_thread_asset"]
+def attachment_for_published_thread_asset(
+    value: str,
+    *,
+    title: str | None = None,
+    upload_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Return a visible attachment for an existing /static/uploads artifact."""
+
+    _, _, attachment = _asset_attachment_from_upload(value, title=title, upload_dir=upload_dir)
+    return attachment
+
+
+def infer_thread_asset_attachments_from_body(
+    body: str | None,
+    *,
+    existing_attachments: list[dict[str, Any]] | None = None,
+    upload_dir: Path | None = None,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Promote existing /static/uploads links in message text into visible attachments."""
+
+    attachments = list(existing_attachments or [])
+    existing_urls = set()
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        existing_url = str(attachment.get("url") or attachment.get("href") or "").strip()
+        if not existing_url:
+            continue
+        try:
+            existing_urls.add(normalize_static_upload_url(existing_url))
+        except ValueError:
+            existing_urls.add(existing_url)
+    text = str(body or "")
+    if not text:
+        return attachments
+
+    for match in STATIC_UPLOAD_LINK_PATTERN.finditer(text):
+        if len(attachments) >= limit:
+            break
+        raw_url = match.group(0).rstrip("),.;!?")
+        try:
+            url = normalize_static_upload_url(raw_url)
+        except ValueError:
+            continue
+        if not url or url in existing_urls:
+            continue
+        try:
+            attachment = attachment_for_published_thread_asset(url, upload_dir=upload_dir)
+        except (FileNotFoundError, ValueError):
+            continue
+        attachments.append(attachment)
+        existing_urls.add(url)
+    return attachments
+
+
+__all__ = [
+    "attachment_for_published_thread_asset",
+    "infer_thread_asset_attachments_from_body",
+    "publish_thread_asset",
+]
