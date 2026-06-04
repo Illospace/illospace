@@ -116,6 +116,7 @@ EXPECTED_TABLES = {
     "workspace_apps",
     "workspace_pins",
     "workspace_pool_entries",
+    "workspace_tool_installations",
 }
 
 

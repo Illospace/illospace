@@ -25,6 +25,7 @@ from brain.systems.runs.tool_definitions import (
     SESSION_TOOLS,
     WORKSPACE_OVERVIEW_SPARSE_GUIDANCE,
     WORKSPACE_APP_TOOLS,
+    WORKSPACE_TOOL_TOOLS,
     WORKER_SPAWN_TOOLS,
 )
 from brain.systems.runs.tool_catalog.metadata import (
@@ -85,6 +86,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "action_manifest": True,
         "expected_effect": "list, inspect, or restart known Illospace runtime services",
         "output_budget_chars": 8_000,
+    },
+    "manage_workspace_tools": {
+        "permission": "manage_runtime",
+        "risk_class": "high",
+        "side_effect_class": "workspace_tool_management",
+        "reversibility": "variable",
+        "action_manifest": True,
+        "expected_effect": "inspect or mutate persisted workspace tool bundle installations",
+        "output_budget_chars": 12_000,
     },
     "brain_encode": {
         "permission": "write_memory",
@@ -573,6 +583,7 @@ def _definition_sources() -> list[tuple[str, tuple[str, ...], list[Mapping[str, 
         ("session", ("coordinator", "worker"), SESSION_TOOLS),
         ("lifecycle", ("coordinator",), LIFECYCLE_TOOLS),
         ("deployment", ("coordinator",), DEPLOYMENT_TOOLS),
+        ("workspace_tools", ("coordinator",), WORKSPACE_TOOL_TOOLS),
         ("worker_spawn", ("coordinator",), WORKER_SPAWN_TOOLS),
         ("reply", ("coordinator",), [CORTEX_REPLY_TOOL]),
         ("visual_reply", ("coordinator", "worker"), [CORTEX_VISUAL_REPLY_TOOL]),
@@ -841,6 +852,21 @@ def action_policy_for_tool(
         }
     if tool_name == "manage_skill" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get", "list_assets", "get_asset"}:
         return None
+    if tool_name == "manage_workspace_tools" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "catalog", "list", "status", "check"}:
+        return None
+    if tool_name == "manage_workspace_tools":
+        workspace_tool_action = str(_arg_at(args_tuple, kwargs_dict, "action", 0, "") or "").strip().lower()
+        effect_by_action = {
+            "install": "queue a persisted workspace tool bundle installation",
+        }
+        return {
+            "risk": "high",
+            "reversibility": "variable",
+            "expected_effect": effect_by_action.get(
+                workspace_tool_action,
+                "mutate persisted workspace tool bundle installations",
+            ),
+        }
     if tool_name == "manage_skill":
         skill_action = str(_arg_at(args_tuple, kwargs_dict, "action", 0, "") or "").strip().lower()
         effect_by_action = {

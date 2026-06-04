@@ -350,6 +350,20 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         "tools": ("manage_deployment", "manage_runtime_services"),
     },
     {
+        "key": "workspace_tool_installer",
+        "name": "Workspace Tool Installer",
+        "category": "operations",
+        "summary": "Illo can inspect, install, and health-check opt-in persisted tool bundles for a workspace, such as AWS diagram rendering tools required by a skill.",
+        "aliases": ("workspace tools", "tool installer", "install tools", "team tools", "tool bundles", "skill dependencies", "aws diagrams", "plantuml"),
+        "tools": ("manage_workspace_tools",),
+        "status_check": {"tool": "manage_workspace_tools", "args": {"action": "status"}},
+        "setup": {
+            "mode": "host_controller_queue",
+            "persistent_root": "ILLO_WORKSPACE_TOOLS_ROOT",
+            "host_queue_env": "ILLO_WORKSPACE_TOOLS_REQUEST_FILE",
+        },
+    },
+    {
         "key": "voice",
         "name": "Voice and Audio",
         "category": "media",

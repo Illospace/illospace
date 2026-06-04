@@ -37,6 +37,11 @@ x-illo-env: &illo-env
   ILLO_RUNTIME_SERVICES_STATUS_FILE: /data/private/runtime-services/status.json
   ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE: /data/private/runtime-services/heartbeat.json
   ILLO_RUNTIME_SERVICES_LOG_PATH: /data/private/logs/illo-runtime-services.log
+  ILLO_WORKSPACE_TOOLS_ROOT: /data/private/workspace-tools
+  ILLO_WORKSPACE_TOOLS_REQUEST_FILE: /data/private/workspace-tools/request.json
+  ILLO_WORKSPACE_TOOLS_STATUS_FILE: /data/private/workspace-tools/status.json
+  ILLO_WORKSPACE_TOOLS_HEARTBEAT_FILE: /data/private/workspace-tools/heartbeat.json
+  ILLO_WORKSPACE_TOOLS_LOG_PATH: /data/private/logs/illo-workspace-tools.log
 
 x-backend-service: &backend-service
   image: ${ILLO_API_IMAGE:-ghcr.io/illospace/api:latest}
@@ -175,6 +180,11 @@ services:
       ILLO_RUNTIME_SERVICES_STATUS_FILE: /data/private/runtime-services/status.json
       ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE: /data/private/runtime-services/heartbeat.json
       ILLO_RUNTIME_SERVICES_LOG_PATH: /data/private/logs/illo-runtime-services.log
+      ILLO_WORKSPACE_TOOLS_ROOT: /data/private/workspace-tools
+      ILLO_WORKSPACE_TOOLS_REQUEST_FILE: /data/private/workspace-tools/request.json
+      ILLO_WORKSPACE_TOOLS_STATUS_FILE: /data/private/workspace-tools/status.json
+      ILLO_WORKSPACE_TOOLS_HEARTBEAT_FILE: /data/private/workspace-tools/heartbeat.json
+      ILLO_WORKSPACE_TOOLS_LOG_PATH: /data/private/logs/illo-workspace-tools.log
       ILLO_COMPOSE_ENV_FILE: /repo/deploy/compose/.env
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-illospace}
     volumes:

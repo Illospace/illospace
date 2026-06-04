@@ -2743,6 +2743,41 @@ DEPLOYMENT_TOOLS = [
     },
 ]
 
+WORKSPACE_TOOL_TOOLS = [
+    {
+        "name": "manage_workspace_tools",
+        "description": (
+            "Inspect, install, and health-check opt-in workspace tool bundles for this team. "
+            "Use this when a skill needs external tooling that should persist for the workspace "
+            "without baking that tool into every Illospace install. Use catalog/list/status/check "
+            "before install unless the user explicitly asked to install a known bundle."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["help", "schema", "catalog", "list", "status", "install", "check"],
+                    "default": "list",
+                    "description": (
+                        "Use catalog to see installable bundles, list/status to inspect current workspace state, "
+                        "install to queue an approved bundle install, and check to refresh persisted health."
+                    ),
+                },
+                "operation": {
+                    "type": "string",
+                    "description": "Optional operation name to inspect when action is help or schema.",
+                },
+                "bundle_id": {
+                    "type": "string",
+                    "description": "Tool bundle id, e.g. aws-diagrams. Required for install and check; optional for status.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+]
+
 # ── Composite Tool Lists ─────────────────────────────────────
 
 # Worker tools = normal workspace/product capabilities. Harness orchestration
@@ -2781,6 +2816,7 @@ COORDINATOR_TOOLS = (
     + SESSION_TOOLS
     + LIFECYCLE_TOOLS
     + DEPLOYMENT_TOOLS
+    + WORKSPACE_TOOL_TOOLS
     + WORKER_SPAWN_TOOLS
     + [
         CORTEX_REPLY_TOOL,

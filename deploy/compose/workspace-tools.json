@@ -1,0 +1,20 @@
+{
+  "bundles": [
+    {
+      "id": "aws-diagrams",
+      "name": "AWS Architecture Diagrams",
+      "description": "PlantUML rendering with Java, Graphviz, and a pinned local awslabs AWS icon cache for architecture diagrams.",
+      "version": "1.0.0",
+      "install_profile": "aws_diagrams_micromamba",
+      "provided_commands": ["plantuml", "java", "dot"],
+      "skill_dependencies": ["aws-architecture-diagrams"],
+      "optional": true,
+      "metadata": {
+        "plantuml_version": "1.2026.4",
+        "aws_icons_version": "v19.0",
+        "installer_runtime": "micromamba",
+        "package_channel": "conda-forge"
+      }
+    }
+  ]
+}

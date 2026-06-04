@@ -83,6 +83,7 @@ from brain.systems.runs.tool_catalog.handlers.workspace_data import (
     _handle_read_workspace_records,
 )
 from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
+from brain.systems.runs.tool_catalog.handlers.workspace_tools import _handle_manage_workspace_tools
 
 
 def _current_agent_value(name: str):
@@ -286,6 +287,10 @@ def _get_tool_handlers(
         "manage_workspace_app": lambda **kw: _patched_private(
             "_handle_manage_workspace_app",
             _handle_manage_workspace_app,
+        )(**kw),
+        "manage_workspace_tools": lambda **kw: _patched_private(
+            "_handle_manage_workspace_tools",
+            _handle_manage_workspace_tools,
         )(**kw),
         # Session scratchpad tools
         "session_write": _handle_session_write,

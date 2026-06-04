@@ -309,10 +309,36 @@ async def async_current_project_bound_env() -> dict[str, str]:
         return {}
 
 
+def _current_workspace_tool_bin_paths() -> list[str]:
+    org_id = getattr(_agent_context, "org_id", None)
+    if not org_id:
+        execution_metadata = getattr(_agent_context, "execution_metadata", None)
+        if isinstance(execution_metadata, dict):
+            org_id = execution_metadata.get("org_id")
+    if not org_id:
+        return []
+    try:
+        from brain.systems.runtime_settings.workspace_tools import installed_workspace_tool_bin_paths
+
+        return installed_workspace_tool_bin_paths(str(org_id))
+    except Exception:
+        logger.debug("workspace_tool_env_resolution_failed", exc_info=True)
+        return []
+
+
+def _prepend_path_entries(env: dict[str, str], path_entries: list[str]) -> None:
+    if not path_entries:
+        return
+    existing = env.get("PATH", "")
+    env["PATH"] = os.pathsep.join([*path_entries, existing]) if existing else os.pathsep.join(path_entries)
+    env["ILLO_WORKSPACE_TOOLS_PATH"] = os.pathsep.join(path_entries)
+
+
 def prepare_project_execution_env(extra_env: Mapping[str, str] | None = None) -> ProjectExecutionEnv:
     injected_env = current_project_bound_env()
     injected_env.update(_resolved_extra_env(extra_env))
-    if not injected_env:
+    workspace_tool_paths = _current_workspace_tool_bin_paths()
+    if not injected_env and not workspace_tool_paths:
         return ProjectExecutionEnv(
             env=None,
             injected_env=[],
@@ -321,13 +347,14 @@ def prepare_project_execution_env(extra_env: Mapping[str, str] | None = None) ->
         )
 
     run_env = os.environ.copy()
+    _prepend_path_entries(run_env, workspace_tool_paths)
     run_env.update(injected_env)
     git_auth_hosts, git_sensitive_values = _configure_project_bound_git_auth(run_env, injected_env)
     if git_auth_hosts:
         _configure_project_bound_git_identity(run_env)
     return ProjectExecutionEnv(
         env=run_env,
-        injected_env=sorted(injected_env),
+        injected_env=sorted([*injected_env, *(["ILLO_WORKSPACE_TOOLS_PATH"] if workspace_tool_paths else [])]),
         git_auth_hosts=git_auth_hosts,
         sensitive_values=list(injected_env.values()) + git_sensitive_values,
     )
@@ -336,7 +363,8 @@ def prepare_project_execution_env(extra_env: Mapping[str, str] | None = None) ->
 async def async_prepare_project_execution_env(extra_env: Mapping[str, str] | None = None) -> ProjectExecutionEnv:
     injected_env = await async_current_project_bound_env()
     injected_env.update(_resolved_extra_env(extra_env))
-    if not injected_env:
+    workspace_tool_paths = _current_workspace_tool_bin_paths()
+    if not injected_env and not workspace_tool_paths:
         return ProjectExecutionEnv(
             env=None,
             injected_env=[],
@@ -345,13 +373,14 @@ async def async_prepare_project_execution_env(extra_env: Mapping[str, str] | Non
         )
 
     run_env = os.environ.copy()
+    _prepend_path_entries(run_env, workspace_tool_paths)
     run_env.update(injected_env)
     git_auth_hosts, git_sensitive_values = _configure_project_bound_git_auth(run_env, injected_env)
     if git_auth_hosts:
         _configure_project_bound_git_identity(run_env)
     return ProjectExecutionEnv(
         env=run_env,
-        injected_env=sorted(injected_env),
+        injected_env=sorted([*injected_env, *(["ILLO_WORKSPACE_TOOLS_PATH"] if workspace_tool_paths else [])]),
         git_auth_hosts=git_auth_hosts,
         sensitive_values=list(injected_env.values()) + git_sensitive_values,
     )

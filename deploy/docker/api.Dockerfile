@@ -37,6 +37,7 @@ RUN python3 -m pip install --upgrade pip setuptools wheel \
 
 COPY brain ./brain
 COPY deploy/compose/runtime-services.json ./deploy/compose/runtime-services.json
+COPY deploy/compose/workspace-tools.json ./deploy/compose/workspace-tools.json
 COPY ops/install-browser-runtime.sh ./ops/install-browser-runtime.sh
 COPY README.md LICENSE NOTICE.md ./
 
