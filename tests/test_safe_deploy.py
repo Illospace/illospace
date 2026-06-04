@@ -326,6 +326,10 @@ def test_compose_self_update_sidecar_can_bootstrap_from_api_queue():
     assert "WORKSPACE_TOOLS_HEARTBEAT_FILE" in self_update_daemon
     assert "write_workspace_tools_heartbeat" in self_update_daemon
     assert "deploy/scripts/workspace-tools.sh" in self_update_daemon
+    workspace_tools = (root / "deploy" / "scripts" / "workspace-tools.sh").read_text()
+    assert '${10:-{}}' not in workspace_tools
+    assert '[ -n "$health_json" ] || health_json="{}"' in workspace_tools
+    assert '[ -n "$metadata_json" ] || metadata_json="{}"' in workspace_tools
 
 
 def test_compose_doctor_can_skip_host_local_http_probes_from_sidecars():

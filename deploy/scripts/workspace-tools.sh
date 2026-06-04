@@ -80,8 +80,10 @@ write_manifest() {
   local bin_path="$7"
   local status="$8"
   local detail="$9"
-  local health_json="${10:-{}}"
-  local metadata_json="${11:-{}}"
+  local health_json="${10:-}"
+  local metadata_json="${11:-}"
+  [ -n "$health_json" ] || health_json="{}"
+  [ -n "$metadata_json" ] || metadata_json="{}"
   mkdir -p "$(dirname "$manifest_path")"
   jq -n \
     --arg bundle_id "$bundle_id" \
