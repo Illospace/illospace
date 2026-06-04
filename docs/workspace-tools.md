@@ -13,6 +13,9 @@ base worker image for every team.
   `/data/private/workspace-tools`.
 - The updater sidecar watches `ILLO_WORKSPACE_TOOLS_REQUEST_FILE` and executes
   curated installer profiles through `deploy/scripts/workspace-tools.sh`.
+- The updater sidecar is exposed as the `host_controller` runtime service; if a
+  workspace tool status says it is waiting for the host controller, restart
+  `host_controller` through `manage_runtime_services`.
 - Successful installs write `illo-tool.json` with status, health, bin paths, and
   metadata.
 - Agent command environments prepend installed bundle `bin` paths for the active

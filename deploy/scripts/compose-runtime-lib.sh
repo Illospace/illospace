@@ -14,6 +14,10 @@ runtime_service_ids() {
   jq -r '.services[].id' "$RUNTIME_SERVICE_CATALOG"
 }
 
+runtime_service_ids_for_all() {
+  jq -r '.services[] | select(.include_in_all != false) | .id' "$RUNTIME_SERVICE_CATALOG"
+}
+
 runtime_service_name() {
   local service="$1"
   local compose_name
@@ -58,7 +62,7 @@ expand_runtime_services() {
   if [ "$include_all" = "1" ]; then
     while IFS= read -r service; do
       append_unique_service "$service"
-    done < <(runtime_service_ids)
+    done < <(runtime_service_ids_for_all)
   fi
 
   printf '%s\n' "${expanded_services[@]}"

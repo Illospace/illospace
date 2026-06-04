@@ -70,15 +70,16 @@ all_runtime_services() {
 }
 
 schedule_updater_refresh_after_self_update() {
-  local delay
+  local delay job_name
   [ "$SKIP_UPDATER_RESTART" = "1" ] || return 0
   delay="${ILLO_COMPOSE_UPDATER_SELF_REFRESH_DELAY_SECONDS:-15}"
   if [[ ! "$delay" =~ ^[0-9]+$ ]]; then
     delay="15"
   fi
+  job_name="${COMPOSE_PROJECT_NAME:-illospace}-updater-self-refresh-$(date -u +%Y%m%d%H%M%S)"
   echo "Updater: scheduling self-refresh in ${delay}s so the host controller runs the latest code."
-  compose run -d --rm --no-deps --entrypoint sh updater -lc \
-    "sleep $delay; docker compose --env-file \"\${ILLO_COMPOSE_ENV_FILE:-/repo/deploy/compose/.env}\" -f /repo/deploy/compose/docker-compose.yml up -d --force-recreate --no-deps updater" \
+  compose run -d --name "$job_name" --no-deps --entrypoint sh updater -lc \
+    "sleep $delay; docker compose --env-file \"\${ILLO_COMPOSE_ENV_FILE:-/repo/deploy/compose/.env}\" -f /repo/deploy/compose/docker-compose.yml up -d --force-recreate --no-deps updater; docker rm -f \"$job_name\" >/dev/null 2>&1 || true" \
     >/dev/null || echo "Updater: could not schedule delayed self-refresh; restart updater manually after this update." >&2
 }
 
