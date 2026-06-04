@@ -181,6 +181,7 @@ def _content_type_for_extension(extension: str) -> str:
         "ppt": "application/vnd.ms-powerpoint",
         "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "rtf": "application/rtf",
+        "svg": "image/svg+xml",
         "xls": "application/vnd.ms-excel",
         "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     }.get(extension, "application/octet-stream")

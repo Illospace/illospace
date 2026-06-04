@@ -58,6 +58,7 @@ _COMPOSITION_PATCH_NAMES = (
     "_handle_post_ai_timeline_message",
     "_handle_post_chat_message",
     "_handle_post_thread_discussion_reply",
+    "_handle_publish_thread_asset",
     "_handle_read_thread_discussion",
     "_handle_read_thread_messages",
     "_handle_manage_cycle",

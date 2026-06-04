@@ -16,6 +16,7 @@ export const ATTACHMENT_INPUT_ACCEPT = [
   'image/webp',
   'image/gif',
   'image/avif',
+  'image/svg+xml',
   'video/mp4',
   'video/webm',
   'video/quicktime',
@@ -29,6 +30,7 @@ export const ATTACHMENT_INPUT_ACCEPT = [
   '.jpg',
   '.jpeg',
   '.png',
+  '.svg',
   '.webp',
   '.m4v',
   '.mov',
@@ -77,6 +79,7 @@ const DOCUMENT_ATTACHMENT_EXTENSIONS = new Set([
 ]);
 const ARCHIVE_ATTACHMENT_EXTENSIONS = new Set(['7z', 'rar', 'tar', 'zip']);
 const MESSAGE_URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
+const MESSAGE_SERVER_UPLOAD_PATTERN = /\/static\/uploads\/[^\s<>"')]+/gi;
 
 export function attachmentUrl(attachment: any): string {
   const url = attachment?.url ?? attachment?.href ?? attachment?.previewUrl ?? attachment?.download_url ?? attachment?.downloadUrl;
@@ -218,17 +221,24 @@ export function messageLinkAttachments(
 
   const existingUrls = new Set((attachments ?? []).map((attachment) => attachmentUrl(attachment)).filter(Boolean));
   const urls: string[] = [];
-  for (const match of text.matchAll(MESSAGE_URL_PATTERN)) {
-    const url = normalizeMessageUrl(match[0]);
+  const matches = [
+    ...Array.from(text.matchAll(MESSAGE_URL_PATTERN), (match) => match[0]),
+    ...Array.from(text.matchAll(MESSAGE_SERVER_UPLOAD_PATTERN), (match) => match[0]),
+  ];
+  for (const match of matches) {
+    const url = normalizeMessageUrl(match);
     if (!url || existingUrls.has(url) || urls.includes(url)) continue;
     urls.push(url);
     if (urls.length >= 2) break;
   }
 
-  return urls.map((url) => ({
-    kind: 'link',
-    url,
-    filename: attachmentHost({ url }) || url,
-    type: 'text/uri-list',
-  }));
+  return urls.map((url) => {
+    const isServerUpload = Boolean(normalizeServerUploadPreviewUrl(url));
+    return {
+      kind: isServerUpload ? 'file' : 'link',
+      url,
+      filename: attachmentHost({ url }) || url,
+      ...(isServerUpload ? {} : { type: 'text/uri-list' }),
+    };
+  });
 }

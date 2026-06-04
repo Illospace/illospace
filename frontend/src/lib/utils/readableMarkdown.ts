@@ -48,6 +48,12 @@ function safeHref(url: string): string | null {
   return null;
 }
 
+function safeImageSrc(url: string): string | null {
+  const trimmed = decodeHrefEntities(url || '').trim();
+  if (!/^\/static\/uploads\//.test(trimmed)) return null;
+  return safeHref(trimmed);
+}
+
 export function normalizeReadableMarkdown(input: string): string {
   return (input || '')
     .replace(/\r\n?/g, '\n')
@@ -60,6 +66,12 @@ export function normalizeReadableMarkdown(input: string): string {
 function applyInlineMarkdown(text: string): string {
   const links: string[] = [];
   let output = text
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_match, label, url) => {
+      const safe = safeImageSrc(url);
+      if (!safe) return label;
+      const cleanLabel = String(label || 'Thread asset');
+      return `<a class="md-readable-image-link" href="${safe}" target="_blank" rel="noopener"><img class="md-readable-image" src="${safe}" alt="${cleanLabel}" loading="lazy" decoding="async"/></a>`;
+    })
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, url) => {
       const safe = safeHref(url);
       if (!safe) return label;

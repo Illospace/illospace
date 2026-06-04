@@ -352,6 +352,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "expected_effect": "post an Illo-authored reply to Thread Discussion",
         "output_budget_chars": 8_000,
     },
+    "publish_thread_asset": {
+        "permission": "write_workspace",
+        "risk_class": "medium",
+        "side_effect_class": "append_only",
+        "reversibility": "append_only",
+        "action_manifest": True,
+        "expected_effect": "publish a generated local artifact as a visible Thread upload asset",
+        "output_budget_chars": 8_000,
+    },
     "post_ai_timeline_message": {
         "permission": "write_chat",
         "risk_class": "medium",

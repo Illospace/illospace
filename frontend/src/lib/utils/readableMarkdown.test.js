@@ -75,6 +75,21 @@ test('preserves server-relative markdown links', () => {
   );
 });
 
+test('renders server upload markdown images as inline preview links', () => {
+  const html = renderReadableMarkdown('![AWS mini diagram](/static/uploads/thread-assets/t/aws.svg)');
+
+  assert.equal(
+    html,
+    '<p><a class="md-readable-image-link" href="/static/uploads/thread-assets/t/aws.svg" target="_blank" rel="noopener"><img class="md-readable-image" src="/static/uploads/thread-assets/t/aws.svg" alt="AWS mini diagram" loading="lazy" decoding="async"/></a></p>',
+  );
+});
+
+test('does not render remote markdown images inline', () => {
+  const html = renderReadableMarkdown('![Remote diagram](https://example.com/aws.svg)');
+
+  assert.equal(html, '<p>Remote diagram</p>');
+});
+
 test('preserves query parameters in bare url hrefs', () => {
   const html = renderReadableMarkdown('Open https://example.com/search?q=illo&sort=new');
 

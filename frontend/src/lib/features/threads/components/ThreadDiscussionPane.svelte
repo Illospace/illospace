@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
 
+  import AttachmentPreviewDialog from '$lib/components/chat/AttachmentPreviewDialog.svelte';
   import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
   import ChatStateView from '$lib/components/chat/ChatStateView.svelte';
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
+  import type { ConstellationIconName } from '$lib/components/constellation/ConstellationIcon.svelte';
   import ObjectReferencePreviewList from '$lib/features/threads/components/ObjectReferencePreviewList.svelte';
   import {
     CONVERSATION_SCROLL_BOTTOM_THRESHOLD,
@@ -11,7 +13,7 @@
     scrollConversationToBottom,
     shouldShowConversationScrollCue,
   } from '$lib/components/chat/conversationScroll';
-  import { ConstellationNotice, ConstellationPresenceSeed } from '$lib/components/constellation';
+  import { ConstellationIcon, ConstellationNotice, ConstellationPresenceSeed } from '$lib/components/constellation';
   import { defaultIlloMentionOption } from '$lib/features/composer/domain/mentionAutocomplete';
   import {
     listThreadDiscussion,
@@ -19,8 +21,19 @@
     type ThreadDiscussionComment,
   } from '$lib/features/threads/api/threadApi';
   import { wsClient } from '$lib/stores/ws.svelte';
+  import {
+    attachmentDetail,
+    attachmentDownloadUrl,
+    attachmentKindLabel,
+    attachmentLabel,
+    attachmentPreviewKind,
+    attachmentUrl,
+    normalizeServerUploadPreviewUrl,
+    type AttachmentPreviewKind,
+  } from '$lib/utils/attachmentPreview';
   import { buildPresenceSeedStyle, normalizeHexColor, presenceToneForColor } from '$lib/utils/constellationPresence';
   import { parseServerDate } from '$lib/utils/datetime';
+  import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
 
   let {
     ideaId = null,
@@ -38,14 +51,21 @@
   let userScrolledUp = $state(false);
   let showScrollCue = $state(false);
   let lastScrollIdeaId = $state<string | null>(null);
+  let previewAttachment = $state<PreviewableAttachment | null>(null);
+  const previewAttachmentUrl = $derived(previewAttachment?.url ?? '');
+  const previewAttachmentLabel = $derived(previewAttachment?.label ?? '');
+  const previewAttachmentDetail = $derived(previewAttachment?.detail ?? '');
+  const previewAttachmentKind = $derived(previewAttachment?.kind ?? 'file');
 
-  type MessageTextSegment = {
-    text: string;
-    mention: boolean;
+  type PreviewableAttachment = {
+    url: string;
+    downloadUrl?: string;
+    label: string;
+    detail?: string;
+    kind: AttachmentPreviewKind;
   };
 
   const MESSAGE_GROUP_WINDOW_MS = 15 * 60 * 1000;
-  const MENTION_RENDER_RE = /(^|[^A-Za-z0-9_])@([A-Za-z0-9._-]+)([.,:;!?]?)/g;
   const THREAD_DISCUSSION_RUN_PREFIX = 'thread-discussion:';
   const THREAD_DISCUSSION_REPLY_TOOL = 'post_thread_discussion_reply';
   const DISCUSSION_REPLY_RECONCILE_DELAYS_MS = [1200, 3000, 7000, 15000, 30000, 45000];
@@ -340,42 +360,80 @@
     );
   }
 
-  function messageTextSegments(bodyText: string): MessageTextSegment[] {
-    const segments: MessageTextSegment[] = [];
-    MENTION_RENDER_RE.lastIndex = 0;
-    let cursor = 0;
-    let match: RegExpExecArray | null;
+  function normalizeServerPreviewUrl(rawHref: string | null | undefined): string {
+    const base = typeof window === 'undefined' ? 'http://illo.local' : window.location.origin;
+    return normalizeServerUploadPreviewUrl(rawHref, base);
+  }
 
-    while ((match = MENTION_RENDER_RE.exec(bodyText)) !== null) {
-      const boundary = match[1] ?? '';
-      let token = match[2] ?? '';
-      let punctuation = match[3] ?? '';
-      const tokenTrailingPunctuation = token.match(/[.,:;!?]+$/)?.[0] ?? '';
-      if (tokenTrailingPunctuation) {
-        token = token.slice(0, -tokenTrailingPunctuation.length);
-        punctuation = `${tokenTrailingPunctuation}${punctuation}`;
-      }
+  function previewIconName(kind: AttachmentPreviewKind): ConstellationIconName {
+    if (kind === 'image') return 'image';
+    if (kind === 'video') return 'video';
+    if (kind === 'pdf') return 'pdf';
+    if (kind === 'link') return 'link';
+    if (kind === 'archive') return 'archive';
+    if (kind === 'text') return 'code';
+    return 'file';
+  }
 
-      const mentionStart = match.index + boundary.length;
-      if (mentionStart > cursor) {
-        segments.push({ text: bodyText.slice(cursor, mentionStart), mention: false });
-      }
+  function toPreviewAttachment(attachment: any): PreviewableAttachment | null {
+    const url = attachmentUrl(attachment);
+    if (!url) return null;
+    const kind = attachmentPreviewKind(attachment);
+    return {
+      url,
+      downloadUrl: attachmentDownloadUrl(attachment),
+      label: attachmentLabel(attachment),
+      detail: attachmentDetail(attachment),
+      kind,
+    };
+  }
 
-      const mentionText = `@${token}`;
-      segments.push({ text: mentionText, mention: true });
-      cursor = mentionStart + mentionText.length;
+  function discussionAttachments(comment: ThreadDiscussionComment): PreviewableAttachment[] {
+    const rawAttachments = Array.isArray(comment.attachments) ? comment.attachments : [];
+    return rawAttachments
+      .map((attachment) => toPreviewAttachment(attachment))
+      .filter(Boolean) as PreviewableAttachment[];
+  }
 
-      if (punctuation) {
-        segments.push({ text: punctuation, mention: false });
-        cursor += punctuation.length;
-      }
-    }
+  function previewAttachmentFromLink(anchor: HTMLAnchorElement): PreviewableAttachment | null {
+    const url = normalizeServerPreviewUrl(anchor.getAttribute('href') || anchor.href);
+    if (!url) return null;
+    const label = anchor.textContent?.trim() || attachmentLabel({ url });
+    const source = { url, filename: label };
+    return {
+      url,
+      downloadUrl: attachmentDownloadUrl(source),
+      label,
+      detail: attachmentKindLabel(source) || attachmentDetail(source),
+      kind: attachmentPreviewKind(source),
+    };
+  }
 
-    if (cursor < bodyText.length) {
-      segments.push({ text: bodyText.slice(cursor), mention: false });
-    }
+  function openAttachmentPreview(attachment: PreviewableAttachment) {
+    previewAttachment = attachment;
+  }
 
-    return segments.length > 0 ? segments : [{ text: bodyText, mention: false }];
+  function closeAttachmentPreview() {
+    previewAttachment = null;
+  }
+
+  function handleDiscussionContentClick(event: MouseEvent) {
+    const target = event.target as HTMLElement | null;
+    const anchor = target?.closest?.('a');
+    if (!(anchor instanceof HTMLAnchorElement)) return;
+    const attachment = previewAttachmentFromLink(anchor);
+    if (!attachment) return;
+    event.preventDefault();
+    openAttachmentPreview(attachment);
+  }
+
+  function previewServerFileLinks(node: HTMLElement) {
+    node.addEventListener('click', handleDiscussionContentClick);
+    return {
+      destroy() {
+        node.removeEventListener('click', handleDiscussionContentClick);
+      },
+    };
   }
 
   function syncScrollCue() {
@@ -449,6 +507,7 @@
           {@const showHeader = shouldShowMessageHeader(comments, index)}
           {@const author = authorLabel(comment)}
           {@const timestamp = timeLabel(comment.created_at)}
+          {@const attachments = discussionAttachments(comment)}
           <article
             class="discussion-message"
             class:has-header={showHeader}
@@ -476,15 +535,46 @@
               </header>
             {/if}
 
-            <p class="discussion-message-body">
-              {#each messageTextSegments(comment.body) as segment, segmentIndex (segmentIndex)}
-                {#if segment.mention}
-                  <span class="chat-mention">{segment.text}</span>
-                {:else}
-                  {segment.text}
-                {/if}
-              {/each}
-            </p>
+            <div
+              class="discussion-message-body constellation-prose"
+              use:previewServerFileLinks
+            >
+              {@html renderReadableMarkdown(comment.body)}
+            </div>
+
+            {#if attachments.length > 0}
+              <div class="discussion-attachments">
+                {#each attachments as attachment, attachmentIndex (`${attachment.url}-${attachmentIndex}`)}
+                  {#if attachment.kind === 'image'}
+                    <button
+                      type="button"
+                      class="discussion-attachment-image-button"
+                      aria-label={`Preview ${attachment.label}`}
+                      onclick={() => openAttachmentPreview(attachment)}
+                    >
+                      <img class="discussion-attachment-image" src={attachment.url} alt={attachment.label} />
+                    </button>
+                  {:else}
+                    <button
+                      type="button"
+                      class={`discussion-attachment-file is-${attachment.kind}`}
+                      aria-label={`Preview ${attachment.label}`}
+                      onclick={() => openAttachmentPreview(attachment)}
+                    >
+                      <span class="discussion-attachment-file-icon" aria-hidden="true">
+                        <ConstellationIcon name={previewIconName(attachment.kind)} size={16} stroke={1.8} />
+                      </span>
+                      <span class="discussion-attachment-file-copy">
+                        <span>{attachment.label}</span>
+                        {#if attachment.detail}
+                          <small>{attachment.detail}</small>
+                        {/if}
+                      </span>
+                    </button>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
             <ObjectReferencePreviewList
               objectReferences={comment.object_references}
               threadReferences={comment.thread_references}
@@ -530,6 +620,18 @@
     />
   </div>
 </div>
+
+{#if previewAttachment && previewAttachmentUrl}
+  <AttachmentPreviewDialog
+    url={previewAttachmentUrl}
+    label={previewAttachmentLabel}
+    detail={previewAttachmentDetail}
+    kind={previewAttachmentKind}
+    openUrl={previewAttachment.downloadUrl || previewAttachmentUrl}
+    fallbackIcon={previewIconName(previewAttachmentKind)}
+    onClose={closeAttachmentPreview}
+  />
+{/if}
 
 <style>
   .thread-discussion-pane {
@@ -662,12 +764,101 @@
   }
 
   .discussion-message-body {
+    --constellation-prose-text: var(--chat-message-body-text);
+    --constellation-prose-heading: var(--constellation-thread-message-heading);
+    --constellation-prose-muted: var(--chat-message-meta-text);
+    --constellation-prose-font-size: 14px;
+    --constellation-prose-line-height: 1.6;
     margin: 0;
     color: var(--chat-message-body-text);
     font-size: 14px;
     line-height: 1.6;
-    white-space: pre-wrap;
+    white-space: normal;
     word-break: break-word;
+  }
+
+  .discussion-attachments {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .discussion-attachment-image-button {
+    appearance: none;
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: zoom-in;
+    text-align: left;
+  }
+
+  .discussion-attachment-image {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    max-height: 320px;
+    border: 1px solid var(--constellation-thread-message-image-border);
+    border-radius: 8px;
+    background: var(--constellation-thread-message-image-background);
+    object-fit: contain;
+  }
+
+  .discussion-attachment-file {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 10px;
+    width: min(100%, 360px);
+    max-width: 100%;
+    padding: 9px 11px;
+    border: 1px solid var(--constellation-thread-message-file-border);
+    border-radius: 8px;
+    background: var(--constellation-thread-message-file-background);
+    color: var(--constellation-thread-message-file-text);
+    cursor: zoom-in;
+    font-family: var(--constellation-font-mono, 'IBM Plex Mono', monospace);
+    font-size: 10px;
+    letter-spacing: 0;
+    text-align: left;
+  }
+
+  .discussion-attachment-file:hover,
+  .discussion-attachment-file:focus-visible,
+  .discussion-attachment-image-button:focus-visible {
+    border-color: color-mix(in srgb, var(--constellation-color-spectral) 42%, var(--constellation-thread-message-file-border));
+    outline: none;
+  }
+
+  .discussion-attachment-file-icon {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--constellation-color-spectral) 13%, transparent);
+    color: var(--constellation-color-spectral);
+  }
+
+  .discussion-attachment-file-copy {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .discussion-attachment-file-copy span,
+  .discussion-attachment-file-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .discussion-attachment-file-copy small {
+    color: var(--chat-message-meta-text);
+    font-size: 10px;
   }
 
   .chat-mention {
