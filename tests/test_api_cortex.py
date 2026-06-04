@@ -1600,6 +1600,71 @@ async def test_post_thread_discussion_reply_tool_writes_illo_comment(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_post_thread_discussion_reply_tool_infers_upload_attachments(monkeypatch, tmp_path):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.chat import _handle_post_thread_discussion_reply
+    from brain.systems.cortex.upload_preview import static_upload_url_for
+
+    upload_dir = tmp_path / "uploads"
+    asset_dir = upload_dir / "thread-assets" / "some-id"
+    asset_dir.mkdir(parents=True)
+    asset = asset_dir / "diagram.png"
+    asset.write_bytes(b"png-bytes")
+    monkeypatch.setattr("brain.systems.cortex.thread_assets.UPLOAD_DIR", upload_dir)
+    url = static_upload_url_for("thread-assets", "some-id", "diagram.png")
+    created = []
+
+    class _Session:
+        async def get(self, _model, thread_id):
+            return SimpleNamespace(id=thread_id, org_id="test-org")
+
+        def add(self, obj):
+            obj.id = 10
+            obj.created_at = datetime(2026, 5, 21, 12, 6, tzinfo=timezone.utc)
+            created.append(obj)
+
+        async def flush(self):
+            return None
+
+    class _UnitOfWork:
+        async def __aenter__(self):
+            self.session = _Session()
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    published = Mock()
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
+    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", published)
+
+    with bind_agent_context({"org_id": "test-org", "run_id": 42, "idea_id": "some-id"}):
+        raw = await _handle_post_thread_discussion_reply(
+            f"Here it is:\n\n![Diagram]({url})",
+        )
+
+    payload = json.loads(raw)
+    assert payload["ok"] is True
+    assert payload["comment"]["attachments"] == [
+        {
+            "kind": "image",
+            "url": url,
+            "download_url": url,
+            "filename": "diagram.png",
+            "label": "diagram.png",
+            "content_type": "image/png",
+            "mime_type": "image/png",
+            "size": len(b"png-bytes"),
+        }
+    ]
+    assert created[0].attachments == payload["comment"]["attachments"]
+    published.assert_called_once_with(
+        "thread_discussion_comment",
+        {"idea_id": "some-id", "org_id": "test-org", "comment": payload["comment"]},
+    )
+
+
+@pytest.mark.asyncio
 async def test_post_ai_timeline_message_tool_writes_linked_thread_message(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers.chat import _handle_post_ai_timeline_message

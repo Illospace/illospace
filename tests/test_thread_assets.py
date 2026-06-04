@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from brain.systems.cortex.thread_assets import publish_thread_asset
+from brain.systems.cortex.thread_assets import (
+    infer_thread_asset_attachments_from_body,
+    publish_thread_asset,
+)
+from brain.systems.cortex.upload_preview import static_upload_url_for
 
 
 def test_publish_thread_asset_copies_svg_to_static_uploads(tmp_path: Path):
@@ -41,3 +45,54 @@ def test_publish_thread_asset_rejects_paths_outside_artifact_roots(tmp_path: Pat
             upload_dir=tmp_path / "uploads",
             source_roots=[source_root],
         )
+
+
+def test_publish_thread_asset_accepts_existing_static_upload_url(tmp_path: Path):
+    upload_dir = tmp_path / "uploads"
+    asset_dir = upload_dir / "thread-assets" / "thread-one"
+    asset_dir.mkdir(parents=True)
+    asset = asset_dir / "diagram.png"
+    asset.write_bytes(b"png-bytes")
+    url = static_upload_url_for("thread-assets", "thread-one", "diagram.png")
+
+    result = publish_thread_asset(
+        url,
+        upload_dir=upload_dir,
+        title="Published diagram",
+    )
+
+    assert result["ok"] is True
+    assert result["already_published"] is True
+    assert result["url"] == url
+    assert result["published_path"] == str(asset.resolve())
+    assert result["markdown"] == f"![Published diagram]({url})"
+    assert result["attachment"]["kind"] == "image"
+    assert result["attachment"]["url"] == url
+    assert result["attachment"]["content_type"] == "image/png"
+
+
+def test_infers_thread_asset_attachments_from_body(tmp_path: Path):
+    upload_dir = tmp_path / "uploads"
+    asset_dir = upload_dir / "thread-assets" / "thread-one"
+    asset_dir.mkdir(parents=True)
+    asset = asset_dir / "diagram.svg"
+    asset.write_text("<svg></svg>")
+    url = static_upload_url_for("thread-assets", "thread-one", "diagram.svg")
+
+    attachments = infer_thread_asset_attachments_from_body(
+        f"See this diagram: ![diagram]({url})",
+        upload_dir=upload_dir,
+    )
+
+    assert attachments == [
+        {
+            "kind": "image",
+            "url": url,
+            "download_url": url,
+            "filename": "diagram.svg",
+            "label": "diagram.svg",
+            "content_type": "image/svg+xml",
+            "mime_type": "image/svg+xml",
+            "size": len("<svg></svg>"),
+        }
+    ]

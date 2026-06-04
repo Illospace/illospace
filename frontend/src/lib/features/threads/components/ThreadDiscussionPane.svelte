@@ -28,6 +28,7 @@
     attachmentLabel,
     attachmentPreviewKind,
     attachmentUrl,
+    messageLinkAttachments,
     normalizeServerUploadPreviewUrl,
     type AttachmentPreviewKind,
   } from '$lib/utils/attachmentPreview';
@@ -390,7 +391,7 @@
 
   function discussionAttachments(comment: ThreadDiscussionComment): PreviewableAttachment[] {
     const rawAttachments = Array.isArray(comment.attachments) ? comment.attachments : [];
-    return rawAttachments
+    return [...rawAttachments, ...messageLinkAttachments(comment.body, rawAttachments)]
       .map((attachment) => toPreviewAttachment(attachment))
       .filter(Boolean) as PreviewableAttachment[];
   }
