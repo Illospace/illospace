@@ -101,7 +101,7 @@ def _created_idea_seed_content(
     description: str | None,
     thread_message: str | None,
 ) -> str:
-    explicit = " ".join(str(thread_message or "").split())
+    explicit = str(thread_message or "").strip()
     if explicit:
         return explicit
     body = str(description or "").strip()
