@@ -34,6 +34,7 @@ def test_workspace_manifest_disambiguates_duplicate_mount_paths():
         {"name": "/reports", "path": "/tmp/materialized/reports-a"},
         {"name": "/reports-2", "path": "/tmp/materialized/reports-b"},
     ]
+    assert manifest.resolve_agent_path("reports/summary.md") is None
     assert manifest.resolve_agent_path("/reports/summary.md") == "/tmp/materialized/reports-a/summary.md"
     assert manifest.resolve_agent_path("/reports-2/summary.md") == "/tmp/materialized/reports-b/summary.md"
     assert manifest.to_dict()["workspaces"] == [
