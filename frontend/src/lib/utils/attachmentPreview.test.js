@@ -43,3 +43,24 @@ test('promotes static upload links from message text into attachments', () => {
     },
   ]);
 });
+
+test('does not promote inline markdown image uploads into duplicate attachments', () => {
+  const body = [
+    '[docs/GENERATION_DISPATCHER_PRD.md](https://github.com/uwear-ai/uwear-backend/blob/docs/generation-dispatcher-prd/docs/GENERATION_DISPATCHER_PRD.md)',
+    '',
+    '![Current Generation Architecture](/static/uploads/thread-assets/t/current-generation-architecture.png)',
+    '',
+    '![Target Generation Dispatcher Architecture](/static/uploads/thread-assets/t/target-generation-dispatcher-architecture.png)',
+  ].join('\n');
+
+  const attachments = messageLinkAttachments(body);
+
+  assert.deepEqual(attachments, [
+    {
+      kind: 'link',
+      url: 'https://github.com/uwear-ai/uwear-backend/blob/docs/generation-dispatcher-prd/docs/GENERATION_DISPATCHER_PRD.md',
+      filename: 'github.com',
+      type: 'text/uri-list',
+    },
+  ]);
+});
