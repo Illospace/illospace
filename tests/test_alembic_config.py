@@ -36,6 +36,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0016_thread_urls_object_references.py",
     # Downgrade removes only the launch handoff table introduced by this migration.
     "0017_launch_handoffs.py",
+    # Downgrade removes only the workspace tool installation table introduced by this migration.
+    "0018_workspace_tool_installations.py",
 }
 
 

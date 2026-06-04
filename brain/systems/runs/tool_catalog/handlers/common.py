@@ -357,6 +357,21 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
             "effect": "refresh the persisted source-card summary on an inbound connection",
         },
     },
+    "manage_workspace_tools": {
+        "catalog": {"required": [], "optional": [], "effect": "read installable workspace tool bundles"},
+        "list": {"required": [], "optional": ["bundle_id"], "effect": "read workspace tool installation state"},
+        "status": {"required": [], "optional": ["bundle_id"], "effect": "read installer queue and installation state"},
+        "install": {
+            "required": ["bundle_id"],
+            "optional": [],
+            "effect": "queue an opt-in persisted tool bundle installation for this workspace",
+        },
+        "check": {
+            "required": ["bundle_id"],
+            "optional": [],
+            "effect": "refresh health/status from the persisted tool manifest",
+        },
+    },
     "manage_skill": {
         "list": {"required": [], "optional": ["include_archived", "limit"], "effect": "read available skills"},
         "get": {"required": ["skill_id or skill_name"], "optional": [], "effect": "read one skill"},
