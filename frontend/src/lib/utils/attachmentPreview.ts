@@ -80,6 +80,7 @@ const DOCUMENT_ATTACHMENT_EXTENSIONS = new Set([
 const ARCHIVE_ATTACHMENT_EXTENSIONS = new Set(['7z', 'rar', 'tar', 'zip']);
 const MESSAGE_URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
 const MESSAGE_SERVER_UPLOAD_PATTERN = /\/static\/uploads\/[^\s<>"')]+/gi;
+const MESSAGE_MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
 
 export function attachmentUrl(attachment: any): string {
   const url = attachment?.url ?? attachment?.href ?? attachment?.previewUrl ?? attachment?.download_url ?? attachment?.downloadUrl;
@@ -212,6 +213,15 @@ export function normalizeMessageUrl(rawUrl: string): string {
   return rawUrl.replace(/[),.;!?]+$/g, '');
 }
 
+function inlineMarkdownImageUploadUrls(text: string): Set<string> {
+  const urls = new Set<string>();
+  for (const match of text.matchAll(MESSAGE_MARKDOWN_IMAGE_PATTERN)) {
+    const url = normalizeMessageUrl(match[1] ?? '');
+    if (url.startsWith(SERVER_UPLOAD_PREVIEW_PATH_PREFIX)) urls.add(url);
+  }
+  return urls;
+}
+
 export function messageLinkAttachments(
   body: string | null | undefined,
   attachments: any[] | null | undefined = [],
@@ -220,6 +230,7 @@ export function messageLinkAttachments(
   if (!text) return [];
 
   const existingUrls = new Set((attachments ?? []).map((attachment) => attachmentUrl(attachment)).filter(Boolean));
+  const inlineImageUrls = inlineMarkdownImageUploadUrls(text);
   const urls: string[] = [];
   const matches = [
     ...Array.from(text.matchAll(MESSAGE_URL_PATTERN), (match) => match[0]),
@@ -227,7 +238,7 @@ export function messageLinkAttachments(
   ];
   for (const match of matches) {
     const url = normalizeMessageUrl(match);
-    if (!url || existingUrls.has(url) || urls.includes(url)) continue;
+    if (!url || existingUrls.has(url) || inlineImageUrls.has(url) || urls.includes(url)) continue;
     urls.push(url);
     if (urls.length >= 2) break;
   }
