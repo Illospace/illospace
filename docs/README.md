@@ -10,6 +10,7 @@ Start here when you want to understand, run, or extend Illo Brain.
 - [Deployment](deployment.md) - deployment overview and advanced native notes.
 - [Cycles](cycles.md) - scheduler-owned recurring jobs.
 - [Project Workspaces](project-workspaces.md) - Project root, thread draft, base, conflict, and publish semantics.
+- [Workspace Tool Installer](workspace-tools.md) - opt-in persisted tool bundles for team-specific skill dependencies.
 - [Security Model](security-model.md) - secrets, tool execution, browser sessions, and data boundaries.
 - [Personal Agent Connections MVP](personal-agent-connections-mvp.md) - implementation plan for connecting Illo with Hermes and OpenClaw.
 - [Universal Thread Context Ingress PRD](prd-universal-thread-context-ingress.md) - product plan for personal agents submitting context into Illo and Universal Threads.

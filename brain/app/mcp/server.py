@@ -1347,6 +1347,78 @@ async def tool_manage_runtime_services(
     return payload
 
 
+async def tool_manage_workspace_tools(
+    action: str = "list",
+    bundle_id: str | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict:
+    """Inspect or install opt-in workspace tool bundles through the host controller."""
+    from brain.platform.db.models.org import User
+    from brain.systems.runtime_settings.workspace_tools import (
+        async_check_workspace_tool,
+        async_get_workspace_tools_status,
+        async_install_workspace_tool,
+        workspace_tool_catalog,
+    )
+
+    normalized_action = str(action or "list").strip().lower()
+    if normalized_action not in {"catalog", "list", "status", "install", "check"}:
+        raise ValueError("manage_workspace_tools action must be 'catalog', 'list', 'status', 'install', or 'check'.")
+
+    if normalized_action == "catalog":
+        return {
+            "action": normalized_action,
+            "catalog": [bundle.model_dump(mode="json") for bundle in workspace_tool_catalog()],
+        }
+
+    async with UnitOfWork() as uow:
+        user = await uow.session.get(User, user_id) if user_id else None
+        if user is None:
+            return {
+                "action": normalized_action,
+                "status": "denied",
+                "available": False,
+                "detail": "Workspace tool installation requires an authenticated workspace user.",
+            }
+        if org_id and str(getattr(user, "org_id", "")) != str(org_id):
+            return {
+                "action": normalized_action,
+                "status": "denied",
+                "available": False,
+                "detail": "Workspace tool installation requires a user in the active organization.",
+            }
+        effective_org_id = str(org_id or user.org_id)
+
+        if normalized_action == "install":
+            if not bundle_id:
+                raise ValueError("install requires bundle_id.")
+            tool_status = await async_install_workspace_tool(
+                uow.session,
+                org_id=effective_org_id,
+                bundle_id=bundle_id,
+                requested_by=str(user.id),
+            )
+        elif normalized_action == "check":
+            if not bundle_id:
+                raise ValueError("check requires bundle_id.")
+            tool_status = await async_check_workspace_tool(
+                uow.session,
+                org_id=effective_org_id,
+                bundle_id=bundle_id,
+            )
+        else:
+            tool_status = await async_get_workspace_tools_status(
+                uow.session,
+                org_id=effective_org_id,
+                bundle_id=bundle_id,
+            )
+
+    payload = tool_status.model_dump(mode="json")
+    payload["action"] = normalized_action
+    return payload
+
+
 # ── MCP Protocol Layer ───────────────────────────────────────
 
 TOOLS = {
@@ -1580,6 +1652,29 @@ TOOLS = {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "For restart, one or more service ids returned by list, or all.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+    "manage_workspace_tools": {
+        "function": tool_manage_workspace_tools,
+        "description": (
+            "Inspect, install, and health-check opt-in workspace tool bundles for this team. "
+            "Use this when skills need persisted external tooling without baking that tool into all teams."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["catalog", "list", "status", "install", "check"],
+                    "default": "list",
+                    "description": "Inspect catalog/status, queue install, or refresh persisted health.",
+                },
+                "bundle_id": {
+                    "type": "string",
+                    "description": "Tool bundle id, e.g. aws-diagrams. Required for install and check.",
                 },
             },
             "required": ["action"],

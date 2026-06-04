@@ -283,7 +283,12 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
     assert "ILLO_RUNTIME_SERVICES_REQUEST_FILE" in compose
     assert "ILLO_RUNTIME_SERVICES_STATUS_FILE" in compose
     assert "ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE" in compose
+    assert "ILLO_WORKSPACE_TOOLS_ROOT" in compose
+    assert "ILLO_WORKSPACE_TOOLS_REQUEST_FILE" in compose
+    assert "ILLO_WORKSPACE_TOOLS_STATUS_FILE" in compose
+    assert "ILLO_WORKSPACE_TOOLS_HEARTBEAT_FILE" in compose
     assert "/data/private/runtime-services/heartbeat.json" in compose
+    assert "/data/private/workspace-tools/heartbeat.json" in compose
     assert "ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE: /data/private/self-update/heartbeat.json" not in compose
     assert "shared_preload_libraries=pg_stat_statements" in compose
     assert "pg_stat_statements.track=all" in compose
@@ -316,6 +321,10 @@ def test_compose_self_update_sidecar_can_bootstrap_from_api_queue():
     assert "RUNTIME_SERVICES_HEARTBEAT_FILE" in self_update_daemon
     assert "write_runtime_services_heartbeat" in self_update_daemon
     assert "deploy/scripts/runtime-services.sh" in self_update_daemon
+    assert "process_workspace_tools_request" in self_update_daemon
+    assert "WORKSPACE_TOOLS_HEARTBEAT_FILE" in self_update_daemon
+    assert "write_workspace_tools_heartbeat" in self_update_daemon
+    assert "deploy/scripts/workspace-tools.sh" in self_update_daemon
 
 
 def test_compose_doctor_can_skip_host_local_http_probes_from_sidecars():

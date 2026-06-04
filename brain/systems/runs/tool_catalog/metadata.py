@@ -70,6 +70,7 @@ class ToolSideEffectClass(StrEnum):
     INBOUND_CONFIGURATION = "inbound_configuration"
     IDEA_MANAGEMENT = "idea_management"
     DEPLOYMENT_MANAGEMENT = "deployment_management"
+    WORKSPACE_TOOL_MANAGEMENT = "workspace_tool_management"
     SOUL_MANAGEMENT = "soul_management"
     PROJECT_CONTEXT_MANAGEMENT = "project_context_management"
     FILE_EDIT = "file_edit"

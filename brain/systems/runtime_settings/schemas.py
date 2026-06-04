@@ -12,6 +12,8 @@ EmbedderKey = Literal["local_gpu", "local_cpu", "openai", "gemini"]
 RerankerKey = Literal["weighted"]
 RuntimeUpdateStatus = Literal["idle", "running"]
 RuntimeServiceStatus = Literal["idle", "running"]
+WorkspaceToolStatus = Literal["requested", "queued", "installing", "installed", "failed", "removed"]
+WorkspaceToolQueueStatus = Literal["idle", "running"]
 VoiceProviderKey = Literal["openai", "gemini"]
 VoiceLanguageKey = Literal["auto", "en", "fr"]
 VoiceStatus = Literal["ready", "missing", "error"]
@@ -109,6 +111,45 @@ class RuntimeServicesRead(BaseModel):
     available: bool
     services: list[RuntimeServiceRead]
     requested_services: list[str] = Field(default_factory=list)
+    started_at: datetime | None = None
+    log_path: str | None = None
+    detail: str | None = None
+
+
+class WorkspaceToolBundleRead(BaseModel):
+    id: str
+    name: str
+    description: str
+    version: str | None = None
+    provided_commands: list[str] = Field(default_factory=list)
+    skill_dependencies: list[str] = Field(default_factory=list)
+    install_profile: str | None = None
+    optional: bool = False
+
+
+class WorkspaceToolInstallationRead(BaseModel):
+    id: str | None = None
+    bundle_id: str
+    display_name: str
+    version: str | None = None
+    status: WorkspaceToolStatus
+    install_root: str | None = None
+    bin_path: str | None = None
+    requested_by_user_id: str | None = None
+    requested_at: datetime | None = None
+    installed_at: datetime | None = None
+    checked_at: datetime | None = None
+    last_error: str | None = None
+    health: dict = Field(default_factory=dict)
+    metadata: dict = Field(default_factory=dict)
+
+
+class WorkspaceToolsRead(BaseModel):
+    status: WorkspaceToolQueueStatus
+    available: bool
+    catalog: list[WorkspaceToolBundleRead]
+    installations: list[WorkspaceToolInstallationRead] = Field(default_factory=list)
+    requested_bundle_id: str | None = None
     started_at: datetime | None = None
     log_path: str | None = None
     detail: str | None = None

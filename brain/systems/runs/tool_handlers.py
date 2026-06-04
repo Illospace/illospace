@@ -27,6 +27,7 @@ from brain.systems.runs.tool_catalog.handlers.web import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.workers import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.workspace_data import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.workspace_apps import *  # noqa: F401,F403
+from brain.systems.runs.tool_catalog.handlers.workspace_tools import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.composition import get_tools_with_extended
 
 _COMPOSITION_PATCH_NAMES = (
@@ -66,6 +67,7 @@ _COMPOSITION_PATCH_NAMES = (
     "_handle_manage_project",
     "_handle_manage_skill",
     "_handle_manage_workspace_app",
+    "_handle_manage_workspace_tools",
     "_handle_edit_file",
     "_handle_exec_command",
     "_handle_list_files",
