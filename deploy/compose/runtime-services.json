@@ -25,6 +25,13 @@
       "description": "Illospace browser interface."
     },
     {
+      "id": "host_controller",
+      "compose_service": "updater",
+      "name": "Host controller",
+      "description": "Updater sidecar that handles self-updates, runtime-service restarts, and workspace tool installs.",
+      "include_in_all": false
+    },
+    {
       "id": "slack_connector",
       "compose_service": "slack-connector",
       "name": "Slack connector",

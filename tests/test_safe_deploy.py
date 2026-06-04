@@ -349,6 +349,8 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     assert "ILLO_COMPOSE_SKIP_UPDATER_RESTART" in upgrade
     assert "schedule_updater_refresh_after_self_update" in upgrade
     assert "ILLO_COMPOSE_UPDATER_SELF_REFRESH_DELAY_SECONDS" in upgrade
+    assert "--name \"$job_name\"" in upgrade
+    assert 'docker rm -f \\"$job_name\\"' in upgrade
     assert "up -d --force-recreate --no-deps updater" in upgrade
     assert "start_worker_handoff" in runtime_lib
     assert "ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1" in runtime_lib
@@ -374,6 +376,9 @@ def test_compose_runtime_service_restart_supports_one_many_or_all_services():
     assert "runtime_service_ids" in runtime_services
     assert 'source "$SCRIPT_DIR/compose-runtime-lib.sh"' in runtime_services
     assert "expand_runtime_services" in runtime_lib
+    assert "runtime_service_ids_for_all" in runtime_lib
+    assert "host_controller" in catalog
+    assert '"include_in_all": false' in catalog
     assert "slack_connector" in catalog
     assert "slack-connector" in catalog
     assert "runtime-services.json" in runtime_lib
