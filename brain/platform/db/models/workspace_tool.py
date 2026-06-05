@@ -11,7 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from brain.platform.db.base import Base
 
-__all__ = ["WorkspaceToolInstallation"]
+__all__ = ["WorkspaceToolInstallation", "WorkspaceToolUserConfig"]
 
 
 class WorkspaceToolInstallation(Base):
@@ -55,4 +55,36 @@ class WorkspaceToolInstallation(Base):
 
     __table_args__ = (
         UniqueConstraint("org_id", "bundle_id", name="uq_workspace_tool_installations_org_bundle"),
+    )
+
+
+class WorkspaceToolUserConfig(Base):
+    """Per-user preferences and credential references for a shared workspace tool."""
+
+    __tablename__ = "workspace_tool_user_configs"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+        default=lambda: str(uuid.uuid4()),
+    )
+    org_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    bundle_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    preferences: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
+    credential_refs: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("NOW()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("NOW()"))
+
+    __table_args__ = (
+        UniqueConstraint("org_id", "user_id", "bundle_id", name="uq_workspace_tool_user_configs_org_user_bundle"),
     )

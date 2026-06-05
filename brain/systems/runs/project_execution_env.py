@@ -334,7 +334,10 @@ def _prepend_path_entries(env: dict[str, str], path_entries: list[str]) -> None:
     env["ILLO_WORKSPACE_TOOLS_PATH"] = os.pathsep.join(path_entries)
 
 
-def prepare_project_execution_env(extra_env: Mapping[str, str] | None = None) -> ProjectExecutionEnv:
+def prepare_project_execution_env(
+    extra_env: Mapping[str, str] | None = None,
+    extra_sensitive_values: list[str] | tuple[str, ...] | None = None,
+) -> ProjectExecutionEnv:
     injected_env = current_project_bound_env()
     injected_env.update(_resolved_extra_env(extra_env))
     workspace_tool_paths = _current_workspace_tool_bin_paths()
@@ -343,7 +346,7 @@ def prepare_project_execution_env(extra_env: Mapping[str, str] | None = None) ->
             env=None,
             injected_env=[],
             git_auth_hosts=[],
-            sensitive_values=[],
+            sensitive_values=list(extra_sensitive_values or []),
         )
 
     run_env = os.environ.copy()
@@ -356,11 +359,14 @@ def prepare_project_execution_env(extra_env: Mapping[str, str] | None = None) ->
         env=run_env,
         injected_env=sorted([*injected_env, *(["ILLO_WORKSPACE_TOOLS_PATH"] if workspace_tool_paths else [])]),
         git_auth_hosts=git_auth_hosts,
-        sensitive_values=list(injected_env.values()) + git_sensitive_values,
+        sensitive_values=list(injected_env.values()) + git_sensitive_values + list(extra_sensitive_values or []),
     )
 
 
-async def async_prepare_project_execution_env(extra_env: Mapping[str, str] | None = None) -> ProjectExecutionEnv:
+async def async_prepare_project_execution_env(
+    extra_env: Mapping[str, str] | None = None,
+    extra_sensitive_values: list[str] | tuple[str, ...] | None = None,
+) -> ProjectExecutionEnv:
     injected_env = await async_current_project_bound_env()
     injected_env.update(_resolved_extra_env(extra_env))
     workspace_tool_paths = _current_workspace_tool_bin_paths()
@@ -369,7 +375,7 @@ async def async_prepare_project_execution_env(extra_env: Mapping[str, str] | Non
             env=None,
             injected_env=[],
             git_auth_hosts=[],
-            sensitive_values=[],
+            sensitive_values=list(extra_sensitive_values or []),
         )
 
     run_env = os.environ.copy()
@@ -382,7 +388,7 @@ async def async_prepare_project_execution_env(extra_env: Mapping[str, str] | Non
         env=run_env,
         injected_env=sorted([*injected_env, *(["ILLO_WORKSPACE_TOOLS_PATH"] if workspace_tool_paths else [])]),
         git_auth_hosts=git_auth_hosts,
-        sensitive_values=list(injected_env.values()) + git_sensitive_values,
+        sensitive_values=list(injected_env.values()) + git_sensitive_values + list(extra_sensitive_values or []),
     )
 
 

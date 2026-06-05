@@ -27,6 +27,8 @@ async def _handle_manage_workspace_tools(
     action: str = "list",
     operation: str | None = None,
     bundle_id: str | None = None,
+    preferences: dict[str, Any] | None = None,
+    credential_refs: dict[str, Any] | None = None,
 ) -> str:
     action = str(action or "list").strip().lower()
     if action in {"help", "schema"}:
@@ -35,8 +37,10 @@ async def _handle_manage_workspace_tools(
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
     from brain.systems.runtime_settings.workspace_tools import (
         async_check_workspace_tool,
+        async_get_workspace_tool_user_config,
         async_get_workspace_tools_status,
         async_install_workspace_tool,
+        async_set_workspace_tool_user_config,
         workspace_tool_catalog,
     )
 
@@ -83,6 +87,38 @@ async def _handle_manage_workspace_tools(
                     bundle_id=bundle_id,
                 )
                 return _dump({"action": action, **status.model_dump(mode="json")})
+
+            if action == "get_config":
+                if not user_id:
+                    return _error("get_config requires authenticated user context")
+                if not bundle_id:
+                    return _error("get_config requires: bundle_id")
+                config = await async_get_workspace_tool_user_config(
+                    session,
+                    org_id=org_id,
+                    user_id=user_id,
+                    bundle_id=bundle_id,
+                )
+                return _dump({
+                    "action": action,
+                    "bundle_id": bundle_id,
+                    "config": config.model_dump(mode="json") if config else None,
+                })
+
+            if action == "set_config":
+                if not user_id:
+                    return _error("set_config requires authenticated user context")
+                if not bundle_id:
+                    return _error("set_config requires: bundle_id")
+                config = await async_set_workspace_tool_user_config(
+                    session,
+                    org_id=org_id,
+                    user_id=user_id,
+                    bundle_id=bundle_id,
+                    preferences=preferences if preferences is not None else {},
+                    credential_refs=credential_refs if credential_refs is not None else {},
+                )
+                return _dump({"action": action, "config": config.model_dump(mode="json")})
     except Exception as exc:
         logger.exception("manage_workspace_tools failed: %s", exc)
         return _error(str(exc))

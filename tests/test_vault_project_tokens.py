@@ -598,6 +598,31 @@ def test_exec_command_uses_resolved_secret_env_without_returning_values(tmp_path
     assert result["stdout"].count("[secret redacted]") == 2
 
 
+def test_exec_command_uses_workspace_tool_runtime_env_and_redacts_file_secrets(tmp_path):
+    from brain.systems.runs.tool_catalog.handlers.files import _handle_exec_command
+
+    token = "codex-access-token-secret"
+    proc = SimpleNamespace(
+        returncode=0,
+        stdout=f"token={token}\n",
+        stderr="",
+    )
+
+    with patch("subprocess.run", return_value=proc) as run:
+        result = _handle_exec_command(
+            "codex --version",
+            working_dir=str(tmp_path),
+            _resolved_workspace_tool_env={"CODEX_HOME": str(tmp_path / "codex-home")},
+            _resolved_workspace_tool_sensitive_values=[token],
+        )
+
+    run_env = run.call_args.kwargs["env"]
+    assert run_env["CODEX_HOME"] == str(tmp_path / "codex-home")
+    assert result["injected_env"] == ["CODEX_HOME"]
+    assert token not in str(result)
+    assert result["stdout"].count("[secret redacted]") == 1
+
+
 def test_exec_command_rejects_non_string_resolved_secret_env_values(tmp_path):
     from brain.systems.runs.tool_catalog.handlers.files import _handle_exec_command
 

@@ -125,6 +125,19 @@ class WorkspaceToolBundleRead(BaseModel):
     skill_dependencies: list[str] = Field(default_factory=list)
     install_profile: str | None = None
     optional: bool = False
+    metadata: dict = Field(default_factory=dict)
+    runtime: dict = Field(default_factory=dict)
+
+
+class WorkspaceToolUserConfigRead(BaseModel):
+    id: str | None = None
+    org_id: str
+    user_id: str
+    bundle_id: str
+    preferences: dict = Field(default_factory=dict)
+    credential_refs: dict = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class WorkspaceToolInstallationRead(BaseModel):

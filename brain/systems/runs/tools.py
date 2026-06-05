@@ -26,6 +26,10 @@ from brain.systems.runs.secret_mounts import (
 )
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.tool_catalog.metadata import ActionPolicyResult
+from brain.systems.runs.workspace_tool_runtime import (
+    handler_args_with_resolved_workspace_tool_runtime,
+    resolve_workspace_tool_runtime,
+)
 
 
 SECRET_TOOL_NAMES = frozenset({"brain_vault", "vault", "secrets"})
@@ -178,12 +182,26 @@ class AsyncRunToolExecutor:
                 run_id=run_id,
                 context=action_context,
             )
+            workspace_tool_runtime = await resolve_workspace_tool_runtime(
+                tool.name,
+                tool.args,
+                run_id=run_id,
+                context=action_context,
+            )
             handler = _runtime_policy_handler(tool.handler)
             handler_args = handler_args_with_resolved_secret_env(tool.name, tool.args, secret_env)
-            with bind_agent_context(_handler_context_from_action_context(action_context)):
-                result = handler(**handler_args)
-                if inspect.isawaitable(result):
-                    result = await result
+            handler_args = handler_args_with_resolved_workspace_tool_runtime(
+                tool.name,
+                handler_args,
+                workspace_tool_runtime,
+            )
+            try:
+                with bind_agent_context(_handler_context_from_action_context(action_context)):
+                    result = handler(**handler_args)
+                    if inspect.isawaitable(result):
+                        result = await result
+            finally:
+                workspace_tool_runtime.cleanup()
         except Exception as exc:
             error_text = str(exc)
             if manifest_id:

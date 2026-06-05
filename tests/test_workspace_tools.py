@@ -10,12 +10,15 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
 
 from brain.platform.db.models.org import Org, User
-from brain.platform.db.models.workspace_tool import WorkspaceToolInstallation
+from brain.platform.db.models.workspace_tool import WorkspaceToolInstallation, WorkspaceToolUserConfig
 from brain.systems.runs.execution_context import AgentExecutionContext, bind_agent_context
 from brain.systems.runs.project_execution_env import prepare_project_execution_env
 from brain.systems.runs.tool_catalog.handlers.workspace_tools import _handle_manage_workspace_tools
 from brain.systems.runtime_settings.workspace_tools import (
+    async_get_workspace_tool_user_config,
     async_install_workspace_tool,
+    async_set_workspace_tool_user_config,
+    installed_workspace_tool_bundle_ids,
     workspace_tool_catalog,
 )
 
@@ -53,6 +56,7 @@ async def session(async_sqlite_session_factory):
             Org.__table__,
             User.__table__,
             WorkspaceToolInstallation.__table__,
+            WorkspaceToolUserConfig.__table__,
         ]
     )
 
@@ -112,6 +116,27 @@ async def test_workspace_tool_catalog_includes_aws_diagrams():
     assert "aws-diagrams" in bundles
     assert "plantuml" in bundles["aws-diagrams"].provided_commands
     assert "aws-architecture-diagrams" in bundles["aws-diagrams"].skill_dependencies
+
+
+async def test_workspace_tool_catalog_includes_codex_runtime_auth_profile():
+    bundles = {bundle.id: bundle for bundle in workspace_tool_catalog()}
+
+    codex = bundles["codex-cli"]
+    profile = codex.runtime["auth_profiles"][0]
+    assert "codex" in codex.provided_commands
+    assert codex.metadata["npm_package"] == "@openai/codex"
+    assert profile["source"] == {
+        "type": "provider_connection",
+        "provider": "openai",
+        "credential": "codex_subscription",
+        "scope": "originating_user",
+    }
+    assert profile["materialize"] == {
+        "type": "file",
+        "env": "CODEX_HOME",
+        "path": "auth.json",
+        "format": "codex_auth_json",
+    }
 
 
 async def test_workspace_tool_install_persists_and_queues_request(seeded_session, monkeypatch, tmp_path):
@@ -181,3 +206,44 @@ async def test_installed_workspace_tool_paths_are_injected_into_command_env(monk
     assert execution_env.env is not None
     assert execution_env.env["PATH"].split(os.pathsep)[0] == str(bin_path)
     assert execution_env.env["ILLO_WORKSPACE_TOOLS_PATH"] == str(bin_path)
+
+
+async def test_installed_workspace_tool_bundle_ids_read_installed_manifests(monkeypatch, tmp_path):
+    root = tmp_path / "tools"
+    bin_path = root / "orgs" / ORG_ID / "codex-cli" / "current" / "bin"
+    bin_path.mkdir(parents=True)
+    manifest_path = bin_path.parent / "illo-tool.json"
+    manifest_path.write_text(
+        json.dumps({
+            "bundle_id": "codex-cli",
+            "status": "installed",
+            "path_entries": [str(bin_path)],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ILLO_WORKSPACE_TOOLS_ROOT", str(root))
+
+    assert installed_workspace_tool_bundle_ids(ORG_ID) == ["codex-cli"]
+
+
+async def test_workspace_tool_user_config_persists_non_secret_refs(seeded_session):
+    saved = await async_set_workspace_tool_user_config(
+        seeded_session,
+        org_id=ORG_ID,
+        user_id=USER_ID,
+        bundle_id="codex-cli",
+        preferences={"default_model": "gpt-5.1-codex", "approval_mode": "suggest"},
+        credential_refs={"openai": {"type": "provider_connection", "credential": "codex_subscription"}},
+    )
+
+    loaded = await async_get_workspace_tool_user_config(
+        seeded_session,
+        org_id=ORG_ID,
+        user_id=USER_ID,
+        bundle_id="codex-cli",
+    )
+
+    assert loaded is not None
+    assert saved.id == loaded.id
+    assert loaded.preferences["approval_mode"] == "suggest"
+    assert loaded.credential_refs["openai"]["credential"] == "codex_subscription"

@@ -15,6 +15,44 @@
         "installer_runtime": "micromamba",
         "package_channel": "conda-forge"
       }
+    },
+    {
+      "id": "codex-cli",
+      "name": "Codex CLI",
+      "description": "OpenAI Codex command-line coding agent installed as a shared workspace tool, with per-run user auth materialization.",
+      "version": "latest",
+      "install_profile": "npm_package_cli",
+      "provided_commands": ["codex"],
+      "skill_dependencies": [],
+      "optional": true,
+      "metadata": {
+        "npm_package": "@openai/codex",
+        "package_version": "latest",
+        "bin": "codex",
+        "installer_runtime": "npm"
+      },
+      "runtime": {
+        "auth_profiles": [
+          {
+            "id": "originating-user-openai-codex",
+            "description": "Use the originating user's OpenAI Codex/ChatGPT connection for this one tool invocation.",
+            "commands": ["codex"],
+            "required": true,
+            "source": {
+              "type": "provider_connection",
+              "provider": "openai",
+              "credential": "codex_subscription",
+              "scope": "originating_user"
+            },
+            "materialize": {
+              "type": "file",
+              "env": "CODEX_HOME",
+              "path": "auth.json",
+              "format": "codex_auth_json"
+            }
+          }
+        ]
+      }
     }
   ]
 }
