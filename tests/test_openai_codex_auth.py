@@ -58,8 +58,10 @@ def test_parse_codex_auth_payload_extracts_nested_tokens_and_jwt_metadata():
 
     encoded = encode_codex_auth_payload(cred)
     assert encoded["auth_mode"] == "chatgpt"
+    assert encoded["last_refresh"] == "2023-11-14T22:13:20Z"
     assert encoded["tokens"]["account_id"] == "acct_123"
     assert encoded["tokens"]["id_token"] == id_token
+    assert encoded["tokens"]["expires_at"] == "2040-06-02T03:57:02Z"
 
 
 def test_load_codex_auth_json_prefers_codex_home_over_home(monkeypatch, tmp_path):
