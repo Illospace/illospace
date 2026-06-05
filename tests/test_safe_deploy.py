@@ -330,6 +330,10 @@ def test_compose_self_update_sidecar_can_bootstrap_from_api_queue():
     assert '${10:-{}}' not in workspace_tools
     assert '[ -n "$health_json" ] || health_json="{}"' in workspace_tools
     assert '[ -n "$metadata_json" ] || metadata_json="{}"' in workspace_tools
+    assert 'npm install --global --prefix "$npm_prefix"' in workspace_tools
+    assert "Workspace tool target missing" in workspace_tools
+    assert "tool_status=$?" in workspace_tools
+    assert 'if [ "$tool_status" -ne 0 ] || [ -z "$tool_version" ]; then' in workspace_tools
 
 
 def test_compose_doctor_can_skip_host_local_http_probes_from_sidecars():

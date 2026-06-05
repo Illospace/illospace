@@ -272,14 +272,24 @@ install_npm_package_cli() {
         package_spec="${NPM_PACKAGE}@${NPM_PACKAGE_VERSION}"
       fi
 
-      npm install --prefix "$npm_prefix" --cache "$npm_cache" "$package_spec"
+      npm install --global --prefix "$npm_prefix" --cache "$npm_cache" "$package_spec"
+      if [ ! -x "$npm_prefix/bin/$TOOL_BIN" ]; then
+        echo "Workspace tool target missing after npm install: $npm_prefix/bin/$TOOL_BIN" >&2
+        ls -la "$npm_prefix/bin" >&2 || true
+        exit 1
+      fi
 
       cat > "$install_bin_path/$TOOL_BIN" <<'"'"'WRAPPER'"'"'
 #!/usr/bin/env bash
 set -euo pipefail
 TOOL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOL_BIN_NAME="$(basename "$0")"
-exec "$TOOL_ROOT/npm-prefix/bin/$TOOL_BIN_NAME" "$@"
+TARGET="$TOOL_ROOT/npm-prefix/bin/$TOOL_BIN_NAME"
+if [ ! -x "$TARGET" ]; then
+  echo "Workspace tool target missing: $TARGET" >&2
+  exit 127
+fi
+exec "$TARGET" "$@"
 WRAPPER
       chmod +x "$install_bin_path/$TOOL_BIN"
 
@@ -288,16 +298,28 @@ WRAPPER
       chown -R "$APP_UID:$APP_GID" "$INSTALL_ROOT" "$(dirname "$CURRENT_ROOT")"
     '
 
-  local tool_version node_version npm_version
-  tool_version="$(docker run --rm -v "$PRIVATE_VOLUME:/data/private" "$builder_image" bash -lc "\"$BIN_PATH/$tool_bin\" --version" 2>&1 | head -n 1 || true)"
+  local tool_output tool_status tool_version node_version npm_version
+  set +e
+  tool_output="$(docker run --rm -v "$PRIVATE_VOLUME:/data/private" "$builder_image" bash -lc "\"$BIN_PATH/$tool_bin\" --version" 2>&1)"
+  tool_status=$?
+  set -e
+  tool_version="${tool_output%%$'\n'*}"
   node_version="$(docker run --rm "$builder_image" node --version 2>&1 | head -n 1 || true)"
   npm_version="$(docker run --rm "$builder_image" npm --version 2>&1 | head -n 1 || true)"
   health_json="$(jq -n \
     --arg tool_bin "$tool_bin" \
     --arg tool "$tool_version" \
+    --arg tool_status "$tool_status" \
     --arg node "$node_version" \
     --arg npm "$npm_version" \
-    '{($tool_bin): $tool, node: $node, npm: $npm}')"
+    '{($tool_bin): $tool, cli_exit_code: ($tool_status | tonumber), node: $node, npm: $npm}')"
+
+  if [ "$tool_status" -ne 0 ] || [ -z "$tool_version" ]; then
+    write_manifest "$manifest_path" "$bundle_id" "$name" "$version" "$INSTALL_ROOT" "$CURRENT_ROOT" "$BIN_PATH" \
+      "failed" "Workspace tool bundle health check failed." "$health_json" "$metadata_json"
+    echo "Workspace tool bundle health check failed for $bundle_id: ${tool_version:-no output}" >&2
+    exit 1
+  fi
 
   write_manifest "$manifest_path" "$bundle_id" "$name" "$version" "$INSTALL_ROOT" "$CURRENT_ROOT" "$BIN_PATH" \
     "installed" "Workspace tool bundle installed." "$health_json" "$metadata_json"
@@ -354,14 +376,18 @@ check_npm_package_cli() {
       "failed" "Workspace tool bundle is not installed or ${tool_bin} is missing." "$health_json" "$metadata_json"
     exit 1
   fi
-  local tool_version node_version npm_version
-  tool_version="$(docker run --rm -v "$PRIVATE_VOLUME:/data/private" "$builder_image" bash -lc "\"$bin_path/$tool_bin\" --version" 2>&1 | head -n 1 || true)"
+  local tool_output tool_status tool_version node_version npm_version
+  set +e
+  tool_output="$(docker run --rm -v "$PRIVATE_VOLUME:/data/private" "$builder_image" bash -lc "\"$bin_path/$tool_bin\" --version" 2>&1)"
+  tool_status=$?
+  set -e
+  tool_version="${tool_output%%$'\n'*}"
   node_version="$(docker run --rm "$builder_image" node --version 2>&1 | head -n 1 || true)"
   npm_version="$(docker run --rm "$builder_image" npm --version 2>&1 | head -n 1 || true)"
-  health_json="$(jq -n --arg tool_bin "$tool_bin" --arg tool "$tool_version" --arg node "$node_version" --arg npm "$npm_version" '{($tool_bin): $tool, node: $node, npm: $npm}')"
+  health_json="$(jq -n --arg tool_bin "$tool_bin" --arg tool "$tool_version" --arg tool_status "$tool_status" --arg node "$node_version" --arg npm "$npm_version" '{($tool_bin): $tool, cli_exit_code: ($tool_status | tonumber), node: $node, npm: $npm}')"
   status="installed"
   detail="Workspace tool bundle health check passed."
-  if [ -z "$tool_version" ]; then
+  if [ "$tool_status" -ne 0 ] || [ -z "$tool_version" ]; then
     status="failed"
     detail="Workspace tool bundle health check failed."
   fi
