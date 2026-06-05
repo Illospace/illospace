@@ -15,6 +15,7 @@ from brain.systems.runs.execution_context import AgentExecutionContext, bind_age
 from brain.systems.runs.project_execution_env import prepare_project_execution_env
 from brain.systems.runs.tool_catalog.handlers.workspace_tools import _handle_manage_workspace_tools
 from brain.systems.runtime_settings.workspace_tools import (
+    async_get_workspace_tools_status,
     async_get_workspace_tool_user_config,
     async_install_workspace_tool,
     async_set_workspace_tool_user_config,
@@ -167,6 +168,51 @@ async def test_workspace_tool_install_persists_and_queues_request(seeded_session
     assert row.status == "queued"
     assert row.requested_by_user_id == USER_ID
     assert row.bin_path.endswith("/aws-diagrams/current/bin")
+
+
+async def test_scoped_workspace_tool_status_does_not_duplicate_other_manifest_rows(
+    seeded_session,
+    monkeypatch,
+    tmp_path,
+):
+    _request_file, _status_file, root = _workspace_tool_queue(monkeypatch, tmp_path)
+    aws_paths_root = root / "orgs" / ORG_ID / "aws-diagrams" / "current"
+    aws_bin = aws_paths_root / "bin"
+    aws_bin.mkdir(parents=True)
+    (aws_paths_root / "illo-tool.json").write_text(
+        json.dumps({
+            "bundle_id": "aws-diagrams",
+            "name": "AWS Architecture Diagrams",
+            "status": "installed",
+            "path_entries": [str(aws_bin)],
+        }),
+        encoding="utf-8",
+    )
+    seeded_session.add(
+        WorkspaceToolInstallation(
+            org_id=ORG_ID,
+            bundle_id="aws-diagrams",
+            display_name="AWS Architecture Diagrams",
+            status="installed",
+            bin_path=str(aws_bin),
+        )
+    )
+    await seeded_session.flush()
+
+    status = await async_get_workspace_tools_status(
+        seeded_session,
+        org_id=ORG_ID,
+        bundle_id="codex-cli",
+    )
+    await seeded_session.flush()
+    rows = (
+        await seeded_session.execute(
+            select(WorkspaceToolInstallation).where(WorkspaceToolInstallation.bundle_id == "aws-diagrams")
+        )
+    ).scalars().all()
+
+    assert status.catalog[0].id == "aws-diagrams"
+    assert [row.bundle_id for row in rows] == ["aws-diagrams"]
 
 
 async def test_manage_workspace_tools_handler_queues_install(
