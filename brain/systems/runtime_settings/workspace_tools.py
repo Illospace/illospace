@@ -105,7 +105,12 @@ async def async_get_workspace_tools_status(
         running = available and _WORKSPACE_TOOLS_QUEUE.status_is_running(request_file, status_data)
 
     rows = await _installation_rows(session, org_id=org_id, bundle_id=normalized_bundle_id)
-    await _sync_installations_from_manifests(session, rows, org_id=org_id, catalog_by_id=catalog_by_id)
+    sync_catalog_by_id = (
+        {normalized_bundle_id: catalog_by_id[normalized_bundle_id]}
+        if normalized_bundle_id
+        else catalog_by_id
+    )
+    await _sync_installations_from_manifests(session, rows, org_id=org_id, catalog_by_id=sync_catalog_by_id)
     rows = await _installation_rows(session, org_id=org_id, bundle_id=normalized_bundle_id)
     installations = [_serialize_installation(row) for row in rows]
 
