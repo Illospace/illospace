@@ -552,6 +552,8 @@ def handle_test_runner(
     verbose: bool = False,
     workspace_root: str | None = None,
     _resolved_secret_env: Mapping[str, str] | None = None,
+    _resolved_workspace_tool_env: Mapping[str, str] | None = None,
+    _resolved_workspace_tool_sensitive_values: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
     """Run tests and return structured results."""
     cmd = [sys.executable, "-m", "pytest", target, "--tb=short", "-q"]
@@ -560,7 +562,12 @@ def handle_test_runner(
     if verbose:
         cmd.append("-v")
 
-    project_execution = prepare_project_execution_env(extra_env=_resolved_secret_env)
+    extra_env = dict(_resolved_secret_env or {})
+    extra_env.update(dict(_resolved_workspace_tool_env or {}))
+    project_execution = prepare_project_execution_env(
+        extra_env=extra_env,
+        extra_sensitive_values=_resolved_workspace_tool_sensitive_values,
+    )
 
     try:
         proc = run_subprocess_sync(

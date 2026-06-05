@@ -230,7 +230,81 @@ WRAPPER
   echo "Installed $bundle_id for org $org_id at $CURRENT_ROOT"
 }
 
-check_tool() {
+install_npm_package_cli() {
+  local bundle_id="$1"
+  local org_id="$2"
+  local version="$3"
+  local paths name metadata_json health_json package_name package_version tool_bin builder_image
+
+  paths="$(tool_paths_json "$bundle_id" "$org_id" "$version")"
+  INSTALL_ROOT="$(jq -r '.install_root' <<<"$paths")"
+  CURRENT_ROOT="$(jq -r '.current_root' <<<"$paths")"
+  BIN_PATH="$(jq -r '.bin_path' <<<"$paths")"
+  local manifest_path
+  manifest_path="$(jq -r '.manifest_path' <<<"$paths")"
+  name="$(bundle_field "$bundle_id" '.name')"
+  package_name="$(bundle_field "$bundle_id" '.metadata.npm_package')"
+  package_version="$(bundle_field "$bundle_id" '.metadata.package_version // "latest"')"
+  tool_bin="$(bundle_field "$bundle_id" '.metadata.bin // .provided_commands[0]')"
+  metadata_json="$(bundle_json "$bundle_id" | jq -c '.metadata // {}')"
+  builder_image="${ILLO_NPM_WORKSPACE_TOOL_BUILDER_IMAGE:-node:22-bookworm-slim}"
+
+  docker run --rm \
+    -e APP_UID="$APP_UID" \
+    -e APP_GID="$APP_GID" \
+    -e INSTALL_ROOT="$INSTALL_ROOT" \
+    -e CURRENT_ROOT="$CURRENT_ROOT" \
+    -e BIN_PATH="$BIN_PATH" \
+    -e NPM_PACKAGE="$package_name" \
+    -e NPM_PACKAGE_VERSION="$package_version" \
+    -e TOOL_BIN="$tool_bin" \
+    -v "$PRIVATE_VOLUME:/data/private" \
+    "$builder_image" \
+    bash -lc '
+      set -euo pipefail
+      install_bin_path="$INSTALL_ROOT/bin"
+      npm_prefix="$INSTALL_ROOT/npm-prefix"
+      npm_cache="$INSTALL_ROOT/npm-cache"
+      mkdir -p "$INSTALL_ROOT" "$install_bin_path" "$npm_prefix" "$npm_cache"
+
+      package_spec="$NPM_PACKAGE"
+      if [ -n "${NPM_PACKAGE_VERSION:-}" ] && [ "$NPM_PACKAGE_VERSION" != "latest" ]; then
+        package_spec="${NPM_PACKAGE}@${NPM_PACKAGE_VERSION}"
+      fi
+
+      npm install --prefix "$npm_prefix" --cache "$npm_cache" "$package_spec"
+
+      cat > "$install_bin_path/$TOOL_BIN" <<'"'"'WRAPPER'"'"'
+#!/usr/bin/env bash
+set -euo pipefail
+TOOL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TOOL_BIN_NAME="$(basename "$0")"
+exec "$TOOL_ROOT/npm-prefix/bin/$TOOL_BIN_NAME" "$@"
+WRAPPER
+      chmod +x "$install_bin_path/$TOOL_BIN"
+
+      rm -rf "$CURRENT_ROOT"
+      ln -s "$INSTALL_ROOT" "$CURRENT_ROOT"
+      chown -R "$APP_UID:$APP_GID" "$INSTALL_ROOT" "$(dirname "$CURRENT_ROOT")"
+    '
+
+  local tool_version node_version npm_version
+  tool_version="$(docker run --rm -v "$PRIVATE_VOLUME:/data/private" "$builder_image" bash -lc "\"$BIN_PATH/$tool_bin\" --version" 2>&1 | head -n 1 || true)"
+  node_version="$(docker run --rm "$builder_image" node --version 2>&1 | head -n 1 || true)"
+  npm_version="$(docker run --rm "$builder_image" npm --version 2>&1 | head -n 1 || true)"
+  health_json="$(jq -n \
+    --arg tool_bin "$tool_bin" \
+    --arg tool "$tool_version" \
+    --arg node "$node_version" \
+    --arg npm "$npm_version" \
+    '{($tool_bin): $tool, node: $node, npm: $npm}')"
+
+  write_manifest "$manifest_path" "$bundle_id" "$name" "$version" "$INSTALL_ROOT" "$CURRENT_ROOT" "$BIN_PATH" \
+    "installed" "Workspace tool bundle installed." "$health_json" "$metadata_json"
+  echo "Installed $bundle_id for org $org_id at $CURRENT_ROOT"
+}
+
+check_aws_diagrams() {
   local bundle_id="$1"
   local org_id="$2"
   local version="$3"
@@ -262,6 +336,58 @@ check_tool() {
   [ "$status" = "installed" ]
 }
 
+check_npm_package_cli() {
+  local bundle_id="$1"
+  local org_id="$2"
+  local version="$3"
+  local paths manifest_path bin_path name metadata_json health_json status detail tool_bin builder_image
+  paths="$(tool_paths_json "$bundle_id" "$org_id" "$version")"
+  manifest_path="$(jq -r '.manifest_path' <<<"$paths")"
+  bin_path="$(jq -r '.bin_path' <<<"$paths")"
+  name="$(bundle_field "$bundle_id" '.name')"
+  metadata_json="$(bundle_json "$bundle_id" | jq -c '.metadata // {}')"
+  tool_bin="$(bundle_field "$bundle_id" '.metadata.bin // .provided_commands[0]')"
+  builder_image="${ILLO_NPM_WORKSPACE_TOOL_BUILDER_IMAGE:-node:22-bookworm-slim}"
+  if [ ! -x "$bin_path/$tool_bin" ]; then
+    health_json="$(jq -n --arg tool_bin "$tool_bin" '{($tool_bin): "missing"}')"
+    write_manifest "$manifest_path" "$bundle_id" "$name" "$version" "$(jq -r '.install_root' <<<"$paths")" "$(jq -r '.current_root' <<<"$paths")" "$bin_path" \
+      "failed" "Workspace tool bundle is not installed or ${tool_bin} is missing." "$health_json" "$metadata_json"
+    exit 1
+  fi
+  local tool_version node_version npm_version
+  tool_version="$(docker run --rm -v "$PRIVATE_VOLUME:/data/private" "$builder_image" bash -lc "\"$bin_path/$tool_bin\" --version" 2>&1 | head -n 1 || true)"
+  node_version="$(docker run --rm "$builder_image" node --version 2>&1 | head -n 1 || true)"
+  npm_version="$(docker run --rm "$builder_image" npm --version 2>&1 | head -n 1 || true)"
+  health_json="$(jq -n --arg tool_bin "$tool_bin" --arg tool "$tool_version" --arg node "$node_version" --arg npm "$npm_version" '{($tool_bin): $tool, node: $node, npm: $npm}')"
+  status="installed"
+  detail="Workspace tool bundle health check passed."
+  if [ -z "$tool_version" ]; then
+    status="failed"
+    detail="Workspace tool bundle health check failed."
+  fi
+  write_manifest "$manifest_path" "$bundle_id" "$name" "$version" "$(jq -r '.install_root' <<<"$paths")" "$(jq -r '.current_root' <<<"$paths")" "$bin_path" \
+    "$status" "$detail" "$health_json" "$metadata_json"
+  [ "$status" = "installed" ]
+}
+
+check_tool() {
+  local bundle_id="$1"
+  local org_id="$2"
+  local version="$3"
+  case "$(bundle_field "$bundle_id" '.install_profile')" in
+    aws_diagrams_micromamba)
+      check_aws_diagrams "$bundle_id" "$org_id" "$version"
+      ;;
+    npm_package_cli)
+      check_npm_package_cli "$bundle_id" "$org_id" "$version"
+      ;;
+    *)
+      echo "Bundle $bundle_id has no supported install_profile" >&2
+      exit 2
+      ;;
+  esac
+}
+
 main() {
   local action="${1:-}"
   case "$action" in
@@ -278,6 +404,9 @@ main() {
       case "$(bundle_field "$bundle_id" '.install_profile')" in
         aws_diagrams_micromamba)
           install_aws_diagrams "$bundle_id" "$org_id" "$version"
+          ;;
+        npm_package_cli)
+          install_npm_package_cli "$bundle_id" "$org_id" "$version"
           ;;
         *)
           echo "Bundle $bundle_id has no supported install_profile" >&2

@@ -12,11 +12,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel import config as cfg
-from brain.platform.db.models.workspace_tool import WorkspaceToolInstallation
+from brain.platform.db.models.workspace_tool import WorkspaceToolInstallation, WorkspaceToolUserConfig
 
 from .schemas import (
     WorkspaceToolBundleRead,
     WorkspaceToolInstallationRead,
+    WorkspaceToolUserConfigRead,
     WorkspaceToolsRead,
 )
 from .sidecar_queue import (
@@ -73,6 +74,8 @@ def workspace_tool_catalog() -> list[WorkspaceToolBundleRead]:
                 skill_dependencies=_string_list(item.get("skill_dependencies")),
                 install_profile=_optional_text(item.get("install_profile") or item.get("installer")),
                 optional=bool(item.get("optional", False)),
+                metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+                runtime=item.get("runtime") if isinstance(item.get("runtime"), dict) else {},
             )
         )
     return bundles
@@ -284,6 +287,79 @@ def installed_workspace_tool_bin_paths(org_id: str | None) -> list[str]:
     return _dedupe(paths)
 
 
+def installed_workspace_tool_bundle_ids(org_id: str | None) -> list[str]:
+    if not org_id:
+        return []
+    org_root = workspace_tool_root() / "orgs" / _safe_path_part(org_id)
+    if not org_root.exists():
+        return []
+    bundle_ids: list[str] = []
+    for manifest_path in sorted(org_root.glob("*/current/illo-tool.json")):
+        manifest = read_json(manifest_path)
+        if str(manifest.get("status") or "").lower() != "installed":
+            continue
+        bundle_id = _optional_text(manifest.get("bundle_id")) or manifest_path.parent.parent.name
+        if bundle_id:
+            bundle_ids.append(bundle_id)
+    return _dedupe(bundle_ids)
+
+
+async def async_get_workspace_tool_user_config(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    user_id: str,
+    bundle_id: str,
+) -> WorkspaceToolUserConfigRead | None:
+    normalized_bundle_id = normalize_bundle_id(bundle_id)
+    row = await _user_config_row(
+        session,
+        org_id=org_id,
+        user_id=user_id,
+        bundle_id=normalized_bundle_id,
+    )
+    return _serialize_user_config(row) if row else None
+
+
+async def async_set_workspace_tool_user_config(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    user_id: str,
+    bundle_id: str,
+    preferences: dict[str, Any] | None = None,
+    credential_refs: dict[str, Any] | None = None,
+) -> WorkspaceToolUserConfigRead:
+    bundle = require_workspace_tool_bundle(bundle_id)
+    row = await _user_config_row(
+        session,
+        org_id=org_id,
+        user_id=user_id,
+        bundle_id=bundle.id,
+    )
+    now = datetime.now(timezone.utc)
+    if row is None:
+        row = WorkspaceToolUserConfig(
+            org_id=str(org_id),
+            user_id=str(user_id),
+            bundle_id=bundle.id,
+            preferences={},
+            credential_refs={},
+        )
+        session.add(row)
+    if preferences is not None:
+        if not isinstance(preferences, dict):
+            raise HTTPException(status_code=400, detail="preferences must be an object.")
+        row.preferences = dict(preferences)
+    if credential_refs is not None:
+        if not isinstance(credential_refs, dict):
+            raise HTTPException(status_code=400, detail="credential_refs must be an object.")
+        row.credential_refs = dict(credential_refs)
+    row.updated_at = now
+    await session.flush()
+    return _serialize_user_config(row)
+
+
 def normalize_bundle_id(value: str | None) -> str:
     normalized = str(value or "").strip().lower().replace("_", "-")
     if not normalized:
@@ -306,6 +382,25 @@ async def _installation_rows(
         stmt = stmt.where(WorkspaceToolInstallation.bundle_id == bundle_id)
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def _user_config_row(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    user_id: str,
+    bundle_id: str,
+) -> WorkspaceToolUserConfig | None:
+    stmt = (
+        select(WorkspaceToolUserConfig)
+        .where(
+            WorkspaceToolUserConfig.org_id == str(org_id),
+            WorkspaceToolUserConfig.user_id == str(user_id),
+            WorkspaceToolUserConfig.bundle_id == str(bundle_id),
+        )
+        .limit(1)
+    )
+    return (await session.scalars(stmt)).first()
 
 
 async def _upsert_requested_installation(
@@ -387,6 +482,19 @@ def _serialize_installation(row: WorkspaceToolInstallation) -> WorkspaceToolInst
         last_error=row.last_error,
         health=row.health or {},
         metadata=row.metadata_ or {},
+    )
+
+
+def _serialize_user_config(row: WorkspaceToolUserConfig) -> WorkspaceToolUserConfigRead:
+    return WorkspaceToolUserConfigRead(
+        id=str(row.id) if row.id is not None else None,
+        org_id=str(row.org_id),
+        user_id=str(row.user_id),
+        bundle_id=str(row.bundle_id),
+        preferences=row.preferences or {},
+        credential_refs=row.credential_refs or {},
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 

@@ -1856,6 +1856,150 @@ async def test_runtime_tool_executor_resolves_secret_env_mount_without_public_va
     assert secret_value not in artifact_payload
 
 
+async def test_runtime_tool_executor_materializes_workspace_tool_auth_for_installed_command(monkeypatch, tmp_path):
+    from brain.platform.integrations.openai_codex_auth import OpenAICodexCredential, encode_codex_auth_payload
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+    from brain.systems.runtime_settings.schemas import WorkspaceToolBundleRead
+
+    credential_payload = json.dumps(encode_codex_auth_payload(OpenAICodexCredential(
+        access_token="access-token-secret",
+        refresh_token="refresh-token-secret",
+        account_id="acct_123",
+        email="reda@uwear.ai",
+        auth_mode="chatgpt",
+    )))
+    catalog = [
+        WorkspaceToolBundleRead(
+            id="codex-cli",
+            name="Codex CLI",
+            description="test bundle",
+            version="latest",
+            provided_commands=["codex"],
+            runtime={
+                "auth_profiles": [{
+                    "id": "originating-user-openai-codex",
+                    "commands": ["codex"],
+                    "source": {
+                        "type": "provider_connection",
+                        "provider": "openai",
+                        "credential": "codex_subscription",
+                        "scope": "originating_user",
+                    },
+                    "materialize": {
+                        "type": "file",
+                        "env": "CODEX_HOME",
+                        "path": "auth.json",
+                        "format": "codex_auth_json",
+                    },
+                }],
+            },
+        )
+    ]
+
+    async def fake_resolve_api_key(**kwargs):
+        assert kwargs["user_id"] == "user-1"
+        assert kwargs["org_id"] == "org-1"
+        assert kwargs["provider"] == "openai"
+        assert kwargs["auth_mode"] == "chatgpt"
+        return credential_payload, "codex_subscription"
+
+    monkeypatch.setattr("brain.systems.runtime_settings.workspace_tools.workspace_tool_catalog", lambda: catalog)
+    monkeypatch.setattr("brain.systems.runtime_settings.workspace_tools.installed_workspace_tool_bundle_ids", lambda org_id: ["codex-cli"])
+    monkeypatch.setattr("brain.systems.vault.async_resolve_api_key", fake_resolve_api_key)
+
+    runtime = _runtime("worker")
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
+    seen = {}
+
+    def handler(**kwargs):
+        codex_home = kwargs["_resolved_workspace_tool_env"]["CODEX_HOME"]
+        auth_path = tmp_path.__class__(codex_home) / "auth.json"
+        auth_payload = json.loads(auth_path.read_text(encoding="utf-8"))
+        seen["codex_home"] = codex_home
+        seen["auth_payload"] = auth_payload
+        seen["sensitive_values"] = kwargs["_resolved_workspace_tool_sensitive_values"]
+        return {"exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    result = await executor.execute(
+        42,
+        ToolExecution(
+            name="exec_command",
+            args={"command": "codex --version"},
+            handler=handler,
+        ),
+        root_run_id=42,
+    )
+
+    assert result["exit_code"] == 0
+    assert seen["auth_payload"]["auth_mode"] == "chatgpt"
+    assert seen["auth_payload"]["tokens"]["account_id"] == "acct_123"
+    assert "access-token-secret" in seen["sensitive_values"]
+    assert not tmp_path.__class__(seen["codex_home"]).exists()
+    public_payload = json.dumps([event.payload for event in runtime.store.events], default=str)
+    artifact_payload = json.dumps([artifact.text for artifact in runtime.store.artifacts], default=str)
+    assert "access-token-secret" not in public_payload
+    assert "access-token-secret" not in artifact_payload
+
+
+async def test_runtime_tool_executor_supports_explicit_workspace_tool_auth_for_script(monkeypatch):
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+    from brain.systems.runtime_settings.schemas import WorkspaceToolBundleRead
+
+    catalog = [
+        WorkspaceToolBundleRead(
+            id="generic-token-tool",
+            name="Generic Token Tool",
+            description="test bundle",
+            provided_commands=["generic-token-tool"],
+            runtime={
+                "auth_profiles": [{
+                    "id": "workspace-api-token",
+                    "source": {
+                        "type": "provider_connection",
+                        "provider": "openai",
+                        "credential": "org_api_key",
+                        "scope": "workspace",
+                    },
+                    "materialize": {
+                        "type": "env",
+                        "name": "GENERIC_TOOL_TOKEN",
+                        "format": "raw",
+                    },
+                }],
+            },
+        )
+    ]
+
+    async def fake_resolve_api_key(**kwargs):
+        assert kwargs["auth_mode"] == "api_key"
+        return "sk-workspace-secret", "org_main"
+
+    monkeypatch.setattr("brain.systems.runtime_settings.workspace_tools.workspace_tool_catalog", lambda: catalog)
+    monkeypatch.setattr("brain.systems.runtime_settings.workspace_tools.installed_workspace_tool_bundle_ids", lambda org_id: [])
+    monkeypatch.setattr("brain.systems.vault.async_resolve_api_key", fake_resolve_api_key)
+
+    runtime = _runtime("worker")
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
+    seen = {}
+
+    def handler(**kwargs):
+        seen.update(kwargs)
+        return {"exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    await executor.execute(
+        42,
+        ToolExecution(
+            name="run_script",
+            args={"script": "print('ok')", "workspace_tool_auth": ["generic-token-tool"]},
+            handler=handler,
+        ),
+        root_run_id=42,
+    )
+
+    assert seen["_resolved_workspace_tool_env"] == {"GENERIC_TOOL_TOKEN": "sk-workspace-secret"}
+    assert seen["_resolved_workspace_tool_sensitive_values"] == ["sk-workspace-secret"]
+
+
 async def test_runtime_tool_executor_rejects_secret_env_on_unsupported_tool():
     from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
 

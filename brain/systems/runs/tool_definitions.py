@@ -14,6 +14,7 @@ from brain.systems.inbound.status import (
 )
 from brain.systems.runs.tool_catalog.definitions.workers import WORKER_SPAWN_TOOLS
 from brain.systems.runs.secret_mounts import SECRET_ENV_SCHEMA
+from brain.systems.runs.workspace_tool_runtime import WORKSPACE_TOOL_AUTH_SCHEMA
 
 
 _WORKSPACE_TIME_WINDOW_VALUES = [
@@ -2007,6 +2008,7 @@ EXEC_TOOLS = [
                 "working_dir": {"type": "string", "description": "Working directory (optional, defaults to workspace)"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 60, max 300)", "default": 60},
                 "secret_env": SECRET_ENV_SCHEMA,
+                "workspace_tool_auth": WORKSPACE_TOOL_AUTH_SCHEMA,
             },
             "required": ["command"],
         },
@@ -2126,6 +2128,7 @@ EXEC_TOOLS = [
                 },
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 60, max 300)", "default": 60},
                 "secret_env": SECRET_ENV_SCHEMA,
+                "workspace_tool_auth": WORKSPACE_TOOL_AUTH_SCHEMA,
             },
             "required": ["script"],
         },
@@ -2808,11 +2811,23 @@ WORKSPACE_TOOL_TOOLS = [
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["help", "schema", "catalog", "list", "status", "install", "check"],
+                    "enum": [
+                        "help",
+                        "schema",
+                        "catalog",
+                        "list",
+                        "status",
+                        "install",
+                        "check",
+                        "get_config",
+                        "set_config",
+                    ],
                     "default": "list",
                     "description": (
                         "Use catalog to see installable bundles, list/status to inspect current workspace state, "
-                        "install to queue an approved bundle install, and check to refresh persisted health."
+                        "install to queue an approved bundle install, check to refresh persisted health, "
+                        "and get_config/set_config for the originating user's non-secret tool preferences "
+                        "and credential references."
                     ),
                 },
                 "operation": {
@@ -2821,7 +2836,21 @@ WORKSPACE_TOOL_TOOLS = [
                 },
                 "bundle_id": {
                     "type": "string",
-                    "description": "Tool bundle id, e.g. aws-diagrams. Required for install and check; optional for status.",
+                    "description": (
+                        "Tool bundle id, e.g. aws-diagrams. Required for install, check, get_config, "
+                        "and set_config; optional for status."
+                    ),
+                },
+                "preferences": {
+                    "type": "object",
+                    "description": "Non-secret per-user preferences for set_config, such as default profile or flags.",
+                },
+                "credential_refs": {
+                    "type": "object",
+                    "description": (
+                        "Per-user credential references for set_config. Store references such as provider "
+                        "connection ids or Vault key names, never raw secret values."
+                    ),
                 },
             },
             "required": ["action"],

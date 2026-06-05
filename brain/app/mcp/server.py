@@ -1350,6 +1350,8 @@ async def tool_manage_runtime_services(
 async def tool_manage_workspace_tools(
     action: str = "list",
     bundle_id: str | None = None,
+    preferences: dict[str, Any] | None = None,
+    credential_refs: dict[str, Any] | None = None,
     user_id: str | None = None,
     org_id: str | None = None,
 ) -> dict:
@@ -1357,14 +1359,19 @@ async def tool_manage_workspace_tools(
     from brain.platform.db.models.org import User
     from brain.systems.runtime_settings.workspace_tools import (
         async_check_workspace_tool,
+        async_get_workspace_tool_user_config,
         async_get_workspace_tools_status,
         async_install_workspace_tool,
+        async_set_workspace_tool_user_config,
         workspace_tool_catalog,
     )
 
     normalized_action = str(action or "list").strip().lower()
-    if normalized_action not in {"catalog", "list", "status", "install", "check"}:
-        raise ValueError("manage_workspace_tools action must be 'catalog', 'list', 'status', 'install', or 'check'.")
+    if normalized_action not in {"catalog", "list", "status", "install", "check", "get_config", "set_config"}:
+        raise ValueError(
+            "manage_workspace_tools action must be 'catalog', 'list', 'status', 'install', "
+            "'check', 'get_config', or 'set_config'."
+        )
 
     if normalized_action == "catalog":
         return {
@@ -1407,6 +1414,32 @@ async def tool_manage_workspace_tools(
                 org_id=effective_org_id,
                 bundle_id=bundle_id,
             )
+        elif normalized_action == "get_config":
+            if not bundle_id:
+                raise ValueError("get_config requires bundle_id.")
+            config = await async_get_workspace_tool_user_config(
+                uow.session,
+                org_id=effective_org_id,
+                user_id=str(user.id),
+                bundle_id=bundle_id,
+            )
+            return {
+                "action": normalized_action,
+                "bundle_id": bundle_id,
+                "config": config.model_dump(mode="json") if config else None,
+            }
+        elif normalized_action == "set_config":
+            if not bundle_id:
+                raise ValueError("set_config requires bundle_id.")
+            config = await async_set_workspace_tool_user_config(
+                uow.session,
+                org_id=effective_org_id,
+                user_id=str(user.id),
+                bundle_id=bundle_id,
+                preferences=preferences if preferences is not None else {},
+                credential_refs=credential_refs if credential_refs is not None else {},
+            )
+            return {"action": normalized_action, "config": config.model_dump(mode="json")}
         else:
             tool_status = await async_get_workspace_tools_status(
                 uow.session,
@@ -1668,13 +1701,27 @@ TOOLS = {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["catalog", "list", "status", "install", "check"],
+                    "enum": ["catalog", "list", "status", "install", "check", "get_config", "set_config"],
                     "default": "list",
-                    "description": "Inspect catalog/status, queue install, or refresh persisted health.",
+                    "description": (
+                        "Inspect catalog/status, queue install, refresh persisted health, or manage "
+                        "the originating user's non-secret tool config."
+                    ),
                 },
                 "bundle_id": {
                     "type": "string",
-                    "description": "Tool bundle id, e.g. aws-diagrams. Required for install and check.",
+                    "description": (
+                        "Tool bundle id, e.g. aws-diagrams. Required for install, check, "
+                        "get_config, and set_config."
+                    ),
+                },
+                "preferences": {
+                    "type": "object",
+                    "description": "Non-secret per-user preferences for set_config.",
+                },
+                "credential_refs": {
+                    "type": "object",
+                    "description": "Per-user credential references for set_config. Never include raw secrets.",
                 },
             },
             "required": ["action"],

@@ -136,6 +136,16 @@ def _resolved_secret_env_arg(secret_env=None, _resolved_secret_env=None):
     return _resolved_secret_env
 
 
+def _resolved_workspace_tool_runtime_args(
+    workspace_tool_auth=None,
+    _resolved_workspace_tool_env=None,
+    _resolved_workspace_tool_sensitive_values=None,
+):
+    if workspace_tool_auth not in (None, {}, []):
+        raise ValueError("workspace_tool_auth specs must be resolved by the runtime before invoking tool handlers")
+    return _resolved_workspace_tool_env, _resolved_workspace_tool_sensitive_values
+
+
 def _get_tool_handlers(
     workspace_root: str | None = None,
     allowed_workspaces: list[str | dict] | None = None,
@@ -385,14 +395,24 @@ def _get_tool_handlers(
         timeout=60,
         workspace=None,
         secret_env=None,
+        workspace_tool_auth=None,
         _resolved_secret_env=None,
+        _resolved_workspace_tool_env=None,
+        _resolved_workspace_tool_sensitive_values=None,
     ):
+        workspace_tool_env, workspace_tool_sensitive_values = _resolved_workspace_tool_runtime_args(
+            workspace_tool_auth,
+            _resolved_workspace_tool_env,
+            _resolved_workspace_tool_sensitive_values,
+        )
         return _handle_exec_command(
             command,
             working_dir=working_dir,
             timeout=timeout,
             _workspace=_select_workspace(workspace, ws, allowed_workspaces),
             _resolved_secret_env=_resolved_secret_env_arg(secret_env, _resolved_secret_env),
+            _resolved_workspace_tool_env=workspace_tool_env,
+            _resolved_workspace_tool_sensitive_values=workspace_tool_sensitive_values,
         )
 
     def _run_script_handler(
@@ -401,14 +421,24 @@ def _get_tool_handlers(
         timeout=60,
         workspace=None,
         secret_env=None,
+        workspace_tool_auth=None,
         _resolved_secret_env=None,
+        _resolved_workspace_tool_env=None,
+        _resolved_workspace_tool_sensitive_values=None,
     ):
+        workspace_tool_env, workspace_tool_sensitive_values = _resolved_workspace_tool_runtime_args(
+            workspace_tool_auth,
+            _resolved_workspace_tool_env,
+            _resolved_workspace_tool_sensitive_values,
+        )
         return _handle_run_script(
             script,
             description,
             timeout,
             _workspace=_select_workspace(workspace, ws, allowed_workspaces),
             _resolved_secret_env=_resolved_secret_env_arg(secret_env, _resolved_secret_env),
+            _resolved_workspace_tool_env=workspace_tool_env,
+            _resolved_workspace_tool_sensitive_values=workspace_tool_sensitive_values,
         )
 
     handlers.update({
@@ -490,13 +520,29 @@ def _get_tool_handlers(
             "file_summary",
             _file_summary_with_workspace,
         )
-        def _test_runner_handler(target, pattern=None, verbose=False, secret_env=None, _resolved_secret_env=None):
+        def _test_runner_handler(
+            target,
+            pattern=None,
+            verbose=False,
+            secret_env=None,
+            workspace_tool_auth=None,
+            _resolved_secret_env=None,
+            _resolved_workspace_tool_env=None,
+            _resolved_workspace_tool_sensitive_values=None,
+        ):
+            workspace_tool_env, workspace_tool_sensitive_values = _resolved_workspace_tool_runtime_args(
+                workspace_tool_auth,
+                _resolved_workspace_tool_env,
+                _resolved_workspace_tool_sensitive_values,
+            )
             return extended_handlers["test_runner"](
                 target,
                 pattern=pattern,
                 verbose=verbose,
                 workspace_root=_workspace_hint(),
                 _resolved_secret_env=_resolved_secret_env_arg(secret_env, _resolved_secret_env),
+                _resolved_workspace_tool_env=workspace_tool_env,
+                _resolved_workspace_tool_sensitive_values=workspace_tool_sensitive_values,
             )
 
         handlers["test_runner"] = _test_runner_handler
