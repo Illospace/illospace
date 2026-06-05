@@ -1866,6 +1866,8 @@ async def test_runtime_tool_executor_materializes_workspace_tool_auth_for_instal
         refresh_token="refresh-token-secret",
         account_id="acct_123",
         email="reda@uwear.ai",
+        expires_at=2_222_222_222,
+        last_refresh=1_700_000_000,
         auth_mode="chatgpt",
     )))
     catalog = [
@@ -1932,7 +1934,9 @@ async def test_runtime_tool_executor_materializes_workspace_tool_auth_for_instal
 
     assert result["exit_code"] == 0
     assert seen["auth_payload"]["auth_mode"] == "chatgpt"
+    assert seen["auth_payload"]["last_refresh"] == "2023-11-14T22:13:20Z"
     assert seen["auth_payload"]["tokens"]["account_id"] == "acct_123"
+    assert seen["auth_payload"]["tokens"]["expires_at"] == "2040-06-02T03:57:02Z"
     assert "access-token-secret" in seen["sensitive_values"]
     assert not tmp_path.__class__(seen["codex_home"]).exists()
     public_payload = json.dumps([event.payload for event in runtime.store.events], default=str)

@@ -193,7 +193,7 @@ def encode_codex_auth_payload(cred: OpenAICodexCredential) -> dict[str, Any]:
         payload["auth_mode"] = auth_mode
 
     if cred.last_refresh is not None:
-        payload["last_refresh"] = cred.last_refresh
+        payload["last_refresh"] = _format_auth_timestamp(cred.last_refresh)
 
     if auth_mode == "api_key" and cred.access_token:
         payload["OPENAI_API_KEY"] = cred.access_token
@@ -213,7 +213,7 @@ def encode_codex_auth_payload(cred: OpenAICodexCredential) -> dict[str, Any]:
     if cred.plan_type:
         tokens["plan_type"] = cred.plan_type
     if cred.expires_at is not None:
-        tokens["expires_at"] = cred.expires_at
+        tokens["expires_at"] = _format_auth_timestamp(cred.expires_at)
 
     if tokens:
         payload["tokens"] = tokens
@@ -506,6 +506,10 @@ def _coerce_timestamp(*values: Any) -> int | float | None:
                 continue
             return int(number) if number.is_integer() else number
     return None
+
+
+def _format_auth_timestamp(value: int | float) -> str:
+    return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _merged_token_claims(id_token: str | None, access_token: str | None) -> dict[str, Any]:
