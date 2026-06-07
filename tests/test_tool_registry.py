@@ -345,6 +345,40 @@ def test_named_capability_setup_question_requires_capabilities_without_agent_men
     assert "capability/setup context" in message
 
 
+def test_work_request_that_mentions_skill_and_cycle_does_not_require_capabilities():
+    from brain.systems.runs.introspection import required_introspection_tool
+
+    message = (
+        "I want to create un dropshipping store where we will add trend products on the hot topics "
+        "we can find on the news/reddit. Idea is a collection last only something short like 2 weeks. "
+        "can you have a skill and a cyle running every week to propose trendy or funny/popular design ?"
+    )
+
+    assert required_introspection_tool(message) == (None, None)
+
+
+def test_run_introspection_uses_current_human_message_over_thread_wrapper():
+    from brain.systems.runs.introspection import (
+        message_for_required_introspection,
+        required_introspection_tool,
+    )
+
+    wrapped_message = (
+        '[Idea: "Help me set up Slack for the team" | idea-1]\n\n'
+        "where are the results ?"
+    )
+
+    assert required_introspection_tool(wrapped_message)[0] == "read_capabilities"
+
+    selected = message_for_required_introspection(
+        wrapped_message,
+        {"human_message": "where are the results ?"},
+    )
+
+    assert selected == "where are the results ?"
+    assert required_introspection_tool(selected) == (None, None)
+
+
 def test_memory_question_does_not_force_workspace_data():
     from brain.systems.runs.introspection import required_introspection_tool
 

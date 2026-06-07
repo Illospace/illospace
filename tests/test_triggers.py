@@ -63,7 +63,11 @@ def test_internal_adapter_builds_cortex_thread_trigger():
         idea=_idea(),
         user=_user(),
         thread_message="@illo ship it",
-        effective_metadata={"target": {"repo": "illo-brain"}},
+        effective_metadata={
+            "human_message": "stale wrapper text",
+            "introspection_message": "stale wrapper text",
+            "target": {"repo": "illo-brain"},
+        },
         priority=1,
     )
 
@@ -73,6 +77,8 @@ def test_internal_adapter_builds_cortex_thread_trigger():
     assert trigger.actor.id == "user-1"
     assert trigger.target["idea_id"] == "idea-1"
     assert trigger.payload["run_message"] == '[Idea: "Build triggers" | idea-1]\n\n@illo ship it'
+    assert trigger.payload["metadata"]["human_message"] == "@illo ship it"
+    assert trigger.payload["metadata"]["introspection_message"] == "@illo ship it"
     assert trigger.payload["metadata"]["target"]["repo"] == "illo-brain"
     assert trigger.policy["route"] == "run"
 
@@ -96,6 +102,10 @@ def test_internal_adapter_builds_thread_discussion_trigger_as_separate_surface()
         comment=SimpleNamespace(id=77, body="@illo can you see this?"),
         user=_user(),
         discussion_trigger=discussion_trigger,
+        metadata={
+            "human_message": "stale wrapper text",
+            "introspection_message": "stale wrapper text",
+        },
     )
 
     assert trigger.source == "cortex"
@@ -108,6 +118,8 @@ def test_internal_adapter_builds_thread_discussion_trigger_as_separate_surface()
         "surface": "thread_discussion",
     }
     assert trigger.payload["metadata"]["required_response_tool"] == "post_thread_discussion_reply"
+    assert trigger.payload["metadata"]["human_message"] == "@illo can you see this?"
+    assert trigger.payload["metadata"]["introspection_message"] == "@illo can you see this?"
     assert "separate Discussion conversation" in trigger.payload["run_message"]
     assert "not an AI Timeline reply" in trigger.payload["run_message"]
 

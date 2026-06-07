@@ -6,6 +6,10 @@ from typing import Any
 
 from brain.app.api.authorization import human_identity
 from brain.app.triggers.contracts import IlloTrigger, stable_idempotency_key
+from brain.systems.runs.message_metadata import (
+    HUMAN_MESSAGE_METADATA_KEY,
+    INTROSPECTION_MESSAGE_METADATA_KEY,
+)
 
 
 def _idea_payload(idea: Any) -> dict[str, Any]:
@@ -59,6 +63,16 @@ def _discussion_mention_run_message(
     return "\n".join(lines)
 
 
+def _with_current_human_message(metadata: dict[str, Any], message: str) -> dict[str, Any]:
+    result = dict(metadata or {})
+    text = str(message or "").strip()
+    if text:
+        current_message = text[:4000]
+        result[HUMAN_MESSAGE_METADATA_KEY] = current_message
+        result[INTROSPECTION_MESSAGE_METADATA_KEY] = current_message
+    return result
+
+
 def build_cortex_notify_trigger(
     *,
     event: str,
@@ -93,9 +107,10 @@ def build_cortex_notify_trigger(
                 f"[Idea: \"{idea_data['title']}\" | {idea_id}]\n\n"
                 f"New idea created.{desc_text}{att_text}"
             )
-        run_metadata = metadata
+        run_metadata = _with_current_human_message(metadata or {}, thread_message)
     else:
-        run_metadata = effective_metadata if effective_metadata is not None else metadata
+        source_metadata = effective_metadata if effective_metadata is not None else metadata
+        run_metadata = _with_current_human_message(source_metadata or {}, thread_message)
         run_message = f"[Idea: \"{idea_data['title']}\" | {idea_id}]\n\n{thread_message[:2000]}"
 
     payload = {
@@ -103,7 +118,7 @@ def build_cortex_notify_trigger(
         "idea": idea_data,
         "thread_message": thread_message[:2000],
         "run_message": run_message,
-        "metadata": dict(run_metadata or {}),
+        "metadata": run_metadata,
         "priority": int(priority),
         "user_id": user.get("id") if user else None,
     }
@@ -166,6 +181,7 @@ def build_thread_discussion_mention_trigger(
     metadata.setdefault("final_answer_target_surface", THREAD_DISCUSSION_SURFACE)
     metadata.setdefault("discussion_comment_id", comment_id)
     metadata.setdefault("discussion_trigger", discussion_trigger)
+    metadata = _with_current_human_message(metadata, body)
     thread_references = list(metadata.get("thread_references") or [])
 
     target = {

@@ -48,7 +48,7 @@ from brain.platform.providers.model_policy import (
     infer_provider_from_model,
     normalize_model_tier,
 )
-from brain.systems.runs.introspection import required_introspection_tool as resolve_required_introspection_tool
+from brain.systems.runs import introspection as run_introspection
 from brain.systems.runs.direct_loop.final_reply import (
     cache_final_reply_review,
     cached_final_reply_review,
@@ -1155,11 +1155,6 @@ def _check_gate_violations(
     )
 
 
-def _required_introspection_tool(message: str) -> tuple[str | None, str | None]:
-    """Return the mandatory tool for certain introspection questions."""
-    return resolve_required_introspection_tool(message)
-
-
 def _response_has_text(response) -> bool:
     """Return True when the assistant response includes any non-empty text block."""
     return _runtime_response_has_text(response)
@@ -1349,13 +1344,15 @@ async def run_agent_async(
         operation_type=operation_type,
         metadata=metadata,
     )
-    metadata_required_tool, metadata_required_msg = resolve_required_introspection_tool(
+    metadata_required_tool, metadata_required_msg = run_introspection.required_introspection_tool(
         explicit_tool=metadata.get("required_introspection_tool") if isinstance(metadata, dict) else None,
     )
     if metadata_required_tool:
         required_introspection_tool, required_introspection_msg = metadata_required_tool, metadata_required_msg
     else:
-        required_introspection_tool, required_introspection_msg = _required_introspection_tool(message)
+        required_introspection_tool, required_introspection_msg = run_introspection.required_introspection_tool(
+            run_introspection.message_for_required_introspection(message, metadata)
+        )
 
     _previous_execution_metadata = getattr(_agent_context, "execution_metadata", None)
     _previous_execution_artifacts = getattr(_agent_context, "execution_artifacts", None)
