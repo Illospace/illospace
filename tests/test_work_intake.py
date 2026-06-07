@@ -98,8 +98,13 @@ async def test_cortex_work_intake_builds_agent_run_request_from_normalized_trigg
         target={"idea_id": "idea-1"},
         payload={
             "user_id": "user-1",
+            "thread_message": "@illo go",
             "run_message": '[Idea: "Launch" | idea-1]\n\n@illo go',
-            "metadata": {"execution_profile": "fast"},
+            "metadata": {
+                "execution_profile": "fast",
+                "human_message": "@illo go",
+                "introspection_message": "@illo go",
+            },
         },
         policy={"priority": 1, "run_event": "thread_reply"},
         idempotency_key="cortex-idem",
@@ -116,6 +121,8 @@ async def test_cortex_work_intake_builds_agent_run_request_from_normalized_trigg
     assert request.metadata["producer"] == "trigger"
     assert request.metadata["idempotency_key"] == "cortex-idem"
     assert request.metadata["execution_profile"] == "fast"
+    assert request.metadata["human_message"] == "@illo go"
+    assert request.metadata["introspection_message"] == "@illo go"
     assert request.metadata["thread_context"]["formatted"] == "Earlier thread context"
     assert request.metadata["work_intake"]["source"] == "cortex"
     assert request.metadata["work_intake"]["actor"] == {"id": "user-1", "org_id": "org-1", "internal": False}
@@ -332,6 +339,7 @@ async def test_discussion_origin_cortex_work_intake_records_surface_and_trigger_
                 "surface": "thread_discussion",
             },
             payload={
+                "thread_message": "@illo this is what we decided, carry on",
                 "message": "[Idea: \"Launch\" | idea-1]\n\n@illo this is what we decided, carry on",
                 "metadata": {
                     "originating_surface": "thread_discussion",
@@ -339,6 +347,8 @@ async def test_discussion_origin_cortex_work_intake_records_surface_and_trigger_
                     "discussion_trigger": discussion_trigger,
                     "required_response_tool": "post_thread_discussion_reply",
                     "final_answer_target_surface": "thread_discussion",
+                    "human_message": "@illo this is what we decided, carry on",
+                    "introspection_message": "@illo this is what we decided, carry on",
                 },
             },
             policy={"priority": 0, "producer": "trigger", "run_event": "thread_discussion_mention"},
@@ -361,6 +371,8 @@ async def test_discussion_origin_cortex_work_intake_records_surface_and_trigger_
     assert request.metadata["discussion_trigger"] == discussion_trigger
     assert request.metadata["required_response_tool"] == "post_thread_discussion_reply"
     assert request.metadata["final_answer_target_surface"] == "thread_discussion"
+    assert request.metadata["human_message"] == "@illo this is what we decided, carry on"
+    assert request.metadata["introspection_message"] == "@illo this is what we decided, carry on"
 
 
 def test_legacy_routing_logic_is_removed_from_adapters():

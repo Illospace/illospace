@@ -9,6 +9,7 @@ from brain.systems.runs.capabilities import (
     registry_capability_manifests,
 )
 from brain.systems.runs.execution_context import _agent_context
+from brain.systems.runs.message_metadata import INTROSPECTION_MESSAGE_METADATA_KEYS
 from brain.systems.runs.tool_catalog.registry import get_tool_registration
 
 _PERSON_ACTIVITY_PATTERNS = (
@@ -66,7 +67,7 @@ _WORKSPACE_RECORD_PHRASES = (
 )
 _CAPABILITY_SETUP_PATTERNS = (
     re.compile(
-        r"\b(?:set\s+(?:you|illo|it|this|that|me|us|them)\s+up|set\s*up|setup|connect|integrate|install|configure|enable|add)\b"
+        r"\b(?:set\s+(?:you|illo|it|this|that|me|us|them)\s+up|set\s*up|setup|connect|integrate|install|configure|enable)\b"
     ),
     re.compile(
         r"\b(?:set\s*up|setup|connect|integrate|install|configure|enable|add)\b"
@@ -159,6 +160,19 @@ def _looks_like_any_phrase(message: str | None, phrases: tuple[str, ...]) -> boo
     if not text:
         return False
     return any(phrase in text for phrase in phrases)
+
+
+def message_for_required_introspection(
+    message: str | None,
+    metadata: dict | None = None,
+) -> str | None:
+    """Prefer the original human text when a trigger decorates the run message."""
+    if isinstance(metadata, dict):
+        for key in INTROSPECTION_MESSAGE_METADATA_KEYS:
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return message
 
 
 def required_introspection_tool(
