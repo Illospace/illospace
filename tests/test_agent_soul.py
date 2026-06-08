@@ -33,6 +33,9 @@ def test_default_soul_is_team_workspace_specific(monkeypatch, tmp_path):
     assert "connected\npersonal agent acting for that member" in soul.content
     assert "not only as a reply to the current user" in soul.content
     assert "teammate-owned threads" in soul.content
+    assert "treat delivery as part of the task" in soul.content
+    assert "Only use external channels" in soul.content
+    assert "short pointer or\nlink" in soul.content
 
 
 def test_manage_soul_replace_writes_bounded_soul(monkeypatch, tmp_path):
