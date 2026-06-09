@@ -49,18 +49,34 @@ def agent_run_request_for_slack(trigger_payload: dict[str, Any] | Any) -> AgentR
     run_event = _run_event(trigger, policy)
     priority = _priority(payload, policy)
     profile = profile_from_metadata(metadata)
+    slack_thread_id = _slack_thread_id(slack_trigger, target)
+    cortex_thread_id = str(target.get("idea_id") or target.get("thread_id") or "").strip()
     target_ref = {
         **target,
         "kind": "slack_message",
         "event": str(run_event),
         "surface": slack_trigger.get("surface") or target.get("surface") or SLACK_SURFACE,
+        "slack_thread_id": slack_thread_id,
         "slack_trigger": slack_trigger,
         **surface_context,
     }
+    if cortex_thread_id:
+        target_ref["idea_id"] = cortex_thread_id
+        target_ref["thread_id"] = cortex_thread_id
+        target_ref["related_surfaces"] = {
+            "slack": {
+                "kind": "slack",
+                "thread_id": slack_thread_id,
+                "team_id": slack_trigger.get("team_id") or target.get("team_id"),
+                "channel_id": slack_trigger.get("channel_id") or target.get("channel_id"),
+                "message_ts": slack_trigger.get("message_ts") or target.get("message_ts"),
+                "thread_ts": slack_trigger.get("thread_ts") or target.get("thread_ts"),
+            }
+        }
     return AgentRunRequest(
         org_id=trigger_org_id,
         user_id=_payload_user_id(payload, trigger, org_id=trigger_org_id),
-        thread_id=_slack_thread_id(slack_trigger, target),
+        thread_id=cortex_thread_id or slack_thread_id,
         message=str(payload.get("run_message") or payload.get("message") or ""),
         profile=profile,
         recipe=recipe_for_profile(profile, metadata),

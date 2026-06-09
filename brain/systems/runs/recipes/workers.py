@@ -17,6 +17,7 @@ from brain.systems.runs.tools import AsyncRunToolExecutor, ToolRecord, ToolScope
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
 from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
+from brain.systems.runs.recipes.surface_guidance import response_surface_guidance
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ Rules:
 - Do not mutate forbidden or out-of-scope files. If scope is too narrow, say exactly what approval is needed.
 - Stream short progress updates while working.
 - Finish with a concise result: what changed or was learned, required evidence, artifacts produced, and remaining uncertainty.
+- If this worker is not headless and inherited a user-facing response surface, make the final result suitable as a user-visible update.
 """
 
 
@@ -114,6 +116,7 @@ class WorkerRecipe(BaseRunRecipe):
             workspace_ref=runtime.request.workspace_ref,
             context=prompt_context,
             evidence_so_far=runtime.request.metadata.get("evidence") or runtime.request.metadata.get("parent_evidence"),
+            metadata=runtime.request.metadata,
         )
         await runtime.activity("Starting scoped worker", workspace_root=workspace_root)
         spec = build_direct_agent_invocation(
@@ -220,6 +223,7 @@ def build_worker_prompt(
     workspace_ref: dict[str, Any],
     context: str = "",
     evidence_so_far: Any = None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     context_block = context
     if not context_block:
@@ -231,6 +235,8 @@ def build_worker_prompt(
         context_block = "\n\n".join(context_parts)
     return (
         WORKER_AGENT_INSTRUCTIONS
+        + "\n\n"
+        + response_surface_guidance(target_ref=target_ref, metadata=metadata)
         + _json_block("Worker Assignment", assignment.to_payload())
         + _json_block("Parent Evidence", evidence_so_far)
         + (f"\n\n## Context\n{context_block}" if context_block else "")

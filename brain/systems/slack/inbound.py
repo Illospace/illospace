@@ -49,25 +49,33 @@ async def process_slack_message_envelope(
             reasoning_summary="Slack events need a connection owner for the permissive self-hosted MVP.",
         )
 
+    slack_payload = dict(normalized.get("payload") or {})
+    slack_thread_id = _slack_conversation_thread_id(slack_payload)
     trigger_payload = build_slack_work_intake_payload(
         org_id=context.org_id,
         authority_user_id=authority_user_id,
-        payload=dict(normalized.get("payload") or {}),
+        payload=slack_payload,
         inbound_event_id=str(event.id),
         connection_id=context.connection_id,
         idempotency_key=_clean_optional(normalized.get("idempotency_key")),
     )
+    trigger_metadata = dict((trigger_payload.get("payload") or {}).get("metadata") or {})
+    trigger_metadata["slack_thread_id"] = slack_thread_id
+    trigger_payload["payload"] = {
+        **dict(trigger_payload.get("payload") or {}),
+        "metadata": trigger_metadata,
+    }
     admission = await admit_work(
         session,
         WorkIntakeEvent.from_trigger_payload(trigger_payload),
     )
-    slack_payload = dict(normalized.get("payload") or {})
     target = {
         "kind": "slack_message",
         "team_id": slack_payload.get("team_id"),
         "channel_id": slack_payload.get("channel_id"),
         "message_ts": slack_payload.get("message_ts"),
         "thread_ts": slack_payload.get("thread_ts"),
+        "slack_thread_id": slack_thread_id,
     }
     if admission.ok:
         if admission.run_id is not None:
@@ -87,8 +95,15 @@ async def process_slack_message_envelope(
             },
             confidence=1.0,
             target=target,
-            tool_use={"type": "slack_teammate_run", "run_id": admission.run_id},
-            reasoning_summary="Slack mention or DM was admitted as a surface-aware Illo run.",
+            tool_use={
+                "type": "slack_teammate_run",
+                "run_id": admission.run_id,
+                "slack_thread_id": slack_thread_id,
+            },
+            reasoning_summary=(
+                "Slack mention or DM was admitted as a surface-aware Illo run. Illo decides "
+                "whether to answer directly or create durable Cortex/worker follow-up."
+            ),
             reusable_pattern_candidate={
                 "kind": SLACK_MESSAGE_ENVELOPE_KIND,
                 "origin": normalized.get("origin"),
@@ -115,6 +130,15 @@ async def process_slack_message_envelope(
         tool_use={"type": "slack_teammate_run", "status": "failed"},
         reasoning_summary=admission.skipped_reason or "Slack event could not be admitted as an Illo run.",
     )
+
+
+def _slack_conversation_thread_id(payload: Mapping[str, Any]) -> str:
+    team_id = str(payload.get("team_id") or "").strip()
+    channel_id = str(payload.get("channel_id") or "").strip()
+    thread_ts = str(payload.get("thread_ts") or payload.get("message_ts") or "").strip()
+    if not team_id or not channel_id or not thread_ts:
+        return ""
+    return f"slack:{team_id}:{channel_id}:{thread_ts}"
 
 
 async def _slack_run_user_id(

@@ -222,6 +222,8 @@ _TERMINAL_RUN_IDEA_STATUS = {
 _AI_TIMELINE_SURFACES = {"ai_timeline", "thread_timeline", "cortex_thread", "main_thread"}
 _THREAD_DISCUSSION_SURFACE = "thread_discussion"
 _THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
+_SLACK_SURFACE = "slack"
+_SLACK_REPLY_TOOL = "post_slack_reply"
 _NON_TIMELINE_FINAL_ANSWER_TARGETS = {
     "discussion",
     "headless",
@@ -245,6 +247,13 @@ def _run_context_maps(run: AgentRunRow):
     for container in (_run_target_ref(run), _run_metadata(run)):
         if container:
             yield container
+
+
+def _run_is_headless(run: AgentRunRow) -> bool:
+    for container in _run_context_maps(run):
+        if bool(container.get("headless")):
+            return True
+    return False
 
 
 def _run_is_thread_discussion_conversation(run: AgentRunRow) -> bool:
@@ -418,6 +427,27 @@ def _run_discussion_trigger(run: AgentRunRow) -> dict[str, Any]:
     return {}
 
 
+def _run_slack_trigger(run: AgentRunRow) -> dict[str, Any]:
+    for container in _run_context_maps(run):
+        trigger = container.get("slack_trigger")
+        if isinstance(trigger, dict):
+            return dict(trigger)
+    return {}
+
+
+def _run_is_slack_origin(run: AgentRunRow) -> bool:
+    if _run_slack_trigger(run):
+        return True
+    for container in _run_context_maps(run):
+        if container.get("originating_surface") == _SLACK_SURFACE:
+            return True
+        if container.get("source_surface") == _SLACK_SURFACE:
+            return True
+        if container.get("final_answer_target_surface") == _SLACK_SURFACE:
+            return True
+    return False
+
+
 def _run_discussion_thread_id(run: AgentRunRow) -> str:
     trigger = _run_discussion_trigger(run)
     response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
@@ -537,12 +567,139 @@ async def _settle_thread_discussion_conversation_run_async(
     }
 
 
+async def _slack_reply_already_recorded(
+    session,
+    *,
+    run: AgentRunRow,
+) -> bool:
+    if not hasattr(session, "scalars"):
+        return False
+    try:
+        result = await session.scalars(
+            select(AgentRunEventRow)
+            .where(
+                AgentRunEventRow.run_id == int(run.id),
+                AgentRunEventRow.event_type == "run.tool_completed",
+            )
+            .order_by(AgentRunEventRow.sequence_no.desc(), AgentRunEventRow.id.desc())
+            .limit(100)
+        )
+        events = list(result.all())
+    except Exception:
+        return False
+    for event in events:
+        payload = getattr(event, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("tool_name") or payload.get("tool") or "") != _SLACK_REPLY_TOOL:
+            continue
+        result_preview = str(payload.get("result") or "").lower()
+        if '"error"' not in result_preview and "'error'" not in result_preview:
+            return True
+    return False
+
+
+def _slack_response_target(run: AgentRunRow) -> dict[str, Any]:
+    trigger = _run_slack_trigger(run)
+    response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
+    channel_id = str(response_target.get("channel_id") or trigger.get("channel_id") or "").strip()
+    thread_ts = response_target.get("thread_ts")
+    if thread_ts is not None:
+        thread_ts = str(thread_ts or "").strip() or None
+    trigger_channel_type = str(trigger.get("channel_type") or "").strip()
+    trigger_message_ts = str(trigger.get("message_ts") or "").strip()
+    if trigger_channel_type == "im":
+        thread_ts = None
+    elif not response_target.get("thread_ts") and thread_ts == trigger_message_ts:
+        thread_ts = None
+    return {
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
+        "trigger": trigger,
+    }
+
+
+async def _slack_client_for_run(run: AgentRunRow):
+    from brain.systems.slack.client import SlackWebClient
+    from brain.systems.vault.runtime_secrets import RuntimeSecretContext, read_runtime_secret
+
+    token = await read_runtime_secret(
+        "SLACK_BOT_TOKEN",
+        context=RuntimeSecretContext(
+            actor_user_id=str(getattr(run, "user_id", "") or "").strip() or None,
+            org_id=str(getattr(run, "org_id", "") or "").strip() or None,
+            run_id=int(run.id),
+            idea_id=str(getattr(run, "thread_id", "") or "").strip() or None,
+        ),
+        reason="Report a completed Slack-origin Illo run back to Slack.",
+        requested_by="slack_run_settlement",
+        access="service",
+        allow_env_fallback=True,
+    )
+    return SlackWebClient(token)
+
+
+async def _clear_slack_processing_status(client: Any, trigger: dict[str, Any]) -> None:
+    set_status = getattr(client, "set_assistant_status", None)
+    if not callable(set_status):
+        return
+    channel_id = str(trigger.get("channel_id") or "").strip()
+    thread_ts = str(trigger.get("thread_ts") or trigger.get("message_ts") or "").strip()
+    if not channel_id or not thread_ts:
+        return
+    with suppress(Exception):
+        await set_status(channel_id=channel_id, thread_ts=thread_ts, status="")
+
+
+async def _settle_slack_origin_run_async(
+    session,
+    run: AgentRunRow,
+) -> dict[str, Any] | None:
+    if not _run_is_slack_origin(run):
+        return None
+    if _run_is_headless(run):
+        return None
+    final_answer, artifact_id = await _latest_final_answer_artifact(session, run=run)
+    if not final_answer:
+        return None
+    if await _slack_reply_already_recorded(session, run=run):
+        return None
+
+    target = _slack_response_target(run)
+    channel_id = target["channel_id"]
+    if not channel_id:
+        return None
+    try:
+        client = await _slack_client_for_run(run)
+        response = await client.post_message(
+            channel=channel_id,
+            text=final_answer,
+            thread_ts=target["thread_ts"],
+        )
+        await _clear_slack_processing_status(client, target["trigger"])
+    except Exception as exc:
+        logger.info("slack_final_answer_settlement_failed: %s", exc, extra={"run_id": int(run.id)})
+        return None
+    return {
+        "surface": _SLACK_SURFACE,
+        "run_id": int(run.id),
+        "artifact_id": artifact_id,
+        "channel_id": channel_id,
+        "thread_ts": target["thread_ts"],
+        "slack": response,
+    }
+
+
 async def _settle_terminal_root_run_async(session, run_id: int) -> dict[str, Any] | None:
     run = await session.get(AgentRunRow, int(run_id))
-    if run is None or run.parent_run_id is not None:
+    if run is None:
         return None
-    if _run_is_thread_discussion_conversation(run):
+    if run.parent_run_id is None and _run_is_thread_discussion_conversation(run):
         return await _settle_thread_discussion_conversation_run_async(session, run)
+    if _run_is_slack_origin(run):
+        slack_payload = await _settle_slack_origin_run_async(session, run)
+        if run.parent_run_id is not None:
+            return slack_payload
     return await _settle_idea_for_terminal_root_run_async(session, run_id)
 
 

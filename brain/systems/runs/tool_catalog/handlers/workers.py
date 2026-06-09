@@ -130,6 +130,35 @@ def _merge_tool_policy(tool_policy: Any, *, headless: bool) -> dict[str, Any]:
     )
 
 
+def _delegation_next_action(*, tool_name: str, response_tool: str | None, headless: bool) -> dict[str, Any]:
+    instruction = (
+        f"{tool_name} has made this delegated work durable. Do not call {tool_name} again "
+        "for the same objective unless the user asks for another distinct delegation."
+    )
+    if response_tool:
+        instruction += (
+            f" Use {response_tool} to give the waiting surface a brief model-authored update "
+            "with the returned run id/status, then continue only with distinct follow-up work."
+        )
+    elif headless:
+        instruction += (
+            " This run is headless, so settle with a concise final answer for the caller or "
+            "monitor only distinct follow-up work."
+        )
+    else:
+        instruction += (
+            " Give the caller a concise model-authored update with the returned run id/status, "
+            "then continue only with distinct follow-up work."
+        )
+    return {
+        "instruction": instruction,
+        "repeat_guard": {
+            "tool": tool_name,
+            "same_objective": "do_not_repeat",
+        },
+    }
+
+
 def _assignment_payload(
     *,
     role: str,
@@ -228,6 +257,8 @@ async def _handle_spawn_worker(
         "thread_attachment_context": inherited_metadata.get("thread_attachment_context"),
     }
     worker_metadata = {key: value for key, value in worker_metadata.items() if value is not None}
+    response_tool = _current_agent_value("required_response_tool")
+    response_tool_text = str(response_tool).strip() if response_tool else None
 
     async with UnitOfWork() as uow:
         store = AsyncAgentRunStore(uow.session)
@@ -275,6 +306,11 @@ async def _handle_spawn_worker(
             "headless": bool(headless),
             "step_key": step_key,
             "deduplicated": deduplicated,
+            "next_action": _delegation_next_action(
+                tool_name="spawn_worker",
+                response_tool=response_tool_text,
+                headless=bool(headless),
+            ),
         },
         default=str,
     )

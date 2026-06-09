@@ -442,6 +442,9 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert captured["spec"].idea_id is None
     assert captured["spec"].workspace_root == "/tmp/work"
     assert "interactive single-agent path" in captured["spec"].system_prompt
+    assert "Triage first" in captured["spec"].system_prompt
+    assert "Response Surface and Delegation" in captured["spec"].system_prompt
+    assert "do not disappear into long work" in captured["spec"].system_prompt
     assert "spawn_worker" in captured["spec"].system_prompt
     assert "headless=true" in captured["spec"].system_prompt
     assert "write one brief task-specific assistant sentence" in captured["spec"].system_prompt
@@ -454,6 +457,143 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert any(event.event_type == "run.activity" and event.payload["label"] == "Reading files" for event in runtime.store.events)
     assert any(event.event_type == "run.tool_completed" and event.payload["tool_name"] == "read_file" for event in runtime.store.events)
     assert any(_artifact_type(artifact) == "file_observation" for artifact in runtime.store.artifacts)
+
+
+async def test_fast_discussion_run_can_ack_visibly_before_spawning_child(monkeypatch):
+    from brain.systems.runs.domain import RunRecipe
+    from brain.systems.runs.events import run_event
+    from brain.systems.runs.recipes.fast import FastRecipe
+
+    runtime = _runtime(
+        "fast",
+        message=(
+            "Please acknowledge first, then launch a child worker to inspect whether "
+            "response-surface delegation tests exist."
+        ),
+    )
+    runtime.request = replace(
+        runtime.request,
+        metadata={
+            **runtime.request.metadata,
+            "originating_surface": "thread_discussion",
+            "required_response_tool": "post_thread_discussion_reply",
+            "final_answer_target_surface": "thread_discussion",
+            "discussion_trigger": {
+                "thread_id": "idea-1",
+                "comment_id": 7,
+                "response_target": {
+                    "thread_id": "idea-1",
+                    "reply_to_comment_id": 7,
+                },
+            },
+        },
+        target_ref={
+            "kind": "thread_discussion",
+            "originating_surface": "thread_discussion",
+            "required_response_tool": "post_thread_discussion_reply",
+            "final_answer_target_surface": "thread_discussion",
+            "discussion_trigger": {
+                "thread_id": "idea-1",
+                "comment_id": 7,
+                "response_target": {
+                    "thread_id": "idea-1",
+                    "reply_to_comment_id": 7,
+                },
+            },
+        },
+    )
+    visible_comments: list[dict] = []
+
+    async def fake_reply(**kwargs):
+        visible_comments.append(dict(kwargs))
+        return {"ok": True, "comment_id": 99}
+
+    async def fake_spawn_worker(**kwargs):
+        child = await runtime.store.create_child_run(
+            runtime.run,
+            recipe=RunRecipe.WORKER,
+            message=str(kwargs["objective"]),
+            step_key="spawn_worker:response-surface-delegation-probe",
+            metadata={
+                "origin": "spawn_worker",
+                "headless": bool(kwargs.get("headless")),
+                "worker_role": kwargs.get("role") or "worker",
+            },
+        )
+        await runtime.store.append_event(
+            run_event(
+                runtime.run.id,
+                "run.worker_spawned",
+                {
+                    "child_run_id": child.id,
+                    "step_key": "spawn_worker:response-surface-delegation-probe",
+                    "headless": bool(kwargs.get("headless")),
+                    "role": kwargs.get("role") or "worker",
+                    "objective": kwargs["objective"],
+                },
+                root_run_id=runtime.run.root_run_id,
+                producer="spawn_worker",
+            )
+        )
+        return {
+            "ok": True,
+            "status": "queued",
+            "child_run_id": child.id,
+            "headless": bool(kwargs.get("headless")),
+        }
+
+    async def fake_invoke(spec):
+        assert "Response Surface and Delegation" in spec.system_prompt
+        assert "User-visible response tool for that surface: post_thread_discussion_reply." in spec.system_prompt
+        await spec.tool_handlers["post_thread_discussion_reply"](
+            body="I will launch a worker now to inspect the response-surface delegation tests.",
+        )
+        await spec.tool_handlers["spawn_worker"](
+            objective="Inspect test names for response-surface delegation coverage.",
+            role="inspect",
+            headless=False,
+        )
+        return SimpleNamespace(output="Worker queued; I will report back when it finishes.", success=True, error=None)
+
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.fast.build_agent_tools",
+        lambda _role: [
+            {"name": "post_thread_discussion_reply"},
+            {"name": "spawn_worker"},
+        ],
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.fast.build_tool_handlers",
+        lambda **_kwargs: {
+            "post_thread_discussion_reply": fake_reply,
+            "spawn_worker": fake_spawn_worker,
+        },
+    )
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
+
+    result = await FastRecipe().execute(runtime)
+
+    assert result.status.value == "completed"
+    assert visible_comments == [
+        {"body": "I will launch a worker now to inspect the response-surface delegation tests."}
+    ]
+    event_types = [event.event_type for event in runtime.store.events]
+    ack_completed_index = next(
+        i
+        for i, event in enumerate(runtime.store.events)
+        if event.event_type == "run.tool_completed"
+        and event.payload["tool_name"] == "post_thread_discussion_reply"
+    )
+    worker_spawned_index = event_types.index("run.worker_spawned")
+    spawn_completed_index = next(
+        i
+        for i, event in enumerate(runtime.store.events)
+        if event.event_type == "run.tool_completed" and event.payload["tool_name"] == "spawn_worker"
+    )
+    assert ack_completed_index < worker_spawned_index < spawn_completed_index
+    worker_event = runtime.store.events[worker_spawned_index]
+    assert worker_event.payload["headless"] is False
+    assert worker_event.payload["child_run_id"] in runtime.store.runs
 
 
 async def test_fast_recipe_uses_the_product_prompt_pipeline(monkeypatch):
@@ -1018,6 +1158,12 @@ async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monke
 
     assert payload["ok"] is True
     assert payload["child_run_id"] == child.id
+    assert payload["next_action"]["repeat_guard"] == {
+        "tool": "spawn_worker",
+        "same_objective": "do_not_repeat",
+    }
+    assert "Do not call spawn_worker again" in payload["next_action"]["instruction"]
+    assert "headless" in payload["next_action"]["instruction"]
     assert create_kwargs["thread_id"].startswith("headless-worker:42:")
     assert create_kwargs["metadata"]["headless"] is True
     assert set(create_kwargs["metadata"]["tool_policy"]["disabled_tools"]) >= {
@@ -2335,6 +2481,8 @@ async def test_worker_recipe_propagates_headless_tool_policy(monkeypatch):
     result = await WorkerRecipe().execute(runtime)
 
     assert result.status.value == "completed"
+    assert "Response Surface and Delegation" in captured["spec"].system_prompt
+    assert "visible delegated run completes" in captured["spec"].system_prompt
     assert captured["spec"].metadata["headless"] is True
     assert captured["spec"].metadata["tool_policy"] == {"blocked_tools": ["post_chat_message"]}
 
@@ -2834,6 +2982,250 @@ async def test_runner_does_not_duplicate_final_answer_thread_message():
 
     assert await _settle_idea_for_terminal_root_run_async(FakeSession(), 45) is None
     assert not any(isinstance(obj, IdeaThread) for obj in added)
+
+
+async def test_runner_reports_slack_origin_final_answer_back_to_slack(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    run = SimpleNamespace(
+        id=77,
+        parent_run_id=None,
+        thread_id=str(uuid.uuid4()),
+        status="completed",
+        org_id="org-1",
+        user_id="user-1",
+        target_ref={
+            "kind": "slack_message",
+            "slack_trigger": {
+                "channel_id": "C456",
+                "channel_type": "channel",
+                "message_ts": "1716900000.000100",
+                "thread_ts": "1716900000.000100",
+                "response_target": {
+                    "channel_id": "C456",
+                    "thread_ts": None,
+                    "visibility": "public",
+                },
+            },
+        },
+        metadata_={"final_answer_target_surface": "slack"},
+    )
+    final_artifact = SimpleNamespace(
+        id=101,
+        run_id=77,
+        artifact_type="final_answer",
+        text="Done. I checked the package list and posted the findings.",
+    )
+    calls = []
+
+    class FakeSession:
+        def __init__(self):
+            self.scalar_calls = 0
+
+        async def scalars(self, stmt):
+            del stmt
+            self.scalar_calls += 1
+            if self.scalar_calls == 1:
+                return _ScalarRows([final_artifact])
+            return _ScalarRows([])
+
+    class FakeSlackClient:
+        async def post_message(self, **kwargs):
+            calls.append(("message", kwargs))
+            return {"ok": True, "channel": kwargs["channel"], "ts": "1716900400.000500"}
+
+        async def set_assistant_status(self, **kwargs):
+            calls.append(("status", kwargs))
+            return {"ok": True}
+
+    async def fake_client_for_run(run_arg):
+        assert run_arg is run
+        return FakeSlackClient()
+
+    monkeypatch.setattr(runner, "_slack_client_for_run", fake_client_for_run)
+
+    result = await runner._settle_slack_origin_run_async(FakeSession(), run)
+
+    assert result["surface"] == "slack"
+    assert result["run_id"] == 77
+    assert result["artifact_id"] == 101
+    assert calls == [
+        (
+            "message",
+            {
+                "channel": "C456",
+                "text": "Done. I checked the package list and posted the findings.",
+                "thread_ts": None,
+            },
+        ),
+        (
+            "status",
+            {
+                "channel_id": "C456",
+                "thread_ts": "1716900000.000100",
+                "status": "",
+            },
+        ),
+    ]
+
+
+async def test_runner_does_not_override_model_authored_slack_reply(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    run = SimpleNamespace(
+        id=78,
+        parent_run_id=None,
+        thread_id=str(uuid.uuid4()),
+        status="completed",
+        org_id="org-1",
+        user_id="user-1",
+        target_ref={
+            "kind": "slack_message",
+            "slack_trigger": {
+                "channel_id": "C456",
+                "channel_type": "channel",
+                "message_ts": "1716900000.000100",
+                "thread_ts": "1716900000.000100",
+                "response_target": {"channel_id": "C456", "thread_ts": None},
+            },
+        },
+        metadata_={"final_answer_target_surface": "slack"},
+    )
+    final_artifact = SimpleNamespace(
+        id=102,
+        run_id=78,
+        artifact_type="final_answer",
+        text="Done. I checked the package list and posted the findings.",
+    )
+    posted_event = SimpleNamespace(
+        payload={
+            "tool_name": "post_slack_reply",
+            "args": {"body": "I started a Cortex thread for this and will report back there."},
+            "result": '{"ok": true, "ts": "1716900001.000200"}',
+        }
+    )
+
+    class FakeSession:
+        def __init__(self):
+            self.scalar_calls = 0
+
+        async def scalars(self, stmt):
+            del stmt
+            self.scalar_calls += 1
+            if self.scalar_calls == 1:
+                return _ScalarRows([final_artifact])
+            return _ScalarRows([posted_event])
+
+    async def fail_client_for_run(_run):
+        raise AssertionError("Slack client should not be requested after post_slack_reply")
+
+    monkeypatch.setattr(runner, "_slack_client_for_run", fail_client_for_run)
+
+    assert await runner._settle_slack_origin_run_async(FakeSession(), run) is None
+
+
+async def test_runner_reports_non_headless_slack_child_final_answer_back_to_slack(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    run = SimpleNamespace(
+        id=79,
+        parent_run_id=78,
+        root_run_id=78,
+        thread_id="slack:T789:C456:1716900000.000100",
+        status="completed",
+        org_id="org-1",
+        user_id="user-1",
+        target_ref={
+            "kind": "slack_message",
+            "slack_trigger": {
+                "channel_id": "C456",
+                "channel_type": "channel",
+                "message_ts": "1716900000.000100",
+                "thread_ts": "1716900000.000100",
+                "response_target": {"channel_id": "C456", "thread_ts": "1716900000.000100"},
+            },
+        },
+        metadata_={"final_answer_target_surface": "slack", "headless": False},
+    )
+    final_artifact = SimpleNamespace(
+        id=103,
+        run_id=79,
+        artifact_type="final_answer",
+        text="Worker finished: the affected package was not present in the scanned manifests.",
+    )
+    calls = []
+
+    class FakeSession:
+        def __init__(self):
+            self.scalar_calls = 0
+
+        async def get(self, model, key):
+            del model, key
+            return run
+
+        async def scalars(self, stmt):
+            del stmt
+            self.scalar_calls += 1
+            if self.scalar_calls == 1:
+                return _ScalarRows([final_artifact])
+            return _ScalarRows([])
+
+    class FakeSlackClient:
+        async def post_message(self, **kwargs):
+            calls.append(("message", kwargs))
+            return {"ok": True, "channel": kwargs["channel"], "ts": "1716900400.000500"}
+
+        async def set_assistant_status(self, **kwargs):
+            calls.append(("status", kwargs))
+            return {"ok": True}
+
+    async def fake_client_for_run(run_arg):
+        assert run_arg is run
+        return FakeSlackClient()
+
+    monkeypatch.setattr(runner, "_slack_client_for_run", fake_client_for_run)
+
+    result = await runner._settle_terminal_root_run_async(FakeSession(), 79)
+
+    assert result["surface"] == "slack"
+    assert result["run_id"] == 79
+    assert calls[0] == (
+        "message",
+        {
+            "channel": "C456",
+            "text": "Worker finished: the affected package was not present in the scanned manifests.",
+            "thread_ts": "1716900000.000100",
+        },
+    )
+
+
+async def test_runner_keeps_headless_slack_child_silent(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    run = SimpleNamespace(
+        id=80,
+        parent_run_id=78,
+        root_run_id=78,
+        thread_id="headless-worker:78:abc",
+        status="completed",
+        org_id="org-1",
+        user_id="user-1",
+        target_ref={
+            "kind": "slack_message",
+            "slack_trigger": {
+                "channel_id": "C456",
+                "response_target": {"channel_id": "C456", "thread_ts": "1716900000.000100"},
+            },
+        },
+        metadata_={"final_answer_target_surface": "slack", "headless": True},
+    )
+
+    async def fail_client_for_run(_run):
+        raise AssertionError("Headless child should not request a Slack client")
+
+    monkeypatch.setattr(runner, "_slack_client_for_run", fail_client_for_run)
+
+    assert await runner._settle_slack_origin_run_async(object(), run) is None
 
 
 async def test_runner_does_not_mirror_after_same_run_ai_timeline_tool_message():

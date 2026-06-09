@@ -13,6 +13,7 @@ from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.shared import project_runtime_workspace_from_ref
+from brain.systems.runs.recipes.surface_guidance import response_surface_guidance
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
 from brain.systems.personality import agent_profile_prompt_section, soul_prompt_section
 
@@ -28,8 +29,9 @@ short feedback loops.
 Runtime rules:
 - Treat the provided Target, Workspace, Context, attachments, memory, and live steering as the current run state.
 - Use later live steering to adjust the current run without discarding useful progress.
-- Prefer the smallest complete action that satisfies the request now; leave larger follow-up work explicit.
-- Fast may spawn scoped workers. If an independent investigation, implementation slice, verification pass, duplicate search, or bug/blocker report can safely progress in parallel while you continue the user-facing run, use spawn_worker.
+- Triage first: decide whether this is a direct answer, a short interactive task, or work that needs durable/parallel delegation.
+- Prefer the smallest complete action that satisfies the request now, but do not disappear into long work before giving the user a timely model-authored update on the originating surface.
+- Fast should spawn scoped workers. If an independent investigation, implementation slice, verification pass, duplicate search, or bug/blocker report can safely progress in parallel while you continue the user-facing run, use spawn_worker.
 - Use headless=true for internal blocker or bug-report workers that do not need user input and should not create visible thread content.
 - Do not spawn a worker when delegation overhead is larger than doing the step directly, when write scopes would overlap unsafely, or when your final answer depends on a multi-wave verified synthesis.
 - Use Deep when the request needs heavy verification, dependency-ordered worker waves, internal follow-ups, or formal synthesis across worker results.
@@ -156,7 +158,13 @@ class FastRecipe(BaseRunRecipe):
             root_run_id=runtime.run.root_run_id,
         )
 
-        prompt_context = context.prompt_context()
+        surface_guidance = response_surface_guidance(
+            target_ref=runtime.request.target_ref,
+            metadata=runtime.request.metadata,
+        )
+        prompt_context = "\n\n".join(
+            section for section in (surface_guidance, context.prompt_context()) if section.strip()
+        )
         system_prompt = build_fast_system_prompt(prompt_context)
         spec = build_direct_agent_invocation(
             message=context.message,
