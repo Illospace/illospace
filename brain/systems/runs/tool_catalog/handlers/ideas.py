@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_, select
@@ -86,13 +86,46 @@ async def _serialize_idea(idea, session) -> dict[str, Any]:
 
 def _current_tool_run_id() -> int | None:
     run = getattr(_agent_context, "run", None)
-    run_id = getattr(run, "run_id", None) or getattr(run, "id", None)
+    run_id = getattr(_agent_context, "run_id", None) or getattr(run, "run_id", None) or getattr(run, "id", None)
     execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
     run_id = run_id or execution_metadata.get("run_id")
     try:
         return int(run_id) if run_id is not None else None
     except Exception:
         return None
+
+
+def _current_response_surface_metadata() -> dict[str, Any]:
+    execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
+    execution_metadata = execution_metadata if isinstance(execution_metadata, Mapping) else {}
+    target_ref = getattr(_agent_context, "target_ref", None)
+    containers = (
+        target_ref if isinstance(target_ref, Mapping) else {},
+        execution_metadata.get("target_ref") if isinstance(execution_metadata.get("target_ref"), Mapping) else {},
+        execution_metadata.get("execution_provenance")
+        if isinstance(execution_metadata.get("execution_provenance"), Mapping)
+        else {},
+        execution_metadata,
+    )
+    inherited: dict[str, Any] = {}
+    for container in containers:
+        for key in (
+            "originating_surface",
+            "triggering_surface",
+            "source_surface",
+            "required_response_tool",
+            "slack_trigger",
+            "slack_thread_id",
+            "discussion_trigger",
+        ):
+            if key in inherited:
+                continue
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                inherited[key] = value.strip()
+            elif isinstance(value, Mapping):
+                inherited[key] = dict(value)
+    return inherited
 
 
 def _created_idea_seed_content(
@@ -127,6 +160,30 @@ def _optional_bool(value: Any) -> bool | None:
     if text in {"0", "false", "no", "n", "off"}:
         return False
     return None
+
+
+def _delegated_run_next_action(*, tool_name: str, response_tool: str | None) -> dict[str, Any]:
+    instruction = (
+        f"{tool_name} has made this delegated run durable. Do not call {tool_name} again "
+        "for the same request unless the user asks for another distinct thread/run."
+    )
+    if response_tool:
+        instruction += (
+            f" Use {response_tool} to give the waiting surface a brief model-authored update "
+            "with the returned thread/run id, then continue only with distinct follow-up work."
+        )
+    else:
+        instruction += (
+            " Give the caller a concise model-authored update with the returned thread/run id, "
+            "then continue only with distinct follow-up work."
+        )
+    return {
+        "instruction": instruction,
+        "repeat_guard": {
+            "tool": tool_name,
+            "same_request": "do_not_repeat",
+        },
+    }
 
 
 async def _seed_created_idea_thread(
@@ -188,6 +245,7 @@ async def _admit_created_idea_run(
             payload={
                 "message": _created_idea_run_message(idea, seed_content),
                 "metadata": {
+                    **_current_response_surface_metadata(),
                     "created_by_tool": "manage_idea",
                     "created_by_run_id": source_run_id,
                     "parent_idea_id": parent_id,
@@ -538,6 +596,13 @@ async def _handle_manage_idea(
                     "run_id": getattr(run_result, "run_id", None),
                     "run_started": run_result is not None,
                 }
+                if run_result is not None:
+                    response_metadata = _current_response_surface_metadata()
+                    response_tool = response_metadata.get("required_response_tool")
+                    result["next_action"] = _delegated_run_next_action(
+                        tool_name="manage_idea",
+                        response_tool=str(response_tool).strip() if response_tool else None,
+                    )
 
             else:
                 if not target_idea_id:

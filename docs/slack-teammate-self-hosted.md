@@ -45,16 +45,24 @@ Optional Slack hints:
 - `app_mention` events and every DM are actionable.
 - Top-level channel mentions reply as normal channel messages; mentions inside
   Slack threads reply back into that thread; DMs reply as normal DM messages.
-- Illo sets a best-effort Slack working status while a Slack-origin run is
-  being admitted, so teammates can see that the request was accepted. This uses
-  the existing `chat:write` scope and Slack clears the status on reply or after
-  its short timeout.
+- Socket Mode envelopes are acknowledged before durable inbound processing.
+  This is a transport acknowledgement only, not user-visible Illo speech.
+- User-visible Slack text is model-authored. Illo decides whether to answer a
+  simple request directly with `post_slack_reply`, or to make longer work
+  durable with `spawn_worker`/`manage_idea` and then post a natural Slack update
+  describing what it actually did.
+- If Illo creates or selects a Cortex Thread, it should share only the
+  `thread_url` returned by that tool. Slack ids and run ids are never converted
+  into Thread URLs.
+- When a Slack-origin run or non-headless Slack-origin child run reaches a
+  terminal final answer, the runner posts that generated final answer back to
+  Slack unless the same run already completed a successful `post_slack_reply`
+  call.
 - Regular channel messages without an Illo mention are ignored.
 - The default manifest subscribes to `app_mention` and `message.im` only. It
   keeps channel history scopes for context reads, but avoids generic channel
   message events as trigger sources because Slack can also deliver the same
   human mention as `app_mention`.
-- Socket Mode envelopes are acknowledged before durable inbound processing.
 - The connector records durable health while it connects. If the app-level
   Socket Mode token is wrong or Slack rejects the connection, `manage_slack`
   reports the connection as `error` instead of leaving it looking configured.

@@ -838,7 +838,14 @@ async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monke
 
     monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
 
-    with bind_agent_context({"idea_id": "parent-idea", "org_id": "org-1", "user_id": "user-1"}):
+    with bind_agent_context(
+        {
+            "idea_id": "parent-idea",
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "execution_metadata": {"required_response_tool": "post_thread_discussion_reply"},
+        }
+    ):
         payload = json.loads(
             await idea_tools._handle_manage_idea(
                 action="create",
@@ -853,8 +860,74 @@ async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monke
     assert payload["created"] is True
     assert payload["run_started"] is True
     assert payload["run_id"] == 321
+    assert payload["next_action"]["repeat_guard"] == {
+        "tool": "manage_idea",
+        "same_request": "do_not_repeat",
+    }
+    assert "Do not call manage_idea again" in payload["next_action"]["instruction"]
+    assert "post_thread_discussion_reply" in payload["next_action"]["instruction"]
     assert payload["idea"]["status"] == "working"
     assert admitted == ["idea-created"]
+
+
+async def test_manage_idea_started_run_inherits_originating_surface_without_stealing_thread_final(
+    monkeypatch,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
+
+    captured = {}
+    idea = SimpleNamespace(id="idea-created", org_id="org-1", title="Check packages")
+
+    async def admit(session_arg, event):
+        del session_arg
+        captured["event"] = event
+        return SimpleNamespace(ok=True, run_id=322, skipped_reason=None)
+
+    monkeypatch.setattr(idea_tools, "admit_work", admit)
+
+    with bind_agent_context(
+        {
+            "run_id": 7,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "execution_metadata": {
+                "target_ref": {
+                    "originating_surface": "slack",
+                    "source_surface": "slack",
+                    "required_response_tool": "post_slack_reply",
+                    "final_answer_target_surface": "slack",
+                    "slack_trigger": {
+                        "channel_id": "C456",
+                        "response_target": {"channel_id": "C456", "thread_ts": "1716900000.000100"},
+                    },
+                    "slack_thread_id": "slack:T789:C456:1716900000.000100",
+                }
+            },
+        }
+    ):
+        result = await idea_tools._admit_created_idea_run(
+            object(),
+            idea=idea,
+            seed_content="Scan the repository manifests for affected packages.",
+            actor_user_id="user-1",
+            parent_id=None,
+            origin_ref="slack:T789:C456:1716900000.000100",
+            thread_message_id=43,
+        )
+
+    assert result.run_id == 322
+    event = captured["event"]
+    assert event.target == {"kind": "cortex_idea", "idea_id": "idea-created"}
+    metadata = event.payload["metadata"]
+    assert metadata["originating_surface"] == "slack"
+    assert metadata["source_surface"] == "slack"
+    assert metadata["required_response_tool"] == "post_slack_reply"
+    assert metadata["slack_thread_id"] == "slack:T789:C456:1716900000.000100"
+    assert metadata["slack_trigger"]["channel_id"] == "C456"
+    assert "final_answer_target_surface" not in metadata
+    assert metadata["created_by_tool"] == "manage_idea"
+    assert metadata["created_by_run_id"] == 7
 
 
 def test_unified_stream_synthesizes_visible_final_answer_from_run_artifact():

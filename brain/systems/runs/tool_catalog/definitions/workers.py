@@ -10,7 +10,9 @@ WORKER_SPAWN_TOOLS = [
             "Queue a scoped worker AgentRun and return immediately. Use this when an independent "
             "slice can progress in parallel while the current run continues, or when Illo should "
             "file/report an internal bug or blocker in the background. Set headless=true for "
-            "background reporting or investigation that should not create visible thread content."
+            "background reporting or investigation that should not create visible thread content; "
+            "leave headless=false when the delegated run should be able to report visible progress "
+            "or a final update back through the inherited originating surface."
         ),
         "input_schema": {
             "type": "object",
@@ -90,4 +92,3 @@ WORKER_SPAWN_TOOLS = [
         },
     },
 ]
-

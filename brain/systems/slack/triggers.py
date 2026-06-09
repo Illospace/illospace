@@ -176,7 +176,13 @@ def slack_run_message(payload: Mapping[str, Any], slack_trigger_payload: Mapping
     lines = [
         "A teammate invoked Illo from Slack.",
         "Slack is the triggering conversation surface; use normal Illospace tools for the work.",
-        f"After acting, reply in Slack with {SLACK_REPLY_TOOL} when a visible response fits.",
+        "Decide whether this is a simple Slack reply or work that should be delegated into Cortex/worker runs.",
+        f"For simple requests, reply in Slack with {SLACK_REPLY_TOOL}.",
+        (
+            "For long-running work, make the delegation durable with manage_idea or spawn_worker, "
+            f"then send a model-authored Slack update with {SLACK_REPLY_TOOL}."
+        ),
+        "Only share Cortex Thread links returned by tools as thread_url; never build a URL from Slack ids or run ids.",
         "Use read_slack_conversation if more Slack context is needed.",
         f"Default Slack reply target: {reply_mode}",
         "",

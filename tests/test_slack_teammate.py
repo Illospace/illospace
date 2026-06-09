@@ -364,7 +364,8 @@ def test_slack_adapter_builds_teammate_trigger():
         "thread_ts": None,
         "visibility": "public",
     }
-    assert "normal Illospace tools" in trigger.payload["run_message"]
+    assert "Decide whether this is a simple Slack reply" in trigger.payload["run_message"]
+    assert "thread_url" in trigger.payload["run_message"]
     assert "post_slack_reply" in trigger.payload["run_message"]
 
 
@@ -413,6 +414,45 @@ async def test_slack_work_intake_builds_surface_aware_agent_run_request():
 
 
 @pytest.mark.asyncio
+async def test_slack_work_intake_uses_backing_cortex_thread_when_provided():
+    from brain.app.triggers.adapters.slack import build_slack_message_trigger
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    trigger = build_slack_message_trigger(
+        org_id="org-1",
+        authority_user_id="owner-1",
+        payload={
+            "event_kind": "mention",
+            "origin": "slack.app_mention",
+            "team_id": "T789",
+            "channel_id": "C456",
+            "channel_type": "channel",
+            "message_ts": "1716900000.000100",
+            "thread_ts": "1716900000.000100",
+            "slack_user_id": "U123",
+            "text": "<@BILLO> ship it",
+        },
+        connection_id="conn-1",
+        idempotency_key="slack:T789:C456:1716900000.000100",
+    ).to_payload()
+    trigger["target"]["idea_id"] = "idea-123"
+    trigger["target"]["thread_id"] = "idea-123"
+    trigger["target"]["thread_url"] = "https://illo.example.com/threads/idea-123"
+
+    request = await build_agent_run_request(
+        object(),
+        WorkIntakeEvent.from_trigger_payload(trigger),
+    )
+
+    assert request.thread_id == "idea-123"
+    assert request.target_ref["idea_id"] == "idea-123"
+    assert request.target_ref["thread_id"] == "idea-123"
+    assert request.target_ref["thread_url"] == "https://illo.example.com/threads/idea-123"
+    assert request.target_ref["slack_thread_id"] == "slack:T789:C456:1716900000.000100"
+    assert request.target_ref["related_surfaces"]["slack"]["thread_id"] == "slack:T789:C456:1716900000.000100"
+
+
+@pytest.mark.asyncio
 async def test_slack_inbound_envelope_records_event_and_admits_slack_run(session):
     from brain.systems.inbound.service import submit_inbound_envelope
     from brain.systems.slack.ingress import normalize_slack_socket_event
@@ -439,11 +479,19 @@ async def test_slack_inbound_envelope_records_event_and_admits_slack_run(session
     assert event.status == "processed"
     assert event.action_type == "slack.run_admitted"
     assert event.ingress_context["transport"] == "slack_socket_mode"
+    assert "idea_id" not in result["ilo_outcome"]
+    assert "thread_id" not in result["ilo_outcome"]
+    assert "thread_url" not in result["ilo_outcome"]
     assert run.thread_id == "slack:T789:C456:1716900000.000100"
     assert run.target_ref["kind"] == "slack_message"
+    assert run.target_ref["slack_thread_id"] == "slack:T789:C456:1716900000.000100"
     assert run.metadata_["slack_trigger"]["channel_id"] == "C456"
+    assert run.metadata_["slack_thread_id"] == "slack:T789:C456:1716900000.000100"
+    assert "cortex_thread" not in run.metadata_
     assert run.metadata_["inbound_event"]["event_id"] == str(event.id)
     assert receipt.target["kind"] == "slack_message"
+    assert receipt.target["slack_thread_id"] == "slack:T789:C456:1716900000.000100"
+    assert receipt.tool_use["slack_thread_id"] == "slack:T789:C456:1716900000.000100"
 
     replay = await submit_inbound_envelope(
         session,
@@ -493,14 +541,64 @@ async def test_duplicate_slack_events_across_connection_rows_share_one_run(sessi
 
     assert len(events) == 2
     assert len(runs) == 1
+    assert runs[0].thread_id == "slack:T789:C456:1716900000.000100"
     assert runs[0].source_idempotency_scope == "slack"
     assert runs[0].source_idempotency_key == "slack:T789:C456:1716900000.000100"
+    assert "thread_id" not in first["ilo_outcome"]
+    assert "thread_id" not in second["ilo_outcome"]
     assert first["ilo_outcome"]["run_id"] == runs[0].id
     assert second["ilo_outcome"]["run_id"] == runs[0].id
 
 
 @pytest.mark.asyncio
-async def test_slack_connector_sets_processing_status_for_actionable_payload(session, monkeypatch):
+async def test_slack_thread_followup_reuses_slack_conversation_key_with_new_run(session):
+    from brain.systems.inbound.service import submit_inbound_envelope
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    connection = await _seed_slack_connection(session)
+    first_message = normalize_slack_socket_event(
+        _socket_mode_app_mention(text="<@BILLO> go launch a thread for this"),
+        bot_user_id="BILLO",
+    )
+    followup_message = normalize_slack_socket_event(
+        _socket_mode_app_mention(
+            text="<@BILLO> is the thread ongoing? can you share the link?",
+            ts="1716900300.000400",
+            event_ts="1716900300.000400",
+            thread_ts="1716900000.000100",
+            event_id="Ev-followup",
+        ),
+        bot_user_id="BILLO",
+    )
+
+    first = await submit_inbound_envelope(
+        session,
+        connection=connection,
+        envelope=first_message,
+        ingress_context={"transport": "slack_socket_mode", "envelope_id": "env-1"},
+    )
+    followup = await submit_inbound_envelope(
+        session,
+        connection=connection,
+        envelope=followup_message,
+        ingress_context={"transport": "slack_socket_mode", "envelope_id": "env-2"},
+    )
+
+    runs = (await session.scalars(select(AgentRunRow).order_by(AgentRunRow.id.asc()))).all()
+
+    assert len(runs) == 2
+    assert runs[0].thread_id == "slack:T789:C456:1716900000.000100"
+    assert runs[1].thread_id == "slack:T789:C456:1716900000.000100"
+    assert runs[0].source_idempotency_key == "slack:T789:C456:1716900000.000100"
+    assert runs[1].source_idempotency_key == "slack:T789:C456:1716900300.000400"
+    assert first["ilo_outcome"]["slack"]["slack_thread_id"] == "slack:T789:C456:1716900000.000100"
+    assert followup["ilo_outcome"]["slack"]["slack_thread_id"] == "slack:T789:C456:1716900000.000100"
+    assert "thread_url" not in first["ilo_outcome"]
+    assert "thread_url" not in followup["ilo_outcome"]
+
+
+@pytest.mark.asyncio
+async def test_slack_connector_does_not_send_backend_authored_ack_for_actionable_payload(session, monkeypatch):
     from brain.systems.slack import connector
 
     connection = await _seed_slack_connection(session)
@@ -513,6 +611,10 @@ async def test_slack_connector_sets_processing_status_for_actionable_payload(ses
         async def set_assistant_status(self, **kwargs):
             calls.append(("status", kwargs))
             return {"ok": True}
+
+        async def post_message(self, **kwargs):
+            calls.append(("message", kwargs))
+            return {"ok": True, "ts": "1716900001.000200", "channel": kwargs["channel"]}
 
     monkeypatch.setattr(connector, "SlackWebClient", _SlackClient, raising=False)
 
@@ -527,21 +629,11 @@ async def test_slack_connector_sets_processing_status_for_actionable_payload(ses
         ),
     )
 
-    assert calls == [
-        ("init", "xoxb-test"),
-        (
-            "status",
-            {
-                "channel_id": "C456",
-                "thread_ts": "1716900000.000100",
-                "status": "is working on it...",
-            },
-        ),
-    ]
+    assert calls == []
 
 
 @pytest.mark.asyncio
-async def test_slack_connector_does_not_reset_status_for_existing_duplicate_run(session, monkeypatch):
+async def test_slack_connector_does_not_send_backend_authored_ack_for_duplicate_run(session, monkeypatch):
     from brain.systems.slack import connector
 
     first_connection = await _seed_slack_connection(session)
@@ -555,6 +647,10 @@ async def test_slack_connector_does_not_reset_status_for_existing_duplicate_run(
         async def set_assistant_status(self, **kwargs):
             calls.append(("status", kwargs))
             return {"ok": True}
+
+        async def post_message(self, **kwargs):
+            calls.append(("message", kwargs))
+            return {"ok": True, "ts": "1716900001.000200", "channel": kwargs["channel"]}
 
     monkeypatch.setattr(connector, "SlackWebClient", _SlackClient, raising=False)
 
@@ -579,17 +675,7 @@ async def test_slack_connector_does_not_reset_status_for_existing_duplicate_run(
         ),
     )
 
-    assert calls == [
-        ("init", "xoxb-test"),
-        (
-            "status",
-            {
-                "channel_id": "C456",
-                "thread_ts": "1716900000.000100",
-                "status": "is working on it...",
-            },
-        ),
-    ]
+    assert calls == []
 
 
 @pytest.mark.asyncio
