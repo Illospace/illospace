@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import signal
 import time
 
-from brain.systems.runs.cortex.queue_health import QueueStallMonitor, queued_backlog_health_snapshot
+from brain.systems.runs.cortex.queue_health import QueueStallMonitor, queued_backlog_health_snapshot_async
 from brain.systems.runs.cortex.runner import (
     runner_health_snapshot,
     start_runner,
@@ -134,7 +135,7 @@ def main() -> None:
 
             if queue_stall_monitor.should_check(now=now):
                 try:
-                    queue_health = queued_backlog_health_snapshot()
+                    queue_health = asyncio.run(queued_backlog_health_snapshot_async())
                 except Exception as exc:
                     logger.warning("agent-run worker queue health check failed: %s", exc)
                 else:
