@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -118,10 +117,6 @@ async def queued_backlog_health_snapshot_async() -> dict[str, Any]:
     }
 
 
-def queued_backlog_health_snapshot() -> dict[str, Any]:
-    return asyncio.run(queued_backlog_health_snapshot_async())
-
-
 @dataclass
 class QueueStallMonitor:
     check_interval_seconds: float
@@ -147,7 +142,6 @@ class QueueStallMonitor:
 
 __all__ = [
     "QueueStallMonitor",
-    "queued_backlog_health_snapshot",
     "queued_backlog_health_snapshot_async",
     "queued_backlog_snapshot_async",
     "queued_watchdog_after_seconds",
