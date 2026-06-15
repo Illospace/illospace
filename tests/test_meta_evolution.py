@@ -288,9 +288,10 @@ class TestRunMetaEvolution:
     """Test full meta-evolution pipeline uses UnitOfWork."""
 
     @patch("brain.systems.feedback.meta_evolution.UnitOfWork")
+    @patch("brain.systems.feedback.meta_evolution.ingest_memory_source", new_callable=AsyncMock)
     @patch("brain.systems.feedback.meta_evolution.compare_periods")
     @patch("brain.systems.feedback.meta_evolution.compute_evolution_metrics")
-    async def test_full_pipeline(self, mock_metrics, mock_compare, mock_uow_cls):
+    async def test_full_pipeline(self, mock_metrics, mock_compare, mock_ingest, mock_uow_cls):
         from brain.systems.feedback.meta_evolution import run_meta_evolution, MetaInsight, EvolutionMetrics
 
         mock_uow = MagicMock()
@@ -319,6 +320,7 @@ class TestRunMetaEvolution:
         assert stats["regressions"] == 1
         assert stats["insights_stored"] >= 1
         assert "prediction_accuracy" in stats["metrics"]
+        mock_ingest.assert_awaited()
 
     @patch("brain.systems.feedback.meta_evolution.compare_periods")
     @patch("brain.systems.feedback.meta_evolution.compute_evolution_metrics")
@@ -398,8 +400,9 @@ class TestStoreParameter:
         mock_uow_cls.return_value.__aexit__ = AsyncMock(return_value=False)
         mock_uow.session.execute = AsyncMock()
 
-        await _store_parameter("test_param", 0.42)
-        mock_uow.session.execute.assert_called_once()
+        with patch("brain.systems.feedback.meta_evolution.ingest_memory_source", new=AsyncMock()) as mock_ingest:
+            await _store_parameter("test_param", 0.42)
+        mock_ingest.assert_awaited_once()
 
     def test_no_cursor_param(self):
         """_store_parameter() should not accept a cur parameter."""

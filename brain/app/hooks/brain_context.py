@@ -39,8 +39,7 @@ async def async_get_context(
     """Query the brain for context relevant to this message."""
     from sqlalchemy import text
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
-    from brain.systems.memory.embeddings import embed_query
-    from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+    from brain.systems.reconstructive_memory.controller import reconstruct_memory
 
     user_id = user_id or os.environ.get("BRAIN_USER_ID")
     org_id = org_id or os.environ.get("BRAIN_ORG_ID")
@@ -51,34 +50,24 @@ async def async_get_context(
         "warnings": [],
     }
 
-    # 1. Semantic search for relevant memories
+    # 1. Reconstruct relevant source-backed memory evidence.
     try:
         async with UnitOfWork() as uow:
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            query_emb = embed_query(message, runtime_config=runtime_config)
-            emb_str = "[" + ",".join(str(x) for x in query_emb) + "]"
-
-            # Get top relevant memories (lessons and patterns weighted higher)
-            memories_result = await _session_execute(uow.session, text("""
-                SELECT id, content, memory_type, salience,
-                       1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity
-                FROM memories
-                WHERE NOT archived
-                  AND 1 - (semantic_embedding <=> CAST(:emb AS vector)) > 0.45
-                ORDER BY
-                    CASE WHEN memory_type IN ('lesson', 'pattern') THEN 0.15 ELSE 0 END
-                    + (1 - (semantic_embedding <=> CAST(:emb AS vector))) * 0.7
-                    + (salience / 10.0) * 0.15
-                    DESC
-                LIMIT 5
-            """), {"emb": emb_str})
-            for row in memories_result.mappings().all():
+            pack = await reconstruct_memory(
+                uow.session,
+                query=message,
+                user_id=user_id,
+                org_id=org_id,
+                limit=5,
+            )
+            for item in pack.supporting_evidence:
                 result["memories"].append({
-                    "id": row["id"],
-                    "content": row["content"][:300],
-                    "type": row["memory_type"],
-                    "salience": float(row["salience"]) if row["salience"] else 0,
-                    "similarity": round(float(row["similarity"]), 3),
+                    "id": item.node_id,
+                    "content": (item.source_text or item.text)[:300],
+                    "type": "reconstructed_evidence",
+                    "salience": round(float(item.confidence) * 10, 2),
+                    "similarity": round(float(item.confidence), 3),
+                    "source_span_id": item.source_span_id,
                 })
 
             # 2. Get active guardrails from recent skill failures
@@ -99,17 +88,16 @@ async def async_get_context(
                     "when": str(row["started_at"]),
                 })
 
-            # 3. Check for high-salience warnings (lessons with salience >= 9)
+            # 3. Check for high-confidence warnings (lessons/patterns/procedures).
             warnings_result = await _session_execute(uow.session, text("""
-                SELECT content, salience
-                FROM memories
-                WHERE memory_type IN ('lesson', 'pattern')
-                  AND salience >= 9
-                  AND NOT archived
-                  AND 1 - (semantic_embedding <=> CAST(:emb AS vector)) > 0.5
-                ORDER BY salience DESC, 1 - (semantic_embedding <=> CAST(:emb AS vector)) DESC
+                SELECT COALESCE(text, canonical_label) AS content, confidence
+                FROM memory_nodes
+                WHERE COALESCE(content_kind, node_kind) IN ('lesson', 'pattern', 'procedure', 'policy')
+                  AND confidence >= 0.9
+                  AND archived_at IS NULL
+                ORDER BY confidence DESC, updated_at DESC
                 LIMIT 2
-            """), {"emb": emb_str})
+            """))
             for row in warnings_result.mappings().all():
                 result["warnings"].append(row["content"][:300])
 

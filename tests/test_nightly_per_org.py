@@ -36,6 +36,7 @@ def mock_nightly_uow():
     execute_result.mappings.return_value.all.return_value = []
     execute_result.mappings.return_value.first.return_value = {"id": 1}
     uow.session.execute.return_value = _AwaitableResult(execute_result)
+    uow.session.scalar = AsyncMock(return_value=0)
     uow.session.scalars.return_value.all.return_value = []
     return uow
 

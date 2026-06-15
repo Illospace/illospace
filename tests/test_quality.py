@@ -120,18 +120,18 @@ class TestDeduplication:
         visibility: str = "private",
     ) -> int:
         result = await db_session.execute(text("""
-            INSERT INTO memories (
-                content, memory_type, salience, source, tags,
-                semantic_embedding, user_id, org_id, visibility
+            INSERT INTO memory_nodes (
+                node_kind, content_kind, canonical_label, text, normalized_key,
+                confidence, truth_status, freshness_status, user_id, org_id, visibility
             )
             VALUES (
-                :content, 'fact', 5.0, 'test', ARRAY[]::text[],
-                CAST(:embedding AS vector), :user_id, :org_id, :visibility
+                'content', 'fact', :content, :content, :normalized_key,
+                0.5, 'active', 'fresh', :user_id, :org_id, :visibility
             )
             RETURNING id
         """), {
             "content": content,
-            "embedding": vec_to_pg(embedding),
+            "normalized_key": content.lower(),
             "user_id": user_id,
             "org_id": org_id,
             "visibility": visibility,

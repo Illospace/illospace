@@ -60,7 +60,7 @@ class TestAuditLessons:
             call_count[0] += 1
             result = MagicMock()
             sql_str = str(sql)
-            if "FROM memories" in sql_str:
+            if "FROM memory_nodes" in sql_str:
                 result.mappings.return_value.all.return_value = [
                     {"id": 5, "content": "test lesson", "salience": 9.0, "tags": []}
                 ]
@@ -88,7 +88,7 @@ class TestAuditLessons:
             call_count[0] += 1
             result = MagicMock()
             sql_str = str(sql)
-            if "FROM memories" in sql_str:
+            if "FROM memory_nodes" in sql_str:
                 result.mappings.return_value.all.return_value = [
                     {"id": 10, "content": "brand new lesson", "salience": 8.0, "tags": []}
                 ]
@@ -117,7 +117,7 @@ class TestCompileLessonToRule:
             sql_str = str(sql).strip()
             executions.append({"sql": sql_str, "params": params})
             result = MagicMock()
-            if "FROM memories" in sql_str and "id = " in sql_str:
+            if "FROM memory_nodes" in sql_str and "id = " in sql_str:
                 # Lesson lookup
                 result.mappings.return_value.first.return_value = {
                     "id": 1, "content": "Always run tests before shipping code",

@@ -148,10 +148,13 @@ async def _async_scan_conversation_patterns(session: AsyncSession, runtime_confi
     try:
         rows = (
             await session.execute(text("""
-                SELECT content, memory_type, created_at
-                FROM memories
+                SELECT COALESCE(text, canonical_label) AS content,
+                       COALESCE(content_kind, node_kind) AS memory_type,
+                       created_at
+                FROM memory_nodes
                 WHERE created_at > NOW() - INTERVAL '7 days'
-                  AND content IS NOT NULL
+                  AND archived_at IS NULL
+                  AND COALESCE(text, canonical_label) IS NOT NULL
                 ORDER BY created_at DESC
                 LIMIT 100
             """))
@@ -291,11 +294,13 @@ async def _async_scan_nightly_insights(session: AsyncSession) -> list[dict]:
     try:
         rows = (
             await session.execute(text("""
-                SELECT content, memory_type
-                FROM memories
-                WHERE memory_type IN ('reflection', 'nightly_reflection', 'dream', 'insight')
+                SELECT COALESCE(text, canonical_label) AS content,
+                       COALESCE(content_kind, node_kind) AS memory_type
+                FROM memory_nodes
+                WHERE content_kind IN ('reflection', 'nightly_reflection', 'dream', 'insight')
                   AND created_at > NOW() - INTERVAL '2 days'
-                  AND content IS NOT NULL
+                  AND archived_at IS NULL
+                  AND COALESCE(text, canonical_label) IS NOT NULL
                 ORDER BY created_at DESC
                 LIMIT 10
             """))

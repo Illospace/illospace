@@ -112,17 +112,22 @@ async def _async_save_processed_ids(ids: set) -> None:
 
 async def gather_improvement_memories(target_date: date, processed_ids: set) -> list[dict]:
     """Query unprocessed improvement memories."""
+    del target_date
     async with UnitOfWork() as uow:
         result = await uow.session.execute(text("""
-            SELECT id, content, salience, tags, created_at
-            FROM memories
-            WHERE memory_type = 'improvement'
-              AND NOT archived
-              AND id NOT IN (SELECT unnest(CAST(:processed_ids AS int[])))
-            ORDER BY salience DESC, created_at DESC
+            SELECT id,
+                   COALESCE(text, canonical_label) AS content,
+                   confidence * 10 AS salience,
+                   ARRAY_REMOVE(ARRAY[node_kind, content_kind], NULL) AS tags,
+                   created_at
+            FROM memory_nodes
+            WHERE content_kind = 'improvement'
+              AND archived_at IS NULL
+            ORDER BY confidence DESC, created_at DESC
             LIMIT 20
-        """), {"processed_ids": list(processed_ids) or [0]})
-        return [dict(r) for r in result.mappings().all()]
+        """))
+        rows = [dict(r) for r in result.mappings().all()]
+    return [row for row in rows if row["id"] not in processed_ids]
 
 
 def load_pending_reflection() -> list[dict]:

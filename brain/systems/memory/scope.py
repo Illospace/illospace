@@ -84,7 +84,14 @@ async def reclassify_all(dry_run: bool = False) -> dict:
     stats = {'total': 0, 'universal': 0, 'personal': 0, 'changed': 0}
     async with UnitOfWork() as uow:
         result = await uow.session.execute(text(
-            "SELECT id, content, memory_type, scope FROM memories WHERE NOT archived"
+            """
+            SELECT id,
+                   COALESCE(text, canonical_label) AS content,
+                   COALESCE(content_kind, node_kind) AS memory_type,
+                   scope_key AS scope
+            FROM memory_nodes
+            WHERE archived_at IS NULL
+            """
         ))
         rows = result.mappings().all()
         stats['total'] = len(rows)
@@ -98,7 +105,7 @@ async def reclassify_all(dry_run: bool = False) -> dict:
                 stats['changed'] += 1
                 if not dry_run:
                     await uow.session.execute(text(
-                        "UPDATE memories SET scope = :scope WHERE id = :id"
+                        "UPDATE memory_nodes SET scope_key = :scope, updated_at = NOW() WHERE id = :id"
                     ), {"scope": new_scope, "id": row['id']})
                 print(f"  [{row['id']}] {old_scope} → {new_scope}: {row['content'][:80]}")
 

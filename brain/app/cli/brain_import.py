@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-"""Import memories into the brain from a starter kit or legacy workspace.
+"""Import reconstructive memories into the brain from a starter kit.
 
 Usage:
     python3 -m brain.app.cli.brain_import --from-export ./export/
-    python3 -m brain.app.cli.brain_import --from-workspace /path/to/legacy-workspace/
     python3 -m brain.app.cli.brain_import --from-export ./export/ --dry-run
 """
 import argparse
 import asyncio
 import json
 import os
-import re
 import subprocess
 import sys
-from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
@@ -34,7 +31,7 @@ async def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
             result = await uow.session.execute(text("""
                 SELECT EXISTS (
                     SELECT FROM information_schema.tables
-                    WHERE table_name = 'memories'
+                    WHERE table_name = 'memory_nodes'
                 )
             """))
             row = result.mappings().first()
@@ -57,18 +54,7 @@ async def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
         else:
             print("[DRY RUN] Would create tables from schema.sql")
 
-    # 2. Apply scope migration
-    migration_path = str(Path(config.BRAIN_DIR) / 'migrations' / '012_scope_column.sql')
-    if not dry_run:
-        try:
-            async with UnitOfWork() as uow:
-                await uow.session.execute(text(
-                    "ALTER TABLE memories ADD COLUMN IF NOT EXISTS scope VARCHAR(20) DEFAULT 'personal'"
-                ))
-        except Exception:
-            pass  # Column may already exist
-
-    # 3. Load memories
+    # 2. Load memories
     memories_path = os.path.join(export_dir, 'memories.jsonl')
     if os.path.exists(memories_path):
         from brain.app.cli.memory import add_memory
@@ -94,7 +80,7 @@ async def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
                     else:
                         print(f"  Rejected: {result.get('reason', 'unknown')}")
 
-    # 4. Load skills
+    # 3. Load skills
     skills_path = os.path.join(export_dir, 'skills.json')
     if os.path.exists(skills_path):
         with open(skills_path) as f:
@@ -159,103 +145,16 @@ async def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
     return stats
 
 
-async def import_from_workspace(workspace_dir: str, dry_run: bool = False) -> dict:
-    """Import from a raw legacy workspace by parsing markdown files."""
-    from brain.systems.memory.scope import classify_scope
-
-    stats = {'total': 0, 'universal': 0, 'personal': 0}
-    memories_to_import = []
-
-    # Parse daily logs (legacy: reads from workspace/memory/ for one-time import;
-    # ongoing daily logs now live in illo-brain/journal/ — see config.JOURNAL_DIR)
-    memory_dir = os.path.join(workspace_dir, 'memory')
-    if os.path.isdir(memory_dir):
-        for fname in sorted(os.listdir(memory_dir)):
-            if fname.endswith('.md'):
-                memories_to_import.extend(
-                    _parse_markdown_sections(
-                        os.path.join(memory_dir, fname), 'daily_log'
-                    )
-                )
-
-    # Classify and import
-    if not dry_run:
-        from brain.app.cli.memory import add_memory
-
-    for mem in memories_to_import:
-        scope = classify_scope(mem['content'], mem['type'])
-        stats['total'] += 1
-        stats[scope] += 1
-
-        if dry_run:
-            print(f"  [{scope}] [{mem['type']}] {mem['content'][:70]}...")
-        else:
-            await add_memory(
-                content=mem['content'],
-                memory_type=mem['type'],
-                salience=mem.get('salience', 5.0),
-                source='workspace_import',
-                scope=scope,
-            )
-
-    return stats
-
-
-def _parse_markdown_sections(filepath: str, default_type: str) -> list[dict]:
-    """Parse a markdown file into memory-sized chunks by section."""
-    with open(filepath) as f:
-        content = f.read()
-
-    memories = []
-    # Split by ## headers
-    sections = re.split(r'\n(?=## )', content)
-
-    for section in sections:
-        text = section.strip()
-        if len(text) < 30:  # Skip tiny fragments
-            continue
-
-        # Split large sections into paragraphs
-        paragraphs = [p.strip() for p in text.split('\n\n') if len(p.strip()) > 30]
-
-        if len(paragraphs) <= 3:
-            # Small enough to be one memory
-            memories.append({
-                'content': text,
-                'type': default_type,
-                'salience': 5.0,
-            })
-        else:
-            # Split into paragraph-level memories
-            for para in paragraphs:
-                if len(para) > 30:
-                    memories.append({
-                        'content': para,
-                        'type': default_type,
-                        'salience': 4.0,
-                    })
-
-    return memories
-
-
 async def _async_main(args) -> None:
-    if args.from_export:
-        stats = await import_from_export(args.from_export, dry_run=args.dry_run)
-        mode = "DRY RUN" if args.dry_run else "IMPORTED"
-        print(f"\n[{mode}] Memories: {stats['memories']}, Skills: {stats['skills']}, "
-              f"Templates: {stats['templates']}")
-    else:
-        stats = await import_from_workspace(args.from_workspace, dry_run=args.dry_run)
-        mode = "DRY RUN" if args.dry_run else "IMPORTED"
-        print(f"\n[{mode}] {stats['total']} memories "
-              f"({stats['universal']} universal, {stats['personal']} personal)")
+    stats = await import_from_export(args.from_export, dry_run=args.dry_run)
+    mode = "DRY RUN" if args.dry_run else "IMPORTED"
+    print(f"\n[{mode}] Memories: {stats['memories']}, Skills: {stats['skills']}, "
+          f"Templates: {stats['templates']}")
 
 
 def main():
     parser = argparse.ArgumentParser(description='Import memories into the brain')
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--from-export', help='Import from starter kit directory')
-    group.add_argument('--from-workspace', help='Import from legacy workspace')
+    parser.add_argument('--from-export', required=True, help='Import from starter kit directory')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
     asyncio.run(_async_main(args))

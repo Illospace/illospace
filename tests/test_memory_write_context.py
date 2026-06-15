@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from brain.platform.db.repositories.memories import MemoryRepository
 from brain.platform.db.repositories.memory_write_context import (
     MemoryWriteContext,
     MemoryWriteContextError,
@@ -41,7 +40,7 @@ async def test_dev_test_compatibility_context_is_disabled_in_production(monkeypa
     monkeypatch.setenv("ILLO_ENV", "production")
 
     with pytest.raises(MemoryWriteContextError):
-        await dangerously_build_dev_test_memory_write_context(source="legacy")
+        await dangerously_build_dev_test_memory_write_context(source="compatibility")
 
 
 @pytest.mark.asyncio
@@ -52,68 +51,13 @@ async def test_dev_test_compatibility_context_warns_loudly(monkeypatch):
 
     with pytest.warns(RuntimeWarning, match="DEV/TEST COMPATIBILITY ONLY"):
         context = await dangerously_build_dev_test_memory_write_context(
-            source="legacy",
+            source="compatibility",
             visibility="org",
         )
 
     assert context.user_id == "user-1"
     assert context.org_id == "org-1"
     assert context.visibility == "org"
-
-
-def test_memory_repository_create_is_disabled():
-    repo = MemoryRepository(MagicMock())
-
-    with pytest.raises(MemoryWriteContextError):
-        repo.create(content="nope", memory_type="fact")
-
-
-@pytest.mark.asyncio
-async def test_repository_insert_memory_persists_context_columns():
-    session = MagicMock()
-    session.get_bind.side_effect = RuntimeError("no bind")
-    session.bind = None
-    execute_result = MagicMock()
-    execute_result.scalar_one.return_value = 101
-    session.execute = AsyncMock(return_value=execute_result)
-    repo = MemoryRepository(session)
-    context = MemoryWriteContext(
-        user_id="user-1",
-        org_id="org-1",
-        visibility="org",
-        source="brain_encode",
-        conversation_id="conversation-1",
-        idea_id="idea-1",
-        run_id=42,
-        session_id="session-1",
-        confidence=0.77,
-        evidence={"kind": "test"},
-    )
-
-    result = await repo.insert_memory(
-        content="A useful memory with enough content",
-        memory_type="lesson",
-        salience=7.0,
-        emotion_label="neutral",
-        tags=["test"],
-        context=context,
-    )
-
-    assert result["id"] == 101
-    assert result["visibility"] == "org"
-    insert_sql, params = session.execute.call_args.args
-    sql_text = str(insert_sql)
-    assert "user_id" in sql_text
-    assert "org_id" in sql_text
-    assert "visibility" in sql_text
-    assert "source_ref" in sql_text
-    assert params["user_id"] == "user-1"
-    assert params["org_id"] == "org-1"
-    assert params["visibility"] == "org"
-    assert params["source"] == "brain_encode"
-    assert params["source_session"] == "session-1"
-    assert params["source_ref"] == "run:42;idea:idea-1;conversation:conversation-1;session:session-1"
-    assert params["confidence"] == 0.77
 
 
 async def test_add_memory_uses_repository_insert_with_context():
@@ -131,8 +75,7 @@ async def test_add_memory_uses_repository_insert_with_context():
     context = MemoryWriteContext(user_id="user-1", source="cli_test")
 
     with patch("brain.app.cli.memory.UnitOfWork", return_value=mock_uow), \
-         patch("brain.app.cli.memory.check_quality", return_value=SimpleNamespace(passed=True, adjusted_salience=None)), \
-         patch("brain.app.cli.memory.embed_document", return_value=[0.1] * 3):
+         patch("brain.app.cli.memory.check_quality", return_value=SimpleNamespace(passed=True, adjusted_salience=None)):
         result = await add_memory(
             content="This is a durable lesson worth recording in tests",
             memory_type="lesson",
@@ -142,5 +85,7 @@ async def test_add_memory_uses_repository_insert_with_context():
 
     assert result["id"] == 55
     kwargs = mock_uow.memories.insert_memory.call_args.kwargs
-    assert kwargs["context"] is context
+    assert kwargs["context"].user_id == context.user_id
+    assert kwargs["context"].source == context.source
+    assert kwargs["context"].confidence == 0.6
     assert kwargs["content"].startswith("This is a durable lesson")

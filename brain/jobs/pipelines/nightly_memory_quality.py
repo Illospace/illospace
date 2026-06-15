@@ -16,7 +16,7 @@ from typing import Any
 
 from sqlalchemy import or_, select
 
-from brain.platform.db.models.memory import Memory, MemoryContradiction
+from brain.platform.db.models.reconstructive_memory import MemoryNode
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.learning.budget import LearningBudgetLedger, LearningBudgetPolicy
 from brain.systems.memory.conflict_resolver import resolve_memory_conflicts
@@ -100,15 +100,8 @@ async def run_nightly_memory_quality(
 
 
 async def _fetch_contradictions(session, *, limit: int) -> list[dict[str, Any]]:
-    rows = (
-        await session.scalars(
-        select(MemoryContradiction)
-        .where(MemoryContradiction.status.in_(_OPEN_CONTRADICTION_STATUSES))
-        .order_by(MemoryContradiction.severity.desc(), MemoryContradiction.created_at.asc())
-        .limit(limit)
-        )
-    ).all()
-    return [_model_to_dict(row) for row in rows]
+    del session, limit
+    return []
 
 
 async def _fetch_stale_memories(
@@ -121,28 +114,27 @@ async def _fetch_stale_memories(
     freshness_floor = max(0.0, min(1.0, 1.0 - stale_threshold))
     rows = (
         await session.scalars(
-        select(Memory)
-        .where(or_(Memory.archived == False, Memory.archived.is_(None)))  # noqa: E712
-        .where(Memory.superseded_by.is_(None))
+        select(MemoryNode)
+        .where(MemoryNode.archived_at.is_(None))
         .where(
             or_(
-                Memory.staleness_score >= stale_threshold,
-                Memory.freshness_score <= freshness_floor,
-                Memory.valid_until < now,
+                MemoryNode.freshness_status.in_(["stale", "expired"]),
+                MemoryNode.valid_until < now,
+                MemoryNode.confidence <= freshness_floor,
             )
         )
-        .order_by(Memory.staleness_score.desc().nullslast(), Memory.last_accessed.asc())
+        .order_by(MemoryNode.confidence.asc(), MemoryNode.updated_at.asc())
         .limit(limit)
         )
     ).all()
-    return [_model_to_dict(row) for row in rows]
+    return [_node_to_quality_dict(row) for row in rows]
 
 
 async def _fetch_memories(session, memory_ids: Sequence[int]) -> list[dict[str, Any]]:
     if not memory_ids:
         return []
-    rows = (await session.scalars(select(Memory).where(Memory.id.in_(memory_ids)))).all()
-    return [_model_to_dict(row) for row in rows]
+    rows = (await session.scalars(select(MemoryNode).where(MemoryNode.id.in_(memory_ids)))).all()
+    return [_node_to_quality_dict(row) for row in rows]
 
 
 def _freshness_signal_from_memory(
@@ -187,6 +179,24 @@ def _model_to_dict(model: Any) -> dict[str, Any]:
     for column in model.__table__.columns:
         data[column.name] = getattr(model, column.name)
     return data
+
+
+def _node_to_quality_dict(node: MemoryNode) -> dict[str, Any]:
+    stale = node.freshness_status in {"stale", "expired"}
+    confidence = float(node.confidence or 0.0)
+    return {
+        "id": node.id,
+        "memory_id": node.id,
+        "content": node.text or node.canonical_label,
+        "memory_type": node.content_kind or node.node_kind,
+        "source_ref": f"memory_node:{node.id}",
+        "subject_ref": node.normalized_key,
+        "freshness_score": 0.2 if stale else confidence,
+        "staleness_score": 0.9 if stale else max(0.0, 1.0 - confidence),
+        "valid_until": node.valid_until,
+        "truth_status": node.truth_status,
+        "freshness_status": node.freshness_status,
+    }
 
 
 def _coerce_float(value: Any) -> float | None:

@@ -163,7 +163,7 @@ class RetrievalLog(Base):
     query_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     results_returned: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     top_result_id: Mapped[Optional[int]] = mapped_column(
-        Integer, ForeignKey("memories.id"), nullable=True
+        Integer, ForeignKey("memory_nodes.id"), nullable=True
     )
     top_score: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
     was_relevant: Mapped[Optional[bool]] = mapped_column(nullable=True)
@@ -236,10 +236,10 @@ class RetrievalItemFeedback(Base):
         nullable=False,
     )
     memory_id: Mapped[Optional[int]] = mapped_column(
-        Integer, ForeignKey("memories.id", ondelete="CASCADE"), nullable=True
+        Integer, ForeignKey("memory_nodes.id", ondelete="CASCADE"), nullable=True
     )
     summary_id: Mapped[Optional[int]] = mapped_column(
-        Integer, ForeignKey("memory_summaries.id", ondelete="CASCADE"), nullable=True
+        Integer, ForeignKey("memory_nodes.id", ondelete="CASCADE"), nullable=True
     )
     user_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     org_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)

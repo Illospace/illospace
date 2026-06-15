@@ -25,7 +25,10 @@ from brain.app.api.authorization import can_manage_run, can_manage_scheduler
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.routers.costs import _fetch_agent_api_call_rows, _provider_model_key
 from brain.app.api.schemas.system import ConsolidationRunRead, DailyMetricsRead
-from brain.platform.db.repositories.memories import EdgeRepository, MemoryRepository
+from brain.platform.db.repositories.reconstructive_memory import (
+    ReconstructiveEdgeCompatibilityRepository,
+    ReconstructiveMemoryCompatibilityRepository,
+)
 from brain.platform.db.repositories.skills import SkillRepository
 from brain.platform.db.repositories.system import (
     ConsolidationRunRepository,
@@ -780,8 +783,8 @@ async def _get_embedding_info(db: AsyncSession) -> dict:
 async def _get_database_info(db: AsyncSession) -> dict:
     """Return database status and stats."""
     try:
-        mem_repo = MemoryRepository(db)
-        edge_repo = EdgeRepository(db)
+        mem_repo = ReconstructiveMemoryCompatibilityRepository(db)
+        edge_repo = ReconstructiveEdgeCompatibilityRepository(db)
 
         # DB size via pg_database_size
         try:
@@ -947,8 +950,8 @@ async def overview(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    mem_repo = MemoryRepository(db)
-    edge_repo = EdgeRepository(db)
+    mem_repo = ReconstructiveMemoryCompatibilityRepository(db)
+    edge_repo = ReconstructiveEdgeCompatibilityRepository(db)
     consol_repo = ConsolidationRunRepository(db)
 
     skill_summary, skill_count, executions = await SkillRepository(db).a_overview_summary(limit=10)
@@ -976,7 +979,7 @@ async def overview(
             await db.execute(text(
                 "SELECT d::date AS day, COUNT(m.id) AS c "
                 "FROM generate_series(CURRENT_DATE - INTERVAL '13 days', CURRENT_DATE, '1 day') AS d "
-                "LEFT JOIN memories m ON m.created_at::date = d::date AND NOT m.archived "
+                "LEFT JOIN memory_nodes m ON m.created_at::date = d::date AND m.archived_at IS NULL "
                 "GROUP BY d::date ORDER BY d::date"
             ))
         ).mappings().all()

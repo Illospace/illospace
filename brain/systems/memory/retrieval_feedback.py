@@ -71,7 +71,7 @@ async def apply_retrieval_feedback(log_id: int, feedback: str, *, cur=None) -> d
                     "old_salience": None, "new_salience": None}
 
         result = await uow.session.execute(text(
-            "SELECT salience FROM memories WHERE id = :id"
+            "SELECT confidence * 10 AS salience FROM memory_nodes WHERE id = :id"
         ), {"id": memory_id})
         mem = result.mappings().first()
         if not mem:
@@ -88,8 +88,8 @@ async def apply_retrieval_feedback(log_id: int, feedback: str, *, cur=None) -> d
             new_salience = old_salience
 
         await uow.session.execute(text(
-            "UPDATE memories SET salience = :salience WHERE id = :id"
-        ), {"salience": new_salience, "id": memory_id})
+            "UPDATE memory_nodes SET confidence = :confidence WHERE id = :id"
+        ), {"confidence": max(0.0, min(1.0, new_salience / 10.0)), "id": memory_id})
 
         return {"log_id": log_id, "feedback": feedback, "memory_id": memory_id,
                 "old_salience": old_salience, "new_salience": new_salience}
@@ -111,16 +111,16 @@ async def analyze_missed_memories(*, cur=None, min_misses: int = 3, days: int = 
     async with UnitOfWork() as uow:
         result = await uow.session.execute(text("""
             SELECT rl.top_result_id as memory_id,
-                   m.content,
-                   m.salience,
+                   COALESCE(m.text, m.canonical_label) AS content,
+                   m.confidence * 10 AS salience,
                    COUNT(*) FILTER (WHERE rl.feedback = 'miss') as miss_count,
                    COUNT(*) FILTER (WHERE rl.feedback = 'hit') as hit_count
             FROM retrieval_log rl
-            JOIN memories m ON m.id = rl.top_result_id
+            JOIN memory_nodes m ON m.id = rl.top_result_id
             WHERE rl.timestamp >= NOW() - INTERVAL '1 day' * :days
               AND rl.top_result_id IS NOT NULL
               AND rl.feedback IS NOT NULL
-            GROUP BY rl.top_result_id, m.content, m.salience
+            GROUP BY rl.top_result_id, COALESCE(m.text, m.canonical_label), m.confidence
             HAVING COUNT(*) FILTER (WHERE rl.feedback = 'miss') >= :min_misses
             ORDER BY miss_count DESC
         """), {"days": days, "min_misses": min_misses})
@@ -235,15 +235,16 @@ async def _adjust_salience(memory_id: int, delta: float) -> None:
 
 async def _adjust_salience_uow(uow, memory_id: int, delta: float) -> None:
     """Adjust a single memory's salience within an existing UnitOfWork."""
-    from brain.platform.db.models.memory import Memory
+    from brain.platform.db.models.reconstructive_memory import MemoryNode
 
-    mem = await uow.session.get(Memory, memory_id)
+    mem = await uow.session.get(MemoryNode, memory_id)
     if mem is None:
         logger.warning("Memory %d not found for salience adjustment", memory_id)
         return
 
-    old = float(mem.salience)
-    mem.salience = max(SALIENCE_FLOOR, min(SALIENCE_CAP, old + delta))
+    old = float(mem.confidence or 0.0) * 10
+    adjusted = max(SALIENCE_FLOOR, min(SALIENCE_CAP, old + delta))
+    mem.confidence = max(0.0, min(1.0, adjusted / 10.0))
 
 
 async def _record_pool_outcome(

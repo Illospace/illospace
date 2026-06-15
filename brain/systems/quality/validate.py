@@ -133,23 +133,11 @@ async def validate_memory_count(target_date: date) -> tuple[bool, list[str]]:
     try:
         async with UnitOfWork() as uow:
             row = (await uow.session.execute(text(
-                "SELECT COUNT(*) as cnt FROM memories WHERE created_at::date = :dt AND NOT archived"
+                "SELECT COUNT(*) as cnt FROM memory_nodes WHERE created_at::date = :dt AND archived_at IS NULL"
             ), {"dt": target_date})).mappings().first()
             count = row["cnt"]
             if count > MEMORY_MAX_PER_DAY:
                 issues.append(f"{count} memories on {target_date} (threshold: {MEMORY_MAX_PER_DAY})")
-
-            dupes = (await uow.session.execute(text("""
-                SELECT m1.id, m2.id, 1 - (m1.semantic_embedding <=> m2.semantic_embedding) as similarity
-                FROM memories m1 JOIN memories m2 ON m1.id < m2.id
-                WHERE m1.created_at::date = :dt AND m2.created_at::date = :dt
-                AND NOT m1.archived AND NOT m2.archived
-                AND m1.semantic_embedding IS NOT NULL AND m2.semantic_embedding IS NOT NULL
-                AND 1 - (m1.semantic_embedding <=> m2.semantic_embedding) > 0.85
-                LIMIT 20
-            """), {"dt": target_date})).all()
-            if dupes:
-                issues.append(f"{len(dupes)} near-duplicate pairs (>0.85 similarity)")
     except Exception as e:
         issues.append(f"Could not check memory count: {e}")
 

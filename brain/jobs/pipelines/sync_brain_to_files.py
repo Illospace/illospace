@@ -24,10 +24,13 @@ async def sync_lessons():
     """Export high-salience lessons from brain → memory/lessons.md"""
     async with UnitOfWork() as uow:
         result = await uow.session.execute(text("""
-            SELECT id, content, salience, created_at
-            FROM memories
-            WHERE memory_type = 'lesson' AND NOT archived
-            ORDER BY salience DESC, created_at DESC
+            SELECT id,
+                   COALESCE(text, canonical_label) AS content,
+                   confidence * 10 AS salience,
+                   created_at
+            FROM memory_nodes
+            WHERE content_kind = 'lesson' AND archived_at IS NULL
+            ORDER BY confidence DESC, created_at DESC
         """))
         rows = result.mappings().all()
 

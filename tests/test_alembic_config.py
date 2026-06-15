@@ -38,6 +38,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0017_launch_handoffs.py",
     # Downgrade removes only the workspace tool installation table introduced by this migration.
     "0018_workspace_tool_installations.py",
+    # Upgrade intentionally removes replaced flat-memory tables after reconstructive memory exists.
+    "0020_reconstructive_memory.py",
 }
 
 
@@ -118,15 +120,15 @@ def _normalized_sql(sql: str) -> str:
 def test_literal_sql_strings_unwraps_common_sql_wrappers():
     module = ast.parse(
         """
-op.execute(sa.text("DROP TABLE memories"))
-op.execute(text("TRUNCATE TABLE memories"))
+op.execute(sa.text("DROP TABLE memory_nodes"))
+op.execute(text("TRUNCATE TABLE memory_nodes"))
 """
     )
     calls = [node for node in ast.walk(module) if isinstance(node, ast.Call) and _call_name(node.func) == "op.execute"]
 
     assert [_literal_sql_strings(call) for call in calls] == [
-        ["DROP TABLE memories"],
-        ["TRUNCATE TABLE memories"],
+        ["DROP TABLE memory_nodes"],
+        ["TRUNCATE TABLE memory_nodes"],
     ]
 
 

@@ -16,17 +16,16 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, or_, select, true
 
 from brain.platform.db.enums import PoolName
-from brain.platform.db.models.memory import Memory
 from brain.platform.db.models.narrative import ProjectNarrative
+from brain.platform.db.models.reconstructive_memory import MemoryNode
 from brain.platform.db.repositories.memory_visibility import (
     MemoryVisibilityContext,
     memory_is_visible,
-    memory_visibility_predicate,
 )
 from brain.systems.memory.dedup import deduplicate_results
 
@@ -104,7 +103,7 @@ class PoolRetriever:
         )
 
     def _apply_memory_visibility(self, stmt):
-        return stmt.where(memory_visibility_predicate(Memory, self._memory_visibility_context()))
+        return stmt.where(_node_visibility_predicate(self._memory_visibility_context()))
 
     # ------------------------------------------------------------------
     # Public API
@@ -216,11 +215,12 @@ class PoolRetriever:
             logger.debug("No session provided for exploit pool — returning empty")
             return []
 
+        del query_embedding
         stmt = (
-            select(Memory)
-            .where(Memory.archived != True)  # noqa: E712
-            .where(Memory.semantic_embedding.isnot(None))
-            .order_by(Memory.semantic_embedding.cosine_distance(query_embedding))
+            select(MemoryNode)
+            .where(MemoryNode.archived_at.is_(None))
+            .where(MemoryNode.node_kind.in_(["content", "summary", "procedure", "policy"]))
+            .order_by(MemoryNode.confidence.desc(), MemoryNode.updated_at.desc())
             .limit(limit)
         )
         stmt = self._apply_memory_visibility(stmt)
@@ -245,22 +245,13 @@ class PoolRetriever:
             logger.debug("No session provided for explore pool — returning empty")
             return []
 
+        del query_embedding
         over_fetch = limit * 3
-
-        # Get median access_count for filtering
-        median_q = await session.scalar(
-            select(func.percentile_cont(0.5).within_group(Memory.access_count))
-            .where(Memory.archived != True)  # noqa: E712
-            .where(memory_visibility_predicate(Memory, self._memory_visibility_context()))
-        )
-        median_access = median_q if median_q is not None else 0
-
         stmt = (
-            select(Memory)
-            .where(Memory.archived != True)  # noqa: E712
-            .where(Memory.semantic_embedding.isnot(None))
-            .where(Memory.access_count <= median_access)
-            .order_by(Memory.semantic_embedding.cosine_distance(query_embedding))
+            select(MemoryNode)
+            .where(MemoryNode.archived_at.is_(None))
+            .where(MemoryNode.node_kind.in_(["content", "summary", "procedure", "policy"]))
+            .order_by(MemoryNode.updated_at.asc(), MemoryNode.confidence.desc())
             .limit(over_fetch)
         )
         stmt = self._apply_memory_visibility(stmt)
@@ -268,8 +259,6 @@ class PoolRetriever:
         result = await session.scalars(stmt)
         rows = result.all()
 
-        # Filter for cosine >= floor (distance <= 1 - floor)
-        max_distance = 1.0 - self.config.explore_cosine_floor
         results: list[dict] = []
         for m in rows:
             d = self._memory_to_dict(m)
@@ -325,18 +314,23 @@ class PoolRetriever:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _memory_to_dict(m: Memory) -> dict:
-        embedding = m.semantic_embedding
+    def _memory_to_dict(m: Any) -> dict:
+        embedding = getattr(m, "semantic_embedding", None)
         if embedding is not None and not isinstance(embedding, list):
             embedding = list(embedding)
+        content = getattr(m, "content", None) or getattr(m, "text", None) or getattr(m, "canonical_label", "")
+        memory_type = getattr(m, "memory_type", None) or getattr(m, "content_kind", None) or getattr(m, "node_kind", "memory")
+        salience = getattr(m, "salience", None)
+        if salience is None:
+            salience = round(float(getattr(m, "confidence", 0.0) or 0.0) * 10, 2)
         return {
             "id": m.id,
-            "content": m.content,
+            "content": content,
             "candidate_kind": "memory",
-            "memory_type": m.memory_type,
-            "salience": m.salience,
+            "memory_type": memory_type,
+            "salience": salience,
             "embedding": embedding,
-            "access_count": m.access_count,
+            "access_count": getattr(m, "access_count", 0) or 0,
             "created_at": m.created_at,
             "visibility": getattr(m, "visibility", "private") or "private",
             "user_id": _text(getattr(m, "user_id", None)),
@@ -380,3 +374,16 @@ def _text(value) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _node_visibility_predicate(context: MemoryVisibilityContext):
+    if context.allow_global:
+        return true()
+    clauses = []
+    if context.user_id:
+        clauses.append(and_(MemoryNode.visibility == "private", MemoryNode.user_id == context.user_id))
+    if context.org_id:
+        clauses.append(and_(MemoryNode.visibility.in_(["team", "org"]), MemoryNode.org_id == context.org_id))
+    if not clauses:
+        return MemoryNode.id < 0
+    return or_(*clauses)

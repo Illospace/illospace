@@ -19,8 +19,7 @@ from typing import Any, Iterable, Sequence
 
 from sqlalchemy import select
 
-from brain.platform.db.models.memory import Memory
-from brain.platform.db.models.memory_dag import MemorySummary
+from brain.platform.db.models.reconstructive_memory import MemoryNode
 from brain.platform.db.repositories.memory_visibility import MemoryVisibilityContext, memory_is_visible
 from brain.platform.db.models.system import RetrievalDecision, RetrievalItemFeedback
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -981,28 +980,28 @@ class AttentionController:
             for row in feedback_rows:
                 payload: dict[str, Any] | None = None
                 if row.memory_id is not None:
-                    mem = await uow.session.get(Memory, row.memory_id)
+                    mem = await uow.session.get(MemoryNode, row.memory_id)
                     if mem is not None and memory_is_visible(mem, visibility_context):
                         payload = {
                             "id": mem.id,
-                            "content": mem.content[:300],
-                            "type": mem.memory_type,
-                            "tier": getattr(mem, "memory_tier", "episodic") or "episodic",
-                            "salience": float(mem.salience) if mem.salience is not None else 0.0,
+                            "content": (mem.text or mem.canonical_label or "")[:300],
+                            "type": mem.content_kind or mem.node_kind,
+                            "tier": mem.content_kind or mem.node_kind,
+                            "salience": round(float(mem.confidence or 0.0) * 10, 2),
                             "visibility": getattr(mem, "visibility", "private") or "private",
                             "lazy_loaded": True,
                             "retrieval_decision_id": retrieval_decision_id,
                             "tenant_context": _tenant_context_payload(visibility_context),
                         }
                 elif row.summary_id is not None:
-                    summary = await uow.session.get(MemorySummary, row.summary_id)
+                    summary = await uow.session.get(MemoryNode, row.summary_id)
                     if summary is not None and memory_is_visible(summary, visibility_context):
                         payload = {
                             "id": summary.id,
-                            "content": summary.content[:300],
-                            "type": "summary",
-                            "tier": "semantic" if summary.depth == 0 else "summary",
-                            "salience": float(summary.descendant_count or 0),
+                            "content": (summary.text or summary.canonical_label or "")[:300],
+                            "type": summary.content_kind or "summary",
+                            "tier": summary.content_kind or "summary",
+                            "salience": round(float(summary.confidence or 0.0) * 10, 2),
                             "visibility": summary.visibility,
                             "lazy_loaded": True,
                             "retrieval_decision_id": retrieval_decision_id,

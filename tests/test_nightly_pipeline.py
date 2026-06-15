@@ -69,6 +69,7 @@ def mock_nightly_uow():
     execute_result.mappings.return_value.all.return_value = []
     execute_result.mappings.return_value.first.return_value = {"id": 1}
     uow.session.execute.return_value = _AwaitableResult(execute_result)
+    uow.session.scalar = AsyncMock(return_value=0)
     uow.session.scalars.return_value.all.return_value = []
     uow.session.scalars.return_value.first.return_value = None
     uow.skills.get = AsyncMock(return_value=None)
@@ -88,40 +89,35 @@ def target_date():
 class TestPhaseConsolidation:
     """Tests for pipelines/consolidate.py — Phase 1 of nightly cycle."""
 
-    async def test_consolidation_runs_without_daily_log(self, mock_nightly_uow, target_date, tmp_workspace):
-        """When no daily log exists, consolidation should complete gracefully."""
-        with patch("brain.jobs.pipelines.consolidate.UnitOfWork", return_value=mock_nightly_uow), \
-             patch("brain.jobs.pipelines.consolidate.MEMORY_DIR", str(tmp_workspace / "memory")), \
-             patch("brain.jobs.pipelines.consolidate.WORKSPACE", str(tmp_workspace)):
+    async def test_consolidation_records_reconstructive_pass(self, mock_nightly_uow, target_date):
+        """Consolidation records an operator pass without manufacturing rows."""
+        with patch("brain.jobs.pipelines.consolidate.UnitOfWork", return_value=mock_nightly_uow):
             from brain.jobs.pipelines.consolidate import phase_consolidation
             result = await phase_consolidation(target_date)
-        assert isinstance(result, tuple)
-        assert len(result) == 2
+        assert result == {
+            "run_id": 1,
+            "phase": "reconstructive_consolidation",
+            "active_memory_nodes": 0,
+            "memory_system": "reconstructive",
+        }
 
-    async def test_consolidation_imports_daily_log(self, mock_nightly_uow, target_date, tmp_workspace):
-        """When a daily log exists, it should be processed."""
+    async def test_consolidation_ignores_workspace_daily_logs(self, mock_nightly_uow, target_date, tmp_workspace):
+        """Workspace markdown logs are not imported by reconstructive consolidation."""
         daily_log = tmp_workspace / "memory" / f"{target_date.isoformat()}.md"
         daily_log.write_text("# March 7\nWorked on nightly pipeline fixes.")
 
-        with patch("brain.jobs.pipelines.consolidate.UnitOfWork", return_value=mock_nightly_uow), \
-             patch("brain.jobs.pipelines.consolidate.MEMORY_DIR", str(tmp_workspace / "memory")), \
-             patch("brain.jobs.pipelines.consolidate.WORKSPACE", str(tmp_workspace)), \
-            patch("brain.jobs.pipelines.consolidate.import_daily_log",
-                   new=AsyncMock(return_value=3)) as mock_import:
-            from brain.jobs.pipelines.consolidate import phase_consolidation
-            await phase_consolidation(target_date)
-        mock_import.assert_called_once()
-
-    async def test_consolidation_handles_empty_memory_dir(self, mock_nightly_uow, target_date, tmp_path):
-        """Consolidation should not crash with empty memory directory."""
-        empty_dir = tmp_path / "empty_memory"
-        empty_dir.mkdir()
-        with patch("brain.jobs.pipelines.consolidate.UnitOfWork", return_value=mock_nightly_uow), \
-             patch("brain.jobs.pipelines.consolidate.MEMORY_DIR", str(empty_dir)), \
-             patch("brain.jobs.pipelines.consolidate.WORKSPACE", str(tmp_path)):
+        with patch("brain.jobs.pipelines.consolidate.UnitOfWork", return_value=mock_nightly_uow):
             from brain.jobs.pipelines.consolidate import phase_consolidation
             result = await phase_consolidation(target_date)
-            assert isinstance(result, tuple)
+        assert result["memory_system"] == "reconstructive"
+        assert result["active_memory_nodes"] == 0
+
+    async def test_consolidation_accepts_org_id(self, mock_nightly_uow, target_date):
+        with patch("brain.jobs.pipelines.consolidate.UnitOfWork", return_value=mock_nightly_uow):
+            from brain.jobs.pipelines.consolidate import phase_consolidation
+            await phase_consolidation(target_date, org_id="org-123")
+        params = mock_nightly_uow.session.execute.call_args[0][1]
+        assert params["org_id"] == "org-123"
 
 
 # ---------------------------------------------------------------------------
@@ -303,9 +299,11 @@ class TestStandaloneJournalDir:
 
     def test_consolidate_uses_journal_dir(self):
         import inspect
-        from brain.jobs.pipelines.consolidate import MEMORY_DIR
-        from brain.kernel.config import JOURNAL_DIR
-        assert str(JOURNAL_DIR) == MEMORY_DIR
+        from brain.jobs.pipelines import consolidate
+
+        source = inspect.getsource(consolidate)
+        assert "MEMORY_DIR" not in source
+        assert "import_daily_log" not in source
 
     def test_no_workspace_memory_in_pipeline_code(self):
         pipelines_dir = os.path.join(os.path.dirname(__file__), "..", "brain", "jobs", "pipelines")

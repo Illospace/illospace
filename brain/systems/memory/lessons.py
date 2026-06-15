@@ -25,10 +25,15 @@ async def audit_lessons(target_date: date) -> dict:
     async with UnitOfWork() as uow:
         # Get today's lessons
         rows = (await uow.session.execute(text("""
-            SELECT id, content, salience, tags
-            FROM memories WHERE memory_type = 'lesson'
-            AND created_at::date = :target_date AND NOT archived
-            ORDER BY salience DESC
+            SELECT id,
+                   COALESCE(text, canonical_label) AS content,
+                   confidence * 10 AS salience,
+                   ARRAY_REMOVE(ARRAY[node_kind, content_kind], NULL) AS tags
+            FROM memory_nodes
+            WHERE content_kind = 'lesson'
+              AND created_at::date = :target_date
+              AND archived_at IS NULL
+            ORDER BY confidence DESC
         """), {"target_date": target_date})).mappings().all()
         todays_lessons = [dict(r) for r in rows]
 
@@ -111,7 +116,14 @@ async def compile_lesson_to_rule(lesson_id: int) -> int | None:
     """Compile a lesson into a guardian rule using LLM analysis."""
     async with UnitOfWork() as uow:
         row = (await uow.session.execute(text(
-            "SELECT id, content, salience, tags FROM memories WHERE id = :id"
+            """
+            SELECT id,
+                   COALESCE(text, canonical_label) AS content,
+                   confidence * 10 AS salience,
+                   ARRAY_REMOVE(ARRAY[node_kind, content_kind], NULL) AS tags
+            FROM memory_nodes
+            WHERE id = :id AND archived_at IS NULL
+            """
         ), {"id": lesson_id})).mappings().first()
         lesson = dict(row) if row else None
 
@@ -295,9 +307,14 @@ async def compile_all_high_salience(min_salience: float = 7.0) -> dict:
 
         # Get uncompiled high-salience lessons
         lesson_rows = (await uow.session.execute(text("""
-            SELECT id, content, salience FROM memories
-            WHERE memory_type = 'lesson' AND salience >= :min_salience AND NOT archived
-            ORDER BY salience DESC
+            SELECT id,
+                   COALESCE(text, canonical_label) AS content,
+                   confidence * 10 AS salience
+            FROM memory_nodes
+            WHERE content_kind = 'lesson'
+              AND confidence >= (:min_salience / 10.0)
+              AND archived_at IS NULL
+            ORDER BY confidence DESC
         """), {"min_salience": min_salience})).mappings().all()
         lessons = [dict(r) for r in lesson_rows]
 

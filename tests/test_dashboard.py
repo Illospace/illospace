@@ -89,8 +89,8 @@ class TestOverviewRoute:
 
     @patch("brain.app.api.routers.system.ConsolidationRunRepository")
     @patch("brain.app.api.routers.system.SkillRepository")
-    @patch("brain.app.api.routers.system.EdgeRepository")
-    @patch("brain.app.api.routers.system.MemoryRepository")
+    @patch("brain.app.api.routers.system.ReconstructiveEdgeCompatibilityRepository")
+    @patch("brain.app.api.routers.system.ReconstructiveMemoryCompatibilityRepository")
     def test_route_overview_delegates(
         self, MockMemRepo, MockEdgeRepo, MockSkillRepo,
         MockConsolRepo, client,
@@ -118,8 +118,8 @@ class TestOverviewRoute:
 
     @patch("brain.app.api.routers.system.ConsolidationRunRepository")
     @patch("brain.app.api.routers.system.SkillRepository")
-    @patch("brain.app.api.routers.system.EdgeRepository")
-    @patch("brain.app.api.routers.system.MemoryRepository")
+    @patch("brain.app.api.routers.system.ReconstructiveEdgeCompatibilityRepository")
+    @patch("brain.app.api.routers.system.ReconstructiveMemoryCompatibilityRepository")
     def test_route_500_on_exception(
         self, MockMemRepo, MockEdgeRepo, MockSkillRepo,
         MockConsolRepo, client,
@@ -177,7 +177,7 @@ class TestSearchRoute:
 class TestHealthRoute:
 
     @patch("brain.platform.db.repositories.skills.SkillRepository")
-    @patch("brain.platform.db.repositories.memories.MemoryRepository")
+    @patch("brain.platform.db.repositories.reconstructive_memory.ReconstructiveMemoryCompatibilityRepository")
     def test_route_health_delegates(self, MockMemRepo, MockSkillRepo, client):
         """Health endpoint returns status."""
         MockMemRepo.return_value.a_count_active = AsyncMock(return_value=10)

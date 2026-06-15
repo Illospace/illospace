@@ -12,11 +12,13 @@ Usage:
 
 MCP Tools Exposed:
     brain_recall(query, limit?)       — semantic memory search
+    memory_reconstruct(query, limit?) — source-backed active evidence reconstruction
+    memory_ingest_source(content, ...) — ingest source-backed reconstructive memory
     brain_guardrails(skill?)          — skill-specific guardrails + recent failures
     brain_skills(task)                — task planning + skill catalog recommendation
     skill_view(name, section?)        — load a skill card/summary/procedure section
     skill_asset(name, path)           — load a versioned skill bundle asset
-    brain_encode(content, type, salience?) — record a memory
+    brain_encode(content, type, salience?) — compatibility alias for memory_ingest_source
     vault_inventory()                 — list safe vault metadata for agent reasoning
     brain_vault(key)                  — request a vault secret reference
     vault_secret_prompt(key_name)     — open a guided vault prompt for missing keys
@@ -44,10 +46,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 from sqlalchemy import text
 
 from brain.systems.memory.attention_controller import AttentionController, observe_retrieval
-from brain.platform.db.repositories.memories import MemoryRepository
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.db.repositories.memory_write_context import MemoryWriteContext
-from brain.platform.db.repositories.memory_visibility import MemoryVisibilityContext
 from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_model_tier
 
 logger = logging.getLogger("mcp_brain")
@@ -195,19 +194,6 @@ def _validate_skill_asset_path(path: str) -> str:
     return cleaned
 
 
-async def _add_attribution(session, memories: list[dict], current_user_id: str) -> list[dict]:
-    """Add attribution info to shared memories from other users.
-
-    If the source user has attribution_enabled=True, shows their name.
-    Otherwise, shows "A teammate" (anonymous).
-    """
-    try:
-        return await MemoryRepository(session).add_attribution(memories, current_user_id)
-    except Exception:
-        pass
-    return memories
-
-
 async def _async_log_retrieval(query: str, results: list) -> None:
     """Insert a row into retrieval_log for metrics tracking. Non-blocking."""
     try:
@@ -232,71 +218,21 @@ async def async_tool_brain_recall(
     expand_lazy_load: bool | None = None,
     service_retrieval: bool = False,
 ) -> dict:
-    """Graph-augmented memory search — vector similarity + relationship traversal.
+    """Compatibility recall over source-backed reconstructive memory.
 
     Multiplayer: pass user_id + org_id for visibility-scoped recall.
     Without viewer context, recall intentionally returns no memories.
     """
-    from brain.systems.memory.embeddings import embed_query
-    from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
-
-    visibility_context = MemoryVisibilityContext(
-        user_id=user_id,
+    reconstruct_user_id = user_id or ("system" if service_retrieval else None)
+    evidence_pack = await async_tool_memory_reconstruct(
+        query=query,
+        limit=limit,
+        user_id=reconstruct_user_id,
         org_id=org_id,
-        allow_global=service_retrieval or (user_id == "system"),
-        principal_type="service" if service_retrieval or user_id == "system" else None,
     )
+    memories = _recall_memories_from_evidence_pack(evidence_pack, limit=limit)
 
-    try:
-        async with UnitOfWork() as uow:
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            query_emb = embed_query(query, runtime_config=runtime_config)
-            results = await _maybe_await(uow.memories.graph_augmented_recall(
-                query_embedding=query_emb,
-                limit=limit,
-                context=visibility_context,
-            ))
-            memories = []
-            for r in results:
-                mem = {
-                    "id": r["id"],
-                    "content": r["content"][:300],
-                    "type": r["type"],
-                    "tier": r.get("tier", "episodic"),
-                    "salience": r.get("salience", 0),
-                    "similarity": r.get("similarity", 0),
-                    "visibility": r.get("visibility", "private"),
-                }
-                if r.get("graph_edges"):
-                    mem["graph_context"] = r["graph_edges"][:3]
-                memories.append(mem)
-            # Add cross-user attribution for shared memories
-            if user_id and memories:
-                memories = await _maybe_await(uow.memories.add_attribution(memories, user_id))
-        return await _finalize_recall_response(
-            query=query,
-            memories=memories,
-            limit=limit,
-            user_id=user_id,
-            org_id=org_id,
-            attention_debug=attention_debug,
-            expand_lazy_load=expand_lazy_load,
-            service_retrieval=service_retrieval,
-        )
-    except Exception as e:
-        logger.warning(f"Graph recall failed, falling back to vector: {e}")
-
-    # Fallback: pure vector search with same visibility filtering
-    async with UnitOfWork() as uow:
-        memories = await _maybe_await(uow.memories.recall_vector(
-            query_embedding=query_emb,
-            limit=limit,
-            context=visibility_context,
-        ))
-        if user_id and memories:
-            memories = await _maybe_await(uow.memories.add_attribution(memories, user_id))
-
-    return await _finalize_recall_response(
+    response = await _finalize_recall_response(
         query=query,
         memories=memories,
         limit=limit,
@@ -306,6 +242,109 @@ async def async_tool_brain_recall(
         expand_lazy_load=expand_lazy_load,
         service_retrieval=service_retrieval,
     )
+    response["memory_system"] = "reconstructive"
+    response["compatibility_alias"] = "brain_recall"
+    response["reconstruction_run_id"] = evidence_pack.get("reconstruction_run_id")
+    response["evidence_pack"] = evidence_pack
+    if evidence_pack.get("unresolved_questions"):
+        response["unresolved_questions"] = evidence_pack["unresolved_questions"]
+    return response
+
+
+def _recall_memories_from_evidence_pack(evidence_pack: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+    memories: list[dict[str, Any]] = []
+    for index, item in enumerate((evidence_pack.get("supporting_evidence") or [])[:limit]):
+        if not isinstance(item, dict):
+            continue
+        confidence = _coerce_float(item.get("confidence"), default=0.0)
+        source_text = str(item.get("source_text") or "").strip()
+        text_value = str(item.get("text") or "").strip()
+        content = source_text or text_value
+        content_preview, _ = _truncate_text(content, 300)
+        node_id = _coerce_int(item.get("node_id"), default=index + 1)
+        memories.append(
+            {
+                "id": node_id,
+                "node_id": node_id,
+                "assertion_id": _coerce_int(item.get("assertion_id")),
+                "source_span_id": _coerce_int(item.get("source_span_id")),
+                "content": content_preview,
+                "type": "reconstructed_evidence",
+                "tier": "source_backed",
+                "salience": round(confidence * 10, 2),
+                "similarity": confidence,
+                "confidence": confidence,
+                "visibility": "scoped",
+                "candidate_source": "reconstructive_memory",
+                "candidate_kind": "memory",
+                "retrieval_mode": "reconstruction",
+                "memory_system": "reconstructive",
+                "evidence_role": item.get("role") or "supports_answer",
+                "evidence_text": text_value,
+                "source_text": source_text or None,
+            }
+        )
+    return memories
+
+
+def _coerce_float(value: Any, *, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_int(value: Any, default: int | None = None) -> int | None:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+async def async_tool_memory_reconstruct(
+    query: str,
+    limit: int = 5,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    run_id: int | str | None = None,
+    thread_id: str | None = None,
+) -> dict:
+    """Source-backed reconstructive recall over the new memory graph."""
+    from brain.systems.reconstructive_memory.controller import reconstruct_memory
+
+    if not user_id and not org_id:
+        return {
+            "reconstruction_run_id": None,
+            "query": query,
+            "confidence": 0.0,
+            "answer_context": [],
+            "supporting_evidence": [],
+            "contradicting_evidence": [],
+            "trajectory": [],
+            "unresolved_questions": ["memory_reconstruct requires user_id or org_id context"],
+        }
+
+    parsed_run_id = None
+    if isinstance(run_id, int):
+        parsed_run_id = run_id
+    elif isinstance(run_id, str) and run_id.isdigit():
+        parsed_run_id = int(run_id)
+
+    async with UnitOfWork() as uow:
+        pack = await reconstruct_memory(
+            uow.session,
+            query=query,
+            org_id=org_id,
+            user_id=user_id,
+            limit=limit,
+            run_id=parsed_run_id,
+            thread_id=thread_id,
+        )
+    return pack.to_dict()
 
 
 async def _finalize_recall_response(
@@ -405,13 +444,8 @@ async def async_tool_brain_guardrails(skill: str | None = None) -> dict:
 
         # High-salience warnings (lessons with salience >= 9)
         if skill:
-            from brain.systems.memory.embeddings import embed_query
-            from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
-
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            skill_emb = embed_query(skill, runtime_config=runtime_config)
             result["warnings"].extend(
-                await _maybe_await(uow.memories.high_salience_warnings_for_skill(skill_embedding=skill_emb))
+                await _maybe_await(uow.memories.high_salience_warnings_for_skill())
             )
 
         # Skill-specific pitfalls
@@ -967,63 +1001,77 @@ async def async_tool_brain_encode(
     confidence: float | None = None,
     evidence: dict | None = None,
 ) -> dict:
-    """Encode a new memory into the brain, scoped to the current user."""
-    from brain.systems.memory.embeddings import embed_document
-    from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+    """Compatibility alias that ingests source-backed reconstructive memory."""
+    del salience, conversation_id
+
+    result = await async_tool_memory_ingest_source(
+        content=content,
+        content_kind=memory_type,
+        source_kind=source,
+        source_ref=(
+            str(run_id)
+            if run_id is not None
+            else str(idea_id)
+            if idea_id is not None
+            else session_id
+        ),
+        user_id=user_id,
+        org_id=org_id,
+        visibility=visibility,
+        confidence=confidence,
+        evidence=evidence,
+        run_id=run_id,
+        session_id=session_id,
+    )
+    result["compatibility_alias"] = "brain_encode"
+    return result
+
+
+async def async_tool_memory_ingest_source(
+    content: str,
+    content_kind: str = "episode",
+    source_kind: str = "agent_run",
+    source_ref: str | None = None,
+    source_url: str | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    visibility: str = "private",
+    confidence: float | None = None,
+    evidence: dict | None = None,
+    run_id: int | str | None = None,
+    session_id: str | None = None,
+) -> dict:
+    """Ingest source-backed reconstructive memory scoped to the current user."""
+    from brain.systems.reconstructive_memory.ingestion import ingest_memory_source
 
     if len(content.strip()) < 20:
         return {"error": "Content too short (min 20 chars)"}
 
     if not user_id:
-        return {"error": "brain_encode requires user context (missing user_id)"}
+        return {"error": "memory_ingest_source requires user context (missing user_id)"}
 
     if visibility not in ("private", "team", "org"):
         visibility = "private"
 
-    try:
-        write_context = MemoryWriteContext(
-            user_id=user_id,
-            org_id=org_id,
-            visibility=visibility,
-            source=source,
-            conversation_id=conversation_id,
-            idea_id=idea_id,
-            run_id=run_id,
-            session_id=session_id,
-            confidence=confidence,
-            evidence=evidence or {},
-        )
-    except ValueError as exc:
-        return {"error": str(exc)}
-
-    semantic_emb = None
-    degraded_reason = None
-
     async with UnitOfWork() as uow:
-        try:
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            semantic_emb = embed_document(content, runtime_config=runtime_config)
-        except Exception as exc:
-            error_text = str(exc)
-            lower = error_text.lower()
-            if any(term in lower for term in ("out of memory", "oom", "cuda")):
-                degraded_reason = f"embedding_oom: {error_text[:200]}"
-            else:
-                degraded_reason = f"embedding_failed: {error_text[:200]}"
-
-        result = await _maybe_await(uow.memories.insert_memory(
+        result = await ingest_memory_source(
+            uow.session,
             content=content,
-            memory_type=memory_type,
-            salience=salience,
-            semantic_embedding=semantic_emb,
-            context=write_context,
-            auto_edge=False,
-        ))
-
-    if degraded_reason:
-        result["warning"] = degraded_reason
-        result["embedding_deferred"] = True
-    return result
+            content_kind=content_kind,
+            source_kind=source_kind,
+            source_ref=source_ref or session_id or (str(run_id) if run_id is not None else None),
+            source_url=source_url,
+            org_id=org_id,
+            user_id=user_id,
+            visibility=visibility,
+            confidence=0.5 if confidence is None else confidence,
+            evidence=evidence or {},
+            authority_principal=user_id,
+        )
+    payload = result.to_dict()
+    payload["content_kind"] = content_kind
+    payload["source_kind"] = source_kind
+    return payload
 
 
 async def tool_brain_vault(
@@ -1469,6 +1517,21 @@ TOOLS = {
             "required": ["query"],
         },
     },
+    "memory_reconstruct": {
+        "function": async_tool_memory_reconstruct,
+        "description": (
+            "Reconstruct source-backed evidence from the new memory graph. Returns an evidence pack, "
+            "source spans, confidence, unresolved questions, and the reconstruction trajectory."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Question or context need to reconstruct evidence for"},
+                "limit": {"type": "integer", "description": "Maximum supporting evidence items", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
     "brain_guardrails": {
         "function": async_tool_brain_guardrails,
         "description": "Get guardrails: recent failures, high-salience warnings, and skill pitfalls.",
@@ -1531,13 +1594,34 @@ TOOLS = {
     },
     "brain_encode": {
         "function": async_tool_brain_encode,
-        "description": "Record a new memory (lesson, pattern, fact, or episode) into the brain.",
+        "description": "Compatibility alias: ingest source-backed reconstructive memory.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "content": {"type": "string", "description": "Memory content (min 20 chars)"},
                 "type": {"type": "string", "enum": ["lesson", "pattern", "fact", "episode"], "default": "episode"},
-                "salience": {"type": "number", "description": "Importance 1-10 (default 5)", "default": 5.0},
+                "salience": {"type": "number", "description": "Ignored compatibility field", "default": 5.0},
+            },
+            "required": ["content"],
+        },
+    },
+    "memory_ingest_source": {
+        "function": async_tool_memory_ingest_source,
+        "description": "Ingest source-backed reconstructive memory and create cue/tag/content graph nodes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "Source content to ingest"},
+                "content_kind": {"type": "string", "description": "Derived content kind", "default": "episode"},
+                "source_kind": {"type": "string", "description": "Immutable source kind", "default": "agent_run"},
+                "source_ref": {"type": "string", "description": "Optional source reference"},
+                "source_url": {"type": "string", "description": "Optional source URL"},
+                "visibility": {
+                    "type": "string",
+                    "enum": ["private", "team", "org"],
+                    "default": "private",
+                },
+                "confidence": {"type": "number", "description": "Extraction confidence", "default": 0.5},
             },
             "required": ["content"],
         },

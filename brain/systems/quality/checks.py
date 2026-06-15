@@ -14,18 +14,13 @@ Every rejection is logged so we can audit what was filtered.
 import json
 import logging
 import os
+import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.memory_visibility import (
-    MemoryVisibilityContext,
-    memory_visibility_sql,
-)
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.memory.embeddings import embed_document, vec_to_pg
-from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -88,34 +83,35 @@ async def check_duplicate(
 
     Returns (is_duplicate, details) where details includes the similar memory if found.
     """
-    visibility_context = MemoryVisibilityContext(
-        user_id=user_id,
-        org_id=org_id,
-        allow_global=allow_global,
-    )
-    vis_clause, vis_params = memory_visibility_sql(visibility_context, alias="")
-
+    del embedding
+    normalized = re.sub(r"\s+", " ", content.strip().lower())
     async with UnitOfWork() as uow:
-        if embedding is None:
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            embedding = embed_document(content, runtime_config=runtime_config)
-
-        emb_str = vec_to_pg(embedding)
+        visibility_clause = ""
+        params = {
+            "normalized": normalized,
+            "cutoff": datetime.now() - timedelta(days=window_days),
+        }
+        if not allow_global:
+            clauses = []
+            if user_id:
+                clauses.append("(visibility = 'private' AND user_id = :user_id)")
+                params["user_id"] = user_id
+            if org_id:
+                clauses.append("(visibility IN ('team', 'org') AND org_id = :org_id)")
+                params["org_id"] = org_id
+            if not clauses:
+                return False, {}
+            visibility_clause = "AND (" + " OR ".join(clauses) + ")"
         row = (await uow.session.execute(text("""
-            SELECT id, content,
-                   1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity
-            FROM memories
-            WHERE NOT archived
-            AND semantic_embedding IS NOT NULL
-            AND created_at > NOW() - (CAST(:window_days AS integer) * INTERVAL '1 day')
-            {vis_clause}
-            ORDER BY semantic_embedding <=> CAST(:emb AS vector)
+            SELECT id, COALESCE(text, canonical_label) AS content, 1.0 AS similarity
+            FROM memory_nodes
+            WHERE archived_at IS NULL
+            AND normalized_key = :normalized
+            AND created_at > :cutoff
+            {visibility_clause}
+            ORDER BY confidence DESC
             LIMIT 1
-        """.format(vis_clause=vis_clause)), {
-            "emb": emb_str,
-            "window_days": window_days,
-            **vis_params,
-        })).first()
+        """.format(visibility_clause=visibility_clause)), params)).first()
 
         if row and row[2] > DEDUP_SIMILARITY_THRESHOLD:
             return True, {

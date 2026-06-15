@@ -177,20 +177,18 @@ async def build_context_block(task: str, skill_name: str = None) -> tuple:
 
     # 2. Guardrails from skills.py plan (reuse existing function)
     try:
-        from brain.systems.memory.embeddings import embed_query, vec_to_pg
-        task_emb = embed_query(task)
-        emb_str = vec_to_pg(task_emb)
         async with UnitOfWork() as uow:
             # Get guardrails from relevant memories (lessons/patterns)
             guardrail_rows = (await uow.session.execute(sa_text("""
-                SELECT content, memory_type,
-                       1 - (semantic_embedding <=> CAST(:emb AS vector)) as sim
-                FROM memories
-                WHERE NOT archived AND superseded_by IS NULL
-                  AND memory_type IN ('lesson', 'pattern')
-                ORDER BY semantic_embedding <=> CAST(:emb AS vector)
+                SELECT COALESCE(text, canonical_label) AS content,
+                       COALESCE(content_kind, node_kind) AS memory_type,
+                       confidence AS sim
+                FROM memory_nodes
+                WHERE archived_at IS NULL
+                  AND content_kind IN ('lesson', 'pattern')
+                ORDER BY confidence DESC, updated_at DESC
                 LIMIT 5
-            """), {"emb": emb_str})).mappings().all()
+            """))).mappings().all()
             guardrails = [r["content"][:200] for r in guardrail_rows if r["sim"] > 0.4]
             if guardrails:
                 parts.append("## Guardrails (from past lessons)")

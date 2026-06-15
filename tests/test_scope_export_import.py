@@ -177,36 +177,14 @@ class TestScrubContent:
 # ============================================================
 
 class TestImportParsing:
-    """Test markdown parsing for workspace import."""
+    """Import only supports explicit reconstructive export bundles."""
 
-    def test_parse_markdown_sections(self, tmp_path):
-        from brain.app.cli.brain_import import _parse_markdown_sections
+    def test_workspace_import_helpers_are_removed(self):
+        import brain.app.cli.brain_import as brain_import
 
-        md = tmp_path / "test.md"
-        md.write_text(
-            "# Title\n\n"
-            "## Section One\n\n"
-            "This is a paragraph with enough content to be a memory chunk for testing.\n\n"
-            "## Section Two\n\n"
-            "Another section with substantial content that should be parsed into memories.\n"
-        )
-        result = _parse_markdown_sections(str(md), 'lesson')
-        assert len(result) >= 2
-        assert all(r['type'] == 'lesson' for r in result)
-
-    def test_skips_tiny_fragments(self, tmp_path):
-        from brain.app.cli.brain_import import _parse_markdown_sections
-
-        md = tmp_path / "tiny.md"
-        md.write_text("# Title\n\n## A\n\nToo short.\n")
-        result = _parse_markdown_sections(str(md), 'lesson')
-        assert len(result) == 0
-
-    async def test_import_from_workspace_dry_run(self, tmp_workspace):
-        from brain.app.cli.brain_import import import_from_workspace
-        stats = await import_from_workspace(str(tmp_workspace), dry_run=True)
-        assert stats['total'] > 0
-        assert stats['universal'] + stats['personal'] == stats['total']
+        assert hasattr(brain_import, "import_from_export")
+        assert not hasattr(brain_import, "import_from_workspace")
+        assert not hasattr(brain_import, "_parse_markdown_sections")
 
     async def test_import_from_export_dry_run(self, tmp_path):
         from brain.app.cli.brain_import import import_from_export

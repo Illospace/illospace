@@ -55,18 +55,19 @@ async def seed_memories(db_session, unit_of_work_for_session):
         salience: float = 7,
     ) -> int:
         result = await db_session.execute(text("""
-            INSERT INTO memories (
-                content, memory_type, salience, source, source_session,
-                created_at, archived, user_id, org_id, visibility
+            INSERT INTO memory_nodes (
+                node_kind, content_kind, canonical_label, text, normalized_key,
+                confidence, truth_status, freshness_status, created_at, user_id, org_id, visibility
             )
             VALUES (
-                :content, 'episode', :salience, 'session', :source_session,
-                :created_at, FALSE, :user_id, :org_id, :visibility
+                'content', 'episode', :content, :content, :normalized_key,
+                :confidence, 'active', 'fresh', :created_at, :user_id, :org_id, :visibility
             )
             RETURNING id
         """), {
             "content": content,
-            "salience": salience,
+            "normalized_key": f"{source_session}:{content}".lower(),
+            "confidence": salience / 10.0,
             "source_session": source_session,
             "created_at": created_at,
             "user_id": user_id,

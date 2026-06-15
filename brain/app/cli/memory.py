@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Illo Brain — memory operations.
 
-CRUD for the memory graph. Uses UnitOfWork for DB access, embeddings.py for vectors.
+CRUD for the reconstructive memory graph.
 CLI interface preserved for backward compatibility.
 """
 
@@ -11,45 +11,11 @@ import json
 import os
 import sys
 from datetime import datetime
+from types import SimpleNamespace
 
-import brain.kernel.config as config
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.db.repositories.memory_write_context import (
-    MemoryWriteContext,
-    dangerously_build_dev_test_memory_write_context,
-)
-from brain.platform.db.repositories.memory_visibility import MemoryVisibilityContext
-from brain.systems.memory.attention_controller import AttentionController, observe_retrieval
 from brain.systems.quality.gate import check_quality
-from brain.systems.memory.embeddings import (
-    embed_document,
-    embed_query,
-)
-
-
-def _lazy_load_enabled(flag: bool | None = None) -> bool:
-    if flag is not None:
-        return flag
-    return os.getenv("ATTENTION_LAZY_LOAD_ENABLED", "0").strip().lower() not in {"0", "false", "no"}
-
-
-async def _expand_lazy_loaded_results(
-    controller: AttentionController,
-    *,
-    attention_decision: dict,
-    user_id: str | None,
-    org_id: str | None,
-    limit: int,
-) -> list[dict]:
-    retrieval_decision_id = attention_decision.get("retrieval_decision_id")
-    if retrieval_decision_id is None:
-        return []
-    return await controller.load_lazy_candidates(
-        retrieval_decision_id=int(retrieval_decision_id),
-        user_id=user_id,
-        org_id=org_id,
-        limit=limit,
-    )
+from brain.systems.reconstructive_memory.controller import reconstruct_memory
 
 
 # ============================================================
@@ -67,61 +33,34 @@ async def add_memory(
     rel_type: str = "related_to",
     decay_eligible: bool = True,
     source_session: str | None = None,
-    write_context: MemoryWriteContext | None = None,
+    write_context: object | None = None,
     confidence: float | None = None,
     harvest_type: str | None = None,
     harvest_confidence: float | None = None,
     topic_tags: list[str] | None = None,
     memory_tier: str = "episodic",
 ) -> dict:
-    """Add a memory node with embeddings and auto-edges."""
-    # Quality gate — reject low-quality content before wasting compute
+    """Add source-backed reconstructive memory."""
     qr = await check_quality(content, salience=salience, memory_type=memory_type)
     if not qr.passed:
         return {"rejected": True, "reason": qr.reason}
     if qr.adjusted_salience is not None:
         salience = qr.adjusted_salience
 
-    # Auto-classify scope if not provided
-    if scope is None:
-        from brain.systems.memory.scope import classify_scope
-        scope = classify_scope(content, memory_type)
-
-    semantic_emb = embed_document(content)
-
+    del related_ids, rel_type, decay_eligible, scope, harvest_type, harvest_confidence, topic_tags, memory_tier
     async with UnitOfWork() as uow:
-        context = write_context
-        if context is None:
-            context = await dangerously_build_dev_test_memory_write_context(
-                session=uow.session,
-                source=source,
-                source_session=source_session,
-            )
-        elif confidence is not None or source_session:
-            context = context.with_defaults(
-                source=source,
-                session_id=source_session,
-                confidence=confidence,
-            )
-
+        context = _coerce_write_context(
+            write_context,
+            source=source,
+            source_session=source_session,
+            confidence=confidence if confidence is not None else max(0.0, min(1.0, salience / 10.0)),
+        )
         return await uow.memories.insert_memory(
             content=content,
             memory_type=memory_type,
-            semantic_embedding=semantic_emb,
             salience=salience,
             tags=tags,
-            related_ids=related_ids,
-            rel_type=rel_type,
-            decay_eligible=decay_eligible,
-            scope=scope,
-            memory_tier=memory_tier,
-            harvest_type=harvest_type,
-            harvest_confidence=harvest_confidence,
-            topic_tags=topic_tags,
             context=context,
-            auto_edge=True,
-            auto_edge_k=config.AUTO_EDGE_K,
-            auto_edge_threshold=0.5,
         )
 
 
@@ -139,102 +78,42 @@ async def query_memories(
     attention_debug: bool = False,
     expand_lazy_load: bool | None = None,
 ) -> dict:
-    """Query memories with multi-signal ranking.
-
-    When use_pools=True, uses three-pool retrieval (exploit/explore/narrative)
-    with adaptive bandit ratios. Falls back to existing behavior on failure.
-    When use_pools=False (default), existing behavior is unchanged.
-    """
-    del emotion_context
-    # Three-pool retrieval path
-    if use_pools:
-        try:
-            return await _query_with_pools(
-                query=query,
-                limit=limit,
-                org_id=org_id,
-                user_id=user_id,
-                attention_debug=attention_debug,
-                expand_lazy_load=expand_lazy_load,
-            )
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).debug(
-                "Pool retrieval failed, falling back to default: %s", e
-            )
-            # Fall through to existing behavior
-
-    query_emb = embed_query(query)
-
+    """Query memory by reconstructing a source-backed evidence pack."""
+    del memory_type, min_salience, tags, spread, use_pools, emotion_context, attention_debug, expand_lazy_load
     async with UnitOfWork() as uow:
-        visibility_context = MemoryVisibilityContext(
-            user_id=user_id,
-            org_id=org_id,
-            allow_global=(user_id == "system"),
-        )
-        retrieval = await uow.memories.query_ranked(
-            query_embedding=query_emb,
+        pack = await reconstruct_memory(
+            uow.session,
+            query=query,
             limit=limit,
-            memory_type=memory_type,
-            min_salience=min_salience,
-            tags=tags,
-            context=visibility_context,
-            spread=spread,
-        )
-        results = retrieval["results"]
-        spread_results = retrieval["spread_activation"]
-
-        formatted_results = [{
-            "id": r["id"], "content": r["content"], "type": r["memory_type"],
-            "tier": r.get("memory_tier", "episodic"),
-            "salience": r["salience"], "tags": r["tags"],
-            "scores": {
-                "combined": round(float(r["combined_score"] or 0), 4),
-                "semantic": round(float(r["semantic_score"] or 0), 4),
-                "recency": round(float(r["recency_score"] or 0), 4),
-            },
-            "created": r["created_at"].isoformat() if r["created_at"] else None,
-        } for r in results]
-
-    attention_decision = await observe_retrieval(
-        stage="memory_query",
-        query_text=query,
-        candidates=formatted_results,
-        user_id=user_id,
-        org_id=org_id,
-        preload_budget_tokens=limit * 120,
-        lazy_budget_tokens=max(0, limit * 40),
-    )
-    selection = AttentionController().materialize_selection(formatted_results, attention_decision)
-    lazy_loaded_results: list[dict] = []
-    if _lazy_load_enabled(expand_lazy_load) and selection.lazy_load_eligible:
-        lazy_loaded_results = await _expand_lazy_loaded_results(
-            AttentionController(),
-            attention_decision=attention_decision,
-            user_id=user_id,
             org_id=org_id,
-            limit=max(0, limit - len(selection.selected)),
+            user_id=user_id,
         )
-    visible_results = list(selection.selected) + list(lazy_loaded_results)
-    result = {
+    evidence_pack = pack.to_dict()
+    results = [
+        {
+            "id": item["node_id"],
+            "content": item.get("source_text") or item.get("text") or "",
+            "type": "reconstructed_evidence",
+            "tier": "source_backed",
+            "salience": round(float(item.get("confidence") or 0.0) * 10, 2),
+            "scores": {"confidence": round(float(item.get("confidence") or 0.0), 4)},
+            "source_span_id": item.get("source_span_id"),
+            "assertion_id": item.get("assertion_id"),
+        }
+        for item in evidence_pack["supporting_evidence"]
+    ]
+    return {
         "query": query,
-        "results": visible_results,
-        "candidate_results": formatted_results,
-        "suppressed_results": selection.suppressed,
-        "lazy_load_results": selection.lazy_load_eligible,
-        "lazy_loaded_results": lazy_loaded_results,
-        "candidate_count": len(formatted_results),
-        "count": len(visible_results),
-        **({"spread_activation": [{
-            "id": r["id"], "content": r["content"], "type": r["memory_type"],
-            "via_relationship": r["relationship"],
-            "edge_weight": round(r["edge_weight"], 3), "from_memory": r["from_id"],
-        } for r in spread_results]} if spread_results else {}),
-        "attention_decision": attention_decision,
+        "results": results,
+        "candidate_results": results,
+        "suppressed_results": [],
+        "lazy_load_results": [],
+        "lazy_loaded_results": [],
+        "candidate_count": len(results),
+        "count": len(results),
+        "retrieval_mode": "reconstructive",
+        "evidence_pack": evidence_pack,
     }
-    if attention_debug:
-        result["attention_explain"] = AttentionController().explain(attention_decision, formatted_results)
-    return result
 
 
 async def _query_with_pools(
@@ -245,56 +124,8 @@ async def _query_with_pools(
     attention_debug: bool = False,
     expand_lazy_load: bool | None = None,
 ) -> dict:
-    """Three-pool retrieval: exploit/explore/narrative with adaptive ratios.
-
-    Uses PoolRetriever with adaptive bandit ratios from RetrievalPoolStatsRepository.
-    Returns {"memories": [...], "retrieval_mode": "pools"}.
-    """
-    query_emb = embed_query(query)
-
-    async with UnitOfWork() as uow:
-        # Get adaptive ratios (falls back to defaults if no data)
-        ratios = await uow.pool_stats.get_pool_ratios(org_id=org_id)
-        results = await uow.memories.retrieve_with_pools(
-            query_embedding=query_emb,
-            limit=limit,
-            org_id=org_id,
-            user_id=user_id,
-            ratios=ratios,
-        )
-
-    attention_decision = await observe_retrieval(
-        stage="memory_query",
-        query_text=query,
-        candidates=results,
-        user_id=user_id,
-        org_id=org_id,
-        preload_budget_tokens=limit * 120,
-        lazy_budget_tokens=max(0, limit * 40),
-    )
-    selection = AttentionController().materialize_selection(results, attention_decision)
-    lazy_loaded_results: list[dict] = []
-    if _lazy_load_enabled(expand_lazy_load) and selection.lazy_load_eligible:
-        lazy_loaded_results = await _expand_lazy_loaded_results(
-            AttentionController(),
-            attention_decision=attention_decision,
-            user_id=user_id,
-            org_id=org_id,
-            limit=max(0, limit - len(selection.selected)),
-        )
-    visible_results = list(selection.selected) + list(lazy_loaded_results)
-    result = {
-        "memories": visible_results,
-        "candidate_memories": results,
-        "lazy_loaded_memories": lazy_loaded_results,
-        "retrieval_mode": "pools",
-        "query": query,
-        "pool_ratios": ratios,
-        "attention_decision": attention_decision,
-    }
-    if attention_debug:
-        result["attention_explain"] = AttentionController().explain(attention_decision, results)
-    return result
+    del attention_debug, expand_lazy_load
+    return await query_memories(query=query, limit=limit, org_id=org_id, user_id=user_id)
 
 
 async def get_memory(memory_id: int) -> dict | None:
@@ -306,24 +137,8 @@ async def get_memory(memory_id: int) -> dict | None:
         memory = detail["memory"]
         edges = detail["edges"]
 
-    result = {
-        "id": memory.id,
-        "content": memory.content,
-        "memory_type": memory.memory_type,
-        "salience": memory.salience,
-        "source": memory.source,
-        "tags": memory.tags,
-        "created_at": memory.created_at,
-        "last_accessed": memory.last_accessed,
-        "access_count": memory.access_count,
-        "decay_eligible": memory.decay_eligible,
-        "archived": memory.archived,
-    }
-    result["edges"] = [{
-        "connected_id": e["connected_id"], "relationship": e["relationship"],
-        "weight": round(e["weight"], 3), "connected_content": e["connected_content"][:100],
-        "connected_type": e["connected_type"], "auto": e["auto_generated"],
-    } for e in edges]
+    result = dict(vars(memory))
+    result["edges"] = edges
     return result
 
 
@@ -471,7 +286,7 @@ async def cmd_index(args):
     }, indent=2, default=str))
 
 
-def _write_context_from_args(args, *, source: str) -> MemoryWriteContext | None:
+def _write_context_from_args(args, *, source: str) -> SimpleNamespace | None:
     user_id = getattr(args, "user_id", None)
     if not user_id:
         return None
@@ -481,7 +296,7 @@ def _write_context_from_args(args, *, source: str) -> MemoryWriteContext | None:
         evidence = json.loads(evidence_json)
     org_id = getattr(args, "org_id", None)
     visibility = getattr(args, "visibility", None) or ("org" if org_id else "private")
-    return MemoryWriteContext(
+    return SimpleNamespace(
         user_id=user_id,
         org_id=org_id,
         visibility=visibility,
@@ -492,6 +307,34 @@ def _write_context_from_args(args, *, source: str) -> MemoryWriteContext | None:
         session_id=getattr(args, "session_id", None),
         confidence=getattr(args, "confidence", None),
         evidence=evidence,
+        source_ref=lambda: (
+            f"conversation:{getattr(args, 'conversation_id', None)}"
+            if getattr(args, "conversation_id", None)
+            else None
+        ),
+        source_session=lambda: getattr(args, "session_id", None),
+    )
+
+
+def _coerce_write_context(
+    context: object | None,
+    *,
+    source: str,
+    source_session: str | None,
+    confidence: float,
+) -> object:
+    if context is not None:
+        if hasattr(context, "with_defaults") and (confidence is not None or source_session):
+            return context.with_defaults(source=source, session_id=source_session, confidence=confidence)
+        return context
+    return SimpleNamespace(
+        user_id=None,
+        org_id=None,
+        visibility="private",
+        source=source,
+        confidence=confidence,
+        source_ref=lambda: None,
+        source_session=lambda: source_session,
     )
 
 

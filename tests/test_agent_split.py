@@ -139,6 +139,8 @@ class TestToolDefinitionContracts:
             "manage_skill",
             "skill_asset",
             "brain_encode",
+            "memory_reconstruct",
+            "memory_ingest_source",
             "vault_inventory",
             "brain_vault",
             "vault_secret_prompt",
