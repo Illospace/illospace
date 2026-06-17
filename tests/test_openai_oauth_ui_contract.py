@@ -20,9 +20,20 @@ def test_onboarding_shows_manual_callback_escape_hatch_while_oauth_is_pending():
 def test_system_access_card_expands_manual_callback_while_oauth_is_pending():
     source = (ROOT / "frontend/src/routes/system/ProviderConnections.svelte").read_text()
 
-    assert "{#if oauthPending && !hasModelAccess}" in source
+    assert "{#if oauthPending && !hasPersonalConnection}" in source
     assert "oauthUrl: string;" in source
     assert 'href={oauthUrl}' in source
+
+
+def test_system_provider_connection_is_not_admin_gated():
+    card = (ROOT / "frontend/src/routes/system/ProviderConnections.svelte").read_text()
+    page = (ROOT / "frontend/src/routes/system/+page.svelte").read_text()
+
+    assert "hasPersonalOpenAIRuntimeConnection(settings)" in page
+    assert "hasPersonalConnection={hasPersonalOpenAIConnection}" in page
+    assert "canManageSettings: boolean;" not in card
+    assert "disabled={!canManageSettings}" not in card
+    assert "disabled={!canManageSettings || savingConnection}" not in card
 
 
 def test_system_oauth_start_keeps_page_open_when_popup_is_blocked():
