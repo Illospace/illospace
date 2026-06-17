@@ -2,24 +2,22 @@
   import { ConstellationButton, ConstellationIcon } from '$lib/components/constellation';
 
   let {
-    connectionStatus,
     oauthUrl,
     oauthCallback,
     oauthPending,
     oauthCallbackMode,
-    canManageSettings,
+    hasPersonalConnection,
     savingConnection,
     onCallbackChange,
     onStartCodexSignIn,
     onStartLocalCodexSignIn,
     onFinishCodexSignIn,
   }: {
-    connectionStatus: string;
     oauthUrl: string;
     oauthCallback: string;
     oauthPending: boolean;
     oauthCallbackMode: 'server' | 'local_bridge' | 'manual';
-    canManageSettings: boolean;
+    hasPersonalConnection: boolean;
     savingConnection: boolean;
     onCallbackChange: (value: string) => void;
     onStartCodexSignIn: () => void;
@@ -27,11 +25,10 @@
     onFinishCodexSignIn: () => void;
   } = $props();
 
-  const hasModelAccess = $derived(connectionStatus === 'connected');
   const openAiActionLabel = $derived(openAiConnectionActionLabel());
 
   function openAiConnectionActionLabel() {
-    if (hasModelAccess) return 'Manage';
+    if (hasPersonalConnection) return 'Manage';
     return oauthPending ? 'Open again' : 'Connect';
   }
 </script>
@@ -60,7 +57,7 @@
         size="sm"
         onclick={onStartCodexSignIn}
         loading={savingConnection}
-        disabled={!canManageSettings}
+        disabled={savingConnection}
       >
         {openAiActionLabel}
       </ConstellationButton>
@@ -69,20 +66,20 @@
     <button
       type="button"
       class="connect-provider-row"
-      disabled={!canManageSettings || savingConnection}
+      disabled={savingConnection}
       onclick={onStartCodexSignIn}
     >
       <span class="connect-provider-icon" aria-hidden="true">
         <ConstellationIcon name="plus" size={15} />
       </span>
       <span class="connect-provider-copy">
-        <strong>Connect provider</strong>
-        <span>API key, OAuth, or custom endpoint</span>
+        <strong>Connect personal account</strong>
+        <span>ChatGPT / Codex sign-in</span>
       </span>
     </button>
   </div>
 
-  {#if oauthPending && !hasModelAccess}
+  {#if oauthPending && !hasPersonalConnection}
     <div class="oauth-callback-row">
       {#if oauthUrl}
         <a class="oauth-sign-in-link" href={oauthUrl} target="_blank" rel="noreferrer">

@@ -18,6 +18,7 @@
     navigateOpenAIOAuthPopup,
     openOpenAIOAuthPopup,
   } from '$lib/utils/oauthPopup';
+  import { hasPersonalOpenAIRuntimeConnection } from '$lib/utils/runtimeOnboarding';
   import { auth } from '$lib/stores/auth.svelte';
 
   import MemoryCard from './MemoryCard.svelte';
@@ -100,6 +101,7 @@
   });
 
   const canManageSettings = $derived(settings?.permissions?.can_manage_settings ?? false);
+  const hasPersonalOpenAIConnection = $derived(hasPersonalOpenAIRuntimeConnection(settings));
   const connectionStatus = $derived(settings?.connection?.status ?? 'missing');
   const modelOptions = $derived(settings?.models?.options ?? []);
   const setupMode = $derived($page.url.searchParams.get('setup') === '1');
@@ -824,12 +826,11 @@
     <div class="runtime-config-layout">
       <div class="runtime-primary-column">
         <ProviderConnections
-          {connectionStatus}
           {oauthUrl}
           {oauthCallback}
           oauthPending={Boolean(oauthUrl)}
           {oauthCallbackMode}
-          {canManageSettings}
+          hasPersonalConnection={hasPersonalOpenAIConnection}
           {savingConnection}
           onCallbackChange={(value) => (oauthCallback = value)}
           onStartCodexSignIn={() => startCodexSignIn()}
