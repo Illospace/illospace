@@ -9,7 +9,10 @@ from brain.systems.runs.capabilities import (
     registry_capability_manifests,
 )
 from brain.systems.runs.execution_context import _agent_context
-from brain.systems.runs.message_metadata import INTROSPECTION_MESSAGE_METADATA_KEYS
+from brain.systems.runs.message_metadata import (
+    INTROSPECTION_MESSAGE_METADATA_KEYS,
+    extract_latest_user_intent,
+)
 from brain.systems.runs.tool_catalog.registry import get_tool_registration
 
 _PERSON_ACTIVITY_PATTERNS = (
@@ -65,25 +68,34 @@ _WORKSPACE_RECORD_PHRASES = (
     "team database",
     "workspace records",
 )
-_CAPABILITY_SETUP_PATTERNS = (
+_CAPABILITY_SETUP_VERB_PATTERN = re.compile(
+    r"\b(?:set\s+(?:you|illo|it|this|that|me|us|them)\s+up|set\s*up|setup|connect|integrate|install|configure|enable)\b"
+)
+_CAPABILITY_CONTEXT_PATTERNS = (
     re.compile(
-        r"\b(?:set\s+(?:you|illo|it|this|that|me|us|them)\s+up|set\s*up|setup|connect|integrate|install|configure|enable)\b"
-    ),
-    re.compile(
-        r"\b(?:set\s*up|setup|connect|integrate|install|configure|enable|add)\b"
+        r"\b(?:set\s*up|setup|connect|integrate|install|configure|enable)\b"
         r"[^?]{0,100}\b(?:you|illo|agent|integration|connector|capability|tool|plugin|app|mcp)\b"
     ),
     re.compile(
         r"\b(?:you|illo|agent|integration|connector|capability|tool|plugin|app|mcp)\b"
-        r"[^?]{0,100}\b(?:set\s*up|setup|connect|integrate|install|configure|enable|add)\b"
+        r"[^?]{0,100}\b(?:set\s*up|setup|connect|integrate|install|configure|enable)\b"
     ),
+)
+_CAPABILITY_ADD_CONTEXT_PATTERNS = (
+    re.compile(
+        r"\badd\b[^?]{0,100}\b(?:integration|connector|capability|plugin|mcp)\b"
+    ),
+    re.compile(
+        r"\b(?:integration|connector|capability|plugin|mcp)\b[^?]{0,100}\badd\b"
+    ),
+)
+_CAPABILITY_QUESTION_PATTERNS = (
     re.compile(r"\b(?:what|which)\b[^?]{0,80}\b(?:capabilities|integrations|connectors|plugins|tools)\b"),
     re.compile(r"\b(?:what|which)\b[^?]{0,80}\b(?:can|could)\b[^?]{0,40}\b(?:you|illo)\b[^?]{0,40}\b(?:do|help)\b"),
     re.compile(r"\b(?:what|which)\b[^?]{0,40}\b(?:you|illo)\b[^?]{0,40}\b(?:can|could)\b[^?]{0,40}\b(?:do|help)\b"),
     re.compile(r"\bhelp\b[^?]{0,80}\b(?:what|which)\b[^?]{0,40}\b(?:can|could)\b[^?]{0,40}\b(?:you|illo)\b[^?]{0,40}\b(?:do|help)\b"),
     re.compile(r"\bhelp\b[^?]{0,80}\b(?:what|which)\b[^?]{0,40}\b(?:you|illo)\b[^?]{0,40}\b(?:can|could)\b[^?]{0,40}\b(?:do|help)\b"),
 )
-_CAPABILITY_CONTEXT_PATTERN_COUNT = 3
 
 
 def _normalized_text(message: str | None) -> str:
@@ -103,13 +115,13 @@ def _looks_like_capability_setup_question(message: str | None) -> bool:
     text = _normalized_text(message)
     if not text:
         return False
-    setup_verb = bool(_CAPABILITY_SETUP_PATTERNS[0].search(text))
-    context_patterns = _CAPABILITY_SETUP_PATTERNS[1:_CAPABILITY_CONTEXT_PATTERN_COUNT]
-    if any(pattern.search(text) for pattern in context_patterns):
+    if any(pattern.search(text) for pattern in _CAPABILITY_CONTEXT_PATTERNS):
         return True
-    if any(pattern.search(text) for pattern in _CAPABILITY_SETUP_PATTERNS[_CAPABILITY_CONTEXT_PATTERN_COUNT:]):
+    if any(pattern.search(text) for pattern in _CAPABILITY_ADD_CONTEXT_PATTERNS):
         return True
-    return setup_verb and _mentions_known_capability(text)
+    if any(pattern.search(text) for pattern in _CAPABILITY_QUESTION_PATTERNS):
+        return True
+    return bool(_CAPABILITY_SETUP_VERB_PATTERN.search(text)) and _mentions_known_capability(text)
 
 
 def _looks_like_self_context_question(message: str | None) -> bool:
@@ -172,7 +184,7 @@ def message_for_required_introspection(
             value = metadata.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-    return message
+    return extract_latest_user_intent(message)
 
 
 def required_introspection_tool(

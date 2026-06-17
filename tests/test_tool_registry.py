@@ -369,6 +369,7 @@ def test_run_introspection_uses_current_human_message_over_thread_wrapper():
     )
 
     assert required_introspection_tool(wrapped_message)[0] == "read_capabilities"
+    assert message_for_required_introspection(wrapped_message) == "where are the results ?"
 
     selected = message_for_required_introspection(
         wrapped_message,
@@ -377,6 +378,34 @@ def test_run_introspection_uses_current_human_message_over_thread_wrapper():
 
     assert selected == "where are the results ?"
     assert required_introspection_tool(selected) == (None, None)
+
+
+def test_thread_content_action_does_not_require_capabilities():
+    from brain.systems.runs.introspection import required_introspection_tool
+
+    tool, message = required_introspection_tool("Add JB's response to the thread.")
+
+    assert tool is None
+    assert message is None
+
+
+def test_app_content_action_does_not_require_capabilities():
+    from brain.systems.runs.introspection import required_introspection_tool
+
+    tool, message = required_introspection_tool("Add JB's response to the app.")
+
+    assert tool is None
+    assert message is None
+
+
+def test_add_integration_action_still_requires_capabilities():
+    from brain.systems.runs.introspection import required_introspection_tool
+
+    tool, message = required_introspection_tool("Add the Slack integration.")
+
+    assert tool == "read_capabilities"
+    assert message is not None
+    assert "capability/setup context" in message
 
 
 def test_memory_question_does_not_force_workspace_data():
