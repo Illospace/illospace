@@ -193,22 +193,37 @@ def _local_bridge_enabled() -> bool:
     return _env_flag("ILLO_OPENAI_OAUTH_LOCAL_BRIDGE", True)
 
 
-def _request_origin(request: Request) -> str | None:
+def _server_callback_enabled() -> bool:
+    return _env_flag("ILLO_OPENAI_OAUTH_SERVER_CALLBACK", True)
+
+
+def _configured_public_origin() -> str | None:
+    for name in ("ILLO_PUBLIC_URL", "ILLO_DASHBOARD_URL"):
+        origin = _origin_from_header(os.getenv(name))
+        if origin and not _is_loopback_origin(origin):
+            return origin
+    return None
+
+
+def _request_header_origin(request: Request) -> str | None:
     candidates = [
         _origin_from_header(request.headers.get("origin")),
         _origin_from_header(request.headers.get("referer")),
+    ]
+    return next((candidate for candidate in candidates if candidate), None)
+
+
+def _request_origin(request: Request) -> str | None:
+    candidates = [
+        _configured_public_origin(),
+        _request_header_origin(request),
         _origin_from_header(str(request.base_url)),
     ]
     return next((candidate for candidate in candidates if candidate), None)
 
 
 def _oauth_callback_return_url(request: Request) -> str:
-    candidates = [
-        _origin_from_header(request.headers.get("origin")),
-        _origin_from_header(request.headers.get("referer")),
-        _origin_from_header(str(request.base_url)),
-    ]
-    origin = next((candidate for candidate in candidates if candidate), None)
+    origin = _request_origin(request)
     if origin is None:
         origin = "http://localhost:8000"
     return f"{origin.rstrip('/')}/auth/callback"
@@ -222,14 +237,11 @@ def _oauth_server_redirect_uri(request: Request) -> str | None:
 
 
 def _oauth_callback_mode(request: Request, requested_mode: str) -> str:
-    # The Codex OAuth client is registered for the localhost callback. A custom
-    # self-hosted callback must stay opt-in because providers can reject it
-    # before Illo receives a recoverable callback URL.
     if requested_mode == "local_bridge":
         return "local_bridge"
-    if requested_mode == "server" and _env_flag("ILLO_OPENAI_OAUTH_SERVER_CALLBACK", False):
-        return "server" if _oauth_server_redirect_uri(request) else "local_bridge"
-    return "local_bridge"
+    if not _server_callback_enabled():
+        return "local_bridge"
+    return "server" if _oauth_server_redirect_uri(request) else "local_bridge"
 
 
 def start_openai_oauth(request: Request, *, callback_mode: str = "auto") -> dict[str, object]:

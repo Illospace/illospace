@@ -55,12 +55,13 @@ Memory setup is also runtime-managed: choosing OpenAI/Gemini memory saves the
 non-secret embedding settings in Postgres and encrypts the embedding API key
 with `VAULT_MASTER_KEY`. The Compose app image and `/app/.env` are not mutated.
 
-OpenAI/Codex sign-in uses OpenAI's registered localhost callback. In this
-Compose deployment, the API runs inside a container, so the browser's
-`localhost:1455` is your workstation, not the API container. Illospace therefore
-shows the manual callback field by default: finish OpenAI sign-in, copy the
-final `localhost:1455/auth/callback?...` URL from the sign-in tab, and paste it
-back into Illospace.
+OpenAI/Codex sign-in uses `<ILLO_PUBLIC_URL>/auth/callback` automatically when
+`ILLO_PUBLIC_URL` is a public browser-facing URL. In localhost-only Compose
+access, the API runs inside a container, so the browser's `localhost:1455` is
+your workstation, not the API container; Illospace keeps the manual callback
+fallback available. Copy the final `localhost:1455/auth/callback?...` URL from
+the sign-in tab and paste it back into Illospace if automatic return is not
+available.
 
 For team-wide access, put your own reverse proxy, VPN, tunnel, or private
 network in front of `127.0.0.1:8080`, then set `ILLO_PUBLIC_URL` to that
