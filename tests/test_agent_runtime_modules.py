@@ -517,6 +517,7 @@ def test_final_reply_helpers_parse_json_and_cache_review():
     assert payload["missing_requirements"] == ["none"]
     assert ask_payload["status"] == "blocked_on_user"
     assert extract_latest_user_intent("wrapper\nLatest user message:\nShip it") == "Ship it"
+    assert extract_latest_user_intent('[Idea: "Setup context" | idea-1]\n\nShip it') == "Ship it"
     assert "Ship it" in continuation_gate_nudge("Latest user message:\nShip it")
 
     ctx = SimpleNamespace()

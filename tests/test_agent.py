@@ -1200,6 +1200,90 @@ class TestAgentLoop:
     @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
+    def test_thread_content_action_does_not_force_capability_detour(self, mock_save, mock_load, mock_client):
+        from brain.systems.runs.direct_agent import run_agent
+
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            self._make_response("I found JB's response and added it to the thread."),
+            self._make_response(
+                text=None,
+                stop_reason="tool_use",
+                tool_use={
+                    "name": "read_capabilities",
+                    "input": {"query": "Add JB's response to the thread."},
+                },
+            ),
+            self._make_response("I can help with threads, Slack, workspace tools, and setup."),
+        ]
+        mock_client.return_value = _mock_llm_client(client)
+
+        handler = MagicMock(return_value={"capabilities": [{"key": "threads"}]})
+
+        result = run_agent(
+            message="Add JB's response to the thread.",
+            tools=[{
+                "name": "read_capabilities",
+                "description": "test",
+                "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+            }],
+            tool_handlers={"read_capabilities": handler},
+            persist_session=False,
+        )
+
+        assert result.success
+        assert result.output == "I found JB's response and added it to the thread."
+        assert result.tool_calls == []
+        assert handler.call_count == 0
+        assert client.messages.create.call_count == 1
+
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
+    @patch("brain.systems.runs.direct_agent._save_session")
+    def test_wrapped_thread_reply_uses_latest_message_for_introspection(self, mock_save, mock_load, mock_client):
+        from brain.systems.runs.direct_agent import run_agent
+
+        message = (
+            '[Idea: "Create a skill to analyze our db in prod and connect to postgres" | idea-1]\n\n'
+            "give me the last 10 generations in production with the company associated"
+        )
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            self._make_response("Last 10 production generations: 826324 Roman.co.uk, 826323 Roman.co.uk."),
+            self._make_response(
+                text=None,
+                stop_reason="tool_use",
+                tool_use={
+                    "name": "read_capabilities",
+                    "input": {"query": "current Illo capability and setup context"},
+                },
+            ),
+            self._make_response("I can inspect and act across the workspace: Threads, Domains, Vault, skills."),
+        ]
+        mock_client.return_value = _mock_llm_client(client)
+
+        handler = MagicMock(return_value={"capabilities": [{"key": "vault"}]})
+
+        result = run_agent(
+            message=message,
+            tools=[{
+                "name": "read_capabilities",
+                "description": "test",
+                "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+            }],
+            tool_handlers={"read_capabilities": handler},
+            persist_session=False,
+        )
+
+        assert result.success
+        assert result.output == "Last 10 production generations: 826324 Roman.co.uk, 826323 Roman.co.uk."
+        assert result.tool_calls == []
+        assert handler.call_count == 0
+        assert client.messages.create.call_count == 1
+
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
+    @patch("brain.systems.runs.direct_agent._save_session")
     def test_provenance_question_does_not_loop_when_my_activity_is_not_exposed(self, mock_save, mock_load, mock_client):
         from brain.systems.runs.direct_agent import run_agent
 

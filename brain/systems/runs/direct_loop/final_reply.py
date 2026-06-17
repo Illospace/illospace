@@ -5,14 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-
-def extract_latest_user_intent(message: str) -> str:
-    """Extract the latest user request from coordinator task wrappers when present."""
-    text = (message or "").strip()
-    marker = "Latest user message:"
-    if marker in text:
-        return text.split(marker, 1)[1].strip() or text
-    return text
+from brain.systems.runs.message_metadata import extract_latest_user_intent
 
 
 def parse_checker_payload(raw_output: str) -> dict | None:
