@@ -201,9 +201,9 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         "key": "threads",
         "name": "Threads and Discussion",
         "category": "core_workspace",
-        "summary": "Illo can work with Illospace Threads, AI Timeline messages, Thread Discussion surfaces, and generated thread assets.",
-        "aliases": ("thread", "threads", "discussion", "ai timeline", "ideas", "thread asset", "show artifact"),
-        "tools": ("manage_idea", "read_thread_discussion", "publish_thread_asset", "post_thread_discussion_reply", "post_ai_timeline_message", "post_chat_message", "cortex_reply", "cortex_visual_reply"),
+        "summary": "Illo can work with Illospace Threads, AI Timeline messages, Thread Discussion surfaces, static thread assets, and interactive thread artifacts.",
+        "aliases": ("thread", "threads", "discussion", "ai timeline", "ideas", "thread asset", "show artifact", "interactive artifact", "shareable artifact", "brainstorm board"),
+        "tools": ("manage_idea", "read_thread_discussion", "publish_thread_asset", "publish_thread_artifact", "post_thread_discussion_reply", "post_ai_timeline_message", "post_chat_message", "cortex_reply", "cortex_visual_reply"),
     },
     {
         "key": "domains",

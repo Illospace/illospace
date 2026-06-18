@@ -17,14 +17,14 @@
   const selectedApp = $derived(apps.find((app) => app.id === selectedAppId) ?? null);
 </script>
 
-<section class="thread-apps-pane" class:has-selected={!!selectedApp} aria-label="Generated apps">
+<section class="thread-apps-pane" class:has-selected={!!selectedApp} aria-label="Thread artifacts">
   {#if selectedApp}
     <div class="thread-apps-pane__selected">
       <GeneratedAppRenderer app={selectedApp} surface="dock" onclose={() => onSelectApp?.(null)} />
     </div>
   {:else}
     <header class="thread-apps-pane__header">
-      <span>Generated apps</span>
+      <span>Thread artifacts</span>
       <strong>{apps.length}</strong>
     </header>
 
@@ -46,7 +46,7 @@
     {:else}
       <div class="thread-apps-pane__empty">
         <ConstellationIcon name="code" size={18} stroke={1.8} />
-        <span>No generated apps yet.</span>
+        <span>No thread artifacts yet.</span>
       </div>
     {/if}
   {/if}

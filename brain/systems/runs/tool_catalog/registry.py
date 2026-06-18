@@ -361,6 +361,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "expected_effect": "publish a generated local artifact as a visible Thread upload asset",
         "output_budget_chars": 8_000,
     },
+    "publish_thread_artifact": {
+        "permission": "write_workspace_app",
+        "risk_class": "medium",
+        "side_effect_class": "workspace_app_management",
+        "reversibility": "reversible_by_archive",
+        "action_manifest": True,
+        "expected_effect": "publish a versioned interactive HTML artifact scoped to a Thread",
+        "output_budget_chars": 12_000,
+    },
     "post_ai_timeline_message": {
         "permission": "write_chat",
         "risk_class": "medium",

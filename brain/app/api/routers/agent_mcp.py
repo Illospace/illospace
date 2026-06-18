@@ -154,7 +154,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             {
                 "capability": {
                     "type": "string",
-                    "description": "Action capability name, such as thread.create, thread.post_message, handoff.create, domain.record.write, or capabilities.",
+                    "description": "Action capability name, such as thread.create, thread.post_message, thread.artifact.publish, handoff.create, domain.record.write, or capabilities.",
                 },
                 "arguments": {
                     "type": "object",
@@ -495,6 +495,26 @@ ACT_CAPABILITIES: dict[str, dict[str, Any]] = {
             "trigger_illo": "boolean",
         },
     },
+    "thread.artifact.publish": {
+        "description": "Publish or republish an interactive HTML artifact app scoped to an existing Illo thread.",
+        "arguments": {
+            "idea_id": "string",
+            "thread_id": "string",
+            "thread_url": "string",
+            "thread_route": "string",
+            "title": "string",
+            "description": "string",
+            "artifact_kind": "string",
+            "source_code": "string",
+            "app_id": "string",
+            "key": "string",
+            "update_existing": "boolean",
+            "manifest": "object",
+            "visual_spec": "object",
+            "metadata": "object",
+            "initial_state": "object",
+        },
+    },
     **agent_mcp_handoffs.ACT_CAPABILITIES,
     "domain.record.write": {
         "description": "Create, update, or archive records in Illo Domains as the user's external-agent delegate.",
@@ -674,6 +694,39 @@ async def _act_post_thread_message(
     return result
 
 
+async def _act_publish_thread_artifact(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    capability_arguments: dict[str, Any],
+) -> dict[str, Any]:
+    from brain.systems.cortex.thread_artifacts import publish_thread_artifact_app
+
+    result = await publish_thread_artifact_app(
+        db,
+        org_id=principal.org_id,
+        user_id=principal.owner_user_id,
+        thread_id=_thread_argument_id(capability_arguments),
+        title=_required_capability_string(capability_arguments, "title", capability="thread.artifact.publish"),
+        description=_clean_optional_string(capability_arguments.get("description")),
+        artifact_kind=_clean_optional_string(capability_arguments.get("artifact_kind")),
+        source_code=_required_capability_string(capability_arguments, "source_code", capability="thread.artifact.publish"),
+        app_id=_clean_optional_string(capability_arguments.get("app_id")),
+        key=_clean_optional_string(capability_arguments.get("key")),
+        update_existing=bool(capability_arguments.get("update_existing", True)),
+        manifest=_clean_dict(capability_arguments.get("manifest")),
+        visual_spec=_clean_dict(capability_arguments.get("visual_spec")),
+        metadata={
+            **_clean_dict(capability_arguments.get("metadata")),
+            "mcp_tool": ACT_TOOL_NAME,
+            "mcp_capability": "thread.artifact.publish",
+        },
+        initial_state=_clean_dict(capability_arguments.get("initial_state")),
+    )
+    result["_mutates_workspace_app"] = True
+    result["_workspace_app_change"] = {"action": result["action"], "app": result["app"]}
+    return result
+
+
 async def _tool_act(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
@@ -697,6 +750,8 @@ async def _tool_act(
             capability_arguments,
             original_arguments=arguments,
         )
+    if capability == "thread.artifact.publish":
+        return await _act_publish_thread_artifact(db, principal, capability_arguments)
     if capability == "handoff.create":
         return await agent_mcp_handoffs.create_handoff(
             db,
@@ -882,6 +937,19 @@ async def _handle_mcp_request(
             await db.commit()
         if tool_payload.pop("_mutates_handoff", False):
             await db.commit()
+        if tool_payload.pop("_mutates_workspace_app", False):
+            workspace_app_change = tool_payload.pop("_workspace_app_change", None)
+            await db.commit()
+            if isinstance(workspace_app_change, dict):
+                from brain.systems.workspace_apps.events import publish_workspace_app_change
+
+                publish_workspace_app_change(
+                    org_id=principal.org_id,
+                    action=str(workspace_app_change.get("action") or "update"),
+                    app=workspace_app_change.get("app"),
+                    app_id=workspace_app_change.get("app_id"),
+                    key=workspace_app_change.get("key"),
+                )
         mutates_thread = bool(spec.get("mutates_thread") or tool_payload.pop("_mutates_thread", False))
         if mutates_thread:
             await _add_thread_trigger_result_if_needed(

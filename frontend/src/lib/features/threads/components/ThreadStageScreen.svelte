@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { page } from '$app/stores';
   import { ConstellationComposerOrb, ConstellationIcon } from '$lib/components/constellation';
   import { auth } from '$lib/stores/auth.svelte';
   import { cortex } from '$lib/stores/cortex.svelte';
@@ -180,6 +181,7 @@
   let titleGenerating = $state(false);
   let threadArchiving = $state(false);
   let threadLinkCopying = $state(false);
+  let lastAutoOpenedThreadAppId = $state<string | null>(null);
 
   const THREAD_STAGE_MIN_THREAD_WIDTH = 380;
   const THREAD_STAGE_DEFAULT_GUTTER = 24;
@@ -226,13 +228,17 @@
   const activeFilePreviewTab = $derived(activeSidePanelTab?.kind === 'file-preview' ? activeSidePanelTab : null);
   const activeFilePreviewPath = $derived(activeFilePreviewTab?.filePath ?? '');
   const activeFilePreviewRunId = $derived(activeFilePreviewTab?.runId ?? null);
+  const threadArtifactApps = $derived.by(() => workspaceApps.threadApps(idea?.id ?? null));
+  const requestedThreadAppId = $derived(
+    $page.url.searchParams.get('app') || $page.url.searchParams.get('artifact_app'),
+  );
   const selectedThreadApp = $derived(
     activeSidePanelTab?.kind === 'app' && activeSidePanelTab.appId
-      ? workspaceApps.appById(activeSidePanelTab.appId)
+      ? threadArtifactApps.find((app) => app.id === activeSidePanelTab.appId) ?? null
       : null,
   );
   const sidePanelAddMenuItems = $derived.by(() =>
-    buildThreadSidePanelAddMenuItems(sidePanelTabs, workspaceApps.visibleApps),
+    buildThreadSidePanelAddMenuItems(sidePanelTabs, threadArtifactApps),
   );
   const activeVaultSecretPrompt = $derived(
     String(cortex.vaultSecretPrompt?.idea_id ?? '') === String(idea?.id ?? '') ? cortex.vaultSecretPrompt : null,
@@ -885,7 +891,8 @@
   }
 
   function openAppTab(appId: string | null | undefined) {
-    applySidePanelState(openAppThreadSidePanelTab(sidePanelState(), appId, workspaceApps.appById(appId ?? '')));
+    const app = threadArtifactApps.find((candidate) => candidate.id === appId) ?? null;
+    applySidePanelState(openAppThreadSidePanelTab(sidePanelState(), appId, app));
   }
 
   function handleThreadAppSelect(appId: string | null) {
@@ -898,6 +905,29 @@
       closeSidePanelTab(activeSidePanelTab.id);
     }
   }
+
+  $effect(() => {
+    const appId = requestedThreadAppId;
+    if (!appId || appId === lastAutoOpenedThreadAppId) return;
+    const app = workspaceApps.appById(appId);
+    if (!app) {
+      if (!workspaceApps.loaded) void workspaceApps.load({ silent: true });
+      return;
+    }
+    if (!workspaceApps.appBelongsToThread(app, idea?.id ?? null)) return;
+    lastAutoOpenedThreadAppId = appId;
+    openAppTab(appId);
+  });
+
+  $effect(() => {
+    const appId = workspaceApps.lastChangedAppId;
+    if (!appId || appId === lastAutoOpenedThreadAppId) return;
+    if (workspaceApps.lastChangeAction !== 'create' && workspaceApps.lastChangeAction !== 'update') return;
+    const app = workspaceApps.appById(appId);
+    if (!workspaceApps.appBelongsToThread(app, idea?.id ?? null)) return;
+    lastAutoOpenedThreadAppId = appId;
+    openAppTab(appId);
+  });
 
   function closeSidePanelTab(tabId: string) {
     const closingTab = sidePanelTabs.find((tab) => tab.id === tabId);
@@ -1203,7 +1233,7 @@
 
   {#snippet appsPane()}
     <ThreadAppsPane
-      apps={workspaceApps.visibleApps}
+      apps={threadArtifactApps}
       selectedAppId={selectedThreadApp?.id ?? null}
       onSelectApp={handleThreadAppSelect}
     />

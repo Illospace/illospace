@@ -42,6 +42,23 @@ class WorkspaceAppsStore {
     return this.apps.filter((app) => !app.archived_at);
   }
 
+  appBelongsToThread(app: WorkspaceAppRead | null | undefined, threadId: string | null | undefined) {
+    if (!app || !threadId) return false;
+    const metadata = app.metadata || {};
+    const threadArtifact = metadata.thread_artifact || {};
+    const metadataThreadId = String(
+      threadArtifact.thread_id
+        ?? metadata.thread_id
+        ?? metadata.idea_id
+        ?? '',
+    );
+    return metadata.artifact_scope === 'thread' && metadataThreadId === String(threadId);
+  }
+
+  threadApps(threadId: string | null | undefined) {
+    return this.visibleApps.filter((app) => this.appBelongsToThread(app, threadId));
+  }
+
   appById(appId: string | null | undefined) {
     if (!appId) return null;
     return this.apps.find((app) => app.id === appId) ?? null;
