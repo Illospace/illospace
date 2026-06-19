@@ -51,6 +51,7 @@
     type ThreadStageRightDockTab,
   } from '$lib/features/threads/controllers/threadSidePanelController';
   import { threadStreamController } from '$lib/features/threads/controllers/threadStreamController';
+  import { decideThreadArtifactDeepLink } from '$lib/features/threads/domain/threadArtifactDeepLink';
   import { threadUrl } from '$lib/features/threads/domain/threadLinks';
   import {
     findSlashCommandToken,
@@ -182,6 +183,7 @@
   let threadArchiving = $state(false);
   let threadLinkCopying = $state(false);
   let lastAutoOpenedThreadAppId = $state<string | null>(null);
+  let requestedThreadAppLoadRequestedFor = $state<string | null>(null);
 
   const THREAD_STAGE_MIN_THREAD_WIDTH = 380;
   const THREAD_STAGE_DEFAULT_GUTTER = 24;
@@ -908,15 +910,30 @@
 
   $effect(() => {
     const appId = requestedThreadAppId;
-    if (!appId || appId === lastAutoOpenedThreadAppId) return;
+    if (requestedThreadAppLoadRequestedFor && requestedThreadAppLoadRequestedFor !== appId) {
+      requestedThreadAppLoadRequestedFor = null;
+    }
     const app = workspaceApps.appById(appId);
-    if (!app) {
-      if (!workspaceApps.loaded) void workspaceApps.load({ silent: true });
+    const decision = decideThreadArtifactDeepLink({
+      requestedAppId: appId,
+      lastAutoOpenedAppId: lastAutoOpenedThreadAppId,
+      appExists: Boolean(app),
+      appBelongsToCurrentThread: workspaceApps.appBelongsToThread(app, idea?.id ?? null),
+      currentThreadLoaded: Boolean(idea?.id),
+      loadRequestedForAppId: requestedThreadAppLoadRequestedFor,
+      appsLoading: workspaceApps.loading,
+    });
+
+    if (decision.action === 'request-refresh') {
+      requestedThreadAppLoadRequestedFor = decision.appId;
+      void workspaceApps.load({ silent: true, force: true });
       return;
     }
-    if (!workspaceApps.appBelongsToThread(app, idea?.id ?? null)) return;
-    lastAutoOpenedThreadAppId = appId;
-    openAppTab(appId);
+    if (decision.action !== 'open') return;
+
+    requestedThreadAppLoadRequestedFor = null;
+    lastAutoOpenedThreadAppId = decision.appId;
+    openAppTab(decision.appId);
   });
 
   $effect(() => {
