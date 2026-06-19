@@ -69,6 +69,7 @@ from brain.systems.runs.tool_catalog.handlers.slack import (
     _handle_post_slack_reply,
     _handle_read_slack_conversation,
 )
+from brain.systems.runs.tool_catalog.handlers.thread_artifacts import _handle_publish_thread_artifact
 from brain.systems.runs.tool_catalog.handlers.activity import _handle_my_activity
 from brain.systems.runs.tool_catalog.handlers.voice import _handle_transcribe_audio_attachment
 from brain.systems.runs.tool_catalog.handlers.web import _handle_web_fetch, _handle_web_search
@@ -272,6 +273,10 @@ def _get_tool_handlers(
         "publish_thread_asset": lambda **kw: _patched_private(
             "_handle_publish_thread_asset",
             _handle_publish_thread_asset,
+        )(**kw),
+        "publish_thread_artifact": lambda **kw: _patched_private(
+            "_handle_publish_thread_artifact",
+            _handle_publish_thread_artifact,
         )(**kw),
         "post_ai_timeline_message": lambda **kw: _patched_private(
             "_handle_post_ai_timeline_message",

@@ -112,6 +112,80 @@ CORTEX_IDEA_TOOLS = [
             "required": ["action"],
         },
     },
+    {
+        "name": "publish_thread_artifact",
+        "description": (
+            "Publish or republish an interactive, thread-scoped HTML artifact as an app-capsule. "
+            "Use this when the user asks for a shareable or visual thread view, brainstorm board, "
+            "status page, walkthrough, dashboard, checklist, comparison, or other interactive artifact. "
+            "Illo chooses the artifact shape by writing a responsive single-document HTML/CSS/JS source. "
+            "The source runs in the sandboxed app-capsule runtime and can use window.illo.state.get/set/update "
+            "for artifact-local interaction state. It must not load external scripts/styles, use browser "
+            "storage, or include secrets. The result is a versioned workspace app stamped with the current "
+            "Thread id; post the returned artifact_url or thread_url plus app_id when telling teammates where "
+            "to review it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "thread_id": {
+                    "type": "string",
+                    "description": "Thread/idea id. Defaults to the current Thread when one is bound.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Human-readable artifact title.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Short artifact description shown in app listings.",
+                },
+                "artifact_kind": {
+                    "type": "string",
+                    "description": "Artifact type such as brainstorm, walkthrough, dashboard, checklist, comparison, incident, status, decision-room, or custom.",
+                    "default": "interactive",
+                },
+                "source_code": {
+                    "type": "string",
+                    "description": (
+                        "Responsive app-capsule HTML/CSS/JS. Use a root element with class illo-app, "
+                        "Illo App Kit classes such as illo-panel, illo-toolbar, illo-button, illo-tabs, "
+                        "illo-list, and illo-table-wrap, and window.illo.state for interactivity."
+                    ),
+                },
+                "app_id": {
+                    "type": "string",
+                    "description": "Existing artifact app id to republish/update.",
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Optional stable app key. Defaults to a thread/title-derived key.",
+                },
+                "update_existing": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "When true, update the existing app with the same key instead of creating duplicates.",
+                },
+                "manifest": {
+                    "type": "object",
+                    "description": "Optional app-capsule manifest extensions. Contract, data plan, design contract, state key, and thread metadata are defaulted.",
+                },
+                "visual_spec": {
+                    "type": "object",
+                    "description": "Optional host-rendered thumbnail/placement metadata.",
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Optional provenance metadata; thread_artifact fields are added automatically.",
+                },
+                "initial_state": {
+                    "type": "object",
+                    "description": "Optional initial artifact-local state. Keep durable records in Domains; use this for UI state or lightweight interaction state.",
+                },
+            },
+            "required": ["title", "source_code"],
+        },
+    },
 ]
 
 # ── Native Chat Tools ─────────────────────────────────────────

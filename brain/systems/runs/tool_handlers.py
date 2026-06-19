@@ -22,6 +22,7 @@ from brain.systems.runs.tool_catalog.handlers.projects import *  # noqa: F401,F4
 from brain.systems.runs.tool_catalog.handlers.session_tools import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.self_context import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.skills import *  # noqa: F401,F403
+from brain.systems.runs.tool_catalog.handlers.thread_artifacts import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.voice import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.web import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.workers import *  # noqa: F401,F403
@@ -59,6 +60,7 @@ _COMPOSITION_PATCH_NAMES = (
     "_handle_post_chat_message",
     "_handle_post_thread_discussion_reply",
     "_handle_publish_thread_asset",
+    "_handle_publish_thread_artifact",
     "_handle_read_thread_discussion",
     "_handle_read_thread_messages",
     "_handle_manage_cycle",

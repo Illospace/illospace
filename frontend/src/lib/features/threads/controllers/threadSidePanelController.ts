@@ -243,8 +243,8 @@ export function buildThreadSidePanelAddMenuItems(
     items.push({
       id: 'no-apps',
       kind: 'app',
-      label: visibleApps.length > 0 ? 'All apps are open' : 'No apps available',
-      description: visibleApps.length > 0 ? 'Close an app tab to reopen it here' : 'Generated apps appear here',
+      label: visibleApps.length > 0 ? 'All artifacts are open' : 'No artifacts available',
+      description: visibleApps.length > 0 ? 'Close an artifact tab to reopen it here' : 'Thread artifacts appear here',
       disabled: true,
     });
   }
