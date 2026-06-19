@@ -20,6 +20,7 @@ from datetime import date, timedelta
 from sqlalchemy import text
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.reconstructive_memory.ingestion import ingest_memory_source
 
 logger = logging.getLogger("feedback.meta_evolution")
 
@@ -329,14 +330,14 @@ async def run_meta_evolution() -> dict:
                     + (f" Suggested: {insight.suggested_action}" if insight.suggested_action else "")
                 )
                 async with UnitOfWork() as uow:
-                    await uow.session.execute(text("""
-                        INSERT INTO memories (content, memory_type, salience, source, tags, decay_eligible)
-                        VALUES (:content, 'insight', :salience, 'meta_evolution', :tags, TRUE)
-                    """), {
-                        "content": content[:500],
-                        "salience": 8.0 if insight.severity == "regression" else 6.0,
-                        "tags": ["meta_evolution", insight.category],
-                    })
+                    await ingest_memory_source(
+                        uow.session,
+                        content=content[:500],
+                        content_kind="insight",
+                        source_kind="meta_evolution",
+                        confidence=0.8 if insight.severity == "regression" else 0.6,
+                        evidence={"tags": ["meta_evolution", insight.category]},
+                    )
                 stored_count += 1
             except Exception as e:
                 logger.debug(f"Failed to store meta-insight: {e}")
@@ -376,13 +377,14 @@ async def _store_parameter(name: str, value: float) -> None:
     """
     try:
         async with UnitOfWork() as uow:
-            await uow.session.execute(text("""
-                INSERT INTO memories (content, memory_type, salience, source, tags, decay_eligible)
-                VALUES (:content, 'decision', 7.0, 'auto_tune', :tags, FALSE)
-            """), {
-                "content": f"[auto-tune] {name} = {value}",
-                "tags": ["auto_tune", "parameter", name],
-            })
+            await ingest_memory_source(
+                uow.session,
+                content=f"[auto-tune] {name} = {value}",
+                content_kind="decision",
+                source_kind="auto_tune",
+                confidence=0.7,
+                evidence={"tags": ["auto_tune", "parameter", name]},
+            )
     except Exception as e:
         logger.debug(f"Failed to store parameter: {e}")
 
@@ -395,11 +397,13 @@ async def get_tuned_parameter(name: str, default: float) -> float:
     try:
         async with UnitOfWork() as uow:
             result = await uow.session.execute(text("""
-                SELECT content FROM memories
-                WHERE source = 'auto_tune' AND tags @> ARRAY[:name]
-                  AND NOT archived
+                SELECT COALESCE(text, canonical_label) AS content
+                FROM memory_nodes
+                WHERE content_kind = 'decision'
+                  AND archived_at IS NULL
+                  AND COALESCE(text, canonical_label) LIKE :prefix
                 ORDER BY created_at DESC LIMIT 1
-            """), {"name": name})
+            """), {"prefix": f"[auto-tune] {name} =%"})
             row = result.mappings().first()
             if row:
                 # Parse "[auto-tune] name = value"

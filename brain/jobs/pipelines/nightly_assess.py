@@ -70,10 +70,14 @@ async def gather_due_experiments(target_date: date) -> list[dict]:
     date_str = target_date.isoformat()
     async with UnitOfWork() as uow:
         result = await uow.session.execute(text("""
-            SELECT id, content, salience, tags, created_at
-            FROM memories
-            WHERE memory_type = 'experiment'
-              AND NOT archived
+            SELECT id,
+                   COALESCE(text, canonical_label) AS content,
+                   confidence * 10 AS salience,
+                   ARRAY_REMOVE(ARRAY[node_kind, content_kind], NULL) AS tags,
+                   created_at
+            FROM memory_nodes
+            WHERE content_kind = 'experiment'
+              AND archived_at IS NULL
             ORDER BY created_at DESC
         """))
         rows = [dict(r) for r in result.mappings().all()]
@@ -236,7 +240,13 @@ async def assess_single_experiment(experiment: dict, target_date: date, dry_run:
         new_content = _update_experiment_content(experiment["content"], meta)
         async with UnitOfWork() as uow:
             await uow.session.execute(text(
-                "UPDATE memories SET content = :content WHERE id = :id"
+                """
+                UPDATE memory_nodes
+                SET text = :content,
+                    canonical_label = LEFT(:content, 140),
+                    updated_at = NOW()
+                WHERE id = :id
+                """
             ), {"content": new_content, "id": mem_id})
 
         # If failed and has PR number, create improvement memory suggesting revert

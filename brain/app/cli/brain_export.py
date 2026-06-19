@@ -110,11 +110,17 @@ async def export_memories(scope: str, skip_llm: bool = False) -> list[dict]:
     """Fetch and scrub memories of the given scope."""
     async with UnitOfWork() as uow:
         result = await uow.session.execute(text("""
-            SELECT id, content, memory_type, salience,
-                   tags, source, created_at, scope
-            FROM memories
-            WHERE scope = :scope AND NOT archived
-            ORDER BY salience DESC, created_at DESC
+            SELECT id,
+                   COALESCE(text, canonical_label) AS content,
+                   COALESCE(content_kind, node_kind) AS memory_type,
+                   confidence * 10 AS salience,
+                   ARRAY_REMOVE(ARRAY[node_kind, content_kind], NULL) AS tags,
+                   'reconstructive_memory' AS source,
+                   created_at,
+                   scope_key AS scope
+            FROM memory_nodes
+            WHERE scope_key = :scope AND archived_at IS NULL
+            ORDER BY confidence DESC, created_at DESC
         """), {"scope": scope})
         rows = [dict(r) for r in result.mappings().all()]
 

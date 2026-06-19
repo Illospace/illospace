@@ -10,8 +10,6 @@ import logging
 from sqlalchemy import text
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.memory.embeddings import embed_document, vec_to_pg
-from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -80,19 +78,18 @@ async def check_quality(
 
 async def _check_near_duplicate(content: str, threshold: float = 0.90) -> dict | None:
     """Check if content is a near-duplicate of an existing memory."""
+    del threshold
     try:
+        normalized = re.sub(r"\s+", " ", content.strip().lower())
         async with UnitOfWork() as uow:
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            emb = embed_document(content, runtime_config=runtime_config)
-            emb_str = vec_to_pg(emb)
             row = (await uow.session.execute(text("""
-                SELECT id, content, 1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity
-                FROM memories
-                WHERE NOT archived AND superseded_by IS NULL
-                ORDER BY semantic_embedding <=> CAST(:emb AS vector)
+                SELECT id, COALESCE(text, canonical_label) AS content, 1.0 AS similarity
+                FROM memory_nodes
+                WHERE archived_at IS NULL
+                  AND normalized_key = :normalized
                 LIMIT 1
-            """), {"emb": emb_str})).mappings().first()
-            if row and row["similarity"] >= threshold:
+            """), {"normalized": normalized})).mappings().first()
+            if row:
                 return {"id": row["id"], "similarity": row["similarity"], "content": row["content"]}
     except Exception as e:
         logger.warning("Duplicate check failed (allowing memory): %s", e)
@@ -124,10 +121,15 @@ async def sweep_low_quality(dry_run: bool = True) -> list[dict]:
     async with UnitOfWork() as uow:
         # Short + low salience
         rows = (await uow.session.execute(text("""
-            SELECT id, content, salience, memory_type, LENGTH(content) as len
-            FROM memories
-            WHERE NOT archived AND superseded_by IS NULL
-              AND LENGTH(content) < 30 AND salience < 7
+            SELECT id,
+                   COALESCE(text, canonical_label) AS content,
+                   confidence * 10 AS salience,
+                   COALESCE(content_kind, node_kind) AS memory_type,
+                   LENGTH(COALESCE(text, canonical_label)) AS len
+            FROM memory_nodes
+            WHERE archived_at IS NULL
+              AND LENGTH(COALESCE(text, canonical_label)) < 30
+              AND confidence < 0.7
         """))).mappings().all()
         for row in rows:
             flagged.append({
@@ -136,34 +138,11 @@ async def sweep_low_quality(dry_run: bool = True) -> list[dict]:
                 "action": "review",
             })
 
-        # Near-duplicate clusters
-        dup_rows = (await uow.session.execute(text("""
-            SELECT m1.id as id1, m2.id as id2,
-                   m1.content as c1, m2.content as c2,
-                   1 - (m1.semantic_embedding <=> m2.semantic_embedding) as sim
-            FROM memories m1
-            JOIN memories m2 ON m2.id > m1.id
-            WHERE NOT m1.archived AND NOT m2.archived
-              AND m1.superseded_by IS NULL AND m2.superseded_by IS NULL
-              AND 1 - (m1.semantic_embedding <=> m2.semantic_embedding) > 0.85
-            ORDER BY sim DESC
-            LIMIT 20
-        """))).mappings().all()
-        for row in dup_rows:
-            flagged.append({
-                "id": row["id2"], "duplicate_of": row["id1"],
-                "similarity": float(row["sim"]),
-                "content": row["c2"][:80],
-                "reason": f"near-duplicate of #{row['id1']} (sim={row['sim']:.3f})",
-                "action": "archive_or_merge",
-            })
-
         if not dry_run:
-            # Auto-archive the short+low-salience ones
             short_ids = [f["id"] for f in flagged if f["action"] == "review"]
             if short_ids:
                 await uow.session.execute(
-                    text("UPDATE memories SET archived = true WHERE id = ANY(:ids)"),
+                    text("UPDATE memory_nodes SET archived_at = NOW() WHERE id = ANY(:ids)"),
                     {"ids": short_ids},
                 )
 

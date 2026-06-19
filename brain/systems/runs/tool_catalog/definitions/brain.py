@@ -56,6 +56,22 @@ BRAIN_TOOLS = [
         },
     },
     {
+        "name": "memory_reconstruct",
+        "description": (
+            "Reconstruct source-backed evidence from Illo's new memory graph. Prefer this over brain_recall "
+            "for decisions, facts, multi-hop history, stale/conflicted context, and any answer that needs "
+            "traceable source evidence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Question or context need to reconstruct evidence for"},
+                "limit": {"type": "integer", "description": "Maximum supporting evidence items", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "brain_guardrails",
         "description": "Get guardrails: recent skill failures, high-salience warnings, and pitfalls for a specific skill.",
         "input_schema": {
@@ -244,13 +260,37 @@ BRAIN_TOOLS = [
     },
     {
         "name": "brain_encode",
-        "description": "Record a new memory (lesson, pattern, fact, or episode) into the brain.",
+        "description": (
+            "Compatibility alias for source-backed reconstructive memory ingestion. "
+            "Prefer memory_ingest_source for new calls."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "content": {"type": "string", "description": "Memory content (min 20 chars)"},
                 "type": {"type": "string", "enum": ["lesson", "pattern", "fact", "episode"], "default": "episode"},
-                "salience": {"type": "number", "description": "Importance 1-10 (default 5)", "default": 5.0},
+                "salience": {"type": "number", "description": "Ignored compatibility field", "default": 5.0},
+            },
+            "required": ["content"],
+        },
+    },
+    {
+        "name": "memory_ingest_source",
+        "description": "Ingest source-backed reconstructive memory and create cue/tag/content graph nodes.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "Source content to ingest"},
+                "content_kind": {"type": "string", "description": "Derived content kind", "default": "episode"},
+                "source_kind": {"type": "string", "description": "Immutable source kind", "default": "agent_run"},
+                "source_ref": {"type": "string", "description": "Optional source reference"},
+                "source_url": {"type": "string", "description": "Optional source URL"},
+                "visibility": {
+                    "type": "string",
+                    "enum": ["private", "team", "org"],
+                    "default": "private",
+                },
+                "confidence": {"type": "number", "description": "Extraction confidence", "default": 0.5},
             },
             "required": ["content"],
         },

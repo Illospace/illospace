@@ -32,15 +32,11 @@ async def test_health(client):
 @pytest.mark.asyncio
 async def test_health_includes_run_event_backbone(client):
     mock_db = MagicMock()
-    mock_db.scalar = AsyncMock(return_value=2)
-
-    mock_mem_repo = MagicMock()
-    mock_mem_repo.a_count_active = AsyncMock(return_value=3)
+    mock_db.scalar = AsyncMock(side_effect=[3, 2])
 
     app.dependency_overrides[get_db] = lambda: mock_db
     try:
-        with patch("brain.platform.db.repositories.memories.MemoryRepository", return_value=mock_mem_repo), \
-        patch("brain.app.ops.health._apply_statement_timeout", new=AsyncMock()), \
+        with patch("brain.app.ops.health._apply_statement_timeout", new=AsyncMock()), \
         patch("brain.systems.runs.event_log.async_run_event_backbone_status", new=AsyncMock(return_value={
             "consumer_name": "api.websocket_fanout",
             "health": "lagging",

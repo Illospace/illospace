@@ -72,8 +72,8 @@ async def graph_augmented_recall(
     org_id: str | None = None,
     service_retrieval: bool = False,
 ) -> list[dict]:
-    """Delegate graph recall to the async memory repository."""
-    from brain.platform.db.repositories.memories import MemoryRepository
+    """Compatibility graph recall over reconstructive memory nodes."""
+    from brain.platform.db.repositories.reconstructive_memory import ReconstructiveMemoryCompatibilityRepository
 
     visibility_context = MemoryVisibilityContext(
         user_id=user_id,
@@ -81,8 +81,8 @@ async def graph_augmented_recall(
         allow_global=service_retrieval or (user_id == "system"),
         principal_type="service" if service_retrieval or user_id == "system" else None,
     )
-    return await MemoryRepository(session).graph_augmented_recall(
-        query_embedding=query_emb_str,
+    return await ReconstructiveMemoryCompatibilityRepository(session).graph_augmented_recall(
+        query=query_emb_str,
         limit=limit,
         hops=hops,
         context=visibility_context,
@@ -127,15 +127,15 @@ async def get_memory_neighborhood(
     user_id: str | None = None,
     org_id: str | None = None,
 ) -> dict:
-    """Delegate neighborhood reads to the async memory repository."""
-    from brain.platform.db.repositories.memories import MemoryRepository
+    """Delegate neighborhood reads to reconstructive memory nodes."""
+    from brain.platform.db.repositories.reconstructive_memory import ReconstructiveMemoryCompatibilityRepository
 
     visibility_context = MemoryVisibilityContext(
         user_id=user_id,
         org_id=org_id,
         allow_global=(user_id == "system"),
     )
-    return await MemoryRepository(session).get_memory_neighborhood(
+    return await ReconstructiveMemoryCompatibilityRepository(session).get_memory_neighborhood(
         memory_id,
         hops=hops,
         context=visibility_context,

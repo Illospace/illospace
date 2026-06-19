@@ -30,15 +30,15 @@ async def detect_divergence(
     async with UnitOfWork() as uow:
         result = await uow.session.execute(text("""
             SELECT m.user_id, u.name AS user_name,
-                   array_agg(DISTINCT unnest_tag) AS topic_tags,
-                   string_agg(DISTINCT LEFT(m.content, 100), ' | ') AS content_sample
-            FROM memories m
+                   array_agg(DISTINCT COALESCE(m.content_kind, m.node_kind)) AS topic_tags,
+                   string_agg(DISTINCT LEFT(COALESCE(m.text, m.canonical_label), 100), ' | ') AS content_sample
+            FROM memory_nodes m
             JOIN users u ON u.id = m.user_id
-            CROSS JOIN LATERAL unnest(m.tags) AS unnest_tag
             WHERE m.org_id = :org_id
               AND m.created_at::date >= :since
-              AND NOT m.archived
-              AND m.tags IS NOT NULL AND array_length(m.tags, 1) > 0
+              AND m.archived_at IS NULL
+              AND m.user_id IS NOT NULL
+              AND m.node_kind IN ('content', 'summary', 'procedure', 'policy')
             GROUP BY m.user_id, u.name
         """), {"org_id": org_id, "since": since})
         user_topics = [dict(r) for r in result.mappings().all()]
@@ -108,22 +108,21 @@ async def store_divergence_results(
 
     content = "\n".join(summary_lines)
 
-    from brain.systems.memory.embeddings import embed_document, vec_to_pg
-    from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+    from brain.systems.reconstructive_memory.ingestion import ingest_memory_source
 
     async with UnitOfWork() as uow:
-        runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-        embedding = embed_document(content, runtime_config=runtime_config)
-
-        await uow.session.execute(text("""
-            INSERT INTO memories (content, memory_type, semantic_embedding,
-                salience, tags, source, org_id, user_id, scope)
-            VALUES (:content, 'meta', :embedding, 7.0, :tags, 'nightly:divergence', :org_id,
-                    (SELECT id FROM users WHERE org_id = :org_id AND role = 'owner' ORDER BY created_at LIMIT 1),
-                    'personal')
-        """), {
-            "content": content,
-            "embedding": vec_to_pg(embedding) if embedding else None,
-            "tags": [t for o in overlaps for t in o["shared_topics"]],
-            "org_id": org_id,
-        })
+        owner_id = await uow.session.scalar(text(
+            "SELECT id FROM users WHERE org_id = :org_id AND role = 'owner' ORDER BY created_at LIMIT 1"
+        ), {"org_id": org_id})
+        await ingest_memory_source(
+            uow.session,
+            content=content,
+            content_kind="meta",
+            source_kind="nightly:divergence",
+            org_id=org_id,
+            user_id=str(owner_id) if owner_id else None,
+            visibility="org",
+            confidence=0.7,
+            evidence={"tags": [t for o in overlaps for t in o["shared_topics"]]},
+            authority_principal=str(owner_id) if owner_id else None,
+        )

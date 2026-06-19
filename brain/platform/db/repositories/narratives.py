@@ -6,7 +6,6 @@ from typing import Sequence
 
 from sqlalchemy import select, update
 
-from brain.platform.db.models.memory import Memory
 from brain.platform.db.models.narrative import NarrativeSession, ProjectNarrative
 from brain.platform.db.repositories.base import BaseRepository
 
@@ -126,31 +125,17 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
         *,
         stale_at: datetime | None = None,
     ) -> int:
-        """Mark narratives stale through memory.source_session -> narrative session."""
+        """Mark narratives stale through reconstructive source lineage.
+
+        Narrative-source lineage is represented through MemorySource/MemorySpan.
+        Until that extractor is installed, this hook intentionally does not
+        guess.
+        """
         source_ids = [int(memory_id) for memory_id in memory_ids if memory_id is not None]
         if not source_ids:
             return 0
-
-        narrative_stmt = (
-            select(NarrativeSession.narrative_id)
-            .join(Memory, Memory.source_session == NarrativeSession.session_id)
-            .where(Memory.id.in_(source_ids))
-        )
-        narrative_ids = set((await self._session.scalars(narrative_stmt)).all())
-        if not narrative_ids:
-            return 0
-
-        result = await self._session.execute(
-            update(ProjectNarrative)
-            .where(ProjectNarrative.id.in_(narrative_ids))
-            .where(ProjectNarrative.stale_at.is_(None))
-            .values(
-                stale_at=stale_at or datetime.now(timezone.utc),
-                stale_reason=str(reason or "narrative source memory changed"),
-            )
-        )
-        await self._session.flush()
-        return int(result.rowcount or 0)
+        del reason, stale_at
+        return 0
 
     # ------------------------------------------------------------------
     # Session entries

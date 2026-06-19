@@ -33,10 +33,15 @@ async def gather_today_memories(target_date: date, limit: int = 10, org_id: str 
     _org_params = {"org_id": org_id} if org_id else {}
     async with UnitOfWork() as uow:
         result = await uow.session.execute(text(f"""
-            SELECT id, content, memory_type, salience, tags
-            FROM memories
-            WHERE created_at::date = :target_date AND NOT archived {_org_filter}
-            ORDER BY salience DESC
+            SELECT id,
+                   COALESCE(text, canonical_label) AS content,
+                   COALESCE(content_kind, node_kind) AS memory_type,
+                   confidence * 10 AS salience,
+                   ARRAY_REMOVE(ARRAY[node_kind, content_kind], NULL) AS tags
+            FROM memory_nodes
+            WHERE created_at::date = :target_date
+              AND archived_at IS NULL {_org_filter}
+            ORDER BY confidence DESC
             LIMIT :lim
         """), {"target_date": target_date, **_org_params, "lim": limit})
         return [dict(r) for r in result.mappings().all()]
@@ -48,12 +53,16 @@ async def gather_random_old_memories(target_date: date, limit: int = 10, org_id:
     _org_params = {"org_id": org_id} if org_id else {}
     async with UnitOfWork() as uow:
         result = await uow.session.execute(text(f"""
-            SELECT id, content, memory_type, salience, tags,
+            SELECT id,
+                   COALESCE(text, canonical_label) AS content,
+                   COALESCE(content_kind, node_kind) AS memory_type,
+                   confidence * 10 AS salience,
+                   ARRAY_REMOVE(ARRAY[node_kind, content_kind], NULL) AS tags,
                    created_at::date as created_date
-            FROM memories
+            FROM memory_nodes
             WHERE created_at::date < :target_date - INTERVAL '7 days'
-              AND NOT archived
-              AND salience >= 4 {_org_filter}
+              AND archived_at IS NULL
+              AND confidence >= 0.4 {_org_filter}
             ORDER BY RANDOM()
             LIMIT :lim
         """), {"target_date": target_date, **_org_params, "lim": limit})

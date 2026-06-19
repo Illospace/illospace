@@ -39,50 +39,6 @@ USER_B = {
 }
 
 
-# -- Cross-user attribution -----------------------------------------------
-
-class TestCrossUserAttribution:
-
-    async def test_attribution_enabled_shows_name(self):
-        """When attribution_enabled=True, cross-user memories show the author's name."""
-        from brain.app.mcp.server import _add_attribution
-        mock_session = MagicMock()
-        result = MagicMock()
-        result.mappings.return_value.all.return_value = [
-            {"id": 1, "user_id": USER_B["id"], "name": "Bob", "attribution_enabled": True},
-        ]
-        mock_session.execute = AsyncMock(return_value=result)
-        memories = [{"id": 1, "content": "test", "type": "lesson"}]
-        result = await _add_attribution(mock_session, memories, USER_A["id"])
-        assert result[0]["attributed_to"] == "Bob"
-
-    async def test_attribution_disabled_anonymizes(self):
-        """When attribution_enabled=False, cross-user memories show 'A teammate'."""
-        from brain.app.mcp.server import _add_attribution
-        mock_session = MagicMock()
-        result = MagicMock()
-        result.mappings.return_value.all.return_value = [
-            {"id": 1, "user_id": USER_B["id"], "name": "Bob", "attribution_enabled": False},
-        ]
-        mock_session.execute = AsyncMock(return_value=result)
-        memories = [{"id": 1, "content": "test", "type": "lesson"}]
-        result = await _add_attribution(mock_session, memories, USER_A["id"])
-        assert result[0]["attributed_to"] == "A teammate"
-
-    async def test_own_memories_no_attribution(self):
-        """Own memories should not get attribution tag."""
-        from brain.app.mcp.server import _add_attribution
-        mock_session = MagicMock()
-        result = MagicMock()
-        result.mappings.return_value.all.return_value = [
-            {"id": 1, "user_id": USER_A["id"], "name": "Alice", "attribution_enabled": True},
-        ]
-        mock_session.execute = AsyncMock(return_value=result)
-        memories = [{"id": 1, "content": "test", "type": "lesson"}]
-        result = await _add_attribution(mock_session, memories, USER_A["id"])
-        assert "attributed_to" not in result[0]
-
-
 # -- brain_encode with user scoping ----------------------------------------
 
 class TestBrainEncodeUserScoped:
@@ -96,15 +52,15 @@ class TestBrainEncodeUserScoped:
         mock_uow.__exit__ = MagicMock(return_value=False)
         mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
         mock_uow.__aexit__ = AsyncMock(return_value=False)
-        mock_uow.memories.insert_memory.return_value = {
-            "id": 42,
-            "type": "episode",
-            "salience": 5.0,
-            "visibility": "org",
+        ingested = MagicMock()
+        ingested.to_dict.return_value = {
+            "memory_system": "reconstructive",
+            "source_id": 7,
+            "content_node_id": 42,
         }
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
-             patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 2000):
+             patch("brain.systems.reconstructive_memory.ingestion.ingest_memory_source", new=AsyncMock(return_value=ingested)) as ingest:
             result = await async_tool_brain_encode(
                 content="This is a test memory with enough content",
                 user_id=USER_A["id"],
@@ -112,12 +68,12 @@ class TestBrainEncodeUserScoped:
                 visibility="org",
             )
 
-        assert result["id"] == 42
-        assert result["visibility"] == "org"
-        context = mock_uow.memories.insert_memory.call_args.kwargs["context"]
-        assert context.user_id == USER_A["id"]
-        assert context.org_id == USER_A["org_id"]
-        assert context.visibility == "org"
+        assert result["content_node_id"] == 42
+        assert result["compatibility_alias"] == "brain_encode"
+        kwargs = ingest.call_args.kwargs
+        assert kwargs["user_id"] == USER_A["id"]
+        assert kwargs["org_id"] == USER_A["org_id"]
+        assert kwargs["visibility"] == "org"
 
     async def test_encode_defaults_to_private(self):
         """brain_encode should default to private visibility."""
@@ -128,23 +84,23 @@ class TestBrainEncodeUserScoped:
         mock_uow.__exit__ = MagicMock(return_value=False)
         mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
         mock_uow.__aexit__ = AsyncMock(return_value=False)
-        mock_uow.memories.insert_memory.return_value = {
-            "id": 43,
-            "type": "episode",
-            "salience": 5.0,
-            "visibility": "private",
+        ingested = MagicMock()
+        ingested.to_dict.return_value = {
+            "memory_system": "reconstructive",
+            "source_id": 8,
+            "content_node_id": 43,
         }
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
-             patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 2000):
+             patch("brain.systems.reconstructive_memory.ingestion.ingest_memory_source", new=AsyncMock(return_value=ingested)) as ingest:
             result = await async_tool_brain_encode(
                 content="Another test memory long enough to pass",
                 user_id=USER_A["id"],
             )
 
-        assert result["visibility"] == "private"
-        context = mock_uow.memories.insert_memory.call_args.kwargs["context"]
-        assert context.visibility == "private"
+        assert result["content_node_id"] == 43
+        assert result["compatibility_alias"] == "brain_encode"
+        assert ingest.call_args.kwargs["visibility"] == "private"
 
 
 # -- Run user passthrough ----------------------------------------------

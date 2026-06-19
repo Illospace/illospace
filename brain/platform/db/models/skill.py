@@ -236,7 +236,7 @@ class SkillExecution(Base):
     refinement_proposed: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     new_pitfall: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     lesson_memory_id: Mapped[Optional[int]] = mapped_column(
-        Integer, ForeignKey("memories.id"), nullable=True
+        Integer, ForeignKey("memory_nodes.id"), nullable=True
     )
     flagged: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("FALSE"), default=False

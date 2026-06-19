@@ -13,6 +13,7 @@ import sys
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
 
@@ -131,15 +132,29 @@ class TestGetContextMocked:
         uow.session.execute.side_effect = execute_side_effect
         return uow
 
+    def _pack(self, *items):
+        return SimpleNamespace(supporting_evidence=list(items))
+
+    def _evidence(self, **overrides):
+        payload = {
+            "node_id": 1,
+            "source_span_id": 7,
+            "text": "Test memory",
+            "source_text": "Test memory",
+            "confidence": 0.65,
+        }
+        payload.update(overrides)
+        return SimpleNamespace(**payload)
+
     def test_returns_memories_above_threshold(self, mock_embeddings):
         """Memories returned must have similarity > 0.45 (enforced by SQL)."""
         uow = self._make_uow(
-            [{"id": 1, "content": "Test memory", "memory_type": "lesson",
-              "salience": 8, "emotion_label": "neutral", "similarity": 0.65}],
             [],  # guardrails
             [],  # warnings
         )
-        with patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=uow):
+        with patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=uow), \
+             patch("brain.systems.reconstructive_memory.controller.reconstruct_memory",
+                   new=AsyncMock(return_value=self._pack(self._evidence()))):
             result = get_context("test message")
 
         assert len(result["memories"]) == 1
@@ -147,10 +162,12 @@ class TestGetContextMocked:
         assert result["memories"][0]["content"] == "Test memory"
 
     def test_empty_results(self, mock_embeddings):
-        uow = self._make_uow([], [], [])
+        uow = self._make_uow([], [])
         with patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=uow), \
-             patch("brain.systems.vault.list_secrets", return_value=[]), \
-             patch("brain.systems.vault.get_missing_requests", return_value=[]):
+             patch("brain.systems.reconstructive_memory.controller.reconstruct_memory",
+                   new=AsyncMock(return_value=self._pack())), \
+             patch("brain.systems.vault.async_list_secrets", new=AsyncMock(return_value=[])), \
+             patch("brain.systems.vault.async_get_missing_requests", new=AsyncMock(return_value=[])):
             result = get_context("nothing relevant")
 
         assert result["memories"] == []
@@ -160,7 +177,10 @@ class TestGetContextMocked:
 
     def test_error_captured(self):
         """DB errors should be captured in result, not raised."""
-        with patch("brain.systems.memory.embeddings.embed_query", side_effect=Exception("DB down")):
+        uow = self._make_uow([], [])
+        with patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=uow), \
+             patch("brain.systems.reconstructive_memory.controller.reconstruct_memory",
+                   new=AsyncMock(side_effect=Exception("DB down"))):
             result = get_context("test")
         assert "error" in result
         assert "DB down" in result["error"]
@@ -168,11 +188,12 @@ class TestGetContextMocked:
     def test_guardrails_from_recent_failures(self, mock_embeddings):
         from datetime import datetime
         uow = self._make_uow(
-            [],  # memories
             [{"name": "deploy", "outcome_details": "timeout", "error_analysis": "server unreachable", "started_at": datetime.now()}],
             [],  # warnings
         )
-        with patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=uow):
+        with patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=uow), \
+             patch("brain.systems.reconstructive_memory.controller.reconstruct_memory",
+                   new=AsyncMock(return_value=self._pack())):
             result = get_context("deploying now")
 
         assert len(result["guardrails"]) == 1

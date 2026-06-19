@@ -39,7 +39,7 @@ PRIVATE_HOME = str(config.PRIVATE_HOME)
 
 async def gather_context(target_date: date, org_id: str | None = None) -> dict:
     """Gather all data the LLM needs for reflection."""
-    # Only memories has org_id. Other tables are org-wide for now.
+    # Only reconstructive memory nodes carry org_id here. Other tables are org-wide for now.
     _mem_org_filter = "AND org_id = :org_id" if org_id else ""
     _mem_org_params = {"org_id": org_id} if org_id else {}
 
@@ -108,10 +108,15 @@ async def gather_context(target_date: date, org_id: str | None = None) -> dict:
         # 5. New memories created today (scoped by org_id if provided)
         params = {"target_date": target_date, **_mem_org_params}
         result = await uow.session.execute(text(f"""
-            SELECT id, content, memory_type, salience, source
-            FROM memories
-            WHERE created_at::date = :target_date AND NOT archived {_mem_org_filter}
-            ORDER BY salience DESC
+            SELECT id,
+                   COALESCE(text, canonical_label) AS content,
+                   COALESCE(content_kind, node_kind) AS memory_type,
+                   confidence * 10 AS salience,
+                   'reconstructive_memory' AS source
+            FROM memory_nodes
+            WHERE created_at::date = :target_date
+              AND archived_at IS NULL {_mem_org_filter}
+            ORDER BY confidence DESC
         """), params)
         context["new_memories"] = [dict(r) for r in result.mappings().all()]
 

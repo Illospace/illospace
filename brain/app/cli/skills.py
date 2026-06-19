@@ -31,7 +31,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 import brain.kernel.config as config
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.db.models.skill import Skill, SkillDependency, SkillExecution
-from brain.platform.db.models.memory import Memory
 from brain.systems.memory.embeddings import embed_batch, embed_document, embed_query, vec_to_pg
 
 from sqlalchemy import func, select, text
@@ -451,17 +450,25 @@ async def cmd_plan(args):
             similar_params,
         )).mappings().all()
 
-        # 2. Query memory for relevant context (pgvector)
+        # 2. Query reconstructive memory nodes for relevant context.
         relevant_memories = (await uow.session.execute(
             text("""
-                SELECT id, content, memory_type, salience,
-                       1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity
-                FROM memories
-                WHERE NOT archived AND superseded_by IS NULL
-                ORDER BY semantic_embedding <=> CAST(:emb AS vector)
+                SELECT id,
+                       COALESCE(text, canonical_label) AS content,
+                       COALESCE(content_kind, node_kind) AS memory_type,
+                       confidence * 10 AS salience,
+                       confidence AS similarity
+                FROM memory_nodes
+                WHERE archived_at IS NULL
+                  AND (
+                    text ILIKE :pattern OR
+                    canonical_label ILIKE :pattern OR
+                    normalized_key ILIKE :pattern
+                  )
+                ORDER BY confidence DESC, updated_at DESC
                 LIMIT 10
             """),
-            {"emb": emb_str},
+            {"pattern": f"%{task_text[:120]}%"},
         )).mappings().all()
 
         # 3. Find matching skills by embedding similarity (pgvector)

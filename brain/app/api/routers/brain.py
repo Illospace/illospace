@@ -13,7 +13,7 @@ from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea, IdeaThread
-from brain.platform.db.models.memory import Memory
+from brain.platform.db.models.reconstructive_memory import MemoryNode, MemoryNodeEmbedding
 from brain.platform.db.models.org import User
 from brain.platform.db.models.skill import Skill, SkillExecution
 from brain.platform.db.models.system import ConsolidationRun, RetrievalLog
@@ -90,8 +90,8 @@ async def brain_health(
     else:
         days_since = 999
 
-    has_embedding_stmt = select(func.count(Memory.id)).where(
-        Memory.semantic_embedding.isnot(None)
+    has_embedding_stmt = select(func.count(MemoryNodeEmbedding.id)).where(
+        MemoryNodeEmbedding.embedding.isnot(None)
     ).limit(1)
     embedding_ok = (await db.scalar(has_embedding_stmt) or 0) > 0
 
@@ -145,25 +145,25 @@ async def recent_learnings(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    """High-salience memories from the last N hours."""
+    """High-confidence reconstructive memory nodes from the last N hours."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     stmt = (
-        select(Memory)
+        select(MemoryNode)
         .where(
-            Memory.created_at >= cutoff,
-            Memory.salience >= min_salience,
-            or_(Memory.archived == False, Memory.archived.is_(None)),  # noqa: E712
+            MemoryNode.created_at >= cutoff,
+            MemoryNode.confidence >= (min_salience / 10.0),
+            MemoryNode.archived_at.is_(None),
         )
-        .order_by(Memory.salience.desc())
+        .order_by(MemoryNode.confidence.desc())
         .limit(limit)
     )
     result = await db.scalars(stmt)
     return [
         {
-            "type": memory.memory_type,
-            "salience": _safe_float(memory.salience),
-            "content": (memory.content or "")[:300],
-            "source": memory.source if hasattr(memory, "source") else None,
+            "type": memory.content_kind or memory.node_kind,
+            "salience": round(_safe_float(memory.confidence) * 10, 2),
+            "content": (memory.text or memory.canonical_label or "")[:300],
+            "source": "reconstructive_memory",
             "created_at": memory.created_at.isoformat() if memory.created_at else None,
         }
         for memory in result.all()
@@ -311,16 +311,19 @@ async def global_search(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    """Full-text search across memories and skills."""
+    """Full-text search across reconstructive memory nodes and skills."""
     pattern = f"%{q}%"
 
     mem_stmt = (
-        select(Memory)
+        select(MemoryNode)
         .where(
-            Memory.content.ilike(pattern),
-            or_(Memory.archived == False, Memory.archived.is_(None)),  # noqa: E712
+            or_(
+                MemoryNode.text.ilike(pattern),
+                MemoryNode.canonical_label.ilike(pattern),
+            ),
+            MemoryNode.archived_at.is_(None),
         )
-        .order_by(Memory.salience.desc())
+        .order_by(MemoryNode.confidence.desc())
         .limit(10)
     )
     memory_result = await db.scalars(mem_stmt)
@@ -343,9 +346,9 @@ async def global_search(
         "memories": [
             {
                 "id": memory.id,
-                "content": (memory.content or "")[:200],
-                "type": memory.memory_type,
-                "salience": _safe_float(memory.salience),
+                "content": (memory.text or memory.canonical_label or "")[:200],
+                "type": memory.content_kind or memory.node_kind,
+                "salience": round(_safe_float(memory.confidence) * 10, 2),
             }
             for memory in memory_result.all()
         ],

@@ -574,10 +574,8 @@ async def _async_indexed_vector_count(session: AsyncSession) -> int:
                     text(
                         """
                         SELECT
-                          (SELECT count(*) FROM memories
-                           WHERE semantic_embedding IS NOT NULL) +
-                          (SELECT count(*) FROM memory_summaries
-                           WHERE semantic_embedding IS NOT NULL) +
+                          (SELECT count(*) FROM memory_node_embeddings
+                           WHERE embedding IS NOT NULL) +
                           (SELECT count(*) FROM project_narratives
                            WHERE semantic_embedding IS NOT NULL) +
                           (SELECT count(*) FROM skills

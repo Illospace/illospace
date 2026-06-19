@@ -37,8 +37,15 @@ from brain.platform.db.repositories.external_agents import (
     ExternalAgentTaskRepository,
 )
 from brain.platform.db.repositories.notifications import NotificationEventRepository
-from brain.platform.db.repositories.memories import EdgeRepository, MemoryRepository
-from brain.platform.db.repositories.memory_dag import MemorySummaryRepository
+from brain.platform.db.repositories.reconstructive_memory import (
+    MemoryAssertionRepository,
+    MemoryEdgeRepository,
+    MemoryNodeRepository,
+    MemorySourceRepository,
+    ReconstructiveEdgeCompatibilityRepository,
+    ReconstructiveMemoryCompatibilityRepository,
+    ReconstructionRepository,
+)
 from brain.platform.db.repositories.memory_health import (
     MemoryHealthRepository,
     RetrievalPoolStatsRepository,
@@ -197,11 +204,11 @@ class UnitOfWork:
 
     @cached_property
     def memories(self):
-        return self._repo(MemoryRepository)
+        return self._repo(ReconstructiveMemoryCompatibilityRepository)
 
     @cached_property
     def edges(self):
-        return self._repo(EdgeRepository)
+        return self._repo(ReconstructiveEdgeCompatibilityRepository)
 
     @cached_property
     def vault(self):
@@ -265,8 +272,24 @@ class UnitOfWork:
         return self._repo(CycleRunRepository)
 
     @cached_property
-    def memory_summaries(self):
-        return self._repo(MemorySummaryRepository)
+    def memory_sources(self):
+        return self._repo(MemorySourceRepository)
+
+    @cached_property
+    def memory_nodes(self):
+        return self._repo(MemoryNodeRepository)
+
+    @cached_property
+    def memory_edges_new(self):
+        return self._repo(MemoryEdgeRepository)
+
+    @cached_property
+    def memory_assertions(self):
+        return self._repo(MemoryAssertionRepository)
+
+    @cached_property
+    def reconstruction_runs(self):
+        return self._repo(ReconstructionRepository)
 
     @cached_property
     def narratives(self):

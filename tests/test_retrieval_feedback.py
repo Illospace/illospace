@@ -52,18 +52,19 @@ async def _fetch_one(db_session, statement: str, params: dict | None = None):
 async def _ensure_test_memory(db_session, content="test memory", salience=5.0):
     """Create a test memory and return its id."""
     row = await _fetch_one(db_session, """
-        INSERT INTO memories (
-            content, memory_type, salience, source, tags,
-            user_id, org_id, visibility
+        INSERT INTO memory_nodes (
+            node_kind, content_kind, canonical_label, text, normalized_key,
+            confidence, truth_status, freshness_status, user_id, org_id, visibility
         )
         VALUES (
-            :content, 'fact', :salience, 'test', ARRAY[]::text[],
-            :user_id, :org_id, 'private'
+            'content', 'fact', :content, :content, :normalized_key,
+            :confidence, 'active', 'fresh', :user_id, :org_id, 'private'
         )
         RETURNING id
     """, {
         "content": content,
-        "salience": salience,
+        "normalized_key": content.lower(),
+        "confidence": salience / 10.0,
         "user_id": USER_ID,
         "org_id": ORG_ID,
     })
@@ -85,7 +86,7 @@ class TestApplyRetrievalFeedback:
         log_id = await _ensure_retrieval_log(db_session, mid)
         with patch("brain.systems.memory.retrieval_feedback.UnitOfWork", unit_of_work_for_session):
             await apply_retrieval_feedback(log_id, "hit")
-        row = await _fetch_one(db_session, "SELECT salience FROM memories WHERE id = :id", {"id": mid})
+        row = await _fetch_one(db_session, "SELECT confidence * 10 AS salience FROM memory_nodes WHERE id = :id", {"id": mid})
         assert row["salience"] == 5.5
 
     async def test_hit_caps_at_10(self, db_session, scoped_principal, unit_of_work_for_session):
@@ -93,7 +94,7 @@ class TestApplyRetrievalFeedback:
         log_id = await _ensure_retrieval_log(db_session, mid)
         with patch("brain.systems.memory.retrieval_feedback.UnitOfWork", unit_of_work_for_session):
             await apply_retrieval_feedback(log_id, "hit")
-        row = await _fetch_one(db_session, "SELECT salience FROM memories WHERE id = :id", {"id": mid})
+        row = await _fetch_one(db_session, "SELECT confidence * 10 AS salience FROM memory_nodes WHERE id = :id", {"id": mid})
         assert row["salience"] == 10.0
 
     async def test_miss_decreases_salience(self, db_session, scoped_principal, unit_of_work_for_session):
@@ -101,7 +102,7 @@ class TestApplyRetrievalFeedback:
         log_id = await _ensure_retrieval_log(db_session, mid)
         with patch("brain.systems.memory.retrieval_feedback.UnitOfWork", unit_of_work_for_session):
             await apply_retrieval_feedback(log_id, "miss")
-        row = await _fetch_one(db_session, "SELECT salience FROM memories WHERE id = :id", {"id": mid})
+        row = await _fetch_one(db_session, "SELECT confidence * 10 AS salience FROM memory_nodes WHERE id = :id", {"id": mid})
         assert abs(row["salience"] - 4.7) < 0.01
 
     async def test_miss_floors_at_1(self, db_session, scoped_principal, unit_of_work_for_session):
@@ -109,7 +110,7 @@ class TestApplyRetrievalFeedback:
         log_id = await _ensure_retrieval_log(db_session, mid)
         with patch("brain.systems.memory.retrieval_feedback.UnitOfWork", unit_of_work_for_session):
             await apply_retrieval_feedback(log_id, "miss")
-        row = await _fetch_one(db_session, "SELECT salience FROM memories WHERE id = :id", {"id": mid})
+        row = await _fetch_one(db_session, "SELECT confidence * 10 AS salience FROM memory_nodes WHERE id = :id", {"id": mid})
         assert row["salience"] == 1.0
 
     async def test_partial_no_salience_change(self, db_session, scoped_principal, unit_of_work_for_session):
@@ -117,7 +118,7 @@ class TestApplyRetrievalFeedback:
         log_id = await _ensure_retrieval_log(db_session, mid)
         with patch("brain.systems.memory.retrieval_feedback.UnitOfWork", unit_of_work_for_session):
             await apply_retrieval_feedback(log_id, "partial")
-        row = await _fetch_one(db_session, "SELECT salience FROM memories WHERE id = :id", {"id": mid})
+        row = await _fetch_one(db_session, "SELECT confidence * 10 AS salience FROM memory_nodes WHERE id = :id", {"id": mid})
         assert row["salience"] == 5.0
 
     async def test_feedback_stored_in_log(self, db_session, scoped_principal, unit_of_work_for_session):

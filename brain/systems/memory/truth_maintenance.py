@@ -1,8 +1,8 @@
 """Truth-maintenance helpers for memories.
 
-The first PR-11 slice keeps this layer additive and conservative:
+This layer keeps compatibility payloads additive and conservative:
 
-- normalize sparse/legacy memory truth metadata on read
+- normalize sparse memory truth metadata on read
 - record structured contradiction and review rows
 - optionally filter quarantined/expired memories when a feature flag is on
 """

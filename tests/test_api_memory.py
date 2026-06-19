@@ -72,6 +72,7 @@ def _make_uow():
     uow.memories = MagicMock()
     uow.memories.get_graph_data = AsyncMock()
     uow.memories.search_visible = AsyncMock()
+    uow.memories.get_or_raise_visible = AsyncMock()
     uow.memories.get_truth_snapshot = AsyncMock()
     uow.session = MagicMock()
     uow.session.flush = AsyncMock()
@@ -169,12 +170,12 @@ async def test_truth_endpoint(client, mock_session_factory):
 
 @pytest.mark.asyncio
 async def test_truth_review_promotes_with_evidence_and_confidence(client, mock_session_factory):
-    mem = _make_memory(content="review me", memory_tier="episodic")
+    mem = _make_memory(content="review me", content_kind="episode")
     truth_snapshot = {
         "memory": mem,
         "state": {
-            "truth_status": "reviewed",
-            "review_status": "reviewed",
+            "truth_status": "active",
+            "review_status": "unreviewed",
             "confidence": 0.91,
             "freshness_score": 0.91,
         },
@@ -182,12 +183,11 @@ async def test_truth_review_promotes_with_evidence_and_confidence(client, mock_s
         "reviews": [],
         "conservative_filter_enabled": True,
     }
-    with patch("brain.app.api.routers.memory.MemoryRepository") as MockRepo, \
-         patch("brain.app.api.routers.memory.async_record_memory_review", new=AsyncMock(return_value={"id": 1})):
-        repo = MockRepo.return_value
-        repo.a_get_or_raise_visible = AsyncMock(return_value=mem)
-        repo.a_list_contradictions = AsyncMock(return_value=[])
-        repo.a_get_truth_snapshot = AsyncMock(return_value=truth_snapshot)
+    mock_uow = _make_uow()
+    mock_uow.memories.get_or_raise_visible.return_value = mem
+    mock_uow.memories.get_truth_snapshot.return_value = truth_snapshot
+    mock_uow.session.get = AsyncMock(return_value=mem)
+    with patch("brain.app.api.routers.memory.UnitOfWork", return_value=mock_uow):
         resp = await client.post(
             "/api/memory/1/truth/review",
             json={
@@ -200,18 +200,18 @@ async def test_truth_review_promotes_with_evidence_and_confidence(client, mock_s
         )
 
     assert resp.status_code == 200
-    assert mem.memory_tier == "semantic"
-    assert mem.truth_status == "reviewed"
-    assert mem.review_status == "reviewed"
+    assert mem.content_kind == "semantic"
+    assert mem.truth_status == "active"
+    assert mem.confidence == 0.91
 
 
 @pytest.mark.asyncio
 async def test_truth_review_requires_evidence(client, mock_session_factory):
-    mem = _make_memory(content="review me", memory_tier="episodic")
-    with patch("brain.app.api.routers.memory.MemoryRepository") as MockRepo:
-        repo = MockRepo.return_value
-        repo.a_get_or_raise_visible = AsyncMock(return_value=mem)
-        repo.a_list_contradictions = AsyncMock(return_value=[])
+    mem = _make_memory(content="review me", content_kind="episode")
+    mock_uow = _make_uow()
+    mock_uow.memories.get_or_raise_visible.return_value = mem
+    mock_uow.session.get = AsyncMock(return_value=mem)
+    with patch("brain.app.api.routers.memory.UnitOfWork", return_value=mock_uow):
         resp = await client.post(
             "/api/memory/1/truth/review",
             json={
@@ -229,7 +229,7 @@ async def test_truth_review_requires_evidence(client, mock_session_factory):
 
 @pytest.mark.asyncio
 async def test_truth_review_demotes_with_evidence_and_confidence(client, mock_session_factory):
-    mem = _make_memory(content="demote me", memory_tier="semantic", truth_status="reviewed", review_status="reviewed")
+    mem = _make_memory(content="demote me", content_kind="semantic", truth_status="active", review_status="reviewed")
     truth_snapshot = {
         "memory": mem,
         "state": {
@@ -242,16 +242,11 @@ async def test_truth_review_demotes_with_evidence_and_confidence(client, mock_se
         "reviews": [],
         "conservative_filter_enabled": True,
     }
-    with patch("brain.app.api.routers.memory.MemoryRepository") as MockRepo, \
-         patch("brain.app.api.routers.memory.async_record_memory_review", new=AsyncMock(return_value={"id": 2})), \
-         patch("brain.platform.db.repositories.memory_dag.MemorySummaryRepository") as MockSummaryRepo, \
-         patch("brain.platform.db.repositories.narratives.NarrativeRepository") as MockNarrativeRepo:
-        repo = MockRepo.return_value
-        repo.a_get_or_raise_visible = AsyncMock(return_value=mem)
-        repo.a_list_contradictions = AsyncMock(return_value=[])
-        repo.a_get_truth_snapshot = AsyncMock(return_value=truth_snapshot)
-        MockSummaryRepo.return_value.a_mark_stale_for_memory = AsyncMock(return_value=0)
-        MockNarrativeRepo.return_value.a_mark_stale_for_memory = AsyncMock(return_value=0)
+    mock_uow = _make_uow()
+    mock_uow.memories.get_or_raise_visible.return_value = mem
+    mock_uow.memories.get_truth_snapshot.return_value = truth_snapshot
+    mock_uow.session.get = AsyncMock(return_value=mem)
+    with patch("brain.app.api.routers.memory.UnitOfWork", return_value=mock_uow):
         resp = await client.post(
             "/api/memory/1/truth/review",
             json={
@@ -264,6 +259,6 @@ async def test_truth_review_demotes_with_evidence_and_confidence(client, mock_se
         )
 
     assert resp.status_code == 200
-    assert mem.memory_tier == "episodic"
+    assert mem.content_kind == "episodic"
     assert mem.truth_status == "tentative"
-    assert mem.demoted_at is not None
+    assert mem.freshness_status == "stale"

@@ -5,9 +5,8 @@ from sqlalchemy import inspect
 
 from brain.kernel import config
 from brain.platform.db.models.idea import Idea
-from brain.platform.db.models.memory import Memory
-from brain.platform.db.models.memory_dag import MemorySummary
 from brain.platform.db.models.narrative import ProjectNarrative
+from brain.platform.db.models.reconstructive_memory import MemoryNodeEmbedding
 from brain.platform.db.models.skill import Skill
 
 
@@ -40,10 +39,10 @@ def test_embedding_vector_registry_defines_required_families():
 
 
 def test_model_vector_dimensions_match_registry():
-    assert _vector_dim(Memory, "semantic_embedding") == config.get_embedding_dimension(
+    assert _vector_dim(MemoryNodeEmbedding, "embedding") == config.get_embedding_dimension(
         "memory.semantic"
     )
-    assert _vector_dim(MemorySummary, "semantic_embedding") == config.get_embedding_dimension(
+    assert _vector_dim(MemoryNodeEmbedding, "embedding") == config.get_embedding_dimension(
         "summary.semantic"
     )
     assert _vector_dim(ProjectNarrative, "semantic_embedding") == config.get_embedding_dimension(
@@ -94,13 +93,13 @@ async def test_validate_embedding_vector_typmods_rejects_drift_with_clear_messag
         (spec.table, spec.column): f"vector({spec.dimensions})"
         for spec in config.embedding_database_vector_specs()
     }
-    vector_types[("memory_summaries", "semantic_embedding")] = "vector(1999)"
+    vector_types[("memory_node_embeddings", "embedding")] = "vector(1999)"
 
     with pytest.raises(config.EmbeddingDimensionError) as exc:
         await config.validate_embedding_vector_typmods(_FakeConnection(vector_types))
 
     message = str(exc.value)
-    assert "summary.semantic memory_summaries.semantic_embedding" in message
+    assert "summary.semantic memory_node_embeddings.embedding" in message
     assert "expected vector(" in message
     assert "Stage a migration and re-embedding plan" in message
 

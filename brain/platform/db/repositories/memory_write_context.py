@@ -93,12 +93,12 @@ class MemoryWriteContext:
         return MemoryVisibilityContext(user_id=self.user_id, org_id=self.org_id)
 
     def source_session(self) -> str | None:
-        """Best existing column for session/conversation provenance."""
+        """Session/conversation provenance for source records."""
 
         return _truncate(self.session_id or self.conversation_id, 100)
 
     def source_ref(self) -> str | None:
-        """Compact provenance reference for existing ``memories.source_ref``."""
+        """Compact provenance reference for reconstructive source records."""
 
         parts: list[str] = []
         if self.run_id is not None:

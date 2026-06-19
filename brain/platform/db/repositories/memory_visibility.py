@@ -101,7 +101,7 @@ def memory_visibility_sql(
     user_param: str = "vis_user_id",
     org_param: str = "vis_org_id",
 ) -> tuple[str, dict[str, str]]:
-    """Return a raw SQL fragment and params for legacy vector SQL paths."""
+    """Return a raw SQL fragment and params for memory-node SQL paths."""
     context = context or MemoryVisibilityContext()
     if context.allow_global:
         return "", {}

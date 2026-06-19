@@ -759,12 +759,14 @@ async def compatibility_health_snapshot(
     session: AsyncSession | None = None,
 ) -> dict[str, Any]:
     try:
-        from brain.platform.db.repositories.memories import MemoryRepository
+        from brain.platform.db.models.reconstructive_memory import MemoryNode
         from brain.platform.db.models.skill import Skill
 
         if session is None:
             raise RuntimeError("health checks require an explicit database session")
-        mem_repo = MemoryRepository(session)
+        memory_count = await session.scalar(
+            select(func.count(MemoryNode.id)).where(MemoryNode.archived_at.is_(None))
+        ) or 0
         skill_count = await session.scalar(
             select(func.count(Skill.id)).where(
                 or_(Skill.archived == False, Skill.archived.is_(None))  # noqa: E712
@@ -778,7 +780,7 @@ async def compatibility_health_snapshot(
         return sanitize_for_health({
             "status": "ok",
             "database": "connected",
-            "memory_count": await mem_repo.a_count_active(),
+            "memory_count": memory_count,
             "skill_count": skill_count,
             "run_event_backbone": event_check.details,
             "health_tiers": {

@@ -120,14 +120,6 @@ def upgrade() -> None:
             op.drop_table(table)
 
     for column_name in (
-        "emotional_embedding",
-        "emotion_valence",
-        "emotion_arousal",
-        "emotion_label",
-    ):
-        _drop_column_if_exists("memories", column_name)
-
-    for column_name in (
         "avg_valence",
         "avg_arousal",
         "valence_trend",
@@ -729,22 +721,6 @@ def _downgrade_0012() -> None:
 
 
 def _downgrade_0013() -> None:
-    if _table_exists("memories"):
-        if not _column_exists("memories", "emotional_embedding"):
-            op.add_column("memories", Column("emotional_embedding", Vector(32), nullable=True))
-        if not _column_exists("memories", "emotion_valence"):
-            op.add_column(
-                "memories",
-                Column("emotion_valence", Double, server_default="0.0", nullable=True),
-            )
-        if not _column_exists("memories", "emotion_arousal"):
-            op.add_column(
-                "memories",
-                Column("emotion_arousal", Double, server_default="0.0", nullable=True),
-            )
-        if not _column_exists("memories", "emotion_label"):
-            op.add_column("memories", Column("emotion_label", String(30), nullable=True))
-
     if _table_exists("daily_metrics"):
         if not _column_exists("daily_metrics", "avg_valence"):
             op.add_column("daily_metrics", Column("avg_valence", Double, nullable=True))

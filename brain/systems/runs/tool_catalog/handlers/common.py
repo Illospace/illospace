@@ -673,6 +673,69 @@ def _wrap_brain_encode(original_fn):
     return wrapper
 
 
+def _wrap_memory_ingest_source(original_fn):
+    """Inject run context into source-backed memory ingestion calls."""
+    async def wrapper(**kwargs):
+        kwargs.setdefault("user_id", getattr(_agent_context, "user_id", None))
+        kwargs.setdefault("org_id", getattr(_agent_context, "org_id", None))
+        kwargs.setdefault("session_id", getattr(_agent_context, "session_id", None))
+        run = getattr(_agent_context, "run", None)
+        execution_metadata = getattr(_agent_context, "execution_metadata", None)
+        run_id = getattr(run, "run_id", None)
+        if not run_id and isinstance(execution_metadata, dict):
+            run_id = execution_metadata.get("run_id")
+        kwargs.setdefault("run_id", run_id)
+        if kwargs.get("user_id") and not kwargs.get("org_id"):
+            try:
+                from brain.platform.db.repositories.unit_of_work import UnitOfWork
+                from brain.platform.db.models.org import User
+                async with UnitOfWork() as uow:
+                    user = await uow.session.get(User, kwargs["user_id"])
+                    if user and getattr(user, "org_id", None):
+                        kwargs["org_id"] = user.org_id
+            except Exception:
+                pass
+        if "visibility" not in kwargs:
+            kwargs["visibility"] = "org" if kwargs.get("org_id") else "private"
+        result = original_fn(**kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    return wrapper
+
+
+def _wrap_memory_reconstruct(original_fn):
+    """Inject viewer context into reconstructive memory calls."""
+    async def wrapper(**kwargs):
+        execution_metadata = getattr(_agent_context, "execution_metadata", None)
+        if kwargs.get("user_id") is None:
+            kwargs["user_id"] = getattr(_agent_context, "user_id", None)
+        if kwargs.get("org_id") is None:
+            kwargs["org_id"] = getattr(_agent_context, "org_id", None)
+        if kwargs.get("thread_id") is None:
+            kwargs["thread_id"] = getattr(_agent_context, "idea_id", None)
+        run = getattr(_agent_context, "run", None)
+        if kwargs.get("run_id") is None and run is not None:
+            kwargs["run_id"] = getattr(run, "run_id", None)
+        if isinstance(execution_metadata, dict):
+            if kwargs.get("user_id") is None:
+                kwargs["user_id"] = execution_metadata.get("user_id")
+            if kwargs.get("org_id") is None:
+                kwargs["org_id"] = execution_metadata.get("org_id")
+            if kwargs.get("run_id") is None:
+                kwargs["run_id"] = execution_metadata.get("run_id")
+        result = original_fn(**kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        _patched_private("_record_tool_evidence", _record_tool_evidence)(
+            "memory_reconstruct",
+            kwargs,
+            result,
+        )
+        return result
+    return wrapper
+
+
 def _wrap_brain_recall(original_fn):
     """Inject run viewer context into recall tool calls."""
     async def wrapper(**kwargs):

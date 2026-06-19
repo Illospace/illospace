@@ -63,8 +63,8 @@ class TestOverviewEndpoint:
 
     @patch("brain.app.api.routers.system.ConsolidationRunRepository")
     @patch("brain.app.api.routers.system.SkillRepository")
-    @patch("brain.app.api.routers.system.EdgeRepository")
-    @patch("brain.app.api.routers.system.MemoryRepository")
+    @patch("brain.app.api.routers.system.ReconstructiveEdgeCompatibilityRepository")
+    @patch("brain.app.api.routers.system.ReconstructiveMemoryCompatibilityRepository")
     def test_returns_all_keys(
         self,
         MockMemRepo,
@@ -120,8 +120,8 @@ class TestOverviewEndpoint:
 
     @patch("brain.app.api.routers.system.ConsolidationRunRepository")
     @patch("brain.app.api.routers.system.SkillRepository")
-    @patch("brain.app.api.routers.system.EdgeRepository")
-    @patch("brain.app.api.routers.system.MemoryRepository")
+    @patch("brain.app.api.routers.system.ReconstructiveEdgeCompatibilityRepository")
+    @patch("brain.app.api.routers.system.ReconstructiveMemoryCompatibilityRepository")
     def test_empty_state(
         self,
         MockMemRepo,
@@ -158,8 +158,8 @@ class TestOverviewEndpoint:
 
     @patch("brain.app.api.routers.system.ConsolidationRunRepository")
     @patch("brain.app.api.routers.system.SkillRepository")
-    @patch("brain.app.api.routers.system.EdgeRepository")
-    @patch("brain.app.api.routers.system.MemoryRepository")
+    @patch("brain.app.api.routers.system.ReconstructiveEdgeCompatibilityRepository")
+    @patch("brain.app.api.routers.system.ReconstructiveMemoryCompatibilityRepository")
     def test_response_types(
         self,
         MockMemRepo,
