@@ -63,7 +63,6 @@ async def test_list_command_summaries_returns_skinny_rows(repo, session):
         session,
         name="active",
         description="Visible in slash menu",
-        model_tier="high",
         maturity="stable",
         use_count=4,
         success_count=3,
@@ -95,14 +94,12 @@ async def test_get_by_name_or_raise_missing(repo):
         await repo.a_get_by_name_or_raise("nonexistent")
 
 
-async def test_update_tiers(repo, session):
+async def test_update_thinking(repo, session):
     skill = await _make_skill(repo, session)
-    updated = await repo.a_update_tiers(
+    updated = await repo.a_update_thinking(
         skill.id,
-        model_tier="high",
         thinking_tier="xhigh",
     )
-    assert updated.model_tier == "high"
     assert updated.thinking_tier == "xhigh"
 
 
@@ -145,7 +142,7 @@ async def test_update_full_rejects_provider_runtime_fields(repo, session):
 
 async def test_update_full_marks_builtin_skill_as_customized(repo, session):
     skill = await _make_skill(repo, session, name="builtin-runtime", builtin=True)
-    updated = await repo.a_update_full(skill.id, model_tier="high")
+    updated = await repo.a_update_full(skill.id, thinking_tier="high")
     await session.flush()
     assert updated.builtin is False
 
@@ -194,7 +191,7 @@ async def test_needing_attention(repo, session):
     assert result[0].name == "bad"
 
 
-async def test_update_tiers_updates_thinking_tier(repo, session):
-    skill = await _make_skill(repo, session, name="mirror-update-tiers")
-    updated = await repo.a_update_tiers(skill.id, thinking_tier="high")
+async def test_update_thinking_updates_thinking_tier(repo, session):
+    skill = await _make_skill(repo, session, name="mirror-update-thinking")
+    updated = await repo.a_update_thinking(skill.id, thinking_tier="high")
     assert updated.thinking_tier == "high"

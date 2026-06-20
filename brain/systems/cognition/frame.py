@@ -210,7 +210,7 @@ async def gather_frame_context(
             async with UnitOfWork() as uow:
                 row = (await uow.session.execute(text("""
                     SELECT name, procedure, pitfalls, maturity, confidence,
-                           model_tier, thinking_tier, fitness_score,
+                           thinking_tier, fitness_score,
                            success_count, failure_count, use_count,
                            graduated_steps
                     FROM skills WHERE name = :name AND NOT archived

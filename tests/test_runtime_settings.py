@@ -35,7 +35,7 @@ async def test_provider_auth_status_reports_openai_codex_runtime():
 
 
 @pytest.mark.asyncio
-async def test_runtime_settings_tool_returns_model_mappings_and_active_status():
+async def test_runtime_settings_tool_returns_model_catalogs_and_active_status():
     import brain.systems.services.runtime_introspection as runtime_settings_service
     from brain.app.mcp.server import tool_runtime_settings
 
@@ -49,7 +49,8 @@ async def test_runtime_settings_tool_returns_model_mappings_and_active_status():
             "selected_provider": "openai",
             "effective_provider": "openai",
             "providers": {"openai": {"status": "in_use"}},
-            "provider_model_mappings": {"openai": {"medium": "gpt-5.4"}},
+            "default_model": "gpt-5.5",
+            "provider_model_catalogs": {"openai": {"default": "gpt-5.5", "options": ["gpt-5.5"]}},
             "worker_backend": {"agent_effective_worker_backend": "predict_rlm"},
             "active": {"provider": "openai", "status": "in_use"},
          })):
@@ -57,7 +58,7 @@ async def test_runtime_settings_tool_returns_model_mappings_and_active_status():
 
     assert data["selected_provider"] == "openai"
     assert data["active"]["status"] == "in_use"
-    assert data["provider_model_mappings"]["openai"]["medium"] == "gpt-5.4"
+    assert data["provider_model_catalogs"]["openai"]["default"] == "gpt-5.5"
     assert data["worker_backend"]["agent_effective_worker_backend"] == "predict_rlm"
 
 
@@ -352,19 +353,16 @@ async def test_store_openai_connection_reports_missing_vault_master_key(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_runtime_models_default_high_uses_gpt_5_5(monkeypatch):
+async def test_runtime_models_default_uses_configured_model(monkeypatch):
     from types import SimpleNamespace
 
     import brain.systems.runtime_settings.models as runtime_models
 
-    async def provider_model_map(*args, **kwargs):
-        return {}
-
-    monkeypatch.setattr(runtime_models, "async_get_provider_model_map", provider_model_map, raising=False)
+    monkeypatch.setattr(runtime_models, "async_get_default_model", AsyncMock(return_value="gpt-5.5"), raising=False)
 
     data = await runtime_models.async_get_runtime_models(MagicMock(), SimpleNamespace(id="user-1", org_id="org-1"))
 
-    assert data.high == "gpt-5.5"
+    assert data.default == "gpt-5.5"
     assert any(option.key == "gpt-5.5" for option in data.options)
 
 
@@ -438,7 +436,8 @@ async def test_runtime_settings_snapshot_includes_routing_marketplace(monkeypatc
         AsyncMock(return_value={"flags": {"shadow": True}, "latest_decisions": []}),
     )
     monkeypatch.setattr(runtime_settings_service, "async_get_provider_auth_status", AsyncMock(return_value={"status": "in_use"}), raising=False)
-    monkeypatch.setattr(runtime_settings_service, "async_get_provider_model_map", AsyncMock(return_value={"medium": "gpt-5.4"}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_provider_model_catalogs", AsyncMock(return_value={"openai": {"default": "gpt-5.5", "options": ["gpt-5.5"]}}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_default_model", AsyncMock(return_value="gpt-5.5"), raising=False)
     monkeypatch.setattr(runtime_settings_service, "async_get_agent_worker_backend_settings", AsyncMock(return_value=SimpleNamespace(to_dict=lambda: {})), raising=False)
     monkeypatch.setattr(runtime_settings_service, "async_resolve_default_provider", AsyncMock(return_value="openai"), raising=False)
 
@@ -454,18 +453,19 @@ async def test_runtime_settings_snapshot_exposes_learning_policy(monkeypatch):
     import brain.systems.services.runtime_introspection as runtime_settings_service
 
     monkeypatch.setenv("LEARNING_POLICY_DEPLOYMENT_MODE", "self_hosted")
-    monkeypatch.setenv("LEARNING_POLICY_ALLOWED_MODEL_TIERS", "local,low")
+    monkeypatch.setenv("LEARNING_POLICY_ALLOWED_MODEL_CLASSES", "local,economy")
     monkeypatch.setenv("LEARNING_POLICY_EXTERNAL_EVAL_EXPORT_ALLOWED", "false")
     monkeypatch.setattr(runtime_settings_service, "get_routing_marketplace_snapshot", AsyncMock(return_value={}), raising=False)
     monkeypatch.setattr(runtime_settings_service, "async_get_provider_auth_status", AsyncMock(return_value={"status": "in_use"}), raising=False)
-    monkeypatch.setattr(runtime_settings_service, "async_get_provider_model_map", AsyncMock(return_value={"medium": "gpt-5.4"}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_provider_model_catalogs", AsyncMock(return_value={"openai": {"default": "gpt-5.5", "options": ["gpt-5.5"]}}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_default_model", AsyncMock(return_value="gpt-5.5"), raising=False)
     monkeypatch.setattr(runtime_settings_service, "async_get_agent_worker_backend_settings", AsyncMock(return_value=SimpleNamespace(to_dict=lambda: {})), raising=False)
     monkeypatch.setattr(runtime_settings_service, "async_resolve_default_provider", AsyncMock(return_value="openai"), raising=False)
 
     snapshot = await runtime_settings_service.async_get_runtime_settings_snapshot(MagicMock(), user_id="user-1", org_id="org-1")
 
     assert snapshot["learning_policy"]["deployment_mode"] == "self_hosted"
-    assert snapshot["learning_policy"]["allowed_model_tiers"] == ["local", "low"]
+    assert snapshot["learning_policy"]["allowed_model_classes"] == ["local", "economy"]
     assert snapshot["learning_policy"]["external_eval_export_allowed"] is False
 
 
@@ -486,7 +486,8 @@ async def test_runtime_settings_snapshot_exposes_provider_health(monkeypatch):
 
     monkeypatch.setattr(runtime_settings_service, "get_routing_marketplace_snapshot", AsyncMock(return_value={}), raising=False)
     monkeypatch.setattr(runtime_settings_service, "async_get_provider_auth_status", AsyncMock(return_value={"status": "in_use"}), raising=False)
-    monkeypatch.setattr(runtime_settings_service, "async_get_provider_model_map", AsyncMock(return_value={"medium": "gpt-5.4"}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_provider_model_catalogs", AsyncMock(return_value={"openai": {"default": "gpt-5.5", "options": ["gpt-5.5"]}}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_default_model", AsyncMock(return_value="gpt-5.5"), raising=False)
     monkeypatch.setattr(runtime_settings_service, "async_get_agent_worker_backend_settings", AsyncMock(return_value=SimpleNamespace(to_dict=lambda: {})), raising=False)
     monkeypatch.setattr(runtime_settings_service, "async_resolve_default_provider", AsyncMock(return_value="openai"), raising=False)
 
@@ -499,7 +500,7 @@ async def test_runtime_settings_snapshot_exposes_provider_health(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_llm_info_uses_low_tier_for_background_models(monkeypatch):
+async def test_get_llm_info_uses_default_background_models(monkeypatch):
     from types import SimpleNamespace
 
     from brain.app.api.routers.system import _get_llm_info
@@ -528,28 +529,28 @@ async def test_get_llm_info_uses_low_tier_for_background_models(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    async def _model_maps(*args, **kwargs):
-        return {"openai": {"low": "gpt-5-mini", "medium": "gpt-5.4"}}
+    async def _model_catalogs(*args, **kwargs):
+        return {"openai": {"default": "gpt-5.5", "options": ["gpt-5.5"]}}
 
     async def _default_provider(*args, **kwargs):
         return "openai"
 
-    async def _model_for_tier(*args, **kwargs):
-        return "gpt-5-mini"
+    async def _default_model(*args, **kwargs):
+        return "gpt-5.5"
 
     async def _backend_settings(*args, **kwargs):
         return SimpleNamespace(to_dict=lambda: {})
 
-    monkeypatch.setattr("brain.app.api.routers.system.async_get_provider_model_maps", _model_maps)
+    monkeypatch.setattr("brain.app.api.routers.system.async_get_provider_model_catalogs", _model_catalogs)
     monkeypatch.setattr("brain.app.api.routers.system.async_resolve_default_provider", _default_provider)
-    monkeypatch.setattr("brain.app.api.routers.system.async_get_model_for_tier", _model_for_tier)
+    monkeypatch.setattr("brain.app.api.routers.system.async_get_default_model", _default_model)
     monkeypatch.setattr("brain.app.api.routers.system.async_get_agent_worker_backend_settings", _backend_settings)
 
     info = await _get_llm_info({"id": "user-1", "org_id": "org-1"}, db=FakeSession())
 
     assert info is not None
-    assert info["harvest_model"] == "gpt-5-mini"
-    assert info["consolidation_model"] == "gpt-5-mini"
+    assert info["harvest_model"] == "gpt-5.5"
+    assert info["consolidation_model"] == "gpt-5.5"
     assert "cortex_default_concurrency" not in info
 
 
@@ -588,21 +589,21 @@ async def test_get_llm_info_exposes_provider_health(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    async def _model_maps(*args, **kwargs):
-        return {"openai": {"medium": "gpt-5.4"}}
+    async def _model_catalogs(*args, **kwargs):
+        return {"openai": {"default": "gpt-5.5", "options": ["gpt-5.5"]}}
 
     async def _default_provider(*args, **kwargs):
         return "openai"
 
-    async def _model_for_tier(*args, **kwargs):
-        return "gpt-5-mini"
+    async def _default_model(*args, **kwargs):
+        return "gpt-5.5"
 
     async def _backend_settings(*args, **kwargs):
         return SimpleNamespace(to_dict=lambda: {})
 
-    monkeypatch.setattr("brain.app.api.routers.system.async_get_provider_model_maps", _model_maps)
+    monkeypatch.setattr("brain.app.api.routers.system.async_get_provider_model_catalogs", _model_catalogs)
     monkeypatch.setattr("brain.app.api.routers.system.async_resolve_default_provider", _default_provider)
-    monkeypatch.setattr("brain.app.api.routers.system.async_get_model_for_tier", _model_for_tier)
+    monkeypatch.setattr("brain.app.api.routers.system.async_get_default_model", _default_model)
     monkeypatch.setattr("brain.app.api.routers.system.async_get_agent_worker_backend_settings", _backend_settings)
 
     info = await _get_llm_info({"id": "user-1", "org_id": "org-1"}, db=FakeSession())

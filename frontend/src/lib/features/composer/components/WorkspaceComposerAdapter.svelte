@@ -39,7 +39,7 @@
     secondaryIntentAriaLabel = 'Mode',
     settingsGroups,
     onSettingsChange,
-    settingsAriaLabel = 'Mode, Intelligence, and Effort',
+    settingsAriaLabel = 'Mode, Model, and Effort',
     attachments = [],
     onAttach,
     onRemoveAttachment,

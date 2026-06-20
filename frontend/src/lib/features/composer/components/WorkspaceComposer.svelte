@@ -429,16 +429,16 @@
   footerStatusActive={isVoiceRecording}
   settingsGroups={buildRunSettingsGroups({
     mode: cortex.executionProfile,
-    intelligence: cortex.intelligenceTier,
+    model: cortex.model,
     effort: cortex.effortLevel,
   })}
   onSettingsChange={(key, nextValue) =>
     applyRunSetting(key, nextValue, {
       setExecutionProfile: (value) => cortex.setExecutionProfile(value),
-      setIntelligenceTier: (value) => cortex.setIntelligenceTier(value),
+      setModel: (value) => cortex.setModel(value),
       setEffortLevel: (value) => cortex.setEffortLevel(value),
     })}
-  settingsAriaLabel="Mode, Intelligence, and Effort"
+  settingsAriaLabel="Mode, Model, and Effort"
   attachments={pendingAttachments}
   context={context}
   disabled={sending}

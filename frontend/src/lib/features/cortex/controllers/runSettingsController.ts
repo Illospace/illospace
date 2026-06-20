@@ -2,30 +2,31 @@ import type {
   AgentRunOptions,
   CortexEffortLevel,
   CortexExecutionProfile,
-  CortexIntelligenceTier,
 } from '$lib/types/cortex';
 
 export type CortexRunSettings = Required<
-  Pick<AgentRunOptions, 'executionProfile' | 'intelligenceTier' | 'effortLevel'>
+  Pick<AgentRunOptions, 'executionProfile' | 'model' | 'effortLevel'>
 >;
 
 export type CortexRunSettingsInput = {
   executionProfile?: unknown;
-  intelligenceTier?: unknown;
+  model?: unknown;
   effortLevel?: unknown;
 };
 
 export type RunSettingsStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
+export const DEFAULT_RUN_MODEL = 'openai/gpt-5.5';
+
 export const CORTEX_RUN_SETTINGS_STORAGE_KEYS = {
   executionProfile: 'illo:cortex:execution-profile',
-  intelligenceTier: 'illo:cortex:intelligence-tier',
+  model: 'illo:cortex:model',
   effortLevel: 'illo:cortex:effort-level',
 } as const;
 
 export const DEFAULT_CORTEX_RUN_SETTINGS: CortexRunSettings = {
   executionProfile: 'fast',
-  intelligenceTier: 'high',
+  model: DEFAULT_RUN_MODEL,
   effortLevel: 'high',
 };
 
@@ -33,9 +34,9 @@ export function normalizeExecutionProfile(value: unknown): CortexExecutionProfil
   return String(value || '').trim().toLowerCase() === 'deep' ? 'deep' : 'fast';
 }
 
-export function normalizeIntelligenceTier(value: unknown): CortexIntelligenceTier {
-  const normalized = String(value || '').trim().toLowerCase();
-  return normalized === 'low' || normalized === 'medium' || normalized === 'high' ? normalized : 'high';
+export function normalizeModel(value: unknown, fallback = DEFAULT_RUN_MODEL): string {
+  const normalized = String(value || '').trim().replace(':', '/');
+  return normalized || fallback;
 }
 
 export function normalizeEffortLevel(value: unknown): CortexEffortLevel {
@@ -51,14 +52,14 @@ export function normalizeRunSettings(
 ): CortexRunSettings {
   return {
     executionProfile: normalizeExecutionProfile(settings?.executionProfile ?? fallback.executionProfile),
-    intelligenceTier: normalizeIntelligenceTier(settings?.intelligenceTier ?? fallback.intelligenceTier),
+    model: normalizeModel(settings?.model ?? fallback.model, fallback.model),
     effortLevel: normalizeEffortLevel(settings?.effortLevel ?? fallback.effortLevel),
   };
 }
 
 export function runSettingsOptions(
   settings: CortexRunSettingsInput,
-): Pick<AgentRunOptions, 'executionProfile' | 'intelligenceTier' | 'effortLevel'> {
+): Pick<AgentRunOptions, 'executionProfile' | 'model' | 'effortLevel'> {
   return normalizeRunSettings(settings);
 }
 
@@ -68,7 +69,7 @@ export function normalizeRunOptions(
 ): AgentRunOptions {
   const settings = normalizeRunSettings({
     executionProfile: options.executionProfile ?? currentSettings.executionProfile,
-    intelligenceTier: options.intelligenceTier ?? currentSettings.intelligenceTier,
+    model: options.model ?? currentSettings.model,
     effortLevel: options.effortLevel ?? currentSettings.effortLevel,
   });
   return {
@@ -86,7 +87,7 @@ export function loadRunSettings(
   try {
     return normalizeRunSettings({
       executionProfile: storage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.executionProfile),
-      intelligenceTier: storage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.intelligenceTier),
+      model: storage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model),
       effortLevel: storage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.effortLevel),
     }, fallback);
   } catch {
@@ -102,7 +103,7 @@ export function persistRunSettings(
   try {
     const normalized = normalizeRunSettings(settings);
     storage.setItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.executionProfile, normalized.executionProfile);
-    storage.setItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.intelligenceTier, normalized.intelligenceTier);
+    storage.setItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model, normalized.model);
     storage.setItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.effortLevel, normalized.effortLevel);
     return true;
   } catch {

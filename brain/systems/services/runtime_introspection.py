@@ -13,7 +13,8 @@ from brain.platform.integrations.llm import async_resolve_llm_client
 from brain.systems.learning.budget import LearningBudgetPolicy
 from brain.systems.learning.policy import build_learning_policy_from_env
 from brain.platform.providers.model_policy import (
-    async_get_provider_model_map,
+    async_get_default_model,
+    async_get_provider_model_catalogs,
     async_resolve_default_provider,
     async_resolve_effective_org_id,
     normalize_default_provider,
@@ -58,6 +59,7 @@ def _provider_auth_payload(
     is_selected_provider = provider == effective_provider
     runtime_scope = (
         "codex_subscription" if runtime_source == "codex_subscription"
+        else "user" if runtime_source == "user_openai"
         else "org" if runtime_source == "org_main"
         else "external" if runtime_source == "codex_cache"
         else "env" if runtime_source in {"env", "dotenv"}
@@ -73,6 +75,7 @@ def _provider_auth_payload(
 
     runtime_label = (
         "your Codex subscription" if runtime_scope == "codex_subscription"
+        else "your OpenAI API key" if runtime_scope == "user"
         else "the org default credential" if runtime_scope == "org"
         else "a local Codex session fallback" if runtime_scope == "external"
         else "an environment credential" if runtime_scope == "env"
@@ -96,7 +99,7 @@ def _provider_auth_payload(
         "runtime_key_label": runtime_label,
         "runtime_credential_id": runtime_credential_id,
         "runtime_credential_name": runtime_credential_name,
-        "runtime_uses_db_key": runtime_source in ("codex_subscription", "org_main"),
+        "runtime_uses_db_key": runtime_source in ("codex_subscription", "user_openai", "org_main"),
         "runtime_uses_external_auth": runtime_uses_external_auth,
         "setup_required": not runtime_available and not (has_codex_subscription or has_org_key),
         "supports_db_api_keys": provider in {"anthropic", "openai"},
@@ -193,15 +196,16 @@ async def async_get_provider_auth_status(
 
     runtime_scope = (
         "codex_subscription" if runtime_source == "codex_subscription"
+        else "user" if runtime_source == "user_openai"
         else "org" if runtime_source == "org_main"
         else "external" if runtime_source == "codex_cache"
         else "env" if runtime_source in {"env", "dotenv"}
         else "none"
     )
 
-    if user_id and runtime_scope in {"codex_subscription", "org"}:
+    if user_id and runtime_scope in {"codex_subscription", "user", "org"}:
         try:
-            if runtime_scope == "codex_subscription":
+            if runtime_scope in {"codex_subscription", "user"}:
                 stmt = (
                     select(UserCodexConnection)
                     .where(
@@ -213,7 +217,10 @@ async def async_get_provider_auth_status(
                 key_row = (await session.scalars(stmt)).first()
                 if key_row:
                     runtime_credential_id = key_row.id
-                    runtime_credential_name = key_row.label or "Codex / ChatGPT"
+                    runtime_credential_name = (
+                        key_row.label
+                        or ("OpenAI API key" if runtime_scope == "user" else "Codex / ChatGPT")
+                    )
             elif runtime_scope == "org" and org_id:
                 stmt = (
                     select(OrgApiKey)
@@ -295,15 +302,10 @@ async def async_get_runtime_settings_snapshot(
         org_id=org_id,
         provider="openai",
     )
-    anthropic_models = await async_get_provider_model_map(
+    model_catalogs = await async_get_provider_model_catalogs(session, user_id=user_id, org_id=org_id)
+    default_model = await async_get_default_model(
         session,
-        "anthropic",
-        user_id=user_id,
-        org_id=org_id,
-    )
-    openai_models = await async_get_provider_model_map(
-        session,
-        "openai",
+        selected_provider,
         user_id=user_id,
         org_id=org_id,
     )
@@ -324,10 +326,8 @@ async def async_get_runtime_settings_snapshot(
             "anthropic": anthropic_status,
             "openai": openai_status,
         },
-        "provider_model_mappings": {
-            "anthropic": anthropic_models,
-            "openai": openai_models,
-        },
+        "default_model": default_model,
+        "provider_model_catalogs": model_catalogs,
         "worker_backend": worker_backend.to_dict(),
         "active": provider_status,
         "routing_marketplace": await get_routing_marketplace_snapshot(

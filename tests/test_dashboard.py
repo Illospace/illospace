@@ -221,7 +221,6 @@ class TestSkillsRoute:
             triggers=[],
             guardrails=[],
             auto_emerged=False,
-            model_tier="medium",
             thinking_tier="medium",
             success_rate=0.75,
             children=[],

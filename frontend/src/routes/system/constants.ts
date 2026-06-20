@@ -1,7 +1,5 @@
-import type { ModelTier } from './types';
-
-export const MODEL_FIELDS: { key: ModelTier; label: string; help: string }[] = [
-  { key: 'low', label: 'Low', help: 'Smallest capable model' },
-  { key: 'medium', label: 'Medium', help: 'Balanced default model' },
-  { key: 'high', label: 'High', help: 'Strongest model tier' },
-];
+export const DEFAULT_MODEL_FIELD = {
+  key: 'default',
+  label: 'Default',
+  help: 'Model used for new runs unless a composer selection overrides it',
+} as const;

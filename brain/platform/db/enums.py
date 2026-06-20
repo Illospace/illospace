@@ -13,13 +13,6 @@ class Maturity(StrEnum):
     EXPERT = "expert"
 
 
-class ModelTier(StrEnum):
-    HIGH = "high"
-    MEDIUM = "medium"
-    LOW = "low"
-    LOCAL = "local"
-
-
 class ThinkingTier(StrEnum):
     HIGH = "high"
     MEDIUM = "medium"

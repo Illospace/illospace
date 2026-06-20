@@ -1063,11 +1063,11 @@ Respond as JSON only: {{"score": N, "task_solved": "yes|partial|no", "output_bet
 
         try:
             from brain.platform.integrations.completions import simple_text_completion
-            from brain.platform.providers.model_policy import get_model_for_tier
+            from brain.platform.providers.model_policy import get_default_model
 
             raw = simple_text_completion(
                 judge_prompt,
-                model=get_model_for_tier("low", include_provider_prefix=True),
+                model=get_default_model(include_provider_prefix=True),
                 max_tokens=300,
             ) or ""
             # Extract JSON from response

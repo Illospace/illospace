@@ -22,18 +22,16 @@ from brain.platform.db.models.agent import AgentApiCall
 from brain.platform.db.models.routing import ProviderHealthSnapshot, RoutingDecision, RoutingExperiment
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.providers.model_policy import (
-    DEFAULT_MODEL_TIER,
-    DEFAULT_PROVIDER_MODEL_MAPS,
     SkillRoutingProfile,
-    async_get_provider_model_map,
+    async_get_default_model,
     async_resolve_default_provider,
     async_resolve_provider_selection,
     async_resolve_skill_routing_profile,
     async_resolve_skill_runtime,
     calculate_model_cost,
+    get_default_model,
     infer_provider_from_model,
     normalize_model_name,
-    normalize_model_tier,
     normalize_runtime_provider,
 )
 
@@ -161,17 +159,13 @@ def _model_rank(model: str | None) -> int:
     normalized = normalize_model_name(model)
     if normalized == "local":
         return 0
-    for model_map in DEFAULT_PROVIDER_MODEL_MAPS.values():
-        for tier, model_name in model_map.items():
-            if normalized.endswith(f"/{model_name}") or normalized == model_name:
-                return {"local": 0, "low": 1, "medium": 2, "high": 3}.get(tier, 1)
-    if "nano" in normalized:
+    if "nano" in normalized or "haiku" in normalized:
         return 0
     if "mini" in normalized:
         return 1
-    if normalized.endswith("/gpt-5.4") or normalized.endswith("/gpt-4o"):
+    if "sonnet" in normalized or normalized.endswith("/gpt-5.4") or normalized.endswith("/gpt-4o"):
         return 2
-    if "pro" in normalized:
+    if "opus" in normalized or "pro" in normalized or normalized.endswith("/gpt-5.5"):
         return 3
     return 1
 
@@ -1044,9 +1038,12 @@ async def _candidate_pool(
     legacy_model = (
         f"{legacy_runtime.provider}/{legacy_runtime.model_name}"
         if legacy_runtime
-        else (
-            f"{provider_resolution.provider}/"
-            f"{(await async_get_provider_model_map(session, provider_resolution.provider, user_id=user_id, org_id=org_id)).get(DEFAULT_MODEL_TIER)}"
+        else await async_get_default_model(
+            session,
+            provider_resolution.provider,
+            include_provider_prefix=True,
+            user_id=user_id,
+            org_id=org_id,
         )
     )
     legacy_reasoning_effort = legacy_runtime.reasoning_effort if legacy_runtime else "medium"
@@ -1089,16 +1086,13 @@ async def _candidate_pool(
         ))
     else:
         for provider in provider_names:
-            model_map = await async_get_provider_model_map(
+            model_name = await async_get_default_model(
                 session,
                 provider,
+                include_provider_prefix=False,
                 user_id=user_id,
                 org_id=org_id,
             )
-            model_tier = normalize_model_tier(
-                skill_profile.model_tier or (legacy_runtime.model_tier if legacy_runtime else None)
-            ) or DEFAULT_MODEL_TIER
-            model_name = model_map.get(model_tier, model_map.get(DEFAULT_MODEL_TIER))
             if not model_name:
                 continue
             candidates.append(RoutingCandidate(
@@ -1106,7 +1100,7 @@ async def _candidate_pool(
                 model=model_name,
                 reasoning_effort=skill_profile.reasoning_effort or legacy_reasoning_effort,
                 eligible=True,
-                evidence={"model_tier": model_tier},
+                evidence={"model_source": "configured_default"},
             ))
 
         # Always retain the legacy route as a shadow baseline for comparison.
@@ -1271,7 +1265,7 @@ async def resolve_marketplace_routing(
     legacy_model = (
         legacy_model.strip()
         if legacy_model
-        else f"{legacy_provider}/{DEFAULT_PROVIDER_MODEL_MAPS[legacy_provider][DEFAULT_MODEL_TIER]}"
+        else get_default_model(legacy_provider, include_provider_prefix=True)
     )
     legacy_reasoning_effort = legacy_reasoning_effort or "medium"
 
@@ -1288,13 +1282,13 @@ async def resolve_marketplace_routing(
             if provided_legacy_model:
                 legacy_model = provided_legacy_model.strip()
             else:
-                provider_map = await async_get_provider_model_map(
+                legacy_model = await async_get_default_model(
                     uow.session,
                     legacy_provider,
+                    include_provider_prefix=True,
                     user_id=user_id,
                     org_id=org_id,
                 )
-                legacy_model = f"{legacy_provider}/{provider_map.get(DEFAULT_MODEL_TIER)}"
 
             experiment = await _resolve_active_experiment(uow.session, task_family)
             if experiment and not experiment_name:

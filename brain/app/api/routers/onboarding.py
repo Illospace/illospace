@@ -101,7 +101,6 @@ def _intro_metadata(prompt_visibility: str = "hidden") -> dict[str, str]:
         "execution_profile": "fast",
         "provider": "openai",
         "model": INTRO_MODEL,
-        "model_tier": "high",
         "thinking_tier": "high",
     }
 

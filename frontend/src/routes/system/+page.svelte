@@ -30,7 +30,6 @@
     MemoryCheck,
     MemoryDraft,
     MemoryNoticeState,
-    ModelTier,
     NoticeState,
     RuntimeOption,
     RuntimeSettings,
@@ -70,7 +69,7 @@
   let memoryCheck = $state<MemoryCheck | null>(null);
   let notice = $state<NoticeState | null>(null);
   let startingIntro = $state(false);
-  let modelDraft = $state<Record<ModelTier, string>>({ low: '', medium: '', high: '' });
+  let modelDraft = $state<{ default: string }>({ default: '' });
   let memoryDraft = $state<MemoryDraft>({
     embedder: 'local_gpu',
     embedding_model: 'text-embedding-3-small',
@@ -145,9 +144,7 @@
   function hydrate(next: RuntimeSettings) {
     settings = next;
     modelDraft = {
-      low: next.models.low,
-      medium: next.models.medium,
-      high: next.models.high,
+      default: next.models.default,
     };
     memoryDraft = {
       embedder: next.memory.embedder,
@@ -396,7 +393,7 @@
       if (shouldSaveModels) {
         const models = await api.updateRuntimeModels(modelDraft);
         nextSettings = { ...nextSettings, models };
-        saved.push('Model routing');
+        saved.push('Model');
       }
       if (shouldSaveMemory) {
         const memory = await api.updateRuntimeMemory(memoryPayload());
@@ -425,8 +422,8 @@
     }
   }
 
-  function updateModelTier(tier: ModelTier, value: string) {
-    modelDraft = { ...modelDraft, [tier]: value };
+  function updateModel(value: string) {
+    modelDraft = { ...modelDraft, default: value };
   }
 
   function updateMemoryDraft(key: keyof MemoryDraft, value: string) {
@@ -532,11 +529,7 @@
 
   function modelDraftDirty() {
     if (!settings) return false;
-    return (
-      modelDraft.low !== settings.models.low ||
-      modelDraft.medium !== settings.models.medium ||
-      modelDraft.high !== settings.models.high
-    );
+    return modelDraft.default !== settings.models.default;
   }
 
   function memoryDraftDirty() {
@@ -842,7 +835,7 @@
           {modelDraft}
           {modelOptions}
           {canManageSettings}
-          onUpdateModel={updateModelTier}
+          onUpdateModel={updateModel}
         />
       </div>
 

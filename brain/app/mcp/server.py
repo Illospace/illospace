@@ -47,7 +47,6 @@ from sqlalchemy import text
 
 from brain.systems.memory.attention_controller import AttentionController, observe_retrieval
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_model_tier
 
 logger = logging.getLogger("mcp_brain")
 
@@ -586,7 +585,7 @@ async def async_tool_brain_skills(task: str) -> dict:
         result = await _session_execute(uow.session, text("""
             SELECT id, name, description, version, maturity, confidence, use_count,
                    success_count::float / GREATEST(use_count, 1) as success_rate,
-                   model_tier, thinking_tier, pitfalls, triggers,
+                   thinking_tier, pitfalls, triggers,
                    bundle_version_id, bundle_digest, overlay_revision,
                    effective_digest, source_kind, trust_level,
                    1.0 as skill_match,
@@ -628,7 +627,7 @@ async def async_tool_brain_skills(task: str) -> dict:
             matching_result = await _session_execute(uow.session, text(f"""
                 SELECT id, name, description, version, maturity, confidence, use_count,
                        success_count::float / GREATEST(use_count, 1) as success_rate,
-                       model_tier, thinking_tier, pitfalls, triggers,
+                       thinking_tier, pitfalls, triggers,
                        bundle_version_id, bundle_digest, overlay_revision,
                        effective_digest, source_kind, trust_level,
                        0.0 as skill_match,
@@ -644,7 +643,7 @@ async def async_tool_brain_skills(task: str) -> dict:
             matching_result = await _session_execute(uow.session, text("""
                 SELECT id, name, description, version, maturity, confidence, use_count,
                        success_count::float / GREATEST(use_count, 1) as success_rate,
-                       model_tier, thinking_tier, pitfalls, triggers,
+                       thinking_tier, pitfalls, triggers,
                        bundle_version_id, bundle_digest, overlay_revision,
                        effective_digest, source_kind, trust_level,
                        1 - (embedding <=> CAST(:emb1 AS vector)) as skill_match,
@@ -665,7 +664,7 @@ async def async_tool_brain_skills(task: str) -> dict:
             matching_result = await _session_execute(uow.session, text("""
                 SELECT id, name, description, version, maturity, confidence, use_count,
                        success_count::float / GREATEST(use_count, 1) as success_rate,
-                       model_tier, thinking_tier, pitfalls, triggers,
+                       thinking_tier, pitfalls, triggers,
                        bundle_version_id, bundle_digest, overlay_revision,
                        effective_digest, source_kind, trust_level,
                        CASE WHEN embedding IS NOT NULL
@@ -925,7 +924,6 @@ async def async_tool_skill_view(
                 "use_count": int(skill.use_count or 0),
                 "success_count": int(skill.success_count or 0),
                 "failure_count": int(skill.failure_count or 0),
-                "model_tier": normalize_model_tier(skill.model_tier) or DEFAULT_MODEL_TIER,
                 "thinking_tier": skill.thinking_tier or "medium",
                 "skill_type": skill.skill_type or "skill",
             }

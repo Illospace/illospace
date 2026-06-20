@@ -1,7 +1,6 @@
 import type {
   CortexEffortLevel,
   CortexExecutionProfile,
-  CortexIntelligenceTier,
 } from '$lib/stores/cortex.svelte';
 import type {
   CortexWorkspaceComposerSettingsGroup,
@@ -23,10 +22,11 @@ export const EXECUTION_PROFILE_OPTIONS = [
   },
 ] as const satisfies readonly CortexWorkspaceComposerIntentOption[];
 
-export const INTELLIGENCE_OPTIONS = [
-  { value: 'low', label: 'Low', description: 'Smallest capable model' },
-  { value: 'medium', label: 'Medium', description: 'Balanced default model' },
-  { value: 'high', label: 'High', description: 'Strongest model tier' },
+export const MODEL_OPTIONS = [
+  { value: 'openai/gpt-5.5', label: 'GPT-5.5', description: 'Best quality for hard reasoning' },
+  { value: 'openai/gpt-5.4', label: 'GPT-5.4', description: 'Balanced general-purpose model' },
+  { value: 'openai/gpt-5.4-mini', label: 'GPT-5.4 Mini', description: 'Fast and economical' },
+  { value: 'openai/gpt-5-mini', label: 'GPT-5 Mini', description: 'Lower cost and latency' },
 ] as const satisfies readonly CortexWorkspaceComposerIntentOption[];
 
 export const EFFORT_OPTIONS = [
@@ -45,7 +45,7 @@ export type ActiveRunMessageIntent = (typeof STEERING_INTENT_OPTIONS)[number]['v
 
 export function buildRunSettingsGroups(values: {
   mode: CortexExecutionProfile;
-  intelligence: CortexIntelligenceTier;
+  model: string;
   effort: CortexEffortLevel;
 }): readonly CortexWorkspaceComposerSettingsGroup[] {
   return [
@@ -57,11 +57,11 @@ export function buildRunSettingsGroups(values: {
       ariaLabel: 'Mode',
     },
     {
-      key: 'intelligence',
-      label: 'Intelligence',
-      options: INTELLIGENCE_OPTIONS,
-      value: values.intelligence,
-      ariaLabel: 'Intelligence',
+      key: 'model',
+      label: 'Model',
+      options: MODEL_OPTIONS,
+      value: values.model,
+      ariaLabel: 'Model',
     },
     {
       key: 'effort',
@@ -78,11 +78,11 @@ export function applyRunSetting(
   value: string,
   handlers: {
     setExecutionProfile: (value: CortexExecutionProfile) => void;
-    setIntelligenceTier: (value: CortexIntelligenceTier) => void;
+    setModel: (value: string) => void;
     setEffortLevel: (value: CortexEffortLevel) => void;
   },
 ): void {
   if (key === 'mode') handlers.setExecutionProfile(value as CortexExecutionProfile);
-  if (key === 'intelligence') handlers.setIntelligenceTier(value as CortexIntelligenceTier);
+  if (key === 'model') handlers.setModel(value);
   if (key === 'effort') handlers.setEffortLevel(value as CortexEffortLevel);
 }

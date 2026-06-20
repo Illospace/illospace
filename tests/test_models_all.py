@@ -66,7 +66,6 @@ EXPECTED_TABLES = {
     "notification_events",
     "object_references",
     "org_api_keys",
-    "org_provider_model_mappings",
     "orgs",
     "project_narratives",
     "project_profile_access",

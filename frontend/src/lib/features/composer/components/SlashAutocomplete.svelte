@@ -11,7 +11,6 @@
     name: string;
     description: string;
     tier?: string;
-    model_tier?: string;
   }
 
   let slashCommandsPromise: Promise<SlashCommand[]> | null = null;

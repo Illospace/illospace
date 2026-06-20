@@ -32,17 +32,12 @@ from brain.systems.runs.execution_context import snapshot_agent_context
 from brain.systems.runs.direct_loop.telemetry import async_record_api_call as _async_record_api_call
 from brain.systems.runs.direct_loop.tool_execution import async_invoke_tool_handler
 from brain.platform.providers.model_policy import (
-    DEFAULT_PROVIDER_MODEL_MAPS,
-    HIGH_MODEL_TIER,
-    LOW_MODEL_TIER,
-    MEDIUM_MODEL_TIER,
-    async_get_model_for_tier,
-    async_get_provider_model_map,
+    DEFAULT_PROVIDER_MODELS,
+    PROVIDER_MODEL_OPTIONS,
+    async_get_default_model,
     async_resolve_default_provider,
-    get_model_for_tier,
-    get_provider_model_map,
+    get_default_model,
     infer_provider_from_model,
-    normalize_model_tier,
     normalize_runtime_provider,
     resolve_default_provider,
 )
@@ -317,7 +312,7 @@ def _canonical_model_name(model: str, *, provider: str) -> str:
 
 def _strip_known_provider_prefix(model: str | None) -> str:
     value = (model or "").strip()
-    for provider in DEFAULT_PROVIDER_MODEL_MAPS:
+    for provider in DEFAULT_PROVIDER_MODELS:
         for separator in ("/", ":"):
             prefix = f"{provider}{separator}"
             if value.startswith(prefix):
@@ -338,93 +333,16 @@ def _explicit_provider_from_model(model: str | None) -> str | None:
     lowered = value.lower()
     if "/" in value:
         prefix = value.split("/", 1)[0].strip().lower()
-        if prefix in DEFAULT_PROVIDER_MODEL_MAPS:
+        if prefix in DEFAULT_PROVIDER_MODELS:
             return prefix
     if lowered.startswith("anthropic:") or lowered.startswith("claude-"):
         return "anthropic"
     if lowered.startswith("openai:") or lowered.startswith(("gpt-", "o1", "o3", "o4")):
         return "openai"
     bare = _strip_known_provider_prefix(value)
-    for provider, defaults in DEFAULT_PROVIDER_MODEL_MAPS.items():
-        if bare in defaults.values():
+    for provider, model_options in PROVIDER_MODEL_OPTIONS.items():
+        if bare in model_options or bare == DEFAULT_PROVIDER_MODELS.get(provider):
             return provider
-    return None
-
-
-def _tier_for_model_override(
-    model: str | None,
-    *,
-    user_id: str | None,
-    org_id: str | None,
-) -> str | None:
-    bare = _strip_known_provider_prefix(model)
-    if not bare:
-        return None
-    checked: set[str] = set()
-    for provider in DEFAULT_PROVIDER_MODEL_MAPS:
-        if provider in checked:
-            continue
-        checked.add(provider)
-        try:
-            model_map = get_provider_model_map(provider, user_id=user_id, org_id=org_id)
-        except Exception:
-            model_map = DEFAULT_PROVIDER_MODEL_MAPS.get(provider, {})
-        for tier, mapped_model in model_map.items():
-            if bare == _strip_known_provider_prefix(mapped_model):
-                return normalize_model_tier(tier, default=None)
-
-    lowered = bare.lower()
-    if lowered.startswith("claude-") and "opus" in lowered:
-        return HIGH_MODEL_TIER
-    if lowered.startswith("claude-") and "haiku" in lowered:
-        return LOW_MODEL_TIER
-    if lowered.startswith("claude-") and "sonnet" in lowered:
-        return MEDIUM_MODEL_TIER
-    if "pro" in lowered:
-        return HIGH_MODEL_TIER
-    if "mini" in lowered or "nano" in lowered:
-        return LOW_MODEL_TIER
-    if lowered.startswith("claude-") or lowered.startswith("gpt-") or lowered.startswith(("o1", "o3", "o4")):
-        return MEDIUM_MODEL_TIER
-    return None
-
-
-async def _async_tier_for_model_override(
-    session: AsyncSession,
-    model: str | None,
-    *,
-    user_id: str | None,
-    org_id: str | None,
-) -> str | None:
-    bare = _strip_known_provider_prefix(model)
-    if not bare:
-        return None
-    checked: set[str] = set()
-    for provider in DEFAULT_PROVIDER_MODEL_MAPS:
-        if provider in checked:
-            continue
-        checked.add(provider)
-        try:
-            model_map = await async_get_provider_model_map(session, provider, user_id=user_id, org_id=org_id)
-        except Exception:
-            model_map = DEFAULT_PROVIDER_MODEL_MAPS.get(provider, {})
-        for tier, mapped_model in model_map.items():
-            if bare == _strip_known_provider_prefix(mapped_model):
-                return normalize_model_tier(tier, default=None)
-
-    lowered = bare.lower()
-    if lowered.startswith("claude-") and "opus" in lowered:
-        return HIGH_MODEL_TIER
-    if lowered.startswith("claude-") and "haiku" in lowered:
-        return LOW_MODEL_TIER
-    if lowered.startswith("claude-") and "sonnet" in lowered:
-        return MEDIUM_MODEL_TIER
-    if "pro" in lowered:
-        return HIGH_MODEL_TIER
-    if "mini" in lowered or "nano" in lowered:
-        return LOW_MODEL_TIER
-    if lowered.startswith("claude-") or lowered.startswith("gpt-") or lowered.startswith(("o1", "o3", "o4")):
-        return MEDIUM_MODEL_TIER
     return None
 
 
@@ -443,18 +361,14 @@ def _resolve_predict_rlm_sub_lm(
 
     configured_provider = _explicit_provider_from_model(configured)
     if configured_provider and configured_provider != selected_provider:
-        tier = _tier_for_model_override(configured, user_id=user_id, org_id=org_id) or LOW_MODEL_TIER
-        if tier == "local":
-            tier = LOW_MODEL_TIER
-        remapped = get_model_for_tier(
-            tier,
+        remapped = get_default_model(
             provider=selected_provider,
             include_provider_prefix=False,
             user_id=user_id,
             org_id=org_id,
         )
         logger.info(
-            "PredictRLM sub_lm provider override remapped from %s to %s/%s for selected provider %s",
+            "PredictRLM sub_lm provider override remapped from %s to configured default %s/%s for selected provider %s",
             configured,
             selected_provider,
             remapped,
@@ -483,19 +397,15 @@ async def _async_resolve_predict_rlm_sub_lm(
 
     configured_provider = _explicit_provider_from_model(configured)
     if configured_provider and configured_provider != selected_provider:
-        tier = await _async_tier_for_model_override(session, configured, user_id=user_id, org_id=org_id) or LOW_MODEL_TIER
-        if tier == "local":
-            tier = LOW_MODEL_TIER
-        remapped = await async_get_model_for_tier(
+        remapped = await async_get_default_model(
             session,
-            tier,
             provider=selected_provider,
             include_provider_prefix=False,
             user_id=user_id,
             org_id=org_id,
         )
         logger.info(
-            "PredictRLM sub_lm provider override remapped from %s to %s/%s for selected provider %s",
+            "PredictRLM sub_lm provider override remapped from %s to configured default %s/%s for selected provider %s",
             configured,
             selected_provider,
             remapped,
@@ -513,8 +423,7 @@ def _default_sub_lm(
     org_id: str | None,
 ) -> str:
     return _canonical_model_name(
-        get_model_for_tier(
-            LOW_MODEL_TIER,
+        get_default_model(
             provider=provider or resolve_default_provider(user_id=user_id, org_id=org_id),
             include_provider_prefix=False,
             user_id=user_id,
@@ -533,9 +442,8 @@ async def _async_default_sub_lm(
 ) -> str:
     resolved_provider = provider or await async_resolve_default_provider(session, user_id=user_id, org_id=org_id)
     return _canonical_model_name(
-        await async_get_model_for_tier(
+        await async_get_default_model(
             session,
-            LOW_MODEL_TIER,
             provider=resolved_provider,
             include_provider_prefix=False,
             user_id=user_id,

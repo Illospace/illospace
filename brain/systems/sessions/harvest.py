@@ -33,7 +33,7 @@ async def _harvest_session(
         from brain.systems.memory.narratives import extract_topic_tags, link_session_to_narratives
         from brain.app.cli.memory import add_memory
         from brain.platform.db.repositories.memory_write_context import MemoryWriteContext
-        from brain.platform.providers.model_policy import get_model_for_tier
+        from brain.platform.providers.model_policy import get_default_model
         from datetime import date
 
         if not messages or len(messages) < 2:
@@ -42,8 +42,7 @@ async def _harvest_session(
             logger.debug("Harvest skipped for session %s: missing user context", session_id)
             return
 
-        harvest_model = get_model_for_tier(
-            "low",
+        harvest_model = get_default_model(
             include_provider_prefix=True,
             user_id=user_id,
             org_id=org_id,

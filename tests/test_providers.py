@@ -875,39 +875,33 @@ class TestOpenAIProvider:
         assert result.content[0].input == {"query": "availability"}
 
 
-# ── MODEL_MAP ─────────────────────────────────────────────────────
+# ── MODEL CATALOG ─────────────────────────────────────────────────
 
-class TestModelMap:
-    def test_get_model_anthropic(self):
-        from brain.platform.providers.model_policy import get_model_for_tier
+class TestModelCatalog:
+    def test_get_default_model_anthropic(self):
+        from brain.platform.providers.model_policy import get_default_model
         with patch.dict("os.environ", {"ILLO_LLM_PROVIDER": "anthropic"}):
-            assert get_model_for_tier("medium", provider="anthropic") == "claude-sonnet-4-6"
-            assert get_model_for_tier("high", provider="anthropic") == "claude-opus-4-6"
+            assert get_default_model(provider="anthropic", include_provider_prefix=False) == "claude-sonnet-4-6"
 
-    def test_get_model_openai(self):
-        from brain.platform.providers.model_policy import get_model_for_tier
-        assert get_model_for_tier("medium", provider="openai") == "gpt-5.4"
-        assert get_model_for_tier("high", provider="openai") == "gpt-5.5"
+    def test_get_default_model_openai(self):
+        from brain.platform.providers.model_policy import get_default_model
+        assert get_default_model(provider="openai", include_provider_prefix=False) == "gpt-5.5"
 
-    def test_get_model_map_default(self):
-        from brain.platform.providers.model_policy import get_provider_model_map
+    def test_get_model_options_default(self):
+        from brain.platform.providers.model_policy import get_provider_model_options
         with patch.dict("os.environ", {}, clear=False):
             import os
             os.environ.pop("ILLO_LLM_PROVIDER", None)
-            m = get_provider_model_map()
-            assert "medium" in m
+            options = get_provider_model_options()
+            assert "gpt-5.4" in options
 
-    def test_tier_from_model_reverse_map(self):
-        from brain.platform.providers.model_policy import model_tier_from_name
-        assert model_tier_from_name("claude-sonnet-4-6") == "medium"
-        assert model_tier_from_name("gpt-5.5") == "high"
-
-    def test_model_map_has_both_providers(self):
-        from brain.platform.providers.model_policy import DEFAULT_PROVIDER_MODEL_MAPS
-        assert "anthropic" in DEFAULT_PROVIDER_MODEL_MAPS
-        assert "openai" in DEFAULT_PROVIDER_MODEL_MAPS
-        assert "medium" in DEFAULT_PROVIDER_MODEL_MAPS["anthropic"]
-        assert "medium" in DEFAULT_PROVIDER_MODEL_MAPS["openai"]
+    def test_model_catalog_has_both_providers(self):
+        from brain.platform.providers.model_policy import get_provider_model_catalogs
+        catalogs = get_provider_model_catalogs()
+        assert catalogs["anthropic"]["default"] == "claude-sonnet-4-6"
+        assert catalogs["openai"]["default"] == "gpt-5.5"
+        assert "claude-opus-4-6" in catalogs["anthropic"]["options"]
+        assert "gpt-5.5" in catalogs["openai"]["options"]
 
 
 # ── LLM Client (OpenAI path) ─────────────────────────────────────

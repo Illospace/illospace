@@ -395,41 +395,41 @@ def _privacy_status(env: Mapping[str, str]) -> DoctorStatus:
 
 def _learning_model_status(env: Mapping[str, str]) -> DoctorStatus:
     policy = build_learning_policy(env=env)
-    allowed_tiers = tuple(str(tier) for tier in policy.allowed_model_tiers)
-    has_local_or_low = bool({"local", "low"} & set(allowed_tiers))
+    allowed_classes = tuple(str(model_class) for model_class in policy.allowed_model_classes)
+    has_local_or_economy = bool({"local", "economy"} & set(allowed_classes))
     has_local_model_setting = any(_first_env(env, name) for name in _LOCAL_MODEL_ENV)
     deployment_mode = str(policy.deployment_mode)
 
     details = {
         "deployment_mode": deployment_mode,
-        "allowed_model_tiers": list(allowed_tiers),
+        "allowed_model_classes": list(allowed_classes),
         "has_local_model_setting": has_local_model_setting,
         "local_model_env_names": list(_LOCAL_MODEL_ENV),
     }
-    if not has_local_or_low:
+    if not has_local_or_economy:
         return DoctorStatus(
-            code="learning-model-tier-review",
+            code="learning-model-class-review",
             status="warning",
             message=(
-                "Learning has no local or low-intelligence model tier available; background learning may cost more than expected."
+                "Learning has no local or economy model class available; background learning may cost more than expected."
             ),
             details=details,
         )
-    if deployment_mode == "self_hosted" and "local" in allowed_tiers and not has_local_model_setting:
+    if deployment_mode == "self_hosted" and "local" in allowed_classes and not has_local_model_setting:
         return DoctorStatus(
             code="learning-local-model-missing",
             status="warning",
             message=(
-                "Self-hosted learning allows the local model tier, but no local model setting was found. "
-                "Configure a local model or rely on the low-intelligence tier."
+                "Self-hosted learning allows the local model class, but no local model setting was found. "
+                "Configure a local model or rely on the economy class."
             ),
             details=details,
         )
 
     return DoctorStatus(
-        code="learning-model-tier",
+        code="learning-model-class",
         status="ok",
-        message="Learning can use a local or low-intelligence model tier.",
+        message="Learning can use a local or economy model class.",
         details=details,
     )
 

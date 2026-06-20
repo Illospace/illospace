@@ -138,7 +138,7 @@ EXTENDED_TOOLS = [
         "description": (
             "Answer a narrow question about one file without dumping the full file into the "
             "main worker context. Uses deterministic structure extraction first and may use a "
-            "low-intelligence reader model for bounded synthesis. Returns structured evidence and citations."
+            "configured reader model for bounded synthesis. Returns structured evidence and citations."
         ),
         "input_schema": {
             "type": "object",
@@ -158,7 +158,7 @@ EXTENDED_TOOLS = [
         "name": "summarize_files_for_task",
         "description": (
             "Answer a narrow question across multiple files without forcing the main worker "
-            "to ingest all of them. Uses deterministic ranking first and a low-intelligence reader model "
+            "to ingest all of them. Uses deterministic ranking first and a configured reader model "
             "for bounded synthesis when available. Returns structured evidence, ranked files, "
             "and citations."
         ),
@@ -692,15 +692,14 @@ def handle_project_context(path: str | None = None, workspace_root: str | None =
 
 
 def _reader_model(user_id: str | None = None, org_id: str | None = None) -> str:
-    """Pick a low-intelligence reader model from the active provider policy."""
+    """Pick the configured default reader model from the active provider policy."""
     from brain.platform.providers.model_policy import (
-        get_model_for_tier,
+        get_default_model,
         resolve_default_provider,
     )
 
     provider = resolve_default_provider(user_id=user_id, org_id=org_id)
-    model = get_model_for_tier(
-        "low",
+    model = get_default_model(
         provider=provider,
         include_provider_prefix=True,
         user_id=user_id,
@@ -1038,7 +1037,7 @@ def _fallback_file_answer(path: str, question: str, summary: dict, text: str) ->
 
 
 async def _reader_completion(prompt: str, *, user_id: str | None = None, org_id: str | None = None) -> dict | None:
-    """Best-effort low-intelligence reader subcall. Returns parsed JSON or None."""
+    """Best-effort configured reader subcall. Returns parsed JSON or None."""
     from brain.platform.integrations.completions import simple_text_completion
     from brain.systems.runs.direct_loop.telemetry import async_record_api_call
     from brain.systems.runs.tool_handlers import _agent_context

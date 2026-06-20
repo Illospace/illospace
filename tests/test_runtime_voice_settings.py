@@ -67,7 +67,7 @@ async def test_runtime_settings_payload_includes_voice_status(monkeypatch):
     monkeypatch.setattr(
         runtime_service,
         "async_get_runtime_models",
-        AsyncMock(return_value={"low": "gpt-5-mini", "medium": "gpt-5.4", "high": "gpt-5.5", "options": []}),
+        AsyncMock(return_value={"default": "gpt-5.5", "options": []}),
     )
     monkeypatch.setattr(
         runtime_service,

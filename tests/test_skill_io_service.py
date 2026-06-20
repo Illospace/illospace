@@ -30,7 +30,6 @@ def test_import_creates_new(mock_validate, mock_repo):
             "reasoning_effort": "xhigh",
             "service_tier": "priority",
             "auth_mode": "chatgpt",
-            "model_tier": "high",
         }
     ])
     assert result["imported"] == 1
@@ -42,7 +41,6 @@ def test_import_creates_new(mock_validate, mock_repo):
     assert "reasoning_effort" not in kwargs
     assert "service_tier" not in kwargs
     assert "auth_mode" not in kwargs
-    assert kwargs["model_tier"] == "high"
     assert kwargs["thinking_tier"] == "xhigh"
 
 
@@ -79,7 +77,6 @@ def test_import_updates_existing(mock_validate, mock_repo):
     existing.reasoning_effort = None
     existing.service_tier = None
     existing.auth_mode = None
-    existing.model_tier = "medium"
     existing.thinking_tier = "medium"
     mock_repo.get_by_name.return_value = existing
 

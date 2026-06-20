@@ -116,9 +116,6 @@ class Skill(Base, TimestampMixin, ArchivableMixin):
     builtin: Mapped[bool] = mapped_column(
         Boolean, server_default=text("FALSE"), default=False
     )
-    model_tier: Mapped[str] = mapped_column(
-        String(20), server_default="medium", default="medium"
-    )
     thinking_tier: Mapped[str] = mapped_column(
         String(20), server_default="medium", default="medium"
     )

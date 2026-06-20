@@ -92,7 +92,7 @@ class LearningCostEstimate:
     """Audit payload for one learning operation estimate."""
 
     estimated_tokens: int
-    model_tier: str = "unknown"
+    model_class: str = "unknown"
     provider_location: ProviderLocation | str = ProviderLocation.LOCAL
     provider: str | None = None
     elapsed_ms: int = 0
@@ -103,7 +103,7 @@ class LearningCostEstimate:
     def __post_init__(self) -> None:
         object.__setattr__(self, "estimated_tokens", max(0, int(self.estimated_tokens or 0)))
         object.__setattr__(self, "elapsed_ms", max(0, int(self.elapsed_ms or 0)))
-        object.__setattr__(self, "model_tier", str(self.model_tier or "unknown"))
+        object.__setattr__(self, "model_class", str(self.model_class or "unknown"))
         object.__setattr__(self, "provider_location", _coerce_provider_location(self.provider_location))
 
     @property
@@ -113,7 +113,7 @@ class LearningCostEstimate:
     def to_payload(self) -> dict[str, object]:
         return {
             "estimated_tokens": self.estimated_tokens,
-            "model_tier": self.model_tier,
+            "model_class": self.model_class,
             "provider_location": str(self.provider_location),
             "provider": self.provider,
             "elapsed_ms": self.elapsed_ms,
@@ -306,7 +306,7 @@ def should_run_learning_task(
     lane: BudgetLane | str,
     task_type: str,
     estimated_tokens: int,
-    model_tier: str = "unknown",
+    model_class: str = "unknown",
     provider_location: ProviderLocation | str = ProviderLocation.LOCAL,
     provider: str | None = None,
     elapsed_ms: int = 0,
@@ -331,7 +331,7 @@ def should_run_learning_task(
     resolved_priority = int(priority or 0)
     cost = LearningCostEstimate(
         estimated_tokens=estimated_tokens,
-        model_tier=model_tier,
+        model_class=model_class,
         provider_location=provider_location,
         provider=provider,
         elapsed_ms=elapsed_ms,
@@ -365,7 +365,7 @@ def should_run_learning_task(
         return _decision(BudgetDecisionAction.ALLOW, "hot path learning within policy", lane=resolved_lane, cost=cost, remaining_tokens=remaining)
 
     if resolved_lane == BudgetLane.AFTER_RUN:
-        key = sample_key or f"{org_id}:{user_id}:{normalized_task}:{cost.estimated_tokens}:{cost.model_tier}"
+        key = sample_key or f"{org_id}:{user_id}:{normalized_task}:{cost.estimated_tokens}:{cost.model_class}"
         if not _sample_allows(key, policy.after_run_sample_rate):
             return _decision(BudgetDecisionAction.DEFER, "after-run learning deferred by deterministic sample policy", lane=resolved_lane, cost=cost, remaining_tokens=remaining)
         if cost.estimated_tokens > lane_remaining:

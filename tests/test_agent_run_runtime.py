@@ -1106,7 +1106,7 @@ async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monke
         profile=RunProfile.FAST,
         target_ref={"kind": "cortex_idea"},
         workspace_ref={"workspace_root": "/tmp/work"},
-        model_policy={"tier": "high"},
+        model_policy={"model": "openai/gpt-5.5"},
     )
     child = SimpleNamespace(id=99, root_run_id=42, recipe=RunRecipe.WORKER)
     events = []
@@ -2573,7 +2573,7 @@ def test_run_stream_payload_is_the_single_cortex_projection():
         input_message="Read README",
         target_ref={"kind": "cortex_idea"},
         workspace_ref={"workspace_root": "/tmp/work"},
-        model_policy={"tier": "high", "thinking": "high"},
+        model_policy={"model": "openai/gpt-5.5", "thinking": "high"},
         metadata_={"event": "thread_reply"},
         created_at=now,
         updated_at=now,
@@ -2592,7 +2592,7 @@ def test_run_stream_payload_is_the_single_cortex_projection():
     assert payload["profile"] == "fast"
     assert payload["recipe"] == "fast"
     assert payload["status"] == "running"
-    assert payload["model_policy"] == {"tier": "high", "thinking": "high"}
+    assert payload["model_policy"] == {"model": "openai/gpt-5.5", "thinking": "high"}
 
 
 def _async_work_intake_session(idea, *, attachment=None, profiles=None):
@@ -2649,7 +2649,7 @@ async def _build_cortex_intake_run_request(
     )
 
 
-async def test_work_intake_keeps_fast_high_intelligence_by_default():
+async def test_work_intake_keeps_fast_high_effort_by_default():
 
     session = _async_work_intake_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
 
@@ -2664,7 +2664,7 @@ async def test_work_intake_keeps_fast_high_intelligence_by_default():
 
     assert request.profile == "fast"
     assert request.recipe == "fast"
-    assert request.model_policy == {"tier": "high", "thinking": "high"}
+    assert request.model_policy == {"thinking": "high"}
     assert request.metadata["event"] == "thread_reply"
 
 
@@ -2849,7 +2849,7 @@ async def test_work_intake_resolves_attached_profile_to_latest_project_root():
     assert request.target_ref["project_context_snapshot"]["resources"][0]["path"] == "attached/latest"
 
 
-async def test_work_intake_applies_intelligence_and_effort_overrides():
+async def test_work_intake_applies_model_and_effort_overrides():
     session = _async_work_intake_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
 
     request = await _build_cortex_intake_run_request(
@@ -2858,12 +2858,12 @@ async def test_work_intake_applies_intelligence_and_effort_overrides():
         event="thread_reply",
         message="Use cheaper settings",
         user_id="u1",
-        metadata={"execution_profile": "fast", "model_tier": "medium", "effort": "xhigh"},
+        metadata={"execution_profile": "fast", "model": "openai/gpt-5.4", "effort": "xhigh"},
     )
 
     assert request.profile == "fast"
     assert request.recipe == "fast"
-    assert request.model_policy == {"tier": "medium", "thinking": "xhigh"}
+    assert request.model_policy == {"model": "openai/gpt-5.4", "thinking": "xhigh"}
 
 
 async def test_work_intake_applies_explicit_model_override():
@@ -2879,7 +2879,6 @@ async def test_work_intake_applies_explicit_model_override():
     )
 
     assert request.model_policy == {
-        "tier": "high",
         "thinking": "high",
         "model": "openai/gpt-5.5",
         "provider": "openai",

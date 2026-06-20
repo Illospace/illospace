@@ -29,8 +29,6 @@ SKILL_FILENAME = "SKILL.md"
 MAX_INLINE_TEXT_BYTES = 256 * 1024
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
-_MODEL_TIERS = frozenset({"high", "medium", "low", "local"})
-_LEGACY_MODEL_TIER_ALIASES: dict[str, str] = {}
 _REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh"})
 _LEGACY_RUNTIME_PROVIDER_KEYS = frozenset(
     {
@@ -201,7 +199,6 @@ class SkillBundleRuntimeSpec(_ManifestModel):
 
     model_config = ConfigDict(extra="ignore", use_enum_values=True)
 
-    default_model_tier: str | None = None
     default_thinking_tier: str | None = None
 
     @model_validator(mode="before")
@@ -215,22 +212,12 @@ class SkillBundleRuntimeSpec(_ManifestModel):
         return value
 
     @field_validator(
-        "default_model_tier",
         "default_thinking_tier",
         mode="before",
     )
     @classmethod
     def _optional_text(cls, value: Any) -> str | None:
         return _optional_string(value)
-
-    @field_validator("default_model_tier")
-    @classmethod
-    def _valid_model_tier(cls, value: str | None) -> str | None:
-        if value is not None:
-            value = _LEGACY_MODEL_TIER_ALIASES.get(value, value)
-        if value is not None and value not in _MODEL_TIERS:
-            raise ValueError(f"default_model_tier must be one of {sorted(_MODEL_TIERS)}")
-        return value
 
     @field_validator("default_thinking_tier")
     @classmethod

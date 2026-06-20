@@ -36,7 +36,6 @@ def test_builtin_skills_have_structured_routing_metadata():
         assert skill["procedure"]
         assert skill["source_kind"] == "illo-core"
         assert skill["trust_level"] == "illo_core"
-        assert skill["model_tier"] in {"low", "medium", "high", "local"}
         assert skill["thinking_tier"] in {"none", "low", "medium", "high", "xhigh"}
         assert _has_text_items(skill["triggers"], "pattern")
         assert _has_text_items(skill["guardrails"], "text")
@@ -76,7 +75,6 @@ def test_builtin_skill_bundles_parse_and_mirror_bootstrap_procedures():
         assert bundle.manifest.name == name
         assert bundle.manifest.source == "illo-core"
         assert bundle.skill_markdown == skill["procedure"]
-        assert bundle.manifest.runtime.default_model_tier == skill["model_tier"]
         assert bundle.manifest.runtime.default_thinking_tier == skill["thinking_tier"]
         assert bundle.manifest.routing.triggers == skill["triggers"]
         assert bundle.assets

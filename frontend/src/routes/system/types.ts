@@ -2,7 +2,6 @@ import type { EmbedderKey, RuntimeVoiceLanguage, RuntimeVoiceProvider } from '$l
 
 export type {
   EmbedderKey,
-  ModelTier,
   RuntimeOption,
   RuntimeSettings,
   RuntimeVoiceLanguage,

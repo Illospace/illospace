@@ -17,7 +17,7 @@ from sqlalchemy import text
 import brain.kernel.config as config
 from brain.app.cli.agent_cli import call_agent, extract_json
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.providers.model_policy import get_model_for_tier
+from brain.platform.providers.model_policy import get_default_model
 
 
 async def audit_lessons(target_date: date) -> dict:
@@ -151,7 +151,7 @@ Return ONLY the JSON object, no other text."""
     result = call_agent(
         session_id=f"lesson-compile-{lesson_id}",
         message=prompt,
-        model=get_model_for_tier("low", include_provider_prefix=True),
+        model=get_default_model(include_provider_prefix=True),
         thinking="off",
     )
 

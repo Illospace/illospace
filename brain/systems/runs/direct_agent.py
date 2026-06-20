@@ -1,7 +1,7 @@
 """Illo Brain — Agent Loop.
 
 Provider-neutral agent loop. Provides tool use, prompt caching,
-conversation persistence, and configurable model/thinking per skill tier.
+conversation persistence, and configurable model/thinking.
 
 The agent loop follows the standard pattern:
     messages.create → check stop_reason → if tool_use, execute tools,
@@ -43,10 +43,8 @@ from brain.platform.async_io import run_blocking
 from brain.platform.integrations.providers import get_provider
 from brain.platform.integrations.providers import ContentBlockType, LLMRequest, MessageRole, StopReason
 from brain.platform.providers.model_policy import (
-    MODEL_TIERS,
-    async_get_model_for_tier,
+    async_get_default_model,
     infer_provider_from_model,
-    normalize_model_tier,
 )
 from brain.systems.runs import introspection as run_introspection
 from brain.systems.runs.direct_loop.final_reply import (
@@ -410,19 +408,18 @@ async def _resolve_model_async(
     user_id: str | None = None,
     org_id: str | None = None,
 ) -> str:
-    tier = normalize_model_tier(model, default=None) if model else "medium"
-    if tier in MODEL_TIERS:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    if model:
+        return str(model)
 
-        async with UnitOfWork() as uow:
-            return await async_get_model_for_tier(
-                uow.session,
-                tier,
-                include_provider_prefix=True,
-                user_id=user_id,
-                org_id=org_id,
-            )
-    return str(model)
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+    async with UnitOfWork() as uow:
+        return await async_get_default_model(
+            uow.session,
+            include_provider_prefix=True,
+            user_id=user_id,
+            org_id=org_id,
+        )
 
 
 async def _init_llm_async(

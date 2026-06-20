@@ -1182,7 +1182,6 @@ async def test_slash_commands_materializes_builtin_skills():
     skill = SimpleNamespace(
         name="develop",
         description="Implementation skill",
-        model_tier="medium",
         maturity="stable",
         use_count=0,
         success_count=0,

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from brain.platform.db.repositories.skills import SkillRepository
 from brain.platform.db.schemas.skills import SkillExport
-from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_model_tier
 from brain.systems.skills.gate import validate_skill_structure
 
 
@@ -23,7 +22,6 @@ class SkillIOService:
             s = dict(s)
             if "thinking_tier" not in s and s.get("reasoning_effort"):
                 s["thinking_tier"] = s.get("reasoning_effort")
-            s["model_tier"] = normalize_model_tier(s.get("model_tier")) or DEFAULT_MODEL_TIER
             name = (s.get("name") or "").strip()
             procedure = (s.get("procedure") or "").strip()
             if not name or not procedure:
@@ -41,7 +39,6 @@ class SkillIOService:
                 existing.pitfalls = s.get("pitfalls", existing.pitfalls)
                 existing.refinements = s.get("refinements", existing.refinements)
                 existing.triggers = s.get("triggers", existing.triggers)
-                existing.model_tier = s.get("model_tier", existing.model_tier)
                 existing.thinking_tier = s.get("thinking_tier", existing.thinking_tier)
             else:
                 self._repo.create(
@@ -53,7 +50,6 @@ class SkillIOService:
                     pitfalls=s.get("pitfalls", []),
                     refinements=s.get("refinements", []),
                     triggers=s.get("triggers", []),
-                    model_tier=s.get("model_tier", DEFAULT_MODEL_TIER),
                     thinking_tier=s.get("thinking_tier", "medium"),
                 )
             imported += 1

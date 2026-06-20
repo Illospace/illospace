@@ -208,7 +208,7 @@ class TestCompressMemories:
         result = compress_memories(self.SOURCES, self.SOURCE_IDS, depth=0)
 
         assert result["level"] == "normal"
-        assert result["model_used"] == "openai/gpt-5-mini"
+        assert result["model_used"] == "openai/gpt-5.5"
         assert "decided" in result["content"].lower()
         assert len(result["breadcrumbs"]) == 2
         # Only one call needed (normal pass succeeded)

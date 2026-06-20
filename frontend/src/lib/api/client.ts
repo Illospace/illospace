@@ -1524,7 +1524,6 @@ export const api = {
     name: string;
     description?: string;
     procedure?: string;
-    model_tier?: string;
     thinking_tier?: string;
     pitfalls?: any[];
     refinements?: any[];
@@ -1674,7 +1673,7 @@ export const api = {
     }),
   exchangeRuntimeOpenAIOAuth: (data: { callback: string }) =>
     fetchJson<any>('/api/runtime-settings/connection/openai/oauth/exchange', { method: 'POST', body: JSON.stringify(data) }),
-  updateRuntimeModels: (data: { low: string; medium: string; high: string }) =>
+  updateRuntimeModels: (data: { default: string }) =>
     fetchJson<any>('/api/runtime-settings/models', { method: 'PATCH', body: JSON.stringify(data) }),
   updateRuntimeMemory: (data: { embedder: string; embedding_model?: string | null; reranker?: string }) =>
     fetchJson<any>('/api/runtime-settings/memory', { method: 'PATCH', body: JSON.stringify(data) }),

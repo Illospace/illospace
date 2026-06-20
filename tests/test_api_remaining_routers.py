@@ -78,7 +78,6 @@ async def test_list_skills(client, mock_session_factory):
         reasoning_effort=None,
         service_tier=None,
         auth_mode=None,
-        model_tier="medium",
         thinking_tier="medium",
         success_rate=0.8,
         bundle_digest=None,

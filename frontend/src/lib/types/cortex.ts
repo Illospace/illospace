@@ -228,12 +228,11 @@ export interface VaultAgentGrantPrompt {
 }
 
 export type CortexExecutionProfile = 'fast' | 'deep';
-export type CortexIntelligenceTier = 'low' | 'medium' | 'high';
 export type CortexEffortLevel = 'low' | 'medium' | 'high' | 'xhigh';
 
 export interface AgentRunOptions {
   executionProfile?: CortexExecutionProfile;
-  intelligenceTier?: CortexIntelligenceTier;
+  model?: string;
   effortLevel?: CortexEffortLevel;
   metadata?: Record<string, any>;
   skipRun?: boolean;

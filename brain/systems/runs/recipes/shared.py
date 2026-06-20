@@ -224,6 +224,24 @@ def workspace_root_from_ref(workspace_ref: dict[str, Any]) -> str | None:
     return None
 
 
+async def default_run_model(
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> str:
+    """Return the configured default model for a run."""
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.providers.model_policy import async_get_default_model
+
+    async with UnitOfWork() as uow:
+        return await async_get_default_model(
+            uow.session,
+            include_provider_prefix=True,
+            user_id=user_id,
+            org_id=org_id,
+        )
+
+
 __all__ = [
     "ProjectRuntimeWorkspace",
     "project_runtime_workspace_from_ref",

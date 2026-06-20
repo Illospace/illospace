@@ -30,7 +30,6 @@ visibility = "public"
 triggers = ["fix bug", "implement feature"]
 
 [runtime]
-default_model_tier = "medium"
 default_thinking_tier = "high"
 
 [permissions]
@@ -81,13 +80,11 @@ def test_load_skill_bundle_happy_path_discovers_assets(tmp_path):
     assert bundle.manifest.version == "1.4.0"
     assert bundle.manifest.license == "Apache-2.0"
     assert bundle.manifest.routing.triggers == ["fix bug", "implement feature"]
-    assert bundle.manifest.runtime.default_model_tier == "medium"
     assert bundle.manifest.runtime.default_thinking_tier == "high"
     assert bundle.manifest.permissions.toolsets == [
         "workspace_read",
         "workspace_write",
     ]
-    assert bundle.manifest.raw["runtime"]["default_model_tier"] == "medium"
     assert bundle.manifest.raw["runtime"]["default_thinking_tier"] == "high"
     assert len(bundle.digest) == 64
     assert [asset.path for asset in bundle.assets] == [
@@ -138,7 +135,6 @@ visibility = "public"
 [runtime]
 default_provider = "openai"
 default_model = "gpt-5.5"
-default_model_tier = "medium"
 default_reasoning_effort = "xhigh"
 service_tier = "priority"
 auth_mode = "chatgpt"
@@ -147,8 +143,6 @@ auth_mode = "chatgpt"
     )
 
     bundle = load_skill_bundle(tmp_path)
-
-    assert bundle.manifest.runtime.default_model_tier == "medium"
     assert bundle.manifest.runtime.default_thinking_tier == "xhigh"
     assert "default_provider" not in bundle.manifest.raw["runtime"]
     assert "default_model" not in bundle.manifest.raw["runtime"]

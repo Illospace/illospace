@@ -143,7 +143,7 @@ async def test_cycle_tool_and_external_agent_events_share_the_same_intake_policy
             event_type="cycle.due_run",
             payload={
                 "message": "Run the scheduled check.",
-                "metadata": {"execution_profile": "deep", "model_tier": "medium"},
+                "metadata": {"execution_profile": "deep", "model": "openai/gpt-5.4"},
             },
             policy={"priority": 4, "idempotency_key": "cycle:run-1"},
             **common,
@@ -180,7 +180,7 @@ async def test_cycle_tool_and_external_agent_events_share_the_same_intake_policy
     assert {request.user_id for request in requests} == {"owner-1"}
     assert requests[0].profile == RunProfile.DEEP
     assert requests[0].recipe == RunRecipe.DEEP
-    assert requests[0].model_policy["tier"] == "medium"
+    assert requests[0].model_policy["model"] == "openai/gpt-5.4"
     assert requests[1].model_policy["thinking"] == "xhigh"
     assert requests[2].model_policy["provider"] == "anthropic"
     assert [request.metadata["idempotency_key"] for request in requests] == [
@@ -246,7 +246,7 @@ async def test_external_headless_ask_uses_async_work_intake_policy():
             payload={
                 "message": "Answer the personal agent.",
                 "workspace_ref": {"source": "external_agent_bridge", "mode": "headless"},
-                "model_policy": {"tier": "standard", "thinking": "medium"},
+                "model_policy": {"model": "openai/gpt-5.4", "thinking": "medium"},
                 "metadata": {
                     "execution_profile": "fast",
                     "recipe": "fast",
@@ -261,7 +261,7 @@ async def test_external_headless_ask_uses_async_work_intake_policy():
     assert request.user_id == "owner-1"
     assert request.target_ref["kind"] == "external_agent_headless_ask"
     assert request.workspace_ref == {"source": "external_agent_bridge", "mode": "headless"}
-    assert request.model_policy == {"tier": "standard", "thinking": "medium"}
+    assert request.model_policy == {"model": "openai/gpt-5.4", "thinking": "medium"}
     assert request.metadata["producer"] == "external_agent"
     assert request.metadata["idempotency_key"] == "ask:task-1"
     assert request.metadata["tool_policy"]["blocked_tools"] == ["manage_idea"]

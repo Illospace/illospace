@@ -17,7 +17,6 @@ TITLE_PREFIX_RE = re.compile(
     r"^(?:title|suggested title|headline|summary title)\s*:\s*",
     re.IGNORECASE,
 )
-TITLE_MODEL_TIER = "low"
 TITLE_REASONING_EFFORT = "low"
 TITLE_INPUT_CHAR_LIMIT = 500
 TITLE_MAX_TOKENS = 20
@@ -112,7 +111,7 @@ def _generate_with_local_title_model(raw_text: str) -> str | None:
 
         client = get_client()
         if not _local_title_runtime_ready(client):
-            logger.info("Local title generation skipped because the configured low-tier llm worker is not ready")
+            logger.info("Local title generation skipped because the configured llm worker is not ready")
             return None
 
         return normalize_generated_title(
@@ -203,16 +202,15 @@ def generate_display_title(
     user_id: str | None = None,
     org_id: str | None = None,
 ) -> str | None:
-    """Generate a display title using the configured low-intelligence model."""
+    """Generate a display title using the configured default model."""
     if not (raw_text or "").strip():
         return None
 
     try:
-        from brain.platform.providers.model_policy import get_model_for_tier, resolve_default_provider
+        from brain.platform.providers.model_policy import get_default_model, resolve_default_provider
 
         provider = resolve_default_provider(user_id=user_id, org_id=org_id)
-        model = get_model_for_tier(
-            TITLE_MODEL_TIER,
+        model = get_default_model(
             provider=provider,
             include_provider_prefix=False,
             user_id=user_id,
@@ -245,13 +243,12 @@ async def async_generate_display_title(
 
     try:
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        from brain.platform.providers.model_policy import async_get_model_for_tier, async_resolve_default_provider
+        from brain.platform.providers.model_policy import async_get_default_model, async_resolve_default_provider
 
         async with UnitOfWork() as uow:
             provider = await async_resolve_default_provider(uow.session, user_id=user_id, org_id=org_id)
-            model = await async_get_model_for_tier(
+            model = await async_get_default_model(
                 uow.session,
-                TITLE_MODEL_TIER,
                 provider=provider,
                 include_provider_prefix=False,
                 user_id=user_id,

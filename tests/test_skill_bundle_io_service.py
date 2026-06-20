@@ -158,12 +158,11 @@ async def test_import_bundle_materializes_skill_installation_and_assets(service,
     assert result["assets"] == 2
 
 
-async def test_import_bundle_applies_provider_neutral_runtime_tiers(service, session, tmp_path):
+async def test_import_bundle_applies_provider_neutral_thinking_tier(service, session, tmp_path):
     _write_bundle(
         tmp_path,
         runtime="""
 [runtime]
-default_model_tier = "high"
 default_thinking_tier = "xhigh"
 """,
     )
@@ -171,7 +170,6 @@ default_thinking_tier = "xhigh"
     result = await service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
     skill = await session.get(Skill, result["skill"]["id"])
-    assert skill.model_tier == "high"
     assert skill.thinking_tier == "xhigh"
 
 
@@ -220,13 +218,12 @@ source = "self_hosted"
 visibility = "private_local"
 
 [runtime]
-default_model_tier = "turbo"
+default_thinking_tier = "turbo"
 """,
         encoding="utf-8",
     )
     (tmp_path / "SKILL.md").write_text("# Develop\n", encoding="utf-8")
-
-    with pytest.raises(SkillBundleError, match="default_model_tier"):
+    with pytest.raises(SkillBundleError, match="default_thinking_tier"):
         await service.import_bundle(tmp_path, namespace="self_hosted", org_id=ORG_ID)
 
     assert await _count(session, SkillBundle) == 0
@@ -310,7 +307,6 @@ async def test_export_skill_bundle_writes_loadable_files(service, session, tmp_p
         description="Debug carefully.",
         procedure="# Debug\n\n## Procedure\nInspect, test, fix.\n",
         triggers=[{"pattern": "bug"}],
-        model_tier="medium",
         thinking_tier="medium",
     )
     await session.flush()
@@ -326,7 +322,6 @@ async def test_export_skill_bundle_writes_loadable_files(service, session, tmp_p
     assert exported.digest == loaded.digest
     assert loaded.manifest.name == "debug-skill"
     assert loaded.manifest.version == "0.2.0"
-    assert loaded.manifest.runtime.default_model_tier == "medium"
     assert loaded.manifest.runtime.default_thinking_tier == "medium"
     assert loaded.skill_markdown.startswith("# Debug")
 
@@ -337,7 +332,6 @@ async def test_upsert_skill_asset_converts_legacy_skill_and_publishes_script(ser
         description="Debug carefully.",
         procedure="# Debug\n\n1. Inspect\n2. Test\n",
         triggers=[{"pattern": "bug"}],
-        model_tier="medium",
         thinking_tier="medium",
     )
     await session.flush()
@@ -369,7 +363,6 @@ async def test_upsert_skill_asset_revisions_are_immutable_and_delete_removes_ass
         name="debug-skill",
         description="Debug carefully.",
         procedure="# Debug\n\n1. Inspect\n2. Test\n",
-        model_tier="medium",
         thinking_tier="medium",
     )
     await session.flush()

@@ -169,7 +169,7 @@ def refs() -> list[MetricRef]:
         direct_agent,
         "run_agent",
         "sync_run_agent_auth_resolver_refs",
-        {"_run_agent_sync_resolved_llm", "resolve_llm_client", "get_default_model", "get_model_for_tier"},
+        {"_run_agent_sync_resolved_llm", "resolve_llm_client", "get_default_model"},
     ))
     found.extend(_call_refs(retry, "direct_retry_blocking_sleep_calls", {"sleep"}))
     found.extend(_call_refs(cancel, "cancel_token_asyncio_run_calls", {"run"}))

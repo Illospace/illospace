@@ -41,7 +41,6 @@ def _skill(
     name: str,
     description: str,
     procedure: str,
-    model_tier: str = "medium",
     thinking_tier: str = "medium",
     maturity: str = "emerging",
     triggers: list[dict[str, str]] | None = None,
@@ -53,7 +52,6 @@ def _skill(
         "name": name,
         "description": description.strip(),
         "procedure": procedure.strip() + "\n",
-        "model_tier": model_tier,
         "thinking_tier": thinking_tier,
         "maturity": maturity,
         "triggers": triggers or [],
@@ -77,7 +75,6 @@ def _skill_from_bundle(name: str, *, maturity: str = "emerging") -> dict[str, An
         name=manifest.name,
         description=manifest.description,
         procedure=bundle.skill_markdown,
-        model_tier=manifest.runtime.default_model_tier or "medium",
         thinking_tier=manifest.runtime.default_thinking_tier or "medium",
         maturity=str(raw.get("maturity") or maturity),
         triggers=list(manifest.routing.triggers or []),
@@ -902,7 +899,7 @@ def _jsonish(value: Any) -> Any:
 
 
 def _row_matches_builtin(row: Mapping[str, Any], skill: Mapping[str, Any]) -> bool:
-    for field_name in ("description", "procedure", "model_tier", "thinking_tier", "maturity"):
+    for field_name in ("description", "procedure", "thinking_tier", "maturity"):
         if row.get(field_name) != skill[field_name]:
             return False
     for field_name in _JSON_FIELDS:
@@ -919,7 +916,6 @@ def _sql_params(skill: Mapping[str, Any]) -> dict[str, Any]:
         "name": skill["name"],
         "desc": skill["description"],
         "proc": skill["procedure"],
-        "model_tier": skill["model_tier"],
         "thinking_tier": skill["thinking_tier"],
         "maturity": skill["maturity"],
         "pitfalls": _json_payload(skill.get("pitfalls")),
@@ -953,7 +949,6 @@ async def ensure_builtin_skills() -> None:
                                 builtin,
                                 description,
                                 procedure,
-                                model_tier,
                                 thinking_tier,
                                 maturity,
                                 pitfalls,
@@ -976,14 +971,14 @@ async def ensure_builtin_skills() -> None:
                                 """
                                 INSERT INTO skills (
                                     name, description, procedure,
-                                    model_tier, thinking_tier, maturity,
+                                    thinking_tier, maturity,
                                     pitfalls, refinements, triggers, guardrails,
                                     source_kind, trust_level,
                                     skill_type, builtin
                                 )
                                 VALUES (
                                     :name, :desc, :proc,
-                                    :model_tier, :thinking_tier, :maturity,
+                                    :thinking_tier, :maturity,
                                     CAST(:pitfalls AS jsonb),
                                     CAST(:refinements AS jsonb),
                                     CAST(:triggers AS jsonb),
@@ -1011,7 +1006,6 @@ async def ensure_builtin_skills() -> None:
                             UPDATE skills
                             SET description = :desc,
                                 procedure = :proc,
-                                model_tier = :model_tier,
                                 thinking_tier = :thinking_tier,
                                 maturity = :maturity,
                                 pitfalls = CAST(:pitfalls AS jsonb),

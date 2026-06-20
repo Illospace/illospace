@@ -24,8 +24,7 @@ def test_skill_read_from_dict():
         "confidence": 0.85, "use_count": 20, "success_count": 17,
         "failure_count": 2, "partial_count": 1, "avg_duration_sec": 45.2,
         "last_used": "2026-03-17T10:00:00", "pitfalls": [{"text": "watch out"}],
-        "refinements": [], "triggers": [], "auto_emerged": False,
-        "model_tier": "medium", "thinking_tier": "medium",
+        "refinements": [], "triggers": [], "auto_emerged": False, "thinking_tier": "medium",
         "success_rate": 0.85, "children": [], "executions": [],
     }
     skill = SkillRead.model_validate(data)
@@ -36,7 +35,6 @@ def test_skill_read_from_dict():
 def test_skill_create_defaults():
     data = {"name": "new-skill", "procedure": "do things carefully"}
     skill = SkillCreate.model_validate(data)
-    assert skill.model_tier == "medium"
     assert skill.thinking_tier == "medium"
     assert skill.description == ""
     assert skill.guardrails == []
@@ -52,7 +50,6 @@ def test_skill_update_all_optional():
     update = SkillUpdate.model_validate(data)
     assert update.name == "renamed"
     assert update.procedure is None
-    assert update.model_tier is None
 
 
 def test_skill_update_accepts_thinking_tier_only():
@@ -80,8 +77,7 @@ def test_skill_read_serialization():
         "confidence": 0.3, "use_count": 0, "success_count": 0,
         "failure_count": 0, "partial_count": 0, "avg_duration_sec": None,
         "last_used": None, "pitfalls": [], "refinements": [], "triggers": [],
-        "auto_emerged": False,
-        "model_tier": "medium", "thinking_tier": "medium",
+        "auto_emerged": False, "thinking_tier": "medium",
         "success_rate": 0.0, "children": [], "executions": [],
     }
     skill = SkillRead.model_validate(data)
@@ -114,7 +110,6 @@ def test_skill_bundle_manifest_schema_validates_nested_specs():
         "visibility": "public",
         "routing": {"triggers": ["fix bug"], "embedding_text": "develop skill"},
         "runtime": {
-            "default_model_tier": "medium",
             "default_thinking_tier": "high",
         },
         "permissions": {
@@ -127,7 +122,6 @@ def test_skill_bundle_manifest_schema_validates_nested_specs():
     assert manifest.source == SkillBundleSourceKind.MARKETPLACE.value
     assert manifest.visibility == SkillBundleTrustLevel.PUBLIC.value
     assert manifest.routing.triggers == ["fix bug"]
-    assert manifest.runtime.default_model_tier == "medium"
     assert manifest.runtime.default_thinking_tier == "high"
     assert manifest.permissions.tools[0].kind == "mcp"
 
