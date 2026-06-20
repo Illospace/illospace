@@ -64,6 +64,12 @@
   let oauthChannel: BroadcastChannel | null = null;
   let oauthExchangeInFlight = false;
   let savingConnection = $state(false);
+  let personalOpenAIKey = $state('');
+  let orgOpenAIKey = $state('');
+  let memoryApiKey = $state('');
+  let savingPersonalApiKey = $state(false);
+  let savingOrgApiKey = $state(false);
+  let savingMemoryApiKey = $state(false);
   let savingChanges = $state(false);
   let checkingMemory = $state(false);
   let memoryCheck = $state<MemoryCheck | null>(null);
@@ -101,6 +107,7 @@
 
   const canManageSettings = $derived(settings?.permissions?.can_manage_settings ?? false);
   const hasPersonalOpenAIConnection = $derived(hasPersonalOpenAIRuntimeConnection(settings));
+  const hasOrgOpenAIConnection = $derived(Boolean(settings?.connection?.has_org_key));
   const connectionStatus = $derived(settings?.connection?.status ?? 'missing');
   const modelOptions = $derived(settings?.models?.options ?? []);
   const setupMode = $derived($page.url.searchParams.get('setup') === '1');
@@ -252,6 +259,40 @@
     } finally {
       oauthExchangeInFlight = false;
       savingConnection = false;
+    }
+  }
+
+  async function savePersonalOpenAIKey() {
+    const value = personalOpenAIKey.trim();
+    if (!value || !settings) return;
+    savingPersonalApiKey = true;
+    notice = null;
+    try {
+      const connection = await api.connectRuntimeOpenAIKey({ api_key: value });
+      settings = { ...settings, connection };
+      personalOpenAIKey = '';
+      notice = { tone: 'success', title: 'Personal OpenAI key saved.' };
+    } catch (error) {
+      notice = errorNotice('Personal OpenAI key was not saved.', error, 'Check the key and try again.');
+    } finally {
+      savingPersonalApiKey = false;
+    }
+  }
+
+  async function saveOrgOpenAIKey() {
+    const value = orgOpenAIKey.trim();
+    if (!value || !settings || !canManageSettings) return;
+    savingOrgApiKey = true;
+    notice = null;
+    try {
+      const connection = await api.connectRuntimeOpenAIOrgKey({ api_key: value });
+      settings = { ...settings, connection };
+      orgOpenAIKey = '';
+      notice = { tone: 'success', title: 'Workspace OpenAI key rotated.' };
+    } catch (error) {
+      notice = errorNotice('Workspace OpenAI key was not rotated.', error, 'Check the key and try again.');
+    } finally {
+      savingOrgApiKey = false;
     }
   }
 
@@ -742,6 +783,32 @@
     }
   }
 
+  async function saveMemoryApiKey() {
+    const value = memoryApiKey.trim();
+    if (!value || !settings || !canManageSettings || !usesApiEmbedder(memoryDraft.embedder)) return;
+    const provider = memoryVaultProvider;
+    savingMemoryApiKey = true;
+    notice = null;
+    try {
+      const memory = provider === 'gemini'
+        ? await api.connectRuntimeGeminiKey({ api_key: value })
+        : await api.connectRuntimeOpenAIEmbeddingKey({ api_key: value });
+      settings = { ...settings, memory };
+      memoryApiKey = '';
+      selectedMemoryVaultKey = '';
+      memoryCheck = null;
+      notice = {
+        tone: 'success',
+        title: 'Memory key rotated.',
+        detail: `${providerLabel(provider)} is available for memory.`,
+      };
+    } catch (error) {
+      notice = errorNotice('Memory key was not rotated.', error, 'Check the key and try again.');
+    } finally {
+      savingMemoryApiKey = false;
+    }
+  }
+
   function memoryNotice(): MemoryNoticeState | null {
     if (!settings) return null;
     if (memoryChangeNeedsRebuild()) {
@@ -824,11 +891,21 @@
           oauthPending={Boolean(oauthUrl)}
           {oauthCallbackMode}
           hasPersonalConnection={hasPersonalOpenAIConnection}
+          hasOrgConnection={hasOrgOpenAIConnection}
+          {canManageSettings}
+          personalApiKey={personalOpenAIKey}
+          orgApiKey={orgOpenAIKey}
           {savingConnection}
+          {savingPersonalApiKey}
+          {savingOrgApiKey}
           onCallbackChange={(value) => (oauthCallback = value)}
+          onPersonalApiKeyChange={(value) => (personalOpenAIKey = value)}
+          onOrgApiKeyChange={(value) => (orgOpenAIKey = value)}
           onStartCodexSignIn={() => startCodexSignIn()}
           onStartLocalCodexSignIn={() => startCodexSignIn('local_bridge')}
           onFinishCodexSignIn={finishCodexSignIn}
+          onSavePersonalApiKey={savePersonalOpenAIKey}
+          onSaveOrgApiKey={saveOrgOpenAIKey}
         />
 
         <ModelsCard
@@ -846,13 +923,17 @@
           embeddingModelOptions={embeddingModelOptions()}
           vaultKeyOptions={memoryVaultKeyOptions}
           selectedVaultKey={selectedMemoryVaultKey}
+          {memoryApiKey}
           notice={memoryNotice()}
           {memoryCheck}
           {canManageSettings}
           {vaultLoading}
           syncingVaultKey={syncingMemoryVaultKey}
+          {savingMemoryApiKey}
           onUpdateMemory={updateMemoryDraft}
           onSelectVaultKey={handleMemoryVaultKeyChange}
+          onMemoryApiKeyChange={(value) => (memoryApiKey = value)}
+          onSaveMemoryApiKey={saveMemoryApiKey}
         />
 
         <VoiceCard

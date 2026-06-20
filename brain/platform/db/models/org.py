@@ -125,7 +125,7 @@ class OrgApiKey(Base, CreatedAtMixin):
 
 
 class UserCodexConnection(Base, CreatedAtMixin):
-    """The only user-owned credential: a user's Codex/ChatGPT subscription."""
+    """A user's personal OpenAI runtime credential."""
 
     __tablename__ = "user_codex_connections"
 

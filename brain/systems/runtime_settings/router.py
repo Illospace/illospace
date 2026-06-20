@@ -13,6 +13,7 @@ from .auth import (
     async_connect_gemini_api_key,
     async_connect_openai_api_key,
     async_connect_openai_embedding_api_key,
+    async_connect_openai_org_api_key,
     async_exchange_openai_oauth,
     start_openai_oauth,
 )
@@ -75,6 +76,16 @@ async def connect_openai_key(
     db: AsyncSession = Depends(get_db),
 ) -> RuntimeConnectionRead:
     return await async_connect_openai_api_key(db, user, payload.api_key)
+
+
+@router.post("/connection/openai/org-api-key", response_model=RuntimeConnectionRead)
+async def connect_openai_org_key(
+    payload: OpenAIKeyConnectRequest,
+    user: User = Depends(_runtime_user),
+    db: AsyncSession = Depends(get_db),
+) -> RuntimeConnectionRead:
+    _require_settings_admin(user)
+    return await async_connect_openai_org_api_key(db, user, payload.api_key)
 
 
 @router.post("/connection/openai/embedding-api-key", response_model=RuntimeMemoryRead)
