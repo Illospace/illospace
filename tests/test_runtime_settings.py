@@ -35,6 +35,41 @@ async def test_provider_auth_status_reports_openai_codex_runtime():
 
 
 @pytest.mark.asyncio
+async def test_provider_auth_status_reports_user_openai_api_key_runtime():
+    from types import SimpleNamespace
+
+    from brain.platform.db.models.org import UserCodexConnection
+    from brain.systems.services.runtime_introspection import async_get_provider_auth_status
+
+    mock_session = MagicMock()
+    mock_session.scalars = AsyncMock(
+        side_effect=[
+            SimpleNamespace(first=lambda: 1),
+            SimpleNamespace(first=lambda: None),
+            SimpleNamespace(first=lambda: SimpleNamespace(id=321, label="Personal OpenAI")),
+        ]
+    )
+
+    mock_llm = MagicMock(source="user_openai", auth_mode="api_key", is_oauth=False)
+
+    with patch("brain.systems.services.runtime_introspection.async_resolve_llm_client", AsyncMock(return_value=mock_llm)), \
+         patch("brain.systems.services.runtime_introspection.async_resolve_default_provider", AsyncMock(return_value="openai")):
+        data = await async_get_provider_auth_status(mock_session, user_id="user-1", org_id="org-1", provider="openai")
+
+    assert data["provider"] == "openai"
+    assert data["status"] == "in_use"
+    assert data["method"] == "api_key"
+    assert data["runtime_key_source"] == "user_openai"
+    assert data["runtime_key_scope"] == "user"
+    assert data["runtime_key_label"] == "your OpenAI API key"
+    assert data["runtime_uses_db_key"] is True
+    assert data["runtime_credential_id"] == 321
+    assert data["runtime_credential_name"] == "Personal OpenAI"
+    stmt = mock_session.scalars.await_args_list[-1].args[0]
+    assert UserCodexConnection.__tablename__ in str(stmt)
+
+
+@pytest.mark.asyncio
 async def test_runtime_settings_tool_returns_model_mappings_and_active_status():
     import brain.systems.services.runtime_introspection as runtime_settings_service
     from brain.app.mcp.server import tool_runtime_settings
@@ -329,6 +364,46 @@ async def test_store_openai_connection_reports_invalid_format():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["member", "owner"])
+async def test_store_openai_api_key_uses_personal_runtime_connection(monkeypatch, role):
+    from types import SimpleNamespace
+
+    import brain.systems.runtime_settings.auth as auth_settings
+    from brain.systems.runtime_settings.schemas import RuntimeConnectionRead
+
+    user = SimpleNamespace(id="user-1", org_id="org-1", role=role)
+    session = MagicMock()
+    session.get = AsyncMock(return_value=user)
+    session.flush = AsyncMock()
+    session.refresh = AsyncMock()
+    store_user_connection = AsyncMock(return_value=7)
+    store_org_connection = AsyncMock(side_effect=AssertionError("model keys must stay user-scoped"))
+    read_connection = AsyncMock(return_value=RuntimeConnectionRead(
+        status="connected",
+        setup_required=False,
+        method="api_key",
+        source="user_openai",
+        label="OpenAI API key",
+    ))
+
+    monkeypatch.setattr(auth_settings, "verify_provider_api_key", lambda *args, **kwargs: None)
+    monkeypatch.setattr(auth_settings, "async_set_user_codex_connection", store_user_connection)
+    monkeypatch.setattr(auth_settings, "_async_store_org_openai_api_key", store_org_connection)
+    monkeypatch.setattr(auth_settings, "async_get_openai_connection", read_connection)
+
+    result = await auth_settings.async_store_openai_connection(session, user, "sk-test")
+
+    assert result.source == "user_openai"
+    store_user_connection.assert_awaited_once()
+    assert store_user_connection.await_args.args[:2] == ("user-1", "sk-test")
+    assert store_user_connection.await_args.kwargs["label"] == "OpenAI API key"
+    assert store_user_connection.await_args.kwargs["session"] is session
+    store_org_connection.assert_not_called()
+    session.flush.assert_awaited_once()
+    session.refresh.assert_awaited_once_with(user)
+
+
+@pytest.mark.asyncio
 async def test_store_openai_connection_reports_missing_vault_master_key(monkeypatch):
     from types import SimpleNamespace
 
@@ -338,7 +413,7 @@ async def test_store_openai_connection_reports_missing_vault_master_key(monkeypa
         raise RuntimeError("VAULT_MASTER_KEY is required. Refusing to auto-generate a vault key.")
 
     monkeypatch.setattr(auth_settings, "verify_provider_api_key", lambda *args, **kwargs: None)
-    monkeypatch.setattr(auth_settings, "async_set_org_api_key", raise_missing_vault_key)
+    monkeypatch.setattr(auth_settings, "async_set_user_codex_connection", raise_missing_vault_key)
 
     with pytest.raises(Exception) as exc:
         await auth_settings.async_store_openai_connection(

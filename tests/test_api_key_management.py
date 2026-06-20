@@ -1,4 +1,5 @@
-"""Tests for org-owned provider keys and user Codex subscription storage."""
+"""Tests for org-owned provider keys and user OpenAI connection storage."""
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -38,37 +39,78 @@ class TestResolveApiKey:
         assert key == "sk-org-main"
         assert source == "org_main"
 
-    @patch("brain.systems.vault._decrypt", return_value="codex-json")
     @patch("brain.systems.vault.UnitOfWork")
-    async def test_openai_can_resolve_user_codex_subscription(self, mock_uow_cls, mock_decrypt):
+    async def test_openai_can_resolve_user_codex_subscription(self, mock_uow_cls):
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
         uow.session = sess
 
+        chatgpt_payload = json.dumps({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "access-token",
+                "account_id": "acct_123",
+            },
+        })
         codex_connection = SimpleNamespace(encrypted_credential=b"codex-enc")
         sess.scalars.return_value.first.return_value = codex_connection
 
         from brain.systems.vault import resolve_api_key
 
-        key, source = await resolve_api_key(user_id="user-1", provider="openai")
+        with patch("brain.systems.vault._decrypt", return_value=chatgpt_payload):
+            key, source = await resolve_api_key(user_id="user-1", provider="openai")
 
-        assert key == "codex-json"
+        assert key == chatgpt_payload
         assert source == "codex_subscription"
 
-    @patch("brain.systems.vault._decrypt", return_value="sk-org-openai")
     @patch("brain.systems.vault.UnitOfWork")
-    async def test_openai_api_key_mode_skips_user_codex_subscription(self, mock_uow_cls, mock_decrypt):
+    async def test_openai_api_key_mode_resolves_user_api_key_before_org(self, mock_uow_cls):
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
         uow.session = sess
 
-        sess.get.return_value = SimpleNamespace(org_id="org-1")
-        org_key = SimpleNamespace(encrypted_key=b"org-enc")
-        sess.scalars.return_value.first.return_value = org_key
+        user_connection = SimpleNamespace(encrypted_credential=b"user-api-enc")
+        sess.scalars.return_value.first.return_value = user_connection
 
         from brain.systems.vault import resolve_api_key
 
-        key, source = await resolve_api_key(user_id="user-1", provider="openai", auth_mode="api_key")
+        with patch("brain.systems.vault._decrypt", return_value="sk-user-openai"):
+            key, source = await resolve_api_key(user_id="user-1", provider="openai", auth_mode="api_key")
+
+        assert key == "sk-user-openai"
+        assert source == "user_openai"
+
+    @patch("brain.systems.vault.UnitOfWork")
+    async def test_openai_api_key_mode_skips_user_codex_subscription(self, mock_uow_cls):
+        uow_cls, sess, uow = _make_uow_mock()
+        mock_uow_cls.return_value = uow
+        uow.session = sess
+
+        chatgpt_payload = json.dumps({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "access-token",
+                "account_id": "acct_123",
+            },
+        })
+        user_connection = SimpleNamespace(encrypted_credential=b"codex-enc")
+        org_key = SimpleNamespace(encrypted_key=b"org-enc")
+        user_result = MagicMock()
+        user_result.first.return_value = user_connection
+        org_result = MagicMock()
+        org_result.first.return_value = org_key
+        sess.scalars = AsyncMock(side_effect=[user_result, org_result])
+        sess.get.return_value = SimpleNamespace(org_id="org-1")
+
+        from brain.systems.vault import resolve_api_key
+
+        def decrypt(value):
+            if value == b"codex-enc":
+                return chatgpt_payload
+            return "sk-org-openai"
+
+        with patch("brain.systems.vault._decrypt", side_effect=decrypt):
+            key, source = await resolve_api_key(user_id="user-1", provider="openai", auth_mode="api_key")
 
         assert key == "sk-org-openai"
         assert source == "org_main"

@@ -133,20 +133,13 @@ async def async_store_openai_connection(
         raise HTTPException(status_code=400, detail=f"OpenAI credential verification failed: {exc}") from exc
 
     try:
-        if method == "chatgpt":
+        if method in {"chatgpt", "api_key"}:
             await async_set_user_codex_connection(
                 str(user.id),
                 api_token,
                 label=label or _connection_label(method),
                 session=session,
             )
-        elif method == "api_key":
-            stored = await _async_store_org_openai_api_key(session, user, api_token)
-            if not stored:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Only workspace owners and admins can connect an org OpenAI API key.",
-                )
         else:
             raise HTTPException(status_code=400, detail="Unsupported OpenAI credential method")
     except RuntimeError as exc:
@@ -158,10 +151,6 @@ async def async_store_openai_connection(
         raise HTTPException(status_code=404, detail="User not found")
     await session.flush()
     await session.refresh(refreshed)
-    if method == "api_key" and _can_manage_installation_memory(refreshed):
-        from .memory import async_configure_openai_embedding_api_key
-
-        await async_configure_openai_embedding_api_key(session, api_token)
     return await async_get_openai_connection(session, refreshed)
 
 

@@ -30,6 +30,9 @@ from brain.platform.vault_crypto import _decrypt, _encrypt, _get_fernet
 
 logger = logging.getLogger(__name__)
 
+USER_OPENAI_API_KEY_SOURCE = "user_openai"
+USER_OPENAI_CODEX_SOURCE = "codex_subscription"
+
 VAULT_UNLOCK_HEADER = "X-Vault-Token"
 VAULT_SESSION_TTL = timedelta(minutes=15)
 VAULT_LOCKOUT_AFTER_FAILURES = 3
@@ -696,6 +699,28 @@ async def async_resolve_project_bound_env_tokens(
 # Runtime provider credentials
 # ---------------------------------------------------------------------------
 
+def _openai_user_connection_source(credential_payload: str) -> str | None:
+    """Classify a stored OpenAI connection without treating ChatGPT as an API key."""
+    payload = (credential_payload or "").strip()
+    if not payload:
+        return None
+    if payload.startswith("sk-"):
+        return USER_OPENAI_API_KEY_SOURCE
+
+    try:
+        from brain.platform.integrations.openai_codex_auth import parse_codex_auth_payload
+
+        credential = parse_codex_auth_payload(payload, source="vault")
+    except Exception:
+        return None
+
+    if credential.auth_mode == "api_key" and credential.access_token:
+        return USER_OPENAI_API_KEY_SOURCE
+    if credential.auth_mode == "chatgpt":
+        return USER_OPENAI_CODEX_SOURCE
+    return None
+
+
 async def resolve_api_key(
     user_id: str | None = None,
     org_id: str | None = None,
@@ -704,8 +729,8 @@ async def resolve_api_key(
 ) -> tuple[str | None, str]:
     """Resolve a runtime provider credential.
 
-    Provider API keys are org-owned. The only user-owned credential lane is a
-    user's OpenAI Codex/ChatGPT subscription connection.
+    Provider API keys are org-owned except for a user's own OpenAI model
+    connection, which may be either a Codex/ChatGPT session or an API key.
 
     Returns (key, source) where source describes which level resolved.
     """
@@ -729,7 +754,7 @@ async def async_resolve_api_key(
 
     async def _resolve(active_session: AsyncSession) -> tuple[str | None, str]:
         normalized_provider = provider.strip().lower()
-        if normalized_provider == "openai" and auth_mode != "api_key" and user_id:
+        if normalized_provider == "openai" and user_id:
             stmt = (
                 select(UserCodexConnection)
                 .where(
@@ -740,7 +765,16 @@ async def async_resolve_api_key(
             )
             codex_connection = (await active_session.scalars(stmt)).first()
             if codex_connection:
-                return _decrypt(bytes(codex_connection.encrypted_credential)), "codex_subscription"
+                credential = _decrypt(bytes(codex_connection.encrypted_credential))
+                user_source = _openai_user_connection_source(credential)
+                if auth_mode == "api_key":
+                    if user_source == USER_OPENAI_API_KEY_SOURCE:
+                        return credential, user_source
+                elif auth_mode == "chatgpt":
+                    if user_source == USER_OPENAI_CODEX_SOURCE:
+                        return credential, user_source
+                elif user_source:
+                    return credential, user_source
 
         effective_org_id = org_id
         if not effective_org_id and user_id:
@@ -800,14 +834,18 @@ async def async_update_resolved_api_key(
     session: AsyncSession | None = None,
 ) -> bool:
     """Update the credential row selected by ``async_resolve_api_key``."""
-    if source not in {"codex_subscription", "org_main"}:
+    if source not in {USER_OPENAI_CODEX_SOURCE, USER_OPENAI_API_KEY_SOURCE, "org_main"}:
         return False
 
     encrypted = _encrypt(api_key)
 
     async def _update(active_session: AsyncSession) -> bool:
         normalized_provider = provider.strip().lower()
-        if source == "codex_subscription" and user_id and normalized_provider == "openai":
+        if (
+            source in {USER_OPENAI_CODEX_SOURCE, USER_OPENAI_API_KEY_SOURCE}
+            and user_id
+            and normalized_provider == "openai"
+        ):
             stmt = (
                 select(UserCodexConnection)
                 .where(
@@ -906,7 +944,7 @@ async def set_user_codex_connection(
     *,
     label: str = "Codex / ChatGPT",
 ) -> int:
-    """Store the one supported user-owned credential: Codex subscription auth."""
+    """Store a user's personal OpenAI runtime credential."""
     return await async_set_user_codex_connection(user_id, credential_payload, label=label)
 
 
@@ -917,7 +955,7 @@ async def async_set_user_codex_connection(
     label: str = "Codex / ChatGPT",
     session: AsyncSession | None = None,
 ) -> int:
-    """Store the one supported user-owned credential using async DB access."""
+    """Store a user's personal OpenAI runtime credential using async DB access."""
     clean_user_id = _require_actor_user_id(user_id)
     encrypted = _encrypt(credential_payload)
 
