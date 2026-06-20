@@ -217,7 +217,7 @@ class AfterRunLearningQueueService:
             lane=BudgetLane.AFTER_RUN,
             task_type=job_type.value,
             estimated_tokens=estimated_tokens,
-            model_tier="metadata",
+            model_class="metadata",
             provider_location=ProviderLocation.LOCAL,
             provider="local",
             blocks_user_latency=False,

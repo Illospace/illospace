@@ -173,7 +173,6 @@ BRAIN_TOOLS = [
                 "name": {"type": "string", "description": "Skill name for create, or replacement name for update."},
                 "description": {"type": "string", "description": "Skill description."},
                 "procedure": {"type": "string", "description": "Skill procedure/instructions."},
-                "model_tier": {"type": "string", "enum": ["local", "low", "medium", "high"], "default": "medium"},
                 "thinking_tier": {
                     "type": "string",
                     "enum": ["none", "low", "medium", "high", "xhigh"],
@@ -196,7 +195,6 @@ BRAIN_TOOLS = [
                             "name": {"type": "string"},
                             "description": {"type": "string"},
                             "procedure": {"type": "string"},
-                            "model_tier": {"type": "string", "enum": ["local", "low", "medium", "high"]},
                             "thinking_tier": {
                                 "type": "string",
                                 "enum": ["none", "low", "medium", "high", "xhigh"],
@@ -213,7 +211,7 @@ BRAIN_TOOLS = [
                     },
                     "description": (
                         "Skill specs for action='create_many'. Per-skill fields mirror create; "
-                        "top-level model_tier, thinking_tier, create_as_package, and user_requested act as defaults."
+                        "top-level thinking_tier, create_as_package, and user_requested act as defaults."
                     ),
                 },
                 "create_as_package": {

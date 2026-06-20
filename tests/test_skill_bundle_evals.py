@@ -29,7 +29,6 @@ keywords = ["tests", "evidence"]
 embedding_text = "focused code changes with tests and evidence"
 
 [runtime]
-default_model_tier = "medium"
 
 [loading]
 summary = "SKILL.md#summary"

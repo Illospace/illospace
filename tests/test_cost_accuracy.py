@@ -44,12 +44,12 @@ class TestCostCalculation:
         cost = calculate_cost("anthropic/claude-opus-4-6", 0, 0)
         assert cost == 0.0
 
-    def test_unknown_model_defaults_to_medium_openai_pricing(self):
-        """Unknown models should default to the medium OpenAI pricing baseline."""
+    def test_unknown_model_defaults_to_default_openai_pricing(self):
+        """Unknown models should default to the configured OpenAI default pricing baseline."""
         from brain.systems.runs.modeling import calculate_cost
 
         cost = calculate_cost("unknown-model", 1_000_000, 1_000_000)
-        expected = 2.5 + 15.0
+        expected = 5.0 + 30.0
         assert abs(cost - expected) < 0.001
 
     def test_local_model_keyword_free(self):

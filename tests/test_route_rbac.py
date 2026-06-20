@@ -62,7 +62,6 @@ def _skill_obj(**overrides):
         "reasoning_effort": None,
         "service_tier": None,
         "auth_mode": None,
-        "model_tier": "medium",
         "thinking_tier": "medium",
         "success_rate": 0.0,
         "children": [],

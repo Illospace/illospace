@@ -19,14 +19,14 @@ def test_hosted_defaults_are_safe_and_budget_capped():
     assert policy.skill_quality_routing_enabled is True
     assert policy.after_run_learning_enabled is True
     assert policy.night_llm_adjudication_enabled is True
-    assert policy.allowed_model_tiers == ("low", "medium")
+    assert policy.allowed_model_classes == ("economy", "standard")
     assert policy.external_eval_export_allowed is False
     assert policy.community_skill_auto_update_policy == CommunitySkillAutoUpdatePolicy.SECURITY_PATCH_ONLY
     assert policy.private_data_redaction_mode == PrivateDataRedactionMode.STRICT
     assert policy.risk_flags == ()
 
 
-def test_self_hosted_defaults_prefer_local_and_low_intelligence_learning():
+def test_self_hosted_defaults_prefer_local_and_economy_learning():
     policy = build_learning_policy(env={"ILLO_DEPLOYMENT_MODE": "self-hosted"})
 
     assert policy.enabled is True
@@ -36,7 +36,7 @@ def test_self_hosted_defaults_prefer_local_and_low_intelligence_learning():
     assert policy.skill_quality_routing_enabled is True
     assert policy.after_run_learning_enabled is True
     assert policy.night_llm_adjudication_enabled is True
-    assert policy.allowed_model_tiers == ("local", "low")
+    assert policy.allowed_model_classes == ("local", "economy")
     assert policy.external_eval_export_allowed is False
     assert policy.community_skill_auto_update_policy == CommunitySkillAutoUpdatePolicy.PATCH_ONLY
     assert policy.private_data_redaction_mode == PrivateDataRedactionMode.LOCAL_ONLY
@@ -49,7 +49,7 @@ def test_env_overrides_are_explicit_and_deterministic():
         "LEARNING_POLICY_AFTER_RUN_SAMPLE_RATE": "0.125",
         "LEARNING_POLICY_NIGHT_BUDGET_UNITS": "123",
         "LEARNING_POLICY_TENANT_DAILY_BUDGET_UNITS": "456",
-        "LEARNING_POLICY_ALLOWED_MODEL_TIERS": "local, low, low, medium",
+        "LEARNING_POLICY_ALLOWED_MODEL_CLASSES": "local, economy, economy, standard",
         "LEARNING_POLICY_EXTERNAL_EVAL_EXPORT_ALLOWED": "true",
         "LEARNING_POLICY_COMMUNITY_SKILL_AUTO_UPDATE": "disabled",
         "LEARNING_POLICY_PRIVATE_DATA_REDACTION": "strict",
@@ -67,7 +67,7 @@ def test_env_overrides_are_explicit_and_deterministic():
     assert first.after_run_sample_rate == 0.125
     assert first.night_budget_units == 123
     assert first.tenant_daily_budget_units == 456
-    assert first.allowed_model_tiers == ("local", "low", "medium")
+    assert first.allowed_model_classes == ("local", "economy", "standard")
     assert first.external_eval_export_allowed is True
     assert first.community_skill_auto_update_policy == CommunitySkillAutoUpdatePolicy.DISABLED
     assert first.private_data_redaction_mode == PrivateDataRedactionMode.STRICT
@@ -134,7 +134,7 @@ def test_org_and_tenant_overrides_apply_without_persistence():
         scope_id="tenant-1",
         source="config",
         enabled=False,
-        allowed_model_tiers=("local", "low"),
+        allowed_model_classes=("local", "economy"),
     )
 
     policy = build_learning_policy(
@@ -147,7 +147,7 @@ def test_org_and_tenant_overrides_apply_without_persistence():
     assert policy.after_run_sample_rate == 0.0
     assert policy.skill_quality_routing_enabled is False
     assert policy.external_eval_export_allowed is True
-    assert policy.allowed_model_tiers == ("local", "low")
+    assert policy.allowed_model_classes == ("local", "economy")
     assert [override["scope"] for override in policy.to_payload()["applied_overrides"]] == [
         "org",
         "tenant",
@@ -158,21 +158,21 @@ def test_risk_flags_call_out_unsafe_override_combinations():
     policy = build_learning_policy(env={
         "LEARNING_POLICY_EXTERNAL_EVAL_EXPORT_ALLOWED": "true",
         "LEARNING_POLICY_PRIVATE_DATA_REDACTION": "disabled",
-        "LEARNING_POLICY_ALLOWED_MODEL_TIERS": "low,high",
+        "LEARNING_POLICY_ALLOWED_MODEL_CLASSES": "economy,premium",
         "LEARNING_POLICY_COMMUNITY_SKILL_AUTO_UPDATE": "minor",
     })
 
     assert set(policy.risk_flags) == {
         "external_eval_export_without_redaction",
         "community_skill_auto_update_allows_minor_versions",
-        "high_intelligence_learning_model_tier_enabled",
+        "premium_learning_model_class_enabled",
     }
 
 
-def test_legacy_cost_tier_aliases_normalize_to_intelligence_tiers():
+def test_cost_class_aliases_normalize_to_model_classes():
     policy = build_learning_policy(env={
-        "LEARNING_POLICY_ALLOWED_MODEL_TIERS": "local,cheap,standard,premium",
+        "LEARNING_POLICY_ALLOWED_MODEL_CLASSES": "local,cheap,standard,premium",
     })
 
-    assert policy.allowed_model_tiers == ("local", "low", "medium", "high")
-    assert policy.risk_flags == ("high_intelligence_learning_model_tier_enabled",)
+    assert policy.allowed_model_classes == ("local", "economy", "standard", "premium")
+    assert policy.risk_flags == ("premium_learning_model_class_enabled",)

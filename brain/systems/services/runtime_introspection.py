@@ -13,7 +13,8 @@ from brain.platform.integrations.llm import async_resolve_llm_client
 from brain.systems.learning.budget import LearningBudgetPolicy
 from brain.systems.learning.policy import build_learning_policy_from_env
 from brain.platform.providers.model_policy import (
-    async_get_provider_model_map,
+    async_get_default_model,
+    async_get_provider_model_catalogs,
     async_resolve_default_provider,
     async_resolve_effective_org_id,
     normalize_default_provider,
@@ -301,15 +302,10 @@ async def async_get_runtime_settings_snapshot(
         org_id=org_id,
         provider="openai",
     )
-    anthropic_models = await async_get_provider_model_map(
+    model_catalogs = await async_get_provider_model_catalogs(session, user_id=user_id, org_id=org_id)
+    default_model = await async_get_default_model(
         session,
-        "anthropic",
-        user_id=user_id,
-        org_id=org_id,
-    )
-    openai_models = await async_get_provider_model_map(
-        session,
-        "openai",
+        selected_provider,
         user_id=user_id,
         org_id=org_id,
     )
@@ -330,10 +326,8 @@ async def async_get_runtime_settings_snapshot(
             "anthropic": anthropic_status,
             "openai": openai_status,
         },
-        "provider_model_mappings": {
-            "anthropic": anthropic_models,
-            "openai": openai_models,
-        },
+        "default_model": default_model,
+        "provider_model_catalogs": model_catalogs,
         "worker_backend": worker_backend.to_dict(),
         "active": provider_status,
         "routing_marketplace": await get_routing_marketplace_snapshot(

@@ -54,7 +54,6 @@ async def test_chat_work_intake_builds_agent_run_request_from_normalized_trigger
         "chat_trigger": {"conversation_id": "conv-1", "message_id": 22},
     }
     assert request.model_policy == {
-        "tier": "high",
         "thinking": "xhigh",
         "model": "openai/gpt-5.4",
         "provider": "openai",
@@ -220,7 +219,6 @@ async def test_cortex_agent_run_request_uses_shared_work_intake_policy(monkeypat
     assert request.target_ref["kind"] == "cortex_idea"
     assert request.target_ref["title"] == "Launch"
     assert request.model_policy == {
-        "tier": "high",
         "thinking": "high",
         "model": "anthropic/claude-sonnet-4-5",
         "provider": "anthropic",

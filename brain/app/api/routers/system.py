@@ -37,8 +37,8 @@ from brain.platform.db.repositories.system import (
 )
 from brain.platform.async_io import path_exists, read_text, run_blocking, run_subprocess
 from brain.platform.providers.model_policy import (
-    async_get_model_for_tier,
-    async_get_provider_model_maps,
+    async_get_default_model,
+    async_get_provider_model_catalogs,
     async_resolve_default_provider,
 )
 from brain.systems.runs.cortex.recording import trace_id_for_run_id, trace_id_for_scheduler_run_id
@@ -919,10 +919,10 @@ async def _get_llm_info(user: dict, db: AsyncSession | None = None) -> dict | No
         config = org.memory_model_config or {}
         effective_provider = await async_resolve_default_provider(db, user_id=user.get("id"), org_id=org_id)
         org_default = config.get("default_provider") or effective_provider
-        low_model = _normalize_llm_model_value(
-            await async_get_model_for_tier(
+        default_model = _normalize_llm_model_value(
+            await async_get_default_model(
                 db,
-                "low",
+                effective_provider,
                 include_provider_prefix=False,
                 user_id=user.get("id"),
                 org_id=org_id,
@@ -935,9 +935,10 @@ async def _get_llm_info(user: dict, db: AsyncSession | None = None) -> dict | No
             "default_provider": org_default,
             "org_default_provider": org_default,
             "effective_provider": effective_provider,
-            "harvest_model": low_model,
-            "consolidation_model": low_model,
-            "provider_model_mappings": await async_get_provider_model_maps(db, user_id=user.get("id"), org_id=org_id),
+            "default_model": default_model,
+            "harvest_model": default_model,
+            "consolidation_model": default_model,
+            "provider_model_catalogs": await async_get_provider_model_catalogs(db, user_id=user.get("id"), org_id=org_id),
             "provider_health": provider_health_snapshot(),
             **backend_settings,
         }

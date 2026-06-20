@@ -1,4 +1,3 @@
-export type ModelTier = 'low' | 'medium' | 'high';
 export type EmbedderKey = 'local_gpu' | 'local_cpu' | 'openai' | 'gemini';
 export type RuntimeVoiceProvider = 'openai';
 export type RuntimeVoiceLanguage = 'auto' | 'en' | 'fr';
@@ -23,9 +22,7 @@ export interface RuntimeSettings {
     has_org_key?: boolean;
   };
   models: {
-    low: string;
-    medium: string;
-    high: string;
+    default: string;
     options: RuntimeOption[];
   };
   memory: {

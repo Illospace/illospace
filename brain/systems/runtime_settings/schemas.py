@@ -6,7 +6,6 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-ModelTier = Literal["low", "medium", "high"]
 ConnectionStatus = Literal["connected", "missing", "error"]
 EmbedderKey = Literal["local_gpu", "local_cpu", "openai", "gemini"]
 RerankerKey = Literal["weighted"]
@@ -39,9 +38,7 @@ class RuntimeConnectionRead(BaseModel):
 
 
 class RuntimeModelsRead(BaseModel):
-    low: str
-    medium: str
-    high: str
+    default: str
     options: list[RuntimeOption]
 
 
@@ -197,9 +194,7 @@ class OpenAIOAuthStartResponse(BaseModel):
 
 
 class RuntimeModelsUpdate(BaseModel):
-    low: str = Field(min_length=1)
-    medium: str = Field(min_length=1)
-    high: str = Field(min_length=1)
+    default: str = Field(min_length=1)
 
 
 class RuntimeMemoryUpdate(BaseModel):

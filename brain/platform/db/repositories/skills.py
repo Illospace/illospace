@@ -20,12 +20,6 @@ def _not_archived():
     return or_(Skill.archived == False, Skill.archived.is_(None))  # noqa: E712
 
 
-def _normalize_model_tier(value: str | None) -> str | None:
-    from brain.platform.providers.model_policy import normalize_model_tier
-
-    return normalize_model_tier(value)
-
-
 _SKILL_READ_COLUMNS = (
     Skill.id,
     Skill.name,
@@ -49,7 +43,6 @@ _SKILL_READ_COLUMNS = (
     Skill.graduated_steps,
     Skill.auto_emerged,
     Skill.builtin,
-    Skill.model_tier,
     Skill.thinking_tier,
     Skill.skill_installation_id,
     Skill.bundle_version_id,
@@ -73,7 +66,6 @@ _SKILL_EXECUTION_READ_COLUMNS = (
 _SKILL_COMMAND_COLUMNS = (
     Skill.name,
     Skill.description,
-    Skill.model_tier,
     Skill.maturity,
     Skill.use_count,
     Skill.success_count,
@@ -171,16 +163,13 @@ class SkillRepository(BaseRepository[Skill]):
     # Updates
     # ------------------------------------------------------------------
 
-    async def a_update_tiers(
+    async def a_update_thinking(
         self,
         skill_id: int,
-        model_tier: str | None = None,
         thinking_tier: str | None = None,
     ) -> Skill:
-        """Update provider-neutral intelligence/effort tiers, flush, return skill."""
+        """Update skill reasoning effort, flush, return skill."""
         skill = await self.a_get_or_raise(skill_id)
-        if model_tier is not None:
-            skill.model_tier = _normalize_model_tier(model_tier) or model_tier
         if thinking_tier is not None:
             skill.thinking_tier = thinking_tier
         await self._session.flush()
@@ -190,7 +179,6 @@ class SkillRepository(BaseRepository[Skill]):
         "name",
         "description",
         "procedure",
-        "model_tier",
         "thinking_tier",
         "pitfalls",
         "refinements",
@@ -208,8 +196,6 @@ class SkillRepository(BaseRepository[Skill]):
         if new_procedure is not None and new_procedure != skill.procedure:
             skill.version = (skill.version or 1) + 1
         for key, value in fields.items():
-            if key == "model_tier":
-                value = _normalize_model_tier(value) or value
             setattr(skill, key, value)
         if fields and skill.builtin:
             skill.builtin = False

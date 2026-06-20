@@ -5,7 +5,6 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, MODEL_TIERS, normalize_model_tier
 from brain.systems.skills.bundles import (
     SkillBundleAssetType,
     SkillBundleInstallStatus,
@@ -64,7 +63,6 @@ class SkillRead(BaseModel):
     triggers: list = []
     guardrails: list = []
     auto_emerged: bool = False
-    model_tier: str = DEFAULT_MODEL_TIER
     thinking_tier: str = "medium"
     success_rate: float = 0.0
     children: list[SkillDepRead] = []
@@ -77,18 +75,12 @@ class SkillRead(BaseModel):
     source_kind: SkillBundleSourceKind = SkillBundleSourceKind.LEGACY_DB
     trust_level: SkillBundleTrustLevel = SkillBundleTrustLevel.PRIVATE_LOCAL
 
-    @field_validator("model_tier")
-    @classmethod
-    def normalize_read_model_tier(cls, v: str) -> str:
-        return normalize_model_tier(v) or DEFAULT_MODEL_TIER
-
 
 class SkillCreate(BaseModel):
     """Input validation for skill creation."""
     name: str
     description: str = ""
     procedure: str
-    model_tier: str = DEFAULT_MODEL_TIER
     thinking_tier: str = "medium"
     pitfalls: list = Field(default_factory=list)
     refinements: list = Field(default_factory=list)
@@ -101,14 +93,6 @@ class SkillCreate(BaseModel):
         if not v.strip():
             raise ValueError("name must not be empty")
         return v.strip()
-
-    @field_validator("model_tier")
-    @classmethod
-    def valid_model_tier(cls, v: str) -> str:
-        v = normalize_model_tier(v) or DEFAULT_MODEL_TIER
-        if v not in MODEL_TIERS:
-            raise ValueError(f"Invalid model_tier: {v}")
-        return v
 
     @field_validator("thinking_tier")
     @classmethod
@@ -123,7 +107,6 @@ class SkillUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     procedure: str | None = None
-    model_tier: str | None = None
     thinking_tier: str | None = None
     pitfalls: list | None = None
     refinements: list | None = None
@@ -136,14 +119,6 @@ class SkillUpdate(BaseModel):
         if v is not None and not v.strip():
             raise ValueError("name must not be empty")
         return v.strip() if v else v
-
-    @field_validator("model_tier")
-    @classmethod
-    def valid_model_tier(cls, v: str | None) -> str | None:
-        v = normalize_model_tier(v, default=None)
-        if v is not None and v not in MODEL_TIERS:
-            raise ValueError(f"Invalid model_tier: {v}")
-        return v
 
     @field_validator("thinking_tier")
     @classmethod
@@ -167,15 +142,9 @@ class SkillExport(BaseModel):
     refinements: list = []
     triggers: list = []
     guardrails: list = []
-    model_tier: str = DEFAULT_MODEL_TIER
     thinking_tier: str = "medium"
     auto_emerged: bool = False
     builtin: bool = False
-
-    @field_validator("model_tier", check_fields=False)
-    @classmethod
-    def normalize_export_model_tier(cls, v: str) -> str:
-        return normalize_model_tier(v) or DEFAULT_MODEL_TIER
 
 
 class SkillAssetRead(BaseModel):

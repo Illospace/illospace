@@ -21,7 +21,6 @@ triggers = [
 ]
 
 [runtime]
-default_model_tier = "medium"
 default_thinking_tier = "high"
 
 [permissions]

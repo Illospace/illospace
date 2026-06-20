@@ -13,7 +13,7 @@ from brain.platform.integrations.llm import resolve_llm_client
 from brain.platform.integrations.providers import get_provider
 from brain.systems.sessions.harvest import _extract_text
 from brain.platform.providers.model_policy import (
-    get_model_for_tier,
+    get_default_model,
     infer_provider_from_model,
     resolve_default_provider,
 )
@@ -154,6 +154,15 @@ def _init_llm(
         llm.is_oauth,
     )
     return llm, provider, extra_headers
+
+
+def _default_checker_model(user_id: str | None) -> str:
+    default_provider = resolve_default_provider(user_id=user_id)
+    return get_default_model(
+        provider=default_provider,
+        include_provider_prefix=False,
+        user_id=user_id,
+    )
 
 
 def _compact_json(value: Any, *, limit: int = 2500) -> str:
@@ -328,12 +337,7 @@ def review_candidate_final_reply(
 
     if checker_llm is None or checker_provider is None:
         if not checker_model:
-            default_provider = resolve_default_provider(user_id=user_id)
-            checker_model = get_model_for_tier(
-                "low",
-                provider=default_provider,
-                user_id=user_id,
-            )
+            checker_model = _default_checker_model(user_id)
         checker_llm, checker_provider, checker_headers = init_llm(
             user_id=user_id,
             session_id=request_session_id,
@@ -378,7 +382,7 @@ def review_candidate_final_reply(
         "content": "\n".join(message_parts),
     }]
     request = build_request(
-        model=checker_model or get_model_for_tier("low", user_id=user_id),
+        model=checker_model or _default_checker_model(user_id),
         messages=messages,
         max_tokens=360,
         system=system,
@@ -400,7 +404,7 @@ def review_candidate_final_reply(
     resolved = _token_resolution_verdict(
         checker_provider,
         checker_llm,
-        checker_model or get_model_for_tier("low", user_id=user_id),
+        checker_model or _default_checker_model(user_id),
         checker_session_id,
         user_request,
         candidate_output,

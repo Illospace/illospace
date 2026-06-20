@@ -1,7 +1,7 @@
 """Narrative lifecycle — topic tagging, linking, and arc synthesis.
 
 Extracts topics from harvest items, creates/updates ProjectNarrative records,
-and synthesises arc summaries via the configured low-intelligence model with deterministic fallback.
+and synthesises arc summaries via the configured default model with deterministic fallback.
 """
 from __future__ import annotations
 
@@ -69,14 +69,14 @@ def should_create_narrative(session_count: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Arc synthesis (low-intelligence configured model with fallback)
+# Arc synthesis (configured default model with fallback)
 # ---------------------------------------------------------------------------
 
 
 def _synthesize_arc(title: str, session_summaries: list[str], *, user_id: str | None = None) -> str:
     """Synthesise a narrative arc summary from session entries.
 
-    Calls the configured low-intelligence model for a concise synthesis. On any failure, falls back
+    Calls the configured default model for a concise synthesis. On any failure, falls back
     to concatenating the last 3 entries with `` | `` separator.
     """
     fallback = " | ".join(session_summaries[-3:])
@@ -85,7 +85,7 @@ def _synthesize_arc(title: str, session_summaries: list[str], *, user_id: str | 
 
     try:
         from brain.platform.integrations.completions import simple_text_completion
-        from brain.platform.providers.model_policy import get_model_for_tier
+        from brain.platform.providers.model_policy import get_default_model
 
         text = simple_text_completion(
             (
@@ -93,14 +93,14 @@ def _synthesize_arc(title: str, session_summaries: list[str], *, user_id: str | 
                 f'the topic "{title}" from these session summaries:\n\n'
                 + "\n".join(f"- {s}" for s in session_summaries)
             ),
-            model=get_model_for_tier("low", include_provider_prefix=True, user_id=user_id),
+            model=get_default_model(include_provider_prefix=True, user_id=user_id),
             max_tokens=300,
             user_id=user_id,
         )
         if text:
             return text
     except Exception:
-        logger.warning("Arc synthesis via configured low-intelligence model failed, using fallback", exc_info=True)
+        logger.warning("Arc synthesis via configured default model failed, using fallback", exc_info=True)
 
     return fallback
 

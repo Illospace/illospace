@@ -75,7 +75,6 @@ import type {
   Connection,
   CortexEffortLevel,
   CortexExecutionProfile,
-  CortexIntelligenceTier,
   Idea,
   StreamItem,
   VaultAgentGrantPrompt,
@@ -94,7 +93,6 @@ export type {
   Connection,
   CortexEffortLevel,
   CortexExecutionProfile,
-  CortexIntelligenceTier,
   Idea,
   StreamItem,
   VaultAgentGrantPrompt,
@@ -118,7 +116,7 @@ class CortexStore {
   teamMembersLoaded = $state(false);
   view = $state<'canvas' | 'list'>('canvas');
   executionProfile = $state<CortexExecutionProfile>('fast');
-  intelligenceTier = $state<CortexIntelligenceTier>('high');
+  model = $state<string>('openai/gpt-5.5');
   effortLevel = $state<CortexEffortLevel>('high');
   constellationMode = $state(false);
   canvasOpen = $state(false);
@@ -192,8 +190,8 @@ class CortexStore {
     return normalizeRunSettings({ executionProfile: value }).executionProfile;
   }
 
-  private _normalizeIntelligenceTier(value: unknown): CortexIntelligenceTier {
-    return normalizeRunSettings({ intelligenceTier: value }).intelligenceTier;
+  private _normalizeModel(value: unknown): string {
+    return normalizeRunSettings({ model: value }).model;
   }
 
   private _normalizeEffortLevel(value: unknown): CortexEffortLevel {
@@ -204,7 +202,7 @@ class CortexStore {
     if (typeof localStorage === 'undefined') return;
     const settings = loadRunSettings(localStorage);
     this.executionProfile = settings.executionProfile;
-    this.intelligenceTier = settings.intelligenceTier;
+    this.model = settings.model;
     this.effortLevel = settings.effortLevel;
   }
 
@@ -218,8 +216,8 @@ class CortexStore {
     this._persistRunSettings();
   }
 
-  setIntelligenceTier(tier: CortexIntelligenceTier) {
-    this.intelligenceTier = this._normalizeIntelligenceTier(tier);
+  setModel(model: string) {
+    this.model = this._normalizeModel(model);
     this._persistRunSettings();
   }
 
@@ -228,10 +226,10 @@ class CortexStore {
     this._persistRunSettings();
   }
 
-  runSettingsOptions(): Pick<AgentRunOptions, 'executionProfile' | 'intelligenceTier' | 'effortLevel'> {
+  runSettingsOptions(): Pick<AgentRunOptions, 'executionProfile' | 'model' | 'effortLevel'> {
     return {
       executionProfile: this.executionProfile,
-      intelligenceTier: this.intelligenceTier,
+      model: this.model,
       effortLevel: this.effortLevel,
     };
   }
@@ -1469,7 +1467,7 @@ class CortexStore {
     const projectContext = projectContextAttachment?.project_context;
     const messageMetadata: Record<string, any> = {
       execution_profile: runOptions.executionProfile,
-      intelligence: runOptions.intelligenceTier,
+      model: runOptions.model,
       effort: runOptions.effortLevel,
       ...(runOptions.metadata || {}),
     };
@@ -1488,8 +1486,7 @@ class CortexStore {
       const runMetadata: Record<string, any> = {
         ...(decision.isExplicit ? {} : { background_activation: decision.reason }),
         execution_profile: runOptions.executionProfile,
-        model_tier: runOptions.intelligenceTier,
-        intelligence: runOptions.intelligenceTier,
+        model: runOptions.model,
         thinking_tier: runOptions.effortLevel,
         effort: runOptions.effortLevel,
         thread_message_id: threadMessage?.id,

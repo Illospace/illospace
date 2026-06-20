@@ -83,7 +83,6 @@
     refinements?: string[] | null;
     triggers?: SkillTrigger[] | null;
     guardrails?: SkillGuardrail[] | null;
-    model_tier?: string | null;
     thinking_tier?: string | null;
     source_kind?: string | null;
     trust_level?: string | null;
@@ -130,7 +129,6 @@
     name: string;
     description: string;
     procedure: string;
-    model_tier: string;
     thinking_tier: string;
     triggers: Required<SkillTrigger>[];
     guardrails: Required<SkillGuardrail>[];
@@ -274,7 +272,6 @@
       name: '',
       description: '',
       procedure: '',
-      model_tier: 'medium',
       thinking_tier: 'medium',
       triggers: [],
       guardrails: [],
@@ -422,7 +419,6 @@
       name: skill.name ?? '',
       description: skill.description ?? '',
       procedure: skill.procedure ?? '',
-      model_tier: skill.model_tier ?? 'medium',
       thinking_tier: skill.thinking_tier ?? 'medium',
       triggers: array(skill.triggers).map((trigger) => ({
         direction: trigger.direction || 'for',
@@ -444,7 +440,6 @@
       name: draft.name.trim(),
       description: draft.description.trim(),
       procedure: draft.procedure.trim(),
-      model_tier: draft.model_tier,
       thinking_tier: draft.thinking_tier,
       triggers: draft.triggers
         .filter((trigger) => trigger.pattern.trim())

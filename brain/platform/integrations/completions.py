@@ -7,11 +7,8 @@ import logging
 from brain.platform.integrations.llm import resolve_llm_client
 from brain.platform.integrations.providers import LLMRequest, get_provider
 from brain.platform.providers.model_policy import (
-    MODEL_TIERS,
     get_default_model,
-    get_model_for_tier,
     infer_provider_from_model,
-    normalize_model_tier,
     resolve_default_provider,
 )
 
@@ -42,15 +39,6 @@ def simple_text_completion(
 ) -> str | None:
     """Run a simple single-turn completion and return the text content."""
     default_provider = resolve_default_provider(user_id=user_id, org_id=org_id)
-    tier = normalize_model_tier(model, default=None)
-    if tier in MODEL_TIERS:
-        model = get_model_for_tier(
-            tier,
-            provider=default_provider,
-            include_provider_prefix=True,
-            user_id=user_id,
-            org_id=org_id,
-        )
     resolved_model = _strip_provider_prefix(
         model
         or get_default_model(

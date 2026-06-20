@@ -71,7 +71,7 @@ def _make_run(**kwargs):
 def _make_skill(**kwargs):
     defaults = dict(
         id=1, name="test_skill", description="Test", procedure="do things",
-        archived=False, triggers=[], model_tier="medium", thinking_tier="medium",
+        archived=False, triggers=[], thinking_tier="medium",
     )
     defaults.update(kwargs)
     s = MagicMock(spec=Skill)
@@ -215,14 +215,14 @@ class TestExtractMentions:
         assert _extract_mentions("no mentions here") == []
 
 
-# ── Low-tier title generation ──────────────────────────────────
+# ── Default-model title generation ─────────────────────────────
 
-class TestGenerateTitleLowTier:
-    def test_uses_local_gpu_when_configured_low_tier_model_is_local(self):
+class TestGenerateTitleDefaultModel:
+    def test_uses_local_gpu_when_configured_default_model_is_local(self):
         from brain.systems.cortex.title_generation import generate_display_title
 
         with patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="openai") as mock_resolve_default_provider, \
-             patch("brain.platform.providers.model_policy.get_model_for_tier", return_value="brain.platform.gpu/qwen3.5:4b") as mock_get_model_for_tier, \
+             patch("brain.platform.providers.model_policy.get_default_model", return_value="brain.platform.gpu/qwen3.5:4b") as mock_get_default_model, \
              patch("brain.platform.gpu_client.get_client") as mock_get_client, \
              patch("brain.platform.integrations.completions.simple_text_completion") as mock_simple_text_completion:
             mock_get_client.return_value.generate.return_value = "Great Title"
@@ -231,8 +231,7 @@ class TestGenerateTitleLowTier:
             assert generate_display_title("some raw text", user_id="user-1", org_id="org-1") == "Great Title"
 
         mock_resolve_default_provider.assert_called_once_with(user_id="user-1", org_id="org-1")
-        mock_get_model_for_tier.assert_called_once_with(
-            "low",
+        mock_get_default_model.assert_called_once_with(
             provider="openai",
             include_provider_prefix=False,
             user_id="user-1",
@@ -245,18 +244,17 @@ class TestGenerateTitleLowTier:
         assert kwargs["think"] is False
         mock_simple_text_completion.assert_not_called()
 
-    def test_uses_configured_api_low_tier_model_with_user_context(self):
+    def test_uses_configured_api_default_model_with_user_context(self):
         from brain.systems.cortex.title_generation import generate_display_title
 
         with patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="openai") as mock_resolve_default_provider, \
-             patch("brain.platform.providers.model_policy.get_model_for_tier", return_value="gpt-5-mini") as mock_get_model_for_tier, \
+             patch("brain.platform.providers.model_policy.get_default_model", return_value="gpt-5.5") as mock_get_default_model, \
              patch("brain.platform.integrations.completions.simple_text_completion", return_value="Provider Title") as mock_simple_text_completion, \
              patch("brain.platform.gpu_client.get_client") as mock_get_client:
             assert generate_display_title("some raw text", user_id="user-1", org_id="org-1") == "Provider Title"
 
         mock_resolve_default_provider.assert_called_once_with(user_id="user-1", org_id="org-1")
-        mock_get_model_for_tier.assert_called_once_with(
-            "low",
+        mock_get_default_model.assert_called_once_with(
             provider="openai",
             include_provider_prefix=False,
             user_id="user-1",
@@ -264,7 +262,7 @@ class TestGenerateTitleLowTier:
         )
         mock_simple_text_completion.assert_called_once()
         kwargs = mock_simple_text_completion.call_args.kwargs
-        assert kwargs["model"] == "openai/gpt-5-mini"
+        assert kwargs["model"] == "openai/gpt-5.5"
         assert kwargs["user_id"] == "user-1"
         assert kwargs["org_id"] == "org-1"
         assert kwargs["system_prompt"]
@@ -276,7 +274,7 @@ class TestGenerateTitleLowTier:
         from brain.systems.cortex.title_generation import generate_display_title
 
         with patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="openai"), \
-             patch("brain.platform.providers.model_policy.get_model_for_tier", return_value="gpt-5-mini"), \
+             patch("brain.platform.providers.model_policy.get_default_model", return_value="gpt-5.5"), \
              patch("brain.platform.integrations.completions.simple_text_completion", return_value=" x "):
             assert generate_display_title("some raw text") is None
 
@@ -284,7 +282,7 @@ class TestGenerateTitleLowTier:
         from brain.systems.cortex.title_generation import generate_display_title
 
         with patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="openai"), \
-             patch("brain.platform.providers.model_policy.get_model_for_tier", return_value="brain.platform.gpu/qwen3.5:4b"), \
+             patch("brain.platform.providers.model_policy.get_default_model", return_value="brain.platform.gpu/qwen3.5:4b"), \
              patch("brain.platform.gpu_client.get_client") as mock_get_client, \
              patch("brain.platform.integrations.completions.simple_text_completion") as mock_simple_text_completion:
             mock_get_client.return_value.is_ready.return_value = True
@@ -297,7 +295,7 @@ class TestGenerateTitleLowTier:
         from brain.systems.cortex.title_generation import generate_display_title
 
         with patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="openai"), \
-             patch("brain.platform.providers.model_policy.get_model_for_tier", return_value="brain.platform.gpu/qwen3.5:4b"), \
+             patch("brain.platform.providers.model_policy.get_default_model", return_value="brain.platform.gpu/qwen3.5:4b"), \
              patch("brain.platform.gpu_client.get_client") as mock_get_client, \
              patch("brain.platform.integrations.completions.simple_text_completion") as mock_simple_text_completion:
             mock_get_client.return_value.is_ready.return_value = False
@@ -306,7 +304,7 @@ class TestGenerateTitleLowTier:
         mock_get_client.return_value.generate.assert_not_called()
         mock_simple_text_completion.assert_not_called()
 
-    async def test_async_uses_configured_api_low_tier_model_with_user_context(self):
+    async def test_async_uses_configured_api_default_model_with_user_context(self):
         from brain.systems.cortex.title_generation import async_generate_display_title
 
         fake_uow = MagicMock()
@@ -316,15 +314,14 @@ class TestGenerateTitleLowTier:
 
         with patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=fake_uow), \
              patch("brain.platform.providers.model_policy.async_resolve_default_provider", AsyncMock(return_value="openai")) as mock_resolve_default_provider, \
-             patch("brain.platform.providers.model_policy.async_get_model_for_tier", AsyncMock(return_value="gpt-5-mini")) as mock_get_model_for_tier, \
+             patch("brain.platform.providers.model_policy.async_get_default_model", AsyncMock(return_value="gpt-5.5")) as mock_get_default_model, \
              patch("brain.systems.cortex.title_generation._async_generate_with_provider_title_model", AsyncMock(return_value="Provider Title")) as mock_generate_with_provider, \
              patch("brain.platform.integrations.completions.simple_text_completion") as mock_simple_text_completion:
             assert await async_generate_display_title("some raw text", user_id="user-1", org_id="org-1") == "Provider Title"
 
         mock_resolve_default_provider.assert_awaited_once_with(fake_uow.session, user_id="user-1", org_id="org-1")
-        mock_get_model_for_tier.assert_awaited_once_with(
+        mock_get_default_model.assert_awaited_once_with(
             fake_uow.session,
-            "low",
             provider="openai",
             include_provider_prefix=False,
             user_id="user-1",
@@ -333,7 +330,7 @@ class TestGenerateTitleLowTier:
         mock_generate_with_provider.assert_awaited_once_with(
             "some raw text",
             provider="openai",
-            model="openai/gpt-5-mini",
+            model="openai/gpt-5.5",
             user_id="user-1",
             org_id="org-1",
         )

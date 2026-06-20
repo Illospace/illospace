@@ -15,7 +15,6 @@ from brain.platform.db.constraints import sql_string_list
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_model_tier
 from brain.systems.cortex.status import (
     ANALYTICS_QUEUED_IDEA_STATUS_VALUES,
     SUGGESTED_IDEA_STATUS_VALUES,
@@ -195,7 +194,6 @@ async def api_slash_commands(user: dict[str, Any] = Depends(get_current_user)):
         result.append({
             "name": s.name,
             "description": s.description,
-            "model_tier": normalize_model_tier(s.model_tier) or DEFAULT_MODEL_TIER,
             "maturity": s.maturity,
             "use_count": use_count,
             "success_count": success_count,

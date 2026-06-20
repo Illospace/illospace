@@ -32,15 +32,13 @@ class PrivateDataRedactionMode(StrEnum):
     DISABLED = "disabled"
 
 
-HOSTED_ALLOWED_MODEL_TIERS = ("low", "medium")
-SELF_HOSTED_ALLOWED_MODEL_TIERS = ("local", "low")
-MODEL_TIER_ALIASES = {
-    "cheap": "low",
-    "small": "low",
-    "standard": "medium",
-    "balanced": "medium",
-    "premium": "high",
-    "expensive": "high",
+HOSTED_ALLOWED_MODEL_CLASSES = ("economy", "standard")
+SELF_HOSTED_ALLOWED_MODEL_CLASSES = ("local", "economy")
+MODEL_CLASS_ALIASES = {
+    "cheap": "economy",
+    "small": "economy",
+    "balanced": "standard",
+    "expensive": "premium",
 }
 
 SELF_HOSTED_MODE_VALUES = {
@@ -139,7 +137,7 @@ def _coerce_units(value: object, default: int) -> int:
         return default
 
 
-def _normalize_model_tiers(value: object, default: tuple[str, ...]) -> tuple[str, ...]:
+def _normalize_model_classes(value: object, default: tuple[str, ...]) -> tuple[str, ...]:
     if value is None:
         return default
     if isinstance(value, str):
@@ -150,14 +148,14 @@ def _normalize_model_tiers(value: object, default: tuple[str, ...]) -> tuple[str
         except TypeError:
             raw_items = [value]
 
-    tiers: list[str] = []
+    classes: list[str] = []
     seen: set[str] = set()
     for item in raw_items:
-        tier = MODEL_TIER_ALIASES.get(_normalize_token(item), _normalize_token(item))
-        if tier and tier not in seen:
-            tiers.append(tier)
-            seen.add(tier)
-    return tuple(tiers) if tiers else default
+        model_class = MODEL_CLASS_ALIASES.get(_normalize_token(item), _normalize_token(item))
+        if model_class and model_class not in seen:
+            classes.append(model_class)
+            seen.add(model_class)
+    return tuple(classes) if classes else default
 
 
 def _first_env(env: Mapping[str, str], *names: str) -> str | None:
@@ -202,7 +200,7 @@ class LearningPolicyOverride:
     skill_quality_routing_enabled: bool | None = None
     after_run_learning_enabled: bool | None = None
     night_llm_adjudication_enabled: bool | None = None
-    allowed_model_tiers: tuple[str, ...] | list[str] | str | None = None
+    allowed_model_classes: tuple[str, ...] | list[str] | str | None = None
     external_eval_export_allowed: bool | None = None
     community_skill_auto_update_policy: CommunitySkillAutoUpdatePolicy | str | None = None
     private_data_redaction_mode: PrivateDataRedactionMode | str | None = None
@@ -240,11 +238,11 @@ class LearningPolicyOverride:
                 "tenant_daily_budget_units",
                 _coerce_units(self.tenant_daily_budget_units, 0),
             )
-        if self.allowed_model_tiers is not None:
+        if self.allowed_model_classes is not None:
             object.__setattr__(
                 self,
-                "allowed_model_tiers",
-                _normalize_model_tiers(self.allowed_model_tiers, ()),
+                "allowed_model_classes",
+                _normalize_model_classes(self.allowed_model_classes, ()),
             )
         if self.community_skill_auto_update_policy is not None:
             object.__setattr__(
@@ -283,8 +281,8 @@ class LearningPolicyOverride:
             updates["after_run_learning_enabled"] = self.after_run_learning_enabled
         if self.night_llm_adjudication_enabled is not None:
             updates["night_llm_adjudication_enabled"] = self.night_llm_adjudication_enabled
-        if self.allowed_model_tiers is not None:
-            updates["allowed_model_tiers"] = self.allowed_model_tiers
+        if self.allowed_model_classes is not None:
+            updates["allowed_model_classes"] = self.allowed_model_classes
         if self.external_eval_export_allowed is not None:
             updates["external_eval_export_allowed"] = bool(self.external_eval_export_allowed)
         if self.community_skill_auto_update_policy is not None:
@@ -311,8 +309,8 @@ class LearningPolicyOverride:
             value = getattr(self, name)
             if value is not None:
                 values[name] = value
-        if self.allowed_model_tiers is not None:
-            values["allowed_model_tiers"] = list(self.allowed_model_tiers)
+        if self.allowed_model_classes is not None:
+            values["allowed_model_classes"] = list(self.allowed_model_classes)
         if self.community_skill_auto_update_policy is not None:
             values["community_skill_auto_update_policy"] = str(self.community_skill_auto_update_policy)
         if self.private_data_redaction_mode is not None:
@@ -336,8 +334,8 @@ class TenantLearningPolicy:
     skill_quality_routing_enabled: bool = True
     after_run_learning_enabled: bool = True
     night_llm_adjudication_enabled: bool = True
-    allowed_model_tiers: tuple[str, ...] | list[str] | str = field(
-        default_factory=lambda: HOSTED_ALLOWED_MODEL_TIERS
+    allowed_model_classes: tuple[str, ...] | list[str] | str = field(
+        default_factory=lambda: HOSTED_ALLOWED_MODEL_CLASSES
     )
     external_eval_export_allowed: bool = False
     community_skill_auto_update_policy: CommunitySkillAutoUpdatePolicy | str = (
@@ -374,15 +372,15 @@ class TenantLearningPolicy:
             "night_llm_adjudication_enabled",
         ):
             object.__setattr__(self, name, _coerce_bool(getattr(self, name)))
-        default_tiers = (
-            SELF_HOSTED_ALLOWED_MODEL_TIERS
+        default_classes = (
+            SELF_HOSTED_ALLOWED_MODEL_CLASSES
             if deployment_mode == LearningDeploymentMode.SELF_HOSTED
-            else HOSTED_ALLOWED_MODEL_TIERS
+            else HOSTED_ALLOWED_MODEL_CLASSES
         )
         object.__setattr__(
             self,
-            "allowed_model_tiers",
-            _normalize_model_tiers(self.allowed_model_tiers, default_tiers),
+            "allowed_model_classes",
+            _normalize_model_classes(self.allowed_model_classes, default_classes),
         )
         object.__setattr__(
             self,
@@ -419,8 +417,8 @@ class TenantLearningPolicy:
             flags.append("external_eval_export_needs_export_redaction_review")
         if self.community_skill_auto_update_policy == CommunitySkillAutoUpdatePolicy.MINOR_AND_PATCH:
             flags.append("community_skill_auto_update_allows_minor_versions")
-        if "high" in self.allowed_model_tiers:
-            flags.append("high_intelligence_learning_model_tier_enabled")
+        if "premium" in self.allowed_model_classes:
+            flags.append("premium_learning_model_class_enabled")
         return tuple(flags)
 
     def to_payload(self) -> dict[str, object]:
@@ -434,7 +432,7 @@ class TenantLearningPolicy:
             "skill_quality_routing_enabled": self.skill_quality_routing_enabled,
             "after_run_learning_enabled": self.after_run_learning_enabled,
             "night_llm_adjudication_enabled": self.night_llm_adjudication_enabled,
-            "allowed_model_tiers": list(self.allowed_model_tiers),
+            "allowed_model_classes": list(self.allowed_model_classes),
             "external_eval_export_allowed": self.external_eval_export_allowed,
             "community_skill_auto_update_policy": str(self.community_skill_auto_update_policy),
             "private_data_redaction_mode": str(self.private_data_redaction_mode),
@@ -455,7 +453,7 @@ def _defaults_for_deployment(deployment_mode: LearningDeploymentMode) -> TenantL
             skill_quality_routing_enabled=True,
             after_run_learning_enabled=True,
             night_llm_adjudication_enabled=True,
-            allowed_model_tiers=SELF_HOSTED_ALLOWED_MODEL_TIERS,
+            allowed_model_classes=SELF_HOSTED_ALLOWED_MODEL_CLASSES,
             external_eval_export_allowed=False,
             community_skill_auto_update_policy=CommunitySkillAutoUpdatePolicy.PATCH_ONLY,
             private_data_redaction_mode=PrivateDataRedactionMode.LOCAL_ONLY,
@@ -470,7 +468,7 @@ def _defaults_for_deployment(deployment_mode: LearningDeploymentMode) -> TenantL
         skill_quality_routing_enabled=True,
         after_run_learning_enabled=True,
         night_llm_adjudication_enabled=True,
-        allowed_model_tiers=HOSTED_ALLOWED_MODEL_TIERS,
+        allowed_model_classes=HOSTED_ALLOWED_MODEL_CLASSES,
         external_eval_export_allowed=False,
         community_skill_auto_update_policy=CommunitySkillAutoUpdatePolicy.SECURITY_PATCH_ONLY,
         private_data_redaction_mode=PrivateDataRedactionMode.STRICT,
@@ -563,7 +561,7 @@ def _apply_env_overrides(policy: TenantLearningPolicy, env: Mapping[str, str]) -
                 "LEARNING_NIGHT_LLM_ADJUDICATION_DISABLED",
             ),
         ),
-        allowed_model_tiers=_first_env(env, "LEARNING_POLICY_ALLOWED_MODEL_TIERS"),
+        allowed_model_classes=_first_env(env, "LEARNING_POLICY_ALLOWED_MODEL_CLASSES"),
         external_eval_export_allowed=(
             _coerce_bool(external_eval_export_allowed)
             if external_eval_export_allowed is not None

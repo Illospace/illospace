@@ -178,7 +178,7 @@ def test_systemd_units_use_home_specifier_and_production_env():
 def _safe_self_hosted_learning_env() -> dict[str, str]:
     return _safe_prod_env() | {
         "ILLO_DEPLOYMENT_MODE": "self-hosted",
-        "LEARNING_POLICY_ALLOWED_MODEL_TIERS": "local,low",
+        "LEARNING_POLICY_ALLOWED_MODEL_CLASSES": "local,economy",
         "EMBEDDING_BACKEND": "cpu",
         "LLM_MODEL": "qwen3.5:4b",
     }
@@ -199,7 +199,7 @@ def test_learning_doctor_reports_clear_self_hosted_status_objects():
     assert statuses["learning-scheduler"].status == "ok"
     assert statuses["learning-budget"].status == "ok"
     assert statuses["learning-privacy"].status == "ok"
-    assert statuses["learning-model-tier"].status == "ok"
+    assert statuses["learning-model-class"].status == "ok"
     assert statuses["learning-embedding"].details["backend"] == "cpu"
 
 
@@ -260,6 +260,6 @@ def test_config_doctor_json_output_includes_learning_status_objects(capsys):
         "learning-scheduler",
         "learning-budget",
         "learning-privacy",
-        "learning-model-tier",
+        "learning-model-class",
         "learning-embedding",
     }

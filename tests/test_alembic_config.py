@@ -40,6 +40,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0018_workspace_tool_installations.py",
     # Upgrade intentionally removes replaced flat-memory tables after reconstructive memory exists.
     "0020_reconstructive_memory.py",
+    # Upgrade intentionally removes replaced model-routing tables after migrating the default model.
+    "0021_remove_intelligence_tiers.py",
 }
 
 

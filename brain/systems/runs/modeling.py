@@ -21,7 +21,7 @@ def resolve_model(
     org_id: str | None = None,
     preferred_provider: str | None = None,
 ) -> tuple[str, str]:
-    """Resolve model and thinking level from a skill's tier settings."""
+    """Resolve model and thinking level from skill runtime settings."""
     try:
         return resolve_skill_model(
             skill_name,
@@ -41,18 +41,18 @@ def resolve_model(
         )
 
 
-async def get_skill_tiers() -> list[dict]:
-    """Return all non-archived skills with their tier settings."""
+async def get_skill_runtime_settings() -> list[dict]:
+    """Return all non-archived skills with their runtime settings."""
     try:
         async with UnitOfWork() as uow:
             rows = (await uow.session.execute(text(
-                "SELECT name, model_tier, thinking_tier, maturity, confidence, "
+                "SELECT name, thinking_tier, maturity, confidence, "
                 "use_count, success_count, version "
                 "FROM skills WHERE NOT archived ORDER BY name"
             ))).mappings().all()
             return [dict(row) for row in rows]
     except Exception as exc:
-        print(f"Warning: get_skill_tiers failed: {exc}", file=sys.stderr)
+        print(f"Warning: get_skill_runtime_settings failed: {exc}", file=sys.stderr)
         return []
 
 
@@ -73,4 +73,4 @@ def calculate_cost(
     )
 
 
-__all__ = ["calculate_cost", "get_skill_tiers", "resolve_model"]
+__all__ = ["calculate_cost", "get_skill_runtime_settings", "resolve_model"]

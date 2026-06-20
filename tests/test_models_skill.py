@@ -9,7 +9,7 @@ def test_skill_has_all_columns():
         "failure_count", "partial_count", "avg_duration_sec", "last_used",
         "pitfalls", "refinements", "triggers", "guardrails", "embedding",
         "task_centroid", "centroid_count", "auto_emerged", "provisional",
-        "builtin", "model_tier", "thinking_tier", "generation",
+        "builtin", "thinking_tier", "generation",
         "procedure_tokens", "fitness_score", "last_distilled_at",
         "heuristic_count", "archived", "created_at", "updated_at",
         "skill_installation_id", "bundle_version_id", "bundle_digest", "overlay_revision",

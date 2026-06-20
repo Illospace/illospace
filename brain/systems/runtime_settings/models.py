@@ -1,24 +1,20 @@
 from __future__ import annotations
 
 from fastapi import HTTPException
-from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.org import Org, User
-from brain.platform.db.models.system import OrgProviderModelMapping
 from brain.platform.providers.model_policy import (
-    DEFAULT_PROVIDER_MODEL_MAPS,
-    async_get_provider_model_map,
+    PROVIDER_MODEL_OPTIONS,
+    async_get_default_model,
 )
 
 from .schemas import RuntimeModelsRead, RuntimeModelsUpdate, RuntimeOption
 
-MODEL_TIERS = ("low", "medium", "high")
-
 OPENAI_MODEL_OPTIONS = [
-    RuntimeOption(key="gpt-5.5", label="GPT-5.5", description="Best quality for hard reasoning."),
+    RuntimeOption(key="gpt-5.5", label="GPT-5.5", description="Default model for hard reasoning."),
     RuntimeOption(key="gpt-5.4-pro", label="GPT-5.4 Pro", description="Previous maximum-quality route."),
-    RuntimeOption(key="gpt-5.4", label="GPT-5.4", description="Previous balanced route."),
+    RuntimeOption(key="gpt-5.4", label="GPT-5.4", description="Balanced general-purpose model."),
     RuntimeOption(key="gpt-5.4-mini", label="GPT-5.4 Mini", description="Fast and economical for lighter tasks."),
     RuntimeOption(key="gpt-5-mini", label="GPT-5 Mini", description="Low-cost route."),
     RuntimeOption(key="gpt-5-nano", label="GPT-5 Nano", description="Smallest low-latency route."),
@@ -34,31 +30,26 @@ def _normalize_model(model: str) -> str:
     value = model.strip()
     if not value:
         raise HTTPException(status_code=400, detail="Model values cannot be empty")
-    if ":" in value:
-        provider, name = value.split(":", 1)
+    if ":" in value or "/" in value:
+        separator = ":" if ":" in value else "/"
+        provider, name = value.split(separator, 1)
         if provider != "openai":
             raise HTTPException(status_code=400, detail="Only OpenAI models can be configured here")
         value = name
+    if value not in PROVIDER_MODEL_OPTIONS["openai"]:
+        raise HTTPException(status_code=400, detail=f"Unsupported OpenAI model: {value}")
     return value
 
 
-def _defaults() -> dict[str, str]:
-    default_map = DEFAULT_PROVIDER_MODEL_MAPS.get("openai", {})
-    return {
-        "low": default_map.get("low", "gpt-5.4-mini"),
-        "medium": default_map.get("medium", "gpt-5.4"),
-        "high": default_map.get("high", "gpt-5.5"),
-    }
-
-
 async def async_get_runtime_models(session: AsyncSession, user: User) -> RuntimeModelsRead:
-    models = _defaults()
-    mapped = await async_get_provider_model_map(session, "openai", org_id=user.org_id, user_id=user.id)
-    for tier in MODEL_TIERS:
-        value = mapped.get(tier)
-        if isinstance(value, str) and value:
-            models[tier] = _normalize_model(value)
-    return RuntimeModelsRead(**models, options=OPENAI_MODEL_OPTIONS)
+    default = await async_get_default_model(
+        session,
+        "openai",
+        include_provider_prefix=False,
+        org_id=user.org_id,
+        user_id=user.id,
+    )
+    return RuntimeModelsRead(default=_normalize_model(default), options=OPENAI_MODEL_OPTIONS)
 
 
 async def async_update_runtime_models(
@@ -66,29 +57,21 @@ async def async_update_runtime_models(
     user: User,
     update: RuntimeModelsUpdate,
 ) -> RuntimeModelsRead:
-    values = {tier: _normalize_model(getattr(update, tier)) for tier in MODEL_TIERS}
-    await session.execute(
-        delete(OrgProviderModelMapping).where(
-            OrgProviderModelMapping.org_id == user.org_id,
-            OrgProviderModelMapping.provider == "openai",
-        )
-    )
-    for tier, model in values.items():
-        session.add(
-            OrgProviderModelMapping(
-                org_id=user.org_id,
-                provider="openai",
-                intelligence_level=tier,
-                model_name=model,
-            )
-        )
-
+    model = _normalize_model(update.default)
     org = await session.get(Org, user.org_id)
     if org is not None:
         config = dict(org.memory_model_config or {})
         config["default_provider"] = "openai"
-        for legacy_key in ("session_harvest", "depth_0", "depth_1_plus"):
-            config.pop(legacy_key, None)
+        config["default_model"] = f"openai/{model}"
+        for stale_key in (
+            "session_harvest",
+            "depth_0",
+            "depth_1_plus",
+            "low",
+            "medium",
+            "high",
+        ):
+            config.pop(stale_key, None)
         org.memory_model_config = config
     await session.flush()
     return await async_get_runtime_models(session, user)

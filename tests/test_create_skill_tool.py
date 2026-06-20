@@ -129,7 +129,7 @@ class TestCreateSkillDBInsert:
     @patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]")
     @patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 384)
     @patch("brain.platform.db.repositories.unit_of_work.UnitOfWork")
-    async def test_model_and_thinking_tier_passed(self, MockUoW, mock_embed, mock_vec):
+    async def test_thinking_tier_passed(self, MockUoW, mock_embed, mock_vec):
         uow = _make_uow({"id": 44})
         MockUoW.return_value = uow
 
@@ -137,18 +137,15 @@ class TestCreateSkillDBInsert:
             name="write-issues",
             description="Write well-structured GitHub issues with context",
             procedure=VALID_PROCEDURE,
-            model_tier="high",
             thinking_tier="xhigh",
         )
 
         assert result["created"] is True
-        assert result["model_tier"] == "high"
         assert result["thinking_tier"] == "xhigh"
 
-        # Verify the SQL call includes the right tiers
+        # Verify the SQL call includes the right runtime setting.
         call_args = uow.session.execute.call_args
         params = call_args[0][1]
-        assert params["model_tier"] == "high"
         assert params["thinking_tier"] == "xhigh"
         assert params["source_kind"] == "agent_draft"
         assert params["trust_level"] == "agent_draft"
@@ -231,7 +228,6 @@ class TestManageSkillUmbrella:
 
         result = json.loads(await _handle_manage_skill(
             action="create_many",
-            model_tier="low",
             thinking_tier="none",
             user_requested=True,
             skills=[
@@ -244,7 +240,6 @@ class TestManageSkillUmbrella:
                     "name": "tdd",
                     "description": "Build with red-green-refactor",
                     "procedure": VALID_PROCEDURE,
-                    "model_tier": "medium",
                 },
             ],
         ))
@@ -257,10 +252,9 @@ class TestManageSkillUmbrella:
         first_call = mock_create.await_args_list[0].kwargs
         second_call = mock_create.await_args_list[1].kwargs
         assert first_call["name"] == "diagnose"
-        assert first_call["model_tier"] == "low"
         assert first_call["thinking_tier"] == "none"
         assert second_call["name"] == "tdd"
-        assert second_call["model_tier"] == "medium"
+        assert second_call["thinking_tier"] == "none"
 
     async def test_create_many_requires_skills_array(self):
         result = json.loads(await _handle_manage_skill(action="create_many"))

@@ -12,7 +12,6 @@ _SKILL_UPDATE_FIELDS = (
     "name",
     "description",
     "procedure",
-    "model_tier",
     "thinking_tier",
     "pitfalls",
     "refinements",
@@ -49,7 +48,6 @@ def _skill_payload(skill: Any, *, include_procedure: bool = True) -> dict[str, A
         "guardrails": getattr(skill, "guardrails", None) or [],
         "pitfalls": getattr(skill, "pitfalls", None) or [],
         "refinements": getattr(skill, "refinements", None) or [],
-        "model_tier": getattr(skill, "model_tier", None),
         "thinking_tier": getattr(skill, "thinking_tier", None),
         "builtin": bool(getattr(skill, "builtin", False)),
         "archived": bool(getattr(skill, "archived", False)),
@@ -127,12 +125,7 @@ async def _async_resolve_skill(repo: Any, *, skill_id: int | None = None, skill_
     raise ValueError("skill_id or skill_name is required")
 
 
-def _validate_skill_tiers(fields: dict[str, Any]) -> dict[str, Any]:
-    if "model_tier" in fields:
-        model_tier = _MODEL_TIER_ALIASES.get(str(fields["model_tier"]), fields["model_tier"])
-        if model_tier not in _MODEL_TIERS:
-            raise ValueError(f"Invalid model_tier: {model_tier}. Use one of: {', '.join(sorted(_MODEL_TIERS))}")
-        fields["model_tier"] = model_tier
+def _validate_skill_runtime(fields: dict[str, Any]) -> dict[str, Any]:
     if "thinking_tier" in fields and fields["thinking_tier"] not in _REASONING_EFFORTS:
         raise ValueError(
             f"Invalid thinking_tier: {fields['thinking_tier']}. "
@@ -146,7 +139,6 @@ async def _handle_create_skill(
     description: str,
     procedure: str,
     user_requested: bool = False,
-    model_tier: str = "medium",
     thinking_tier: str = "medium",
     triggers: list | None = None,
     guardrails: list | None = None,
@@ -158,13 +150,6 @@ async def _handle_create_skill(
     """Create a new skill via the live gate (no CLI ceremony required)."""
     from brain.systems.skills.gate import enforce_live_gate
 
-    model_tier = _MODEL_TIER_ALIASES.get(model_tier, model_tier)
-    if model_tier not in _MODEL_TIERS:
-        return {
-            "created": False,
-            "error": f"Invalid model_tier: {model_tier}",
-            "hint": f"Use one of: {', '.join(sorted(_MODEL_TIERS))}",
-        }
     if thinking_tier not in _REASONING_EFFORTS:
         return {
             "created": False,
@@ -207,11 +192,11 @@ async def _handle_create_skill(
 
             row = (await uow.session.execute(sa_text("""
                 INSERT INTO skills
-                    (name, description, procedure, level, model_tier, thinking_tier,
+                    (name, description, procedure, level, thinking_tier,
                      provisional, auto_emerged, embedding,
                      skill_type, source_kind, trust_level,
                      triggers, guardrails, pitfalls, refinements)
-                VALUES (:name, :desc, :proc, 'cognitive', :model_tier, :thinking_tier,
+                VALUES (:name, :desc, :proc, 'cognitive', :thinking_tier,
                         :provisional, FALSE, CAST(:embedding AS vector),
                         'skill', :source_kind, :trust_level,
                         CAST(:triggers AS jsonb), CAST(:guardrails AS jsonb),
@@ -220,7 +205,7 @@ async def _handle_create_skill(
                 RETURNING id
             """), {
                 "name": name, "desc": description, "proc": procedure,
-                "model_tier": model_tier, "thinking_tier": thinking_tier,
+                "thinking_tier": thinking_tier,
                 "provisional": provisional, "embedding": vec_to_pg(embedding),
                 "source_kind": source_kind, "trust_level": trust_level,
                 "triggers": json.dumps(triggers or []),
@@ -277,7 +262,6 @@ async def _handle_create_skill(
             "name": name,
             "provisional": provisional,
             "status": status,
-            "model_tier": model_tier,
             "thinking_tier": thinking_tier,
             "source_kind": source_kind,
             "trust_level": trust_level,
@@ -293,7 +277,6 @@ async def _handle_create_skill(
 async def _handle_create_many_skills(
     skill_specs: list | None,
     *,
-    model_tier: str = "medium",
     thinking_tier: str = "medium",
     create_as_package: bool = False,
     user_requested: bool = True,
@@ -359,7 +342,6 @@ async def _handle_create_many_skills(
             description=str(spec.get("description") or ""),
             procedure=str(procedure),
             user_requested=bool(spec.get("user_requested", user_requested)),
-            model_tier=str(spec.get("model_tier") or model_tier or "medium"),
             thinking_tier=str(spec.get("thinking_tier") or thinking_tier or "medium"),
             triggers=spec.get("triggers"),
             guardrails=spec.get("guardrails"),
@@ -464,7 +446,6 @@ async def _handle_manage_skill(
     name: str | None = None,
     description: str | None = None,
     procedure: str | None = None,
-    model_tier: str | None = None,
     thinking_tier: str | None = None,
     triggers: list | None = None,
     guardrails: list | None = None,
@@ -505,7 +486,6 @@ async def _handle_manage_skill(
             description=description or "",
             procedure=procedure,
             user_requested=bool(user_requested),
-            model_tier=model_tier or "medium",
             thinking_tier=thinking_tier or "medium",
             triggers=triggers,
             guardrails=guardrails,
@@ -519,7 +499,6 @@ async def _handle_manage_skill(
     if normalized == "create_many":
         result = await _handle_create_many_skills(
             skills,
-            model_tier=model_tier or "medium",
             thinking_tier=thinking_tier or "medium",
             create_as_package=create_as_package,
             user_requested=bool(user_requested),
@@ -566,7 +545,6 @@ async def _handle_manage_skill(
                     "name": name,
                     "description": description,
                     "procedure": procedure,
-                    "model_tier": model_tier,
                     "thinking_tier": thinking_tier,
                     "pitfalls": pitfalls,
                     "refinements": refinements,
@@ -583,7 +561,7 @@ async def _handle_manage_skill(
                         "update requires at least one changed field",
                         action=normalized,
                     )
-                _validate_skill_tiers(updates)
+                _validate_skill_runtime(updates)
                 updated = await skills.a_update_full(skill.id, **updates)
                 return json.dumps(
                     {"ok": True, "action": normalized, "skill": _skill_payload(updated)},

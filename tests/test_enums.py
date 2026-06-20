@@ -7,7 +7,6 @@ from brain.platform.db.enums import (
     MemoryScope,
     MemoryTier,
     MemoryType,
-    ModelTier,
     Outcome,
     ScoutLane,
     ScoutStatus,
@@ -22,7 +21,6 @@ from brain.platform.db.enums import (
 
 def test_strenum_values():
     assert Maturity.EMERGING == "emerging"
-    assert ModelTier.HIGH == "high"
     assert ThinkingTier.HIGH == "high"
     assert Outcome.SUCCESS == "success"
     assert MemoryType.LESSON == "lesson"
@@ -46,10 +44,6 @@ def test_strenum_is_str():
 
 def test_all_maturity_values():
     assert set(Maturity) == {"emerging", "developing", "proficient", "expert"}
-
-def test_all_model_tiers():
-    assert set(ModelTier) == {"high", "medium", "low", "local"}
-
 
 def test_run_enum_values_match_db_strings():
     assert {status.value for status in RunStatus} == {

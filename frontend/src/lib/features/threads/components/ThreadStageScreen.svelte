@@ -613,7 +613,7 @@
   function setRunSetting(key: string, value: string) {
     applyRunSetting(key, value, {
       setExecutionProfile: (nextValue) => cortex.setExecutionProfile(nextValue),
-      setIntelligenceTier: (nextValue) => cortex.setIntelligenceTier(nextValue),
+      setModel: (nextValue) => cortex.setModel(nextValue),
       setEffortLevel: (nextValue) => cortex.setEffortLevel(nextValue),
     });
   }
@@ -1148,11 +1148,11 @@
         sendLabel={activeRunSendLabel()}
         settingsGroups={buildRunSettingsGroups({
           mode: cortex.executionProfile,
-          intelligence: cortex.intelligenceTier,
+          model: cortex.model,
           effort: cortex.effortLevel,
         })}
         onSettingsChange={setRunSetting}
-        settingsAriaLabel="Mode, Intelligence, and Effort"
+        settingsAriaLabel="Mode, Model, and Effort"
         secondaryIntentOptions={activeFastRun() ? STEERING_INTENT_OPTIONS : undefined}
         secondaryIntentValue={activeFastRun() ? activeRunMessageIntent : undefined}
         secondaryIntentAriaLabel="Message intent"

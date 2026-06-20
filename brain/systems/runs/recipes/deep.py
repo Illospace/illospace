@@ -8,7 +8,6 @@ import re
 from collections.abc import Mapping
 from typing import Any, Iterable
 
-from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.personality import agent_profile_prompt_section, soul_prompt_section
 from brain.systems.runs.assignments import AcceptanceCriteria, EvidenceRequirement, WorkerAssignment
 from brain.systems.runs.domain import AgentRun, AgentRunArtifact, ArtifactType, RunProfile, RunRecipe
@@ -24,7 +23,7 @@ from brain.systems.runs.recipes.phase_barrier import (
     review_completed_phase,
 )
 from brain.systems.runs.recipes.scout import ScoutHandoff, scout_request
-from brain.systems.runs.recipes.shared import workspace_root_from_ref
+from brain.systems.runs.recipes.shared import default_run_model, workspace_root_from_ref
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.verification.evidence import (
     artifact_payloads,
@@ -529,7 +528,7 @@ class DeepRecipe(BaseRunRecipe):
 
     async def _synthesize_with_coordinator(self, runtime: RunRuntime, node_results: dict[str, dict[str, Any]]) -> str:
         fallback = self._synthesize_output(node_results)
-        model, thinking = _coordinator_model_and_thinking(runtime)
+        model, thinking = await _coordinator_model_and_thinking(runtime)
         system_prompt = "\n\n".join((
             soul_prompt_section(),
             agent_profile_prompt_section(),
@@ -781,13 +780,11 @@ def _child_output(artifacts: list[Any]) -> str:
     return latest_final or latest_worker
 
 
-def _coordinator_model_and_thinking(runtime: RunRuntime) -> tuple[str, str]:
+async def _coordinator_model_and_thinking(runtime: RunRuntime) -> tuple[str, str]:
     model_policy = dict(runtime.request.model_policy or {})
     model = model_policy.get("coordinator_model") or model_policy.get("model")
     if not model:
-        model = get_model_for_tier(
-            model_policy.get("coordinator_tier") or model_policy.get("tier") or "high",
-            include_provider_prefix=True,
+        model = await default_run_model(
             user_id=runtime.request.user_id,
             org_id=runtime.request.org_id,
         )

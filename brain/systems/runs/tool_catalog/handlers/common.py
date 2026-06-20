@@ -45,8 +45,6 @@ from brain.systems.runs.tool_catalog.registry import (
 
 logger = logging.getLogger("agent")
 
-_MODEL_TIERS = {"high", "medium", "low", "local"}
-_MODEL_TIER_ALIASES: dict[str, str] = {}
 _REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh"}
 
 # Workspace root — configurable, defaults to project root
@@ -379,7 +377,6 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
             "required": ["name", "procedure"],
             "optional": [
                 "description",
-                "model_tier",
                 "thinking_tier",
                 "triggers",
                 "guardrails",
@@ -393,17 +390,17 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         },
         "create_many": {
             "required": ["skills"],
-            "optional": ["model_tier", "thinking_tier", "create_as_package", "user_requested"],
+            "optional": ["thinking_tier", "create_as_package", "user_requested"],
             "effect": "create multiple durable slash-routable skills in one tool call",
         },
         "update": {
             "required": ["skill_id or skill_name", "at least one changed field"],
-            "optional": ["name", "description", "procedure", "model_tier", "thinking_tier", "triggers", "guardrails", "pitfalls", "refinements"],
+            "optional": ["name", "description", "procedure", "thinking_tier", "triggers", "guardrails", "pitfalls", "refinements"],
             "effect": "update a skill and bump version when procedure changes",
         },
         "edit": {
             "required": ["skill_id or skill_name", "at least one changed field"],
-            "optional": ["name", "description", "procedure", "model_tier", "thinking_tier", "triggers", "guardrails", "pitfalls", "refinements"],
+            "optional": ["name", "description", "procedure", "thinking_tier", "triggers", "guardrails", "pitfalls", "refinements"],
             "effect": "alias for update",
         },
         "archive": {"required": ["skill_id or skill_name"], "optional": [], "effect": "archive a skill"},

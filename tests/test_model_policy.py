@@ -33,40 +33,36 @@ class TestModelPolicy:
         from brain.platform.providers.model_policy import get_default_model
 
         with patch("brain.platform.providers.model_policy.get_active_provider", return_value="openai"):
-            assert get_default_model() == "openai/gpt-5.4"
+            assert get_default_model() == "openai/gpt-5.5"
 
-    def test_openai_tier_map_uses_native_defaults(self):
-        from brain.platform.providers.model_policy import get_provider_model_map
+    def test_openai_model_options_use_native_defaults(self):
+        from brain.platform.providers.model_policy import get_provider_model_options
 
-        model_map = get_provider_model_map("openai")
-        assert model_map["high"] == "gpt-5.5"
-        assert model_map["medium"] == "gpt-5.4"
-        assert model_map["low"] == "gpt-5-mini"
+        options = get_provider_model_options("openai")
+        assert "gpt-5.5" in options
+        assert "gpt-5.4" in options
+        assert "gpt-5-mini" in options
 
     @pytest.mark.asyncio
-    async def test_org_provider_model_map_overrides_defaults(self):
-        from brain.platform.providers.model_policy import async_get_provider_model_map
+    async def test_org_default_model_overrides_default(self):
+        from brain.platform.providers.model_policy import async_get_default_model
 
         def execute_side_effect(stmt, params=None):
             sql = str(stmt)
             if "SELECT org_id FROM users" in sql:
                 return _AsyncMappingResult(first={"org_id": "org-1"})
-            if "FROM org_provider_model_mappings" in sql:
-                return _AsyncMappingResult(all=[
-                    {"intelligence_level": "medium", "model_name": "gpt-5.5"},
-                    {"intelligence_level": "low", "model_name": "gpt-5.5-mini"},
-                ])
+            if "SELECT memory_model_config FROM orgs" in sql:
+                return _AsyncMappingResult(first={"memory_model_config": {"default_model": "openai/gpt-5.5"}})
             raise AssertionError(f"Unexpected SQL: {sql}")
 
-        model_map = await async_get_provider_model_map(
+        model = await async_get_default_model(
             _AsyncPolicySession(execute_side_effect),
             "openai",
+            include_provider_prefix=False,
             user_id="user-1",
         )
 
-        assert model_map["medium"] == "gpt-5.5"
-        assert model_map["low"] == "gpt-5.5-mini"
-        assert model_map["high"] == "gpt-5.5"
+        assert model == "gpt-5.5"
 
     def test_infer_provider_recognizes_new_openai_models(self):
         from brain.platform.providers.model_policy import infer_provider_from_model
@@ -114,11 +110,11 @@ class TestModelPolicy:
 
         assert abs(cost - 1.771059) < 0.000001
 
-    def test_unknown_model_still_defaults_to_medium_pricing(self):
+    def test_unknown_model_still_defaults_to_default_pricing(self):
         from brain.platform.providers.model_policy import calculate_model_cost
 
         cost = calculate_model_cost("unknown-model", 1_000_000, 1_000_000)
-        assert abs(cost - 17.5) < 0.001
+        assert abs(cost - 35.0) < 0.001
 
     def test_infer_provider_from_prefixed_model(self):
         from brain.platform.providers.model_policy import infer_provider_from_model
@@ -127,22 +123,21 @@ class TestModelPolicy:
         assert infer_provider_from_model("anthropic/claude-sonnet-4-6") == "anthropic"
 
     @pytest.mark.asyncio
-    async def test_resolve_skill_runtime_uses_tiers_with_selected_provider(self):
+    async def test_resolve_skill_runtime_uses_thinking_with_selected_provider(self):
         from brain.platform.providers.model_policy import async_resolve_skill_model, async_resolve_skill_runtime
 
         row = {
-            "model_tier": "high",
             "thinking_tier": "xhigh",
         }
 
         def execute_side_effect(stmt, params=None):
             sql = str(stmt)
-            if "SELECT model_tier, thinking_tier" in sql:
+            if "SELECT thinking_tier" in sql:
                 return _AsyncMappingResult(first=row)
             if "SELECT org_id FROM users" in sql:
                 return _AsyncMappingResult(first={"org_id": "org-1"})
-            if "FROM org_provider_model_mappings" in sql:
-                return _AsyncMappingResult(all=[])
+            if "SELECT memory_model_config FROM orgs" in sql:
+                return _AsyncMappingResult(first={"memory_model_config": {}})
             raise AssertionError(f"Unexpected SQL: {sql}")
 
         session = _AsyncPolicySession(execute_side_effect)
@@ -159,10 +154,10 @@ class TestModelPolicy:
         from brain.systems.runs.modeling import resolve_model
 
         with patch("brain.systems.runs.modeling.resolve_skill_model", side_effect=RuntimeError("boom")), \
-             patch("brain.systems.runs.modeling.get_default_model", return_value="openai/gpt-5.4"):
+             patch("brain.systems.runs.modeling.get_default_model", return_value="openai/gpt-5.5"):
             model, thinking = resolve_model("missing-skill", user_id="user-1", preferred_provider="openai")
 
-        assert model == "openai/gpt-5.4"
+        assert model == "openai/gpt-5.5"
         assert thinking == "medium"
 
     @pytest.mark.asyncio
@@ -216,53 +211,38 @@ class TestModelPolicy:
             assert resolve_default_provider() == "openai"
 
     @pytest.mark.asyncio
-    async def test_get_provider_model_maps_returns_all_providers(self):
-        from brain.platform.providers.model_policy import async_get_provider_model_maps
+    async def test_get_provider_model_catalogs_returns_all_providers(self):
+        from brain.platform.providers.model_policy import async_get_provider_model_catalogs
 
-        def execute_side_effect(stmt, params=None):
-            sql = str(stmt)
-            params = params or {}
-            if "SELECT org_id FROM users" in sql:
-                return _AsyncMappingResult(first={"org_id": "org-1"})
-            if "FROM org_provider_model_mappings" in sql:
-                return _AsyncMappingResult(all=(
-                    [{"intelligence_level": "high", "model_name": "gpt-5.5-pro"}]
-                    if params.get("provider") == "openai"
-                    else []
-                ))
-            raise AssertionError(f"Unexpected SQL: {sql}")
-
-        mappings = await async_get_provider_model_maps(
-            _AsyncPolicySession(execute_side_effect),
+        catalogs = await async_get_provider_model_catalogs(
+            _AsyncPolicySession(lambda _stmt, _params=None: _AsyncMappingResult()),
             user_id="user-1",
         )
 
-        assert mappings["openai"]["high"] == "gpt-5.5-pro"
-        assert mappings["anthropic"]["high"] == "claude-opus-4-6"
+        assert catalogs["openai"]["default"] == "gpt-5.5"
+        assert "gpt-5.5" in catalogs["openai"]["options"]
+        assert catalogs["anthropic"]["default"] == "claude-sonnet-4-6"
 
     @pytest.mark.asyncio
-    async def test_org_provider_model_map_strips_legacy_provider_prefixes(self):
-        from brain.platform.providers.model_policy import async_get_provider_model_map
+    async def test_org_default_model_strips_provider_prefixes(self):
+        from brain.platform.providers.model_policy import async_get_default_model
 
         def execute_side_effect(stmt, params=None):
             sql = str(stmt)
             if "SELECT org_id FROM users" in sql:
                 return _AsyncMappingResult(first={"org_id": "org-1"})
-            if "FROM org_provider_model_mappings" in sql:
-                return _AsyncMappingResult(all=[
-                    {"intelligence_level": "medium", "model_name": "openai:gpt-5.4"},
-                    {"intelligence_level": "low", "model_name": "openai/gpt-5.4-mini"},
-                ])
+            if "SELECT memory_model_config FROM orgs" in sql:
+                return _AsyncMappingResult(first={"memory_model_config": {"default_model": "openai:gpt-5.4-mini"}})
             raise AssertionError(f"Unexpected SQL: {sql}")
 
-        model_map = await async_get_provider_model_map(
+        model = await async_get_default_model(
             _AsyncPolicySession(execute_side_effect),
             "openai",
+            include_provider_prefix=False,
             user_id="user-1",
         )
 
-        assert model_map["medium"] == "gpt-5.4"
-        assert model_map["low"] == "gpt-5.4-mini"
+        assert model == "gpt-5.4-mini"
 
     def test_llm_request_normalized_model_strips_colon_prefix(self):
         from brain.platform.integrations.providers import LLMRequest

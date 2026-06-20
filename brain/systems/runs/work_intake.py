@@ -16,7 +16,6 @@ from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
 from brain.systems.runs.store import AsyncAgentRunStore
 
-_VALID_MODEL_TIERS = {"low", "medium", "high"}
 _VALID_EFFORT_LEVELS = {"low", "medium", "high", "xhigh"}
 _VALID_MODEL_PROVIDERS = {"anthropic", "openai"}
 THREAD_DISCUSSION_SURFACE = "thread_discussion"
@@ -180,12 +179,6 @@ def metadata_choice(
 def model_policy_from_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
     metadata = metadata or {}
     policy = {
-        "tier": metadata_choice(
-            metadata,
-            ("model_tier", "intelligence", "intelligence_tier"),
-            _VALID_MODEL_TIERS,
-            "high",
-        ),
         "thinking": metadata_choice(
             metadata,
             ("thinking_tier", "effort", "effort_level", "thinking"),

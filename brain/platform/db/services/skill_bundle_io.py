@@ -84,7 +84,6 @@ class _SkillBundleIOBase:
         manifest["routing"] = routing
 
         runtime = dict(manifest.get("runtime") or {})
-        runtime["default_model_tier"] = skill.model_tier
         runtime["default_thinking_tier"] = skill.thinking_tier
         manifest["runtime"] = runtime
 
@@ -389,7 +388,6 @@ class AsyncSkillBundleIOService(_SkillBundleIOBase):
                 "embedding_text": f"{skill.name}: {skill.description or ''}".strip(),
             },
             "runtime": {
-                "default_model_tier": skill.model_tier,
                 "default_thinking_tier": skill.thinking_tier,
             },
             "loading": {
@@ -590,8 +588,6 @@ class AsyncSkillBundleIOService(_SkillBundleIOBase):
             manifest_values = _manifest_list(parsed, field_name)
             if manifest_values is not None:
                 setattr(skill, field_name, manifest_values)
-        if parsed.manifest.runtime.default_model_tier:
-            skill.model_tier = parsed.manifest.runtime.default_model_tier
         if parsed.manifest.runtime.default_thinking_tier:
             skill.thinking_tier = parsed.manifest.runtime.default_thinking_tier
         return skill

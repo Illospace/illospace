@@ -7,7 +7,7 @@ the DAG depth.  Falls back through three levels:
 2. **Aggressive** — tighter "durable facts only" prompt, on validation failure.
 3. **Deterministic** — algorithmic line-scoring with no LLM call.
 
-When callers do not pass a model, compaction uses the configured low-tier
+When callers do not pass a model, compaction uses the configured default
 model from :mod:`brain.platform.providers.model_policy`.
 """
 
@@ -93,9 +93,9 @@ def compress_memories(
         ``{"content": str, "breadcrumbs": list[dict], "model_used": str, "level": str}``
     """
     if model is None:
-        from brain.platform.providers.model_policy import get_model_for_tier
+        from brain.platform.providers.model_policy import get_default_model
 
-        model = get_model_for_tier("low", include_provider_prefix=True, user_id=user_id)
+        model = get_default_model(include_provider_prefix=True, user_id=user_id)
 
     combined_text = "\n---\n".join(contents)
 

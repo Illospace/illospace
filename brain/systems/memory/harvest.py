@@ -273,10 +273,9 @@ def extract_harvest_items(
     if not messages:
         return []
     if model is None:
-        from brain.platform.providers.model_policy import get_model_for_tier
+        from brain.platform.providers.model_policy import get_default_model
 
-        model = get_model_for_tier(
-            "low",
+        model = get_default_model(
             include_provider_prefix=True,
             user_id=user_id,
             org_id=org_id,

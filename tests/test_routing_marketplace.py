@@ -91,19 +91,17 @@ async def test_candidate_exclusion_keeps_runtime_openai_only():
          patch("brain.systems.routing.marketplace.async_resolve_skill_routing_profile", return_value=SkillRoutingProfile(
              skill_name="develop",
              reasoning_effort="high",
-             model_tier="medium",
              thinking_tier="high",
          )), \
          patch("brain.systems.routing.marketplace.async_resolve_skill_runtime", return_value=SkillRuntimeConfig(
              provider="openai",
              model_name="gpt-5.4",
              reasoning_effort="medium",
-             model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.async_get_provider_model_map", side_effect=lambda _session, provider, **kwargs: {
-             "anthropic": {"high": "claude-opus-4-6", "medium": "claude-sonnet-4-6"},
-             "openai": {"high": "gpt-5.4-pro", "medium": "gpt-5.4"},
+         patch("brain.systems.routing.marketplace.async_get_default_model", side_effect=lambda _session, provider, **kwargs: {
+             "anthropic": "claude-sonnet-4-6",
+             "openai": "gpt-5.4",
          }[provider]), \
          patch("brain.systems.routing.marketplace._load_latest_health_snapshot", side_effect=load_snapshot), \
          patch("brain.systems.routing.marketplace._load_verifier_evidence", return_value={"sample_count": 12, "success_rate": 0.92}), \
@@ -144,17 +142,15 @@ async def test_candidate_pool_preserves_explicit_anthropic_route():
          patch("brain.systems.routing.marketplace.async_resolve_skill_routing_profile", return_value=SkillRoutingProfile(
              skill_name="develop",
              reasoning_effort="high",
-             model_tier="medium",
              thinking_tier="high",
          )), \
          patch("brain.systems.routing.marketplace.async_resolve_skill_runtime", return_value=SkillRuntimeConfig(
              provider="anthropic",
              model_name="claude-sonnet-4-6",
              reasoning_effort="medium",
-             model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.async_get_provider_model_map", return_value={"medium": "claude-sonnet-4-6"}), \
+         patch("brain.systems.routing.marketplace.async_get_default_model", return_value="claude-sonnet-4-6"), \
          patch("brain.systems.routing.marketplace._load_latest_health_snapshot", return_value=None), \
          patch("brain.systems.routing.marketplace._load_verifier_evidence", return_value={"sample_count": 0, "success_rate": None}), \
          patch("brain.systems.services.runtime_introspection.async_get_provider_auth_status", return_value={"authenticated": True}):
@@ -176,7 +172,7 @@ async def test_candidate_pool_preserves_explicit_anthropic_route():
 
 
 @pytest.mark.asyncio
-async def test_active_within_provider_canary_uses_stronger_openai_model():
+async def test_active_within_provider_canary_uses_configured_openai_model():
     from brain.platform.providers.model_policy import ProviderResolution, SkillRoutingProfile, SkillRuntimeConfig
     from brain.systems.routing.marketplace import resolve_marketplace_routing
 
@@ -251,19 +247,17 @@ async def test_active_within_provider_canary_uses_stronger_openai_model():
          patch("brain.systems.routing.marketplace.async_resolve_skill_routing_profile", return_value=SkillRoutingProfile(
              skill_name="develop",
              reasoning_effort="high",
-             model_tier="high",
              thinking_tier="high",
          )), \
          patch("brain.systems.routing.marketplace.async_resolve_skill_runtime", return_value=SkillRuntimeConfig(
              provider="openai",
              model_name="gpt-5.4",
              reasoning_effort="medium",
-             model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.async_get_provider_model_map", side_effect=lambda _session, provider, **kwargs: {
-             "anthropic": {"high": "claude-opus-4-6", "medium": "claude-sonnet-4-6"},
-             "openai": {"high": "gpt-5.4-pro", "medium": "gpt-5.4"},
+         patch("brain.systems.routing.marketplace.async_get_default_model", side_effect=lambda _session, provider, **kwargs: {
+             "anthropic": "claude-sonnet-4-6",
+             "openai": "gpt-5.4-pro",
          }[provider]), \
          patch("brain.systems.routing.marketplace._load_latest_health_snapshot", side_effect=load_snapshot), \
          patch("brain.systems.routing.marketplace._load_verifier_evidence", side_effect=load_verifier), \
@@ -356,19 +350,17 @@ async def test_active_canary_requires_eval_gate_before_switching_models():
          patch("brain.systems.routing.marketplace.async_resolve_skill_routing_profile", return_value=SkillRoutingProfile(
              skill_name="develop",
              reasoning_effort="high",
-             model_tier="high",
              thinking_tier="high",
          )), \
          patch("brain.systems.routing.marketplace.async_resolve_skill_runtime", return_value=SkillRuntimeConfig(
              provider="openai",
              model_name="gpt-5.4",
              reasoning_effort="medium",
-             model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.async_get_provider_model_map", side_effect=lambda _session, provider, **kwargs: {
-             "openai": {"high": "gpt-5.4-pro", "medium": "gpt-5.4"},
-             "anthropic": {"high": "claude-opus-4-6", "medium": "claude-sonnet-4-6"},
+         patch("brain.systems.routing.marketplace.async_get_default_model", side_effect=lambda _session, provider, **kwargs: {
+             "openai": "gpt-5.4-pro",
+             "anthropic": "claude-sonnet-4-6",
          }[provider]), \
          patch("brain.systems.routing.marketplace._load_latest_health_snapshot", side_effect=lambda _session, provider, model: snapshots.get((provider, model))), \
          patch("brain.systems.routing.marketplace._load_verifier_evidence", return_value={"sample_count": 24, "success_rate": 0.98}), \
@@ -423,19 +415,17 @@ async def test_active_within_provider_canary_falls_back_with_clear_reason_when_s
          patch("brain.systems.routing.marketplace.async_resolve_skill_routing_profile", return_value=SkillRoutingProfile(
              skill_name="develop",
              reasoning_effort="high",
-             model_tier="high",
              thinking_tier="high",
          )), \
          patch("brain.systems.routing.marketplace.async_resolve_skill_runtime", return_value=SkillRuntimeConfig(
              provider="openai",
              model_name="gpt-5.4",
              reasoning_effort="medium",
-             model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.async_get_provider_model_map", side_effect=lambda _session, provider, **kwargs: {
-             "anthropic": {"high": "claude-opus-4-6", "medium": "claude-sonnet-4-6"},
-             "openai": {"high": "gpt-5.4-pro", "medium": "gpt-5.4"},
+         patch("brain.systems.routing.marketplace.async_get_default_model", side_effect=lambda _session, provider, **kwargs: {
+             "anthropic": "claude-sonnet-4-6",
+             "openai": "gpt-5.4",
          }[provider]), \
          patch("brain.systems.routing.marketplace._load_latest_health_snapshot", return_value=None), \
          patch("brain.systems.routing.marketplace._load_verifier_evidence", return_value={"sample_count": 0, "success_rate": None}), \
@@ -477,19 +467,17 @@ async def test_scoring_falls_back_to_legacy_when_evidence_is_sparse():
          patch("brain.systems.routing.marketplace.async_resolve_skill_routing_profile", return_value=SkillRoutingProfile(
              skill_name="coordinate",
              reasoning_effort=None,
-             model_tier="medium",
              thinking_tier="medium",
          )), \
          patch("brain.systems.routing.marketplace.async_resolve_skill_runtime", return_value=SkillRuntimeConfig(
              provider="openai",
              model_name="gpt-5.4",
              reasoning_effort="medium",
-             model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.async_get_provider_model_map", side_effect=lambda _session, provider, **kwargs: {
-             "anthropic": {"medium": "claude-sonnet-4-6"},
-             "openai": {"medium": "gpt-5.4"},
+         patch("brain.systems.routing.marketplace.async_get_default_model", side_effect=lambda _session, provider, **kwargs: {
+             "anthropic": "claude-sonnet-4-6",
+             "openai": "gpt-5.4",
          }[provider]), \
          patch("brain.systems.routing.marketplace._load_latest_health_snapshot", return_value=None), \
          patch("brain.systems.routing.marketplace._load_verifier_evidence", return_value={"sample_count": 0, "success_rate": None}), \

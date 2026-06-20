@@ -17,7 +17,6 @@ from sqlalchemy import (
     Text,
     text,
     func,
-    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -27,7 +26,6 @@ from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin
 __all__ = [
     "ConsolidationRun",
     "DailyMetrics",
-    "OrgProviderModelMapping",
     "RetrievalLog",
     "RetrievalDecision",
     "RetrievalItemFeedback",
@@ -123,32 +121,6 @@ class DailyMetrics(Base):
     )
     reflection_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     behavioral_adjustments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-
-class OrgProviderModelMapping(Base, CreatedAtMixin):
-    """Org-level mapping from intelligence tier to concrete provider model."""
-
-    __tablename__ = "org_provider_model_mappings"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    org_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False),
-        ForeignKey("orgs.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    provider: Mapped[str] = mapped_column(String(50), nullable=False)
-    intelligence_level: Mapped[str] = mapped_column(String(20), nullable=False)
-    model_name: Mapped[str] = mapped_column(String(120), nullable=False)
-
-    __table_args__ = (
-        UniqueConstraint(
-            "org_id",
-            "provider",
-            "intelligence_level",
-            name="uq_org_provider_model_mappings_org_provider_level",
-        ),
-    )
 
 
 class RetrievalLog(Base):

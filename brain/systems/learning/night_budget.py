@@ -618,7 +618,7 @@ def _budget_decision(
         reason=reason,
         cost_estimate=LearningCostEstimate(
             estimated_tokens=candidate.estimated_tokens,
-            model_tier="night_budget",
+            model_class="night_budget",
             provider_location=ProviderLocation.LOCAL,
             org_id=org_id,
             user_id=user_id,
@@ -798,7 +798,7 @@ def build_night_budget_plan(
             lane=BudgetLane.NIGHT,
             task_type=str(work_type),
             estimated_tokens=cost,
-            model_tier="night_budget",
+            model_class="night_budget",
             provider_location=ProviderLocation.LOCAL,
             org_id=org_id,
             user_id=user_id,

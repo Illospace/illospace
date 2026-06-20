@@ -170,7 +170,7 @@ def enforce_cli_gate(skill_creator_ack: bool) -> tuple[bool, Optional[dict]]:
             "instructions": (
                 "Before creating or modifying any skill, you MUST: "
                 "1) Read the skill creation guidelines from brain_skills tool, "
-                "2) Follow the skill structure and principles (name, procedure, pitfalls, model_tier, thinking_tier), "
+                "2) Follow the skill structure and principles (name, procedure, pitfalls, thinking_tier), "
                 "3) Re-run this command with --skill-creator-ack to confirm compliance. "
                 "This gate is mandatory and cannot be bypassed."
             ),

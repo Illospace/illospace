@@ -9,13 +9,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
 from brain.systems.runs.events import run_event
 from brain.systems.runs.graph import DeepPlan, RunNode
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
-from brain.systems.runs.recipes.shared import workspace_root_from_ref
+from brain.systems.runs.recipes.shared import default_run_model, workspace_root_from_ref
 
 logger = logging.getLogger(__name__)
 
@@ -137,9 +136,7 @@ async def review_completed_phase(
     model_policy = dict(getattr(runtime.request, "model_policy", {}) or {})
     model = model_policy.get("coordinator_model") or model_policy.get("model")
     if not model:
-        model = get_model_for_tier(
-            model_policy.get("coordinator_tier") or model_policy.get("tier") or "high",
-            include_provider_prefix=True,
+        model = await default_run_model(
             user_id=getattr(runtime.request, "user_id", None),
             org_id=getattr(runtime.request, "org_id", None),
         )

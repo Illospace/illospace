@@ -9,10 +9,9 @@ from brain.systems.runs.engine import RunRecipeResult, RunRuntime, cancel_event_
 from brain.systems.runs.tools import wrap_tool_handlers
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
-from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 from brain.systems.runs.recipes.base import BaseRunRecipe
-from brain.systems.runs.recipes.shared import project_runtime_workspace_from_ref
+from brain.systems.runs.recipes.shared import default_run_model, project_runtime_workspace_from_ref
 from brain.systems.runs.recipes.surface_guidance import response_surface_guidance
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
 from brain.systems.personality import agent_profile_prompt_section, soul_prompt_section
@@ -125,9 +124,7 @@ class FastRecipe(BaseRunRecipe):
         project_workspace = project_runtime_workspace_from_ref(runtime.request.workspace_ref)
         workspace_root = project_workspace.workspace_root
         model_policy = dict(runtime.request.model_policy or {})
-        model = model_policy.get("model") or get_model_for_tier(
-            model_policy.get("tier") or "high",
-            include_provider_prefix=True,
+        model = model_policy.get("model") or await default_run_model(
             user_id=runtime.request.user_id,
             org_id=runtime.request.org_id,
         )
