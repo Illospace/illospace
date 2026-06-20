@@ -70,6 +70,35 @@ async def test_provider_auth_status_reports_user_openai_api_key_runtime():
 
 
 @pytest.mark.asyncio
+async def test_openai_connection_reports_personal_and_org_key_flags(monkeypatch):
+    from types import SimpleNamespace
+
+    import brain.systems.runtime_settings.auth as auth_settings
+
+    monkeypatch.setattr(
+        auth_settings,
+        "async_get_provider_auth_status",
+        AsyncMock(return_value={
+            "runtime_key_available": True,
+            "method": "api_key",
+            "runtime_key_source": "user_openai",
+            "has_codex_subscription": True,
+            "has_org_db_key": True,
+        }),
+    )
+
+    connection = await auth_settings.async_get_openai_connection(
+        MagicMock(),
+        SimpleNamespace(id="user-1", org_id="org-1"),
+    )
+
+    assert connection.status == "connected"
+    assert connection.source == "user_openai"
+    assert connection.has_personal_connection is True
+    assert connection.has_org_key is True
+
+
+@pytest.mark.asyncio
 async def test_runtime_settings_tool_returns_model_mappings_and_active_status():
     import brain.systems.services.runtime_introspection as runtime_settings_service
     from brain.app.mcp.server import tool_runtime_settings
@@ -401,6 +430,62 @@ async def test_store_openai_api_key_uses_personal_runtime_connection(monkeypatch
     store_org_connection.assert_not_called()
     session.flush.assert_awaited_once()
     session.refresh.assert_awaited_once_with(user)
+
+
+@pytest.mark.asyncio
+async def test_store_openai_org_api_key_rotates_workspace_runtime_key(monkeypatch):
+    from types import SimpleNamespace
+
+    import brain.systems.runtime_settings.auth as auth_settings
+    from brain.systems.runtime_settings.schemas import RuntimeConnectionRead
+
+    session = MagicMock()
+    store_org_connection = AsyncMock(return_value=True)
+    store_user_connection = AsyncMock(side_effect=AssertionError("org key must not replace personal key"))
+    read_connection = AsyncMock(return_value=RuntimeConnectionRead(
+        status="connected",
+        setup_required=False,
+        method="api_key",
+        source="org_main",
+        label="OpenAI API key",
+        has_org_key=True,
+    ))
+
+    monkeypatch.setattr(auth_settings, "parse_provider_connect_token", lambda token, provider: (token, "api_key"))
+    monkeypatch.setattr(auth_settings, "verify_provider_api_key", lambda *args, **kwargs: None)
+    monkeypatch.setattr(auth_settings, "_async_store_org_openai_api_key", store_org_connection)
+    monkeypatch.setattr(auth_settings, "async_set_user_codex_connection", store_user_connection)
+    monkeypatch.setattr(auth_settings, "async_get_openai_connection", read_connection)
+
+    user = SimpleNamespace(id="owner-1", org_id="org-1", role="owner")
+
+    result = await auth_settings.async_connect_openai_org_api_key(session, user, "sk-org-rotated")
+
+    assert result.has_org_key is True
+    store_org_connection.assert_awaited_once()
+    assert store_org_connection.await_args.args == (session, user, "sk-org-rotated")
+    store_user_connection.assert_not_called()
+    read_connection.assert_awaited_once_with(session, user)
+
+
+@pytest.mark.asyncio
+async def test_store_openai_org_api_key_rejects_members(monkeypatch):
+    from types import SimpleNamespace
+
+    import brain.systems.runtime_settings.auth as auth_settings
+
+    store_org_connection = AsyncMock()
+    monkeypatch.setattr(auth_settings, "_async_store_org_openai_api_key", store_org_connection)
+
+    with pytest.raises(Exception) as exc:
+        await auth_settings.async_connect_openai_org_api_key(
+            MagicMock(),
+            SimpleNamespace(id="member-1", org_id="org-1", role="member"),
+            "sk-org-rotated",
+        )
+
+    assert exc.value.status_code == 403
+    store_org_connection.assert_not_called()
 
 
 @pytest.mark.asyncio

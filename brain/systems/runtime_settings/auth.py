@@ -112,6 +112,8 @@ async def async_get_openai_connection(session: AsyncSession, user: User) -> Runt
         source=source,
         label=_connection_label(method),
         detail=None if connected else "Connect Codex or an OpenAI API key to run models.",
+        has_personal_connection=bool(status.get("has_codex_subscription")),
+        has_org_key=bool(status.get("has_org_db_key")),
     )
 
 
@@ -319,6 +321,35 @@ async def async_connect_openai_api_key(
     api_key: str,
 ) -> RuntimeConnectionRead:
     return await async_store_openai_connection(session, user, api_key.strip(), label="OpenAI API key")
+
+
+async def async_connect_openai_org_api_key(
+    session: AsyncSession,
+    user: User,
+    api_key: str,
+) -> RuntimeConnectionRead:
+    if not _can_manage_installation_memory(user):
+        raise HTTPException(
+            status_code=403,
+            detail="You need owner or admin access to manage the workspace OpenAI key",
+        )
+    token = (api_key or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Paste an OpenAI API key")
+    try:
+        api_token, method = parse_provider_connect_token(token, OPENAI_PROVIDER)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if method != "api_key" or not api_token.startswith("sk-"):
+        raise HTTPException(status_code=400, detail="Workspace runtime needs a standard OpenAI API key")
+    try:
+        verify_provider_api_key(api_token, OPENAI_PROVIDER)
+    except Exception as exc:  # pragma: no cover - exact SDK exception type varies.
+        logger.warning("OpenAI workspace credential verification failed: %s", exc)
+        raise HTTPException(status_code=400, detail=f"OpenAI credential verification failed: {exc}") from exc
+
+    await _async_store_org_openai_api_key(session, user, api_token)
+    return await async_get_openai_connection(session, user)
 
 
 async def async_connect_openai_embedding_api_key(

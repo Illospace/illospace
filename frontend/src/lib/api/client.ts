@@ -1660,6 +1660,11 @@ export const api = {
     fetchJson<any>('/api/runtime-settings/update', { method: 'POST' }),
   connectRuntimeOpenAIKey: (data: { api_key: string }) =>
     fetchJson<any>('/api/runtime-settings/connection/openai/api-key', { method: 'POST', body: JSON.stringify(data) }),
+  connectRuntimeOpenAIOrgKey: (data: { api_key: string }) =>
+    fetchJson<any>('/api/runtime-settings/connection/openai/org-api-key', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   connectRuntimeOpenAIEmbeddingKey: (data: { api_key: string }) =>
     fetchJson<any>('/api/runtime-settings/connection/openai/embedding-api-key', {
       method: 'POST',

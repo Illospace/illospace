@@ -19,6 +19,8 @@ export interface RuntimeSettings {
     source?: string | null;
     label?: string | null;
     detail?: string | null;
+    has_personal_connection?: boolean;
+    has_org_key?: boolean;
   };
   models: {
     low: string;
