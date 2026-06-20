@@ -22,6 +22,7 @@ from brain.app.api.routers.agent_mcp_domains import DOMAIN_TOOL_HANDLERS
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.mentions import classify_mention_intent
 from brain.systems.cortex.thread_links import thread_id_from_reference
+from brain.systems.cortex.project_context.search import search_project_contexts
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
@@ -133,7 +134,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             {
                 "capability": {
                     "type": "string",
-                    "description": "Read capability name, such as workspace.search, thread.get, handoff.get, team.members.list, domain.inspect, or capabilities.",
+                    "description": "Read capability name, such as workspace.search, project_contexts.search, thread.get, handoff.get, team.members.list, domain.inspect, or capabilities.",
                 },
                 "arguments": {
                     "type": "object",
@@ -443,8 +444,16 @@ async def _tool_submit(
 
 READ_CAPABILITIES: dict[str, dict[str, Any]] = {
     "workspace.search": {
-        "description": "Search the Illo workspace for related ideas, threads, and shared work.",
+        "description": "Search the Illo workspace for related Project Contexts, ideas, threads, and shared work.",
         "arguments": {"query": "string", "limit": "integer"},
+    },
+    "project_contexts.search": {
+        "description": "Search reusable Project Context profiles and attached project context resources visible to the bridge user.",
+        "arguments": {
+            "query": "string",
+            "limit": "integer",
+            "include_inactive": "boolean",
+        },
     },
     "thread.get": {
         "description": "Read messages from an existing Illo idea/thread.",
@@ -581,6 +590,15 @@ async def _tool_read(
             principal,
             query=_required_capability_string(capability_arguments, "query", capability=capability),
             limit=int(capability_arguments.get("limit") or 10),
+        )
+    if capability == "project_contexts.search":
+        return await search_project_contexts(
+            db,
+            org_id=principal.org_id,
+            user_id=principal.owner_user_id,
+            query=capability_arguments.get("query"),
+            limit=int(capability_arguments.get("limit") or 10),
+            include_inactive=bool(capability_arguments.get("include_inactive", False)),
         )
     if capability == "thread.get":
         return await external_agents.get_thread(

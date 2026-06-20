@@ -21,7 +21,14 @@ from brain.platform.db.models.external_agent import (
     ExternalAgentTaskRow,
 )
 from brain.systems.external_agents import service
-from brain.platform.db.models.idea import Idea, IdeaThread, UserMention
+from brain.platform.db.models.idea import (
+    Idea,
+    IdeaProjectAttachment,
+    IdeaThread,
+    ProjectProfile,
+    ProjectProfileAccess,
+    UserMention,
+)
 from brain.platform.db.models.notification import (
     NOTIFICATION_KIND_WORKSPACE_MENTION,
     NotificationEvent,
@@ -364,6 +371,74 @@ async def test_headless_ask_serializes_after_run_admission_without_lazy_loading(
     assert payload["illo_run_id"] is not None
     assert payload["updated_at"]
     assert [event["event_type"] for event in payload["events"]] == ["external_task.ask_illo_submitted"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_search_returns_visible_project_context_profiles(async_sqlite_session_factory):
+    _patch_sqlite_for_external_agent_tables()
+    session = await async_sqlite_session_factory(
+        [
+            Org.__table__,
+            User.__table__,
+            Idea.__table__,
+            IdeaThread.__table__,
+            ProjectProfile.__table__,
+            ProjectProfileAccess.__table__,
+            IdeaProjectAttachment.__table__,
+        ]
+    )
+    session.add_all(
+        [
+            Org(id=ORG_ID, name="Org", slug="org"),
+            User(id=OWNER_ID, org_id=ORG_ID, name="User", email="user@example.com", approved=True),
+        ]
+    )
+    await session.flush()
+    profile = ProjectProfile(
+        id="cccccccc-cccc-4ccc-8ccc-ccccccccccc1",
+        org_id=ORG_ID,
+        user_id=OWNER_ID,
+        slug="aritzia-uwear-client-project",
+        name="Aritzia / Uwear Client Project",
+        description="85K asset pilot with QA retry proof and delivery package.",
+        visibility="private",
+        active=True,
+        project_context={
+            "resources": [
+                {
+                    "id": "delivery-package",
+                    "kind": "folder",
+                    "label": "Delivery package",
+                    "path": "/projects/aritzia/delivery",
+                }
+            ]
+        },
+    )
+    session.add(profile)
+    await session.flush()
+
+    principal = service.AgentBridgePrincipal(
+        connection_id="conn-1",
+        org_id=ORG_ID,
+        owner_user_id=OWNER_ID,
+        token_id="token-1",
+        scopes=frozenset(service.DEFAULT_BRIDGE_SCOPES),
+        connection_display_name="Codex",
+        agent_kind="codex",
+    )
+
+    payload = await service.search_workspace(
+        session,
+        principal,
+        query="Aritzia 85K asset pilot",
+        limit=5,
+    )
+
+    assert payload["query"] == "Aritzia 85K asset pilot"
+    assert payload["results"][0]["type"] == "project_context_profile"
+    assert payload["results"][0]["slug"] == "aritzia-uwear-client-project"
+    assert payload["results"][0]["resources"]["count"] == 1
+    assert payload["results"][0]["resources"]["items"][0]["path"] == "/projects/aritzia/delivery"
 
 
 class _ScalarResult:

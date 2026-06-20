@@ -156,6 +156,19 @@ A typical payload:
 }
 ```
 
+For saved project packets, docs, folders, or customer context, prefer the
+Project Context read capability:
+
+```json
+{
+  "capability": "project_contexts.search",
+  "arguments": {
+    "query": "aritzia client project",
+    "limit": 10
+  }
+}
+```
+
 ## Act
 
 Use `illo_act` only when the user has asked for a visible team action or for
