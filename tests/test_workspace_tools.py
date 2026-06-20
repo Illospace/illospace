@@ -140,6 +140,30 @@ async def test_workspace_tool_catalog_includes_codex_runtime_auth_profile():
     }
 
 
+async def test_workspace_tool_provider_api_key_accepts_user_openai_connection(monkeypatch):
+    from brain.systems.runs import workspace_tool_runtime
+
+    async def fake_resolve_api_key(**kwargs):
+        assert kwargs["user_id"] == USER_ID
+        assert kwargs["org_id"] == ORG_ID
+        assert kwargs["provider"] == "openai"
+        assert kwargs["auth_mode"] == "api_key"
+        return "sk-user-openai", "user_openai"
+
+    monkeypatch.setattr("brain.systems.vault.async_resolve_api_key", fake_resolve_api_key)
+
+    raw = await workspace_tool_runtime._resolve_provider_connection(
+        {
+            "provider": "openai",
+            "credential": "api_key",
+            "scope": "originating_user",
+        },
+        context={"actor_id": USER_ID, "org_id": ORG_ID},
+    )
+
+    assert raw == "sk-user-openai"
+
+
 async def test_workspace_tool_install_persists_and_queues_request(seeded_session, monkeypatch, tmp_path):
     request_file, status_file, _root = _workspace_tool_queue(monkeypatch, tmp_path)
 

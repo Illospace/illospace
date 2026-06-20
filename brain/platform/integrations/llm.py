@@ -93,7 +93,7 @@ class LLMClient:
     """Resolved LLM client ready for API calls."""
     client: Any
     provider: str                     # "anthropic" or "openai"
-    source: str                       # "codex_subscription", "org_main", "env", "none"
+    source: str                       # "codex_subscription", "user_openai", "org_main", "env", "none"
     auth_mode: str | None             # "api_key", "chatgpt", etc.
     is_oauth: bool                    # True for provider OAuth-style credentials.
     extra_headers: dict[str, str]     # Per-request headers.

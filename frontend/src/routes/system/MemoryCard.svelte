@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ConstellationNotice } from '$lib/components/constellation';
+  import { ConstellationButton, ConstellationNotice, ConstellationTextInput } from '$lib/components/constellation';
 
   import RuntimeSelect from './RuntimeSelect.svelte';
   import type { MemoryCheck, MemoryDraft, MemoryNoticeState, RuntimeOption, RuntimeSettings } from './types';
@@ -10,31 +10,42 @@
     embeddingModelOptions,
     vaultKeyOptions,
     selectedVaultKey,
+    memoryApiKey,
     notice,
     memoryCheck,
     canManageSettings,
     vaultLoading,
     syncingVaultKey,
+    savingMemoryApiKey,
     onUpdateMemory,
     onSelectVaultKey,
+    onMemoryApiKeyChange,
+    onSaveMemoryApiKey,
   }: {
     memory: RuntimeSettings['memory'];
     memoryDraft: MemoryDraft;
     embeddingModelOptions: RuntimeSettings['memory']['embedding_model_options'];
     vaultKeyOptions: RuntimeOption[];
     selectedVaultKey: string;
+    memoryApiKey: string;
     notice: MemoryNoticeState | null;
     memoryCheck: MemoryCheck | null;
     canManageSettings: boolean;
     vaultLoading: boolean;
     syncingVaultKey: boolean;
+    savingMemoryApiKey: boolean;
     onUpdateMemory: (key: keyof MemoryDraft, value: string) => void;
     onSelectVaultKey: (value: string) => void;
+    onMemoryApiKeyChange: (value: string) => void;
+    onSaveMemoryApiKey: () => void;
   } = $props();
 
   const localModelLabel = $derived(memoryDraft.embedder === 'local_cpu' ? 'Local CPU model' : 'Local GPU model');
   const usesApiModel = $derived(memoryDraft.embedder === 'openai' || memoryDraft.embedder === 'gemini');
   const showReranker = $derived(memory.reranker_options.length > 1);
+  const memoryKeyLabel = $derived(memoryDraft.embedder === 'gemini' ? 'Gemini key' : 'OpenAI key');
+  const memoryKeyPlaceholder = $derived(memoryDraft.embedder === 'gemini' ? 'AIza...' : 'sk-...');
+  const memoryKeyConnected = $derived(Boolean(memory.api_key_statuses?.[memoryDraft.embedder === 'gemini' ? 'gemini' : 'openai']));
 </script>
 
 <section class="runtime-section memory-runtime" aria-labelledby="memory-runtime-heading">
@@ -106,6 +117,34 @@
         />
       {/if}
     </div>
+
+    {#if usesApiModel}
+      <div class="memory-key-row">
+        <div class="memory-key-copy">
+          <span>{memoryKeyLabel}</span>
+          <strong>{memoryKeyConnected ? 'Connected' : 'Missing'}</strong>
+        </div>
+        <ConstellationTextInput
+          id="memory-api-key"
+          type="password"
+          placeholder={memoryKeyPlaceholder}
+          value={memoryApiKey}
+          autocomplete="off"
+          mono
+          disabled={!canManageSettings || savingMemoryApiKey}
+          oninput={(event) => onMemoryApiKeyChange((event.currentTarget as HTMLInputElement).value)}
+        />
+        <ConstellationButton
+          variant="secondary"
+          size="sm"
+          onclick={onSaveMemoryApiKey}
+          loading={savingMemoryApiKey}
+          disabled={!canManageSettings || !memoryApiKey.trim() || syncingVaultKey}
+        >
+          Rotate
+        </ConstellationButton>
+      </div>
+    {/if}
   </div>
 </section>
 
@@ -185,5 +224,45 @@
     background: color-mix(in srgb, var(--constellation-control-input-background) 72%, transparent);
     color: var(--constellation-text-primary);
     padding: 0 12px;
+  }
+
+  .memory-key-row {
+    display: grid;
+    grid-template-columns: minmax(120px, 0.34fr) minmax(180px, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding-top: 2px;
+  }
+
+  .memory-key-copy {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .memory-key-copy span,
+  .memory-key-copy strong {
+    min-width: 0;
+    font-family: var(--constellation-font-mono);
+    font-size: var(--constellation-type-meta);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .memory-key-copy span {
+    color: var(--constellation-color-text-secondary);
+    font-weight: 700;
+  }
+
+  .memory-key-copy strong {
+    color: var(--constellation-color-text-primary);
+    font-weight: 700;
+  }
+
+  @media (max-width: 760px) {
+    .memory-key-row {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

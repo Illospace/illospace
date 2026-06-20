@@ -34,6 +34,8 @@ class RuntimeConnectionRead(BaseModel):
     source: str | None = None
     label: str | None = None
     detail: str | None = None
+    has_personal_connection: bool = False
+    has_org_key: bool = False
 
 
 class RuntimeModelsRead(BaseModel):

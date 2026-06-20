@@ -31,9 +31,35 @@ def test_system_provider_connection_is_not_admin_gated():
 
     assert "hasPersonalOpenAIRuntimeConnection(settings)" in page
     assert "hasPersonalConnection={hasPersonalOpenAIConnection}" in page
-    assert "canManageSettings: boolean;" not in card
-    assert "disabled={!canManageSettings}" not in card
-    assert "disabled={!canManageSettings || savingConnection}" not in card
+    assert "Personal API key" in card
+    assert "onSavePersonalApiKey={savePersonalOpenAIKey}" in page
+    assert "disabled={!personalApiKey.trim() || savingConnection}" in card
+    assert "disabled={!canManageSettings || !personalApiKey.trim()" not in card
+
+
+def test_system_provider_connection_exposes_admin_org_key_rotation():
+    card = (ROOT / "frontend/src/routes/system/ProviderConnections.svelte").read_text()
+    page = (ROOT / "frontend/src/routes/system/+page.svelte").read_text()
+    client = (ROOT / "frontend/src/lib/api/client.ts").read_text()
+
+    assert "Workspace API key" in card
+    assert "{#if canManageSettings}" in card
+    assert "onSaveOrgApiKey={saveOrgOpenAIKey}" in page
+    assert "connectRuntimeOpenAIOrgKey" in client
+    assert "/api/runtime-settings/connection/openai/org-api-key" in client
+
+
+def test_system_memory_card_exposes_memory_key_rotation():
+    card = (ROOT / "frontend/src/routes/system/MemoryCard.svelte").read_text()
+    page = (ROOT / "frontend/src/routes/system/+page.svelte").read_text()
+    vault = (ROOT / "frontend/src/routes/vault/+page.svelte").read_text()
+
+    assert "onSaveMemoryApiKey" in card
+    assert "onSaveMemoryApiKey={saveMemoryApiKey}" in page
+    assert "connectRuntimeOpenAIEmbeddingKey" in page
+    assert "connectRuntimeGeminiKey" in page
+    assert "connectRuntimeOpenAIOrgKey" in vault
+    assert "OPENAI_ORG_API_KEY" in vault
 
 
 def test_system_oauth_start_keeps_page_open_when_popup_is_blocked():
@@ -58,7 +84,7 @@ def test_onboarding_routes_require_personal_openai_connection():
     layout = (ROOT / "frontend/src/routes/+layout.svelte").read_text()
     onboarding = (ROOT / "frontend/src/routes/onboarding/+page.svelte").read_text()
 
-    assert "connection?.source === 'codex_subscription'" in helper
+    assert "['codex_subscription', 'user_openai'].includes" in helper
     assert "requiresPersonalOpenAIOnboarding(runtime)" in login
     assert "requiresPersonalOpenAIOnboarding(runtime)" in layout
     assert "hasPersonalOpenAIRuntimeConnection(runtime)" in onboarding

@@ -227,8 +227,8 @@ async def _resolve_provider_connection(source: dict[str, Any], *, context: dict[
             provider=provider,
             auth_mode="api_key",
         )
-        if resolved_source not in {"org_main", "env"} or not raw:
-            raise PermissionError(f"Workspace tool requires a {provider} workspace API key")
+        if resolved_source not in {"user_openai", "org_main", "env"} or not raw:
+            raise PermissionError(f"Workspace tool requires a {provider} user or workspace API key")
         return raw
 
     raise ValueError(f"Unsupported workspace tool provider credential: {credential or '<empty>'}")

@@ -1009,6 +1009,14 @@
     try {
       if (normalized === 'OPENAI_API_KEY') {
         await api.connectRuntimeOpenAIKey({ api_key: value });
+        if (canManageRuntimeSettings()) {
+          await api.connectRuntimeOpenAIOrgKey({ api_key: value });
+          await api.connectRuntimeOpenAIEmbeddingKey({ api_key: value });
+        }
+        return true;
+      }
+      if (normalized === 'OPENAI_ORG_API_KEY' || normalized === 'OPENAI_WORKSPACE_API_KEY') {
+        await api.connectRuntimeOpenAIOrgKey({ api_key: value });
         return true;
       }
       if (normalized === 'OPENAI_EMBEDDING_API_KEY') {
@@ -1023,6 +1031,10 @@
       ui.toast(err?.message || 'Secret saved, but runtime did not accept the key.', 'error');
     }
     return false;
+  }
+
+  function canManageRuntimeSettings() {
+    return ['owner', 'admin'].includes(String(auth.user?.role || ''));
   }
 
   async function submitCreate() {

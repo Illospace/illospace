@@ -9,7 +9,7 @@ type RuntimeSettingsLike = {
 
 export function hasPersonalOpenAIRuntimeConnection(runtime: RuntimeSettingsLike) {
   const connection = runtime?.connection;
-  return connection?.status === 'connected' && connection?.source === 'codex_subscription';
+  return connection?.status === 'connected' && ['codex_subscription', 'user_openai'].includes(connection?.source || '');
 }
 
 export function requiresPersonalOpenAIOnboarding(runtime: RuntimeSettingsLike) {
