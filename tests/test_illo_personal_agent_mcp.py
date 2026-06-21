@@ -32,6 +32,7 @@ def test_tool_catalog_contains_behavior_guidance():
     assert tools["illo_submit"]["inputSchema"]["required"] == ["message"]
     assert "named capability" in tools["illo_read"]["description"]
     assert tools["illo_read"]["inputSchema"]["required"] == ["capability"]
+    assert "project_contexts.search" in tools["illo_read"]["inputSchema"]["properties"]["capability"]["description"]
     assert "user's delegate" in tools["illo_act"]["description"]
     assert tools["illo_act"]["inputSchema"]["required"] == ["capability"]
     assert "result_id" in tools["illo_get_result"]["description"]

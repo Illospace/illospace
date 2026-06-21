@@ -37,6 +37,7 @@ from brain.systems.cortex.thought_lifecycle import (
 )
 from brain.systems.cortex.thread_links import thread_id_from_reference, thread_link_payload
 from brain.systems.cortex.thread_read_model import thread_reference_payload
+from brain.systems.cortex.project_context.search import search_project_contexts
 from brain.systems.cortex.status import EXTERNAL_TASK_STARTABLE_IDEA_STATUSES
 from brain.systems.external_agents.status import EXTERNAL_AGENT_TASK_TERMINAL_STATUSES
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
@@ -1104,6 +1105,19 @@ async def search_workspace(
     max_results = max(1, min(int(limit or 10), 25))
     results: list[dict[str, Any]] = []
 
+    project_contexts = await search_project_contexts(
+        session,
+        org_id=principal.org_id,
+        user_id=principal.owner_user_id,
+        query=text,
+        limit=max_results,
+    )
+    results.extend(project_contexts["results"][:max_results])
+
+    remaining = max_results - len(results)
+    if remaining <= 0:
+        return {"query": text, "results": results}
+
     ideas = (
         await session.scalars(
             select(Idea)
@@ -1113,7 +1127,7 @@ async def search_workspace(
                 or_(Idea.title.ilike(pattern), Idea.description.ilike(pattern)),
             )
             .order_by(Idea.updated_at.desc(), Idea.id.desc())
-            .limit(max_results)
+            .limit(remaining)
         )
     ).all()
     for idea in ideas:

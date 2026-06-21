@@ -428,7 +428,7 @@ TOOLS: dict[str, dict[str, Any]] = {
             "properties": {
                 "capability": {
                     "type": "string",
-                    "description": "Read capability name, such as workspace.search, thread.get, handoff.get, team.members.list, domain.inspect, or capabilities.",
+                    "description": "Read capability name, such as workspace.search, project_contexts.search, thread.get, handoff.get, team.members.list, domain.inspect, or capabilities.",
                 },
                 "arguments": {"type": "object", "description": "Capability-specific arguments.", "default": {}},
             },

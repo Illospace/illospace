@@ -113,6 +113,16 @@
       "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
     },
     {
+      "source": "brain/platform/db/repositories/reconstructive_memory.py",
+      "import": "brain.systems.reconstructive_memory.ingestion",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Move the compatibility write facade out of the platform repository layer or extract a lower-layer ingestion contract.",
+      "reason": "Compatibility repository delegates legacy writes into the reconstructive-memory system ingestion path."
+    },
+    {
       "source": "brain/platform/db/repositories/skill_bundles.py",
       "import": "brain.systems.skills.bundles",
       "source_layer": "brain.platform",
