@@ -25,6 +25,20 @@ test('builds canonical thread routes and removes transient query params', () => 
   );
 });
 
+test('canonical thread routes preserve generated app deep links', () => {
+  const params = new URLSearchParams({
+    idea: 'old-thread',
+    app: 'app-123',
+    artifact_app: 'legacy-app-456',
+    focus: 'reply',
+  });
+
+  assert.equal(
+    buildCortexThreadHref('thread:123', params),
+    '/threads/thread%3A123?app=app-123&artifact_app=legacy-app-456&focus=reply',
+  );
+});
+
 test('extracts thread ids from canonical and legacy URLs', () => {
   assert.equal(threadIdFromThreadPathname('/threads/thread%3A123'), 'thread:123');
   assert.equal(threadIdFromUrl(new URL('http://localhost:8080/threads/abc-123')), 'abc-123');
