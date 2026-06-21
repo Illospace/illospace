@@ -5,8 +5,12 @@
   import { ConstellationIcon, ConstellationPill } from '$lib/components/constellation';
   import type { GeneratedAppSurface } from '$lib/features/workspace-apps/domain/generatedAppSurface';
   import {
+    appendWorkspaceAppEvent,
+    getWorkspaceAppCollaboration,
+    listWorkspaceAppEvents,
     runWorkspaceAppAction,
     runWorkspaceAppBinding,
+    type WorkspaceAppCollaborationRead,
     type WorkspaceAppRead,
   } from '$lib/features/workspace-apps/api/workspaceAppsApi';
   import {
@@ -29,7 +33,15 @@
     payload?: Record<string, any>;
     data?: Record<string, any>;
     patch?: Record<string, any>;
+    statePatch?: Record<string, any>;
     actionKey?: string;
+    eventType?: string;
+    stateKey?: string;
+    idempotencyKey?: string;
+    expectedStateVersion?: number;
+    afterEventId?: number;
+    limit?: number;
+    metadata?: Record<string, any>;
     message?: string;
   };
 
@@ -159,6 +171,63 @@
     }
   }
 
+  function rememberCollaboration(result: WorkspaceAppCollaborationRead) {
+    const resultState = result?.state;
+    if (resultState?.key === stateKey) {
+      stateData = resultState.data || {};
+      workspaceApps.rememberState(app.id, stateKey, stateData);
+      postToFrame('illo:state', { state: stateData });
+    }
+    postToFrame('illo:collab', { collaboration: result });
+  }
+
+  async function handleCollaborationGet(message: RuntimeMessage) {
+    try {
+      const result = await getWorkspaceAppCollaboration(app.id, {
+        state_key: message.stateKey || undefined,
+        after_event_id: message.afterEventId ?? undefined,
+        limit: message.limit ?? undefined,
+      });
+      rememberCollaboration(result);
+      respond(message.requestId, result);
+    } catch (err: any) {
+      respond(message.requestId, null, err?.detail || err?.message || 'Collaboration request failed');
+    }
+  }
+
+  async function handleCollaborationEvents(message: RuntimeMessage) {
+    try {
+      const result = await listWorkspaceAppEvents(app.id, {
+        after_event_id: message.afterEventId ?? undefined,
+        event_type: message.eventType || undefined,
+        limit: message.limit ?? undefined,
+      });
+      respond(message.requestId, result);
+    } catch (err: any) {
+      respond(message.requestId, null, err?.detail || err?.message || 'Collaboration events request failed');
+    }
+  }
+
+  async function handleCollaborationEvent(message: RuntimeMessage) {
+    try {
+      const eventType = String(message.eventType || '').trim();
+      if (!eventType) throw new Error('collab.event(eventType, payload) requires an event type');
+      const result = await appendWorkspaceAppEvent(app.id, {
+        event_type: eventType,
+        payload: message.payload || {},
+        state_patch: message.statePatch || message.patch || null,
+        state_key: message.stateKey || undefined,
+        idempotency_key: message.idempotencyKey || undefined,
+        expected_state_version: message.expectedStateVersion ?? undefined,
+        metadata: message.metadata || {},
+      });
+      rememberCollaboration(result);
+      respond(message.requestId, result);
+    } catch (err: any) {
+      respond(message.requestId, null, err?.detail || err?.message || 'Collaboration event failed');
+    }
+  }
+
   async function handleBindingRequest(message: RuntimeMessage) {
     try {
       const alias = String(message.alias || '').trim();
@@ -246,6 +315,21 @@
 
     if (message.type === 'illo:action:run') {
       void handleActionRequest(message);
+      return;
+    }
+
+    if (message.type === 'illo:collab:get') {
+      void handleCollaborationGet(message);
+      return;
+    }
+
+    if (message.type === 'illo:collab:events') {
+      void handleCollaborationEvents(message);
+      return;
+    }
+
+    if (message.type === 'illo:collab:event') {
+      void handleCollaborationEvent(message);
       return;
     }
 

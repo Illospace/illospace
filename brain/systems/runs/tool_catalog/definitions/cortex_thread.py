@@ -120,7 +120,9 @@ CORTEX_IDEA_TOOLS = [
             "status page, walkthrough, dashboard, checklist, comparison, or other interactive artifact. "
             "Illo chooses the artifact shape by writing a responsive single-document HTML/CSS/JS source. "
             "The source runs in the sandboxed app-capsule runtime and can use window.illo.state.get/set/update "
-            "for artifact-local interaction state. It must not load external scripts/styles, use browser "
+            "for artifact-local UI state. For team collaboration artifacts, pass manifest.collaboration "
+            "and use window.illo.collab.event/state/events/subscribe for durable votes, notes, status changes, "
+            "and participant input that Illo can inspect later. It must not load external scripts/styles, use browser "
             "storage, or include secrets. The result is a versioned workspace app stamped with the current "
             "Thread id; post the returned artifact_url or thread_url plus app_id when telling teammates where "
             "to review it."
@@ -150,7 +152,8 @@ CORTEX_IDEA_TOOLS = [
                     "description": (
                         "Responsive app-capsule HTML/CSS/JS. Use a root element with class illo-app, "
                         "Illo App Kit classes such as illo-panel, illo-toolbar, illo-button, illo-tabs, "
-                        "illo-list, and illo-table-wrap, and window.illo.state for interactivity."
+                        "illo-list, and illo-table-wrap. Use window.illo.collab for durable team interactions "
+                        "and window.illo.state only for app-local UI preferences."
                     ),
                 },
                 "app_id": {
@@ -168,7 +171,12 @@ CORTEX_IDEA_TOOLS = [
                 },
                 "manifest": {
                     "type": "object",
-                    "description": "Optional app-capsule manifest extensions. Contract, data plan, design contract, state key, and thread metadata are defaulted.",
+                    "description": (
+                        "Optional app-capsule manifest extensions. Contract, data plan, design contract, state key, "
+                        "and thread metadata are defaulted. For collaborative artifacts include "
+                        "collaboration.mode='event_sourced' and collaboration.actions with reducers such as "
+                        "choice_by_actor, append, or set."
+                    ),
                 },
                 "visual_spec": {
                     "type": "object",

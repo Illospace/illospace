@@ -127,10 +127,17 @@ def build_contract_validation_report(
                 "warnings": ["legacy app has no enforced generated-app contract"],
             }
 
-    _validate_data_plan(manifest_dict.get("data_plan"), errors, initial_state=initial_state)
+    collaboration = _as_mapping(manifest_dict.get("collaboration"))
+    _validate_data_plan(
+        manifest_dict.get("data_plan"),
+        errors,
+        initial_state=initial_state,
+        collaboration_enabled=bool(collaboration),
+    )
     if _forbidden_secret_paths(manifest_dict):
         errors.append("manifest must not contain raw credentials or secret values")
     _validate_actions(manifest_dict, errors)
+    _validate_collaboration(collaboration, errors)
     _validate_design_contract(manifest_dict.get("design_contract"), errors)
     _validate_thumbnail(visual_spec_dict.get("thumbnail"), errors)
 
@@ -155,7 +162,13 @@ def _as_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-def _validate_data_plan(value: Any, errors: list[str], *, initial_state: Mapping[str, Any] | None) -> None:
+def _validate_data_plan(
+    value: Any,
+    errors: list[str],
+    *,
+    initial_state: Mapping[str, Any] | None,
+    collaboration_enabled: bool = False,
+) -> None:
     plan = _as_mapping(value)
     if not plan:
         errors.append("manifest.data_plan is required")
@@ -176,7 +189,7 @@ def _validate_data_plan(value: Any, errors: list[str], *, initial_state: Mapping
         bindings = _as_mapping(bindings)
         for alias, raw_binding in bindings.items():
             _validate_capability_binding(str(alias), raw_binding, errors)
-        if record_like_state_keys(initial_state):
+        if record_like_state_keys(initial_state) and not collaboration_enabled:
             errors.append("initial_state must not contain record-like collections; use a Domain capability binding")
         return
 
@@ -187,7 +200,7 @@ def _validate_data_plan(value: Any, errors: list[str], *, initial_state: Mapping
             return
         for alias, raw_binding in bindings.items():
             _validate_domain_binding(str(alias), raw_binding, errors)
-        if record_like_state_keys(initial_state):
+        if record_like_state_keys(initial_state) and not collaboration_enabled:
             errors.append("initial_state must not contain record-like collections; use a Domain binding")
         return
 
@@ -197,8 +210,40 @@ def _validate_data_plan(value: Any, errors: list[str], *, initial_state: Mapping
             "manifest.data_plan for app_local apps must declare a UI-only scope "
             "(ui_state, preferences, filters, draft, or ephemeral)"
         )
-    if record_like_state_keys(initial_state):
+    if record_like_state_keys(initial_state) and not collaboration_enabled:
         errors.append("app_local initial_state must not contain record-like collections; use a Domain binding")
+
+
+def _validate_collaboration(value: Mapping[str, Any], errors: list[str]) -> None:
+    if not value:
+        return
+    mode = str(value.get("mode") or "event_sourced").strip()
+    if mode != "event_sourced":
+        errors.append("manifest.collaboration.mode must be 'event_sourced'")
+    state_key = value.get("state_key")
+    if state_key is not None and (not isinstance(state_key, str) or len(state_key.strip()) > 120):
+        errors.append("manifest.collaboration.state_key must be a string up to 120 characters")
+    actions = value.get("actions")
+    if not isinstance(actions, Mapping) or not actions:
+        errors.append("manifest.collaboration.actions must declare allowed event types")
+        return
+    for key, raw_action in actions.items():
+        action_key = str(key or "").strip()
+        prefix = f"manifest.collaboration.actions.{action_key or '<empty>'}"
+        if not action_key or not re.match(r"^[a-zA-Z][\w.-]*$", action_key):
+            errors.append("manifest.collaboration.actions keys must be stable identifiers")
+        if not isinstance(raw_action, Mapping):
+            errors.append(f"{prefix} must be an object")
+            continue
+        reducer = raw_action.get("reducer")
+        if reducer is None:
+            continue
+        reducer_obj = _as_mapping(reducer)
+        reducer_type = str(reducer_obj.get("type") or "").strip()
+        if reducer_type not in {"choice_by_actor", "append", "set"}:
+            errors.append(f"{prefix}.reducer.type must be one of: append, choice_by_actor, set")
+        if not str(reducer_obj.get("state_path") or "").strip():
+            errors.append(f"{prefix}.reducer.state_path is required")
 
 
 def _validate_domain_binding(alias: str, value: Any, errors: list[str]) -> None:

@@ -233,8 +233,8 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         "key": "workspace_apps",
         "name": "Workspace Apps",
         "category": "core_workspace",
-        "summary": "Illo can inspect and manage generated workspace apps, dashboards, app metadata, and app-local state.",
-        "aliases": ("apps", "dashboards", "workspace apps", "generated apps"),
+        "summary": "Illo can inspect and manage generated workspace apps, dashboards, app metadata, app-local state, and collaborative artifact events.",
+        "aliases": ("apps", "dashboards", "workspace apps", "generated apps", "artifacts", "collaborative artifacts"),
         "tools": ("read_workspace_apps", "manage_workspace_app"),
     },
     {

@@ -36,3 +36,32 @@ def publish_workspace_app_change(
         publish_safe("workspace_apps_changed", payload)
     except Exception:
         logger.debug("workspace_app_change_publish_failed", exc_info=True)
+
+
+def publish_workspace_app_collaboration_event(
+    *,
+    org_id: str,
+    app_id: str,
+    state: Mapping[str, Any] | None = None,
+    events: list[Mapping[str, Any]] | None = None,
+    duplicate: bool = False,
+) -> None:
+    """Notify open Cortex clients that a collaborative app event/state changed."""
+    payload: dict[str, Any] = {
+        "org_id": str(org_id),
+        "app_id": str(app_id),
+        "duplicate": bool(duplicate),
+    }
+    if state:
+        payload["state"] = dict(state)
+        payload["state_key"] = str(state.get("key") or "")
+        payload["state_version"] = int(state.get("version") or 0)
+    if events:
+        payload["events"] = [dict(event) for event in events]
+
+    try:
+        from brain.systems.cortex.events import publish_safe
+
+        publish_safe("workspace_app_collaboration_changed", payload)
+    except Exception:
+        logger.debug("workspace_app_collaboration_publish_failed", exc_info=True)

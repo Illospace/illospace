@@ -182,7 +182,7 @@ WORKSPACE_APP_TOOLS = [
     {
         "name": "manage_workspace_app",
         "description": (
-            "Create, list, update, archive, and persist state for generated workspace apps. "
+            "Create, list, update, archive, persist state, and inspect collaborative events for generated workspace apps. "
             "This is the action tool to create or change a persistent programmable UI surface or dashboard "
             "inside Cortex. Default new on-demand software to renderer_key='app-capsule' and source_kind='html': "
             "a full-code single-document HTML/CSS/JS app with a capability manifest. Use generated-ui-app/json "
@@ -195,6 +195,8 @@ WORKSPACE_APP_TOOLS = [
             "Durable generated or user data should be exposed through manifest data capabilities, usually "
             "Domain bindings that Illo creates or attaches behind the scenes. App-local state is only for "
             "UI preferences, filters, drafts, and ephemeral interface state. "
+            "For collaborative thread artifacts, use manifest.collaboration plus window.illo.collab in the app, "
+            "then use get_collaboration/list_events/append_event to inspect or write structured team interaction events. "
             "For awareness questions about what apps exist or current app state, prefer read_workspace_apps first. "
             "New generated apps must pass the workspace app contract before they are persisted. Use action='help' "
             "or action='schema' with operation to inspect arguments before mutating."
@@ -215,6 +217,9 @@ WORKSPACE_APP_TOOLS = [
                         "restore",
                         "get_state",
                         "update_state",
+                        "get_collaboration",
+                        "list_events",
+                        "append_event",
                     ],
                     "description": "The workspace app operation to run.",
                 },
@@ -245,6 +250,7 @@ WORKSPACE_APP_TOOLS = [
                     "description": (
                         "Generated app source. For app-capsule, provide a responsive single-document HTML/CSS/JS app "
                         "that uses the runtime bridge: window.illo.data(alias), window.illo.state.get/set/update, "
+                        "window.illo.collab.get/state/events/event/subscribe for team interaction artifacts, "
                         "and window.illo.actions.run(actionKey, payload). For generated-ui-app legacy edits, provide "
                         "a JSON string with schema_version=1, title, optional description, optional top-level actions "
                         "referencing manifest.actions, and views. "
@@ -277,7 +283,8 @@ WORKSPACE_APP_TOOLS = [
                         "Domain binding operations are exact SDK method names; do not use capability labels "
                         "such as read, write, or crud in manifest.data_plan.bindings.*.operations. "
                         "The app-capsule runtime exposes manifest-bound data CRUD/read operations, polling-backed "
-                        "subscribe, app-local state, and window.illo.actions.run(actionKey, payload) for "
+                        "subscribe, app-local state, collaborative artifact events through window.illo.collab, "
+                        "and window.illo.actions.run(actionKey, payload) for "
                         "manifest-declared server-side actions. "
                         "Treat Domains as the workspace truth bridge and actions/connectors as external IO. "
                         "For external systems, prefer workflow-level action keys such as tickets.importExternal "
@@ -310,6 +317,32 @@ WORKSPACE_APP_TOOLS = [
                 },
                 "data": {"type": "object", "description": "Replacement state data for update_state."},
                 "data_patch": {"type": "object", "description": "Shallow state patch for update_state."},
+                "payload": {"type": "object", "description": "Collaborative event payload for append_event."},
+                "state_patch": {
+                    "type": "object",
+                    "description": "Optional shallow collaborative state patch for append_event; omit to use the manifest-declared reducer.",
+                },
+                "event_type": {
+                    "type": "string",
+                    "description": "Collaborative event type such as vote.cast, note.add, status.change, or ask_illo.",
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Optional stable key to prevent duplicate event appends.",
+                },
+                "expected_state_version": {
+                    "type": "integer",
+                    "description": "Optional optimistic concurrency guard for append_event.",
+                },
+                "after_event_id": {
+                    "type": "integer",
+                    "description": "Return collaborative events after this id for get_collaboration/list_events.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 50,
+                    "description": "Maximum collaborative events to return for get_collaboration/list_events.",
+                },
                 "include_archived": {"type": "boolean", "default": False},
                 "include_prototypes": {"type": "boolean", "default": False},
                 "confirm_include_archived": {

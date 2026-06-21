@@ -12,7 +12,9 @@ export function appCapsuleBridgeScript(app: AppCapsuleRuntimeApp) {
       const pending = new Map();
       let sequence = 0;
       let currentState = {};
+      let currentCollaboration = null;
       let lastStateSignature = '';
+      let lastCollaborationSignature = '';
       let lastThemeSignature = '';
       let lastAppSignature = '';
 
@@ -153,11 +155,84 @@ export function appCapsuleBridgeScript(app: AppCapsuleRuntimeApp) {
         value: () => currentState
       };
 
+      function normalizeCollabOptions(options) {
+        const config = options || {};
+        return {
+          stateKey: config.stateKey || config.state_key || undefined,
+          afterEventId: config.afterEventId ?? config.after_event_id ?? undefined,
+          limit: config.limit ?? undefined
+        };
+      }
+
+      const collabApi = {
+        get: (options) => request('illo:collab:get', normalizeCollabOptions(options)),
+        state: async (options) => {
+          const snapshot = await collabApi.get(options);
+          return snapshot && snapshot.state ? snapshot.state.data || {} : {};
+        },
+        events: (options) => {
+          const config = options || {};
+          return request('illo:collab:events', {
+            afterEventId: config.afterEventId ?? config.after_event_id ?? undefined,
+            eventType: config.eventType || config.event_type || undefined,
+            limit: config.limit ?? undefined
+          });
+        },
+        event: (eventType, payload, options) => {
+          const config = options || {};
+          return request('illo:collab:event', {
+            eventType: String(eventType || ''),
+            payload: payload || {},
+            statePatch: config.statePatch || config.state_patch || undefined,
+            stateKey: config.stateKey || config.state_key || undefined,
+            idempotencyKey: config.idempotencyKey || config.idempotency_key || undefined,
+            expectedStateVersion: config.expectedStateVersion ?? config.expected_state_version ?? undefined,
+            metadata: config.metadata || {}
+          });
+        },
+        subscribe: (handler, options) => {
+          if (typeof handler !== 'function') throw new Error('collab.subscribe(handler) requires a function');
+          const config = options || {};
+          const intervalMs = Math.max(1000, Math.min(Number(config.intervalMs || config.interval_ms || 5000), 60000));
+          let active = true;
+          let timer = null;
+          let signature = '';
+          function emit(snapshot) {
+            const nextSignature = stableSignature(snapshot);
+            if (nextSignature === signature) return;
+            signature = nextSignature;
+            handler(snapshot);
+          }
+          async function tick() {
+            if (!active) return;
+            try {
+              emit(await collabApi.get(config));
+            } catch (error) {
+              if (active && typeof config.onError === 'function') config.onError(error);
+            } finally {
+              if (active) timer = setTimeout(tick, intervalMs);
+            }
+          }
+          function onHostUpdate(event) {
+            if (active) emit(event.detail);
+          }
+          window.addEventListener('illo:collab', onHostUpdate);
+          tick();
+          return function unsubscribe() {
+            active = false;
+            if (timer) clearTimeout(timer);
+            window.removeEventListener('illo:collab', onHostUpdate);
+          };
+        },
+        value: () => currentCollaboration
+      };
+
       window.illo = {
         app: ${jsonForScript(app)},
         theme: {},
         data: binding,
         state: stateApi,
+        collab: collabApi,
         actions: {
           run: (actionKey, payload) => request('illo:action:run', { actionKey: String(actionKey || ''), payload: payload || {} })
         },
@@ -190,6 +265,16 @@ export function appCapsuleBridgeScript(app: AppCapsuleRuntimeApp) {
           lastThemeSignature = themeSignature;
           if (changed) {
             window.dispatchEvent(new CustomEvent('illo:state', { detail: currentState }));
+          }
+          return;
+        }
+        if (message.type === 'illo:collab') {
+          const nextCollaboration = message.collaboration || message.data || null;
+          const collaborationSignature = stableSignature(nextCollaboration || {});
+          currentCollaboration = nextCollaboration;
+          if (collaborationSignature !== lastCollaborationSignature) {
+            lastCollaborationSignature = collaborationSignature;
+            window.dispatchEvent(new CustomEvent('illo:collab', { detail: currentCollaboration }));
           }
           return;
         }

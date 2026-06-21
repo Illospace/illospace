@@ -239,8 +239,12 @@ def test_app_capsule_runtime_uses_new_bridge_and_responsive_surface():
     assert "activeVersion?.source_kind === 'html'" not in dispatcher.split("const canRenderHtml", 1)[1]
 
     assert "runWorkspaceAppBinding" in capsule
+    assert "appendWorkspaceAppEvent" in capsule
     assert "window.illo.data(alias)" in capsule_runtime
     assert "state: stateApi" in capsule_runtime
+    assert "collab: collabApi" in capsule_runtime
+    assert "illo:collab:event" in capsule_runtime
+    assert "illo:collab" in capsule_runtime
     assert "window.illo.domain" not in capsule_runtime
     assert "illo:ready" in capsule_runtime
     assert "did not finish connecting" in capsule

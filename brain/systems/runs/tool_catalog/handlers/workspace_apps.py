@@ -90,6 +90,13 @@ async def _handle_manage_workspace_app(
     state_key: str = "default",
     data: dict | None = None,
     data_patch: dict | None = None,
+    payload: dict | None = None,
+    state_patch: dict | None = None,
+    event_type: str | None = None,
+    idempotency_key: str | None = None,
+    expected_state_version: int | None = None,
+    after_event_id: int | None = None,
+    limit: int = 50,
     include_archived: bool = False,
     include_prototypes: bool = False,
     confirm_include_archived: bool = False,
@@ -144,6 +151,23 @@ async def _handle_manage_workspace_app(
     data_patch, mapping_error = _optional_mapping(data_patch, "data_patch")
     if mapping_error:
         return json.dumps(mapping_error)
+    payload, mapping_error = _optional_mapping(payload, "payload")
+    if mapping_error:
+        return json.dumps(mapping_error)
+    state_patch, mapping_error = _optional_mapping(state_patch, "state_patch")
+    if mapping_error:
+        return json.dumps(mapping_error)
+    event_type = _optional_text(event_type)
+    idempotency_key = _optional_text(idempotency_key)
+    try:
+        expected_state_version = int(expected_state_version) if expected_state_version is not None else None
+    except (TypeError, ValueError):
+        return json.dumps({"error": "expected_state_version must be an integer when provided"})
+    try:
+        after_event_id = int(after_event_id) if after_event_id is not None else None
+    except (TypeError, ValueError):
+        return json.dumps({"error": "after_event_id must be an integer when provided"})
+    limit = max(1, min(int(limit or 50), 200))
 
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
     from brain.systems.workspace_apps.service import (
@@ -161,7 +185,16 @@ async def _handle_manage_workspace_app(
         a_update_state,
         serialize_state,
     )
-    from brain.systems.workspace_apps.events import publish_workspace_app_change
+    from brain.systems.workspace_apps.collaboration import (
+        a_append_collaboration_event,
+        a_get_collaboration_snapshot,
+        a_list_collaboration_events,
+        serialize_event,
+    )
+    from brain.systems.workspace_apps.events import (
+        publish_workspace_app_change,
+        publish_workspace_app_collaboration_event,
+    )
 
     org_id, user_id = _workspace_app_context()
     if not org_id:
@@ -309,6 +342,64 @@ async def _handle_manage_workspace_app(
                     user_id=actor_id,
                 )
                 return json.dumps({"state": serialize_state(state)}, default=str)
+
+            if action == "get_collaboration":
+                if not app_id and not key:
+                    return json.dumps({"error": "get_collaboration requires: app_id or key"})
+                resolved_app = await a_get_app(uow.session, org_id, app_id, key=key)
+                result = await a_get_collaboration_snapshot(
+                    uow.session,
+                    org_id=org_id,
+                    app_id=resolved_app.id,
+                    state_key=state_key,
+                    after_event_id=after_event_id,
+                    limit=limit,
+                    user_id=actor_id,
+                )
+                return json.dumps(result, default=str)
+
+            if action == "list_events":
+                if not app_id and not key:
+                    return json.dumps({"error": "list_events requires: app_id or key"})
+                resolved_app = await a_get_app(uow.session, org_id, app_id, key=key)
+                events = await a_list_collaboration_events(
+                    uow.session,
+                    org_id=org_id,
+                    app_id=resolved_app.id,
+                    after_event_id=after_event_id,
+                    event_type=event_type,
+                    limit=limit,
+                )
+                return json.dumps({"events": [serialize_event(event) for event in events]}, default=str)
+
+            if action == "append_event":
+                if not app_id and not key:
+                    return json.dumps({"error": "append_event requires: app_id or key"})
+                if not event_type:
+                    return json.dumps({"error": "append_event requires: event_type"})
+                resolved_app = await a_get_app(uow.session, org_id, app_id, key=key)
+                result = await a_append_collaboration_event(
+                    uow.session,
+                    org_id=org_id,
+                    app_id=resolved_app.id,
+                    event_type=event_type,
+                    payload=payload,
+                    state_patch=state_patch,
+                    state_key=state_key,
+                    idempotency_key=idempotency_key,
+                    expected_state_version=expected_state_version,
+                    metadata={"tool": "manage_workspace_app", "action": "append_event"},
+                    user_id=actor_id,
+                )
+                await uow.commit()
+                publish_workspace_app_collaboration_event(
+                    org_id=org_id,
+                    app_id=resolved_app.id,
+                    state=result.get("state"),
+                    events=result.get("events"),
+                    duplicate=bool(result.get("duplicate")),
+                )
+                return json.dumps(result, default=str)
 
             if action == "update_state":
                 if not app_id:

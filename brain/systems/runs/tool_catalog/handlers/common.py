@@ -509,6 +509,21 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         },
         "get_state": {"required": ["app_id"], "optional": ["state_key"], "effect": "read app-local state"},
         "update_state": {"required": ["app_id"], "optional": ["state_key", "data", "data_patch"], "effect": "write app-local state"},
+        "get_collaboration": {
+            "required": ["app_id or key"],
+            "optional": ["state_key", "after_event_id", "limit"],
+            "effect": "read collaborative artifact state plus event tail",
+        },
+        "list_events": {
+            "required": ["app_id or key"],
+            "optional": ["event_type", "after_event_id", "limit"],
+            "effect": "read collaborative artifact events",
+        },
+        "append_event": {
+            "required": ["app_id or key", "event_type"],
+            "optional": ["payload", "state_patch", "state_key", "idempotency_key", "expected_state_version"],
+            "effect": "append a collaborative artifact event and update materialized shared state",
+        },
     },
 }
 

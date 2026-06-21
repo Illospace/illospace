@@ -113,6 +113,7 @@ EXPECTED_TABLES = {
     "vault_project_bindings",
     "vault_sessions",
     "visual_blocks",
+    "workspace_app_events",
     "workspace_app_states",
     "workspace_app_versions",
     "workspace_apps",

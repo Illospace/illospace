@@ -421,6 +421,7 @@ def serialize_state(state: WorkspaceAppState) -> dict[str, Any]:
         "scope": state.scope,
         "key": state.key,
         "data": state.data or {},
+        "version": int(state.version or 0),
         "updated_by_user_id": state.updated_by_user_id,
         "created_at": state.created_at,
         "updated_at": state.updated_at,
@@ -859,6 +860,7 @@ async def a_update_state(
         next_data = data or {}
     _validate_contract_state_payload_or_raise(app, await a_active_version(session, app.id), next_data)
     state.data = next_data
+    state.version = int(state.version or 0) + 1
     state.updated_by_user_id = user_id
     await session.flush()
     return state

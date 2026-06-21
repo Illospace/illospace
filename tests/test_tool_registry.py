@@ -173,6 +173,23 @@ def test_publish_thread_artifact_tool_is_registered_and_exposed():
     assert registration.reversibility == "reversible_by_archive"
 
 
+def test_manage_workspace_app_exposes_collaborative_artifact_runtime():
+    from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS
+    from brain.systems.runs.tool_catalog.registry import action_policy_for_tool
+
+    tool = next(item for item in COORDINATOR_TOOLS if item["name"] == "manage_workspace_app")
+    action_enum = tool["input_schema"]["properties"]["action"]["enum"]
+
+    assert "get_collaboration" in action_enum
+    assert "list_events" in action_enum
+    assert "append_event" in action_enum
+    assert "window.illo.collab" in tool["input_schema"]["properties"]["source_code"]["description"]
+
+    assert action_policy_for_tool("manage_workspace_app", kwargs={"action": "get_collaboration"}) is None
+    assert action_policy_for_tool("manage_workspace_app", kwargs={"action": "list_events"}) is None
+    assert action_policy_for_tool("manage_workspace_app", kwargs={"action": "append_event"}) is not None
+
+
 def test_ai_timeline_message_tool_is_registered_and_exposed():
     from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
     from brain.systems.runs.tool_handlers import _get_tool_handlers

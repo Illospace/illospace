@@ -572,9 +572,50 @@ export interface WorkspaceAppStateRead {
   scope: string;
   key: string;
   data: Record<string, any>;
+  version: number;
   updated_by_user_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface WorkspaceAppEventCreateInput {
+  event_type: string;
+  payload?: Record<string, any>;
+  state_patch?: Record<string, any> | null;
+  state_key?: string | null;
+  idempotency_key?: string | null;
+  expected_state_version?: number | null;
+  metadata?: Record<string, any>;
+}
+
+export interface WorkspaceAppEventRead {
+  id: number;
+  org_id: string;
+  app_id: string;
+  thread_id: string | null;
+  event_type: string;
+  idempotency_key: string | null;
+  actor_kind: string;
+  actor_user_id: string | null;
+  actor_display: Record<string, any>;
+  payload: Record<string, any>;
+  state_key: string;
+  state_patch: Record<string, any>;
+  state_version: number;
+  metadata: Record<string, any>;
+  created_at: string;
+}
+
+export interface WorkspaceAppEventsRead {
+  events: WorkspaceAppEventRead[];
+}
+
+export interface WorkspaceAppCollaborationRead {
+  app_id: string;
+  state: WorkspaceAppStateRead;
+  events: WorkspaceAppEventRead[];
+  collaboration: Record<string, any>;
+  duplicate: boolean;
 }
 
 export interface WorkspaceAppActionRunInput {
@@ -1470,6 +1511,41 @@ export const api = {
     fetchJson<WorkspaceAppStateRead>(`/api/workspace-apps/${appId}/state/${encodeURIComponent(stateKey)}`, {
       method: 'PUT',
       body: JSON.stringify({ data }),
+    }),
+  getWorkspaceAppCollaboration: (
+    appId: string,
+    params: { state_key?: string | null; after_event_id?: number | null; limit?: number | null } = {},
+  ) =>
+    fetchJson<WorkspaceAppCollaborationRead>(
+      withQuery(`/api/workspace-apps/${appId}/collaboration`, {
+        state_key: params.state_key || undefined,
+        after_event_id: params.after_event_id ?? undefined,
+        limit: params.limit ?? undefined,
+      }),
+    ),
+  listWorkspaceAppEvents: (
+    appId: string,
+    params: { after_event_id?: number | null; event_type?: string | null; limit?: number | null } = {},
+  ) =>
+    fetchJson<WorkspaceAppEventsRead>(
+      withQuery(`/api/workspace-apps/${appId}/events`, {
+        after_event_id: params.after_event_id ?? undefined,
+        event_type: params.event_type || undefined,
+        limit: params.limit ?? undefined,
+      }),
+    ),
+  appendWorkspaceAppEvent: (appId: string, data: WorkspaceAppEventCreateInput) =>
+    fetchJson<WorkspaceAppCollaborationRead>(`/api/workspace-apps/${appId}/events`, {
+      method: 'POST',
+      body: JSON.stringify({
+        event_type: data.event_type,
+        payload: data.payload ?? {},
+        state_patch: data.state_patch ?? undefined,
+        state_key: data.state_key ?? undefined,
+        idempotency_key: data.idempotency_key ?? undefined,
+        expected_state_version: data.expected_state_version ?? undefined,
+        metadata: data.metadata ?? {},
+      }),
     }),
   runWorkspaceAppAction: (appId: string, data: WorkspaceAppActionRunInput) =>
     fetchJson<WorkspaceAppActionRunRead>(`/api/workspace-apps/${appId}/actions/run`, {
