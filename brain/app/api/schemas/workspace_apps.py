@@ -70,6 +70,7 @@ class WorkspaceAppStateRead(BaseModel):
     scope: str
     key: str
     data: dict[str, Any]
+    version: int = 0
     updated_by_user_id: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -78,6 +79,46 @@ class WorkspaceAppStateRead(BaseModel):
 class WorkspaceAppStateUpdate(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
     data_patch: dict[str, Any] | None = None
+
+
+class WorkspaceAppEventCreate(BaseModel):
+    event_type: str = Field(min_length=1, max_length=120)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    state_patch: dict[str, Any] | None = None
+    state_key: str | None = Field(default=None, max_length=120)
+    idempotency_key: str | None = Field(default=None, max_length=180)
+    expected_state_version: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceAppEventRead(BaseModel):
+    id: int
+    org_id: str
+    app_id: str
+    thread_id: str | None = None
+    event_type: str
+    idempotency_key: str | None = None
+    actor_kind: str
+    actor_user_id: str | None = None
+    actor_display: dict[str, Any]
+    payload: dict[str, Any]
+    state_key: str
+    state_patch: dict[str, Any]
+    state_version: int
+    metadata: dict[str, Any]
+    created_at: datetime
+
+
+class WorkspaceAppEventsRead(BaseModel):
+    events: list[WorkspaceAppEventRead] = Field(default_factory=list)
+
+
+class WorkspaceAppCollaborationRead(BaseModel):
+    app_id: str
+    state: WorkspaceAppStateRead
+    events: list[WorkspaceAppEventRead] = Field(default_factory=list)
+    collaboration: dict[str, Any] = Field(default_factory=dict)
+    duplicate: bool = False
 
 
 class WorkspaceAppActionRun(BaseModel):

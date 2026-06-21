@@ -923,7 +923,15 @@ def action_policy_for_tool(
         return None
     if tool_name == "manage_project" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get", "search_files", "mount_reference"}:
         return None
-    if tool_name == "manage_workspace_app" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get", "get_state"}:
+    if tool_name == "manage_workspace_app" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {
+        "help",
+        "schema",
+        "list",
+        "get",
+        "get_state",
+        "get_collaboration",
+        "list_events",
+    }:
         return None
     if tool_name == "manage_soul" and _arg_at(args_tuple, kwargs_dict, "action", 0) == "read":
         return None

@@ -14,7 +14,10 @@ from brain.app.api.schemas.workspace_apps import (
     WorkspaceAppActionRunRead,
     WorkspaceAppBindingRun,
     WorkspaceAppBindingRunRead,
+    WorkspaceAppCollaborationRead,
     WorkspaceAppCreate,
+    WorkspaceAppEventCreate,
+    WorkspaceAppEventsRead,
     WorkspaceAppRead,
     WorkspaceAppStateRead,
     WorkspaceAppStateUpdate,
@@ -28,6 +31,12 @@ from brain.systems.workspace_apps.actions import (
     async_run_workspace_app_action,
 )
 from brain.systems.workspace_apps.bindings import async_run_workspace_app_binding
+from brain.systems.workspace_apps.collaboration import (
+    a_append_collaboration_event,
+    a_get_collaboration_snapshot,
+    a_list_collaboration_events,
+    serialize_event,
+)
 from brain.systems.workspace_apps.service import (
     WorkspaceAppConflict,
     WorkspaceAppContractError,
@@ -47,7 +56,10 @@ from brain.systems.workspace_apps.service import (
     a_update_state,
     serialize_state,
 )
-from brain.systems.workspace_apps.events import publish_workspace_app_change
+from brain.systems.workspace_apps.events import (
+    publish_workspace_app_change,
+    publish_workspace_app_collaboration_event,
+)
 
 router = APIRouter(
     prefix="/api/workspace-apps",
@@ -269,6 +281,89 @@ async def update_workspace_app_state(
             user_id=_user_id(user),
         )
         return serialize_state(state)
+    except WorkspaceAppError as exc:
+        _raise_http(exc)
+
+
+@router.get("/{app_id}/collaboration", response_model=WorkspaceAppCollaborationRead)
+async def get_workspace_app_collaboration(
+    app_id: str,
+    state_key: str | None = None,
+    after_event_id: int | None = None,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    org_id = require_org_context(user)
+    try:
+        return await a_get_collaboration_snapshot(
+            db,
+            org_id=org_id,
+            app_id=app_id,
+            state_key=state_key,
+            after_event_id=after_event_id,
+            limit=limit,
+            user_id=_user_id(user),
+        )
+    except WorkspaceAppError as exc:
+        _raise_http(exc)
+
+
+@router.get("/{app_id}/events", response_model=WorkspaceAppEventsRead)
+async def list_workspace_app_events(
+    app_id: str,
+    after_event_id: int | None = None,
+    event_type: str | None = None,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    org_id = require_org_context(user)
+    try:
+        events = await a_list_collaboration_events(
+            db,
+            org_id=org_id,
+            app_id=app_id,
+            after_event_id=after_event_id,
+            event_type=event_type,
+            limit=limit,
+        )
+        return {"events": [serialize_event(event) for event in events]}
+    except WorkspaceAppError as exc:
+        _raise_http(exc)
+
+
+@router.post("/{app_id}/events", response_model=WorkspaceAppCollaborationRead, status_code=201)
+async def append_workspace_app_event(
+    app_id: str,
+    body: WorkspaceAppEventCreate,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    org_id = require_org_context(user)
+    try:
+        result = await a_append_collaboration_event(
+            db,
+            org_id=org_id,
+            app_id=app_id,
+            event_type=body.event_type,
+            payload=body.payload,
+            state_patch=body.state_patch,
+            state_key=body.state_key,
+            idempotency_key=body.idempotency_key,
+            expected_state_version=body.expected_state_version,
+            metadata=body.metadata,
+            user_id=_user_id(user),
+        )
+        await db.commit()
+        publish_workspace_app_collaboration_event(
+            org_id=org_id,
+            app_id=app_id,
+            state=result.get("state"),
+            events=result.get("events"),
+            duplicate=bool(result.get("duplicate")),
+        )
+        return result
     except WorkspaceAppError as exc:
         _raise_http(exc)
 

@@ -14,6 +14,52 @@ records, and system bindings for scoped workspace reads.
 Use app state for filters, drafts, collapsed sections, selected tabs, and other
 ephemeral UI preferences. Store durable shared rows in Domains.
 
+## Collaborative Artifacts
+
+For team-facing thread artifacts such as votes, brainstorm boards, critique
+walls, async check-ins, retros, and approval flows, declare
+`manifest.collaboration` and write structured events through `window.illo.collab`.
+This is the durable shared interaction layer Illo can inspect later.
+
+```json
+{
+  "collaboration": {
+    "mode": "event_sourced",
+    "actions": {
+      "vote.cast": {
+        "reducer": {
+          "type": "choice_by_actor",
+          "state_path": "votes",
+          "value_field": "optionId"
+        }
+      },
+      "note.add": {
+        "reducer": {
+          "type": "append",
+          "state_path": "notes"
+        }
+      },
+      "status.change": {}
+    }
+  }
+}
+```
+
+```js
+await window.illo.collab.event("vote.cast", { optionId: "b", confidence: 0.8 });
+await window.illo.collab.event("note.add", { body: "B seems lower risk." });
+
+const sharedState = await window.illo.collab.state();
+const tail = await window.illo.collab.events({ afterEventId: 12, limit: 50 });
+const unsubscribe = window.illo.collab.subscribe((snapshot) => render(snapshot), {
+  intervalMs: 5000
+});
+```
+
+Use `statePatch` only for simple host-materialized fields such as
+`status`, `summary`, or `phase`. Prefer declared reducers for repeatable team
+input like votes and notes.
+
 ## Data Bindings
 
 Bind Domains or system sources in `manifest.data_plan.bindings`, then use the

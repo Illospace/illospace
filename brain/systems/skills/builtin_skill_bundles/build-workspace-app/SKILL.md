@@ -53,6 +53,11 @@ Illo app-capsule bridge.
    - `await window.illo.state.get()`,
      `await window.illo.state.set(nextState)`, and
      `await window.illo.state.update(patch)` for app-local UI state only.
+   - For team artifacts, declare `manifest.collaboration` and use
+     `window.illo.collab.event(eventType, payload, options)`,
+     `window.illo.collab.state()`, `window.illo.collab.events(options)`, and
+     `window.illo.collab.subscribe(handler, { intervalMs })` for durable
+     votes, notes, status changes, and participant input.
    - `await window.illo.actions.run(actionKey, payload)` for
      manifest-declared server-side actions.
    - Listen for `window` event `illo:state` when the host sends fresh state.

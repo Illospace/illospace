@@ -15,6 +15,7 @@ __all__ = [
     "WorkspaceApp",
     "WorkspaceAppVersion",
     "WorkspaceAppState",
+    "WorkspaceAppEvent",
 ]
 
 
@@ -110,6 +111,48 @@ class WorkspaceAppState(Base, TimestampMixin):
     data: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
     )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", default=0)
     updated_by_user_id: Mapped[Optional[str]] = mapped_column(
         UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class WorkspaceAppEvent(Base, CreatedAtMixin):
+    """Append-only collaborative interaction event for a generated workspace app."""
+
+    __tablename__ = "workspace_app_events"
+    __table_args__ = (
+        UniqueConstraint("app_id", "idempotency_key", name="uq_workspace_app_events_app_idempotency"),
+        Index("ix_workspace_app_events_org_app_created", "org_id", "app_id", "created_at"),
+        Index("ix_workspace_app_events_app_type_created", "app_id", "event_type", "created_at"),
+        Index("ix_workspace_app_events_thread_created", "thread_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    app_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("workspace_apps.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    thread_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(180), nullable=True)
+    actor_kind: Mapped[str] = mapped_column(String(40), nullable=False, server_default="user", default="user")
+    actor_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    actor_display: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
+    state_key: Mapped[str] = mapped_column(String(120), nullable=False, server_default="default", default="default")
+    state_patch: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", default=0)
+    event_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
     )
