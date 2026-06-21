@@ -60,6 +60,7 @@
   } from '$lib/features/threads/domain/threadLinks';
 
   const RUNTIME_READY_ONBOARDING_PARAM = 'runtime-ready';
+  const WORKSPACE_APP_QUERY_PARAM = 'app';
   const WORKSPACE_ARRIVAL_DURATION_MS = 1320;
   const RUNTIME_READY_INTRO_DELAY_MS = 1560;
   type RuntimeReadyComposerDraft = {
@@ -101,6 +102,10 @@
     return threadIdFromUrl($page.url);
   }
 
+  function requestedWorkspaceAppIdFromPage() {
+    return ($page.url.searchParams.get(WORKSPACE_APP_QUERY_PARAM) || '').trim() || null;
+  }
+
   function isThreadStageUrl() {
     return isThreadRoutePathname($page.url.pathname) || Boolean($page.url.searchParams.get(CORTEX_THREAD_PARAM));
   }
@@ -108,6 +113,7 @@
   let initialDirectThreadIdeaId = $state<string | null>(requestedThreadIdeaIdFromPage());
   let directThreadUrlPending = $state(Boolean(requestedThreadIdeaIdFromPage()));
   let lastAutoOpenedAppId = $state<string | null>(null);
+  let lastRouteOpenedWorkspaceAppId = $state<string | null>(null);
   let threadStagePrewarmQueued = false;
   let CortexArchiveBinMenuComponent = $state<typeof import('$lib/features/cortex/components/ArchiveBinMenu.svelte').default | null>(null);
   let WorkspaceSceneComponent = $state<typeof import('$lib/features/workspace-scene/components/WorkspaceScene.svelte').default | null>(null);
@@ -266,6 +272,23 @@
   });
 
   $effect(() => {
+    if (isThreadStageUrl()) return;
+    const requestedAppId = requestedWorkspaceAppIdFromPage();
+    if (!requestedAppId) {
+      lastRouteOpenedWorkspaceAppId = null;
+      return;
+    }
+    const app = workspaceApps.appById(requestedAppId);
+    if (!app) {
+      if (!workspaceApps.loaded) void workspaceApps.load({ silent: true });
+      return;
+    }
+    if (requestedAppId === lastRouteOpenedWorkspaceAppId && workspaceOverlay.activeWorkspaceAppId === requestedAppId) return;
+    lastRouteOpenedWorkspaceAppId = requestedAppId;
+    void openWorkspaceAppFromRoute(requestedAppId);
+  });
+
+  $effect(() => {
     const modalId = activeWorkspacePageModalId;
     if (!modalId) {
       workspacePageLoadToken += 1;
@@ -323,6 +346,14 @@
 
   async function handleWorkspaceAppOpen(origin: { x: number; y: number; appId: string }) {
     workspaceOverlay.openWorkspaceAppOverlay(origin.appId);
+    threadStage.setCenteredOrigin('50%', '50%');
+    if (cortex.panelOpen) {
+      await cortex.selectIdea(null);
+    }
+  }
+
+  async function openWorkspaceAppFromRoute(appId: string) {
+    workspaceOverlay.openWorkspaceAppOverlay(appId);
     threadStage.setCenteredOrigin('50%', '50%');
     if (cortex.panelOpen) {
       await cortex.selectIdea(null);

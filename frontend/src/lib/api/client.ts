@@ -563,6 +563,11 @@ export interface WorkspaceAppRead {
   updated_at: string;
   active_version: WorkspaceAppVersionRead | null;
   contract_validation: Record<string, any>;
+  app_route: string;
+  app_url: string;
+  share_url: string;
+  url: string;
+  thread_id?: string | null;
 }
 
 export interface WorkspaceAppStateRead {

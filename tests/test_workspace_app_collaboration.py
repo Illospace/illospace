@@ -174,6 +174,56 @@ async def test_collaboration_event_applies_declared_reducer_and_lists_events(ses
     assert snapshot["events"][0]["id"] == result["events"][0]["id"]
 
 
+async def test_collaboration_accepts_reducer_shorthand_manifest(session):
+    manifest = _collaboration_manifest()
+    manifest["collaboration"]["actions"]["vote.cast"] = {
+        "description": "Record or update one participant vote.",
+        "reducer": "choice_by_actor",
+        "state_key": "votes",
+        "value_field": "optionId",
+    }
+    manifest["collaboration"]["actions"]["note.add"] = {
+        "description": "Append one participant note.",
+        "reducer": "append",
+        "list_key": "notes",
+    }
+
+    app = await a_create_app(
+        session,
+        org_id=ORG_ID,
+        key="shorthand-decision-board",
+        name="Shorthand Decision Board",
+        renderer_key="app-capsule",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=manifest,
+        visual_spec={"thumbnail": {"label": "Decision", "value": "Open"}},
+        initial_state={"votes": {}, "notes": []},
+        state_key="decision-board",
+        created_by_user_id=USER_ID,
+    )
+
+    vote = await a_append_collaboration_event(
+        session,
+        org_id=ORG_ID,
+        app_id=app.id,
+        event_type="vote.cast",
+        payload={"optionId": "decision-board"},
+        user_id=USER_ID,
+    )
+    note = await a_append_collaboration_event(
+        session,
+        org_id=ORG_ID,
+        app_id=app.id,
+        event_type="note.add",
+        payload={"text": "The board makes feedback concrete."},
+        user_id=USER_ID,
+    )
+
+    assert vote["state"]["data"]["votes"][f"user:{USER_ID}"]["value"] == "decision-board"
+    assert note["state"]["data"]["notes"] == [{"text": "The board makes feedback concrete."}]
+
+
 async def test_collaboration_event_idempotency_returns_existing_event(session):
     app = await _create_collaboration_app(session)
 

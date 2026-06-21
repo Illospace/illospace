@@ -34,6 +34,11 @@ class WorkspaceAppRead(BaseModel):
     updated_at: datetime
     active_version: WorkspaceAppVersionRead | None = None
     contract_validation: dict[str, Any] = Field(default_factory=dict)
+    app_route: str
+    app_url: str
+    share_url: str
+    url: str
+    thread_id: str | None = None
 
 
 class WorkspaceAppCreate(BaseModel):
