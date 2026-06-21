@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decideThreadRouteSelection } from '../features/cortex/domain/threadRouteOpening.ts';
+import {
+  buildSyncedThreadRouteHref,
+  decideThreadRouteSelection,
+} from '../features/cortex/domain/threadRouteOpening.ts';
 
 test('thread routes load through the direct thread path', () => {
   assert.deepEqual(
@@ -48,5 +51,19 @@ test('thread routes skip duplicate unresolved requests', () => {
       lastRequestedIdeaId: 'missing-thread',
     }),
     { action: 'skip-repeat' },
+  );
+});
+
+test('thread route synchronization preserves app deep links', () => {
+  const params = new URLSearchParams({
+    idea: 'legacy-thread',
+    app: 'generated-app-1',
+    onboarding: 'runtime-ready',
+    focus: 'reply',
+  });
+
+  assert.equal(
+    buildSyncedThreadRouteHref('thread-1', params),
+    '/threads/thread-1?app=generated-app-1&focus=reply',
   );
 });

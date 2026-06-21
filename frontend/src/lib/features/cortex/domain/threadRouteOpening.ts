@@ -1,3 +1,5 @@
+import { buildCortexThreadHref } from '../../threads/domain/threadLinks.ts';
+
 export type ThreadRouteSelectionDecision =
   | { action: 'idle'; directThreadUrlPending: false }
   | { action: 'already-open'; ideaId: string; directThreadUrlPending: false }
@@ -23,4 +25,11 @@ export function decideThreadRouteSelection({
   }
   if (requestedIdeaId === lastRequestedIdeaId) return { action: 'skip-repeat' };
   return { action: 'load-direct', ideaId: requestedIdeaId };
+}
+
+export function buildSyncedThreadRouteHref(
+  ideaId: string,
+  sourceParams?: URLSearchParams,
+): string {
+  return buildCortexThreadHref(ideaId, sourceParams);
 }

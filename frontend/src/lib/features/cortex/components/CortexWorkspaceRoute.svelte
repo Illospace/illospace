@@ -50,7 +50,10 @@
     isWorkspacePageModalId,
     type WorkspacePageModalId,
   } from '$lib/features/cortex/domain/workspacePageModal';
-  import { decideThreadRouteSelection } from '$lib/features/cortex/domain/threadRouteOpening';
+  import {
+    buildSyncedThreadRouteHref,
+    decideThreadRouteSelection,
+  } from '$lib/features/cortex/domain/threadRouteOpening';
   import {
     buildCortexHrefWithoutThread,
     CORTEX_THREAD_PARAM,
@@ -1014,7 +1017,7 @@
 
   function syncCanonicalThreadUrl(ideaId: string | null | undefined): boolean {
     if (!browser || !ideaId) return false;
-    const nextRoute = threadRoute(ideaId);
+    const nextRoute = buildSyncedThreadRouteHref(ideaId, $page.url.searchParams);
     const current = `${$page.url.pathname}${$page.url.search}${$page.url.hash}`;
     lastSyncedThreadRoute = nextRoute;
     if (current === nextRoute) return false;
