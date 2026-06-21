@@ -1,9 +1,11 @@
 <script lang="ts">
   import { browser } from '$app/environment';
+  import { page } from '$app/stores';
   import { onMount } from 'svelte';
 
   import { ConstellationIcon, ConstellationPill } from '$lib/components/constellation';
   import type { GeneratedAppSurface } from '$lib/features/workspace-apps/domain/generatedAppSurface';
+  import { resolveWorkspaceAppStateKey } from '$lib/features/workspace-apps/domain/workspaceAppStateKey';
   import {
     appendWorkspaceAppEvent,
     getWorkspaceAppCollaboration,
@@ -71,7 +73,7 @@
 
   const activeVersion = $derived(app.active_version);
   const manifest = $derived(activeVersion?.manifest ?? {});
-  const stateKey = $derived(String(manifest.state_key || 'default'));
+  const stateKey = $derived(resolveWorkspaceAppStateKey($page.url.searchParams, manifest.state_key));
   const sourceCode = $derived(activeVersion?.source_code || fallbackAppCapsuleSource(app.name));
   const appAccent = $derived(String(app.visual_spec?.accent || app.visual_spec?.thumbnail?.accent || '#4BACB8'));
   const srcdoc = $derived(
@@ -185,7 +187,7 @@
   async function handleCollaborationGet(message: RuntimeMessage) {
     try {
       const result = await getWorkspaceAppCollaboration(app.id, {
-        state_key: message.stateKey || undefined,
+        state_key: message.stateKey || stateKey || undefined,
         after_event_id: message.afterEventId ?? undefined,
         limit: message.limit ?? undefined,
       });
@@ -217,7 +219,7 @@
         event_type: eventType,
         payload: message.payload || {},
         state_patch: message.statePatch || message.patch || null,
-        state_key: message.stateKey || undefined,
+        state_key: message.stateKey || stateKey || undefined,
         idempotency_key: message.idempotencyKey || undefined,
         expected_state_version: message.expectedStateVersion ?? undefined,
         metadata: message.metadata || {},

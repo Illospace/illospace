@@ -524,6 +524,23 @@ ACT_CAPABILITIES: dict[str, dict[str, Any]] = {
             "initial_state": "object",
         },
     },
+    "thread.collaboration.start": {
+        "description": (
+            "Start or update a reusable team collaboration board for a thread. "
+            "Use this for brainstorms, votes, async team opinions, decision rooms, and status collection "
+            "instead of generating throwaway HTML apps."
+        ),
+        "arguments": {
+            "idea_id": "string",
+            "thread_id": "string",
+            "title": "string",
+            "prompt": "string",
+            "mode": "string",
+            "options": "object[]",
+            "session_key": "string",
+            "metadata": "object",
+        },
+    },
     **agent_mcp_handoffs.ACT_CAPABILITIES,
     "domain.record.write": {
         "description": "Create, update, or archive records in Illo Domains as the user's external-agent delegate.",
@@ -745,6 +762,34 @@ async def _act_publish_thread_artifact(
     return result
 
 
+async def _act_start_thread_collaboration(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    capability_arguments: dict[str, Any],
+) -> dict[str, Any]:
+    from brain.systems.cortex.thread_artifacts import publish_thread_collaboration_app
+
+    result = await publish_thread_collaboration_app(
+        db,
+        org_id=principal.org_id,
+        user_id=principal.owner_user_id,
+        thread_id=_thread_argument_id(capability_arguments),
+        title=_required_capability_string(capability_arguments, "title", capability="thread.collaboration.start"),
+        prompt=_required_capability_string(capability_arguments, "prompt", capability="thread.collaboration.start"),
+        mode=_clean_optional_string(capability_arguments.get("mode")),
+        options=capability_arguments.get("options") if isinstance(capability_arguments.get("options"), list) else [],
+        session_key=_clean_optional_string(capability_arguments.get("session_key")),
+        metadata={
+            **_clean_dict(capability_arguments.get("metadata")),
+            "mcp_tool": ACT_TOOL_NAME,
+            "mcp_capability": "thread.collaboration.start",
+        },
+    )
+    result["_mutates_workspace_app"] = True
+    result["_workspace_app_change"] = {"action": result["action"], "app": result["app"]}
+    return result
+
+
 async def _tool_act(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
@@ -770,6 +815,8 @@ async def _tool_act(
         )
     if capability == "thread.artifact.publish":
         return await _act_publish_thread_artifact(db, principal, capability_arguments)
+    if capability == "thread.collaboration.start":
+        return await _act_start_thread_collaboration(db, principal, capability_arguments)
     if capability == "handoff.create":
         return await agent_mcp_handoffs.create_handoff(
             db,
