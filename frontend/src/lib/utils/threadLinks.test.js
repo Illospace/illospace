@@ -30,12 +30,13 @@ test('canonical thread routes preserve generated app deep links', () => {
     idea: 'old-thread',
     app: 'app-123',
     artifact_app: 'legacy-app-456',
+    state_key: 'thread-collab-789',
     focus: 'reply',
   });
 
   assert.equal(
     buildCortexThreadHref('thread:123', params),
-    '/threads/thread%3A123?app=app-123&artifact_app=legacy-app-456&focus=reply',
+    '/threads/thread%3A123?app=app-123&artifact_app=legacy-app-456&state_key=thread-collab-789&focus=reply',
   );
 });
 

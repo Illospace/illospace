@@ -17,6 +17,7 @@ from brain.platform.db.models.workspace_app import WorkspaceApp, WorkspaceAppSta
 ORG_ID = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"
 USER_ID = "bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb"
 THREAD_ID = "cccccccccccc4ccc8ccccccccccccccc"
+SECOND_THREAD_ID = "dddddddddddd4ddd8ddddddddddddddd"
 
 VALID_ARTIFACT_SOURCE = """
 <main class="illo-app">
@@ -86,6 +87,7 @@ async def session(async_sqlite_session_factory):
             Org(id=ORG_ID, name="Test Org", slug="test"),
             User(id=USER_ID, org_id=ORG_ID, name="Alex", email="alex@example.test"),
             Idea(id=THREAD_ID, title="Artifact source thread", user_id=USER_ID, org_id=ORG_ID),
+            Idea(id=SECOND_THREAD_ID, title="Second source thread", user_id=USER_ID, org_id=ORG_ID),
         ]
     )
     await db.flush()
@@ -133,6 +135,50 @@ async def test_publish_thread_artifact_creates_and_republishes_app_capsule(sessi
     assert "Republished." in updated["app"]["active_version"]["source_code"]
 
 
+async def test_publish_thread_collaboration_reuses_system_app_with_thread_state_keys(session):
+    from brain.systems.cortex.thread_artifacts import (
+        SYSTEM_COLLABORATION_APP_KEY,
+        publish_thread_collaboration_app,
+    )
+
+    first = await publish_thread_collaboration_app(
+        session,
+        org_id=ORG_ID,
+        user_id=USER_ID,
+        thread_id=THREAD_ID,
+        title="Pick the next artifact",
+        prompt="Which collaborative surface should Illo share first?",
+        mode="decision",
+        options=[
+            {"id": "vote", "label": "Vote board"},
+            {"id": "brainstorm", "label": "Brainstorm board"},
+        ],
+    )
+    second = await publish_thread_collaboration_app(
+        session,
+        org_id=ORG_ID,
+        user_id=USER_ID,
+        thread_id=SECOND_THREAD_ID,
+        title="Choose review style",
+        prompt="How should the team review the proposal?",
+        mode="brainstorm",
+        options=["Async notes", "Live vote"],
+    )
+
+    assert first["action"] == "created"
+    assert second["action"] == "reused"
+    assert first["app_id"] == second["app_id"]
+    assert first["app_key"] == SYSTEM_COLLABORATION_APP_KEY
+    assert first["state_key"] != second["state_key"]
+    assert f"state_key={first['state_key']}" in first["artifact_route"]
+    assert f"state_key={second['state_key']}" in second["artifact_route"]
+    assert first["state"]["data"]["config"]["prompt"] == "Which collaborative surface should Illo share first?"
+    assert second["state"]["data"]["config"]["options"][0]["id"] == "async-notes"
+    assert first["app"]["active_version"]["manifest"]["collaboration"]["actions"]["vote.cast"]["reducer"][
+        "state_path"
+    ] == "votes"
+
+
 async def test_mcp_thread_artifact_publish_capability_sets_workspace_app_mutation(monkeypatch, session):
     from brain.app.api.routers import agent_mcp
 
@@ -175,3 +221,51 @@ async def test_mcp_thread_artifact_publish_capability_sets_workspace_app_mutatio
     assert calls[0]["user_id"] == USER_ID
     assert calls[0]["thread_id"] == THREAD_ID
     assert calls[0]["metadata"]["mcp_capability"] == "thread.artifact.publish"
+
+
+async def test_mcp_thread_collaboration_start_uses_system_publisher(monkeypatch, session):
+    from brain.app.api.routers import agent_mcp
+
+    calls: list[dict] = []
+
+    async def fake_publish(db, **kwargs):
+        calls.append({"db": db, **kwargs})
+        return {
+            "action": "reused",
+            "app_id": "system-app",
+            "app_key": "system-team-collaboration-board",
+            "state_key": "thread-collab-1",
+            "app": {"id": "system-app", "key": "system-team-collaboration-board"},
+        }
+
+    monkeypatch.setattr(
+        "brain.systems.cortex.thread_artifacts.publish_thread_collaboration_app",
+        fake_publish,
+    )
+    principal = SimpleNamespace(org_id=ORG_ID, owner_user_id=USER_ID)
+
+    result = await agent_mcp._tool_act(
+        session,
+        principal,
+        {
+            "capability": "thread.collaboration.start",
+            "arguments": {
+                "thread_id": THREAD_ID,
+                "title": "Team decision",
+                "prompt": "Which option should we pick?",
+                "mode": "decision",
+                "options": [{"id": "a", "label": "A"}],
+            },
+        },
+    )
+
+    assert "thread.collaboration.start" in agent_mcp.ACT_CAPABILITIES
+    assert result["_mutates_workspace_app"] is True
+    assert result["_workspace_app_change"] == {
+        "action": "reused",
+        "app": {"id": "system-app", "key": "system-team-collaboration-board"},
+    }
+    assert calls[0]["db"] is session
+    assert calls[0]["thread_id"] == THREAD_ID
+    assert calls[0]["prompt"] == "Which option should we pick?"
+    assert calls[0]["metadata"]["mcp_capability"] == "thread.collaboration.start"

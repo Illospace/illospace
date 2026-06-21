@@ -232,9 +232,11 @@
   const requestedThreadAppId = $derived(
     $page.url.searchParams.get('app') || $page.url.searchParams.get('artifact_app'),
   );
+  const requestedThreadAppStateKey = $derived($page.url.searchParams.get('state_key'));
   const selectedThreadApp = $derived(
     activeSidePanelTab?.kind === 'app' && activeSidePanelTab.appId
-      ? threadArtifactApps.find((app) => app.id === activeSidePanelTab.appId) ?? null
+      ? threadArtifactApps.find((app) => app.id === activeSidePanelTab.appId)
+        ?? workspaceApps.appById(activeSidePanelTab.appId)
       : null,
   );
   const sidePanelAddMenuItems = $derived.by(() =>
@@ -891,8 +893,17 @@
   }
 
   function openAppTab(appId: string | null | undefined) {
-    const app = threadArtifactApps.find((candidate) => candidate.id === appId) ?? null;
+    const app = threadArtifactApps.find((candidate) => candidate.id === appId) ?? workspaceApps.appById(appId);
     applySidePanelState(openAppThreadSidePanelTab(sidePanelState(), appId, app));
+  }
+
+  function isStateKeyScopedSystemCollaborationApp(app: ReturnType<typeof workspaceApps.appById>): boolean {
+    const metadata = app?.metadata || {};
+    return Boolean(
+      requestedThreadAppStateKey
+        && metadata.system_app === true
+        && metadata.source === 'system_thread_collaboration',
+    );
   }
 
   function handleThreadAppSelect(appId: string | null) {
@@ -914,7 +925,10 @@
       if (!workspaceApps.loaded) void workspaceApps.load({ silent: true });
       return;
     }
-    if (!workspaceApps.appBelongsToThread(app, idea?.id ?? null)) return;
+    if (
+      !workspaceApps.appBelongsToThread(app, idea?.id ?? null)
+      && !isStateKeyScopedSystemCollaborationApp(app)
+    ) return;
     lastAutoOpenedThreadAppId = appId;
     openAppTab(appId);
   });
