@@ -25,7 +25,7 @@ export function appCapsuleBridgeScript(app: AppCapsuleRuntimeApp) {
 
       function request(type, payload) {
         const requestId = nextId();
-        parent.postMessage({ source: 'illo-app', type, requestId, ...(payload || {}) }, '*');
+        parent.postMessage(cloneForBridge({ source: 'illo-app', type, requestId, ...(payload || {}) }), '*');
         return new Promise((resolve, reject) => {
           pending.set(requestId, { resolve, reject });
           setTimeout(() => {
@@ -34,6 +34,40 @@ export function appCapsuleBridgeScript(app: AppCapsuleRuntimeApp) {
             reject(new Error('Illo app bridge timed out'));
           }, 8000);
         });
+      }
+
+      function jsonRoundTrip(value) {
+        try {
+          return JSON.parse(JSON.stringify(value));
+        } catch (error) {
+          return null;
+        }
+      }
+
+      function safeJsonValue(value, seen) {
+        if (value === undefined || typeof value === 'function' || typeof value === 'symbol') return undefined;
+        if (typeof value === 'bigint') return String(value);
+        if (!value || typeof value !== 'object') return value;
+        if (value instanceof Date) return value.toISOString();
+        seen = seen || new WeakSet();
+        if (seen.has(value)) return undefined;
+        seen.add(value);
+        if (Array.isArray(value)) return value.map((item) => safeJsonValue(item, seen));
+        const output = {};
+        Object.entries(value).forEach(([key, item]) => {
+          const safeItem = safeJsonValue(item, seen);
+          if (safeItem !== undefined) output[key] = safeItem;
+        });
+        return output;
+      }
+
+      function cloneForBridge(value) {
+        if (!value || typeof value !== 'object') return value;
+        try {
+          return structuredClone(value);
+        } catch (error) {
+          return jsonRoundTrip(value) || safeJsonValue(value);
+        }
       }
 
       function stableSignature(value) {

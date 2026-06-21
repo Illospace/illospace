@@ -21,6 +21,7 @@
   import { theme } from '$lib/stores/theme.svelte';
   import { workspaceApps } from '$lib/stores/workspaceApps.svelte';
   import { ui } from '$lib/stores/ui.svelte';
+  import { cloneForPostMessage } from '$lib/utils/postMessageClone';
   import { normalizeDomainRequest, withDomainRecordAliases } from '$lib/utils/generatedAppBridge';
 
   import GeneratedAppChrome from './GeneratedAppChrome.svelte';
@@ -123,7 +124,7 @@
 
         function request(type, payload) {
           const requestId = nextId();
-          parent.postMessage({ source: 'illo-app', type, requestId, ...(payload || {}) }, '*');
+          parent.postMessage(cloneForBridge({ source: 'illo-app', type, requestId, ...(payload || {}) }), '*');
           return new Promise((resolve, reject) => {
             pending.set(requestId, { resolve, reject });
             setTimeout(() => {
@@ -132,6 +133,40 @@
               reject(new Error('Illo host bridge timed out'));
             }, 8000);
           });
+        }
+
+        function jsonRoundTrip(value) {
+          try {
+            return JSON.parse(JSON.stringify(value));
+          } catch (error) {
+            return null;
+          }
+        }
+
+        function safeJsonValue(value, seen) {
+          if (value === undefined || typeof value === 'function' || typeof value === 'symbol') return undefined;
+          if (typeof value === 'bigint') return String(value);
+          if (!value || typeof value !== 'object') return value;
+          if (value instanceof Date) return value.toISOString();
+          seen = seen || new WeakSet();
+          if (seen.has(value)) return undefined;
+          seen.add(value);
+          if (Array.isArray(value)) return value.map((item) => safeJsonValue(item, seen));
+          const output = {};
+          Object.entries(value).forEach(([key, item]) => {
+            const safeItem = safeJsonValue(item, seen);
+            if (safeItem !== undefined) output[key] = safeItem;
+          });
+          return output;
+        }
+
+        function cloneForBridge(value) {
+          if (!value || typeof value !== 'object') return value;
+          try {
+            return structuredClone(value);
+          } catch (error) {
+            return jsonRoundTrip(value) || safeJsonValue(value);
+          }
         }
 
         function applyTheme(nextTheme) {
@@ -687,7 +722,7 @@
   function postToFrame(type: string, payload: Record<string, any> = {}) {
     const target = frameWindow();
     if (!target) return;
-    target.postMessage({ source: 'illo-host', type, ...payload }, '*');
+    target.postMessage(cloneForPostMessage({ source: 'illo-host', type, ...payload }), '*');
   }
 
   function buildInitPayload() {
