@@ -31,6 +31,7 @@ from brain.systems.workspace_apps.service import (
     a_delete_archived_apps,
     a_list_archived_apps,
     a_restore_app,
+    a_serialize_app,
     a_update_app,
 )
 from brain.systems.workspace_apps.bindings import WorkspaceAppBindingError, async_run_workspace_app_binding
@@ -305,6 +306,54 @@ async def test_app_capsule_capability_manifest_saves(session):
     assert version.renderer_key == "app-capsule"
     assert version.source_kind == "html"
     assert version.manifest["data_plan"]["mode"] == "capability"
+
+
+async def test_serialized_workspace_app_includes_share_url(session, monkeypatch):
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com/app")
+
+    app = await a_create_app(
+        session,
+        org_id=ORG_ID,
+        key="team-feedback",
+        name="Team Feedback",
+        renderer_key="app-capsule",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=_app_local_manifest(),
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    serialized = await a_serialize_app(session, app)
+
+    assert serialized["app_route"] == f"/cortex?app={app.id}"
+    assert serialized["app_url"] == f"https://illo.example.com/cortex?app={app.id}"
+    assert serialized["share_url"] == serialized["app_url"]
+    assert serialized["url"] == serialized["app_url"]
+
+
+async def test_serialized_thread_workspace_app_uses_thread_share_url(session, monkeypatch):
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com/app")
+
+    app = await a_create_app(
+        session,
+        org_id=ORG_ID,
+        key="thread-feedback",
+        name="Thread Feedback",
+        renderer_key="app-capsule",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=_app_local_manifest(),
+        visual_spec=VALID_VISUAL_SPEC,
+        metadata={"thread_artifact": {"thread_id": "thread:123"}},
+        created_by_user_id=USER_ID,
+    )
+
+    serialized = await a_serialize_app(session, app)
+
+    assert serialized["thread_id"] == "thread:123"
+    assert serialized["app_route"] == f"/threads/thread%3A123?app={app.id}"
+    assert serialized["app_url"] == f"https://illo.example.com/threads/thread%3A123?app={app.id}"
 
 
 async def test_workspace_app_binding_broker_routes_domain_operations(session):

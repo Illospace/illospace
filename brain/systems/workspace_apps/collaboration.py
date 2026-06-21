@@ -114,6 +114,25 @@ def _value_from_payload(payload: Mapping[str, Any], reducer: Mapping[str, Any]) 
     return dict(payload)
 
 
+def _reducer_object(action: Mapping[str, Any]) -> dict[str, Any]:
+    reducer = action.get("reducer")
+    if isinstance(reducer, str):
+        state_path = (
+            action.get("state_path")
+            or action.get("list_key")
+            or action.get("map_key")
+            or action.get("state_key")
+        )
+        normalized = {
+            "type": reducer.strip(),
+            "state_path": state_path,
+        }
+        if action.get("value_field") is not None:
+            normalized["value_field"] = action.get("value_field")
+        return normalized
+    return _as_mapping(reducer)
+
+
 def _top_level_patch(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
     return {
         key: value
@@ -135,7 +154,7 @@ def _apply_reducer(
     payload: Mapping[str, Any],
     actor_key: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    reducer = _as_mapping(action.get("reducer"))
+    reducer = _reducer_object(action)
     if not reducer:
         return data, {}
 

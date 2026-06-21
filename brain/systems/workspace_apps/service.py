@@ -18,6 +18,7 @@ from brain.systems.workspace_apps.contracts import (
     build_contract_validation_report,
     record_like_state_keys,
 )
+from brain.systems.workspace_apps.links import workspace_app_link_payload
 
 DEFAULT_RENDERER_KEY = APP_CAPSULE_RENDERER_KEY
 DEFAULT_SOURCE_KIND = APP_CAPSULE_SOURCE_KIND
@@ -386,6 +387,7 @@ async def a_serialize_app(
     version: WorkspaceAppVersion | None | object = _VERSION_MISSING,
 ) -> dict[str, Any]:
     resolved_version = await a_active_version(session, app.id) if version is _VERSION_MISSING else version
+    links = workspace_app_link_payload(app.id, metadata=app.app_metadata or {})
     return {
         "id": app.id,
         "org_id": app.org_id,
@@ -402,6 +404,7 @@ async def a_serialize_app(
         "updated_at": app.updated_at,
         "active_version": serialize_version(resolved_version),
         "contract_validation": contract_validation_report_for_app(app, resolved_version),
+        **links,
     }
 
 

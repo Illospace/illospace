@@ -238,12 +238,31 @@ def _validate_collaboration(value: Mapping[str, Any], errors: list[str]) -> None
         reducer = raw_action.get("reducer")
         if reducer is None:
             continue
-        reducer_obj = _as_mapping(reducer)
+        reducer_obj = _collaboration_reducer_object(raw_action)
         reducer_type = str(reducer_obj.get("type") or "").strip()
         if reducer_type not in {"choice_by_actor", "append", "set"}:
             errors.append(f"{prefix}.reducer.type must be one of: append, choice_by_actor, set")
         if not str(reducer_obj.get("state_path") or "").strip():
             errors.append(f"{prefix}.reducer.state_path is required")
+
+
+def _collaboration_reducer_object(action: Mapping[str, Any]) -> dict[str, Any]:
+    reducer = action.get("reducer")
+    if isinstance(reducer, str):
+        state_path = (
+            action.get("state_path")
+            or action.get("list_key")
+            or action.get("map_key")
+            or action.get("state_key")
+        )
+        normalized = {
+            "type": reducer.strip(),
+            "state_path": state_path,
+        }
+        if action.get("value_field") is not None:
+            normalized["value_field"] = action.get("value_field")
+        return normalized
+    return _as_mapping(reducer)
 
 
 def _validate_domain_binding(alias: str, value: Any, errors: list[str]) -> None:
