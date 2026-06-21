@@ -21,6 +21,7 @@
   import { theme } from '$lib/stores/theme.svelte';
   import { ui } from '$lib/stores/ui.svelte';
   import { workspaceApps } from '$lib/stores/workspaceApps.svelte';
+  import { cloneForPostMessage } from '$lib/utils/postMessageClone';
 
   import GeneratedAppChrome from './GeneratedAppChrome.svelte';
 
@@ -92,7 +93,7 @@
   function postToFrame(type: string, payload: Record<string, any> = {}) {
     const target = frameWindow();
     if (!target) return;
-    target.postMessage({ source: 'illo-host', type, ...payload }, '*');
+    target.postMessage(cloneForPostMessage({ source: 'illo-host', type, ...payload }), '*');
   }
 
   function buildInitPayload() {
