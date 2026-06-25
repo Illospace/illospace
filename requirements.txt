@@ -34,3 +34,8 @@ structlog>=24.0
 sentence-transformers>=5.0
 transformers>=5.0
 accelerate>=1.0
+
+# Local voice dictation (CPU Whisper via CTranslate2; no torch). Ships in the
+# production image too; the "Local" voice provider degrades to unavailable if
+# this is somehow missing.
+faster-whisper>=1.0

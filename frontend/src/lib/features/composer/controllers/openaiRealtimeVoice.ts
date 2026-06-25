@@ -96,7 +96,7 @@ export async function createOpenAIRealtimeVoiceConnection(
   };
 }
 
-function createAudioLevelMonitor(
+export function createAudioLevelMonitor(
   stream: MediaStream,
   onAudioLevel?: (level: number) => void,
 ): AudioLevelMonitor | null {

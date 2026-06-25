@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.auth import get_current_user
@@ -33,11 +33,16 @@ from .schemas import (
     RuntimeUpdateRead,
     RuntimeVoiceRead,
     RuntimeVoiceSessionRead,
+    RuntimeVoiceTranscriptRead,
     RuntimeVoiceUpdate,
 )
 from .service import async_get_runtime_settings, can_manage_runtime_settings
 from .self_update import async_get_runtime_update_status, async_start_runtime_update
-from .voice import async_create_runtime_voice_session, async_update_runtime_voice
+from .voice import (
+    async_create_runtime_voice_session,
+    async_transcribe_runtime_voice_clip,
+    async_update_runtime_voice,
+)
 
 router = APIRouter(prefix="/api/runtime-settings", tags=["runtime-settings"], dependencies=[Depends(rate_limit)])
 _OPENAI_OAUTH_CALLBACK_START_MODES = {"auto", "server", "local_bridge"}
@@ -184,6 +189,15 @@ async def create_voice_session(
     db: AsyncSession = Depends(get_db),
 ) -> RuntimeVoiceSessionRead:
     return await async_create_runtime_voice_session(db, user)
+
+
+@router.post("/voice/transcribe", response_model=RuntimeVoiceTranscriptRead)
+async def transcribe_voice_clip(
+    audio: UploadFile = File(...),
+    user: User = Depends(_runtime_user),
+    db: AsyncSession = Depends(get_db),
+) -> RuntimeVoiceTranscriptRead:
+    return await async_transcribe_runtime_voice_clip(db, user, upload=audio)
 
 
 @router.patch("/voice", response_model=RuntimeVoiceRead)

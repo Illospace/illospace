@@ -55,6 +55,16 @@
         disabled={!canManageSettings}
         onValueChange={(value) => onUpdateVoice('language', value)}
       />
+      {#if voiceDraft.provider === 'local'}
+        <RuntimeSelect
+          id="voice-model-size"
+          label="Model size"
+          value={voiceDraft.model_size}
+          options={voice.model_size_options}
+          disabled={!canManageSettings}
+          onValueChange={(value) => onUpdateVoice('model_size', value)}
+        />
+      {/if}
       <label class="runtime-static-field" for="voice-model">
         <span>Transcription model</span>
         <div id="voice-model">{voice.model}</div>

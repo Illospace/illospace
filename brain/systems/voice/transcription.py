@@ -66,6 +66,14 @@ async def async_transcribe_audio_path(
             language=selected_language,
             safety_identifier=safety_identifier,
         )
+    if config.provider == "local":
+        from brain.systems.voice.local_whisper import async_transcribe_local_audio_path
+
+        return await async_transcribe_local_audio_path(
+            audio_path,
+            language=selected_language,
+            model_size=getattr(config, "model_size", "base"),
+        )
     if config.provider in {"gemini", "google"}:
         raise AudioTranscriptionError(
             "Gemini Live is selected, but server-side audio attachment transcription is not enabled yet."
