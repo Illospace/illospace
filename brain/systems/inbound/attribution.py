@@ -27,6 +27,14 @@ _SUMMARY_OPERATION_TAGS = {
     "refreshed",
     "posted",
 }
+_EXPLICIT_REF_KEYS = frozenset(
+    {
+        "target_refs",
+        "mutated_target_refs",
+        "durable_refs",
+        "durable_target_refs",
+    }
+)
 
 _DIRECT_REF_KINDS = {
     "idea_id": "idea",
@@ -35,6 +43,20 @@ _DIRECT_REF_KINDS = {
     "message_id": "message",
     "domain_id": "domain",
     "record_id": "domain_record",
+    "project_id": "project_context",
+    "project_profile_id": "project_context",
+    "handoff_id": "launch_handoff",
+    "source_id": "memory_source",
+    "span_id": "memory_span",
+    "span_ids": "memory_span",
+    "content_node_id": "memory_node",
+    "cue_node_id": "memory_node",
+    "cue_node_ids": "memory_node",
+    "tag_node_id": "memory_node",
+    "tag_node_ids": "memory_node",
+    "assertion_id": "memory_assertion",
+    "edge_id": "memory_edge",
+    "edge_ids": "memory_edge",
     "connection_id": "external_source_connection",
     "policy_id": "inbound_source_policy",
     "projection_id": "inbound_domain_projection",
@@ -50,6 +72,9 @@ _OBJECT_REF_KINDS = {
     "message": "message",
     "domain": "domain",
     "record": "domain_record",
+    "project": "project_context",
+    "handoff": "launch_handoff",
+    "attachment": "project_context_attachment",
     "connection": "external_source_connection",
     "policy": "inbound_source_policy",
     "projection": "inbound_domain_projection",
@@ -129,14 +154,70 @@ def _add_ref(refs: list[dict[str, str]], seen: set[tuple[str, str]], *, kind: st
     refs.append({"kind": kind, "id": text, "source": source})
 
 
+def _add_ref_values(
+    refs: list[dict[str, str]],
+    seen: set[tuple[str, str]],
+    *,
+    kind: str,
+    value: Any,
+    source: str,
+) -> None:
+    if isinstance(value, list | tuple | set):
+        for item in value:
+            _add_ref(refs, seen, kind=kind, value=item, source=source)
+        return
+    _add_ref(refs, seen, kind=kind, value=value, source=source)
+
+
+def _add_explicit_ref(
+    refs: list[dict[str, str]],
+    seen: set[tuple[str, str]],
+    *,
+    value: Any,
+    source: str,
+) -> None:
+    if not isinstance(value, Mapping):
+        return
+    kind = str(value.get("kind") or value.get("type") or "").strip()
+    ref_id = value.get("id") or value.get("ref") or value.get("value")
+    if not ref_id and kind:
+        ref_id = value.get(f"{kind}_id")
+    if not kind or ref_id is None:
+        return
+    _add_ref(
+        refs,
+        seen,
+        kind=kind,
+        value=ref_id,
+        source=str(value.get("source") or source),
+    )
+
+
+def _add_explicit_ref_values(
+    refs: list[dict[str, str]],
+    seen: set[tuple[str, str]],
+    *,
+    value: Any,
+    source: str,
+) -> None:
+    if isinstance(value, list | tuple | set):
+        for item in value:
+            _add_explicit_ref(refs, seen, value=item, source=source)
+        return
+    _add_explicit_ref(refs, seen, value=value, source=source)
+
+
 def _collect_refs(value: Any, refs: list[dict[str, str]], seen: set[tuple[str, str]], *, source: str) -> None:
     if len(refs) >= _MAX_TARGET_REFS:
         return
     if isinstance(value, Mapping):
         for key, child in value.items():
             key_text = str(key)
+            if key_text in _EXPLICIT_REF_KEYS:
+                _add_explicit_ref_values(refs, seen, value=child, source=source)
+                continue
             if key_text in _DIRECT_REF_KINDS:
-                _add_ref(refs, seen, kind=_DIRECT_REF_KINDS[key_text], value=child, source=source)
+                _add_ref_values(refs, seen, kind=_DIRECT_REF_KINDS[key_text], value=child, source=source)
             if key_text in _OBJECT_REF_KINDS and isinstance(child, Mapping):
                 _add_ref(refs, seen, kind=_OBJECT_REF_KINDS[key_text], value=child.get("id"), source=source)
             if isinstance(child, Mapping | list):

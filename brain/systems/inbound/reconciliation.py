@@ -11,6 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunRow
 from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundEventRow
 from brain.systems.inbound.attribution import summarize_inbound_run_attribution
+from brain.systems.inbound.preservation import (
+    PRESERVATION_MISSING_REASON,
+    preservation_contract_from_run_metadata,
+    preservation_evidence_result,
+)
+from brain.systems.inbound.status import STATUS_REVIEW_REQUIRED
 from brain.systems.runs.domain import AgentRun, ArtifactType
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 
@@ -164,7 +170,14 @@ async def reconcile_inbound_triage_run(
     terminal_at = _run_datetime(row, status)
     final_answer = await _latest_final_answer(session, run_id)
     attribution = await summarize_inbound_run_attribution(session, run_id=run_id, status=status)
-    terminal_status = _receipt_terminal_status(status)
+    evidence_contract = preservation_evidence_result(
+        preservation_contract_from_run_metadata(metadata),
+        run_status=status,
+        attribution=attribution,
+    )
+    evidence_missing = evidence_contract.get("status") == "missing"
+    terminal_status = STATUS_REVIEW_REQUIRED if evidence_missing else _receipt_terminal_status(status)
+    outcome_status = "needs_action" if evidence_missing else status.value
     triage_terminal = _triage_terminal_payload(
         run_id=run_id,
         status=status,
@@ -172,27 +185,40 @@ async def reconcile_inbound_triage_run(
         terminal_at=terminal_at,
         final_answer=final_answer,
     )
+    triage_terminal["status"] = outcome_status
+    triage_terminal["evidence_contract"] = evidence_contract
 
     outcome = _json_dict(receipt.outcome)
     tool_use = _json_dict(receipt.tool_use)
     outcome_key = "handling" if tool_use.get("type") == "illo_submit" else "triage"
     handling = _json_dict(outcome.get(outcome_key))
+    result_payload = _triage_result(status, final_answer)
+    if evidence_missing:
+        result_payload = {
+            **result_payload,
+            "status": outcome_status,
+            "reason": evidence_contract.get("reason") or PRESERVATION_MISSING_REASON,
+        }
     outcome[outcome_key] = {
         **handling,
         **triage_terminal,
-        "result": _triage_result(status, final_answer),
+        "result": result_payload,
         "attribution": attribution,
     }
 
     receipt.status = terminal_status
     receipt.outcome = outcome
+    tool_terminal = _tool_use_terminal_payload(
+        status=status,
+        reconciled_at=now,
+        terminal_at=terminal_at,
+    )
+    if evidence_missing:
+        tool_terminal["status"] = outcome_status
+    tool_terminal["evidence_contract"] = evidence_contract
     receipt.tool_use = {
         **tool_use,
-        **_tool_use_terminal_payload(
-            status=status,
-            reconciled_at=now,
-            terminal_at=terminal_at,
-        ),
+        **tool_terminal,
         "attribution": attribution,
     }
 
@@ -202,7 +228,9 @@ async def reconcile_inbound_triage_run(
         outcome_key: outcome[outcome_key],
     }
     event.processed_at = event.processed_at or now
-    if status == RunStatus.COMPLETED:
+    if evidence_missing:
+        event.error = evidence_contract.get("reason") or PRESERVATION_MISSING_REASON
+    elif status == RunStatus.COMPLETED:
         event.error = None
     else:
         event.error = final_answer or f"Illo triage run ended with status {status.value}"

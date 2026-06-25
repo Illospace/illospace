@@ -29,6 +29,7 @@ def test_tool_catalog_contains_behavior_guidance():
     assert {"illo_submit", "illo_read", "illo_act", "illo_get_result"} == set(tools)
     assert "queues headless handling" in tools["illo_submit"]["description"]
     assert "message" in tools["illo_submit"]["inputSchema"]["properties"]
+    assert "desired_outcome" in tools["illo_submit"]["inputSchema"]["properties"]
     assert tools["illo_submit"]["inputSchema"]["required"] == ["message"]
     assert "named capability" in tools["illo_read"]["description"]
     assert tools["illo_read"]["inputSchema"]["required"] == ["capability"]
@@ -63,6 +64,7 @@ def test_client_routes_and_auth_header_are_stable(monkeypatch):
 
     submit_result = client.submit(
         "Ask the team to review the implementation context",
+        desired_outcome="preserve_knowledge",
         parts=[{"type": "text", "text": "Implemented MCP submission"}],
         repo="illospace-project",
         branch="codex/mcp-submit-context",
@@ -102,6 +104,7 @@ def test_client_routes_and_auth_header_are_stable(monkeypatch):
     context_payload = calls[0]["payload"]
     assert context_payload["method"] == "tools/call"
     assert context_payload["params"]["arguments"]["message"] == "Ask the team to review the implementation context"
+    assert context_payload["params"]["arguments"]["desired_outcome"] == "preserve_knowledge"
     assert context_payload["params"]["arguments"]["parts"] == [
         {"type": "text", "text": "Implemented MCP submission"}
     ]

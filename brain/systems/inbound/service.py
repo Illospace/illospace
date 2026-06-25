@@ -31,6 +31,10 @@ from brain.systems.inbound.status import (
     STATUS_QUARANTINED,
     STATUS_REVIEW_REQUIRED,
 )
+from brain.systems.inbound.preservation import (
+    submission_preservation_contract,
+    submission_preservation_prompt_lines,
+)
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.systems.user_domains.service import AsyncDomainService, DomainError, DomainNotFound
 
@@ -1073,6 +1077,7 @@ async def _process_submission_envelope(
             "message": "Submission accepted and queued for Illo handling.",
             "event_id": str(event.id),
             "handling": handling,
+            "preservation": submission_preservation_contract(normalized),
         },
         confidence=None,
         target=_submission_target(handling, event=event),
@@ -1097,6 +1102,7 @@ async def _queue_illo_submission(
         return {"status": "skipped", "reason": "missing_authority_user", "event_id": str(event.id)}
 
     source_name = context.display_name or context.source_kind or "external source"
+    preservation = submission_preservation_contract(normalized)
     message = _submission_prompt(context=context, event=event, normalized=normalized)
     result = await admit_work(
         session,
@@ -1130,6 +1136,7 @@ async def _queue_illo_submission(
                         "correlation": dict(normalized.get("correlation") or {}),
                         "response": dict(normalized.get("response") or {}),
                         "part_count": len(list(normalized.get("parts") or [])),
+                        "preservation": preservation,
                     },
                 },
             },
@@ -1158,6 +1165,7 @@ def _submission_prompt(
     normalized: Mapping[str, Any],
 ) -> str:
     source_name = context.display_name or context.source_kind or "external source"
+    preservation = submission_preservation_contract(normalized)
     lines = [
         "Handle this external coordination submission.",
         "",
@@ -1180,6 +1188,7 @@ def _submission_prompt(
         value = normalized.get(key)
         if value:
             lines.extend(["", f"{label}:", _json_preview(value, limit=1200)])
+    lines.extend(submission_preservation_prompt_lines(preservation))
     lines.extend(
         [
             "",
