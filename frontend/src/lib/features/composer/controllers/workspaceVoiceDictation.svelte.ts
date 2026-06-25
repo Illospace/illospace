@@ -34,6 +34,7 @@ export class WorkspaceVoiceDictationController {
   private controllerProvider: string | null = null;
   private startedAt = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private lastSettingsLoadAt = 0;
 
   constructor(private readonly deps: WorkspaceVoiceDictationDeps) {}
 
@@ -67,12 +68,24 @@ export class WorkspaceVoiceDictationController {
   }
 
   async loadSettings() {
+    this.lastSettingsLoadAt = Date.now();
     try {
       const runtime = await api.runtimeSettings();
       this.settings = runtime.voice ?? null;
     } catch {
       this.settings = null;
     }
+  }
+
+  /**
+   * Re-sync voice settings when the provider may have changed in System → Voice,
+   * so the mic re-enables without a manual page refresh. No-op while recording or
+   * already ready, and throttled, so it never spams the API or disrupts a session.
+   */
+  maybeRefreshSettings() {
+    if (this.isBusy || this.isReady) return;
+    if (Date.now() - this.lastSettingsLoadAt < 2000) return;
+    void this.loadSettings();
   }
 
   toggle() {

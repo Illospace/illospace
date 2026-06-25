@@ -148,20 +148,40 @@
   });
 
   $effect(() => {
+    const el = textareaEl;
+    if (!el) return;
+    const refresh = () => voiceDictation.maybeRefreshSettings();
+    el.addEventListener('focus', refresh);
+    return () => el.removeEventListener('focus', refresh);
+  });
+
+  $effect(() => {
     workspaceComposerMaxHeight;
     void syncComposerHeight();
   });
+
+  function refreshVoiceSettings() {
+    voiceDictation.maybeRefreshSettings();
+  }
+
+  function onVisibilityChange() {
+    if (document.visibilityState === 'visible') refreshVoiceSettings();
+  }
 
   onMount(() => {
     updateViewportHeight();
     void voiceDictation.loadSettings();
     window.addEventListener('resize', updateViewportHeight);
     window.visualViewport?.addEventListener('resize', updateViewportHeight);
+    window.addEventListener('focus', refreshVoiceSettings);
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     return () => {
       voiceDictation.destroy();
       window.removeEventListener('resize', updateViewportHeight);
       window.visualViewport?.removeEventListener('resize', updateViewportHeight);
+      window.removeEventListener('focus', refreshVoiceSettings);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   });
 
