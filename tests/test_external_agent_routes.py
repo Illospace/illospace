@@ -696,6 +696,7 @@ async def test_hosted_mcp_submit_builds_submission_envelope():
                     "arguments": {
                         "message": "Ask Illo to review the implementation context and decide next steps.",
                         "origin": "codex.submit",
+                        "desired_outcome": "preserve_knowledge",
                         "source_tool": "codex",
                         "repo": "illospace-project",
                         "branch": "codex/mcp-submit",
@@ -734,6 +735,7 @@ async def test_hosted_mcp_submit_builds_submission_envelope():
     assert captured["envelope"] == {
         "kind": "submission",
         "origin": "codex.submit",
+        "desired_outcome": "preserve_knowledge",
         "payload": {
             "message": "Ask Illo to review the implementation context and decide next steps.",
             "parts": [{"type": "text", "text": "Implemented the submit tool."}],

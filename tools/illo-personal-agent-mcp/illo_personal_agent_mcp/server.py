@@ -160,6 +160,7 @@ class IlloBridgeClient:
         message: str,
         *,
         origin: str = "codex.submit",
+        desired_outcome: str | None = None,
         parts: list[dict[str, Any]] | None = None,
         source: dict[str, Any] | None = None,
         constraints: dict[str, Any] | None = None,
@@ -182,6 +183,7 @@ class IlloBridgeClient:
                 **extra,
                 "message": str(message),
                 "origin": str(origin or "codex.submit"),
+                "desired_outcome": desired_outcome,
                 "parts": list(parts or []),
                 "source": dict(source or {}),
                 "constraints": dict(constraints or {}),
@@ -267,6 +269,7 @@ def _client() -> IlloBridgeClient:
 def tool_illo_submit(
     message: str,
     origin: str = "codex.submit",
+    desired_outcome: str | None = None,
     parts: list[dict[str, Any]] | None = None,
     source: dict[str, Any] | None = None,
     constraints: dict[str, Any] | None = None,
@@ -286,6 +289,7 @@ def tool_illo_submit(
     return _client().submit(
         message=message,
         origin=origin,
+        desired_outcome=desired_outcome,
         parts=parts,
         source=source,
         constraints=constraints,
@@ -361,6 +365,7 @@ TOOLS: dict[str, dict[str, Any]] = {
         "description": (
             "Submit instructions, context, traces, decisions, or work material to Illo. "
             "Use this when the request needs Illo's judgment, memory, or coordination. "
+            "Use it for preserve/store/remember requests so Illo can choose the durable memory or workspace surface. "
             "The call is async-first: Illo stores an inbound event, queues headless handling, "
             "and returns an event id that can be read with illo_get_result."
         ),
@@ -372,6 +377,10 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "description": "Natural-language instruction or context for Illo to handle.",
                 },
                 "origin": {"type": "string", "description": "Stable event name.", "default": "codex.submit"},
+                "desired_outcome": {
+                    "type": "string",
+                    "description": "Explicit outcome request, for example preserve_knowledge for durable Illo storage.",
+                },
                 "parts": {
                     "type": "array",
                     "items": {"type": "object"},
@@ -464,8 +473,9 @@ TOOLS: dict[str, dict[str, Any]] = {
         "function": tool_illo_get_result,
         "description": (
             "Retrieve or poll the outcome of an asynchronous Illo operation returned by "
-            "illo_submit, illo_read, or illo_act. Use this for result_id receipts instead of "
-            "repeating the original request."
+            "illo_submit, illo_read, or illo_act. Preservation results include whether durable "
+            "evidence is pending, satisfied, or missing. Use this for result_id receipts instead "
+            "of repeating the original request."
         ),
         "inputSchema": {
             "type": "object",

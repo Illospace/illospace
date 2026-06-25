@@ -25,6 +25,7 @@ from brain.systems.cortex.thread_links import thread_id_from_reference
 from brain.systems.cortex.project_context.search import search_project_contexts
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
+from brain.systems.inbound.results import read_inbound_submission_result
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
 
 
@@ -59,6 +60,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             (
                 "Submit instructions, context, traces, decisions, or work material to Illo. "
                 "Use this when the request needs Illo's judgment, memory, or coordination. "
+                "Use it for preserve/store/remember requests so Illo can choose the durable memory or workspace surface. "
                 "The call is async-first: Illo stores an inbound event, queues headless handling, "
                 f"and returns an event id that can be read with {RESULT_TOOL_NAME}."
             ),
@@ -66,6 +68,10 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 "message": {
                     "type": "string",
                     "description": "Natural-language instruction or context for Illo to handle.",
+                },
+                "desired_outcome": {
+                    "type": "string",
+                    "description": "Explicit outcome request, such as preserve_knowledge when Illo should create durable memory or workspace state.",
                 },
                 "origin": {
                     "type": "string",
@@ -180,6 +186,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
         **_tool_schema(
             (
                 "Read the current status and receipts for an async Illo submission. "
+                "For preservation requests, returns whether durable evidence is pending, satisfied, or missing. "
                 "Prefer webhook callbacks when configured; this tool is the polling fallback."
             ),
             {
@@ -291,6 +298,7 @@ def _build_submit_envelope(arguments: dict[str, Any]) -> dict[str, Any]:
     source_tool = _clean_optional_string(source.get("source_tool")) or "external"
     source.setdefault("source_tool", source_tool)
     origin = _clean_optional_string(arguments.get("origin")) or f"{source_tool}.submit"
+    desired_outcome = _clean_optional_string(arguments.get("desired_outcome"))
     constraints = _clean_dict(arguments.get("constraints"))
     correlation = _clean_dict(arguments.get("correlation"))
     response = _clean_dict(arguments.get("response"))
@@ -303,7 +311,7 @@ def _build_submit_envelope(arguments: dict[str, Any]) -> dict[str, Any]:
         "correlation": correlation,
         "response": response,
     }
-    return {
+    envelope = {
         "kind": "submission",
         "origin": origin,
         "payload": payload,
@@ -316,6 +324,9 @@ def _build_submit_envelope(arguments: dict[str, Any]) -> dict[str, Any]:
         "response": response,
         "idempotency_key": _clean_optional_string(arguments.get("idempotency_key")),
     }
+    if desired_outcome:
+        envelope["desired_outcome"] = desired_outcome
+    return envelope
 
 
 def _submission_connection(principal: external_agents.AgentBridgePrincipal) -> dict[str, Any]:
@@ -844,34 +855,17 @@ async def _tool_get_result(
     )
     if not event_id:
         raise ValueError(f"{RESULT_TOOL_NAME} requires event_id, submission_id, or result_id")
-    event = await inbound_admin.require_event_for_org(db, org_id=principal.org_id, event_id=event_id)
-    if str(event.connection_id) != str(principal.connection_id):
-        raise ValueError("Inbound event not found")
-    receipts = await inbound_admin.list_receipts(
+    result = await read_inbound_submission_result(
         db,
         org_id=principal.org_id,
-        event_id=str(event.id),
+        connection_id=principal.connection_id,
+        event_id=event_id,
+        include_payload=bool(arguments.get("include_payload", True)),
         limit=int(arguments.get("limit") or 25),
     )
-    receipt_payloads = [inbound_admin.serialize_receipt(receipt) for receipt in receipts]
-    event_payload = inbound_admin.serialize_event(
-        event,
-        include_payload=bool(arguments.get("include_payload", True)),
-    )
-    action_result = dict(event.action_result or {})
-    handling = dict(action_result.get("handling") or {})
-    latest_receipt = receipt_payloads[0] if receipt_payloads else None
-    return {
-        "event_id": str(event.id),
-        "submission_id": str(event.id),
-        "result_id": str(event.id),
-        "status": event.status,
-        "handling_status": handling.get("status"),
-        "run_id": handling.get("run_id"),
-        "event": event_payload,
-        "latest_receipt": latest_receipt,
-        "receipts": receipt_payloads,
-    }
+    if result.mutated_inbound:
+        await db.commit()
+    return result.payload
 
 
 async def _add_thread_trigger_result_if_needed(
