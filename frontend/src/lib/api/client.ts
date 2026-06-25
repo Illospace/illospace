@@ -1,4 +1,4 @@
-import type { RuntimeSettings, RuntimeVoiceSession } from '$lib/types/runtimeSettings';
+import type { RuntimeSettings, RuntimeVoiceSession, RuntimeVoiceTranscript } from '$lib/types/runtimeSettings';
 
 const BASE = '';
 const DEFAULT_API_TIMEOUT_MS = 20_000;
@@ -43,10 +43,12 @@ async function fetchJson<T>(path: string, init?: ApiRequestInit): Promise<T> {
   const controller = !signal && timeoutMs > 0 ? new AbortController() : null;
   const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
+    const isFormData = typeof FormData !== 'undefined' && rest.body instanceof FormData;
+    const baseHeaders: Record<string, string> = isFormData ? {} : { 'Content-Type': 'application/json' };
     const res = await fetch(`${BASE}${path}`, {
       ...rest,
       signal: signal ?? controller?.signal,
-      headers: { 'Content-Type': 'application/json', ...(extraHeaders as Record<string, string>) },
+      headers: { ...baseHeaders, ...(extraHeaders as Record<string, string>) },
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -1678,7 +1680,7 @@ export const api = {
     fetchJson<any>('/api/runtime-settings/models', { method: 'PATCH', body: JSON.stringify(data) }),
   updateRuntimeMemory: (data: { embedder: string; embedding_model?: string | null; reranker?: string }) =>
     fetchJson<any>('/api/runtime-settings/memory', { method: 'PATCH', body: JSON.stringify(data) }),
-  updateRuntimeVoice: (data: { provider: string; language: string }) =>
+  updateRuntimeVoice: (data: { provider: string; language: string; model_size?: string }) =>
     fetchJson<RuntimeSettings['voice']>('/api/runtime-settings/voice', {
       method: 'PATCH',
       body: JSON.stringify(data),
@@ -1687,6 +1689,14 @@ export const api = {
     fetchJson<any>('/api/runtime-settings/memory/check', { method: 'POST' }),
   createRuntimeVoiceSession: () =>
     fetchJson<RuntimeVoiceSession>('/api/runtime-settings/voice/session', { method: 'POST' }),
+  transcribeRuntimeVoiceClip: (blob: Blob, filename = 'voice-clip.webm') => {
+    const form = new FormData();
+    form.append('audio', blob, filename);
+    return fetchJson<RuntimeVoiceTranscript>('/api/runtime-settings/voice/transcribe', {
+      method: 'POST',
+      body: form,
+    });
+  },
 
   // Onboarding
   runtimeReadyIntroDraft: () =>

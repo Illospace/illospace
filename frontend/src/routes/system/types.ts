@@ -1,4 +1,9 @@
-import type { EmbedderKey, RuntimeVoiceLanguage, RuntimeVoiceProvider } from '$lib/types/runtimeSettings';
+import type {
+  EmbedderKey,
+  RuntimeVoiceLanguage,
+  RuntimeVoiceModelSize,
+  RuntimeVoiceProvider,
+} from '$lib/types/runtimeSettings';
 
 export type {
   EmbedderKey,
@@ -6,6 +11,7 @@ export type {
   RuntimeOption,
   RuntimeSettings,
   RuntimeVoiceLanguage,
+  RuntimeVoiceModelSize,
   RuntimeVoiceProvider,
   RuntimeVoiceSession,
   RuntimeVoiceSettings,
@@ -39,6 +45,7 @@ export interface MemoryDraft {
 export interface VoiceDraft {
   provider: RuntimeVoiceProvider;
   language: RuntimeVoiceLanguage;
+  model_size: RuntimeVoiceModelSize;
 }
 
 export interface NoticeState {

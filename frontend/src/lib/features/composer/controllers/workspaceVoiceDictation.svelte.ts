@@ -1,7 +1,9 @@
 import { api } from '$lib/api/client';
+import { createLocalPushToTalkVoiceConnection } from '$lib/features/composer/controllers/localPushToTalkVoice';
 import { createOpenAIRealtimeVoiceConnection } from '$lib/features/composer/controllers/openaiRealtimeVoice';
 import {
   createVoiceDictationController,
+  type VoiceDictationSession,
   type VoiceDictationSnapshot,
 } from '$lib/features/composer/domain/voiceDictation';
 import { appendVoiceLevel } from '$lib/features/composer/domain/voiceLevels';
@@ -29,6 +31,7 @@ export class WorkspaceVoiceDictationController {
   audioLevels = $state<number[]>([]);
 
   private controller: ReturnType<typeof createVoiceDictationController> | null = null;
+  private controllerProvider: string | null = null;
   private startedAt = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -126,22 +129,39 @@ export class WorkspaceVoiceDictationController {
   }
 
   private ensureController() {
-    if (this.controller && this.snapshot.status !== 'error') return this.controller;
+    const provider = this.settings?.provider ?? 'openai';
+    if (this.controller && this.controllerProvider === provider && this.snapshot.status !== 'error') {
+      return this.controller;
+    }
+    const isLocal = provider === 'local';
+    this.controllerProvider = provider;
     this.controller = createVoiceDictationController({
       getDraft: this.deps.getDraft,
       setDraft: this.deps.setDraft,
       submit: this.deps.submit,
-      createSession: () => api.createRuntimeVoiceSession(),
-      connect: (session, handlers) =>
-        createOpenAIRealtimeVoiceConnection(session, {
+      createSession: () =>
+        isLocal ? Promise.resolve(this.localSession()) : api.createRuntimeVoiceSession(),
+      connect: (session, handlers) => {
+        const wrapped = {
           ...handlers,
-          onAudioLevel: (level) => {
+          onAudioLevel: (level: number) => {
             this.audioLevels = appendVoiceLevel(this.audioLevels, level);
           },
-        }),
+        };
+        return isLocal
+          ? createLocalPushToTalkVoiceConnection(session, wrapped)
+          : createOpenAIRealtimeVoiceConnection(session, wrapped);
+      },
     });
     this.refreshSnapshot();
     return this.controller;
+  }
+
+  private localSession(): VoiceDictationSession {
+    return {
+      client_secret: '',
+      model: this.settings?.model ?? 'faster-whisper-base',
+    };
   }
 
   private refreshSnapshot() {

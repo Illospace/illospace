@@ -78,6 +78,7 @@
   let voiceDraft = $state<VoiceDraft>({
     provider: 'openai',
     language: 'auto',
+    model_size: 'base',
   });
   let vaultSecrets = $state<VaultSecret[]>([]);
   let vaultLoading = $state(false);
@@ -155,6 +156,7 @@
     voiceDraft = {
       provider: next.voice.provider,
       language: next.voice.language || 'auto',
+      model_size: next.voice.model_size || 'base',
     };
   }
 
@@ -525,6 +527,7 @@
     return {
       provider: voiceDraft.provider,
       language: voiceDraft.language,
+      model_size: voiceDraft.model_size,
     };
   }
 
@@ -551,7 +554,8 @@
     if (!settings) return false;
     return (
       voiceDraft.provider !== settings.voice.provider ||
-      voiceDraft.language !== (settings.voice.language || 'auto')
+      voiceDraft.language !== (settings.voice.language || 'auto') ||
+      voiceDraft.model_size !== (settings.voice.model_size || 'base')
     );
   }
 

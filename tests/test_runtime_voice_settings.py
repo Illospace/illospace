@@ -1,7 +1,23 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+
+def _memory_without_openai_key():
+    from brain.systems.runtime_settings.schemas import RuntimeMemoryRead
+
+    return RuntimeMemoryRead(
+        embedder="openai",
+        embedding_status="ready",
+        indexed_vectors=0,
+        api_key_statuses={"openai": False},
+        reranker="weighted",
+        embedder_options=[],
+        embedding_model_options=[],
+        reranker_options=[],
+    )
 
 
 @pytest.mark.asyncio
@@ -322,3 +338,167 @@ async def test_runtime_voice_session_endpoint_is_available_to_workspace_members(
 
     assert response is result
     create_session.assert_awaited_once_with(session, user)
+
+
+@pytest.mark.asyncio
+async def test_runtime_voice_local_provider_is_ready_when_faster_whisper_available(monkeypatch):
+    from brain.systems.runtime_settings import voice as voice_settings
+    from brain.systems.voice import local_whisper
+
+    monkeypatch.setattr(local_whisper, "local_whisper_available", lambda: True)
+
+    voice = voice_settings.runtime_voice_from_memory(
+        _memory_without_openai_key(),
+        voice_settings.RuntimeVoiceConfig(provider="local", language="fr", model_size="small"),
+    )
+
+    assert voice.provider == "local"
+    assert voice.model == "faster-whisper-small"
+    assert voice.model_size == "small"
+    assert voice.language == "fr"
+    assert voice.status == "ready"
+    assert voice.detail is None
+    assert [option.key for option in voice.provider_options] == ["openai", "local", "gemini"]
+    assert [option.key for option in voice.model_size_options] == ["tiny", "base", "small"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_voice_local_provider_is_missing_without_faster_whisper(monkeypatch):
+    from brain.systems.runtime_settings import voice as voice_settings
+    from brain.systems.voice import local_whisper
+
+    monkeypatch.setattr(local_whisper, "local_whisper_available", lambda: False)
+
+    voice = voice_settings.runtime_voice_from_memory(
+        _memory_without_openai_key(),
+        voice_settings.RuntimeVoiceConfig(provider="local"),
+    )
+
+    assert voice.provider == "local"
+    assert voice.model == "faster-whisper-base"
+    assert voice.model_size == "base"
+    assert voice.status == "missing"
+    assert "faster-whisper" in (voice.detail or "")
+
+
+@pytest.mark.asyncio
+async def test_runtime_voice_update_persists_provider_and_model_size(monkeypatch):
+    from brain.systems.runtime_settings import voice as voice_settings
+    from brain.systems.runtime_settings.schemas import RuntimeVoiceUpdate
+    from brain.systems.voice import local_whisper
+
+    monkeypatch.setattr(local_whisper, "local_whisper_available", lambda: True)
+    written = {}
+
+    async def fake_write(_session, key, value):
+        written["key"] = key
+        written["value"] = value
+
+    monkeypatch.setattr(voice_settings, "_async_write_runtime_config_value", fake_write)
+    monkeypatch.setattr(
+        voice_settings,
+        "async_get_runtime_memory",
+        AsyncMock(return_value=_memory_without_openai_key()),
+    )
+
+    result = await voice_settings.async_update_runtime_voice(
+        MagicMock(),
+        SimpleNamespace(id="user-1", org_id="org-1"),
+        RuntimeVoiceUpdate(provider="local", language="fr", model_size="small"),
+    )
+
+    assert written["key"] == "runtime_voice"
+    assert '"provider": "local"' in written["value"]
+    assert '"model_size": "small"' in written["value"]
+    assert result.provider == "local"
+    assert result.model_size == "small"
+    assert result.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_runtime_voice_session_rejects_local_provider_without_openai_lookup(monkeypatch):
+    from fastapi import HTTPException
+
+    from brain.systems.runtime_settings import voice as voice_settings
+
+    key_lookup = AsyncMock(return_value="sk-memory-openai")
+    monkeypatch.setattr(
+        voice_settings,
+        "async_get_runtime_voice_config",
+        AsyncMock(return_value=voice_settings.RuntimeVoiceConfig(provider="local")),
+    )
+    monkeypatch.setattr(voice_settings, "_async_installation_embedding_api_key", key_lookup)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await voice_settings.async_create_runtime_voice_session(MagicMock(), SimpleNamespace(id="user-1"))
+
+    assert excinfo.value.status_code == 409
+    assert "push-to-talk" in str(excinfo.value.detail)
+    key_lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_runtime_voice_clip_routes_through_configured_provider(monkeypatch):
+    from brain.systems.runtime_settings import voice as voice_settings
+    from brain.systems.voice import transcription as transcription_mod
+
+    captured = {}
+
+    async def fake_transcribe(session, path, **kwargs):
+        captured["path"] = path
+        captured["kwargs"] = kwargs
+        captured["existed_during_call"] = Path(path).is_file()
+        return transcription_mod.AudioTranscriptionResult(
+            transcript="bonjour le monde",
+            language="fr",
+            provider="local",
+            model="faster-whisper-base",
+            transport="faster_whisper",
+            bytes_streamed=11,
+        )
+
+    monkeypatch.setattr(transcription_mod, "async_transcribe_audio_path", fake_transcribe)
+
+    class FakeUpload:
+        filename = "clip.webm"
+
+        async def read(self):
+            return b"webm-audio-bytes"
+
+    result = await voice_settings.async_transcribe_runtime_voice_clip(
+        MagicMock(),
+        SimpleNamespace(id="user-1", org_id="org-1"),
+        upload=FakeUpload(),
+    )
+
+    assert result.transcript == "bonjour le monde"
+    assert result.provider == "local"
+    assert result.model == "faster-whisper-base"
+    assert result.language == "fr"
+    assert captured["kwargs"]["filename"] == "clip.webm"
+    assert str(captured["kwargs"]["safety_identifier"]).startswith("illo-user-")
+    assert captured["existed_during_call"] is True
+    # Temp file is cleaned up after transcription returns.
+    assert not Path(captured["path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_runtime_voice_clip_rejects_empty_audio():
+    from fastapi import HTTPException
+
+    from brain.systems.runtime_settings import voice as voice_settings
+
+    class EmptyUpload:
+        filename = "clip.webm"
+
+        async def read(self):
+            return b""
+
+    with pytest.raises(HTTPException) as excinfo:
+        await voice_settings.async_transcribe_runtime_voice_clip(
+            MagicMock(),
+            SimpleNamespace(id="user-1", org_id="org-1"),
+            upload=EmptyUpload(),
+        )
+
+    assert excinfo.value.status_code == 422

@@ -14,8 +14,9 @@ RuntimeUpdateStatus = Literal["idle", "running"]
 RuntimeServiceStatus = Literal["idle", "running"]
 WorkspaceToolStatus = Literal["requested", "queued", "installing", "installed", "failed", "removed"]
 WorkspaceToolQueueStatus = Literal["idle", "running"]
-VoiceProviderKey = Literal["openai", "gemini"]
+VoiceProviderKey = Literal["openai", "gemini", "local"]
 VoiceLanguageKey = Literal["auto", "en", "fr"]
+VoiceModelSizeKey = Literal["tiny", "base", "small"]
 VoiceStatus = Literal["ready", "missing", "error"]
 
 
@@ -70,10 +71,12 @@ class RuntimeVoiceRead(BaseModel):
     model: str
     source: Literal["memory"] = "memory"
     language: VoiceLanguageKey = "auto"
+    model_size: VoiceModelSizeKey = "base"
     status: VoiceStatus
     detail: str | None = None
     provider_options: list[RuntimeOption] = Field(default_factory=list)
     language_options: list[RuntimeOption] = Field(default_factory=list)
+    model_size_options: list[RuntimeOption] = Field(default_factory=list)
 
 
 class RuntimeVoiceSessionRead(BaseModel):
@@ -82,6 +85,15 @@ class RuntimeVoiceSessionRead(BaseModel):
     language: VoiceLanguageKey = "auto"
     client_secret: str
     expires_at: int | None = None
+
+
+class RuntimeVoiceTranscriptRead(BaseModel):
+    transcript: str
+    provider: str
+    model: str
+    language: str
+    transport: str
+    bytes_streamed: int = 0
 
 
 class RuntimePermissionsRead(BaseModel):
@@ -209,3 +221,4 @@ class RuntimeMemoryUpdate(BaseModel):
 class RuntimeVoiceUpdate(BaseModel):
     provider: VoiceProviderKey = "openai"
     language: VoiceLanguageKey = "auto"
+    model_size: VoiceModelSizeKey = "base"

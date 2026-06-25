@@ -162,6 +162,21 @@ restore, upgrades, logs, and status.
 See [docs/configuration.md](docs/configuration.md) for the production
 configuration contract.
 
+## Voice dictation
+
+Composer voice input supports two transcription providers, selectable in
+System → Voice:
+
+- **OpenAI Realtime** (default) — low-latency streaming transcription using the
+  OpenAI API key saved in AI Runtime. Words appear as you speak.
+- **Local (faster-whisper)** — on-device CPU transcription with no API key.
+  Push-to-talk: the recorded clip is transcribed when you stop. Choose a model
+  size (`tiny` / `base` / `small`, default `base`); weights download on first
+  use into `ILLO_PRIVATE_HOME/voice-models`. `faster-whisper` ships in the
+  default image and pulls no Torch/CUDA, so the provider works out of the box;
+  if it is ever absent the provider reports as unavailable and OpenAI dictation
+  is unaffected.
+
 ## Development commands
 
 ```bash

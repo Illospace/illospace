@@ -125,6 +125,111 @@ async def test_transcribe_audio_path_reports_gemini_boundary(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_transcribe_audio_path_routes_local_provider_to_faster_whisper(monkeypatch, tmp_path):
+    from brain.systems.voice import local_whisper, transcription
+
+    audio_path = tmp_path / "voice.webm"
+    audio_path.write_bytes(b"webm audio")
+
+    local = AsyncMock(
+        return_value=transcription.AudioTranscriptionResult(
+            transcript="bonjour",
+            language="fr",
+            provider="local",
+            model="faster-whisper-small",
+            transport="faster_whisper",
+        )
+    )
+    monkeypatch.setattr(
+        transcription,
+        "_runtime_voice_config",
+        AsyncMock(return_value=SimpleNamespace(provider="local", language="fr", model_size="small")),
+    )
+    monkeypatch.setattr(local_whisper, "async_transcribe_local_audio_path", local)
+
+    result = await transcription.async_transcribe_audio_path(object(), audio_path)
+
+    assert result.transcript == "bonjour"
+    assert result.provider == "local"
+    local.assert_awaited_once_with(audio_path, language="fr", model_size="small")
+
+
+@pytest.mark.asyncio
+async def test_local_whisper_joins_segments_and_normalizes_model_size(monkeypatch, tmp_path):
+    from brain.systems.voice import local_whisper
+
+    audio_path = tmp_path / "voice.webm"
+    audio_path.write_bytes(b"webm audio")
+
+    captured = {}
+
+    class FakeInfo:
+        language = "fr"
+
+    class FakeModel:
+        def transcribe(self, path, language=None, vad_filter=True):
+            captured["path"] = path
+            captured["language"] = language
+            captured["vad_filter"] = vad_filter
+            return iter([SimpleNamespace(text=" bon"), SimpleNamespace(text="jour")]), FakeInfo()
+
+    monkeypatch.setattr(local_whisper, "_load_model", lambda size: FakeModel())
+
+    result = await local_whisper.async_transcribe_local_audio_path(
+        audio_path,
+        language="fr",
+        model_size="not-a-size",
+    )
+
+    assert result.transcript == "bonjour"
+    assert result.provider == "local"
+    assert result.transport == "faster_whisper"
+    assert result.language == "fr"
+    # Unknown size falls back to the base default.
+    assert result.model == "faster-whisper-base"
+    assert captured["language"] == "fr"
+    assert captured["vad_filter"] is True
+
+
+@pytest.mark.asyncio
+async def test_local_whisper_auto_language_passes_none_to_model(monkeypatch, tmp_path):
+    from brain.systems.voice import local_whisper
+
+    audio_path = tmp_path / "voice.webm"
+    audio_path.write_bytes(b"webm audio")
+    captured = {}
+
+    class FakeModel:
+        def transcribe(self, path, language=None, vad_filter=True):
+            captured["language"] = language
+            return iter([SimpleNamespace(text="hello")]), SimpleNamespace(language="en")
+
+    monkeypatch.setattr(local_whisper, "_load_model", lambda size: FakeModel())
+
+    result = await local_whisper.async_transcribe_local_audio_path(audio_path, language="auto")
+
+    assert captured["language"] is None
+    assert result.language == "en"
+
+
+@pytest.mark.asyncio
+async def test_local_whisper_raises_when_no_transcript(monkeypatch, tmp_path):
+    from brain.systems.voice import local_whisper
+
+    audio_path = tmp_path / "voice.webm"
+    audio_path.write_bytes(b"webm audio")
+
+    class FakeModel:
+        def transcribe(self, path, language=None, vad_filter=True):
+            return iter([]), SimpleNamespace(language="fr")
+
+    monkeypatch.setattr(local_whisper, "_load_model", lambda size: FakeModel())
+
+    with pytest.raises(local_whisper.AudioTranscriptionError):
+        await local_whisper.async_transcribe_local_audio_path(audio_path, language="fr")
+
+
+@pytest.mark.asyncio
 async def test_transcribe_audio_attachment_handler_uses_context_audio(monkeypatch, tmp_path):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import voice as voice_handler
