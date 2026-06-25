@@ -3,6 +3,7 @@ import type { RuntimeSettings, RuntimeVoiceSession, RuntimeVoiceTranscript } fro
 const BASE = '';
 const DEFAULT_API_TIMEOUT_MS = 20_000;
 const PROJECT_CONTEXT_UPLOAD_TIMEOUT_MS = 30_000;
+const VOICE_TRANSCRIPTION_TIMEOUT_MS = 5 * 60_000;
 
 type ApiRequestInit = RequestInit & {
   timeoutMs?: number;
@@ -1695,6 +1696,7 @@ export const api = {
     return fetchJson<RuntimeVoiceTranscript>('/api/runtime-settings/voice/transcribe', {
       method: 'POST',
       body: form,
+      timeoutMs: VOICE_TRANSCRIPTION_TIMEOUT_MS,
     });
   },
 
