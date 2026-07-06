@@ -13,6 +13,7 @@ from brain.platform.async_io import async_http_client, sync_http_client
 GITHUB_API_BASE = "https://api.github.com"
 GITHUB_REPO_PAGE_LIMIT = 10
 GITHUB_SEARCH_LIMIT = 10
+GITHUB_ITEM_LIMIT = 100
 
 
 @dataclass
@@ -109,6 +110,104 @@ def _repo_payload(repo: dict[str, Any]) -> dict[str, Any]:
         "topics": repo.get("topics") if isinstance(repo.get("topics"), list) else [],
         "private": bool(repo.get("private")),
         "permissions": permissions,
+    }
+
+
+def _compact_body(value: Any, *, limit: int = 1000) -> str | None:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 3, 0)].rstrip() + "..."
+
+
+def _user_payload(user: Any) -> dict[str, Any] | None:
+    if not isinstance(user, dict):
+        return None
+    login = user.get("login")
+    if not login:
+        return None
+    return {
+        "login": login,
+        "id": user.get("id"),
+        "html_url": user.get("html_url"),
+    }
+
+
+def _label_payloads(labels: Any) -> list[dict[str, Any]]:
+    if not isinstance(labels, list):
+        return []
+    return [
+        {
+            "name": label.get("name"),
+            "color": label.get("color"),
+            "description": label.get("description"),
+        }
+        for label in labels
+        if isinstance(label, dict) and label.get("name")
+    ]
+
+
+def _issue_payload(issue: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "pull_request" if issue.get("pull_request") else "issue",
+        "id": issue.get("id"),
+        "node_id": issue.get("node_id"),
+        "number": issue.get("number"),
+        "title": issue.get("title"),
+        "state": issue.get("state"),
+        "html_url": issue.get("html_url"),
+        "user": _user_payload(issue.get("user")),
+        "assignees": [
+            user
+            for user in (_user_payload(item) for item in issue.get("assignees") or [])
+            if user is not None
+        ],
+        "labels": _label_payloads(issue.get("labels")),
+        "comments": issue.get("comments"),
+        "created_at": issue.get("created_at"),
+        "updated_at": issue.get("updated_at"),
+        "closed_at": issue.get("closed_at"),
+        "body": _compact_body(issue.get("body")),
+    }
+
+
+def _pull_request_payload(pr: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "pull_request",
+        "id": pr.get("id"),
+        "node_id": pr.get("node_id"),
+        "number": pr.get("number"),
+        "title": pr.get("title"),
+        "state": pr.get("state"),
+        "draft": bool(pr.get("draft")),
+        "html_url": pr.get("html_url"),
+        "user": _user_payload(pr.get("user")),
+        "assignees": [
+            user
+            for user in (_user_payload(item) for item in pr.get("assignees") or [])
+            if user is not None
+        ],
+        "requested_reviewers": [
+            user
+            for user in (_user_payload(item) for item in pr.get("requested_reviewers") or [])
+            if user is not None
+        ],
+        "labels": _label_payloads(pr.get("labels")),
+        "head": {
+            "ref": (pr.get("head") or {}).get("ref") if isinstance(pr.get("head"), dict) else None,
+            "sha": (pr.get("head") or {}).get("sha") if isinstance(pr.get("head"), dict) else None,
+        },
+        "base": {
+            "ref": (pr.get("base") or {}).get("ref") if isinstance(pr.get("base"), dict) else None,
+            "sha": (pr.get("base") or {}).get("sha") if isinstance(pr.get("base"), dict) else None,
+        },
+        "created_at": pr.get("created_at"),
+        "updated_at": pr.get("updated_at"),
+        "closed_at": pr.get("closed_at"),
+        "merged_at": pr.get("merged_at"),
+        "body": _compact_body(pr.get("body")),
     }
 
 
@@ -214,6 +313,93 @@ async def async_get_repo_by_slug(slug: str, *, token: str | None = None) -> dict
                 return None
             raise
     return _repo_payload(payload)
+
+
+async def async_list_repo_issues(
+    slug: str,
+    *,
+    token: str | None = None,
+    state: str = "open",
+    labels: list[str] | None = None,
+    assignee: str | None = None,
+    creator: str | None = None,
+    mentioned: str | None = None,
+    since: str | None = None,
+    include_pull_requests: bool = False,
+    limit: int = 30,
+) -> dict[str, Any]:
+    owner, repo = slug.split("/", 1)
+    max_items = max(1, min(int(limit or 30), GITHUB_ITEM_LIMIT))
+    params: dict[str, Any] = {
+        "state": state or "open",
+        "per_page": GITHUB_ITEM_LIMIT,
+        "sort": "updated",
+        "direction": "desc",
+    }
+    if labels:
+        params["labels"] = ",".join([str(label).strip() for label in labels if str(label).strip()])
+    if assignee:
+        params["assignee"] = assignee
+    if creator:
+        params["creator"] = creator
+    if mentioned:
+        params["mentioned"] = mentioned
+    if since:
+        params["since"] = since
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        data = await _async_request(
+            client,
+            "GET",
+            f"/repos/{owner}/{repo}/issues",
+            token=token,
+            params=params,
+        )
+    items = data if isinstance(data, list) else []
+    if not include_pull_requests:
+        items = [item for item in items if not (isinstance(item, dict) and item.get("pull_request"))]
+    return {
+        "repo": slug,
+        "state": params["state"],
+        "issues": [_issue_payload(item) for item in items[:max_items] if isinstance(item, dict)],
+        "included_pull_requests": include_pull_requests,
+    }
+
+
+async def async_list_repo_pull_requests(
+    slug: str,
+    *,
+    token: str | None = None,
+    state: str = "open",
+    head: str | None = None,
+    base: str | None = None,
+    limit: int = 30,
+) -> dict[str, Any]:
+    owner, repo = slug.split("/", 1)
+    max_items = max(1, min(int(limit or 30), GITHUB_ITEM_LIMIT))
+    params: dict[str, Any] = {
+        "state": state or "open",
+        "per_page": max_items,
+        "sort": "updated",
+        "direction": "desc",
+    }
+    if head:
+        params["head"] = head
+    if base:
+        params["base"] = base
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        data = await _async_request(
+            client,
+            "GET",
+            f"/repos/{owner}/{repo}/pulls",
+            token=token,
+            params=params,
+        )
+    items = data if isinstance(data, list) else []
+    return {
+        "repo": slug,
+        "state": params["state"],
+        "pull_requests": [_pull_request_payload(item) for item in items[:max_items] if isinstance(item, dict)],
+    }
 
 
 def search_repos(query: str, *, token: str | None = None) -> dict[str, Any]:

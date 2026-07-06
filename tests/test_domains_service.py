@@ -103,6 +103,96 @@ async def test_create_custom_domain_schema_and_record(session):
     ]
 
 
+async def test_list_records_filters_by_data_fields_and_record_metadata(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="Work Ledger",
+        objects=[
+            {
+                "key": "ticket",
+                "name": "Ticket",
+                "title_field": "title",
+                "fields": [
+                    {"key": "title", "field_type": "text", "required": True},
+                    {"key": "repo", "field_type": "text"},
+                    {"key": "assignee", "field_type": "text"},
+                    {"key": "status", "field_type": "enum", "options": ["todo", "doing", "done"]},
+                    {"key": "labels", "field_type": "json"},
+                ],
+            }
+        ],
+        actor_id=USER_ID,
+    )
+    reda = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "ticket",
+        data={
+            "title": "Ship MCP filters",
+            "repo": "uwear-ai/illospace-project",
+            "assignee": "Reda",
+            "status": "todo",
+            "labels": ["mcp", "coordination"],
+        },
+    )
+    await service.create_record(
+        ORG_ID,
+        domain.id,
+        "ticket",
+        data={
+            "title": "Polish docs",
+            "repo": "uwear-ai/uwear-website",
+            "assignee": "Axel",
+            "status": "todo",
+            "labels": ["docs"],
+        },
+    )
+
+    records = await service.list_records(
+        ORG_ID,
+        domain.id,
+        object_key="ticket",
+        filters={
+            "assignee": "reda",
+            "repo": "uwear-ai/illospace-project",
+            "status": ["todo", "doing"],
+            "labels": {"contains": "mcp"},
+            "title": {"contains": "filters"},
+        },
+    )
+
+    assert [record.id for record in records] == [reda.id]
+
+
+async def test_domain_events_drop_non_uuid_idea_ids(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="Tickets",
+        objects=[
+            {
+                "key": "ticket",
+                "fields": [{"key": "title", "field_type": "text", "required": True}],
+            }
+        ],
+    )
+
+    await service.create_record(
+        ORG_ID,
+        domain.id,
+        "ticket",
+        data={"title": "Persist from inbound run"},
+        run_id=123,
+        idea_id="inbound:abc",
+    )
+
+    events = await service.list_events(ORG_ID, domain.id)
+    created = next(event for event in events if event.event_type == "record.created")
+    assert created.run_id == 123
+    assert created.idea_id is None
+
+
 async def test_record_validation_rejects_missing_unknown_and_bad_enum(session):
     service = AsyncDomainService(session)
     domain = await service.create_domain(

@@ -1,9 +1,11 @@
 """Domain validation, persistence, and serialization helpers."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, datetime, timezone
 import re
 from typing import Any, Iterable, Sequence
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -112,6 +114,88 @@ def _serialize_event(event: DomainEvent) -> dict[str, Any]:
         "reason": event.reason,
         "created_at": event.created_at,
     }
+
+
+def _uuid_or_none(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return str(UUID(text))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _record_filter_value(record: DomainRecord, key: str) -> Any:
+    clean_key = str(key or "").strip()
+    if clean_key in {"id", "record_id"}:
+        return record.id
+    if clean_key == "title":
+        return record.title
+    if clean_key == "version":
+        return record.version
+    if clean_key == "object_type_id":
+        return record.object_type_id
+    data = record.data if isinstance(record.data, dict) else {}
+    path = clean_key[5:] if clean_key.startswith("data.") else clean_key
+    current: Any = data
+    for part in [item for item in path.split(".") if item]:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _values_equal(left: Any, right: Any) -> bool:
+    if isinstance(left, str) or isinstance(right, str):
+        return str(left or "").strip().lower() == str(right or "").strip().lower()
+    return left == right
+
+
+def _value_in(actual: Any, choices: Any) -> bool:
+    if not isinstance(choices, list | tuple | set):
+        choices = [choices]
+    if isinstance(actual, list | tuple | set):
+        return any(_values_equal(item, choice) for item in actual for choice in choices)
+    return any(_values_equal(actual, choice) for choice in choices)
+
+
+def _value_contains(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, str):
+        return str(expected or "").strip().lower() in actual.strip().lower()
+    if isinstance(actual, list | tuple | set):
+        return any(_values_equal(item, expected) for item in actual)
+    if isinstance(actual, Mapping):
+        return str(expected) in actual
+    return _values_equal(actual, expected)
+
+
+def _matches_record_filter(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, Mapping):
+        if "exists" in expected and bool(expected.get("exists")) != (actual is not None):
+            return False
+        if "eq" in expected and not _values_equal(actual, expected.get("eq")):
+            return False
+        choices = expected.get("in", expected.get("any_of"))
+        if choices is not None and not _value_in(actual, choices):
+            return False
+        if "contains" in expected and not _value_contains(actual, expected.get("contains")):
+            return False
+        return True
+    if isinstance(expected, list | tuple | set):
+        return _value_in(actual, expected)
+    if isinstance(actual, list | tuple | set):
+        return _value_in(actual, [expected])
+    return _values_equal(actual, expected)
+
+
+def _record_matches_filters(record: DomainRecord, filters: Mapping[str, Any] | None) -> bool:
+    if not filters:
+        return True
+    for key, expected in filters.items():
+        if not _matches_record_filter(_record_filter_value(record, str(key)), expected):
+            return False
+    return True
 
 
 class AsyncDomainService:
@@ -370,6 +454,7 @@ class AsyncDomainService:
         *,
         object_key: str | None = None,
         search: str | None = None,
+        filters: Mapping[str, Any] | None = None,
         include_archived: bool = False,
         limit: int = 100,
     ) -> Sequence[DomainRecord]:
@@ -385,10 +470,14 @@ class AsyncDomainService:
             stmt = stmt.where(DomainRecord.archived_at.is_(None))
         if search and search.strip():
             stmt = stmt.where(DomainRecord.search_text.ilike(f"%{search.strip()}%"))
+        max_results = max(1, min(int(limit), 500))
         stmt = stmt.order_by(DomainRecord.updated_at.desc(), DomainRecord.id.desc()).limit(
-            max(1, min(int(limit), 500))
+            500 if filters else max_results
         )
-        return (await self.session.scalars(stmt)).all()
+        records = (await self.session.scalars(stmt)).all()
+        if filters:
+            return [record for record in records if _record_matches_filters(record, filters)][:max_results]
+        return records
 
     async def get_record(self, org_id: str, domain_id: int, record_id: int) -> DomainRecord:
         await self.get_domain(org_id, domain_id)
@@ -909,7 +998,7 @@ class AsyncDomainService:
             actor_kind=actor_kind,
             actor_id=actor_id,
             run_id=run_id,
-            idea_id=idea_id,
+            idea_id=_uuid_or_none(idea_id),
             before=_json_safe(before or {}),
             after=_json_safe(after or {}),
             patch=_json_safe(patch or {}),

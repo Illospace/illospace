@@ -31,6 +31,12 @@ class _AsyncSession:
     async def rollback(self):
         self.order.append("rollback")
 
+    async def flush(self):
+        return None
+
+    async def refresh(self, _row):
+        return None
+
     async def close(self):
         return None
 
@@ -71,6 +77,35 @@ def _handoff_row(**overrides):
         "metadata_": {},
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
+def _cycle_row(**overrides):
+    now = datetime.now(timezone.utc)
+    data = {
+        "id": 12,
+        "user_id": "user-1",
+        "org_id": "org-1",
+        "creator_type": "external_agent",
+        "creator_id": "conn-1",
+        "maintainer_type": "external_agent",
+        "maintainer_id": "conn-1",
+        "name": "Scan work",
+        "prompt": "Scan important repos.",
+        "schedule_expr": "every 30 minutes",
+        "timezone": "UTC",
+        "enabled": True,
+        "model_override": None,
+        "thinking_override": None,
+        "target_idea_id": None,
+        "next_run_at": now,
+        "last_run_at": None,
+        "last_status": None,
+        "last_error": None,
+        "created_at": now,
+        "updated_at": now,
     }
     data.update(overrides)
     return SimpleNamespace(**data)
@@ -578,6 +613,316 @@ async def test_hosted_mcp_read_thread_get_accepts_canonical_thread_url():
     assert captured["idea_id"] == thread_id
     assert captured["limit"] == 7
     assert payload["thread_reference"]["thread_route"] == f"/threads/{thread_id}"
+
+
+async def test_hosted_mcp_run_get_returns_tool_events_and_artifacts():
+    now = datetime.now(timezone.utc)
+    run = SimpleNamespace(
+        id=55,
+        created_at=now,
+        updated_at=now,
+        org_id="org-1",
+        user_id="user-1",
+        thread_id="idea-1",
+        parent_run_id=None,
+        root_run_id=None,
+        trace_id="trace-1",
+        profile="standard",
+        recipe="default",
+        status="completed",
+        input_message="Do work",
+        target_ref={},
+        workspace_ref={},
+        model_policy={},
+        metadata_={},
+        started_at=now,
+        paused_at=None,
+        completed_at=now,
+        failed_at=None,
+        canceled_at=None,
+    )
+    event = SimpleNamespace(
+        id=91,
+        run_id=55,
+        root_run_id=None,
+        sequence_no=3,
+        event_type="run.tool_completed",
+        payload={"tool_name": "domain.inspect"},
+        producer="agent_runtime",
+        visibility="public",
+        created_at=now,
+    )
+    artifact = SimpleNamespace(
+        id=92,
+        run_id=55,
+        root_run_id=None,
+        artifact_type="final_answer",
+        title="Done",
+        payload={},
+        text="Finished.",
+        uri=None,
+        visibility="public",
+        created_at=now,
+    )
+
+    class ScalarResult:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class RunSession(_AsyncSession):
+        async def get(self, model, row_id):
+            assert row_id == 55
+            return run
+
+        async def scalars(self, stmt):
+            text = str(stmt)
+            if "agent_run_events" in text:
+                return ScalarResult([event])
+            if "agent_run_artifacts" in text:
+                return ScalarResult([artifact])
+            return ScalarResult([])
+
+    session = RunSession()
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ):
+        response = await _request(
+            "POST",
+            "/mcp",
+            session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 13,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_read",
+                    "arguments": {
+                        "capability": "run.get",
+                        "arguments": {"run_id": 55},
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert payload["run"]["run_id"] == 55
+    assert payload["tool_events"][0]["payload"] == {"tool_name": "domain.inspect"}
+    assert payload["artifacts"][0]["text"] == "Finished."
+    assert "events" not in payload
+    assert session.order == []
+
+
+async def test_hosted_mcp_cycle_manage_create_commits_and_publishes_change():
+    order: list[str] = []
+    session = _AsyncSession(order)
+    cycle = _cycle_row()
+
+    def publish_change(**kwargs):
+        order.append(f"publish:{kwargs['action']}:{kwargs['cycle_id']}")
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp.command_create_cycle",
+        new=AsyncMock(return_value=cycle),
+    ) as create_cycle, patch(
+        "brain.app.api.routers.agent_mcp._validate_cycle_target_idea",
+        new=AsyncMock(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp.publish_cycle_change",
+        side_effect=publish_change,
+    ):
+        response = await _request(
+            "POST",
+            "/api/mcp",
+            session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 14,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_act",
+                    "arguments": {
+                        "capability": "cycle.manage",
+                        "arguments": {
+                            "action": "create",
+                            "name": "Scan work",
+                            "prompt": "Scan important repos.",
+                            "schedule_expr": "*/30 * * * *",
+                            "timezone": "UTC",
+                            "enabled": True,
+                        },
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert payload["cycle"]["id"] == 12
+    assert order == ["commit", "publish:create:12"]
+    create_cycle.assert_awaited_once()
+
+
+async def test_hosted_mcp_identity_resolve_lists_provider_links():
+    user = SimpleNamespace(
+        id="user-1",
+        org_id="org-1",
+        name="Reda",
+        email="reda@example.com",
+        role="owner",
+        color="#111111",
+    )
+    connection = SimpleNamespace(
+        id="conn-github",
+        org_id="org-1",
+        owner_user_id="user-1",
+        display_name="GitHub",
+        agent_kind="github",
+        transport="webhook",
+        remote_agent_id=None,
+        remote_session_key=None,
+        metadata_={
+            "identity_links": {
+                "github": {
+                    "redawear": {
+                        "user_id": "user-1",
+                        "display_name": "redawear",
+                        "metadata": {"source": "manual"},
+                    }
+                }
+            }
+        },
+        created_at=datetime.now(timezone.utc),
+    )
+    codex = SimpleNamespace(id=5, user_id="user-1", label="Codex / ChatGPT")
+
+    class ScalarResult:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class IdentitySession(_AsyncSession):
+        def __init__(self):
+            super().__init__()
+            self.results = [ScalarResult([user]), ScalarResult([connection]), ScalarResult([codex])]
+
+        async def scalars(self, _stmt):
+            return self.results.pop(0)
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ):
+        response = await _request(
+            "POST",
+            "/api/mcp",
+            session=IdentitySession(),
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_read",
+                    "arguments": {
+                        "capability": "identity.resolve",
+                        "arguments": {"provider": "github", "external_user_id": "redawear"},
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert payload["identities"] == [
+        {
+            "provider": "github",
+            "external_user_id": "redawear",
+            "user_id": "user-1",
+            "display_name": "redawear",
+            "source": "external_connection.identity_links",
+            "metadata": {"source": "manual"},
+            "connection_id": "conn-github",
+            "connection_display_name": "GitHub",
+            "connection_agent_kind": "github",
+            "connection_transport": "webhook",
+        }
+    ]
+    assert payload["members"][0]["identities"] == payload["identities"]
+
+
+async def test_hosted_mcp_identity_manage_link_commits_and_mirrors_slack_map():
+    order: list[str] = []
+    connection = SimpleNamespace(
+        id="conn-slack",
+        org_id="org-1",
+        owner_user_id="user-1",
+        display_name="Slack",
+        agent_kind="slack",
+        transport="slack_socket_mode",
+        remote_agent_id=None,
+        remote_session_key=None,
+        metadata_={"slack": {"team_id": "T1", "identity_map": {}}},
+    )
+    user = SimpleNamespace(id="user-1", org_id="org-1")
+
+    class IdentityWriteSession(_AsyncSession):
+        async def get(self, model, row_id):
+            if model.__name__ == "ExternalAgentConnectionRow":
+                assert row_id == "conn-slack"
+                return connection
+            if model.__name__ == "User":
+                assert row_id == "user-1"
+                return user
+            return None
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ):
+        response = await _request(
+            "POST",
+            "/api/mcp",
+            session=IdentityWriteSession(order),
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 16,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_act",
+                    "arguments": {
+                        "capability": "identity.manage",
+                        "arguments": {
+                            "action": "link",
+                            "connection_id": "conn-slack",
+                            "provider": "slack",
+                            "external_user_id": "U123",
+                            "user_id": "user-1",
+                            "display_name": "Reda in Slack",
+                        },
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert payload["identity"]["provider"] == "slack"
+    assert connection.metadata_["identity_links"]["slack"]["U123"]["user_id"] == "user-1"
+    assert connection.metadata_["slack"]["identity_map"] == {"U123": "user-1"}
+    assert order == ["commit"]
 
 
 async def test_launch_handoff_redirects_to_codex_deep_link():

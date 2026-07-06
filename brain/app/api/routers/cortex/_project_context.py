@@ -28,6 +28,7 @@ from brain.systems.cortex.project_context.browser import (
     with_project_file_browser,
 )
 from brain.systems.cortex.project_context.identity import stamped_project_context
+from brain.systems.cortex.project_context.merge import project_resource_identity
 from brain.systems.cortex.project_context.profile_browser import (
     ProjectProfileBrowserError,
     project_profile_draft_state_payload,
@@ -335,11 +336,14 @@ def _resource_identity(resource: dict[str, Any]) -> str:
     value = resource.get("id")
     if isinstance(value, str) and value.strip():
         return value.strip()
-    for key in ("path", "uri", "repo", "name", "label"):
-        value = resource.get(key)
-        if isinstance(value, str) and value.strip():
-            return f"{key}:{value.strip()}"
-    return ""
+    return project_resource_identity(resource)
+
+
+def _merge_project_resource(existing: dict[str, Any], addition: dict[str, Any]) -> dict[str, Any]:
+    merged = {**existing, **addition}
+    if existing.get("id"):
+        merged["id"] = existing["id"]
+    return merged
 
 
 def _unique_resource_id(resource: dict[str, Any], existing_ids: set[str], index: int) -> str:
@@ -842,9 +846,18 @@ async def add_project_resources(
     _require_project_profile_manager(profile, user)
     resources = _project_resources(profile)
     existing_ids = {str(resource.get("id")) for resource in resources if resource.get("id")}
+    resource_indexes = {project_resource_identity(resource): idx for idx, resource in enumerate(resources)}
     for raw in body.resources:
         resource = normalize_project_resource(raw, index=len(resources))
+        identity = project_resource_identity(resource)
+        if identity in resource_indexes:
+            resources[resource_indexes[identity]] = _merge_project_resource(
+                resources[resource_indexes[identity]],
+                resource,
+            )
+            continue
         resource["id"] = _unique_resource_id(resource, existing_ids, len(resources))
+        resource_indexes[identity] = len(resources)
         resources.append(resource)
     _replace_project_resources(profile, resources)
     db.add(profile)
