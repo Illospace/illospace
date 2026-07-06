@@ -230,6 +230,14 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         "tools": ("read_project_contexts", "manage_project"),
     },
     {
+        "key": "github_source",
+        "name": "GitHub Source",
+        "category": "integrations",
+        "summary": "Illo can read bounded GitHub repository metadata, issues, and pull requests for coordination workflows.",
+        "aliases": ("github", "issues", "pull requests", "prs", "repo tickets", "source repo"),
+        "tools": ("read_github_source",),
+    },
+    {
         "key": "workspace_apps",
         "name": "Workspace Apps",
         "category": "core_workspace",

@@ -51,6 +51,15 @@ DOMAIN_MCP_TOOLS: dict[str, dict[str, Any]] = {
                     "type": "string",
                     "description": "Optional text search when listing records.",
                 },
+                "filters": {
+                    "type": "object",
+                    "description": (
+                        "Optional exact record filters keyed by record data field, dotted data path, "
+                        "or metadata key such as title/id. Values may be scalars, arrays, or small "
+                        "operator objects using eq, in, contains, or exists."
+                    ),
+                    "default": {},
+                },
                 "relation_key": {
                     "type": "string",
                     "description": "Optional relation type key used when listing relations.",
@@ -223,6 +232,7 @@ async def _tool_inspect_domains(
                 domain.id,
                 object_key=_clean_optional_string(arguments.get("object_key")),
                 search=_clean_optional_string(arguments.get("search")),
+                filters=_clean_dict(arguments.get("filters")),
                 include_archived=include_archived,
                 limit=limit,
             )

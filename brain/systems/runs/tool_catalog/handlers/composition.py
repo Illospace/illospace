@@ -41,6 +41,7 @@ from brain.systems.runs.tool_catalog.handlers.chat import (
 from brain.systems.runs.tool_catalog.handlers.cycles import _handle_manage_cycle
 from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
 from brain.systems.runs.tool_catalog.handlers.inbound import _handle_manage_inbound
+from brain.systems.runs.tool_catalog.handlers.github import _handle_read_github_source
 from brain.systems.runs.tool_catalog.handlers.ideas import _handle_manage_idea
 from brain.systems.runs.tool_catalog.handlers.launch_handoffs import _handle_create_launch_handoff
 from brain.systems.runs.tool_catalog.handlers.projects import _handle_manage_project
@@ -261,6 +262,10 @@ def _get_tool_handlers(
         "read_workspace_records": _handle_read_workspace_records,
         "read_cycles": _handle_read_cycles,
         "read_workspace_apps": _handle_read_workspace_apps,
+        "read_github_source": lambda **kw: _patched_private(
+            "_handle_read_github_source",
+            _handle_read_github_source,
+        )(**kw),
         "read_thread_messages": _handle_read_thread_messages,
         "post_chat_message": lambda **kw: _patched_private(
             "_handle_post_chat_message",

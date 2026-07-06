@@ -5,8 +5,16 @@ import copy
 import json
 from typing import Any
 
+from brain.systems.cortex.project_context.github import parse_github_repo_slug
+
 
 def project_resource_identity(resource: dict[str, Any]) -> str:
+    for key in ("repo", "uri", "url", "remote"):
+        value = resource.get(key)
+        if isinstance(value, str):
+            slug = parse_github_repo_slug(value)
+            if slug:
+                return f"github_repo:{slug.lower()}"
     for key in ("path", "uri", "repo", "name", "label"):
         value = resource.get(key)
         if isinstance(value, str) and value.strip():

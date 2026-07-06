@@ -6,6 +6,7 @@ import json
 from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, Depends, Request, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
@@ -19,14 +20,38 @@ from brain.app.api.routers.agent_bridge import (
 )
 from brain.app.api.routers import agent_mcp_handoffs
 from brain.app.api.routers.agent_mcp_domains import DOMAIN_TOOL_HANDLERS
+from brain.app.api.routers.agent_mcp_identity import manage_identity, resolve_identities
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.mentions import classify_mention_intent
+from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
+from brain.platform.db.models.cycle import Cycle, CycleRun
+from brain.platform.db.models.idea import Idea
 from brain.systems.cortex.thread_links import thread_id_from_reference
 from brain.systems.cortex.project_context.search import search_project_contexts
+from brain.systems.cycles.access import CycleActor, cycle_scope_conditions, target_idea_scope_conditions
+from brain.systems.cycles.commands import (
+    UNSET_CYCLE_FIELD,
+    async_add_guidance_to_cycle as command_add_cycle_guidance,
+    async_add_output_target_to_cycle as command_add_cycle_output_target,
+    async_create_cycle as command_create_cycle,
+    async_delete_cycle as command_delete_cycle,
+    async_remove_output_target_from_cycle as command_remove_cycle_output_target,
+    async_update_cycle as command_update_cycle,
+    cycle_change_event,
+)
+from brain.systems.cycles.events import publish_cycle_change
+from brain.systems.cycles.serializers import (
+    serialize_cycle,
+    serialize_cycle_guidance,
+    serialize_cycle_output_target,
+    serialize_cycle_run,
+)
+from brain.systems.cycles.service import async_run_cycle_now
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.results import read_inbound_submission_result
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
+from brain.systems.runs.cortex.read_models import run_stream_payload
 
 
 router = APIRouter(tags=["agent-mcp"], dependencies=[Depends(rate_limit)])
@@ -258,6 +283,25 @@ def _clean_optional_string(value: Any) -> str | None:
     return text or None
 
 
+def _clean_optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def _bounded_limit(value: Any, *, default: int = 25, maximum: int = 100) -> int:
+    try:
+        return max(1, min(int(value or default), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+def _iso(value: Any) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def _submission_source(arguments: dict[str, Any]) -> dict[str, Any]:
     source = _clean_dict(arguments.get("source"))
     for key in ("source_tool", "repo", "branch", "task_title", "session_id", "run_id"):
@@ -470,10 +514,39 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
         "description": "Read messages from an existing Illo idea/thread.",
         "arguments": {"idea_id": "string", "limit": "integer"},
     },
+    "run.get": {
+        "description": "Read a visible Illo run, including bounded tool-call evidence, events, and artifacts.",
+        "arguments": {
+            "run_id": "integer",
+            "include_tool_events": "boolean",
+            "include_events": "boolean",
+            "include_artifacts": "boolean",
+            "event_types": "string[]",
+            "limit": "integer",
+        },
+    },
+    "cycles.inspect": {
+        "description": "List visible Illo Cycles or inspect one Cycle with optional recent run history.",
+        "arguments": {
+            "cycle_id": "integer",
+            "include_runs": "boolean",
+            "limit": "integer",
+        },
+    },
     **agent_mcp_handoffs.READ_CAPABILITIES,
     "team.members.list": {
         "description": "List visible Illo team members.",
         "arguments": {},
+    },
+    "identity.resolve": {
+        "description": "Resolve Illospace team members to provider-neutral external identities such as Slack, GitHub, Codex, or MCP connections.",
+        "arguments": {
+            "provider": "string",
+            "external_user_id": "string",
+            "user_id": "string",
+            "query": "string",
+            "limit": "integer",
+        },
     },
     "domain.inspect": {
         "description": "Inspect Illo Domains, schemas, records, relations, and recent domain events.",
@@ -483,6 +556,7 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
             "object_key": "string",
             "record_id": "integer",
             "search": "string",
+            "filters": "object",
             "include_records": "boolean",
             "include_relations": "boolean",
             "include_events": "boolean",
@@ -568,6 +642,41 @@ ACT_CAPABILITIES: dict[str, dict[str, Any]] = {
             "reason": "string",
         },
     },
+    "cycle.manage": {
+        "description": "Create, update, delete, run, or adjust reusable Illo Cycles as the user's external-agent delegate.",
+        "arguments": {
+            "action": "create | update | delete | run | add_guidance | add_output_target | remove_output_target",
+            "cycle_id": "integer",
+            "name": "string",
+            "prompt": "string",
+            "schedule_expr": "string",
+            "run_at": "string",
+            "timezone": "string",
+            "enabled": "boolean",
+            "model_override": "string",
+            "thinking_override": "string",
+            "target_idea_id": "string",
+            "guidance": "string",
+            "target_type": "string",
+            "target_id": "string",
+            "label": "string",
+            "config": "object",
+            "output_target_id": "integer",
+            "rationale": "string",
+        },
+    },
+    "identity.manage": {
+        "description": "Link or unlink a provider-neutral external identity on an existing external source connection.",
+        "arguments": {
+            "action": "link | unlink",
+            "connection_id": "string",
+            "provider": "string",
+            "external_user_id": "string",
+            "user_id": "string",
+            "display_name": "string",
+            "metadata": "object",
+        },
+    },
 }
 
 
@@ -603,6 +712,149 @@ def _required_capability_string(arguments: dict[str, Any], key: str, *, capabili
     return value
 
 
+def _cycle_actor(principal: external_agents.AgentBridgePrincipal) -> CycleActor:
+    return CycleActor(
+        user_id=principal.owner_user_id,
+        org_id=principal.org_id,
+        principal_type="external_agent",
+        source_id=principal.connection_id,
+    )
+
+
+async def _get_cycle_for_principal(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    cycle_id: int,
+) -> Cycle:
+    stmt = select(Cycle).where(Cycle.id == cycle_id, *cycle_scope_conditions(_cycle_actor(principal)))
+    cycle = (await db.scalars(stmt)).first()
+    if cycle is None:
+        raise ValueError("Cycle not found")
+    return cycle
+
+
+async def _validate_cycle_target_idea(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    idea_id: str | None,
+) -> None:
+    if not idea_id:
+        return
+    stmt = select(Idea.id).where(*target_idea_scope_conditions(idea_id, _cycle_actor(principal)))
+    if (await db.execute(stmt)).first() is None:
+        raise ValueError("target_idea_id must belong to the current workspace")
+
+
+def _serialize_run_event(event: AgentRunEventRow) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "run_id": event.run_id,
+        "root_run_id": event.root_run_id,
+        "sequence_no": event.sequence_no,
+        "event_type": event.event_type,
+        "payload": event.payload or {},
+        "producer": event.producer,
+        "visibility": event.visibility,
+        "created_at": _iso(event.created_at),
+    }
+
+
+def _serialize_run_artifact(artifact: AgentRunArtifactRow) -> dict[str, Any]:
+    return {
+        "id": artifact.id,
+        "run_id": artifact.run_id,
+        "root_run_id": artifact.root_run_id,
+        "artifact_type": artifact.artifact_type,
+        "title": artifact.title,
+        "payload": artifact.payload or {},
+        "text": artifact.text,
+        "uri": artifact.uri,
+        "visibility": artifact.visibility,
+        "created_at": _iso(artifact.created_at),
+    }
+
+
+async def _read_run_get(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    run_id = _clean_optional_int(arguments.get("run_id"))
+    if run_id is None:
+        raise ValueError("run.get requires run_id")
+    run = await db.get(AgentRunRow, run_id)
+    if run is None or str(run.org_id or "") != str(principal.org_id):
+        raise ValueError("Run not found")
+
+    limit = _bounded_limit(arguments.get("limit"), default=50, maximum=200)
+    payload: dict[str, Any] = {"run": run_stream_payload(run)}
+    event_types = _clean_string_list(arguments.get("event_types"))
+    include_events = bool(arguments.get("include_events", False))
+    include_tool_events = bool(arguments.get("include_tool_events", True))
+    if include_events:
+        event_stmt = (
+            select(AgentRunEventRow)
+            .where(AgentRunEventRow.run_id == run.id)
+            .order_by(AgentRunEventRow.sequence_no.asc(), AgentRunEventRow.id.asc())
+            .limit(limit)
+        )
+        if event_types:
+            event_stmt = event_stmt.where(AgentRunEventRow.event_type.in_(event_types))
+        payload["events"] = [_serialize_run_event(event) for event in (await db.scalars(event_stmt)).all()]
+    if include_tool_events:
+        tool_stmt = (
+            select(AgentRunEventRow)
+            .where(
+                AgentRunEventRow.run_id == run.id,
+                AgentRunEventRow.event_type.like("run.tool_%"),
+            )
+            .order_by(AgentRunEventRow.sequence_no.asc(), AgentRunEventRow.id.asc())
+            .limit(limit)
+        )
+        payload["tool_events"] = [_serialize_run_event(event) for event in (await db.scalars(tool_stmt)).all()]
+    if bool(arguments.get("include_artifacts", True)):
+        artifact_stmt = (
+            select(AgentRunArtifactRow)
+            .where(AgentRunArtifactRow.run_id == run.id)
+            .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
+            .limit(limit)
+        )
+        payload["artifacts"] = [
+            _serialize_run_artifact(artifact)
+            for artifact in (await db.scalars(artifact_stmt)).all()
+        ]
+    return payload
+
+
+async def _read_cycles_inspect(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    limit = _bounded_limit(arguments.get("limit"), default=25, maximum=100)
+    cycle_id = _clean_optional_int(arguments.get("cycle_id"))
+    if cycle_id is None:
+        stmt = (
+            select(Cycle)
+            .where(*cycle_scope_conditions(_cycle_actor(principal)))
+            .order_by(Cycle.created_at.desc(), Cycle.id.desc())
+            .limit(limit)
+        )
+        return {"cycles": [serialize_cycle(cycle) for cycle in (await db.scalars(stmt)).all()]}
+
+    cycle = await _get_cycle_for_principal(db, principal, cycle_id)
+    payload = {"cycle": serialize_cycle(cycle)}
+    if bool(arguments.get("include_runs", False)):
+        run_stmt = (
+            select(CycleRun)
+            .where(CycleRun.cycle_id == cycle.id)
+            .order_by(CycleRun.created_at.desc(), CycleRun.id.desc())
+            .limit(limit)
+        )
+        payload["runs"] = [serialize_cycle_run(run) for run in (await db.scalars(run_stmt)).all()]
+    return payload
+
+
 async def _tool_read(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
@@ -635,10 +887,16 @@ async def _tool_read(
             idea_id=_thread_argument_id(capability_arguments),
             limit=int(capability_arguments.get("limit") or 100),
         )
+    if capability == "run.get":
+        return await _read_run_get(db, principal, capability_arguments)
+    if capability == "cycles.inspect":
+        return await _read_cycles_inspect(db, principal, capability_arguments)
     if capability == "handoff.get":
         return await agent_mcp_handoffs.read_handoff(db, principal, capability_arguments)
     if capability == "team.members.list":
         return await external_agents.get_team_members(db, principal)
+    if capability == "identity.resolve":
+        return await resolve_identities(db, principal, capability_arguments)
     if capability == "domain.inspect":
         return await DOMAIN_TOOL_HANDLERS["illo_inspect_domains"](db, principal, capability_arguments)
     raise ValueError(f"Unknown {READ_TOOL_NAME} capability: {capability}")
@@ -801,6 +1059,137 @@ async def _act_start_thread_collaboration(
     return result
 
 
+def _cycle_mutation_payload(action: str, cycle: Cycle, payload: dict[str, Any]) -> dict[str, Any]:
+    payload["_mutates_cycle"] = True
+    payload["_cycle_change"] = {"action": action, "event": cycle_change_event(cycle)}
+    return payload
+
+
+async def _act_manage_cycle(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    action = _required_capability_string(arguments, "action", capability="cycle.manage")
+    actor = _cycle_actor(principal)
+    rationale = _clean_optional_string(arguments.get("rationale"))
+
+    if action == "create":
+        target_idea_id = _clean_optional_string(arguments.get("target_idea_id"))
+        await _validate_cycle_target_idea(db, principal, target_idea_id)
+        cycle = await command_create_cycle(
+            db,
+            actor=actor,
+            name=_required_capability_string(arguments, "name", capability="cycle.manage"),
+            prompt=_required_capability_string(arguments, "prompt", capability="cycle.manage"),
+            timezone_name=_clean_optional_string(arguments.get("timezone")) or "UTC",
+            schedule_expr=_clean_optional_string(arguments.get("schedule_expr")),
+            run_at=arguments.get("run_at"),
+            enabled=bool(arguments.get("enabled", True)),
+            model_override=_clean_optional_string(arguments.get("model_override")),
+            thinking_override=_clean_optional_string(arguments.get("thinking_override")),
+            target_idea_id=target_idea_id,
+            guidance=_clean_optional_string(arguments.get("guidance")),
+            rationale=rationale,
+        )
+        await db.flush()
+        await db.refresh(cycle)
+        return _cycle_mutation_payload("create", cycle, {"cycle": serialize_cycle(cycle)})
+
+    cycle_id = _clean_optional_int(arguments.get("cycle_id"))
+    if cycle_id is None:
+        raise ValueError(f"cycle.manage action '{action}' requires cycle_id")
+    cycle = await _get_cycle_for_principal(db, principal, cycle_id)
+
+    if action == "update":
+        target_idea_id = arguments.get("target_idea_id", UNSET_CYCLE_FIELD)
+        if target_idea_id is not UNSET_CYCLE_FIELD:
+            target_idea_id = _clean_optional_string(target_idea_id)
+            await _validate_cycle_target_idea(db, principal, target_idea_id)
+        cycle = await command_update_cycle(
+            db,
+            cycle,
+            actor=actor,
+            name=_clean_optional_string(arguments.get("name")),
+            prompt=_clean_optional_string(arguments.get("prompt")),
+            timezone_name=_clean_optional_string(arguments.get("timezone")),
+            schedule_expr=_clean_optional_string(arguments.get("schedule_expr")),
+            run_at=arguments.get("run_at", UNSET_CYCLE_FIELD),
+            enabled=arguments.get("enabled", UNSET_CYCLE_FIELD),
+            model_override=arguments.get("model_override", UNSET_CYCLE_FIELD),
+            thinking_override=arguments.get("thinking_override", UNSET_CYCLE_FIELD),
+            target_idea_id=target_idea_id,
+            guidance=_clean_optional_string(arguments.get("guidance")),
+            rationale=rationale,
+        )
+        await db.flush()
+        await db.refresh(cycle)
+        return _cycle_mutation_payload("update", cycle, {"cycle": serialize_cycle(cycle)})
+
+    if action == "delete":
+        await command_delete_cycle(db, cycle)
+        return _cycle_mutation_payload("delete", cycle, {"ok": True, "id": cycle.id})
+
+    if action == "run":
+        result = await async_run_cycle_now(cycle.id)
+        payload = {"cycle": serialize_cycle(cycle), "run": result}
+        payload["_mutates_cycle"] = True
+        payload["_cycle_change"] = {"action": "run", "event": cycle_change_event(cycle)}
+        return payload
+
+    if action == "add_guidance":
+        guidance = await command_add_cycle_guidance(
+            db,
+            cycle,
+            actor=actor,
+            guidance=_required_capability_string(arguments, "guidance", capability="cycle.manage"),
+            rationale=rationale,
+        )
+        return _cycle_mutation_payload(
+            "update",
+            cycle,
+            {"cycle": serialize_cycle(cycle), "guidance": serialize_cycle_guidance(guidance)},
+        )
+
+    if action == "add_output_target":
+        target = await command_add_cycle_output_target(
+            db,
+            cycle,
+            actor=actor,
+            target_type=_required_capability_string(arguments, "target_type", capability="cycle.manage"),
+            target_id=_clean_optional_string(arguments.get("target_id")),
+            label=_clean_optional_string(arguments.get("label")),
+            config=_clean_dict(arguments.get("config")),
+            rationale=rationale,
+        )
+        return _cycle_mutation_payload(
+            "update",
+            cycle,
+            {"cycle": serialize_cycle(cycle), "output_target": serialize_cycle_output_target(target)},
+        )
+
+    if action == "remove_output_target":
+        output_target_id = _clean_optional_int(arguments.get("output_target_id") or arguments.get("target_id"))
+        if output_target_id is None:
+            raise ValueError("cycle.manage action 'remove_output_target' requires output_target_id")
+        target = await command_remove_cycle_output_target(
+            db,
+            cycle,
+            actor=actor,
+            target_id=output_target_id,
+            rationale=rationale,
+        )
+        if target is None:
+            raise ValueError("Cycle output target not found")
+        return _cycle_mutation_payload(
+            "update",
+            cycle,
+            {"cycle": serialize_cycle(cycle), "output_target": serialize_cycle_output_target(target)},
+        )
+
+    raise ValueError(f"Unknown cycle.manage action: {action}")
+
+
 async def _tool_act(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
@@ -839,6 +1228,12 @@ async def _tool_act(
     if capability == "domain.record.write":
         result = await DOMAIN_TOOL_HANDLERS["illo_write_domain_record"](db, principal, capability_arguments)
         result["_mutates_domain"] = True
+        return result
+    if capability == "cycle.manage":
+        return await _act_manage_cycle(db, principal, capability_arguments)
+    if capability == "identity.manage":
+        result = await manage_identity(db, principal, capability_arguments)
+        result["_mutates_identity"] = True
         return result
     raise ValueError(f"Unknown {ACT_TOOL_NAME} capability: {capability}")
 
@@ -994,6 +1389,16 @@ async def _handle_mcp_request(
             await db.commit()
         if tool_payload.pop("_mutates_domain", False):
             await db.commit()
+        if tool_payload.pop("_mutates_identity", False):
+            await db.commit()
+        if tool_payload.pop("_mutates_cycle", False):
+            cycle_change = tool_payload.pop("_cycle_change", None)
+            await db.commit()
+            if isinstance(cycle_change, dict):
+                publish_cycle_change(
+                    action=str(cycle_change.get("action") or "update"),
+                    **dict(cycle_change.get("event") or {}),
+                )
         if tool_payload.pop("_mutates_handoff", False):
             await db.commit()
         if tool_payload.pop("_mutates_workspace_app", False):

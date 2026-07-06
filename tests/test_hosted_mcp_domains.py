@@ -99,14 +99,16 @@ async def test_hosted_mcp_inspect_domains_reads_schema_and_optional_records():
             *,
             object_key=None,
             search=None,
+            filters=None,
             include_archived=False,
             limit=100,
         ):
-            assert (org_id, domain_id, object_key, search, include_archived, limit) == (
+            assert (org_id, domain_id, object_key, search, filters, include_archived, limit) == (
                 "org-1",
                 3,
                 "company",
                 "acme",
+                {"assignee": "Reda"},
                 False,
                 2,
             )
@@ -167,6 +169,7 @@ async def test_hosted_mcp_inspect_domains_reads_schema_and_optional_records():
                             "domain_id": 3,
                             "object_key": "company",
                             "search": "acme",
+                            "filters": {"assignee": "Reda"},
                             "include_records": True,
                             "include_relations": True,
                             "include_events": True,
