@@ -46,6 +46,9 @@ _REPO_RESOURCE_KINDS = {
     "github_repository",
 }
 _LOCAL_FIRST_RESOURCE_KINDS = {"file", "folder", "directory", "workspace", "docs", "doc"}
+_DEFAULT_GIT_CLONE_TIMEOUT_SECONDS = 600
+_MIN_GIT_CLONE_TIMEOUT_SECONDS = 30
+_MAX_GIT_CLONE_TIMEOUT_SECONDS = 1800
 
 
 @dataclass
@@ -311,6 +314,17 @@ def _askpass_script(parent: Path) -> Path:
     return path
 
 
+def _git_clone_timeout_seconds() -> int:
+    raw = os.getenv("ILLO_PROJECT_CONTEXT_GIT_CLONE_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return _DEFAULT_GIT_CLONE_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_GIT_CLONE_TIMEOUT_SECONDS
+    return max(_MIN_GIT_CLONE_TIMEOUT_SECONDS, min(value, _MAX_GIT_CLONE_TIMEOUT_SECONDS))
+
+
 def _clone_github_repo(
     slug: str,
     destination: Path,
@@ -334,7 +348,16 @@ def _clone_github_repo(
     try:
         last_error = ""
         for selected_branch in dict.fromkeys(branches):
-            command = ["git", "clone", "--depth", "1"]
+            command = [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--single-branch",
+                "--no-tags",
+                "--filter",
+                "blob:none",
+            ]
             if selected_branch:
                 command.extend(["--branch", selected_branch])
             command.extend([f"https://github.com/{slug}.git", str(destination)])
@@ -344,7 +367,7 @@ def _clone_github_repo(
                 command,
                 capture_output=True,
                 text=True,
-                timeout=180,
+                timeout=_git_clone_timeout_seconds(),
                 env=env,
             )
             if proc.returncode == 0:
