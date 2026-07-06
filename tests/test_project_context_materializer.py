@@ -40,6 +40,74 @@ def test_project_context_materializable_resources_include_empty_project_roots():
     }) is True
 
 
+def test_github_clone_uses_lightweight_command_and_configurable_timeout(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import _clone_github_repo
+
+    calls = []
+
+    def fake_run_subprocess(command, **kwargs):
+        kwargs = {**kwargs, "env": dict(kwargs.get("env") or {})}
+        calls.append({"command": command, **kwargs})
+        Path(command[-1]).mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def fake_git_output(_cwd, *args):
+        if args == ("branch", "--show-current"):
+            return "main"
+        if args == ("rev-parse", "HEAD"):
+            return "abc123"
+        return None
+
+    monkeypatch.setenv("ILLO_PROJECT_CONTEXT_GIT_CLONE_TIMEOUT_SECONDS", "900")
+    monkeypatch.setattr(materializer, "run_subprocess_sync", fake_run_subprocess)
+    monkeypatch.setattr(materializer, "_git_output", fake_git_output)
+
+    destination = tmp_path / "repo"
+    result = _clone_github_repo(
+        "example-org/private-repo",
+        destination,
+        token="secret-token",
+        branch="main",
+    )
+
+    assert result == {"path": str(destination), "branch": "main", "commit": "abc123"}
+    assert len(calls) == 1
+    assert calls[0]["command"] == [
+        "git",
+        "clone",
+        "--depth",
+        "1",
+        "--single-branch",
+        "--no-tags",
+        "--filter",
+        "blob:none",
+        "--branch",
+        "main",
+        "https://github.com/example-org/private-repo.git",
+        str(destination),
+    ]
+    assert calls[0]["timeout"] == 900
+    assert calls[0]["capture_output"] is True
+    assert calls[0]["text"] is True
+    assert calls[0]["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert calls[0]["env"]["ILLO_GITHUB_PROJECT_CONTEXT_TOKEN"] == "secret-token"
+    assert "secret-token" not in " ".join(calls[0]["command"])
+
+
+def test_github_clone_timeout_env_is_bounded(monkeypatch):
+    from brain.systems.cortex.project_context.materializer import _git_clone_timeout_seconds
+
+    monkeypatch.delenv("ILLO_PROJECT_CONTEXT_GIT_CLONE_TIMEOUT_SECONDS", raising=False)
+    assert _git_clone_timeout_seconds() == 600
+    monkeypatch.setenv("ILLO_PROJECT_CONTEXT_GIT_CLONE_TIMEOUT_SECONDS", "5")
+    assert _git_clone_timeout_seconds() == 30
+    monkeypatch.setenv("ILLO_PROJECT_CONTEXT_GIT_CLONE_TIMEOUT_SECONDS", "3600")
+    assert _git_clone_timeout_seconds() == 1800
+    monkeypatch.setenv("ILLO_PROJECT_CONTEXT_GIT_CLONE_TIMEOUT_SECONDS", "not-an-int")
+    assert _git_clone_timeout_seconds() == 600
+
+
 def test_project_root_key_uses_canonical_project_key():
     from brain.systems.cortex.project_context.project_root import project_key_from_context
 
