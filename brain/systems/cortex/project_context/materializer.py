@@ -35,7 +35,7 @@ from brain.systems.cortex.project_context.workspace_manifest import (
     ThreadDraftIdentity,
     normalize_project_workspace_manifest,
 )
-from brain.systems.vault import get_secret, list_secrets
+from brain.systems.vault import async_get_secret, list_secrets
 
 
 _REPO_RESOURCE_KINDS = {
@@ -210,11 +210,22 @@ async def _github_secret_names(user_id: str, org_id: str | None) -> list[str]:
     return names[:5]
 
 
-async def _token_candidates(resource: dict[str, Any], user_id: str | None, org_id: str | None) -> list[tuple[str | None, str | None]]:
+def _vault_read_error_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    return message or exc.__class__.__name__
+
+
+async def _token_candidates(
+    resource: dict[str, Any],
+    user_id: str | None,
+    org_id: str | None,
+) -> list[tuple[str | None, str | None, str | None]]:
     explicit_key = _vault_key_from_resource(resource)
-    candidates: list[tuple[str | None, str | None]] = []
+    candidates: list[tuple[str | None, str | None, str | None]] = []
     if not user_id:
-        return [(None, None)]
+        if explicit_key:
+            return [(explicit_key, None, "Vault credential requires a run user_id context.")]
+        return [(None, None, None)]
 
     key_names = []
     if explicit_key:
@@ -228,17 +239,21 @@ async def _token_candidates(resource: dict[str, Any], user_id: str | None, org_i
             continue
         seen.add(key_name)
         try:
-            token = await _maybe_await(get_secret(
+            token = await async_get_secret(
                 key_name,
                 actor_user_id=user_id,
                 org_id=org_id,
-                accessed_by="api",
-            ))
-        except Exception:
-            token = None
+                accessed_by="github_runtime_tool",
+            )
+        except Exception as exc:
+            candidates.append((key_name, None, _vault_read_error_message(exc)))
+            continue
         if token:
-            candidates.append((key_name, token.strip()))
-    candidates.append((None, None))
+            candidates.append((key_name, token.strip(), None))
+        else:
+            candidates.append((key_name, None, "Vault secret was not found or is empty."))
+    if not explicit_key:
+        candidates.append((None, None, None))
     return candidates
 
 
@@ -688,7 +703,13 @@ async def _materialize_resource(
         return None, message
 
     errors: list[str] = []
-    for key_name, token in await _token_candidates(resource, user_id, org_id):
+    for candidate in await _token_candidates(resource, user_id, org_id):
+        key_name, token = candidate[:2]
+        token_error = candidate[2] if len(candidate) > 2 else None
+        if token_error:
+            prefix = f"Vault key {key_name}: " if key_name else "GitHub credential: "
+            errors.append(prefix + token_error)
+            continue
         try:
             clone = _clone_github_repo(slug, destination, token=token, branch=branch)
         except Exception as exc:
