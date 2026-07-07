@@ -1,0 +1,33 @@
+schema_version = 1
+name = "uwear-engineering-triage"
+display_name = "Uwear Engineering Triage"
+version = "1.0.0"
+description = "Uwear engineering operating model for triaging GitHub issues and PRs, assigning Reda/Axel/JB, and moving work through backlog, staging, review, merge, and closure."
+license = "UNLICENSED"
+source = "uwear"
+visibility = "private"
+
+[routing]
+triggers = [
+  { pattern = "Uwear engineering triage", direction = "for" },
+  { pattern = "Uwear tickets", direction = "for" },
+  { pattern = "Uwear GitHub issues", direction = "for" },
+  { pattern = "Uwear PR lifecycle", direction = "for" },
+  { pattern = "assign Reda Axel JB", direction = "for" },
+  { pattern = "uwearaiapp staging", direction = "for" },
+  { pattern = "uwear-backend staging", direction = "for" },
+  { pattern = "uwear-mobile-app master", direction = "for" },
+  { pattern = "uwear-website main", direction = "for" },
+  { pattern = "release watcher", direction = "against" },
+  { pattern = "changelog", direction = "against" },
+]
+
+[runtime]
+default_thinking_tier = "high"
+
+[permissions]
+toolsets = ["brain"]
+
+[loading]
+summary = "SKILL.md#role"
+procedure = "SKILL.md"
