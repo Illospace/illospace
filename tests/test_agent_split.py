@@ -345,7 +345,27 @@ class TestRuntimeExtractionContracts:
 
         messages = []
         assert _detect_stuck_loop(["read_file:{}"] * 5, "session-1", messages)
+        # The fabricated stuck message must not masquerade as model output.
+        assert messages[-1]["role"] == "user"
         assert "stuck in a loop" in messages[-1]["content"][0]["text"]
+
+    def test_inject_nudges_returns_only_durable_reminder(self):
+        from brain.systems.runs.direct_loop.loop_control import _inject_nudges
+
+        # Below the warn threshold: nothing to say.
+        assert _inject_nudges(["read_file:{}"]) is None
+
+        # 3 identical calls: durable `cd` reminder, no strategy second-guessing.
+        message = _inject_nudges(["read_file:{}"] * 3)
+        assert message is not None
+        assert message["role"] == "user"
+        assert "cd` does not persist" in message["content"]
+        assert "different strategy" not in message["content"]
+        assert "run_script" not in message["content"]
+        assert "adding NEW information" not in message["content"]
+
+        # Non-repeating calls: no reminder.
+        assert _inject_nudges(["read_file:{}", "write_file:{}", "list_files:{}"]) is None
 
     def test_session_effects_apply_auto_harvest_and_save(self):
         from brain.systems.runs.direct_loop.session_effects import apply_agent_session_side_effects

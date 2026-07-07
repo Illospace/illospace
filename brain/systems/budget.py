@@ -16,7 +16,6 @@ and we want to stop the bleeding, not silently degrade quality.
 
 import logging
 import os
-import re
 from datetime import datetime, timezone, timedelta
 from typing import Any, Iterable
 
@@ -50,17 +49,7 @@ MAX_TOOL_RESULT_CHARS = int(os.environ.get("BUDGET_MAX_TOOL_RESULT_CHARS", "1500
 # Context limits for run
 MAX_THREAD_SUMMARY_CHARS = int(os.environ.get("BUDGET_MAX_THREAD_SUMMARY_CHARS", "2000"))
 MAX_LAST_MESSAGES = int(os.environ.get("BUDGET_MAX_LAST_MESSAGES", "5"))
-REPAIR_GRACE_MULTIPLIER = float(os.environ.get("BUDGET_REPAIR_GRACE_MULTIPLIER", "1.75"))
-REPAIR_MAX_ESTIMATED_INPUT = int(os.environ.get("BUDGET_REPAIR_MAX_ESTIMATED_INPUT", "120000"))
 BUDGET_STATUSES = ("completed", "running")
-
-_REPAIR_TASK_RE = re.compile(
-    r"(?i)\b("
-    r"brain|memory|recall|context|migration|schema|db|database|pgvector|cursor|"
-    r"transaction|graph|guardrail|circuit breaker|budget|diagnos\w*|investigat\w*|"
-    r"debug\w*|repair|hotfix|root cause|backend"
-    r")\b"
-)
 
 
 class BudgetDecision:
@@ -77,13 +66,6 @@ class BudgetDecision:
 
     def __repr__(self):
         return f"BudgetDecision(allowed={self.allowed}, reason={self.reason!r})"
-
-
-def _looks_like_repair_task(task_description: str | None) -> bool:
-    """Return True for bounded repair/diagnostic tasks that deserve grace."""
-    if not task_description:
-        return False
-    return bool(_REPAIR_TASK_RE.search(task_description))
 
 
 def _coerce_int(value: Any) -> int:
@@ -182,8 +164,7 @@ async def _async_summarize_token_totals(
 
 
 async def check_budget(idea_id: str, estimated_input_tokens: int,
-                       model: str | None = None,
-                       task_description: str | None = None) -> BudgetDecision:
+                       model: str | None = None) -> BudgetDecision:
     """Check if a run should proceed.
 
     Normal usage: always allowed, maybe logs a warning.
@@ -213,23 +194,8 @@ async def check_budget(idea_id: str, estimated_input_tokens: int,
                     f"in last hour (warn threshold: {WARN_PER_IDEA_HOUR:,})"
                 )
 
-            repair_like = _looks_like_repair_task(task_description)
-            repair_grace_limit = int(CIRCUIT_BREAKER_PER_IDEA_HOUR * REPAIR_GRACE_MULTIPLIER)
-
             # Circuit breaker: something is catastrophically wrong
             if idea_hour_tokens > CIRCUIT_BREAKER_PER_IDEA_HOUR:
-                if repair_like and idea_hour_tokens <= repair_grace_limit and estimated_input_tokens <= REPAIR_MAX_ESTIMATED_INPUT:
-                    warning = (
-                        f"Closure mode: idea {idea_id[:8]}… is over the normal breaker "
-                        f"({idea_hour_tokens:,}/{CIRCUIT_BREAKER_PER_IDEA_HOUR:,}) but task "
-                        f"looks like bounded repair work. Allowing one more run."
-                    )
-                    logger.warning(warning)
-                    return BudgetDecision(
-                        allowed=True,
-                        warning=warning,
-                        closure_mode=True,
-                    )
                 logger.error(
                     f"CIRCUIT BREAKER: idea {idea_id[:8]}… used {idea_hour_tokens:,} tokens "
                     f"in last hour. Stopping to prevent runaway."
@@ -256,19 +222,6 @@ async def check_budget(idea_id: str, estimated_input_tokens: int,
                 )
 
             if daily_tokens > CIRCUIT_BREAKER_PER_DAY:
-                repair_grace_daily = int(CIRCUIT_BREAKER_PER_DAY * REPAIR_GRACE_MULTIPLIER)
-                if repair_like and daily_tokens <= repair_grace_daily and estimated_input_tokens <= REPAIR_MAX_ESTIMATED_INPUT:
-                    warning = (
-                        f"Closure mode: daily usage is over the normal breaker "
-                        f"({daily_tokens:,}/{CIRCUIT_BREAKER_PER_DAY:,}) but task "
-                        f"looks like bounded repair work. Allowing one more run."
-                    )
-                    logger.warning(warning)
-                    return BudgetDecision(
-                        allowed=True,
-                        warning=warning,
-                        closure_mode=True,
-                    )
                 logger.error(
                     f"CIRCUIT BREAKER: {daily_tokens:,} tokens used today. "
                     f"Stopping all runs."
