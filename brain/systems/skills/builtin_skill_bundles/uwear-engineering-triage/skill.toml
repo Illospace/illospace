@@ -4,8 +4,8 @@ display_name = "Uwear Engineering Triage"
 version = "1.0.0"
 description = "Uwear engineering operating model for triaging GitHub issues and PRs, assigning Reda/Axel/JB, and moving work through backlog, staging, review, merge, and closure."
 license = "UNLICENSED"
-source = "uwear"
-visibility = "private"
+source = "self_hosted"
+visibility = "private_local"
 
 [routing]
 triggers = [

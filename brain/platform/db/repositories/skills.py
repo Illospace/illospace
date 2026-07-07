@@ -43,6 +43,7 @@ _SKILL_READ_COLUMNS = (
     Skill.graduated_steps,
     Skill.auto_emerged,
     Skill.builtin,
+    Skill.archived,
     Skill.thinking_tier,
     Skill.skill_installation_id,
     Skill.bundle_version_id,

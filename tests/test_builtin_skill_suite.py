@@ -27,6 +27,24 @@ def test_builtin_skills_are_limited_to_product_primitives():
     assert not hasattr(module, "BUILTIN_SKILL_RETIREMENTS")
 
 
+def test_filesystem_bundle_discovery_includes_private_team_bundles():
+    from brain.systems.skills.builtin import (
+        BUILTIN_SKILL_BUNDLE_ROOT,
+        BUILTIN_SKILLS,
+        _filesystem_skill_bundle_names,
+    )
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    names = set(_filesystem_skill_bundle_names())
+    assert CORE_BUILTINS <= names
+    assert "uwear-engineering-triage" in names
+    assert "uwear-engineering-triage" not in BUILTIN_SKILLS
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    assert bundle.manifest.source == "self_hosted"
+    assert bundle.manifest.visibility == "private_local"
+
+
 def test_builtin_skills_have_structured_routing_metadata():
     from brain.systems.skills.builtin import BUILTIN_SKILLS
 
