@@ -329,14 +329,12 @@ def test_context_route_surface_is_registry_driven():
     assert "workspace setup" in routes["read_workspace_overview"]["domains"]
 
 
-def test_workspace_activity_question_requires_workspace_data():
+def test_workspace_activity_question_is_not_force_routed():
+    # No heuristic forcing remains: "what is X working on" is answered by the model
+    # calling read_team_activity voluntarily, not by an end-of-turn forced detour.
     from brain.systems.runs.introspection import required_introspection_tool
 
-    tool, message = required_introspection_tool("Hey illo what is Alex working on?")
-
-    assert tool == "read_team_activity"
-    assert message is not None
-    assert "current workspace/team activity" in message
+    assert required_introspection_tool("Hey illo what is Alex working on?") == (None, None)
 
 
 def test_capability_question_is_not_force_routed():
@@ -404,20 +402,19 @@ def test_work_request_that_mentions_skill_and_cycle_does_not_require_capabilitie
 
 
 def test_run_introspection_uses_current_human_message_over_thread_wrapper():
+    # message_for_required_introspection extracts the operator's latest message from a
+    # decorated thread wrapper, and prefers an explicit human_message metadata field.
+    # (Nothing is force-routed anymore regardless of content — asserted for good measure.)
     from brain.systems.runs.introspection import (
         message_for_required_introspection,
         required_introspection_tool,
     )
 
-    # The wrapper text would trip a freshness requirement (read_team_activity); the actual
-    # latest human message ("where are the results ?") should not. Routing must evaluate the
-    # human message, not the decorated wrapper.
     wrapped_message = (
         '[Idea: "what is Alex working on this week" | idea-1]\n\n'
         "where are the results ?"
     )
 
-    assert required_introspection_tool(wrapped_message)[0] == "read_team_activity"
     assert message_for_required_introspection(wrapped_message) == "where are the results ?"
 
     selected = message_for_required_introspection(
@@ -426,6 +423,7 @@ def test_run_introspection_uses_current_human_message_over_thread_wrapper():
     )
 
     assert selected == "where are the results ?"
+    assert required_introspection_tool(wrapped_message) == (None, None)
     assert required_introspection_tool(selected) == (None, None)
 
 
