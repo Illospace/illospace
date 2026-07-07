@@ -121,6 +121,50 @@ highest-signal work into `Todo`, `ready-for-agent`, `ready-for-human`,
 Before closing GitHub issues or PRs, get human approval unless the user already
 delegated closure.
 
+## Backlog Hygiene
+
+Keep stale backlog cleanup separate from the twice-daily priority coordinator.
+Backlog hygiene has three explicit modes:
+
+- `process-design`: define cleanup rules, state meanings, ownership rules,
+  schedule, and output shape. Do not write Slack, GitHub, or Domain records.
+- `no-write-audit`: inspect live GitHub and existing GitHub Ticket Tracker
+  Domain 1 records, then propose classifications and owner batches. Do not
+  mutate Slack, GitHub, or Domain records.
+- `live-hygiene-run`: after human approval, seed or refresh generic Domain 1
+  ticket/PR records and post a concise Slack summary if requested. Do not close
+  or merge GitHub issues/PRs unless that exact authority was delegated.
+
+Use the existing GitHub Ticket Tracker Domain 1 objects. Do not create
+Uwear-specific backlog objects when generic ticket fields, relations, labels,
+and progress notes can hold the coordination.
+
+Classify stale work by next action:
+
+- `ready-for-agent`: scoped enough for Codex, Claude, or Illo to implement.
+- `ready-for-human`: needs product judgment, owner decision, credentialed
+  testing, or approval.
+- `needs-info`: blocked on reproduction, context, or a specific missing answer.
+- `Blocked`: blocked by CI, review changes, branch drift, or external
+  dependency.
+- `Backlog`: valid but not selected for near-term work.
+- `Done`: already merged, closed, or otherwise complete.
+- `Canceled` / `wontfix`: explicitly obsolete, duplicate, invalid, or not
+  worth doing after approval.
+
+For likely obsolete work, preserve the lifecycle state and add a queryable note
+such as `cleanup:close-candidate` in the progress note or another existing
+queryable field. Treat close candidates as approval batches; do not close them
+silently.
+
+Assign cleanup ownership by the next action, not blindly by author. Use the
+original author as a clue only when they clearly hold missing context.
+
+Slack summaries for hygiene runs should report batches and decisions, not the
+entire backlog. Include scope counts, owner batches, close-candidate approval
+batches, and MCP search examples such as `cleanup:close-candidate`,
+`ready-for-agent`, `Reda`, `Axel`, `JB`, or `Blocked`.
+
 ## Public Output
 
 Slack or team-facing summaries must be safe for teammates:
