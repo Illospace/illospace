@@ -207,22 +207,7 @@ def submission_preservation_contract(normalized: Mapping[str, Any]) -> dict[str,
 
 
 def submission_preservation_prompt_lines(contract: Mapping[str, Any]) -> list[str]:
-    if contract.get("requires_durable_evidence"):
-        visibility = contract.get("visibility_hint") or "the narrowest visibility that preserves future utility"
-        return [
-            "",
-            "Preservation workflow:",
-            "- This submission explicitly asks Illo to preserve knowledge or work material.",
-            "- The inbound event is only raw source evidence; by itself it is not enough to satisfy preservation.",
-            "- First inspect the full event with manage_inbound(action='get_event', event_id=..., include_receipts=true) if the preview is insufficient.",
-            "- Decide the right durable surface: reconstructive memory for reusable lessons/procedures, a Domain/doc/project record for canonical structured knowledge, a handoff when this should launch future work, or a thread note when team visibility matters.",
-            "- Prefer memory_ingest_source with source_kind='inbound_submission', source_ref equal to the inbound event id, and visibility set to "
-            f"{visibility}.",
-            "- Use manage_domain/manage_project/create_launch_handoff/thread tools when those are the better Illo-owned storage surfaces.",
-            "- Avoid direct source duplication when a matching durable record already exists; update or link to the existing object instead.",
-            "- Final answer must list what Illo decided, every durable handle created or updated, and any reason no durable write was appropriate.",
-        ]
-    if contract.get("intent") == "possible_preservation":
+    if contract.get("requires_durable_evidence") or contract.get("intent") == "possible_preservation":
         return [
             "",
             "Possible preservation workflow:",

@@ -182,12 +182,21 @@ async def test_preservation_submission_gets_curator_prompt_and_contract(session)
     event = await session.get(InboundEventRow, result["event_id"])
 
     assert run is not None
-    assert "Preservation workflow:" in run.input_message
-    assert "memory_ingest_source" in run.input_message
+    # The mandatory preservation preamble is now a soft hint, not a storage mandate,
+    # so the operator's real request is no longer buried under ceremony.
+    assert "Possible preservation workflow:" in run.input_message
+    assert "Treat this as a hint, not a storage mandate." in run.input_message
+    assert "Final answer must list" not in run.input_message
+    # The raw operator message leads the run prompt; source/constraints are metadata only.
+    assert run.input_message.startswith(envelope["message"])
+    assert "Source metadata:" not in run.input_message
     preservation = run.metadata_["submission"]["preservation"]
     assert preservation["requires_durable_evidence"] is True
     assert preservation["intent"] == "preserve_knowledge"
     assert preservation["detection_source"] == "desired_outcome"
+    # Origin/source/constraints are carried as structured run metadata, not prompt text.
+    assert run.metadata_["submission"]["source"] == envelope["source"]
+    assert run.metadata_["submission"]["constraints"] == envelope["constraints"]
     assert event is not None
     assert event.action_result["preservation"]["requires_durable_evidence"] is True
 
@@ -218,11 +227,12 @@ async def test_language_only_preservation_match_is_prompt_hint_not_evidence_cont
 
 
 async def test_submission_tags_human_message_for_introspection_routing(session):
-    # Regression for issue #249: the headless submission wrapper embeds boilerplate
-    # ("Handle this external coordination submission.", "Source metadata:") that can
-    # trip the self-context heuristic and hijack the final answer with a runtime
-    # self-description. The operator's clean message must be tagged as human_message so
-    # required-introspection routing evaluates the request, not the wrapper prompt.
+    # Regression for issue #249: the headless submission wrapper used to embed
+    # boilerplate ("Handle this external coordination submission.", "Source metadata:")
+    # that could trip the self-context heuristic and hijack the final answer with a
+    # runtime self-description. The prompt now leads with the operator's raw message and
+    # keeps origin/source in metadata, and the clean message is still tagged as
+    # human_message so required-introspection routing evaluates the request.
     from brain.systems.runs import introspection as run_introspection
 
     principal = await _seed_connection(session)
@@ -247,6 +257,11 @@ async def test_submission_tags_human_message_for_introspection_routing(session):
     handling = await _assert_queued_submission(session, result["ilo_outcome"])
     run = await session.get(AgentRunRow, handling["run_id"])
     assert run is not None
+    # The wrapper envelope is gone: the run prompt leads with the raw operator message
+    # and no longer embeds the "Source metadata:" boilerplate that caused the false-match.
+    assert run.input_message.startswith(message)
+    assert "Handle this external coordination submission." not in run.input_message
+    assert "Source metadata:" not in run.input_message
     # The clean operator message is tagged for introspection routing...
     assert run.metadata_["human_message"] == message
     # ...and routing resolves to it rather than the wrapper prompt persisted as
