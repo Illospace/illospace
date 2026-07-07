@@ -2209,7 +2209,9 @@ class TestCortexReplyHandler:
             _agent_context.intent_satisfaction = None
 
     @patch("brain.systems.runs.direct_agent.review_final_reply_once")
-    def test_cortex_reply_blocks_unresolved_final_message(self, mock_review):
+    def test_cortex_reply_stages_reply_with_advisory_warning_when_checker_unresolved(self, mock_review):
+        """An 'unresolved' checker verdict is advisory: the reply still stages, and the
+        verdict is surfaced as a non-blocking warning instead of vetoing the reply."""
         from brain.systems.runs.direct_agent import _handle_cortex_reply, _agent_context
 
         class _Run:
@@ -2234,49 +2236,16 @@ class TestCortexReplyHandler:
                     "I got it materially closer, but I cannot honestly say we are fully ready yet."
                 )
 
-            assert result["blocked"] is True
-            assert result["checker_status"] == "continue"
-            assert "AgentRun recipe escalate" in result["instruction"]
-            mock_reply.assert_not_called()
-            assert _agent_context.reply_contents == []
-        finally:
-            _agent_context.idea_id = None
-            _agent_context.run = None
-            _agent_context.user_request = None
-            _agent_context.reply_contents = []
-            _agent_context.final_reply_review = None
-
-    @patch("brain.systems.runs.direct_agent.review_final_reply_once")
-    def test_cortex_reply_allows_concrete_dependency_blocker(self, mock_review):
-        from brain.systems.runs.direct_agent import _handle_cortex_reply, _agent_context
-
-        class _Run:
-            run_id = 42
-
-        mock_review.return_value = {
-            "status": "continue",
-            "approved": False,
-            "rationale": "The proposed reply does not complete the requested listing.",
-            "missing_requirements": ["List the cycles"],
-            "raw_output": "",
-        }
-        _agent_context.idea_id = "idea-123"
-        _agent_context.run = _Run()
-        _agent_context.user_request = "List my cycles"
-        _agent_context.reply_contents = []
-        _agent_context.final_reply_review = None
-
-        try:
-            with patch("brain.systems.cortex.reply.reply_to_cortex") as mock_reply:
-                result = _handle_cortex_reply(
-                    "I couldn't list your cycles because the cycles database migration is missing."
-                )
-
+            assert "blocked" not in result
             assert result["staged"] is True
             assert result["posted"] is False
-            assert result["checker_status"] == "blocked_on_user"
-            assert result["checker_override"] == "concrete_dependency_blocker"
+            assert result["checker_status"] == "continue"
+            assert result["checker_note"] == "The proposed reply admits the work is not ready yet."
+            assert "settlement" in result["instruction"]
             mock_reply.assert_not_called()
+            assert _agent_context.reply_contents == [
+                "I got it materially closer, but I cannot honestly say we are fully ready yet."
+            ]
         finally:
             _agent_context.idea_id = None
             _agent_context.run = None
