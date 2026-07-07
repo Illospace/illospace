@@ -339,35 +339,32 @@ def test_workspace_activity_question_requires_workspace_data():
     assert "current workspace/team activity" in message
 
 
-def test_ability_intro_requires_capabilities():
+def test_capability_question_is_not_force_routed():
+    # read_capabilities is a self-description tool; force-routing it at end-of-turn hijacked
+    # completed work (issue #249 recurrences). A genuine "what can you do" question is
+    # answered by the model calling read_capabilities voluntarily, not by forcing.
     from brain.systems.runs.introspection import required_introspection_tool
 
-    tool, message = required_introspection_tool("Hey Illo, help me understand what you can do to help me.")
-
-    assert tool == "read_capabilities"
-    assert message is not None
-    assert "capability/setup context" in message
+    assert required_introspection_tool(
+        "Hey Illo, help me understand what you can do to help me."
+    ) == (None, None)
 
 
-def test_source_identity_question_requires_self_context():
+def test_source_identity_question_is_not_force_routed():
+    # read_self_context is no longer force-routed: its "where … source" trigger also fires
+    # inside ordinary work requests and hijacked the answer (issue #249). The model can
+    # still call read_self_context voluntarily for a genuine identity question.
     from brain.systems.runs.introspection import required_introspection_tool
 
-    tool, message = required_introspection_tool("Where is your source code installed?")
-
-    assert tool == "read_self_context"
-    assert message is not None
-    assert "identity/source/runtime context" in message
+    assert required_introspection_tool("Where is your source code installed?") == (None, None)
 
 
 def test_where_source_across_sentences_does_not_require_self_context():
-    # Regression for issue #249: a task's ordinary "where ..." must not bridge across a
-    # sentence boundary to a "source"/"code" token elsewhere in the prompt (here the
-    # coordination wrapper's "Source metadata:" header) and force read_self_context,
-    # which then hijacks the final answer with a runtime self-description.
-    from brain.systems.runs.introspection import (
-        _looks_like_self_context_question,
-        required_introspection_tool,
-    )
+    # Regression for issue #249: an ordinary task that happens to contain "where ..." and a
+    # "source"/"code" token (here the coordination wrapper's "Source metadata:" header) must
+    # never be routed to a self-description tool. read_self_context is no longer force-routed
+    # at all, so this holds unconditionally.
+    from brain.systems.runs.introspection import required_introspection_tool
 
     message = (
         "Post-deploy SEO health check for uwear.ai. Confirm the 301 redirects resolve and "
@@ -375,28 +372,23 @@ def test_where_source_across_sentences_does_not_require_self_context():
         'with the findings. Source metadata: {"repo": "uwear-website"}'
     )
 
-    assert _looks_like_self_context_question(message) is False
     assert required_introspection_tool(message) == (None, None)
 
 
-def test_capability_setup_question_requires_capabilities():
+def test_setup_request_is_not_force_routed_to_capabilities():
+    # "set you up in our Slack" is a work request, not a request for a capability listing.
+    # Force-routing read_capabilities here is exactly what hijacked answers; it no longer does.
     from brain.systems.runs.introspection import required_introspection_tool
 
-    tool, message = required_introspection_tool("Hi Illo, I would like to set you up in our Slack.")
-
-    assert tool == "read_capabilities"
-    assert message is not None
-    assert "capability/setup context" in message
+    assert required_introspection_tool(
+        "Hi Illo, I would like to set you up in our Slack."
+    ) == (None, None)
 
 
-def test_named_capability_setup_question_requires_capabilities_without_agent_mention():
+def test_named_setup_request_is_not_force_routed_to_capabilities():
     from brain.systems.runs.introspection import required_introspection_tool
 
-    tool, message = required_introspection_tool("Help me set up Slack for the team.")
-
-    assert tool == "read_capabilities"
-    assert message is not None
-    assert "capability/setup context" in message
+    assert required_introspection_tool("Help me set up Slack for the team.") == (None, None)
 
 
 def test_work_request_that_mentions_skill_and_cycle_does_not_require_capabilities():
@@ -417,12 +409,15 @@ def test_run_introspection_uses_current_human_message_over_thread_wrapper():
         required_introspection_tool,
     )
 
+    # The wrapper text would trip a freshness requirement (read_team_activity); the actual
+    # latest human message ("where are the results ?") should not. Routing must evaluate the
+    # human message, not the decorated wrapper.
     wrapped_message = (
-        '[Idea: "Help me set up Slack for the team" | idea-1]\n\n'
+        '[Idea: "what is Alex working on this week" | idea-1]\n\n'
         "where are the results ?"
     )
 
-    assert required_introspection_tool(wrapped_message)[0] == "read_capabilities"
+    assert required_introspection_tool(wrapped_message)[0] == "read_team_activity"
     assert message_for_required_introspection(wrapped_message) == "where are the results ?"
 
     selected = message_for_required_introspection(
@@ -452,14 +447,10 @@ def test_app_content_action_does_not_require_capabilities():
     assert message is None
 
 
-def test_add_integration_action_still_requires_capabilities():
+def test_add_integration_action_is_not_force_routed_to_capabilities():
     from brain.systems.runs.introspection import required_introspection_tool
 
-    tool, message = required_introspection_tool("Add the Slack integration.")
-
-    assert tool == "read_capabilities"
-    assert message is not None
-    assert "capability/setup context" in message
+    assert required_introspection_tool("Add the Slack integration.") == (None, None)
 
 
 def test_memory_question_does_not_force_workspace_data():
