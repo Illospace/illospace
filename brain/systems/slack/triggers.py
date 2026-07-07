@@ -238,13 +238,21 @@ def slack_channel_monitor_message(
         "Classify this message and act accordingly:",
         "- Casual chatter, or discussion about an existing alert: take NO visible action. Do not reply.",
         "- A genuine automated alert (Sentry, Rollbar, CI) or a user-reported problem that is "
-        "ticket-worthy: create/route a ticket by loading the 'uwear-engineering-triage' skill "
-        "(brain_skills then skill_view), then optionally post a brief Slack note with post_slack_reply.",
+        "ticket-worthy AND the target repo and incident are both clear: open a REAL GitHub issue "
+        "with create_github_issue in the correct uwear-ai repo. Load the 'uwear-engineering-triage' "
+        "skill (brain_skills then skill_view) first for routing/ownership rules, then optionally "
+        "post a brief Slack note with post_slack_reply citing the issue number and URL.",
+        "- Ticket-worthy but the repo/incident is unclear, or create_github_issue reports "
+        "no write-capable token can reach the repo (no_write_token / 403 / 404): do NOT claim a "
+        "GitHub issue was filed. Ask for clarification with post_slack_reply, or record an internal "
+        "tracker record + handoff so it is not lost.",
         "- Ambiguous or low-signal: prefer no visible action; the 👀 already confirms you saw it.",
         "",
         "Silence is the correct default. Only use post_slack_reply when you have opened/flagged a "
         "ticket or must surface something important. Use read_slack_conversation "
-        "(scope=recent_channel or thread) for more context before deciding.",
+        "(scope=recent_channel or thread) for more context before deciding. An internal Domain/"
+        "tracker record is NOT a GitHub issue — only a successful create_github_issue opens a real "
+        "issue; never describe a tracker record as a filed GitHub issue.",
         "",
         f"Channel: {channel_id}" + (f" ({channel_name})" if channel_name else ""),
         f"Team: {slack_trigger_payload.get('team_id')}",

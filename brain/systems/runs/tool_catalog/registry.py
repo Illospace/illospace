@@ -316,6 +316,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
     },
+    "create_github_issue": {
+        "permission": "write_workspace",
+        "risk_class": "high",
+        "side_effect_class": "append_only",
+        "reversibility": "append_only",
+        "action_manifest": True,
+        "expected_effect": "open a real GitHub issue in the target repository",
+        "output_budget_chars": 8_000,
+    },
     "manage_cycle": {
         "permission": "manage_cycles",
         "risk_class": "high",
