@@ -51,7 +51,11 @@ _WORKSPACE_OVERVIEW_PHRASES = (
 )
 _SELF_CONTEXT_PATTERNS = (
     re.compile(r"\b(?:who are you|what is illo|what is illospace|what are you)\b"),
-    re.compile(r"\bwhere\b[^?]{0,100}\b(?:installed|running|hosted|source|code|repo|repository)\b"),
+    # Keep the "where … <runtime noun>" association within a single sentence: a period
+    # is only allowed mid-token (e.g. "illo.ai"), never as a sentence break. Otherwise an
+    # unrelated "where …" in one sentence bridges to a "source"/"code" in the next and
+    # false-positives on ordinary prose (issue #249).
+    re.compile(r"\bwhere\b(?:[^.?!]|\.(?=\S)){0,100}\b(?:installed|running|hosted|source|code|repo|repository)\b"),
     re.compile(r"\b(?:open[- ]source repo|github repo|source code|your code|own code|inspect yourself)\b"),
 )
 _PROJECT_CONTEXT_PHRASES = (

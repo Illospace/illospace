@@ -1128,6 +1128,12 @@ async def _queue_illo_submission(
                 "metadata": {
                     "execution_profile": "fast",
                     "origin": normalized.get("origin"),
+                    # Route required-introspection detection off the operator's actual
+                    # request, not the coordination wrapper prompt (issue #249). The
+                    # wrapper embeds boilerplate like "Source metadata:" that can trip
+                    # the self-context heuristic and hijack the final answer with a
+                    # runtime self-description.
+                    "human_message": normalized.get("message"),
                     "inbound_event": _inbound_event_metadata(context, event, normalized, None),
                     "submission": {
                         "message": normalized.get("message"),

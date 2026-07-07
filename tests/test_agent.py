@@ -1304,6 +1304,86 @@ class TestAgentLoop:
         assert result.tool_calls == []
         assert client.messages.create.call_count == 1
 
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
+    @patch("brain.systems.runs.direct_agent._save_session")
+    def test_derived_introspection_does_not_overwrite_substantial_answer(self, mock_save, mock_load, mock_client):
+        # Regression for issue #249: a real task can trip the self-context heuristic
+        # (here "...where the source code is installed..."). Once the model has produced
+        # a substantial answer without the heuristically-derived tool, the end-of-run
+        # guard must NOT force a late read_self_context detour that discards the work and
+        # replaces it with a runtime self-description.
+        from brain.systems.runs.direct_agent import run_agent
+
+        long_answer = (
+            "Redirect audit complete. Every 301 resolves in a single hop to a live 200; "
+            "no chains, loops, or 404s. Rankings for the retired pages are being retained "
+            "by their redirect targets, and the hedge pages held their impressions. Search "
+            "Console shows no new coverage or indexing errors, and the sitemap was re-fetched "
+            "with the new URL structure. It is still early, so treat week-one ranking data as "
+            "noisy rather than conclusive, and re-check impressions again after a full week."
+        )
+        assert len(long_answer.strip()) >= 400
+
+        client = MagicMock()
+        client.messages.create.return_value = self._make_response(long_answer)
+        mock_client.return_value = _mock_llm_client(client)
+
+        handler = MagicMock(return_value={"ok": True, "source": "runtime_self_context"})
+
+        result = run_agent(
+            message=(
+                "Audit our deploy: confirm the redirects still work and tell me where the "
+                "source code is installed if you need it."
+            ),
+            tools=[{
+                "name": "read_self_context",
+                "description": "test",
+                "input_schema": {"type": "object", "properties": {}},
+            }],
+            tool_handlers={"read_self_context": handler},
+            persist_session=False,
+            max_turns=4,
+        )
+
+        assert result.success
+        assert result.output == long_answer
+        assert result.tool_calls == []
+        assert handler.call_count == 0
+        assert client.messages.create.call_count == 1
+
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
+    @patch("brain.systems.runs.direct_agent._save_session")
+    def test_explicit_required_tool_forces_even_after_substantial_answer(self, mock_save, mock_load, mock_client):
+        # The #249 guard only relaxes heuristically-derived requirements. An explicit
+        # routing directive stays authoritative and must still force its tool even when
+        # the model already produced a long first answer.
+        from brain.systems.runs.direct_agent import run_agent
+
+        long_answer = "Here is a detailed answer to your question. " * 12
+        assert len(long_answer.strip()) >= 400
+
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            self._make_response(long_answer),
+            self._make_response(text=None, stop_reason="tool_use", tool_use={"name": "brain_recall", "input": {"query": "history"}}),
+            self._make_response("Grounded summary from memory."),
+        ]
+        mock_client.return_value = _mock_llm_client(client)
+
+        result = run_agent(
+            message="Summarize what we did this week.",
+            tools=[{"name": "brain_recall", "description": "test", "input_schema": {"type": "object", "properties": {}}}],
+            tool_handlers={"brain_recall": lambda **kw: {"memories": [{"content": "prior work"}]}},
+            metadata={"required_introspection_tool": "brain_recall"},
+            persist_session=False,
+        )
+
+        assert result.success
+        assert "brain_recall" in result.tool_calls
+        assert client.messages.create.call_count == 3
+
 
 class TestCallLLM:
     """Test the call_llm convenience function."""
