@@ -217,6 +217,46 @@ async def test_language_only_preservation_match_is_prompt_hint_not_evidence_cont
     assert "Possible preservation workflow:" in run.input_message
 
 
+async def test_submission_tags_human_message_for_introspection_routing(session):
+    # Regression for issue #249: the headless submission wrapper embeds boilerplate
+    # ("Handle this external coordination submission.", "Source metadata:") that can
+    # trip the self-context heuristic and hijack the final answer with a runtime
+    # self-description. The operator's clean message must be tagged as human_message so
+    # required-introspection routing evaluates the request, not the wrapper prompt.
+    from brain.systems.runs import introspection as run_introspection
+
+    principal = await _seed_connection(session)
+    message = (
+        "Post-deploy SEO health check for uwear.ai: confirm the 301 redirects resolve "
+        "and keyword rankings are retained since the deploy."
+    )
+    result = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "kind": "submission",
+            "origin": "claude-code.submit",
+            "desired_outcome": "seo_post_deploy_health_report",
+            "message": message,
+            "source": {"source_tool": "claude-code", "repo": "uwear-website"},
+            "idempotency_key": "claude-code:submission:seo-249",
+        },
+        ingress_context={"surface": "test"},
+    )
+
+    handling = await _assert_queued_submission(session, result["ilo_outcome"])
+    run = await session.get(AgentRunRow, handling["run_id"])
+    assert run is not None
+    # The clean operator message is tagged for introspection routing...
+    assert run.metadata_["human_message"] == message
+    # ...and routing resolves to it rather than the wrapper prompt persisted as
+    # input_message, so the coordination boilerplate can no longer force a detour.
+    assert (
+        run_introspection.message_for_required_introspection(run.input_message, run.metadata_)
+        == message
+    )
+
+
 async def test_preservation_submission_without_durable_evidence_stays_actionable(session):
     principal = await _seed_connection(session)
     result = await inbound.submit_inbound_envelope(

@@ -1346,10 +1346,12 @@ async def run_agent_async(
     )
     if metadata_required_tool:
         required_introspection_tool, required_introspection_msg = metadata_required_tool, metadata_required_msg
+        required_introspection_explicit = True
     else:
         required_introspection_tool, required_introspection_msg = run_introspection.required_introspection_tool(
             run_introspection.message_for_required_introspection(message, metadata)
         )
+        required_introspection_explicit = False
 
     _previous_execution_metadata = getattr(_agent_context, "execution_metadata", None)
     _previous_execution_artifacts = getattr(_agent_context, "execution_artifacts", None)
@@ -1701,11 +1703,21 @@ async def run_agent_async(
                 if guidance_count:
                     continue
                 output = _extract_text(state.messages)
+                # A heuristic-derived (non-explicit) required-introspection tool is a
+                # low-confidence guess. If the model already produced a substantial
+                # answer without it, forcing the detour now would discard real work and
+                # emit a runtime self-description instead (issue #249). Explicit routing
+                # metadata stays authoritative and is always honored.
+                _DERIVED_INTROSPECTION_ANSWER_LIMIT = 400
                 if (
                     required_introspection_tool
                     and _tool_is_available(tools, required_introspection_tool)
                     and required_introspection_tool in tool_handlers
                     and required_introspection_tool not in state.tool_calls_made
+                    and (
+                        required_introspection_explicit
+                        or len(output.strip()) < _DERIVED_INTROSPECTION_ANSWER_LIMIT
+                    )
                 ):
                     _append_message_with_archive(
                         state.messages,

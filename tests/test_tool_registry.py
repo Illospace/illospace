@@ -359,6 +359,26 @@ def test_source_identity_question_requires_self_context():
     assert "identity/source/runtime context" in message
 
 
+def test_where_source_across_sentences_does_not_require_self_context():
+    # Regression for issue #249: a task's ordinary "where ..." must not bridge across a
+    # sentence boundary to a "source"/"code" token elsewhere in the prompt (here the
+    # coordination wrapper's "Source metadata:" header) and force read_self_context,
+    # which then hijacks the final answer with a runtime self-description.
+    from brain.systems.runs.introspection import (
+        _looks_like_self_context_question,
+        required_introspection_tool,
+    )
+
+    message = (
+        "Post-deploy SEO health check for uwear.ai. Confirm the 301 redirects resolve and "
+        "call out where it's too soon to tell vs. where there's a real signal. Reply back "
+        'with the findings. Source metadata: {"repo": "uwear-website"}'
+    )
+
+    assert _looks_like_self_context_question(message) is False
+    assert required_introspection_tool(message) == (None, None)
+
+
 def test_capability_setup_question_requires_capabilities():
     from brain.systems.runs.introspection import required_introspection_tool
 
