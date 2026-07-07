@@ -235,6 +235,7 @@ async def _handle_manage_project(
     path: str | None = None,
     paths: list[str] | None = None,
     query: str | None = None,
+    search: str | None = None,
     glob: str | None = None,
     limit: int | None = None,
     mount_path: str | None = None,
@@ -252,6 +253,12 @@ async def _handle_manage_project(
     action = str(action or "").strip().lower()
     if action in {"help", "schema"}:
         return _project_manage_tool_guide(operation)
+
+    # Accept `search` as an alias for `query` (matches the convention used by
+    # manage_domain/manage_cycle/etc.) so a plausible-but-undocumented kwarg
+    # doesn't raise a raw TypeError.
+    if query is None and search is not None:
+        query = search
 
     if action == "draft_status":
         return json.dumps(project_draft_status_payload(), default=str)

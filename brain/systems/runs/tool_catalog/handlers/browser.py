@@ -253,6 +253,65 @@ async def _handle_browser(
     full_page: bool = True,
     landscape: bool = False,
 ) -> dict:
+    try:
+        return await _dispatch_browser_action(
+            action,
+            operation=operation,
+            url=url,
+            viewport_width=viewport_width,
+            viewport_height=viewport_height,
+            storage_mode=storage_mode,
+            allow_downloads=allow_downloads,
+            allow_file_uploads=allow_file_uploads,
+            selector=selector,
+            x=x,
+            y=y,
+            text=text,
+            press_enter=press_enter,
+            key=key,
+            index=index,
+            wait_until=wait_until,
+            timeout_ms=timeout_ms,
+            mode=mode,
+            max_chars=max_chars,
+            max_results=max_results,
+            attachment_url=attachment_url,
+            persist=persist,
+            title=title,
+            full_page=full_page,
+            landscape=landscape,
+        )
+    except Exception as exc:
+        return _tool_failure_payload("browser", exc)
+
+
+async def _dispatch_browser_action(
+    action: str,
+    operation: str | None = None,
+    url: str | None = None,
+    viewport_width: int = 1280,
+    viewport_height: int = 800,
+    storage_mode: str = "ephemeral",
+    allow_downloads: bool = False,
+    allow_file_uploads: bool = True,
+    selector: str | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    text: str | None = None,
+    press_enter: bool = False,
+    key: str | None = None,
+    index: int | None = None,
+    wait_until: str = "load",
+    timeout_ms: int = 10000,
+    mode: str = "text",
+    max_chars: int = 6000,
+    max_results: int = 40,
+    attachment_url: str | None = None,
+    persist: bool = False,
+    title: str | None = None,
+    full_page: bool = True,
+    landscape: bool = False,
+) -> dict:
     normalized = str(action or "").strip().lower()
     if normalized == "session_open":
         normalized = "open"

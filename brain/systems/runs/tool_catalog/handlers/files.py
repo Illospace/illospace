@@ -332,7 +332,19 @@ def _resolve_path(path: str, working_dir: str | None = None, *, for_write: bool 
 
     # Path containment: must stay within workspace
     if not _path_is_within(resolved, base):
-        raise ValueError(f"Path escapes workspace: {path} → {resolved} (workspace: {base})")
+        readable_roots = [base]
+        manifest = _current_project_workspace_manifest()
+        if manifest is not None:
+            for mount in manifest.mounts:
+                mount_path = getattr(mount, "mount_path", None)
+                if mount_path and mount_path not in readable_roots:
+                    readable_roots.append(mount_path)
+        roots_desc = ", ".join(readable_roots)
+        raise ValueError(
+            f"Path escapes workspace: {path} → {resolved} is outside the accessible root(s). "
+            f"Readable root(s) for this run: {roots_desc}. "
+            "Use a path inside one of these roots, or list_files/read_project_contexts to discover mounts."
+        )
     return resolved
 
 _BLOCKED_PATTERNS = [

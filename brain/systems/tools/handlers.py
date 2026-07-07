@@ -51,7 +51,10 @@ def _resolve_path(path: str, workspace_root: str | None = None) -> str:
     else:
         resolved = os.path.realpath(os.path.join(base, path))
     if not resolved.startswith(base + os.sep) and resolved != base:
-        raise ValueError(f"Path escapes workspace: {path}")
+        raise ValueError(
+            f"Path escapes workspace: {path} → {resolved} is outside the accessible root. "
+            f"Readable root for this run: {base}. Use a path inside this root instead."
+        )
     return resolved
 
 
