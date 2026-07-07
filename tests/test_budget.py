@@ -117,19 +117,6 @@ class TestCheckBudget:
         assert not result.allowed
         assert "circuit breaker" in result.reason.lower()
 
-    async def test_repair_task_gets_hourly_closure_grace(self):
-        mock_uow = _make_uow()
-        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow), \
-             _patch_budget_usage(CIRCUIT_BREAKER_PER_IDEA_HOUR + 100000):
-            result = await check_budget(
-                "test-idea-id",
-                40000,
-                task_description="Fix brain DB migration and cursor recall bug",
-            )
-        assert result.allowed
-        assert result.closure_mode
-        assert "closure mode" in result.warning.lower()
-
     async def test_circuit_breaker_daily(self):
         """Circuit breaker fires on catastrophic daily token usage."""
         mock_uow = _make_uow()
@@ -139,28 +126,14 @@ class TestCheckBudget:
         assert not result.allowed
         assert "circuit breaker" in result.reason.lower()
 
-    async def test_repair_task_gets_daily_closure_grace(self):
-        mock_uow = _make_uow()
-        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow), \
-             _patch_budget_usage(50000, CIRCUIT_BREAKER_PER_DAY + 1000000):
-            result = await check_budget(
-                "test-idea-id",
-                40000,
-                task_description="Investigate brain recall transaction failure",
-            )
-        assert result.allowed
-        assert result.closure_mode
-
-    async def test_large_repair_run_still_blocked(self):
+    async def test_circuit_breaker_hourly_ignores_task_description(self):
+        """No text-sniffing grace: any task description still trips the breaker."""
         mock_uow = _make_uow()
         with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow), \
              _patch_budget_usage(CIRCUIT_BREAKER_PER_IDEA_HOUR + 100000):
-            result = await check_budget(
-                "test-idea-id",
-                250000,
-                task_description="Fix brain DB migration and cursor recall bug",
-            )
+            result = await check_budget("test-idea-id", 40000)
         assert not result.allowed
+        assert not result.closure_mode
 
     async def test_opus_never_downgraded(self):
         """Opus model is NEVER downgraded — model choice is not budget's job."""

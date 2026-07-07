@@ -1750,14 +1750,21 @@ async def run_agent_async(
                     max_parallel_tool_calls=max_parallel_tool_calls,
                 )
 
-                # Inject system nudges
-                _inject_nudges(tool_results, state.recent_calls, response, session_id, agent_context=_agent_context)
-
                 _append_message_with_archive(
                     state.messages,
                     {"role": "user", "content": tool_results},
                     raw_archive_messages,
                 )
+
+                # Durable reminder (e.g. `cd` non-persistence), sent as its own
+                # message AFTER tool_results — never spliced into tool output.
+                reminder_message = _inject_nudges(state.recent_calls)
+                if reminder_message is not None:
+                    _append_message_with_archive(
+                        state.messages,
+                        reminder_message,
+                        raw_archive_messages,
+                    )
                 state.messages, _ = _maybe_compact_active_context(
                     state.messages,
                     session_id=session_id,
