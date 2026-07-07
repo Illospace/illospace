@@ -51,6 +51,35 @@ surface the conflict and prefer the live document after verification.
 If repo-local agent instructions contradict this skill, surface the conflict
 before acting. Do not silently choose.
 
+## Dependency Monitor
+
+For selected priority issues or PRs, check likely companion surfaces before
+finalizing triage. This is part of Uwear engineering coordination, not a
+separate release watcher.
+
+Use concrete evidence first: linked GitHub issues/PRs, recent comments, touched
+files, branch targets, labels, CI failures, docs references, MCP tool names,
+payload keys, env vars, and GitHub Ticket Tracker Domain records.
+
+High-confidence examples:
+
+- Backend endpoint, payload, schema, database, agent, or runtime changes may
+  need companion checks in `uwearaiapp`, `uwear-mobile-app`, API docs, MCP
+  tools, staging verification, or downstream tests.
+- Studio/frontend changes may need companion checks for backend expectations,
+  MCP payloads, docs, mobile parity, or staging verification.
+- MCP/tooling changes may need companion checks for app Agent mode, backend
+  processing, docs, and downstream test contracts.
+- Deployment, CI, environment, or runtime changes may need companion checks for
+  staging/main promotion, EAS/mobile profiles, API env vars, and app/backend
+  integration.
+
+If companion work already exists, link it or update the existing tracker
+record. If high-confidence companion work is missing, create or update a
+generic coordination ticket in the GitHub Ticket Tracker Domain instead of
+adding a Uwear-specific object. Keep low-confidence hunches internal or as
+low-noise tracker notes.
+
 ## States
 
 - `needs-triage`: not enough signal yet to classify or assign.
@@ -98,6 +127,8 @@ Slack or team-facing summaries must be safe for teammates:
 
 - Say the priority workset is not the full backlog when relevant.
 - Show concrete next actions with ticket/PR numbers and owners.
+- Mention only high-confidence dependency blockers or missing companion work;
+  keep broader impact analysis in tracker records or internal notes.
 - Do not expose private reasoning, workload psychology, or phrases like
   "stuck", "don't stack", or "bandwidth holds".
 - For AI-written GitHub comments, begin with:
@@ -106,5 +137,5 @@ Slack or team-facing summaries must be safe for teammates:
 ## Done
 
 Triage is done when every item in scope has a state, owner or explicit reason
-for no owner, next action, and enough evidence for another agent or teammate
-to continue without re-discovering the same facts.
+for no owner, next action, dependency check, and enough evidence for another
+agent or teammate to continue without re-discovering the same facts.
