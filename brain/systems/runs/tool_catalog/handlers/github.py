@@ -7,6 +7,7 @@ from typing import Any
 
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
+    async_create_repo_issue,
     async_get_repo_by_slug,
     async_list_repo_issues,
     async_list_repo_pull_requests,
@@ -62,11 +63,19 @@ async def _github_token_candidates(
     *,
     repo_slug: str,
     token_secret_key: str | None,
+    for_write: bool = False,
 ) -> list[dict[str, str | None]]:
     """Return safe token candidates for a GitHub repo read.
 
     A bad explicit key should not strand a read when the org has a project-bound
     or default GitHub token that can see the target repo.
+
+    ``for_write`` narrows the vault-inventory fallback to the canonical
+    ``GITHUB_TOKEN``/``GH_TOKEN`` default. A read may fall back to any available
+    github-ish secret, but an irreversible public write must not silently author
+    an issue under an arbitrary teammate's personal token — write identity is
+    limited to an explicit key, a repo project-binding, or the designated
+    default token.
     """
 
     user_id = _clean(getattr(_agent_context, "user_id", None))
@@ -131,9 +140,13 @@ async def _github_token_candidates(
             if normalize_agent_access_level(secret.get("agent_access_level"))
             == VAULT_AGENT_ACCESS_AVAILABLE
             and (
-                str(secret.get("key_name") or "") == "GITHUB_TOKEN"
-                or "github" in str(secret.get("key_name") or "").lower()
-                or str(secret.get("category") or "").lower() == "github"
+                str(secret.get("key_name") or "") in {"GITHUB_TOKEN", "GH_TOKEN"}
+                if for_write
+                else (
+                    str(secret.get("key_name") or "") == "GITHUB_TOKEN"
+                    or "github" in str(secret.get("key_name") or "").lower()
+                    or str(secret.get("category") or "").lower() == "github"
+                )
             )
         ]
         for secret in sorted(github_like, key=priority):
@@ -261,4 +274,92 @@ async def _handle_read_github_source(
     return json.dumps({"error": "No GitHub token candidates were available"})
 
 
-__all__ = ["_handle_read_github_source"]
+async def _handle_create_github_issue(
+    repo: str | None = None,
+    title: str | None = None,
+    body: str | None = None,
+    labels: list[str] | str | None = None,
+    assignees: list[str] | str | None = None,
+    token_secret_key: str | None = None,
+) -> str:
+    """Open a REAL GitHub issue in the target repository.
+
+    Degrades gracefully: when no write-capable token can reach the repo (empty
+    candidates, or a 401/403/404 from every candidate) it returns a JSON error
+    carrying ``no_write_token: true`` so the triage flow can fall back to asking
+    for clarification or recording an internal tracker record + handoff, instead
+    of falsely claiming a GitHub issue was filed.
+    """
+
+    repo_slug = parse_github_repo_slug(repo or "")
+    if not repo_slug:
+        return json.dumps({"error": "create_github_issue requires repo as owner/name or a GitHub URL"})
+    clean_title = _clean(title)
+    if not clean_title:
+        return json.dumps({"error": "create_github_issue requires a non-empty title"})
+
+    candidates = await _github_token_candidates(
+        repo_slug=repo_slug,
+        token_secret_key=token_secret_key,
+        for_write=True,
+    )
+    # A write must never fall back to the public/no-token candidate.
+    write_candidates = [candidate for candidate in candidates if candidate.get("token")]
+    if not write_candidates:
+        return json.dumps({
+            "error": (
+                "No write-capable GitHub token could reach this repo. Ask for clarification "
+                "(which repo, or a write-capable token) or fall back to an internal tracker "
+                "record + handoff — do not claim a GitHub issue was filed."
+            ),
+            "status_code": 401,
+            "no_write_token": True,
+            "repo": repo_slug,
+        })
+
+    last_error: GitHubConnectorError | None = None
+    auth_statuses = {401, 403, 404}
+    for index, candidate in enumerate(write_candidates):
+        try:
+            payload = await async_create_repo_issue(
+                repo_slug,
+                title=clean_title,
+                body=_clean(body),
+                labels=_string_list(labels),
+                assignees=_string_list(assignees),
+                token=candidate["token"],
+            )
+        except GitHubConnectorError as exc:
+            last_error = exc
+            # Retry the next token only on auth/visibility failures. A 422 is a
+            # hard validation error and a success ends the loop, so a filed issue
+            # never retries under a second identity.
+            if exc.status_code in auth_statuses and index < len(write_candidates) - 1:
+                continue
+            return json.dumps({
+                "error": exc.message,
+                "status_code": exc.status_code,
+                "no_write_token": exc.status_code in auth_statuses,
+                "repo": repo_slug,
+                "token_key_name": candidate.get("key_name"),
+            })
+        payload["token_secret_key_used"] = bool(candidate.get("key_name"))
+        payload["token_source"] = candidate["source"]
+        # Surface the exact Vault key that authored the public issue so the audit
+        # manifest and any human-facing note record the identity used.
+        payload["token_key_name"] = candidate.get("key_name")
+        if last_error is not None:
+            payload["fallback_from_status_code"] = last_error.status_code
+        return json.dumps(payload, default=str)
+
+    if last_error is not None:
+        return json.dumps({
+            "error": last_error.message,
+            "status_code": last_error.status_code,
+            "no_write_token": last_error.status_code in auth_statuses,
+            "repo": repo_slug,
+        })
+    return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
+
+
+__all__ = ["_handle_read_github_source", "_handle_create_github_issue"]

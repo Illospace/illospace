@@ -156,6 +156,23 @@ def test_publish_thread_asset_tool_is_registered_and_exposed():
     assert registration.reversibility == "append_only"
 
 
+def test_create_github_issue_tool_is_registered_and_exposed():
+    from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+    from brain.systems.runs.tool_catalog.registry import get_tool_registration
+
+    name = "create_github_issue"
+    assert name in _names(COORDINATOR_TOOLS)
+    assert name in _names(WORKER_TOOLS)
+    assert name in _get_tool_handlers()
+
+    registration = get_tool_registration(name)
+    assert registration is not None
+    assert registration.side_effect_class != "read_only"
+    assert registration.action_manifest is True
+    assert registration.risk_class == "high"
+
+
 def test_publish_thread_artifact_tool_is_registered_and_exposed():
     from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
     from brain.systems.runs.tool_handlers import _get_tool_handlers

@@ -51,7 +51,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.0.1"
+    assert bundle.manifest.version == "1.1.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -62,6 +62,20 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
         "dependency check",
     ):
         assert expected in procedure
+
+
+def test_uwear_triage_skill_distinguishes_internal_tracker_from_real_github_issue():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    procedure = bundle.skill_markdown
+
+    assert "## Creating Work Items" in procedure
+    assert "create_github_issue" in procedure
+    assert "Never describe an internal tracker record as a GitHub issue" in procedure
+    # The graceful-degradation branch must be spelled out, not just the happy path.
+    assert "no_write_token" in procedure
 
 
 def test_uwear_triage_skill_keeps_slack_formatting_contract():

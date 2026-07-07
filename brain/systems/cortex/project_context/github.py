@@ -89,9 +89,16 @@ async def _async_request(
     *,
     token: str | None = None,
     params: dict[str, Any] | None = None,
+    json: Any = None,
 ) -> Any:
     try:
-        response = await client.request(method, f"{GITHUB_API_BASE}{path}", headers=_headers(token), params=params)
+        response = await client.request(
+            method,
+            f"{GITHUB_API_BASE}{path}",
+            headers=_headers(token),
+            params=params,
+            json=json,
+        )
     except httpx.HTTPError as exc:
         raise GitHubConnectorError(status_code=502, message="Could not reach GitHub.") from exc
     if not response.is_success:
@@ -399,6 +406,49 @@ async def async_list_repo_pull_requests(
         "repo": slug,
         "state": params["state"],
         "pull_requests": [_pull_request_payload(item) for item in items[:max_items] if isinstance(item, dict)],
+    }
+
+
+async def async_create_repo_issue(
+    slug: str,
+    *,
+    title: str,
+    body: str | None = None,
+    labels: list[str] | None = None,
+    assignees: list[str] | None = None,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Open a real GitHub issue via POST /repos/{owner}/{repo}/issues.
+
+    Raises GitHubConnectorError on any non-success (401/403/404 auth/visibility,
+    422 bad label/assignee, 502 unreachable). The caller decides how to degrade.
+    """
+
+    owner, repo = slug.split("/", 1)
+    clean_title = (title or "").strip()
+    if not clean_title:
+        raise GitHubConnectorError(status_code=422, message="Issue title is required.")
+    payload: dict[str, Any] = {"title": clean_title}
+    clean_body = (body or "").strip()
+    if clean_body:
+        payload["body"] = clean_body
+    clean_labels = [str(label).strip() for label in (labels or []) if str(label).strip()]
+    if clean_labels:
+        payload["labels"] = clean_labels
+    clean_assignees = [str(assignee).strip() for assignee in (assignees or []) if str(assignee).strip()]
+    if clean_assignees:
+        payload["assignees"] = clean_assignees
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        created = await _async_request(
+            client,
+            "POST",
+            f"/repos/{owner}/{repo}/issues",
+            token=token,
+            json=payload,
+        )
+    return {
+        "repo": slug,
+        "issue": _issue_payload(created if isinstance(created, dict) else {}),
     }
 
 

@@ -55,7 +55,54 @@ GITHUB_TOOLS = [
             },
             "required": ["repo"],
         },
-    }
+    },
+    {
+        "name": "create_github_issue",
+        "description": (
+            "Open a REAL GitHub issue in a repository via the GitHub API. This performs a public "
+            "write to the target repo — it is NOT an internal tracker record and has real-world "
+            "effects. Use only when the target repo and the incident are both clear and a "
+            "write-capable token can reach the repo. If no write-capable token can reach a "
+            "(private) repo, this returns an error carrying no_write_token so the triage flow can "
+            "ask for clarification or fall back to an internal tracker record + handoff. Accepts "
+            "owner/name, GitHub URL, or git remote repo values."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Target repository as owner/name, GitHub URL, or git remote URL.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Issue title. Required.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": (
+                        "Optional Markdown issue body. Prefix AI-authored triage issues with a "
+                        "clear AI-generated disclaimer."
+                    ),
+                },
+                "labels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional label names to apply. Labels must already exist in the repo.",
+                },
+                "assignees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional GitHub login handles to assign.",
+                },
+                "token_secret_key": {
+                    "type": "string",
+                    "description": "Optional Vault secret key holding a write-capable GitHub token for private repos.",
+                },
+            },
+            "required": ["repo", "title"],
+        },
+    },
 ]
 
 
