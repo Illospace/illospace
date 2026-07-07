@@ -23,7 +23,11 @@ from brain.systems.slack.client import (
     slack_app_token_from_env,
     slack_bot_token_from_env,
 )
-from brain.systems.slack.ingress import normalize_slack_socket_event
+from brain.systems.slack.ingress import (
+    SLACK_CHANNEL_MESSAGE_ORIGIN,
+    normalize_slack_socket_event,
+)
+from brain.systems.slack.monitors import monitored_channel_ids
 
 logger = logging.getLogger(__name__)
 
@@ -307,12 +311,19 @@ async def process_socket_payload(
     """Normalize and process a Socket Mode payload after its ack is sent."""
 
     ack = socket_mode_ack(socket_payload)
+    monitored_channels = monitored_channel_ids(connection)
     envelope = normalize_slack_socket_event(
         socket_payload,
         bot_user_id=config.bot_user_id,
+        monitored_channels=monitored_channels,
     )
     if envelope is None:
         return {"ack": ack, "ignored": True}
+    if envelope.get("origin") == SLACK_CHANNEL_MESSAGE_ORIGIN:
+        # Reflex acknowledgement: leave a 👀 on every observed message so the
+        # channel knows Illo has seen it, independent of whether the ensuing
+        # triage run decides to reply.
+        await _acknowledge_monitored_message(config, envelope)
     inbound = await submit_inbound_envelope(
         session,
         connection=connection,
@@ -323,6 +334,32 @@ async def process_socket_payload(
         },
     )
     return {"ack": ack, "ignored": False, "inbound": inbound}
+
+
+async def _acknowledge_monitored_message(
+    config: SlackConnectorConfig,
+    envelope: Mapping[str, Any],
+) -> None:
+    """Add the 👀 reaction to an observed monitored-channel message.
+
+    Best-effort: a missing ``reactions:write`` scope or an already-present
+    reaction must not break inbound processing.
+    """
+
+    payload = dict(envelope.get("payload") or {})
+    channel_id = str(payload.get("channel_id") or "").strip()
+    message_ts = str(payload.get("message_ts") or "").strip()
+    if not channel_id or not message_ts:
+        return
+    try:
+        client = SlackWebClient(config.bot_token)
+        await client.add_reaction(channel=channel_id, timestamp=message_ts, name="eyes")
+    except SlackApiError as exc:
+        if exc.error == "already_reacted":
+            return
+        logger.info("slack_monitor_reaction_failed: %s", exc)
+    except Exception as exc:
+        logger.info("slack_monitor_reaction_failed: %s", exc)
 
 
 async def open_socket_mode_url(config: SlackConnectorConfig) -> str:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 SLACK_MESSAGE_ENVELOPE_KIND = "slack_message"
+SLACK_CHANNEL_MESSAGE_ORIGIN = "slack.channel_message"
 MAX_SLACK_TEXT_CHARS = 4000
 
 _IGNORED_MESSAGE_SUBTYPES = {
@@ -45,27 +46,69 @@ def _bot_user_id(socket_payload: Mapping[str, Any], explicit_bot_user_id: str | 
     return None
 
 
-def _event_origin(event: Mapping[str, Any], *, bot_user_id: str | None) -> str | None:
+def _is_own_slack_message(
+    event: Mapping[str, Any],
+    *,
+    bot_user_id: str | None,
+    api_app_id: str | None,
+) -> bool:
+    """Return True when a message was authored by Illo's own Slack app.
+
+    Guards against Illo reacting to or triaging its own posts, which would loop
+    on a monitored channel.
+    """
+
+    if bot_user_id and str(event.get("user") or "").strip() == str(bot_user_id):
+        return True
+    event_app_id = str(event.get("app_id") or "").strip()
+    if event_app_id and api_app_id and event_app_id == str(api_app_id).strip():
+        return True
+    return False
+
+
+def _event_origin(
+    event: Mapping[str, Any],
+    *,
+    bot_user_id: str | None,
+    api_app_id: str | None = None,
+    monitored_channels: frozenset[str] | set[str] | None = None,
+) -> str | None:
     event_type = str(event.get("type") or "")
     subtype = str(event.get("subtype") or "")
     channel_type = str(event.get("channel_type") or "")
     text = str(event.get("text") or "")
-    if event.get("bot_id") or subtype in _IGNORED_MESSAGE_SUBTYPES:
+    channel_id = str(event.get("channel") or "").strip()
+    if subtype in _IGNORED_MESSAGE_SUBTYPES:
         return None
-    if event_type == "app_mention":
-        return "slack.app_mention"
-    if event_type != "message":
+    if _is_own_slack_message(event, bot_user_id=bot_user_id, api_app_id=api_app_id):
         return None
-    if channel_type == "im":
-        return "slack.direct_message"
-    if bot_user_id and f"<@{bot_user_id}>" in text:
-        return "slack.app_mention"
+    is_bot = bool(event.get("bot_id"))
+    # Direct human invitations to participate: explicit mentions and DMs.
+    if not is_bot:
+        if event_type == "app_mention":
+            return "slack.app_mention"
+        if event_type == "message" and channel_type == "im":
+            return "slack.direct_message"
+        if event_type == "message" and bot_user_id and f"<@{bot_user_id}>" in text:
+            return "slack.app_mention"
+    # Passive monitoring: every message in an explicitly monitored channel,
+    # including third-party bots (Sentry, Rollbar) posting automated alerts.
+    if (
+        event_type == "message"
+        and channel_type != "im"
+        and channel_id
+        and monitored_channels
+        and channel_id in monitored_channels
+    ):
+        return SLACK_CHANNEL_MESSAGE_ORIGIN
     return None
 
 
 def _event_kind(origin: str) -> str:
     if origin == "slack.direct_message":
         return "direct_message"
+    if origin == SLACK_CHANNEL_MESSAGE_ORIGIN:
+        return "channel_message"
     return "mention"
 
 
@@ -97,18 +140,29 @@ def normalize_slack_socket_event(
     socket_payload: Mapping[str, Any],
     *,
     bot_user_id: str | None = None,
+    monitored_channels: frozenset[str] | set[str] | list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Return a shared inbound envelope for actionable Slack Socket Mode events.
 
-    Only explicit mentions and DMs are actionable in the self-hosted MVP. Other
-    channel messages may be visible to the bot, but they are not invitations for
-    Illo to participate.
+    Explicit mentions and DMs are always actionable. In addition, every message
+    posted to an explicitly *monitored* channel (``monitored_channels``) is
+    admitted as a ``slack.channel_message`` so Illo can observe and triage the
+    channel; other channel messages remain non-actionable.
     """
 
     payload = _socket_payload(socket_payload)
     event = _slack_event(socket_payload)
     resolved_bot_user_id = _bot_user_id(socket_payload, bot_user_id)
-    origin = _event_origin(event, bot_user_id=resolved_bot_user_id)
+    api_app_id = str(payload.get("api_app_id") or "").strip() or None
+    monitored = frozenset(
+        str(channel).strip() for channel in (monitored_channels or ()) if str(channel).strip()
+    )
+    origin = _event_origin(
+        event,
+        bot_user_id=resolved_bot_user_id,
+        api_app_id=api_app_id,
+        monitored_channels=monitored,
+    )
     if origin is None:
         return None
 

@@ -172,6 +172,28 @@ class SlackWebClient:
             payload["loading_messages"] = loading_messages[:10]
         return await self._post("assistant.threads.setStatus", payload)
 
+    async def add_reaction(
+        self,
+        *,
+        channel: str,
+        timestamp: str,
+        name: str = "eyes",
+    ) -> dict[str, Any]:
+        """Add an emoji reaction to a Slack message.
+
+        Slack returns ``already_reacted`` when the emoji is already present; the
+        caller may treat that as success. Requires the ``reactions:write`` scope.
+        """
+
+        return await self._post(
+            "reactions.add",
+            {
+                "channel": channel,
+                "timestamp": timestamp,
+                "name": str(name or "eyes").strip().strip(":"),
+            },
+        )
+
     async def open_conversation(self, *, users: str) -> dict[str, Any]:
         return await self._post("conversations.open", {"users": users})
 

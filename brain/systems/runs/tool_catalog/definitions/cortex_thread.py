@@ -442,12 +442,15 @@ CHAT_TOOLS = [
         "name": "manage_slack",
         "description": (
             "Inspect Slack connection health, list Slack conversations visible to Illo's bot or observed from "
-            "Slack-origin mentions, "
-            "and manage Slack-to-Illospace identity mappings. Use action='status' to check "
-            "whether Slack is connected, action='list_channels' to see channels/DMs the "
-            "configured bot token can enumerate plus Slack surfaces Illo has already seen, "
-            "and identity mapping actions to link Slack users "
-            "to Illospace users."
+            "Slack-origin mentions, manage Slack-to-Illospace identity mappings, and configure which channels "
+            "Illo passively monitors. Use action='status' to check whether Slack is connected, "
+            "action='list_channels' to see channels/DMs the configured bot token can enumerate plus Slack "
+            "surfaces Illo has already seen, and identity mapping actions to link Slack users to Illospace "
+            "users. To make Illo watch a channel's every message (acknowledging each with a 👀 reaction and "
+            "triaging automated alerts or user-reported issues into tickets), use action='monitor_channel' "
+            "with the channel_id; action='unmonitor_channel' to stop; action='list_monitored' to review. The "
+            "bot must be a member of the channel and the Slack app needs the channels:history and "
+            "reactions:write scopes."
         ),
         "input_schema": {
             "type": "object",
@@ -460,6 +463,9 @@ CHAT_TOOLS = [
                         "list_mappings",
                         "link_identity",
                         "unlink_identity",
+                        "list_monitored",
+                        "monitor_channel",
+                        "unmonitor_channel",
                     ],
                     "description": "Slack management action.",
                 },
@@ -474,6 +480,14 @@ CHAT_TOOLS = [
                 "user_id": {
                     "type": "string",
                     "description": "Illospace user id, required for link_identity.",
+                },
+                "channel_id": {
+                    "type": "string",
+                    "description": "Slack channel id (e.g. C0123ABCD), required for monitor_channel and unmonitor_channel.",
+                },
+                "channel_name": {
+                    "type": "string",
+                    "description": "Optional human-readable channel name stored alongside a monitored channel for readability.",
                 },
                 "channel_types": {
                     "oneOf": [
