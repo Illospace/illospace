@@ -138,6 +138,9 @@ def _stage_cortex_reply(content: str, *, run_id: int | None, review: dict) -> di
     }
     if run_id:
         result["run_id"] = run_id
+    checker_note = review.get("rationale")
+    if checker_note:
+        result["checker_note"] = checker_note
     if review.get("override"):
         result["checker_override"] = review["override"]
     if reply_count > 1:
@@ -188,35 +191,9 @@ def _handle_cortex_reply(content: str) -> dict:
         user_id=getattr(_agent_context, "user_id", None),
         session_id=getattr(_agent_context, "session_id", None),
     )
-    if review["status"] not in {"resolved", "blocked_on_user"} and _looks_like_concrete_blocker_reply(
-        proposed_reply,
-        execution_context,
-    ):
-        review = {
-            "status": "blocked_on_user",
-            "approved": True,
-            "rationale": (
-                "The candidate reports a concrete backend/tool dependency blocker, "
-                "so continuing the agent loop would not make progress."
-            ),
-            "missing_requirements": [],
-            "raw_output": review.get("raw_output", ""),
-            "override": "concrete_dependency_blocker",
-        }
-    if review["status"] not in {"resolved", "blocked_on_user"}:
-        return {
-            "blocked": True,
-            "error": "Final reply checker rejected cortex_reply.",
-            "checker_status": review["status"],
-            "checker_reason": review.get("rationale") or "The proposed final reply does not show the work is finished.",
-            "missing_requirements": review.get("missing_requirements") or [],
-            "instruction": (
-                "Do not send this as the final reply yet. Continue working. "
-                "If more execution is required, use the normal project tools or let the AgentRun recipe escalate. "
-                "Only call cortex_reply after the user goal is complete or concretely blocked by user input, "
-                "credentials, an unavailable service, or a backend/tool dependency."
-            ),
-        }
+    # The checker is advisory: its verdict is surfaced as a non-blocking warning so
+    # the model can decide for itself whether to continue or reply again. It no longer
+    # vetoes a reply the model considers final.
 
     run_id = getattr(getattr(_agent_context, "run", None), "run_id", None)
     if run_id:
@@ -234,6 +211,9 @@ def _handle_cortex_reply(content: str) -> dict:
         if run_id:
             result["run_id"] = run_id
         result["checker_status"] = review["status"]
+        checker_note = review.get("rationale")
+        if checker_note:
+            result["checker_note"] = checker_note
         if review.get("override"):
             result["checker_override"] = review["override"]
         if reply_count > 1:
