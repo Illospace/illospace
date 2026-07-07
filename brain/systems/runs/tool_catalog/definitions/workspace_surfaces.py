@@ -98,7 +98,15 @@ PROJECT_TOOLS = [
                 },
                 "query": {
                     "type": "string",
-                    "description": "Search text for action='search_files' across visible Projects; returns matching paths without loading every file.",
+                    "description": (
+                        "Search/filter text. For action='list', filters by project name, slug, description, "
+                        "aliases, or resources. For action='search_files', matches file contents across "
+                        "visible Projects without loading every file. 'search' is accepted as an alias."
+                    ),
+                },
+                "search": {
+                    "type": "string",
+                    "description": "Alias for 'query'.",
                 },
                 "limit": {
                     "type": "integer",

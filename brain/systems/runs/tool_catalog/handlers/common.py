@@ -434,7 +434,7 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         "mark_read": {"required": ["idea_id/thread_url unless a current thread is bound"], "optional": [], "effect": "mark a thought read"},
     },
     "manage_project": {
-        "list": {"required": [], "optional": ["query", "limit", "include_inactive"], "effect": "read project context profiles, optionally filtered by project name, description, aliases, or resources"},
+        "list": {"required": [], "optional": ["query", "search", "limit", "include_inactive"], "effect": "read project context profiles, optionally filtered by project name, description, aliases, or resources ('search' is an alias for 'query')"},
         "get": {"required": ["project_id"], "optional": ["include_inactive"], "effect": "read one project profile"},
         "create": {
             "required": ["slug", "name"],
@@ -1127,6 +1127,31 @@ def _patched_workspace_root() -> str:
 
 
 _VALID_SECTIONS = frozenset({"findings", "decisions", "open_questions", "resources", "handoffs"})
+
+
+def _short_exception_reason(exc: Exception, *, max_len: int = 200) -> str:
+    """Reduce an internal exception to a short, model-safe reason string.
+
+    Avoids leaking raw driver/tracebacks (e.g. asyncpg.Error, SQLAlchemy
+    internals) to the model — callers should present `{"error": ...}` built
+    from this instead of str(exc) directly for unexpected exception types.
+    """
+    text = str(exc).strip() or exc.__class__.__name__
+    text = text.replace("\n", " ").replace("\r", " ")
+    if len(text) > max_len:
+        text = text[: max_len - 1].rstrip() + "…"
+    return text
+
+
+def _tool_failure_payload(tool_name: str, exc: Exception) -> dict:
+    """Build a clean `{"error": ...}` payload for an unexpected handler exception.
+
+    Used by handlers that talk to the DB or other backends (e.g. browser,
+    post_ai_timeline_message) to avoid leaking raw driver/tracebacks
+    (asyncpg.Error, SQLAlchemy internals, etc.) to the model.
+    """
+    logger.exception("%s failed: %s", tool_name, exc)
+    return {"error": f"tool failed: {_short_exception_reason(exc)}"}
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

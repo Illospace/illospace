@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from brain.systems.runs.tool_catalog.handlers.common import _agent_context, logger
+from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _tool_failure_payload, logger
 
 THREAD_DISCUSSION_SURFACE = "thread_discussion"
 AI_TIMELINE_SURFACE = "ai_timeline"
@@ -379,37 +379,40 @@ async def _handle_post_ai_timeline_message(
     reply_to_comment_id = _coerce_comment_id(response_target.get("reply_to_comment_id") or trigger.get("comment_id"))
     visible_attachments = _visible_attachments_for_body(text, attachments)
 
-    async with UnitOfWork() as uow:
-        idea = await uow.session.get(Idea, target_thread_id)
-        if idea is None:
-            return json.dumps({"error": "Thread not found"})
-        idea_org_id = str(getattr(idea, "org_id", "") or "")
-        if idea_org_id and idea_org_id != org_id:
-            return json.dumps({"error": "Thread is outside this org"})
+    try:
+        async with UnitOfWork() as uow:
+            idea = await uow.session.get(Idea, target_thread_id)
+            if idea is None:
+                return json.dumps({"error": "Thread not found"})
+            idea_org_id = str(getattr(idea, "org_id", "") or "")
+            if idea_org_id and idea_org_id != org_id:
+                return json.dumps({"error": "Thread is outside this org"})
 
-        metadata = {
-            "source": "illo_agent",
-            "surface": AI_TIMELINE_SURFACE,
-            "originating_surface": THREAD_DISCUSSION_SURFACE if trigger else AI_TIMELINE_SURFACE,
-            "created_by_run_id": _current_run_id(),
-        }
-        if reply_to_comment_id is not None:
-            metadata["discussion_comment_id"] = reply_to_comment_id
-        result = await post_thread_message(
-            uow.session,
-            idea=idea,
-            command=ThreadMessageCommand(
-                idea_id=target_thread_id,
-                role="illo",
-                content=text,
-                actor={"org_id": org_id},
-                attachments=visible_attachments,
-                metadata=metadata,
-            ),
-            lifecycle_trigger="agent_tool_ai_timeline_message",
-        )
-        message_payload = result.message_payload
-        status_change = result.status_change
+            metadata = {
+                "source": "illo_agent",
+                "surface": AI_TIMELINE_SURFACE,
+                "originating_surface": THREAD_DISCUSSION_SURFACE if trigger else AI_TIMELINE_SURFACE,
+                "created_by_run_id": _current_run_id(),
+            }
+            if reply_to_comment_id is not None:
+                metadata["discussion_comment_id"] = reply_to_comment_id
+            result = await post_thread_message(
+                uow.session,
+                idea=idea,
+                command=ThreadMessageCommand(
+                    idea_id=target_thread_id,
+                    role="illo",
+                    content=text,
+                    actor={"org_id": org_id},
+                    attachments=visible_attachments,
+                    metadata=metadata,
+                ),
+                lifecycle_trigger="agent_tool_ai_timeline_message",
+            )
+            message_payload = result.message_payload
+            status_change = result.status_change
+    except Exception as exc:
+        return json.dumps(_tool_failure_payload("post_ai_timeline_message", exc), default=str)
 
     publish_safe(
         "thread_message",

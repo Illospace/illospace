@@ -413,7 +413,12 @@ def _get_tool_handlers(
         _resolved_secret_env=None,
         _resolved_workspace_tool_env=None,
         _resolved_workspace_tool_sensitive_values=None,
+        **_unexpected_kwargs,
     ):
+        if _unexpected_kwargs:
+            # Tolerate undocumented/legacy kwargs the model may pass instead of
+            # raising a raw TypeError — the schema is the source of truth.
+            logger.debug("exec_command ignoring unexpected kwargs: %s", sorted(_unexpected_kwargs))
         workspace_tool_env, workspace_tool_sensitive_values = _resolved_workspace_tool_runtime_args(
             workspace_tool_auth,
             _resolved_workspace_tool_env,
