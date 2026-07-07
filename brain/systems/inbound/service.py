@@ -1103,7 +1103,7 @@ async def _queue_illo_submission(
 
     source_name = context.display_name or context.source_kind or "external source"
     preservation = submission_preservation_contract(normalized)
-    message = _submission_prompt(context=context, event=event, normalized=normalized)
+    message = _submission_prompt(normalized=normalized)
     result = await admit_work(
         session,
         WorkIntakeEvent(
@@ -1129,10 +1129,10 @@ async def _queue_illo_submission(
                     "execution_profile": "fast",
                     "origin": normalized.get("origin"),
                     # Route required-introspection detection off the operator's actual
-                    # request, not the coordination wrapper prompt (issue #249). The
-                    # wrapper embeds boilerplate like "Source metadata:" that can trip
-                    # the self-context heuristic and hijack the final answer with a
-                    # runtime self-description.
+                    # request rather than any surrounding coordination text (issue #249).
+                    # The run message now leads with the raw operator message and origin/
+                    # source/constraints live in metadata, but keep this tag as the
+                    # authoritative human-message signal for introspection routing.
                     "human_message": normalized.get("message"),
                     "inbound_event": _inbound_event_metadata(context, event, normalized, None),
                     "submission": {
@@ -1164,36 +1164,19 @@ async def _queue_illo_submission(
     return handling
 
 
-def _submission_prompt(
-    *,
-    context: _ConnectionContext,
-    event: InboundEventRow,
-    normalized: Mapping[str, Any],
-) -> str:
-    source_name = context.display_name or context.source_kind or "external source"
+def _submission_prompt(*, normalized: Mapping[str, Any]) -> str:
+    """Build the run message with the operator's raw request as the primary content.
+
+    Origin, source, constraints, and correlation are NOT embedded as authoritative
+    prompt text (that "Source metadata:" envelope is what tripped issue #249). They
+    are carried as structured run metadata in the ``submission`` payload instead.
+    """
+
     preservation = submission_preservation_contract(normalized)
-    lines = [
-        "Handle this external coordination submission.",
-        "",
-        f"Inbound event: {event.id}",
-        f"Origin: {normalized.get('origin') or event.origin}",
-        f"Source: {source_name}",
-        "",
-        "Message:",
-        str(normalized.get("message") or normalized.get("summary") or ""),
-    ]
+    lines = [str(normalized.get("message") or normalized.get("summary") or "")]
     parts = list(normalized.get("parts") or [])
     if parts:
         lines.extend(["", f"Context parts: {len(parts)}", _json_preview(parts, limit=MAX_TRIAGE_PAYLOAD_CHARS)])
-    for label, key in (
-        ("Source metadata", "source"),
-        ("Constraints", "constraints"),
-        ("Correlation", "correlation"),
-        ("Response hints", "response"),
-    ):
-        value = normalized.get(key)
-        if value:
-            lines.extend(["", f"{label}:", _json_preview(value, limit=1200)])
     lines.extend(submission_preservation_prompt_lines(preservation))
     lines.extend(
         [
