@@ -429,11 +429,13 @@ async def _handle_manage_slack(
     slack_user_id: str | None = None,
     user_id: str | None = None,
     channel_types: str | list[str] | None = None,
+    channel_id: str | None = None,
+    channel_name: str | None = None,
     limit: int = 200,
     cursor: str | None = None,
     include_archived: bool = False,
 ) -> str:
-    """Inspect Slack connection health and manage minimal identity mappings."""
+    """Inspect Slack connection health, identity mappings, and channel monitors."""
 
     normalized_action = str(action or "").strip().lower()
     org_id = str(getattr(_agent_context, "org_id", "") or "").strip()
@@ -446,6 +448,12 @@ async def _handle_manage_slack(
         link_slack_identity,
         list_slack_identity_mappings,
         unlink_slack_identity,
+    )
+    from brain.systems.slack.monitors import (
+        SlackMonitorConfigError,
+        add_monitored_channel,
+        list_monitored_channels,
+        remove_monitored_channel,
     )
 
     async with UnitOfWork() as uow:
@@ -564,7 +572,57 @@ async def _handle_manage_slack(
             )
             return json.dumps({"ok": True, "mapping": mapping}, default=str)
 
-    return json.dumps({"error": "manage_slack action must be status, list_channels, list_mappings, link_identity, or unlink_identity"})
+        if normalized_action == "list_monitored":
+            channels = await list_monitored_channels(
+                uow.session,
+                connection_id=str(connection.id),
+                org_id=org_id,
+            )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "connection": _slack_connection_payload(connection),
+                    "monitored_channels": channels,
+                },
+                default=str,
+            )
+        if normalized_action == "monitor_channel":
+            if not str(channel_id or "").strip():
+                return json.dumps({"error": "monitor_channel requires: channel_id"})
+            try:
+                result = await add_monitored_channel(
+                    uow.session,
+                    connection_id=str(connection.id),
+                    channel_id=str(channel_id),
+                    org_id=org_id,
+                    channel_name=channel_name,
+                )
+            except SlackMonitorConfigError as exc:
+                return json.dumps({"error": str(exc)})
+            return json.dumps({"ok": True, **result}, default=str)
+        if normalized_action == "unmonitor_channel":
+            if not str(channel_id or "").strip():
+                return json.dumps({"error": "unmonitor_channel requires: channel_id"})
+            try:
+                result = await remove_monitored_channel(
+                    uow.session,
+                    connection_id=str(connection.id),
+                    channel_id=str(channel_id),
+                    org_id=org_id,
+                )
+            except SlackMonitorConfigError as exc:
+                return json.dumps({"error": str(exc)})
+            return json.dumps({"ok": True, **result}, default=str)
+
+    return json.dumps(
+        {
+            "error": (
+                "manage_slack action must be status, list_channels, list_mappings, "
+                "link_identity, unlink_identity, list_monitored, monitor_channel, "
+                "or unmonitor_channel"
+            )
+        }
+    )
 
 
 __all__ = [

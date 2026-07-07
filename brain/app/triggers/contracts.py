@@ -43,6 +43,7 @@ ILLO_NATIVE_EVENTS = frozenset({
     "chat.room_thread_mention",
     "slack.app_mention",
     "slack.direct_message",
+    "slack.channel_message",
 })
 
 

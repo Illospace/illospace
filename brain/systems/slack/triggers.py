@@ -7,6 +7,7 @@ from typing import Any, Mapping
 SLACK_MESSAGE_ENVELOPE_KIND = "slack_message"
 SLACK_SURFACE = "slack"
 SLACK_REPLY_TOOL = "post_slack_reply"
+SLACK_CHANNEL_MESSAGE_ORIGIN = "slack.channel_message"
 
 
 def build_slack_work_intake_payload(
@@ -23,16 +24,29 @@ def build_slack_work_intake_payload(
     trigger = slack_trigger(slack_payload)
     event_type = slack_event_type(slack_payload)
     target = slack_target(trigger)
+    is_monitor = event_type == SLACK_CHANNEL_MESSAGE_ORIGIN
     metadata = {
-        "origin": "slack_teammate",
+        "origin": "slack_channel_monitor" if is_monitor else "slack_teammate",
         "originating_surface": SLACK_SURFACE,
         "triggering_surface": SLACK_SURFACE,
         "source_surface": SLACK_SURFACE,
-        "required_response_tool": SLACK_REPLY_TOOL,
-        "final_answer_target_surface": SLACK_SURFACE,
         "slack_trigger": trigger,
         "slack_connection_id": connection_id,
     }
+    if is_monitor:
+        # Passive observation of a monitored channel: run headless so the
+        # settlement layer never auto-posts the final answer, and do not force a
+        # response tool. Illo replies only when it explicitly chooses to via
+        # post_slack_reply (e.g. after creating a ticket).
+        metadata["slack_monitor"] = True
+        metadata["headless"] = True
+        metadata["final_answer_target_surface"] = "headless"
+        metadata["execution_profile"] = "fast"
+        run_message = slack_channel_monitor_message(slack_payload, trigger)
+    else:
+        metadata["required_response_tool"] = SLACK_REPLY_TOOL
+        metadata["final_answer_target_surface"] = SLACK_SURFACE
+        run_message = slack_run_message(slack_payload, trigger)
     if inbound_event_id:
         metadata["inbound_event"] = {
             "event_id": inbound_event_id,
@@ -61,7 +75,7 @@ def build_slack_work_intake_payload(
         "payload": {
             "slack": trigger,
             "thread_message": _clean(slack_payload.get("text"))[:2000],
-            "run_message": slack_run_message(slack_payload, trigger),
+            "run_message": run_message,
             "metadata": metadata,
             "priority": int(priority),
             "user_id": str(authority_user_id),
@@ -108,10 +122,13 @@ def slack_target(slack_trigger_payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def slack_event_type(payload: Mapping[str, Any]) -> str:
     origin = _clean(payload.get("origin"))
-    if origin in {"slack.app_mention", "slack.direct_message"}:
+    if origin in {"slack.app_mention", "slack.direct_message", SLACK_CHANNEL_MESSAGE_ORIGIN}:
         return origin
-    if _clean(payload.get("event_kind")) == "direct_message":
+    event_kind = _clean(payload.get("event_kind"))
+    if event_kind == "direct_message":
         return "slack.direct_message"
+    if event_kind == "channel_message":
+        return SLACK_CHANNEL_MESSAGE_ORIGIN
     return "slack.app_mention"
 
 
@@ -198,15 +215,59 @@ def slack_run_message(payload: Mapping[str, Any], slack_trigger_payload: Mapping
     return "\n".join(lines)
 
 
+def slack_channel_monitor_message(
+    payload: Mapping[str, Any],
+    slack_trigger_payload: Mapping[str, Any],
+) -> str:
+    """Frame a monitored-channel message as a passive triage decision.
+
+    The message has already been acknowledged with a 👀 reaction at ingest, so
+    the run's job is only to decide whether the content is ticket-worthy — and to
+    stay silent otherwise.
+    """
+
+    text = _clean(payload.get("text"))[:2000]
+    channel_id = _clean(slack_trigger_payload.get("channel_id"))
+    channel_name = _clean(payload.get("channel_name"))
+    channel_label = f"#{channel_name}" if channel_name else f"channel {channel_id}"
+    author = _clean(slack_trigger_payload.get("slack_user_id")) or "unknown (may be an app/bot)"
+    lines = [
+        f"You are passively monitoring Slack {channel_label}. A new message was posted "
+        "and has already been acknowledged with a 👀 reaction — do not acknowledge it again.",
+        "",
+        "Classify this message and act accordingly:",
+        "- Casual chatter, or discussion about an existing alert: take NO visible action. Do not reply.",
+        "- A genuine automated alert (Sentry, Rollbar, CI) or a user-reported problem that is "
+        "ticket-worthy: create/route a ticket by loading the 'uwear-engineering-triage' skill "
+        "(brain_skills then skill_view), then optionally post a brief Slack note with post_slack_reply.",
+        "- Ambiguous or low-signal: prefer no visible action; the 👀 already confirms you saw it.",
+        "",
+        "Silence is the correct default. Only use post_slack_reply when you have opened/flagged a "
+        "ticket or must surface something important. Use read_slack_conversation "
+        "(scope=recent_channel or thread) for more context before deciding.",
+        "",
+        f"Channel: {channel_id}" + (f" ({channel_name})" if channel_name else ""),
+        f"Team: {slack_trigger_payload.get('team_id')}",
+        f"Message ts: {slack_trigger_payload.get('message_ts')}",
+        f"Author (Slack id): {author}",
+    ]
+    if slack_trigger_payload.get("permalink"):
+        lines.append(f"Permalink: {slack_trigger_payload.get('permalink')}")
+    lines.extend(["", f"Message text: {text}"])
+    return "\n".join(lines)
+
+
 def _clean(value: Any) -> str:
     return str(value or "").strip()
 
 
 __all__ = [
+    "SLACK_CHANNEL_MESSAGE_ORIGIN",
     "SLACK_MESSAGE_ENVELOPE_KIND",
     "SLACK_REPLY_TOOL",
     "SLACK_SURFACE",
     "build_slack_work_intake_payload",
+    "slack_channel_monitor_message",
     "slack_event_type",
     "slack_response_target",
     "slack_run_message",

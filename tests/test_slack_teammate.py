@@ -1359,7 +1359,16 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
     actions = tool["input_schema"]["properties"]["action"]["enum"]
     serialized_tool = json.dumps(tool)
 
-    assert actions == ["status", "list_channels", "list_mappings", "link_identity", "unlink_identity"]
+    assert actions == [
+        "status",
+        "list_channels",
+        "list_mappings",
+        "link_identity",
+        "unlink_identity",
+        "list_monitored",
+        "monitor_channel",
+        "unmonitor_channel",
+    ]
     assert "setup_instructions" not in serialized_tool
     assert "SLACK_" not in serialized_tool
     assert "docker" not in serialized_tool

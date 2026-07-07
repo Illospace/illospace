@@ -35,13 +35,24 @@ def agent_run_request_for_slack(trigger_payload: dict[str, Any] | Any) -> AgentR
         payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
     )
     slack_trigger = dict(metadata.get("slack_trigger") or payload.get("slack") or {})
-    surface_context = {
-        "originating_surface": SLACK_SURFACE,
-        "triggering_surface": SLACK_SURFACE,
-        "source_surface": SLACK_SURFACE,
-        "required_response_tool": SLACK_REPLY_TOOL,
-        "final_answer_target_surface": SLACK_SURFACE,
-    }
+    if metadata.get("slack_monitor"):
+        # Passive channel monitoring runs headless: no forced response tool and no
+        # auto-settled Slack post. Illo replies only if it calls post_slack_reply.
+        surface_context = {
+            "originating_surface": SLACK_SURFACE,
+            "triggering_surface": SLACK_SURFACE,
+            "source_surface": SLACK_SURFACE,
+            "final_answer_target_surface": "headless",
+            "headless": True,
+        }
+    else:
+        surface_context = {
+            "originating_surface": SLACK_SURFACE,
+            "triggering_surface": SLACK_SURFACE,
+            "source_surface": SLACK_SURFACE,
+            "required_response_tool": SLACK_REPLY_TOOL,
+            "final_answer_target_surface": SLACK_SURFACE,
+        }
     for key, value in surface_context.items():
         metadata.setdefault(key, value)
     metadata["slack_trigger"] = slack_trigger
