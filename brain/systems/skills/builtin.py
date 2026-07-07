@@ -84,6 +84,22 @@ def _skill_from_bundle(name: str, *, maturity: str = "emerging") -> dict[str, An
     )
 
 
+def _filesystem_skill_bundle_names() -> list[str]:
+    """Return all complete filesystem bundle directories shipped with this build."""
+
+    if not BUILTIN_SKILL_BUNDLE_ROOT.exists():
+        return []
+    names: list[str] = []
+    for child in BUILTIN_SKILL_BUNDLE_ROOT.iterdir():
+        if (
+            child.is_dir()
+            and (child / "skill.toml").is_file()
+            and (child / "SKILL.md").is_file()
+        ):
+            names.append(child.name)
+    return sorted(names)
+
+
 BUILTIN_SKILLS: dict[str, dict[str, Any]] = {
     "coordinate": _skill(
         name="coordinate",
@@ -1071,9 +1087,9 @@ async def _ensure_builtin_skill_bundles() -> None:
         logger.warning("ensure_builtin_skill_bundles unavailable: %s", exc)
         return
 
-    for name in BUILTIN_SKILLS:
+    for name in _filesystem_skill_bundle_names():
         bundle_dir = BUILTIN_SKILL_BUNDLE_ROOT / name
-        if not bundle_dir.is_dir():
+        if name in BUILTIN_SKILLS and not bundle_dir.is_dir():
             logger.warning("Missing built-in skill bundle: %s", bundle_dir)
             continue
 
@@ -1083,16 +1099,22 @@ async def _ensure_builtin_skill_bundles() -> None:
                     SkillRepository(uow.session),
                     SkillBundleRepository(uow.session),
                 )
-                await service.import_bundle(
-                    bundle_dir,
-                    namespace="illo_core",
-                    enabled_scope="system",
-                    update_policy="pinned",
-                    review_status="approved",
-                    trust_level=ILLO_CORE_TRUST_LEVEL,
-                    source_kind=ILLO_CORE_SOURCE_KIND,
-                    auto_bump_conflicting_semver=True,
-                )
+                import_kwargs: dict[str, Any] = {
+                    "namespace": "self_hosted",
+                    "enabled_scope": "system",
+                    "update_policy": "pinned",
+                    "review_status": "approved",
+                    "auto_bump_conflicting_semver": True,
+                }
+                if name in BUILTIN_SKILLS:
+                    import_kwargs.update(
+                        {
+                            "namespace": "illo_core",
+                            "trust_level": ILLO_CORE_TRUST_LEVEL,
+                            "source_kind": ILLO_CORE_SOURCE_KIND,
+                        }
+                    )
+                await service.import_bundle(bundle_dir, **import_kwargs)
         except Exception as exc:
             logger.warning(
                 "ensure_builtin_skill_bundle_failed skill=%s error=%s",
@@ -1106,4 +1128,5 @@ __all__ = [
     "BUILTIN_SKILL_BUNDLE_ROOT",
     "ensure_builtin_skills",
     "ensure_builtin_skills_cached",
+    "_filesystem_skill_bundle_names",
 ]
