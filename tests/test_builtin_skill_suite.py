@@ -45,6 +45,25 @@ def test_filesystem_bundle_discovery_includes_private_team_bundles():
     assert bundle.manifest.visibility == "private_local"
 
 
+def test_uwear_engineering_triage_includes_dependency_monitor():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+
+    assert bundle.manifest.version == "1.0.1"
+    procedure = bundle.skill_markdown
+    for expected in (
+        "## Dependency Monitor",
+        "selected priority issues or PRs",
+        "GitHub Ticket Tracker Domain",
+        "generic coordination ticket",
+        "only high-confidence dependency blockers or missing companion work",
+        "dependency check",
+    ):
+        assert expected in procedure
+
+
 def test_builtin_skills_have_structured_routing_metadata():
     from brain.systems.skills.builtin import BUILTIN_SKILLS
 
