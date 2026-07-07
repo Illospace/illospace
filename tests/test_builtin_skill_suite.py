@@ -64,6 +64,19 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
         assert expected in procedure
 
 
+def test_uwear_triage_skill_keeps_slack_formatting_contract():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    procedure = bundle.skill_markdown
+
+    assert "## Slack Formatting" in procedure
+    assert "Prefer Slack-native links" in procedure
+    assert "Never invent Slack user ids" in procedure
+    assert "Fall back gracefully" in procedure
+
+
 def test_builtin_skills_have_structured_routing_metadata():
     from brain.systems.skills.builtin import BUILTIN_SKILLS
 
