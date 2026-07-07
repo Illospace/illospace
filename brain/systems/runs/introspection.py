@@ -1,80 +1,15 @@
 """Shared metadata helpers for questions that require hidden tool-backed context."""
 from __future__ import annotations
 
-import re
-
 from brain.systems.runs.message_metadata import (
     INTROSPECTION_MESSAGE_METADATA_KEYS,
     extract_latest_user_intent,
 )
 from brain.systems.runs.tool_catalog.registry import get_tool_registration
 
-_PERSON_ACTIVITY_PATTERNS = (
-    re.compile(
-        r"\bwhat(?:'s| is| are| has| have| was| were| did| does)\s+"
-        r"[^?]{1,80}\s+(?:working on|been working on|doing|up to)\b"
-    ),
-    re.compile(
-        r"\bwho\s+(?:is|are|has|have|was|were)\s+[^?]{0,60}\b"
-        r"(?:working|active)\b"
-    ),
-)
-_WORKSPACE_ACTIVITY_PHRASES = (
-    "active cortex",
-    "active runs",
-    "active thoughts",
-    "latest activity",
-    "latest shared activity",
-    "latest signals",
-    "recent activity",
-    "team activity",
-    "teammate activity",
-    "workspace activity",
-)
-_WORKSPACE_OVERVIEW_PHRASES = (
-    "finish setting up this workspace",
-    "help me understand this workspace",
-    "help me finish setting up this workspace",
-    "introduce yourself",
-    "what can you see",
-    "what do you know about this workspace",
-    "what you should know about the team",
-    "what is this workspace",
-    "workspace overview",
-    "workspace setup",
-)
-_PROJECT_CONTEXT_PHRASES = (
-    "connected repo",
-    "connected repos",
-    "connected docs",
-    "project context",
-    "project contexts",
-    "what projects",
-)
-_WORKSPACE_RECORD_PHRASES = (
-    "domain records",
-    "structured records",
-    "team database",
-    "workspace records",
-)
+
 def _normalized_text(message: str | None) -> str:
     return " ".join((message or "").strip().lower().split())
-
-
-def _looks_like_workspace_activity_question(message: str | None) -> bool:
-    text = _normalized_text(message)
-    if not text:
-        return False
-    if any(pattern.search(text) for pattern in _PERSON_ACTIVITY_PATTERNS):
-        return True
-    return any(phrase in text for phrase in _WORKSPACE_ACTIVITY_PHRASES)
-
-
-def _looks_like_any_phrase(message: str | None, phrases: tuple[str, ...]) -> bool:
-    text = _normalized_text(message)
-    if not text:
-        return False
-    return any(phrase in text for phrase in phrases)
 
 
 def message_for_required_introspection(
@@ -95,62 +30,27 @@ def required_introspection_tool(
     *,
     explicit_tool: str | None = None,
 ) -> tuple[str | None, str | None]:
-    """Return a mandatory hidden-context tool from explicit routing metadata.
+    """Return a mandatory hidden-context tool ONLY from an explicit routing directive.
 
-    Explicit metadata is the preferred path. The small heuristic below is a guardrail
-    for high-risk freshness questions where answering from memory produces stale
-    workspace status.
+    There is deliberately NO heuristic/keyword forcing. A competent model calls the
+    context tools it needs — read_self_context, read_capabilities, read_team_activity,
+    read_workspace_overview, read_project_contexts, read_workspace_records — voluntarily,
+    because they are in its registry and its tool descriptions point at them.
+
+    End-of-turn forcing of *guessed* tools was the source of the recurring
+    "introspection hijack": a regex/keyword match on an ordinary work request (e.g.
+    "set … up", "where … source", "what is X working on") force-injected a tool whose
+    output then replaced the model's completed answer with the wrong thing (issue #249
+    and ~30% of production runs). Only an explicit ``required_introspection_tool``
+    metadata directive is honored here; nothing in the app currently sets one, so in
+    practice this never forces. The ``message`` argument is retained for call-site
+    compatibility.
     """
     tool = _normalized_text(explicit_tool)
-    registration = get_tool_registration(tool) if tool else None
+    if not tool:
+        return None, None
+    registration = get_tool_registration(tool)
     if registration and registration.context_route is not None:
         route = registration.context_route
         return tool, f"This question requires {tool}. {route.description}"
-    # NOTE: The self-description tools read_self_context and read_capabilities are
-    # deliberately NOT force-routed here. Their triggers ("who are you", "set … up",
-    # "where … source") also appear inside ordinary *work* requests, so forcing them at
-    # end-of-turn repeatedly hijacked completed work and replaced the answer with a
-    # runtime self-description (issue #249 and its recurrences). Both tools remain
-    # available for the model to call voluntarily when a question genuinely needs them.
-    if _looks_like_any_phrase(message, _WORKSPACE_OVERVIEW_PHRASES):
-        tool = "read_workspace_overview"
-        registration = get_tool_registration(tool)
-        if registration and registration.context_route is not None:
-            route = registration.context_route
-            return (
-                tool,
-                f"This question asks for a current workspace overview or setup status. Use {tool} "
-                f"before answering from memory. {route.description}",
-            )
-    if _looks_like_any_phrase(message, _PROJECT_CONTEXT_PHRASES):
-        tool = "read_project_contexts"
-        registration = get_tool_registration(tool)
-        if registration and registration.context_route is not None:
-            route = registration.context_route
-            return (
-                tool,
-                f"This question asks what project context is connected. Use {tool} "
-                f"before answering from memory. {route.description}",
-            )
-    if _looks_like_any_phrase(message, _WORKSPACE_RECORD_PHRASES):
-        tool = "read_workspace_records"
-        registration = get_tool_registration(tool)
-        if registration and registration.context_route is not None:
-            route = registration.context_route
-            return (
-                tool,
-                f"This question asks about structured workspace records. Use {tool} "
-                f"before answering from memory. {route.description}",
-            )
-    if _looks_like_workspace_activity_question(message):
-        tool = "read_team_activity"
-        registration = get_tool_registration(tool)
-        if registration and registration.context_route is not None:
-            route = registration.context_route
-            return (
-                tool,
-                f"This question asks for current workspace/team activity. Use {tool} "
-                f"with a recent time window and person filter when relevant before "
-                f"answering from memory. {route.description}",
-            )
     return None, None

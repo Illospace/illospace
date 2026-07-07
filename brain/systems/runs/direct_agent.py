@@ -1702,22 +1702,17 @@ async def run_agent_async(
                     raw_archive_messages.append(copy.deepcopy(state.messages[-1]))
                 if guidance_count:
                     continue
-                output = _extract_text(state.messages)
-                # A heuristic-derived (non-explicit) required-introspection tool is a
-                # low-confidence guess. If the model already produced a substantial
-                # answer without it, forcing the detour now would discard real work and
-                # emit a runtime self-description instead (issue #249). Explicit routing
-                # metadata stays authoritative and is always honored.
-                _DERIVED_INTROSPECTION_ANSWER_LIMIT = 400
+                # Only an EXPLICIT routing directive (metadata["required_introspection_tool"])
+                # may force a hidden-context tool at end-of-turn. There is no heuristic
+                # forcing: guessed detours repeatedly hijacked completed answers with a
+                # runtime self-description (issue #249). A competent model calls its
+                # context tools voluntarily.
                 if (
-                    required_introspection_tool
+                    required_introspection_explicit
+                    and required_introspection_tool
                     and _tool_is_available(tools, required_introspection_tool)
                     and required_introspection_tool in tool_handlers
                     and required_introspection_tool not in state.tool_calls_made
-                    and (
-                        required_introspection_explicit
-                        or len(output.strip()) < _DERIVED_INTROSPECTION_ANSWER_LIMIT
-                    )
                 ):
                     _append_message_with_archive(
                         state.messages,
