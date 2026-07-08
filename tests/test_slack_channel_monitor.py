@@ -79,6 +79,44 @@ def test_monitored_channel_plain_message_admitted_as_channel_message():
     assert envelope["idempotency_key"] == "slack:T789:C_ALERTS:1716900000.000200"
 
 
+def test_monitored_channel_reply_threads_under_alert():
+    """A monitored-channel triage reply must thread UNDER the original alert.
+
+    Regression: monitored alerts are top-level (thread_ts == message_ts). The
+    default reply-target logic drops thread_ts for top-level messages (so Illo
+    does not force threads on plain mentions), which sent Illo's monitored-channel
+    reply as a detached top-level message instead of a threaded reply under the
+    alert. The monitored-channel origin is the deliberate exception.
+    """
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    envelope = normalize_slack_socket_event(
+        _socket_mode_channel_message(),
+        bot_user_id="BILLO",
+        monitored_channels={"C_ALERTS"},
+    )
+
+    assert envelope is not None
+    assert envelope["origin"] == "slack.channel_message"
+    # Threads under the alert's own ts, in both mirrors of response_target.
+    assert envelope["hints"]["response_target"]["thread_ts"] == "1716900000.000200"
+    assert envelope["payload"]["response_target"]["thread_ts"] == "1716900000.000200"
+
+
+def test_monitored_channel_reply_threads_under_existing_parent_thread():
+    """If the monitored alert is itself already threaded, reply under its parent."""
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    envelope = normalize_slack_socket_event(
+        _socket_mode_channel_message(thread_ts="1716899999.000001"),
+        bot_user_id="BILLO",
+        monitored_channels={"C_ALERTS"},
+    )
+
+    assert envelope is not None
+    assert envelope["hints"]["response_target"]["thread_ts"] == "1716899999.000001"
+
+
 def test_unmonitored_channel_plain_message_is_ignored():
     from brain.systems.slack.ingress import normalize_slack_socket_event
 
@@ -243,6 +281,9 @@ def test_build_payload_for_mention_still_forces_reply():
     assert metadata["required_response_tool"] == "post_slack_reply"
     assert metadata["final_answer_target_surface"] == "slack"
     assert "headless" not in metadata
+    # Origin-scoped: the monitored-channel threading exception must NOT change
+    # mention behavior — a top-level mention still replies top-level (no thread).
+    assert metadata["slack_trigger"]["response_target"]["thread_ts"] is None
 
 
 def test_agent_run_request_for_monitor_is_headless_without_forced_tool():
@@ -266,6 +307,26 @@ def test_agent_run_request_for_monitor_is_headless_without_forced_tool():
     assert request.metadata.get("final_answer_target_surface") == "headless"
     assert request.target_ref.get("headless") is True
     assert request.target_ref.get("slack_trigger", {}).get("channel_id") == "C_ALERTS"
+
+
+def test_channel_monitor_reply_target_threads_under_alert():
+    """The trigger built for a monitored message carries a thread anchor so an
+    explicit post_slack_reply (the only reply path in a headless monitor run)
+    threads under the alert rather than posting a detached channel message.
+    """
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
+    payload = build_slack_work_intake_payload(
+        org_id="org1",
+        authority_user_id="user1",
+        payload=_channel_monitor_payload(),
+        inbound_event_id="evt1",
+        connection_id="conn1",
+        idempotency_key="idem1",
+    )
+
+    slack_trigger = payload["payload"]["metadata"]["slack_trigger"]
+    assert slack_trigger["response_target"]["thread_ts"] == "1716900000.000200"
 
 
 # --------------------------------------------------------------------------- #

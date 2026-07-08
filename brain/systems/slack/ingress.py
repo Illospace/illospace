@@ -120,17 +120,30 @@ def _surface(channel_type: str, thread_ts: str, message_ts: str) -> str:
     return "slack_channel"
 
 
-def _response_thread_ts(channel_type: str, thread_ts: str, message_ts: str) -> str | None:
+def _response_thread_ts(
+    channel_type: str,
+    thread_ts: str,
+    message_ts: str,
+    *,
+    is_monitored_channel: bool = False,
+) -> str | None:
     """Return the Slack thread timestamp Illo should use for its visible reply.
 
     Slack uses ``thread_ts=message_ts`` to create a thread under a top-level
     message. That made top-level mentions look like Illo could only answer in
     threads. The response target should only carry a thread when the user invoked
     Illo from an existing Slack thread. DMs should stay as normal DM messages.
+
+    Monitored-channel triage is the deliberate exception: a reply to an alert
+    threads *under the original alert* (its ``thread_ts`` or ``message_ts``) so
+    the alert and Illo's response stay attached, instead of landing as a detached
+    top-level message that fragments the follow-up.
     """
 
     if channel_type == "im":
         return None
+    if is_monitored_channel:
+        return thread_ts or message_ts or None
     if thread_ts and thread_ts != message_ts:
         return thread_ts
     return None
@@ -185,7 +198,12 @@ def normalize_slack_socket_event(
     surface = _surface(channel_type, thread_ts, message_ts)
     response_target = {
         "channel_id": channel_id,
-        "thread_ts": _response_thread_ts(channel_type, thread_ts, message_ts),
+        "thread_ts": _response_thread_ts(
+            channel_type,
+            thread_ts,
+            message_ts,
+            is_monitored_channel=origin == SLACK_CHANNEL_MESSAGE_ORIGIN,
+        ),
         "visibility": "public",
     }
     permalink = str(event.get("permalink") or "").strip() or None

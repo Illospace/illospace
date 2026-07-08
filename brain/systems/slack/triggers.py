@@ -150,11 +150,13 @@ def slack_response_target(payload: Mapping[str, Any]) -> dict[str, Any]:
     existing = payload.get("response_target")
     channel_type = _clean(payload.get("channel_type"))
     message_ts = _clean(payload.get("message_ts"))
+    is_monitored_channel = _clean(payload.get("origin")) == SLACK_CHANNEL_MESSAGE_ORIGIN
     if isinstance(existing, Mapping):
         thread_ts = _response_thread_ts(
             channel_type,
             _clean(existing.get("thread_ts")),
             message_ts,
+            is_monitored_channel=is_monitored_channel,
         )
         return {
             "channel_id": _clean(existing.get("channel_id") or payload.get("channel_id")),
@@ -164,14 +166,29 @@ def slack_response_target(payload: Mapping[str, Any]) -> dict[str, Any]:
     thread_ts = _clean(payload.get("thread_ts") or message_ts)
     return {
         "channel_id": _clean(payload.get("channel_id")),
-        "thread_ts": _response_thread_ts(channel_type, thread_ts, message_ts),
+        "thread_ts": _response_thread_ts(
+            channel_type,
+            thread_ts,
+            message_ts,
+            is_monitored_channel=is_monitored_channel,
+        ),
         "visibility": "public",
     }
 
 
-def _response_thread_ts(channel_type: str, thread_ts: str, message_ts: str) -> str | None:
+def _response_thread_ts(
+    channel_type: str,
+    thread_ts: str,
+    message_ts: str,
+    *,
+    is_monitored_channel: bool = False,
+) -> str | None:
     if channel_type == "im":
         return None
+    if is_monitored_channel:
+        # Monitored-channel triage replies thread under the original alert so the
+        # alert and Illo's response stay attached. See ingress._response_thread_ts.
+        return thread_ts or message_ts or None
     if thread_ts and thread_ts != message_ts:
         return thread_ts
     return None
