@@ -660,6 +660,7 @@ async def async_resolve_project_bound_env_tokens(
     project_slug: str | None = None,
     project_slugs: list[str] | tuple[str, ...] | set[str] | None = None,
     target_registry_id: int | None = None,
+    github_app_only: bool = False,
 ) -> dict[str, str]:
     """Return env-name/token pairs for matching org project bindings."""
     if not project_slug and not project_slugs and target_registry_id is None:
@@ -678,6 +679,8 @@ async def async_resolve_project_bound_env_tokens(
                 target_registry_id=target_registry_id,
             )
         ]:
+            if github_app_only and getattr(secret, "category", None) != "github_app":
+                continue
             if getattr(secret, "category", None) == "github_app":
                 secret.last_accessed_at = datetime.now(timezone.utc)
                 secret.access_count = (secret.access_count or 0) + 1

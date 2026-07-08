@@ -65,17 +65,14 @@ async def _github_token_candidates(
     token_secret_key: str | None,
     for_write: bool = False,
 ) -> list[dict[str, str | None]]:
-    """Return safe token candidates for a GitHub repo read.
+    """Return safe token candidates for a GitHub repo operation.
 
     A bad explicit key should not strand a read when the org has a project-bound
     or default GitHub token that can see the target repo.
 
-    ``for_write`` narrows the vault-inventory fallback to the canonical
-    ``GITHUB_TOKEN``/``GH_TOKEN`` default. A read may fall back to any available
-    github-ish secret, but an irreversible public write must not silently author
-    an issue under an arbitrary teammate's personal token — write identity is
-    limited to an explicit key, a repo project-binding, or the designated
-    default token.
+    ``for_write`` restricts automatic identity selection to GitHub App project
+    bindings. Writes may also use an explicit ``token_secret_key``. Reads keep
+    the broader project-binding and vault-inventory fallback behavior.
     """
 
     user_id = _clean(getattr(_agent_context, "user_id", None))
@@ -113,6 +110,7 @@ async def _github_token_candidates(
                 actor_user_id=user_id,
                 org_id=org_id,
                 project_slug=repo_slug,
+                github_app_only=for_write,
             )
         except Exception:
             bound_env = {}
@@ -121,36 +119,33 @@ async def _github_token_candidates(
         for env_name, token in sorted(bound_env.items()):
             await add_token(token, f"project_binding:{env_name}")
 
-        try:
-            secrets = await async_list_secrets(actor_user_id=user_id, org_id=org_id)
-        except Exception:
-            secrets = []
+        if not for_write:
+            try:
+                secrets = await async_list_secrets(actor_user_id=user_id, org_id=org_id)
+            except Exception:
+                secrets = []
 
-        def priority(secret: dict[str, Any]) -> tuple[int, str]:
-            key = str(secret.get("key_name") or "")
-            if key == "GITHUB_TOKEN":
-                return (0, key)
-            if str(secret.get("category") or "").lower() == "github":
-                return (1, key)
-            return (2, key)
+            def priority(secret: dict[str, Any]) -> tuple[int, str]:
+                key = str(secret.get("key_name") or "")
+                if key == "GITHUB_TOKEN":
+                    return (0, key)
+                if str(secret.get("category") or "").lower() == "github":
+                    return (1, key)
+                return (2, key)
 
-        github_like = [
-            secret
-            for secret in secrets
-            if normalize_agent_access_level(secret.get("agent_access_level"))
-            == VAULT_AGENT_ACCESS_AVAILABLE
-            and (
-                str(secret.get("key_name") or "") in {"GITHUB_TOKEN", "GH_TOKEN"}
-                if for_write
-                else (
+            github_like = [
+                secret
+                for secret in secrets
+                if normalize_agent_access_level(secret.get("agent_access_level"))
+                == VAULT_AGENT_ACCESS_AVAILABLE
+                and (
                     str(secret.get("key_name") or "") == "GITHUB_TOKEN"
                     or "github" in str(secret.get("key_name") or "").lower()
                     or str(secret.get("category") or "").lower() == "github"
                 )
-            )
-        ]
-        for secret in sorted(github_like, key=priority):
-            await add_secret_key(str(secret.get("key_name") or ""), "vault_inventory")
+            ]
+            for secret in sorted(github_like, key=priority):
+                await add_secret_key(str(secret.get("key_name") or ""), "vault_inventory")
 
     if not candidates:
         candidates.append({"key_name": None, "token": None, "source": "public"})
@@ -308,9 +303,8 @@ async def _handle_create_github_issue(
     if not write_candidates:
         return json.dumps({
             "error": (
-                "No write-capable GitHub token could reach this repo. Ask for clarification "
-                "(which repo, or a write-capable token) or fall back to an internal tracker "
-                "record + handoff — do not claim a GitHub issue was filed."
+                f"No GitHub App identity is connected for {repo_slug}. Connect the GitHub App "
+                "for this repo (or pass token_secret_key) so Illo can write as its own bot."
             ),
             "status_code": 401,
             "no_write_token": True,

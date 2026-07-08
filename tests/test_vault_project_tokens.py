@@ -421,6 +421,67 @@ async def test_github_app_project_binding_mints_before_manual_skip(patch_uow, se
     }
 
 
+async def test_resolve_project_bound_env_tokens_can_filter_to_github_app_only(patch_uow, session, monkeypatch):
+    from brain.systems.vault import async_resolve_project_bound_env_tokens
+
+    github_app = await _secret(
+        session,
+        "GITHUB_APP__ILLO",
+        "github-app-blob",
+        access_level="manual",
+        category="github_app",
+    )
+    await _binding(
+        session,
+        github_app,
+        project_slug="uwear-ai/uwear-backend",
+        env_name="GITHUB_TOKEN",
+    )
+    personal = await _secret(
+        session,
+        "AXEL_LEGACY",
+        "personal-token",
+        access_level="ask",
+        category="github",
+    )
+    await _binding(
+        session,
+        personal,
+        project_slug="uwear-ai/uwear-backend",
+        env_name="GH_TOKEN",
+    )
+
+    async def async_mint_installation_token(decrypted_blob, *, repositories, permissions):
+        assert decrypted_blob == "github-app-blob"
+        assert repositories == ["uwear-backend"]
+        assert permissions == {"issues": "write"}
+        return "minted-installation-token"
+
+    monkeypatch.setattr(
+        "brain.systems.vault.github_app_mint.async_mint_installation_token",
+        async_mint_installation_token,
+    )
+
+    app_only = await async_resolve_project_bound_env_tokens(
+        actor_user_id=OTHER_USER_ID,
+        org_id=ORG_ID,
+        project_slug="uwear-ai/uwear-backend",
+        github_app_only=True,
+    )
+    all_bound = await async_resolve_project_bound_env_tokens(
+        actor_user_id=OTHER_USER_ID,
+        org_id=ORG_ID,
+        project_slug="uwear-ai/uwear-backend",
+        github_app_only=False,
+    )
+
+    assert app_only == {"GITHUB_TOKEN": "minted-installation-token"}
+    assert all_bound == {
+        "GITHUB_TOKEN": "minted-installation-token",
+        "GH_TOKEN": "personal-token",
+    }
+
+
 async def test_create_github_issue_uses_minted_github_app_project_binding(
     patch_uow,
     session,
@@ -480,6 +541,185 @@ async def test_create_github_issue_uses_minted_github_app_project_binding(
     assert access_request["json"]["repositories"] == ["uwear-backend"]
     assert access_request["json"]["permissions"] == {"issues": "write"}
     assert issue_request["headers"]["Authorization"] == "Bearer minted-issue-token"
+
+
+async def test_create_github_issue_does_not_use_personal_project_binding(
+    patch_uow,
+    session,
+    monkeypatch,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.github import _handle_create_github_issue
+
+    personal = await _secret(
+        session,
+        "AXEL_LEGACY",
+        "personal-token",
+        access_level="ask",
+        category="github",
+    )
+    await _binding(
+        session,
+        personal,
+        project_slug="uwear-ai/uwear-backend",
+        env_name="GH_TOKEN",
+    )
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("personal token must not be used for GitHub writes")
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.github.async_create_repo_issue",
+        fail_if_called,
+    )
+
+    with bind_agent_context({"user_id": USER_ID, "org_id": ORG_ID}):
+        result = await _handle_create_github_issue(
+            repo="uwear-ai/uwear-backend",
+            title="Backend incident",
+        )
+
+    payload = json.loads(result)
+    assert payload["repo"] == "uwear-ai/uwear-backend"
+    assert payload["status_code"] == 401
+    assert payload["no_write_token"] is True
+    assert "No GitHub App identity is connected for uwear-ai/uwear-backend" in payload["error"]
+
+
+async def test_create_github_issue_does_not_use_canonical_inventory_personal_token(
+    patch_uow,
+    session,
+    monkeypatch,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.github import _handle_create_github_issue
+
+    await _secret(
+        session,
+        "GITHUB_TOKEN",
+        "personal-inventory-token",
+        access_level="available",
+        category="github",
+    )
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("inventory token must not be used for GitHub writes")
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.github.async_create_repo_issue",
+        fail_if_called,
+    )
+
+    with bind_agent_context({"user_id": USER_ID, "org_id": ORG_ID}):
+        result = await _handle_create_github_issue(
+            repo="uwear-ai/uwear-backend",
+            title="Backend incident",
+        )
+
+    payload = json.loads(result)
+    assert payload["repo"] == "uwear-ai/uwear-backend"
+    assert payload["status_code"] == 401
+    assert payload["no_write_token"] is True
+    assert "No GitHub App identity is connected for uwear-ai/uwear-backend" in payload["error"]
+
+
+async def test_create_github_issue_honors_explicit_token_secret_key_for_write(
+    patch_uow,
+    session,
+    monkeypatch,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.github import _handle_create_github_issue
+
+    await _secret(
+        session,
+        "CUSTOM_WRITE_TOKEN",
+        "explicit-write-token",
+        access_level="available",
+        category="github",
+    )
+    issued_with = {}
+
+    async def fake_create_repo_issue(repo_slug, *, title, body, labels, assignees, token):
+        issued_with["repo_slug"] = repo_slug
+        issued_with["token"] = token
+        return {
+            "repo": repo_slug,
+            "issue": {
+                "number": 123,
+                "html_url": "https://github.com/uwear-ai/uwear-backend/issues/123",
+                "title": title,
+                "state": "open",
+            },
+        }
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.github.async_create_repo_issue",
+        fake_create_repo_issue,
+    )
+
+    with bind_agent_context({"user_id": USER_ID, "org_id": ORG_ID}):
+        result = await _handle_create_github_issue(
+            repo="uwear-ai/uwear-backend",
+            title="Backend incident",
+            token_secret_key="CUSTOM_WRITE_TOKEN",
+        )
+
+    payload = json.loads(result)
+    assert payload["repo"] == "uwear-ai/uwear-backend"
+    assert payload["issue"]["number"] == 123
+    assert payload["token_secret_key_used"] is True
+    assert payload["token_source"] == "explicit"
+    assert payload["token_key_name"] == "CUSTOM_WRITE_TOKEN"
+    assert payload.get("no_write_token") is not True
+    assert issued_with == {
+        "repo_slug": "uwear-ai/uwear-backend",
+        "token": "explicit-write-token",
+    }
+
+
+async def test_read_token_candidates_still_use_personal_binding_and_inventory(
+    patch_uow,
+    session,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.github import _github_token_candidates
+
+    personal = await _secret(
+        session,
+        "AXEL_LEGACY",
+        "personal-bound-token",
+        access_level="ask",
+        category="github",
+    )
+    await _binding(
+        session,
+        personal,
+        project_slug="uwear-ai/uwear-backend",
+        env_name="GH_TOKEN",
+    )
+    await _secret(
+        session,
+        "GITHUB_TOKEN",
+        "personal-inventory-token",
+        access_level="available",
+        category="github",
+    )
+
+    with bind_agent_context({"user_id": USER_ID, "org_id": ORG_ID}):
+        candidates = await _github_token_candidates(
+            repo_slug="uwear-ai/uwear-backend",
+            token_secret_key=None,
+            for_write=False,
+        )
+
+    assert {
+        (candidate["source"], candidate["token"])
+        for candidate in candidates
+    } == {
+        ("project_binding:GH_TOKEN", "personal-bound-token"),
+        ("vault_inventory", "personal-inventory-token"),
+    }
 
 
 async def test_project_bindings_require_org_scope(patch_uow, session):
