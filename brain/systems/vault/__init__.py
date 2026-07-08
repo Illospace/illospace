@@ -721,14 +721,17 @@ async def async_resolve_project_bound_env_tokens(
             assert value is not None
             env[env_name] = value
             continue
-        from brain.systems.vault.github_app_mint import async_mint_installation_token
+        from brain.systems.vault.github_app_mint import (
+            DEFAULT_INSTALLATION_PERMISSIONS,
+            async_mint_installation_token,
+        )
 
         assert repo_name is not None
         try:
             env[env_name] = await async_mint_installation_token(
                 decrypted_blob,
                 repositories=[repo_name],
-                permissions={"issues": "write"},
+                permissions=DEFAULT_INSTALLATION_PERMISSIONS,
             )
         finally:
             decrypted_blob = None
