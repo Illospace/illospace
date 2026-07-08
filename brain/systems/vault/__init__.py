@@ -728,7 +728,16 @@ async def async_resolve_project_bound_env_tokens(
             env[env_name] = await async_mint_installation_token(
                 decrypted_blob,
                 repositories=[repo_name],
-                permissions={"issues": "write"},
+                # issues:write authors issues; contents+pull_requests read let the
+                # App also serve read_github_source (PR/repo reads) instead of 404
+                # falling back to a personal token. The App install already holds
+                # these (no re-approval) and they stay READ-only, so the write
+                # blast-radius is unchanged (the token can still only mutate issues).
+                permissions={
+                    "issues": "write",
+                    "contents": "read",
+                    "pull_requests": "read",
+                },
             )
         finally:
             decrypted_blob = None
