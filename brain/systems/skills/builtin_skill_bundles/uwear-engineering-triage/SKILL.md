@@ -95,6 +95,12 @@ Two different places can hold work, and they are NOT the same thing:
 
 Decide as follows:
 
+- **One problem = one issue — check before filing.** Before calling
+  `create_github_issue`, search open AND recently-closed GitHub issues and
+  Domain 1 tracker records for the same error signature, Rollbar id, endpoint,
+  profile id, or root cause. If a match exists — even if closed — comment on or
+  reopen it instead of filing a new one. Never file a second issue for a symptom
+  already tracked, and never split one error/Rollbar alert into multiple issues.
 - **Repo and incident are both clear and a write-capable token can reach the
   repo:** open a real GitHub issue with `create_github_issue` in the correct
   repo (`uwear-ai/uwearaiapp`, `uwear-ai/uwear-backend`,
@@ -127,21 +133,34 @@ number and URL.
 - `In Review`: non-draft PR is open and awaiting review, CI, or merge.
 - `Blocked`: failing CI, requested changes, unclear owner, missing info, or
   external dependency.
-- `Done`: linked PR merged or issue closed.
+- `Done`: linked PR merged or issue closed. A `Done` item must not appear in
+  anyone's priority workset — see **Before Posting** and **Public Output**.
 - `Canceled` / `wontfix`: obsolete, duplicate, invalid, intentionally closed,
   or not worth doing.
 
 ## Ownership
 
-- Reda: frontend, website, UI/UX, visual/customer-facing app flows, product
-  review decisions.
-- Axel: agent/LLM/MCP work, backend data/model paths, database-heavy features,
-  AI behavior.
-- JB: infra, AWS, CI/runtime/platform, deployment, backend/platform review.
+Route by GitHub signal first, area second.
 
-Choose by the next action, not by the original author. Workload and momentum
-can inform the choice, but team-facing notes should only say owner, status,
-blocker, and next action.
+- **PRs are owned by their GitHub author.** The team does not do peer review, so
+  never assign a PR to a reviewer, a "review owner", or a "coordination owner".
+  The only next action on an open PR is a one-line reminder to its **author** to
+  merge or close it. Never put another person's name on someone else's open PR.
+- **Issues with a GitHub assignee** are owned by that assignee. Only use the area
+  fallback below when the issue has no GitHub assignee.
+- **Area fallback (unassigned issues only):**
+  - Reda: app/Studio UI, UX, visual, website, customer-facing app flows,
+    product-review decisions.
+  - Axel: agent/LLM/MCP and agent-mode tooling — Axel even when the code lives in
+    `uwearaiapp` — plus backend data/model paths, database-heavy features, AI
+    behavior.
+  - JB: infra, AWS, CI/runtime/platform, deployment, ArtDirection/queue/authoring.
+- Customer-reported generation-quality issues have **no owner** until an
+  investigation produces a hypothesis. Never pre-assign them to Axel — or anyone
+  — merely because the output came from an AI model.
+
+Choose by the next action, not by the original author. Team-facing notes should
+only say owner, status, blocker, and next action.
 
 ## Backlog Seed
 
@@ -198,11 +217,35 @@ entire backlog. Include scope counts, owner batches, close-candidate approval
 batches, and MCP search examples such as `cleanup:close-candidate`,
 `ready-for-agent`, `Reda`, `Axel`, `JB`, or `Blocked`.
 
+## Before Posting
+
+Re-check every item in the workset against these gates before posting; drop or
+fix any that fail:
+
+1. **State gate:** no `Done` item is in the priority list. A merged PR whose
+   issue is still open goes to the `Cleanup — safe to close` batch or gets
+   closed — never listed as active work.
+2. **Owner gate:** every PR is owned by its GitHub author with a "merge or close"
+   nudge and no other name attached. Every issue owner is the GitHub assignee, or
+   the area fallback only if unassigned. No customer-generation issue is
+   pre-assigned.
+3. **Dedup gate:** no two items describe the same underlying problem under
+   different issue numbers.
+
 ## Public Output
 
 Slack or team-facing summaries must be safe for teammates:
 
 - Say the priority workset is not the full backlog when relevant.
+- A `Done` item (linked PR merged) must never appear in a person's priority
+  workset, even if its GitHub issue is still open. If the PR is merged but the
+  issue is open, either close the issue (when closure authority is delegated and
+  the PR clearly resolves it) or list it **once** in a separate
+  `Cleanup — safe to close` batch at the end. Never carry a `Done` item across
+  check-ins as active work.
+- Never list the same underlying problem under two numbers. If a bug was re-filed
+  (a closed issue reopened under a new number, or one alert split into several),
+  collapse to the single active item and note the rest as duplicates.
 - Show concrete next actions with ticket/PR numbers, owners, and links when
   those links can be verified.
 - Mention only high-confidence dependency blockers or missing companion work;
