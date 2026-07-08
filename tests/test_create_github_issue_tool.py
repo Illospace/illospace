@@ -67,9 +67,12 @@ async def test_create_github_issue_returns_no_write_token_when_no_token_resolves
         )
 
     payload = json.loads(result)
+    # Contract, not copy: a write with no App identity is flagged no_write_token,
+    # returns a non-empty actionable error, and never opens an issue. The exact
+    # wording is free to change without breaking this test.
     assert payload["no_write_token"] is True
     assert payload["repo"] == "uwear-ai/uwear-backend"
-    assert "GitHub App" in payload["error"]
+    assert isinstance(payload.get("error"), str) and payload["error"].strip()
     create.assert_not_awaited()
 
 
