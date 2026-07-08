@@ -69,7 +69,7 @@ async def test_create_github_issue_returns_no_write_token_when_no_token_resolves
     payload = json.loads(result)
     assert payload["no_write_token"] is True
     assert payload["repo"] == "uwear-ai/uwear-backend"
-    assert "clarification" in payload["error"]
+    assert "GitHub App" in payload["error"]
     create.assert_not_awaited()
 
 
