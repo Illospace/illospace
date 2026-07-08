@@ -1,0 +1,31 @@
+schema_version = 1
+name = "uwear-generation-investigation"
+display_name = "Uwear Generation Investigation"
+version = "1.0.0"
+description = "Read-only recipe for investigating a customer-reported generation-quality complaint: given a profile_id, fetch the generation payload (prompt, inputs, model, QA/status) from production Postgres and form an evidence-backed hypothesis for why the customer got that result."
+license = "UNLICENSED"
+source = "self_hosted"
+visibility = "private_local"
+maturity = "emerging"
+
+[routing]
+triggers = [
+  { pattern = "why did the customer get this generation", direction = "for" },
+  { pattern = "customer reported a bad generation", direction = "for" },
+  { pattern = "investigate a generation for a profile", direction = "for" },
+  { pattern = "garment generation quality issue", direction = "for" },
+  { pattern = "generation quality complaint", direction = "for" },
+  { pattern = "unexpected generation result", direction = "for" },
+  { pattern = "customer support generation issue", direction = "for" },
+  { pattern = "explain this generation for a profile_id", direction = "for" },
+]
+
+[runtime]
+default_thinking_tier = "high"
+
+[permissions]
+toolsets = ["brain"]
+
+[loading]
+summary = "SKILL.md#role"
+procedure = "SKILL.md"

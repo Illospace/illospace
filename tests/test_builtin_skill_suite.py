@@ -260,6 +260,40 @@ def test_report_workspace_blocker_routes_to_headless_worker():
     assert any("Search for duplicates" in guardrail["text"] for guardrail in skill["guardrails"])
 
 
+def test_uwear_generation_investigation_bundle_uses_canonical_join():
+    from brain.systems.skills.builtin import (
+        BUILTIN_SKILL_BUNDLE_ROOT,
+        BUILTIN_SKILLS,
+        _filesystem_skill_bundle_names,
+    )
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    names = set(_filesystem_skill_bundle_names())
+    assert "uwear-generation-investigation" in names
+    # Filesystem team bundle, not a core product primitive.
+    assert "uwear-generation-investigation" not in BUILTIN_SKILLS
+
+    bundle = load_skill_bundle(
+        BUILTIN_SKILL_BUNDLE_ROOT / "uwear-generation-investigation"
+    )
+    assert bundle.manifest.source == "self_hosted"
+    assert bundle.manifest.visibility == "private_local"
+
+    procedure = bundle.skill_markdown
+    # The validated CANONICAL owner join, read-only credential, and the payload
+    # fields the hypothesis depends on.
+    assert "user_type = 'profile'" in procedure
+    assert "PROD_POSTGRES_READONLY_URL" in procedure
+    assert "tryon_prompt" in procedure
+    assert "generation_result_origin" in procedure
+    # Must actively warn off the legacy batch path that silently misses recent
+    # profiles (the trap that would have produced a wrong recipe).
+    assert "legacy" in procedure.lower()
+    assert "batch" in procedure.lower()
+    # Read-only safety must be spelled out, not assumed.
+    assert "read-only" in procedure.lower()
+
+
 def _has_text_items(items: Any, key: str) -> bool:
     if not isinstance(items, list) or not items:
         return False
