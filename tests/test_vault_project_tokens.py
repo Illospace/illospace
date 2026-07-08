@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import base64
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import func, select
 
 from brain.platform.db.models.environment import TargetRegistry  # noqa: F401 - resolves project binding FK target
@@ -85,12 +89,14 @@ async def _secret(
     actor_user_id=USER_ID,
     org_id: str | None = None,
     access_level="ask",
+    category="general",
 ) -> Secret:
     from brain.systems.vault import _encrypt
 
     secret = Secret(
         key_name=key_name,
         encrypted_value=_encrypt(value),
+        category=category,
         org_id=org_id or ORG_ID,
         created_by_user_id=actor_user_id,
         updated_by_user_id=actor_user_id,
@@ -121,6 +127,54 @@ async def _binding(
     session.add(binding)
     await session.flush()
     return binding
+
+
+class _MockGitHubClient:
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def request(self, method, url, *, headers=None, params=None, json=None):
+        self.requests.append({
+            "method": method,
+            "url": url,
+            "headers": dict(headers or {}),
+            "json": json,
+            "params": params,
+        })
+        if url.endswith("/app/installations/456/access_tokens"):
+            return httpx.Response(
+                201,
+                json={
+                    "token": "minted-issue-token",
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                },
+            )
+        if url.endswith("/repos/uwear-ai/uwear-backend/issues"):
+            return httpx.Response(
+                201,
+                json={
+                    "number": 321,
+                    "html_url": "https://github.com/uwear-ai/uwear-backend/issues/321",
+                    "title": json["title"],
+                    "state": "open",
+                },
+            )
+        return httpx.Response(404, json={"message": "unexpected mocked URL"})
+
+
+def _test_private_key_pem() -> str:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    ).decode("ascii")
 
 
 async def _grant_count(session) -> int:
@@ -271,6 +325,161 @@ async def test_resolve_project_bound_env_tokens_returns_org_bound_tokens_for_mem
     assert env == {"GITHUB_TOKEN": "ghp-test"}
     await session.refresh(github)
     assert github.access_count == 1
+
+
+async def test_github_app_project_binding_mints_before_manual_skip(patch_uow, session, monkeypatch):
+    from brain.systems.vault import async_resolve_project_bound_env_tokens
+
+    github_app = await _secret(
+        session,
+        "GITHUB_APP__ILLO",
+        "github-app-blob",
+        access_level="manual",
+        category="github_app",
+    )
+    await _binding(
+        session,
+        github_app,
+        project_slug="uwear-ai/uwear-backend",
+        env_name="GITHUB_TOKEN",
+    )
+    normal = await _secret(session, "NORMAL_TOKEN", "plain-token", access_level="ask")
+    await _binding(
+        session,
+        normal,
+        project_slug="uwear-ai/uwear-backend",
+        env_name="NORMAL_TOKEN",
+    )
+    manual = await _secret(session, "MANUAL_TOKEN", "manual-token", access_level="manual")
+    await _binding(
+        session,
+        manual,
+        project_slug="uwear-ai/uwear-backend",
+        env_name="MANUAL_TOKEN",
+    )
+    transaction_state = {"open": False}
+    mint_calls = []
+
+    class TrackingUoW(_TestUoW):
+        async def __aenter__(self):
+            transaction_state["open"] = True
+            return await super().__aenter__()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            try:
+                return await super().__aexit__(exc_type, exc, tb)
+            finally:
+                transaction_state["open"] = False
+
+    async def async_mint_installation_token(decrypted_blob, *, repositories, permissions):
+        mint_calls.append({
+            "decrypted_blob": decrypted_blob,
+            "repositories": repositories,
+            "permissions": permissions,
+            "transaction_open": transaction_state["open"],
+        })
+        return "minted-installation-token"
+
+    monkeypatch.setattr("brain.systems.vault.UnitOfWork", lambda: TrackingUoW(session))
+    monkeypatch.setattr(
+        "brain.systems.vault.github_app_mint.async_mint_installation_token",
+        async_mint_installation_token,
+    )
+
+    env = await async_resolve_project_bound_env_tokens(
+        actor_user_id=OTHER_USER_ID,
+        org_id=ORG_ID,
+        project_slug="uwear-ai/uwear-backend",
+    )
+
+    assert env == {
+        "GITHUB_TOKEN": "minted-installation-token",
+        "NORMAL_TOKEN": "plain-token",
+    }
+    assert mint_calls == [
+        {
+            "decrypted_blob": "github-app-blob",
+            "repositories": ["uwear-backend"],
+            "permissions": {"issues": "write"},
+            "transaction_open": False,
+        }
+    ]
+    await session.refresh(github_app)
+    await session.refresh(normal)
+    await session.refresh(manual)
+    assert github_app.access_count == 1
+    assert normal.access_count == 1
+    assert manual.access_count == 0
+    logs = (await session.scalars(select(VaultAccessLog).order_by(VaultAccessLog.key_name))).all()
+    assert {
+        log.key_name: log.accessed_by
+        for log in logs
+        if log.action == "read"
+    } == {
+        "GITHUB_APP__ILLO": "agent",
+        "NORMAL_TOKEN": "agent",
+    }
+
+
+async def test_create_github_issue_uses_minted_github_app_project_binding(
+    patch_uow,
+    session,
+    monkeypatch,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.github import _handle_create_github_issue
+    from brain.systems.vault import github_app_mint
+
+    github_app_mint._TOKEN_CACHE.clear()
+    github_app_mint._MINT_LOCKS.clear()
+    app_blob = json.dumps({
+        "app_id": "123",
+        "client_id": "Iv23.client",
+        "installation_id": "456",
+        "private_key_pem": _test_private_key_pem(),
+    })
+    github_app = await _secret(
+        session,
+        "GITHUB_APP__ILLO",
+        app_blob,
+        access_level="manual",
+        category="github_app",
+    )
+    await _binding(
+        session,
+        github_app,
+        project_slug="uwear-ai/uwear-backend",
+        env_name="GITHUB_TOKEN",
+    )
+    client = _MockGitHubClient()
+    monkeypatch.setattr(
+        "brain.systems.vault.github_app_mint.async_http_client",
+        lambda **_kwargs: client,
+    )
+    monkeypatch.setattr(
+        "brain.systems.cortex.project_context.github.async_http_client",
+        lambda **_kwargs: client,
+    )
+
+    with bind_agent_context({"user_id": USER_ID, "org_id": ORG_ID}):
+        result = await _handle_create_github_issue(
+            repo="uwear-ai/uwear-backend",
+            title="Backend incident",
+            body="Details",
+            labels=["bug"],
+        )
+
+    payload = json.loads(result)
+    assert payload["repo"] == "uwear-ai/uwear-backend"
+    assert payload["issue"]["number"] == 321
+    assert payload["token_source"] == "project_binding:GITHUB_TOKEN"
+    assert "token_key_name" in payload
+    assert payload.get("no_write_token") is not True
+    access_request = next(request for request in client.requests if request["url"].endswith("/access_tokens"))
+    issue_request = next(request for request in client.requests if request["url"].endswith("/issues"))
+    assert access_request["json"]["repositories"] == ["uwear-backend"]
+    assert access_request["json"]["permissions"] == {"issues": "write"}
+    assert issue_request["headers"]["Authorization"] == "Bearer minted-issue-token"
 
 
 async def test_project_bindings_require_org_scope(patch_uow, session):

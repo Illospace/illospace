@@ -1,10 +1,13 @@
 """Regression tests for vault hardening boundaries."""
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from starlette.testclient import TestClient
 
 from brain.app.api.main import app
@@ -56,6 +59,77 @@ def test_reveal_requires_personal_pin_setup_before_unlock():
     reveal.assert_not_called()
 
 
+def test_reveal_github_app_secret_omits_private_key_pem():
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nsecret-key-material\n-----END RSA PRIVATE KEY-----"
+    raw_value = json.dumps({
+        "app_id": 123,
+        "client_id": "Iv23.client",
+        "installation_id": "456",
+        "private_key_pem": pem,
+    })
+    with _client() as client, \
+         patch("brain.systems.vault.async_has_pin", return_value=True), \
+         patch("brain.systems.vault.async_validate_vault_token", return_value=True), \
+         patch(
+             "brain.systems.vault.async_get_secret_record",
+             return_value=SimpleNamespace(category="github_app"),
+         ), \
+         patch("brain.systems.vault.async_reveal_secret", return_value=raw_value):
+        response = client.get("/api/vault/GITHUB_APP__ILLO", headers={"X-Vault-Token": "ok"})
+
+    assert response.status_code == 200
+    value = json.loads(response.json()["value"])
+    assert value == {
+        "app_id": "123",
+        "client_id": "Iv23.client",
+        "installation_id": "456",
+    }
+    assert "private_key_pem" not in response.text
+    assert "secret-key-material" not in response.text
+
+
+def test_secret_create_validates_github_app_blob_without_affecting_other_categories():
+    from pydantic import ValidationError
+
+    from brain.app.api.schemas.vault import SecretCreate
+
+    SecretCreate(
+        key_name="GITHUB_APP__ILLO",
+        value=json.dumps({
+            "app_id": "123",
+            "installation_id": "456",
+            "private_key_pem": "-----BEGIN RSA PRIVATE KEY-----\nsecret\n-----END RSA PRIVATE KEY-----",
+        }),
+        category="github_app",
+        agent_access_level="manual",
+    )
+    SecretCreate(key_name="PLAIN", value="not-json", category="general")
+
+    for access_level in ("available", "ask"):
+        with pytest.raises(ValidationError) as exc:
+            SecretCreate(
+                key_name="GITHUB_APP__ILLO",
+                value=json.dumps({
+                    "app_id": "123",
+                    "installation_id": "456",
+                    "private_key_pem": "-----BEGIN RSA PRIVATE KEY-----\nsecret\n-----END RSA PRIVATE KEY-----",
+                }),
+                category="github_app",
+                agent_access_level=access_level,
+            )
+        assert "github_app secrets must be stored with agent_access_level 'manual'" in str(exc.value)
+
+    with pytest.raises(ValidationError) as exc:
+        SecretCreate(
+            key_name="GITHUB_APP__ILLO",
+            value="not-json-secret",
+            category="github_app",
+            agent_access_level="manual",
+        )
+    assert "valid JSON" in str(exc.value)
+    assert "not-json-secret" not in str(exc.value)
+
+
 def test_list_returns_metadata_without_unlock_when_pin_is_configured():
     secret = {
         "id": 1,
@@ -82,6 +156,45 @@ def test_list_returns_metadata_without_unlock_when_pin_is_configured():
     assert payload[0]["key_name"] == "OPENAI_API_KEY"
     assert "value" not in payload[0]
     list_secrets.assert_called_once_with(USER["id"], category=None, org_id=USER["org_id"])
+
+
+async def test_github_app_manual_secret_is_denied_on_agent_tool_runtime_lane(monkeypatch):
+    from brain.systems.vault.runtime_secrets import RuntimeSecretContext, RuntimeSecretUnavailable, read_runtime_secret
+
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nsecret-key-material\n-----END RSA PRIVATE KEY-----"
+
+    async def async_get_secret_record(key_name, actor_user_id, *, org_id):
+        return SimpleNamespace(category="github_app", agent_access_level="manual")
+
+    read_calls = []
+
+    async def read_agent_secret_for_runtime(key_name, **kwargs):
+        read_calls.append(key_name)
+        return {"error": "secret is marked manual and cannot be auto-read by agents"}
+
+    monkeypatch.setattr("brain.systems.vault.async_get_secret_record", async_get_secret_record)
+    monkeypatch.setattr(
+        "brain.systems.vault.agent_access.read_agent_secret_for_runtime",
+        read_agent_secret_for_runtime,
+    )
+
+    with pytest.raises(RuntimeSecretUnavailable) as exc:
+        await read_runtime_secret(
+            "GITHUB_APP__ILLO",
+            context=RuntimeSecretContext(
+                actor_user_id=USER["id"],
+                org_id=USER["org_id"],
+                run_id=42,
+            ),
+            reason="Agent-controlled secret_env mount must not expose GitHub App credentials.",
+            requested_by="secret_env_mount",
+            access="agent_tool",
+        )
+
+    assert read_calls == []
+    assert "GitHub App credential" in str(exc.value)
+    assert "secret-key-material" not in str(exc.value)
+    assert pem not in str(exc.value)
 
 
 def test_unlock_rejects_bad_pin_and_returns_session_token_for_good_pin():

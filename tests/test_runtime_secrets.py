@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,10 @@ async def test_agent_tool_runtime_secret_uses_central_agent_access(monkeypatch):
         kwargs["key_name"] = key_name
         return await read_agent_secret_for_runtime(**kwargs)
 
+    async def async_get_secret_record(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("brain.systems.vault.async_get_secret_record", async_get_secret_record)
     monkeypatch.setattr(
         "brain.systems.vault.agent_access.read_agent_secret_for_runtime",
         read_agent_secret_for_runtime_with_key,
@@ -77,7 +82,11 @@ async def test_service_runtime_secret_prefers_vault_before_env(monkeypatch):
         )
         return "vault-token"
 
+    async def async_get_secret_record(*_args, **_kwargs):
+        return None
+
     monkeypatch.setenv("SERVICE_TOKEN", "env-token")
+    monkeypatch.setattr("brain.systems.vault.async_get_secret_record", async_get_secret_record)
     monkeypatch.setattr("brain.systems.vault.get_secret", get_secret)
 
     value = await read_runtime_secret(
@@ -107,7 +116,11 @@ async def test_service_runtime_secret_can_fall_back_to_env(monkeypatch):
     async def get_secret(key_name, actor_user_id, *, org_id, accessed_by):
         return None
 
+    async def async_get_secret_record(*_args, **_kwargs):
+        return None
+
     monkeypatch.setenv("SERVICE_TOKEN", "env-token")
+    monkeypatch.setattr("brain.systems.vault.async_get_secret_record", async_get_secret_record)
     monkeypatch.setattr("brain.systems.vault.get_secret", get_secret)
 
     value = await read_runtime_secret(
@@ -120,6 +133,82 @@ async def test_service_runtime_secret_can_fall_back_to_env(monkeypatch):
     )
 
     assert value == "env-token"
+
+
+@pytest.mark.asyncio
+async def test_service_runtime_secret_denies_github_app_secret_before_decrypt(monkeypatch):
+    from brain.systems.vault.runtime_secrets import RuntimeSecretContext, RuntimeSecretUnavailable, read_runtime_secret
+
+    calls = []
+
+    async def async_get_secret_record(key_name, actor_user_id, *, org_id):
+        return SimpleNamespace(category="github_app")
+
+    async def get_secret(key_name, actor_user_id, *, org_id, accessed_by):
+        calls.append(key_name)
+        return "-----BEGIN RSA PRIVATE KEY-----\nsecret-key-material\n-----END RSA PRIVATE KEY-----"
+
+    monkeypatch.setattr("brain.systems.vault.async_get_secret_record", async_get_secret_record)
+    monkeypatch.setattr("brain.systems.vault.get_secret", get_secret)
+
+    with pytest.raises(RuntimeSecretUnavailable) as exc:
+        await read_runtime_secret(
+            "GITHUB_APP__ILLO",
+            context=RuntimeSecretContext(actor_user_id="user-1", org_id="org-1"),
+            reason="Service callers must not read GitHub App private keys.",
+            requested_by="service_tool",
+            access="service",
+        )
+
+    assert calls == []
+    assert "GitHub App credential" in str(exc.value)
+    assert "secret-key-material" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_access_level", ["available", "ask"])
+async def test_agent_tool_runtime_secret_denies_github_app_secret_before_agent_read(
+    monkeypatch,
+    agent_access_level,
+):
+    from brain.systems.vault.runtime_secrets import RuntimeSecretContext, RuntimeSecretUnavailable, read_runtime_secret
+
+    raw_blob = (
+        '{"app_id":"123","installation_id":"456",'
+        '"private_key_pem":"-----BEGIN RSA PRIVATE KEY-----\\nsecret-key-material\\n-----END RSA PRIVATE KEY-----"}'
+    )
+    read_calls = []
+
+    async def async_get_secret_record(key_name, actor_user_id, *, org_id):
+        return SimpleNamespace(category="github_app", agent_access_level=agent_access_level)
+
+    async def read_agent_secret_for_runtime(key_name, **kwargs):
+        read_calls.append(key_name)
+        return {"value": raw_blob}
+
+    monkeypatch.setattr("brain.systems.vault.async_get_secret_record", async_get_secret_record)
+    monkeypatch.setattr(
+        "brain.systems.vault.agent_access.read_agent_secret_for_runtime",
+        read_agent_secret_for_runtime,
+    )
+
+    with pytest.raises(RuntimeSecretUnavailable) as exc:
+        await read_runtime_secret(
+            "GITHUB_APP__ILLO",
+            context=RuntimeSecretContext(
+                actor_user_id="user-1",
+                org_id="org-1",
+                run_id=42,
+            ),
+            reason="Agent-controlled secret_env mount must not expose GitHub App credentials.",
+            requested_by="secret_env_mount",
+            access="agent_tool",
+        )
+
+    assert read_calls == []
+    assert "cannot be read by agents" in str(exc.value)
+    assert "secret-key-material" not in str(exc.value)
+    assert raw_blob not in str(exc.value)
 
 
 def _string_arg(node: ast.Call) -> str | None:
@@ -259,6 +348,8 @@ async def test_agent_tool_runtime_secret_falls_back_to_uppercase_legacy_key_when
     assert record_calls == [
         ("DataForSeoLogin", "user-1", "org-1"),
         ("DATAFORSEOLOGIN", "user-1", "org-1"),
+        # agent_tool github_app guard re-reads the selected candidate's record.
+        ("DATAFORSEOLOGIN", "user-1", "org-1"),
     ]
     assert read_calls == ["DATAFORSEOLOGIN"]
 
@@ -323,6 +414,7 @@ async def test_service_runtime_secret_falls_back_to_uppercase_legacy_vault_key(m
     assert value == "legacy-service-token"
     assert record_calls == [
         ("service_token", "user-1", "org-1"),
+        ("SERVICE_TOKEN", "user-1", "org-1"),
         ("SERVICE_TOKEN", "user-1", "org-1"),
     ]
     assert calls == [("SERVICE_TOKEN", "user-1", "org-1", "service_tool")]
