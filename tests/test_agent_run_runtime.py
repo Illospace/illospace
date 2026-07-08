@@ -2208,7 +2208,11 @@ async def test_runtime_tool_executor_stops_before_command_when_secret_mount_fail
     async def fake_runtime_secret_read(key, **kwargs):
         return {"error": "Vault grant required before this agent can read the secret", "key_name": key}
 
+    async def fake_secret_record(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr("brain.systems.vault.agent_access.read_agent_secret_for_runtime", fake_runtime_secret_read)
+    monkeypatch.setattr("brain.systems.vault.async_get_secret_record", fake_secret_record)
 
     runtime = _runtime("worker")
     executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)

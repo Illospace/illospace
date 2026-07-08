@@ -666,8 +666,8 @@ async def async_resolve_project_bound_env_tokens(
         return {}
     clean_org_id = _require_org_id(org_id)
     clean_actor_user_id = _require_actor_user_id(actor_user_id)
+    env_assignments: list[tuple[str, str | None, str | None, str | None]] = []
     async with UnitOfWork() as uow:
-        env: dict[str, str] = {}
         for binding, secret in [
             (binding, secret)
             for binding, secret in await _async_project_binding_rows(uow, org_id=clean_org_id)
@@ -678,6 +678,24 @@ async def async_resolve_project_bound_env_tokens(
                 target_registry_id=target_registry_id,
             )
         ]:
+            if getattr(secret, "category", None) == "github_app":
+                secret.last_accessed_at = datetime.now(timezone.utc)
+                secret.access_count = (secret.access_count or 0) + 1
+                await _async_log_access(
+                    org_id=clean_org_id,
+                    actor_user_id=clean_actor_user_id,
+                    secret_id=secret.id,
+                    key_name=secret.key_name,
+                    action="read",
+                    # github_app mint reads audit as agent on the binding lane.
+                    accessed_by="agent",
+                    uow=uow,
+                )
+                repo_name = binding.project_slug.split("/")[-1]
+                decrypted = _decrypt(bytes(secret.encrypted_value))
+                env_assignments.append((binding.env_name, None, repo_name, decrypted))
+                decrypted = None
+                continue
             if normalize_agent_access_level(getattr(secret, "agent_access_level", None)) == VAULT_AGENT_ACCESS_MANUAL:
                 continue
             secret.last_accessed_at = datetime.now(timezone.utc)
@@ -691,8 +709,27 @@ async def async_resolve_project_bound_env_tokens(
                 accessed_by="agent",
                 uow=uow,
             )
-            env[binding.env_name] = _decrypt(bytes(secret.encrypted_value))
-        return env
+            env_assignments.append((binding.env_name, _decrypt(bytes(secret.encrypted_value)), None, None))
+
+    env: dict[str, str] = {}
+    while env_assignments:
+        env_name, value, repo_name, decrypted_blob = env_assignments.pop(0)
+        if decrypted_blob is None:
+            assert value is not None
+            env[env_name] = value
+            continue
+        from brain.systems.vault.github_app_mint import async_mint_installation_token
+
+        assert repo_name is not None
+        try:
+            env[env_name] = await async_mint_installation_token(
+                decrypted_blob,
+                repositories=[repo_name],
+                permissions={"issues": "write"},
+            )
+        finally:
+            decrypted_blob = None
+    return env
 
 
 # ---------------------------------------------------------------------------

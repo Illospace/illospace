@@ -78,6 +78,43 @@ async def test_async_set_secret_creates_secret_without_sync_uow_bridge(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_async_set_and_get_github_app_secret_preserves_category_and_manual_access(monkeypatch):
+    blob = '{"app_id":"123","installation_id":"456","private_key_pem":"-----BEGIN KEY-----\\nsecret\\nKEY-----"}'
+    session = _Session()
+    _patch_uow(monkeypatch, session)
+    secret_holder = {"secret": None}
+
+    async def fake_secret_by_key(*_args, **_kwargs):
+        return secret_holder["secret"]
+
+    monkeypatch.setattr(vault, "_async_secret_by_key", fake_secret_by_key)
+    monkeypatch.setattr(vault, "_encrypt", lambda value: b"ciphertext")
+    monkeypatch.setattr(vault, "_decrypt", lambda value: blob)
+
+    async def fake_resolve_missing(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(vault, "async_resolve_missing", fake_resolve_missing)
+
+    await vault.async_set_secret(
+        "GITHUB_APP__ILLO",
+        blob,
+        ACTOR_ID,
+        org_id=ORG_ID,
+        category="github_app",
+        agent_access_level="manual",
+    )
+    secret = next(obj for obj in session.added if isinstance(obj, Secret))
+    secret_holder["secret"] = secret
+
+    value = await vault.async_get_secret("GITHUB_APP__ILLO", ACTOR_ID, org_id=ORG_ID)
+
+    assert value == blob
+    assert secret.category == "github_app"
+    assert secret.agent_access_level == "manual"
+
+
+@pytest.mark.asyncio
 async def test_async_get_secret_reads_and_audits_actor(monkeypatch):
     secret = SimpleNamespace(
         id=9,

@@ -109,13 +109,22 @@ async def read_runtime_secret(
 
     if access == "service":
         if actor_user_id and org_id:
-            from brain.systems.vault import get_secret
+            from brain.systems.vault import async_get_secret_record, get_secret
 
             candidate = await _select_existing_vault_key_candidate(
                 key_candidates,
                 actor_user_id=actor_user_id,
                 org_id=org_id,
             )
+            record = await async_get_secret_record(
+                candidate,
+                actor_user_id=actor_user_id,
+                org_id=org_id,
+            )
+            if getattr(record, "category", None) == "github_app":
+                raise RuntimeSecretUnavailable(
+                    f"Vault secret '{candidate}' is a GitHub App credential and cannot be read by service runtimes"
+                )
             value = await get_secret(
                 candidate,
                 actor_user_id=actor_user_id,
@@ -140,6 +149,7 @@ async def read_runtime_secret(
     if context.run_id is None:
         raise RuntimeSecretUnavailable("Runtime secret reads require an AgentRun id")
 
+    from brain.systems.vault import async_get_secret_record
     from brain.systems.vault.agent_access import read_agent_secret_for_runtime
 
     candidate = await _select_existing_vault_key_candidate(
@@ -147,6 +157,15 @@ async def read_runtime_secret(
         actor_user_id=actor_user_id,
         org_id=org_id,
     )
+    record = await async_get_secret_record(
+        candidate,
+        actor_user_id=actor_user_id,
+        org_id=org_id,
+    )
+    if getattr(record, "category", None) == "github_app":
+        raise RuntimeSecretUnavailable(
+            f"Vault secret '{candidate}' is a GitHub App credential and cannot be read by agents"
+        )
     response = await read_agent_secret_for_runtime(
         candidate,
         reason=reason,

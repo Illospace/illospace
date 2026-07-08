@@ -1,6 +1,7 @@
 """Vault router — org secret management, lock state, and audit."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,6 +17,7 @@ from brain.app.api.schemas.vault import (
     SecretReveal,
     VaultProjectBindingCreate,
     VaultProjectBindingRead,
+    validate_github_app_secret_value,
 )
 
 
@@ -33,6 +35,7 @@ class SecretUpdate(BaseModel):
     description: str | None = None
     category: str | None = None
     agent_access_level: str | None = Field(default=None, pattern="^(available|ask|manual)$")
+    model_config = {"hide_input_in_errors": True}
 
 
 class AgentGrantApproval(BaseModel):
@@ -80,6 +83,35 @@ def _raise_if_vault_not_configured(exc: RuntimeError) -> None:
         status_code=503,
         detail="Vault master key is not configured. Set VAULT_MASTER_KEY before saving or revealing secrets.",
     ) from exc
+
+
+def _masked_github_app_reveal(value: str) -> str:
+    try:
+        payload = json.loads(value)
+        if not isinstance(payload, dict):
+            raise ValueError
+        app_id = str(int(str(payload.get("app_id") or "").strip()))
+        installation_id = str(int(str(payload.get("installation_id") or "").strip()))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise HTTPException(
+            status_code=422,
+            detail="GitHub App credential cannot be revealed because the stored value is invalid.",
+        ) from None
+
+    masked = {
+        "app_id": app_id,
+        "installation_id": installation_id,
+    }
+    client_id = payload.get("client_id")
+    if isinstance(client_id, str):
+        clean_client_id = client_id.strip()
+        if clean_client_id and "\n" not in clean_client_id and len(clean_client_id) <= 128:
+            masked["client_id"] = clean_client_id
+    return json.dumps(masked, sort_keys=True)
+
+
+def _github_app_update_422(detail: str) -> HTTPException:
+    return HTTPException(status_code=422, detail=detail)
 
 
 async def _async_require_unlocked(request: Request, user: dict[str, Any]) -> None:
@@ -150,6 +182,20 @@ async def update_secret(
     if not secret:
         raise HTTPException(status_code=404, detail="Secret not found")
     updates = body.model_dump(exclude_unset=True)
+    effective_category = updates.get("category", getattr(secret, "category", None))
+    effective_level = updates.get("agent_access_level", getattr(secret, "agent_access_level", None))
+    if effective_category == "github_app":
+        try:
+            normalized_level = normalize_agent_access_level(effective_level)
+        except ValueError as exc:
+            raise _github_app_update_422(str(exc)) from exc
+        if normalized_level != "manual":
+            raise _github_app_update_422("github_app secrets must be stored with agent_access_level 'manual'")
+        if "value" in updates:
+            try:
+                validate_github_app_secret_value(updates["value"])
+            except ValueError as exc:
+                raise _github_app_update_422(str(exc)) from exc
     if "value" in updates:
         try:
             await async_set_secret(
@@ -329,16 +375,19 @@ async def reveal_secret(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     await _async_require_unlocked(request, user)
-    from brain.systems.vault import async_reveal_secret as _reveal
+    from brain.systems.vault import async_get_secret_record, async_reveal_secret as _reveal
 
     org_id, actor_user_id = _vault_identity(user)
     try:
+        secret = await async_get_secret_record(key_name, actor_user_id, org_id=org_id)
         value = await _reveal(key_name, actor_user_id=actor_user_id, org_id=org_id)
     except RuntimeError as exc:
         _raise_if_vault_not_configured(exc)
         raise
     if value is None:
         raise HTTPException(status_code=404, detail="Secret not found")
+    if getattr(secret, "category", None) == "github_app":
+        value = _masked_github_app_reveal(value)
     return SecretReveal(key_name=key_name, value=value)
 
 
