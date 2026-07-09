@@ -218,6 +218,60 @@ def _pull_request_payload(pr: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _pull_request_detail_payload(pr: dict[str, Any]) -> dict[str, Any]:
+    payload = _pull_request_payload(pr)
+    payload.update({
+        "mergeable": pr.get("mergeable"),
+        "mergeable_state": pr.get("mergeable_state"),
+        "merged": bool(pr.get("merged")),
+        "commits": pr.get("commits"),
+        "changed_files": pr.get("changed_files"),
+        "additions": pr.get("additions"),
+        "deletions": pr.get("deletions"),
+    })
+    return payload
+
+
+def _check_runs_payload(data: Any) -> dict[str, Any]:
+    raw_runs = data.get("check_runs") if isinstance(data, dict) else []
+    runs = [run for run in raw_runs if isinstance(run, dict)] if isinstance(raw_runs, list) else []
+    check_runs = [
+        {
+            "name": run.get("name"),
+            "status": run.get("status"),
+            "conclusion": run.get("conclusion"),
+            "details_url": run.get("details_url"),
+            "started_at": run.get("started_at"),
+            "completed_at": run.get("completed_at"),
+        }
+        for run in runs
+    ]
+    failure_conclusions = {
+        "action_required",
+        "cancelled",
+        "failure",
+        "stale",
+        "startup_failure",
+        "timed_out",
+    }
+    if not check_runs:
+        status = "none"
+    elif any(run.get("status") != "completed" for run in check_runs):
+        status = "pending"
+    elif any(run.get("conclusion") in failure_conclusions for run in check_runs):
+        status = "failure"
+    elif all(run.get("conclusion") in {"success", "neutral", "skipped"} for run in check_runs):
+        status = "success"
+    else:
+        status = "unknown"
+    total_count = data.get("total_count") if isinstance(data, dict) else None
+    return {
+        "status": status,
+        "total_count": int(total_count) if isinstance(total_count, int) else len(check_runs),
+        "check_runs": check_runs,
+    }
+
+
 def _merge_repos(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     merged: list[dict[str, Any]] = []
@@ -406,6 +460,95 @@ async def async_list_repo_pull_requests(
         "repo": slug,
         "state": params["state"],
         "pull_requests": [_pull_request_payload(item) for item in items[:max_items] if isinstance(item, dict)],
+    }
+
+
+async def async_get_pull_request(
+    slug: str,
+    pull_number: int,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Read one pull request and its head commit's check runs with one identity."""
+
+    owner, repo = slug.split("/", 1)
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        pr = await _async_request(
+            client,
+            "GET",
+            f"/repos/{owner}/{repo}/pulls/{pull_number}",
+            token=token,
+        )
+        head = pr.get("head") if isinstance(pr, dict) else None
+        head_sha = head.get("sha") if isinstance(head, dict) else None
+        if not head_sha:
+            raise GitHubConnectorError(status_code=502, message="GitHub pull request response omitted the head SHA.")
+        checks = await _async_request(
+            client,
+            "GET",
+            f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
+            token=token,
+            params={"per_page": GITHUB_ITEM_LIMIT, "page": 1},
+        )
+        total_checks = checks.get("total_count") if isinstance(checks, dict) else None
+        check_runs = checks.get("check_runs") if isinstance(checks, dict) else None
+        if isinstance(total_checks, int) and isinstance(check_runs, list):
+            page_count = (total_checks + GITHUB_ITEM_LIMIT - 1) // GITHUB_ITEM_LIMIT
+            for page in range(2, page_count + 1):
+                page_data = await _async_request(
+                    client,
+                    "GET",
+                    f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
+                    token=token,
+                    params={"per_page": GITHUB_ITEM_LIMIT, "page": page},
+                )
+                page_runs = page_data.get("check_runs") if isinstance(page_data, dict) else None
+                if isinstance(page_runs, list):
+                    check_runs.extend(page_runs)
+    return {
+        "repo": slug,
+        "pull_request": _pull_request_detail_payload(pr if isinstance(pr, dict) else {}),
+        "checks": _check_runs_payload(checks),
+    }
+
+
+async def async_get_repo_counts(
+    slug: str,
+    *,
+    token: str | None = None,
+    state: str = "open",
+) -> dict[str, Any]:
+    """Return exact issue and pull-request counts from authenticated GitHub Search."""
+
+    clean_state = (state or "open").strip().lower()
+    if clean_state not in {"open", "closed", "all"}:
+        raise GitHubConnectorError(status_code=422, message="Count state must be open, closed, or all.")
+    state_qualifier = "" if clean_state == "all" else f" is:{clean_state}"
+    counts: dict[str, int] = {}
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        for result_key, kind in (("issues", "issue"), ("pull_requests", "pr")):
+            data = await _async_request(
+                client,
+                "GET",
+                "/search/issues",
+                token=token,
+                params={
+                    "q": f"repo:{slug} is:{kind}{state_qualifier}",
+                    "per_page": 1,
+                },
+            )
+            raw_count = data.get("total_count") if isinstance(data, dict) else None
+            if not isinstance(raw_count, int):
+                raise GitHubConnectorError(
+                    status_code=502,
+                    message="GitHub search response omitted total_count.",
+                )
+            counts[result_key] = raw_count
+    return {
+        "repo": slug,
+        "state": clean_state,
+        "counts": counts,
+        "total_count": sum(counts.values()),
     }
 
 

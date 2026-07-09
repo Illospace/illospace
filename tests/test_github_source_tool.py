@@ -6,8 +6,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from brain.systems.cortex.project_context.github import GitHubConnectorError, _issue_payload
-from brain.systems.runs.execution_context import bind_agent_context
-from brain.systems.runs.tool_catalog.handlers.github import _handle_read_github_source
+from brain.systems.runs.execution_context import bind_agent_context, snapshot_agent_context
+from brain.systems.runs.tool_catalog.handlers.github import (
+    _github_token_candidates,
+    _handle_read_github_source,
+)
 
 
 def test_issue_payload_normalizes_github_issue_shape():
@@ -172,3 +175,387 @@ async def test_read_github_source_falls_back_from_project_binding_to_available_g
         "expired-token",
         "good-token",
     ]
+
+
+@pytest.mark.asyncio
+async def test_github_token_candidates_drop_known_legacy_and_put_primary_before_aliases():
+    async def fake_get_secret(key_name, *args, **kwargs):
+        return {"GITHUB_TOKEN": "primary-token"}.get(key_name)
+
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_get_secret",
+        new=AsyncMock(side_effect=fake_get_secret),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_secrets",
+        new=AsyncMock(
+            return_value=[
+                {
+                    "key_name": "GITHUB_TOKEN",
+                    "category": "github",
+                    "agent_access_level": "available",
+                }
+            ]
+        ),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_resolve_project_bound_env_tokens",
+        new=AsyncMock(
+            return_value={
+                "GITHUB_TOKEN__JB_LEGACY": "legacy-token",
+                "GITHUB_TOKEN__AXEL": "secondary-token",
+            }
+        ),
+    ):
+        candidates = await _github_token_candidates(
+            repo_slug="uwear-ai/uwear-backend",
+            token_secret_key=None,
+        )
+
+    assert [candidate["token"] for candidate in candidates] == [
+        "primary-token",
+        "secondary-token",
+    ]
+    assert all("LEGACY" not in candidate["source"] for candidate in candidates)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 404])
+async def test_read_github_source_does_not_retry_rejected_token_within_run(status_code: int):
+    attempts: list[str | None] = []
+
+    async def fake_list_issues(*args, token=None, **kwargs):
+        attempts.append(token)
+        if token == "bad-token":
+            raise GitHubConnectorError(status_code=status_code, message="Not visible")
+        return {"repo": "uwear-ai/uwear-backend", "issues": []}
+
+    bound_tokens = {
+        "GITHUB_TOKEN": "bad-token",
+        "GITHUB_TOKEN__AXEL": "good-token",
+    }
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_resolve_project_bound_env_tokens",
+        new=AsyncMock(return_value=bound_tokens),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_secrets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_repo_issues",
+        new=AsyncMock(side_effect=fake_list_issues),
+    ):
+        tool_context = snapshot_agent_context()
+        with bind_agent_context(tool_context):
+            first = json.loads(await _handle_read_github_source(repo="uwear-ai/uwear-backend"))
+        with bind_agent_context(tool_context):
+            second = json.loads(await _handle_read_github_source(repo="uwear-ai/uwear-backend"))
+
+    assert first["fallback_from_status_code"] == status_code
+    assert "fallback_from_status_code" not in second
+    assert attempts == ["bad-token", "good-token", "good-token"]
+
+
+@pytest.mark.asyncio
+async def test_read_github_source_prefers_repo_winner_for_follow_up_pull_checks():
+    attempts: list[tuple[str, str | None]] = []
+
+    async def fake_list_prs(*args, token=None, **kwargs):
+        attempts.append(("list", token))
+        if token == "explicit-token":
+            raise GitHubConnectorError(status_code=403, message="Forbidden")
+        return {"repo": "uwear-ai/uwear-backend", "pull_requests": [{"number": 42}]}
+
+    async def fake_get_pull(*args, token=None, **kwargs):
+        attempts.append(("detail", token))
+        return {
+            "repo": "uwear-ai/uwear-backend",
+            "pull_request": {"number": 42},
+            "checks": {"status": "success", "total_count": 1, "check_runs": []},
+        }
+
+    async def fake_get_secret(key_name, *args, **kwargs):
+        return {"EXPLICIT_TOKEN": "explicit-token"}.get(key_name)
+
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_get_secret",
+        new=AsyncMock(side_effect=fake_get_secret),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_resolve_project_bound_env_tokens",
+        new=AsyncMock(return_value={"GITHUB_TOKEN": "winning-token"}),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_secrets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_repo_pull_requests",
+        new=AsyncMock(side_effect=fake_list_prs),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_get_pull_request",
+        new=AsyncMock(side_effect=fake_get_pull),
+    ):
+        listed = json.loads(
+            await _handle_read_github_source(
+                action="list_pull_requests",
+                repo="uwear-ai/uwear-backend",
+                token_secret_key="EXPLICIT_TOKEN",
+            )
+        )
+        detailed = json.loads(
+            await _handle_read_github_source(
+                action="get_pull_request",
+                repo="uwear-ai/uwear-backend",
+                pull_number=42,
+                token_secret_key="EXPLICIT_TOKEN",
+            )
+        )
+
+    assert listed["fallback_from_status_code"] == 403
+    assert detailed["checks"]["status"] == "success"
+    assert attempts == [
+        ("list", "explicit-token"),
+        ("list", "winning-token"),
+        ("detail", "winning-token"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pull_check_read_uses_primary_without_trying_bound_legacy_token():
+    attempts: list[str | None] = []
+
+    async def fake_get_secret(key_name, *args, **kwargs):
+        return {"GITHUB_TOKEN": "primary-token"}.get(key_name)
+
+    async def fake_get_pull(*args, token=None, **kwargs):
+        attempts.append(token)
+        if token == "legacy-token":
+            raise GitHubConnectorError(status_code=404, message="Not visible")
+        return {
+            "repo": "uwear-ai/uwear-backend",
+            "pull_request": {"number": 42, "mergeable": True},
+            "checks": {"status": "success", "total_count": 2, "check_runs": []},
+        }
+
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_get_secret",
+        new=AsyncMock(side_effect=fake_get_secret),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_resolve_project_bound_env_tokens",
+        new=AsyncMock(return_value={"GITHUB_TOKEN__JB_LEGACY": "legacy-token"}),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_secrets",
+        new=AsyncMock(
+            return_value=[
+                {
+                    "key_name": "GITHUB_TOKEN",
+                    "category": "github",
+                    "agent_access_level": "available",
+                }
+            ]
+        ),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_get_pull_request",
+        new=AsyncMock(side_effect=fake_get_pull),
+    ):
+        result = json.loads(
+            await _handle_read_github_source(
+                action="get_pull_request",
+                repo="uwear-ai/uwear-backend",
+                pull_number=42,
+            )
+        )
+
+    assert result["checks"]["status"] == "success"
+    assert result["pull_request"]["mergeable"] is True
+    assert "fallback_from_status_code" not in result
+    assert attempts == ["primary-token"]
+
+
+@pytest.mark.asyncio
+async def test_read_github_source_still_falls_back_to_normal_secondary_token():
+    attempts: list[str | None] = []
+
+    async def fake_list_prs(*args, token=None, **kwargs):
+        attempts.append(token)
+        if token == "primary-token":
+            raise GitHubConnectorError(status_code=401, message="Expired")
+        return {"repo": "uwear-ai/uwear-backend", "pull_requests": []}
+
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_resolve_project_bound_env_tokens",
+        new=AsyncMock(
+            return_value={
+                "GITHUB_TOKEN": "primary-token",
+                "GITHUB_TOKEN__AXEL": "secondary-token",
+            }
+        ),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_secrets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_repo_pull_requests",
+        new=AsyncMock(side_effect=fake_list_prs),
+    ):
+        result = json.loads(
+            await _handle_read_github_source(
+                action="list_pull_requests",
+                repo="uwear-ai/uwear-backend",
+            )
+        )
+
+    assert result["token_source"] == "project_binding:GITHUB_TOKEN__AXEL"
+    assert attempts == ["primary-token", "secondary-token"]
+
+
+@pytest.mark.asyncio
+async def test_pull_request_reader_fetches_details_and_checks_with_same_token():
+    from brain.systems.cortex.project_context.github import async_get_pull_request
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(
+            side_effect=[
+                {
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": True,
+                    "mergeable_state": "clean",
+                    "head": {"ref": "fix-ci", "sha": "abc123"},
+                    "base": {"ref": "staging", "sha": "def456"},
+                },
+                {
+                    "total_count": 2,
+                    "check_runs": [
+                        {"name": "unit", "status": "completed", "conclusion": "success"},
+                        {"name": "lint", "status": "completed", "conclusion": "failure"},
+                    ],
+                },
+            ]
+        ),
+    ) as request:
+        result = await async_get_pull_request(
+            "uwear-ai/uwear-backend",
+            42,
+            token="primary-token",
+        )
+
+    assert result["pull_request"]["mergeable"] is True
+    assert result["pull_request"]["mergeable_state"] == "clean"
+    assert result["checks"]["status"] == "failure"
+    assert result["checks"]["total_count"] == 2
+    assert [call.args[2] for call in request.await_args_list] == [
+        "/repos/uwear-ai/uwear-backend/pulls/42",
+        "/repos/uwear-ai/uwear-backend/commits/abc123/check-runs",
+    ]
+    assert [call.kwargs["token"] for call in request.await_args_list] == [
+        "primary-token",
+        "primary-token",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_authenticated_github_search_reader_returns_exact_repo_counts():
+    from brain.systems.cortex.project_context.github import async_get_repo_counts
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(
+            side_effect=[
+                {"total_count": 17, "items": []},
+                {"total_count": 4, "items": []},
+            ]
+        ),
+    ) as request:
+        result = await async_get_repo_counts(
+            "uwear-ai/uwear-backend",
+            token="primary-token",
+            state="open",
+        )
+
+    assert result == {
+        "repo": "uwear-ai/uwear-backend",
+        "state": "open",
+        "counts": {"issues": 17, "pull_requests": 4},
+        "total_count": 21,
+    }
+    assert [call.kwargs["token"] for call in request.await_args_list] == [
+        "primary-token",
+        "primary-token",
+    ]
+    assert [call.kwargs["params"]["q"] for call in request.await_args_list] == [
+        "repo:uwear-ai/uwear-backend is:issue is:open",
+        "repo:uwear-ai/uwear-backend is:pr is:open",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_read_github_source_exact_counts_action_uses_authenticated_reader():
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_resolve_project_bound_env_tokens",
+        new=AsyncMock(return_value={"GITHUB_TOKEN": "primary-token"}),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_secrets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_get_repo_counts",
+        new=AsyncMock(
+            return_value={
+                "repo": "uwear-ai/uwear-backend",
+                "state": "open",
+                "counts": {"issues": 17, "pull_requests": 4},
+                "total_count": 21,
+            }
+        ),
+    ) as get_counts:
+        result = json.loads(
+            await _handle_read_github_source(
+                action="get_counts",
+                repo="uwear-ai/uwear-backend",
+            )
+        )
+
+    assert result["counts"] == {"issues": 17, "pull_requests": 4}
+    assert result["total_count"] == 21
+    get_counts.assert_awaited_once_with(
+        "uwear-ai/uwear-backend",
+        token="primary-token",
+        state="open",
+    )
+
+
+@pytest.mark.asyncio
+async def test_exact_counts_retry_search_422_with_healthy_secondary_token():
+    attempts: list[str | None] = []
+
+    async def fake_get_counts(repo, *, token, state):
+        attempts.append(token)
+        if token == "primary-token":
+            raise GitHubConnectorError(status_code=422, message="Validation Failed")
+        return {
+            "repo": repo,
+            "state": state,
+            "counts": {"issues": 17, "pull_requests": 4},
+            "total_count": 21,
+        }
+
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_resolve_project_bound_env_tokens",
+        new=AsyncMock(
+            return_value={
+                "GITHUB_TOKEN": "primary-token",
+                "GITHUB_TOKEN__AXEL": "secondary-token",
+            }
+        ),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_secrets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_get_repo_counts",
+        new=AsyncMock(side_effect=fake_get_counts),
+    ):
+        result = json.loads(
+            await _handle_read_github_source(
+                action="get_counts",
+                repo="uwear-ai/uwear-backend",
+            )
+        )
+
+    assert result["counts"] == {"issues": 17, "pull_requests": 4}
+    assert result["fallback_from_status_code"] == 422
+    assert attempts == ["primary-token", "secondary-token"]
