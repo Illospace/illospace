@@ -598,7 +598,7 @@ async def test_slack_thread_followup_reuses_slack_conversation_key_with_new_run(
 
 
 @pytest.mark.asyncio
-async def test_slack_connector_does_not_send_backend_authored_ack_for_actionable_payload(session, monkeypatch):
+async def test_slack_connector_sets_native_processing_status_for_actionable_payload(session, monkeypatch):
     from brain.systems.slack import connector
 
     connection = await _seed_slack_connection(session)
@@ -629,11 +629,21 @@ async def test_slack_connector_does_not_send_backend_authored_ack_for_actionable
         ),
     )
 
-    assert calls == []
+    assert calls == [
+        ("init", "xoxb-test"),
+        (
+            "status",
+            {
+                "channel_id": "C456",
+                "thread_ts": "1716900000.000100",
+                "status": "is working on it...",
+            },
+        ),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_slack_connector_does_not_send_backend_authored_ack_for_duplicate_run(session, monkeypatch):
+async def test_slack_connector_does_not_reset_native_status_for_duplicate_run(session, monkeypatch):
     from brain.systems.slack import connector
 
     first_connection = await _seed_slack_connection(session)
@@ -675,7 +685,17 @@ async def test_slack_connector_does_not_send_backend_authored_ack_for_duplicate_
         ),
     )
 
-    assert calls == []
+    assert calls == [
+        ("init", "xoxb-test"),
+        (
+            "status",
+            {
+                "channel_id": "C456",
+                "thread_ts": "1716900000.000100",
+                "status": "is working on it...",
+            },
+        ),
+    ]
 
 
 @pytest.mark.asyncio
