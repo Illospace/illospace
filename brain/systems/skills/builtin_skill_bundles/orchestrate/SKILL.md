@@ -31,7 +31,8 @@ skills, relevant repo/server/memory context, and any user corrections. Call
 3. For each run step define OBJECTIVE, SCOPE, INPUT, OUTPUT, DONE WHEN, EVIDENCE,
    RISKS, and allowed files/resources.
 4. Use parallel workers only when write scopes or resources are independent.
-5. Tell workers they are not alone in the codebase and must preserve others'
+5. Tell workers they are not alone in the shared workspace (the codebase for code
+   work; shared docs, records, and threads otherwise) and must preserve others'
    changes.
 6. Track dependencies in waves, then synthesize outputs after all required
    evidence is present.

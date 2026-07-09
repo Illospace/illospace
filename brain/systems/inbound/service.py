@@ -31,11 +31,13 @@ from brain.systems.inbound.status import (
     STATUS_QUARANTINED,
     STATUS_REVIEW_REQUIRED,
 )
+from brain.systems.inbound.assignment import default_rules, resolve_owner
 from brain.systems.inbound.preservation import (
     submission_preservation_contract,
     submission_preservation_prompt_lines,
 )
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
+from brain.systems.task_domain import classify_task_domain
 from brain.systems.user_domains.service import AsyncDomainService, DomainError, DomainNotFound
 
 
@@ -858,6 +860,24 @@ async def _complete_event_with_illo_triage(
     )
 
 
+def _unclaimed_pool_user_id() -> "str | None":
+    """The configured 'unclaimed pool' owner (``ILLO_UNCLAIMED_POOL_USER_ID``).
+    When set, owner-less triage items park here (visible, claimable) instead of
+    being skipped. Unset -> the pool is off and owner-less items skip as before."""
+    import os
+
+    value = os.environ.get("ILLO_UNCLAIMED_POOL_USER_ID", "").strip()
+    return value or None
+
+
+def _github_repo_from_origin(origin: "str | None") -> "str | None":
+    """Extract ``owner/repo`` from a ``github:owner/repo`` origin, else ``None``."""
+    if origin and str(origin).lower().startswith("github:"):
+        repo = str(origin).split(":", 1)[1].strip()
+        return repo or None
+    return None
+
+
 async def _queue_illo_triage(
     session: AsyncSession,
     *,
@@ -868,11 +888,45 @@ async def _queue_illo_triage(
     reason: str,
     reasoning_summary: str | None,
 ) -> dict[str, Any]:
-    if not context.owner_user_id:
-        return {"status": "skipped", "reason": "missing_authority_user"}
-
     origin = str(normalized.get("origin") or event.origin)
     source_name = context.display_name or context.source_kind or "external source"
+
+    # Deterministic domain + ownership. Rules (business/product -> Reda, repo->owner)
+    # are env-configured via default_rules(); with none set this resolves to the
+    # connection authority, preserving today's behavior.
+    # Classify on the message content (summary), never the origin identifier, so a
+    # source-name substring (e.g. "github:acme/ads-content") can't drive ownership.
+    signal_text = normalized.get("summary") or ""
+    repo = _github_repo_from_origin(origin)
+    task_domain = classify_task_domain(signal_text)
+    # task_domain (text heuristic) drives the checklist/labeling only. Let the
+    # domain rule reassign ownership ONLY on the GitHub lane (repo present), where
+    # the summary is a real issue/PR title; other lanes route by repo rule or the
+    # connection authority, so a stray keyword in a Slack message can't yank an
+    # item to a domain owner.
+    decision = resolve_owner(
+        task_domain=task_domain if repo else None,
+        repo=repo,
+        connection_owner_id=context.owner_user_id,
+        rules=default_rules(),
+    )
+    owner_user_id = decision.user_id
+    unclaimed = False
+    if not owner_user_id:
+        # No rule and no connection authority -> the unclaimed pool. Rather than
+        # loosen ideas.user_id (NOT NULL), park the item on a configured pool user
+        # (ILLO_UNCLAIMED_POOL_USER_ID); teammates claim it by reassigning. With no
+        # pool user configured, preserve the old skip so nothing changes.
+        pool_user_id = _unclaimed_pool_user_id()
+        if not pool_user_id:
+            return {
+                "status": "skipped",
+                "reason": "missing_authority_user",
+                "task_domain": task_domain.value,
+            }
+        owner_user_id = pool_user_id
+        unclaimed = True
+
     title = _truncate(f"Inbound signal needs Illo triage: {origin}", 180)
     idea = Idea(
         title=title,
@@ -883,7 +937,7 @@ async def _queue_illo_triage(
         status="emerged",
         origin="inbound_signal",
         origin_ref=f"inbound_event:{event.id}",
-        user_id=context.owner_user_id,
+        user_id=owner_user_id,
         org_id=context.org_id,
         agent_details={
             "inbound_triage": {
@@ -892,7 +946,14 @@ async def _queue_illo_triage(
                 "reason": reason,
                 "connection_id": context.connection_id,
                 "policy_id": str(policy.id) if policy is not None else None,
-            }
+            },
+            "task_domain": task_domain.value,
+            "assignment": {
+                "owner_id": owner_user_id,
+                "basis": decision.basis.value,
+                "authority_user_id": context.owner_user_id,
+                "unclaimed": unclaimed,
+            },
         },
     )
     session.add(idea)
@@ -921,7 +982,7 @@ async def _queue_illo_triage(
             "authority_user_id": context.owner_user_id,
         },
         message_type="message",
-        user_id=context.owner_user_id,
+        user_id=owner_user_id,
     )
     session.add(thread_message)
     await session.flush()
@@ -933,7 +994,10 @@ async def _queue_illo_triage(
             event_type="inbound.triage_required",
             org_id=context.org_id,
             actor={
-                "id": context.owner_user_id,
+                # Keep idea, thread, and run actor on one principal (the resolved
+                # owner), as the original code did — avoids a run-actor/idea-owner
+                # split. Defaults to the connection authority when no rule matched.
+                "id": owner_user_id,
                 "org_id": context.org_id,
                 "principal_type": "external_source_authority",
                 "name": source_name,

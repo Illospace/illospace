@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 from sqlalchemy import text as sa_text
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.task_domain import TaskDomain, classify_task_domain
 # ============================================================
 # Inline Allowlist
 # ============================================================
@@ -378,6 +379,19 @@ async def build_payload(
         context_block=context_text,
     )
 
+    # Domain-aware: don't force engineering rituals (TDD, run tests) onto
+    # non-engineering work. The execution template stays; we append the fitting bar.
+    task_domain = classify_task_domain(task)
+    # Only override on positive non-engineering evidence — an ambiguous OTHER keeps
+    # the engineering bar, mirroring self_assess.select_checklist. (Without this, a
+    # vaguely-worded real coding task classifies OTHER and wrongly loses TDD.)
+    if task_domain in (TaskDomain.BUSINESS, TaskDomain.PRODUCT, TaskDomain.OPS):
+        prompt += (
+            f"\nNote: this is {task_domain.value} work, not engineering. Apply the "
+            "quality bar that fits (objective, owner, deliverable) rather than "
+            "code/test rituals.\n"
+        )
+
     prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()[:16]
     label = _make_label(template["label_prefix"], task)
 
@@ -387,6 +401,7 @@ async def build_payload(
         "thinking": effective_thinking,
         "prompt": prompt,
         "task_type": task_type,
+        "task_domain": task_domain.value,
         "template": task_type,
         "context_injected": context_meta,
     }
