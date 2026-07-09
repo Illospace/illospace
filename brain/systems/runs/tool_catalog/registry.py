@@ -312,7 +312,9 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "risk_class": "low",
         "side_effect_class": "read_only",
         "reversibility": "none",
-        "expected_effect": "read bounded GitHub repository metadata, issues, or pull requests",
+        "expected_effect": (
+            "read bounded GitHub repository metadata, issues, pull requests, exact counts, or CI checks"
+        ),
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
     },

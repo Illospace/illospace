@@ -5,7 +5,17 @@ from __future__ import annotations
 from contextlib import contextmanager
 import contextvars
 from dataclasses import dataclass, field, fields
-from typing import Iterator, Mapping
+from typing import Callable, Iterator, Mapping, TypeVar, cast
+
+
+_StateT = TypeVar("_StateT")
+
+
+@dataclass
+class _AgentRunState:
+    """Mutable namespaces intentionally shared by cloned tool-call contexts."""
+
+    values: dict[str, object] = field(default_factory=dict)
 
 
 def _clone_context_value(value: object) -> object:
@@ -109,6 +119,17 @@ def get_agent_context_value(name: str, default=None):
     return getattr(_agent_context, name, default)
 
 
+def get_or_create_agent_run_state(namespace: str, factory: Callable[[], _StateT]) -> _StateT:
+    """Return state shared by tool calls in one bound agent run, never globally."""
+
+    holder = getattr(_agent_context, "_run_state", None)
+    if not isinstance(holder, _AgentRunState):
+        return factory()
+    if namespace not in holder.values:
+        holder.values[namespace] = factory()
+    return cast(_StateT, holder.values[namespace])
+
+
 def snapshot_agent_context() -> dict:
     """Capture the current task's bound AgentRun context attributes."""
     return _agent_context._copy()
@@ -130,6 +151,11 @@ def bind_agent_context(
 
     next_values = clone_agent_context_mapping(_context_values.get())
     next_values.update(clone_agent_context_mapping(attrs))
+    # A fresh explicit binding starts a new run-local scope. Runtime tool-call
+    # propagation includes the existing holder in ``attrs`` and therefore
+    # deliberately shares it with nested/cloned contexts.
+    if not isinstance(attrs.get("_run_state"), _AgentRunState):
+        next_values["_run_state"] = _AgentRunState()
     token = _context_values.set(next_values)
     try:
         yield _agent_context
@@ -143,5 +169,6 @@ __all__ = [
     "clone_agent_context_mapping",
     "current_agent_context",
     "get_agent_context_value",
+    "get_or_create_agent_run_state",
     "snapshot_agent_context",
 ]

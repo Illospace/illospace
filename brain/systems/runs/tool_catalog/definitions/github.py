@@ -7,19 +7,28 @@ GITHUB_TOOLS = [
     {
         "name": "read_github_source",
         "description": (
-            "Read bounded GitHub repository source data such as repo metadata, issues, and pull requests. "
-            "Use this as a generic source reader before writing findings into Domains, Cycles, Slack updates, "
-            "or inbound projections. This tool is read-only and accepts owner/name, GitHub URL, or git remote "
-            "repo values."
+            "Read bounded GitHub repository source data such as repo metadata, issues, pull requests, exact "
+            "issue/PR counts, and pull-request CI check status. Use this as a generic source reader before "
+            "writing findings into Domains, Cycles, Slack updates, or inbound projections. This tool is "
+            "read-only and accepts owner/name, GitHub URL, or git remote repo values."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["get_repo", "list_issues", "list_pull_requests"],
+                    "enum": [
+                        "get_repo",
+                        "list_issues",
+                        "list_pull_requests",
+                        "get_pull_request",
+                        "get_counts",
+                    ],
                     "default": "list_issues",
-                    "description": "Which GitHub source data to read.",
+                    "description": (
+                        "Which GitHub source data to read. get_pull_request includes mergeability and CI "
+                        "check runs; get_counts returns exact issue and PR counts for the requested state."
+                    ),
                 },
                 "repo": {
                     "type": "string",
@@ -47,6 +56,11 @@ GITHUB_TOOLS = [
                 },
                 "head": {"type": "string", "description": "Optional pull request head filter."},
                 "base": {"type": "string", "description": "Optional pull request base branch filter."},
+                "pull_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Pull request number required by get_pull_request.",
+                },
                 "limit": {"type": "integer", "default": 30, "description": "Maximum items to return, 1-100."},
                 "token_secret_key": {
                     "type": "string",

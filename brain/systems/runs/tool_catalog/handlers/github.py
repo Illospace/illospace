@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import json
 from typing import Any
 
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
     async_create_repo_issue,
+    async_get_pull_request,
+    async_get_repo_counts,
     async_get_repo_by_slug,
     async_list_repo_issues,
     async_list_repo_pull_requests,
     parse_github_repo_slug,
 )
+from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
 from brain.systems.vault import (
     VAULT_AGENT_ACCESS_AVAILABLE,
@@ -41,6 +45,40 @@ def _limit(value: Any) -> int:
         return max(1, min(int(value or 30), 100))
     except (TypeError, ValueError):
         return 30
+
+
+def _is_known_legacy_token_key(value: Any) -> bool:
+    key = str(value or "").strip().upper()
+    return "__" in key and key.endswith("_LEGACY")
+
+
+@dataclass
+class _GitHubReadState:
+    rejected: dict[tuple[str | None, str], GitHubConnectorError] = field(default_factory=dict)
+    preferred: dict[str, str | None] = field(default_factory=dict)
+
+
+def _github_read_state() -> _GitHubReadState:
+    """Return context-local token history for the current agent run."""
+
+    return get_or_create_agent_run_state("github_read", _GitHubReadState)
+
+
+def _ordered_read_candidates(
+    candidates: list[dict[str, str | None]],
+    *,
+    repo_slug: str,
+    state: _GitHubReadState,
+) -> list[dict[str, str | None]]:
+    available = [
+        candidate
+        for candidate in candidates
+        if (candidate.get("token"), repo_slug) not in state.rejected
+    ]
+    if repo_slug in state.preferred:
+        preferred_token = state.preferred[repo_slug]
+        available.sort(key=lambda candidate: candidate.get("token") != preferred_token)
+    return available
 
 
 async def _github_token_from_secret(token_secret_key: str | None) -> str | None:
@@ -86,7 +124,7 @@ async def _github_token_candidates(
 
     async def add_secret_key(key_name: str | None, source: str) -> None:
         key = _clean(key_name)
-        if not key or key in seen_keys:
+        if not key or key in seen_keys or _is_known_legacy_token_key(key):
             return
         seen_keys.add(key)
         token = await _github_token_from_secret(key)
@@ -116,9 +154,8 @@ async def _github_token_candidates(
             bound_env = {}
         for env_name in ("GITHUB_TOKEN", "GH_TOKEN"):
             await add_token(bound_env.get(env_name), f"project_binding:{env_name}")
-        for env_name, token in sorted(bound_env.items()):
-            await add_token(token, f"project_binding:{env_name}")
 
+        sorted_secrets: list[dict[str, Any]] = []
         if not for_write:
             try:
                 secrets = await async_list_secrets(actor_user_id=user_id, org_id=org_id)
@@ -144,7 +181,21 @@ async def _github_token_candidates(
                     or str(secret.get("category") or "").lower() == "github"
                 )
             ]
-            for secret in sorted(github_like, key=priority):
+            sorted_secrets = sorted(github_like, key=priority)
+            for secret in sorted_secrets:
+                if str(secret.get("key_name") or "") != "GITHUB_TOKEN":
+                    continue
+                await add_secret_key(str(secret.get("key_name") or ""), "vault_inventory")
+
+        for env_name, token in sorted(bound_env.items()):
+            if env_name in {"GITHUB_TOKEN", "GH_TOKEN"} or _is_known_legacy_token_key(env_name):
+                continue
+            await add_token(token, f"project_binding:{env_name}")
+
+        if not for_write:
+            for secret in sorted_secrets:
+                if str(secret.get("key_name") or "") == "GITHUB_TOKEN":
+                    continue
                 await add_secret_key(str(secret.get("key_name") or ""), "vault_inventory")
 
     if not candidates:
@@ -167,11 +218,13 @@ async def _read_with_token(
     base: str | None,
     limit: int,
     token: str | None,
+    pull_number: int | None,
 ) -> dict[str, Any]:
     if action in {"repo", "get_repo"}:
-        return {
-            "repo": await async_get_repo_by_slug(repo_slug, token=token),
-        }
+        repo = await async_get_repo_by_slug(repo_slug, token=token)
+        if repo is None:
+            raise GitHubConnectorError(status_code=404, message="Repository not found or not visible to this token.")
+        return {"repo": repo}
     if action in {"list_issues", "issues"}:
         return await async_list_repo_issues(
             repo_slug,
@@ -194,7 +247,22 @@ async def _read_with_token(
             base=_clean(base),
             limit=_limit(limit),
         )
-    raise ValueError("read_github_source action must be get_repo, list_issues, or list_pull_requests")
+    if action in {"pull_request", "get_pull_request", "pr"}:
+        return await async_get_pull_request(
+            repo_slug,
+            int(pull_number or 0),
+            token=token,
+        )
+    if action in {"counts", "get_counts", "exact_counts"}:
+        return await async_get_repo_counts(
+            repo_slug,
+            token=token,
+            state=state,
+        )
+    raise ValueError(
+        "read_github_source action must be get_repo, list_issues, list_pull_requests, "
+        "get_pull_request, or get_counts"
+    )
 
 
 async def _handle_read_github_source(
@@ -209,10 +277,11 @@ async def _handle_read_github_source(
     include_pull_requests: bool = False,
     head: str | None = None,
     base: str | None = None,
+    pull_number: int | None = None,
     limit: int = 30,
     token_secret_key: str | None = None,
 ) -> str:
-    """Read GitHub repo metadata, issues, or pull requests."""
+    """Read GitHub repo metadata, issues, pull requests, counts, or CI checks."""
 
     repo_slug = parse_github_repo_slug(repo or "")
     if not repo_slug:
@@ -226,17 +295,58 @@ async def _handle_read_github_source(
         "list_pull_requests",
         "pull_requests",
         "prs",
+        "pull_request",
+        "get_pull_request",
+        "pr",
+        "counts",
+        "get_counts",
+        "exact_counts",
     }
     if clean_action not in valid_actions:
-        return json.dumps({"error": "read_github_source action must be get_repo, list_issues, or list_pull_requests"})
+        return json.dumps({
+            "error": (
+                "read_github_source action must be get_repo, list_issues, list_pull_requests, "
+                "get_pull_request, or get_counts"
+            )
+        })
+    if clean_action in {"pull_request", "get_pull_request", "pr"}:
+        try:
+            clean_pull_number = int(pull_number or 0)
+        except (TypeError, ValueError):
+            clean_pull_number = 0
+        if clean_pull_number < 1:
+            return json.dumps({"error": "get_pull_request requires a positive pull_number"})
+    else:
+        clean_pull_number = None
 
     candidates = await _github_token_candidates(
         repo_slug=repo_slug,
         token_secret_key=token_secret_key,
     )
+    read_state = _github_read_state()
+    read_candidates = _ordered_read_candidates(
+        candidates,
+        repo_slug=repo_slug,
+        state=read_state,
+    )
+    if not read_candidates:
+        cached_errors = [
+            error
+            for (token, rejected_repo), error in read_state.rejected.items()
+            if rejected_repo == repo_slug and any(candidate.get("token") == token for candidate in candidates)
+        ]
+        if cached_errors:
+            cached_error = cached_errors[-1]
+            return json.dumps({"error": cached_error.message, "status_code": cached_error.status_code})
+        return json.dumps({"error": "No GitHub token candidates were available"})
     last_error: GitHubConnectorError | None = None
-    auth_statuses = {401, 403, 404}
-    for index, candidate in enumerate(candidates):
+    retry_statuses = {401, 403, 404}
+    if clean_action in {"counts", "get_counts", "exact_counts"}:
+        # The generated query is valid, so GitHub Search's 422 can mean that
+        # this candidate cannot search the private repository.
+        retry_statuses.add(422)
+    negative_cache_statuses = {401, 404}
+    for index, candidate in enumerate(read_candidates):
         try:
             payload = await _read_with_token(
                 action=clean_action,
@@ -252,12 +362,16 @@ async def _handle_read_github_source(
                 base=base,
                 limit=limit,
                 token=candidate["token"],
+                pull_number=clean_pull_number,
             )
         except GitHubConnectorError as exc:
             last_error = exc
-            if exc.status_code in auth_statuses and index < len(candidates) - 1:
+            if exc.status_code in negative_cache_statuses:
+                read_state.rejected[(candidate.get("token"), repo_slug)] = exc
+            if exc.status_code in retry_statuses and index < len(read_candidates) - 1:
                 continue
             return json.dumps({"error": exc.message, "status_code": exc.status_code})
+        read_state.preferred[repo_slug] = candidate.get("token")
         payload["token_secret_key_used"] = bool(candidate.get("key_name"))
         payload["token_source"] = candidate["source"]
         if last_error is not None:
