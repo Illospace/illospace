@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from hashlib import sha256
@@ -271,7 +272,7 @@ def build_api_request(
 
     return LLMRequest(
         model=model,
-        messages=messages,
+        messages=copy.deepcopy(messages),
         max_output_tokens=request_max_tokens,
         system=system,
         tools=request_tools,

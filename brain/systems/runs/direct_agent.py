@@ -111,6 +111,7 @@ from brain.systems.runs.direct_loop.tool_execution import (
     async_execute_tool_calls as _runtime_async_execute_tool_calls,
     resolve_tool_call as _runtime_resolve_tool_call,
 )
+from brain.systems.runs.context import has_scheduled_result_contract
 from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
 from brain.systems import sessions as _session_store
@@ -822,6 +823,45 @@ def _append_message_with_archive(
         archive_messages.append(copy.deepcopy(message))
 
 
+def _content_without_cache_control(content):
+    if not isinstance(content, list):
+        return content
+    return [
+        {key: value for key, value in block.items() if key != "cache_control"}
+        if isinstance(block, dict)
+        else block
+        for block in content
+    ]
+
+
+def _same_user_message(left: dict, right: dict) -> bool:
+    if left.get("role") != right.get("role"):
+        return False
+    left_content = left.get("content")
+    right_content = right.get("content")
+    if left_content == right_content:
+        return True
+    if _content_without_cache_control(left_content) == _content_without_cache_control(right_content):
+        return True
+    if isinstance(right_content, str):
+        return _content_without_cache_control(left_content) == [{"type": "text", "text": right_content}]
+    return False
+
+
+def _ensure_current_message_last(messages: list[dict], current_message: dict) -> list[dict]:
+    """Keep scheduled-run historical context before the current instruction."""
+    current = copy.deepcopy(current_message)
+    for index in range(len(messages) - 1, -1, -1):
+        if _same_user_message(messages[index], current_message):
+            if index == len(messages) - 1:
+                return messages
+            reordered = messages[:index] + messages[index + 1:] + [messages[index]]
+            messages[:] = reordered
+            return messages
+    messages.append(current)
+    return messages
+
+
 def _prepare_thread_startup_context(
     messages: list[dict],
     *,
@@ -829,6 +869,7 @@ def _prepare_thread_startup_context(
     session_id: str,
     recent_message_limit: int,
     semantic_compactor=None,
+    historical_context_only: bool = False,
 ) -> tuple[list[dict], dict | None]:
     """Build the startup context from a durable handoff plus recent raw messages."""
     from brain.systems.context.thread_handoff import (
@@ -854,6 +895,7 @@ def _prepare_thread_startup_context(
         messages,
         handoff=effective_handoff,
         max_recent_messages=recent_message_limit,
+        historical_context_only=historical_context_only,
     )
     if effective_handoff and len(active_messages) < len(messages):
         logger.info(
@@ -1319,6 +1361,7 @@ async def run_agent_async(
     if effective_user_id and not metadata.get("user_id"):
         metadata["user_id"] = effective_user_id
     max_parallel_tool_calls = max(1, _metadata_int(metadata, "max_parallel_tool_calls", _MAX_PARALLEL_TOOL_CALLS))
+    scheduled_result_contract = has_scheduled_result_contract(metadata)
     semantic_compactor = _semantic_compactor_from_metadata(metadata)
     thread_handoff_compactor = _thread_handoff_compactor_from_metadata(metadata)
     operation_type = _infer_provider_operation_type(
@@ -1491,13 +1534,15 @@ async def run_agent_async(
                 session_id=session_id,
                 recent_message_limit=_thread_handoff_recent_message_limit(metadata),
                 semantic_compactor=thread_handoff_compactor,
+                historical_context_only=scheduled_result_contract,
             )
         else:
             state.messages = loaded_messages
 
+        current_user_message = {"role": "user", "content": _initial_user_content(message, metadata)}
         _append_message_with_archive(
             state.messages,
-            {"role": "user", "content": _initial_user_content(message, metadata)},
+            current_user_message,
             raw_archive_messages,
         )
 
@@ -1539,6 +1584,8 @@ async def run_agent_async(
                 run_id=run_id,
                 semantic_compactor=semantic_compactor,
             )
+            if scheduled_result_contract and turn == 0:
+                _ensure_current_message_last(state.messages, current_user_message)
             if state.provider_name == "anthropic" and cache_system_prompt and len(state.messages) >= 2:
                 _clear_message_cache_breakpoints(state.messages)
                 _set_cache_breakpoint(state.messages[-1])
@@ -1625,6 +1672,8 @@ async def run_agent_async(
                         raise
                     if on_stream_activity:
                         await _call_optional_async(on_stream_activity, "Compacted context after provider limit; retrying")
+                    if scheduled_result_contract and turn == 0:
+                        _ensure_current_message_last(state.messages, current_user_message)
                     if state.provider_name == "anthropic" and cache_system_prompt and len(state.messages) >= 2:
                         _clear_message_cache_breakpoints(state.messages)
                         _set_cache_breakpoint(state.messages[-1])

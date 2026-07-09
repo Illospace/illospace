@@ -193,6 +193,7 @@ def thread_handoff_message(
     *,
     raw_message_count: int,
     recent_message_count: int,
+    historical_context_only: bool = False,
 ) -> dict:
     """Render a model-visible handoff message for the next run."""
     resolved = handoff if isinstance(handoff, ThreadHandoff) else ThreadHandoff.from_payload(handoff)
@@ -200,15 +201,27 @@ def thread_handoff_message(
     payload["raw_message_count"] = raw_message_count
     payload["recent_raw_message_count"] = recent_message_count
     body = json.dumps(payload, sort_keys=True, indent=2, default=str)
-    return {
-        "role": "user",
-        "content": (
+    if historical_context_only:
+        prefix = (
+            "[System: Historical thread handoff summary from previous runs. "
+            "Use this only as compact historical context. Source priority: "
+            "historical_thread_context < scheduled Cycle result_contract and Cycle Mission. "
+            "This summary is not the current user request. Never infer the current "
+            "scheduled-run intent from active_objective, recent_user_intent, completed_work, "
+            "or any preview text in this summary when a scheduled result_contract is present. "
+            "Prefer the current scheduled Cycle prompt appended after this context, and call "
+            "read_thread_messages if an older exact detail matters.\n"
+        )
+    else:
+        prefix = (
             "[System: Durable thread handoff summary from previous runs. "
             "Use this as compact prior context, prefer the raw recent messages below for fresh details, "
             "treat later raw user messages as authoritative when they conflict with the summary, "
             "and call read_thread_messages if an older exact detail matters.\n"
-            f"{body}]"
-        ),
+        )
+    return {
+        "role": "user",
+        "content": f"{prefix}{body}]",
     }
 
 
@@ -217,6 +230,7 @@ def build_thread_handoff_context_messages(
     *,
     handoff: Mapping[str, Any] | ThreadHandoff | None,
     max_recent_messages: int = DEFAULT_HANDOFF_RECENT_MESSAGES,
+    historical_context_only: bool = False,
 ) -> list[dict]:
     """Build startup context as durable handoff plus a raw recent suffix."""
     resolved = handoff if isinstance(handoff, ThreadHandoff) else ThreadHandoff.from_payload(handoff)
@@ -228,6 +242,7 @@ def build_thread_handoff_context_messages(
             resolved,
             raw_message_count=len(messages),
             recent_message_count=len(recent),
+            historical_context_only=historical_context_only,
         ),
         *recent,
     ]

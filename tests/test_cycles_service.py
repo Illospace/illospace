@@ -744,6 +744,8 @@ async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeyp
     assert "Result Contract" in admissions[0]["message"]
     assert "Report evidence health explicitly" in admissions[0]["message"]
     assert "Thread messages are output/context surfaces" in admissions[0]["message"]
+    assert "Result Contract and Cycle Mission are authoritative" in admissions[0]["message"]
+    assert "Historical thread handoff/preview summaries are context only" in admissions[0]["message"]
 
 
 @pytest.mark.asyncio
