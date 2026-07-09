@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -314,6 +315,50 @@ class _SingleRunSession:
 
 def _fail_sync_bridge(*args, **kwargs):
     raise AssertionError("sync DB bridge should not be used")
+
+
+def _cycle_execution_objects(*, model_override: str | None) -> tuple[CycleRun, Cycle, Idea]:
+    idea_id = uuid4()
+
+    run = CycleRun()
+    run.id = 12
+    run.cycle_id = 5
+    run.status = "queued"
+    run.scheduled_for = datetime(2026, 4, 28, 20, 20, tzinfo=timezone.utc)
+    run.prompt_snapshot = "Run a scheduled coding-agent check"
+
+    cycle = Cycle()
+    cycle.id = 5
+    cycle.user_id = "user-1"
+    cycle.org_id = "org-1"
+    cycle.name = "Scheduled Codex check"
+    cycle.prompt = "Run a scheduled coding-agent check"
+    cycle.schedule_expr = "20 16 * * *"
+    cycle.timezone = "America/Toronto"
+    cycle.target_idea_id = idea_id
+    cycle.deleted_at = None
+    cycle.model_override = model_override
+    cycle.thinking_override = None
+
+    idea = Idea()
+    idea.id = idea_id
+    idea.title = "Scheduled Codex check"
+    idea.display_title = None
+    idea.description = "Run a scheduled coding-agent check"
+    idea.status = "needs_input"
+    idea.origin = "cycle"
+    idea.origin_ref = "cycle:5"
+    idea.salience_score = None
+    idea.position_x = None
+    idea.position_y = None
+    idea.created_at = None
+    idea.updated_at = None
+    idea.user_id = "user-1"
+    idea.org_id = "org-1"
+    idea.archived_at = None
+    idea.active_agents = []
+    idea.attachments = []
+    return run, cycle, idea
 
 
 def test_compute_next_run_at_uses_timezone():
@@ -670,7 +715,7 @@ async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeyp
     cycle.timezone = "America/Toronto"
     cycle.target_idea_id = idea_id
     cycle.deleted_at = None
-    cycle.model_override = None
+    cycle.model_override = "anthropic/claude-sonnet-4-6"
     cycle.thinking_override = None
 
     idea = Idea()
@@ -767,7 +812,7 @@ async def test_async_execute_cycle_run_uses_native_uow_without_sync_bridges(monk
     cycle.timezone = "America/Toronto"
     cycle.target_idea_id = idea_id
     cycle.deleted_at = None
-    cycle.model_override = None
+    cycle.model_override = "anthropic/claude-sonnet-4-6"
     cycle.thinking_override = None
 
     idea = Idea()
@@ -815,6 +860,128 @@ async def test_async_execute_cycle_run_uses_native_uow_without_sync_bridges(monk
 
 
 @pytest.mark.asyncio
+async def test_execute_cycle_run_auth_blocks_expired_codex_before_agent_admission(monkeypatch):
+    from brain.platform.integrations.openai_codex_auth import (
+        OpenAICodexCredential,
+        encode_codex_auth_payload,
+    )
+
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.3-codex")
+    expired_payload = json.dumps(encode_codex_auth_payload(OpenAICodexCredential(
+        access_token="expired-access",
+        refresh_token="refresh-token-123",
+        account_id="acct_123",
+        expires_at=time.time() - 30,
+        auth_mode="chatgpt",
+    )))
+    session = _AsyncExecuteCycleSession(run=run, cycle=cycle, idea=idea, expected_run_id=run.id)
+
+    async def fake_resolve_key(active_session, **kwargs):
+        assert active_session is session
+        assert kwargs["user_id"] == "user-1"
+        assert kwargs["org_id"] == "org-1"
+        assert kwargs["provider"] == "openai"
+        return expired_payload, "codex_subscription"
+
+    refresh_calls = []
+
+    def fake_refresh(refresh_token):
+        refresh_calls.append(refresh_token)
+        raise RuntimeError("invalid_grant")
+
+    admissions = []
+
+    async def fail_admit(*args, **kwargs):
+        admissions.append(kwargs)
+        raise AssertionError("agent admission should not run after auth preflight blocks")
+
+    published = []
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr("brain.platform.integrations.llm._async_resolve_key_from_db", fake_resolve_key)
+    monkeypatch.setattr("brain.platform.integrations.llm.refresh_codex_access_token", fake_refresh)
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
+    monkeypatch.setattr(service, "publish", lambda event, payload: published.append((event, payload)))
+
+    await service.async_execute_cycle_run(run.id)
+
+    assert admissions == []
+    assert refresh_calls == ["refresh-token-123"]
+    assert run.status == "auth_blocked"
+    assert run.run_id is None
+    assert run.started_at is None
+    assert cycle.last_status == "auth_blocked"
+    assert "OpenAI Codex / ChatGPT" in run.error
+    assert "Settings > Access" in run.error
+    assert "token expired and refresh failed" not in run.error
+    assert run.context_snapshot["auth_preflight"]["status"] == "auth_blocked"
+    assert run.context_snapshot["auth_preflight"]["credential"] == "OpenAI Codex / ChatGPT"
+
+    thread_msg = next(item for item in session.added if item.__class__.__name__ == "IdeaThread")
+    assert thread_msg.role == "illo"
+    assert "OpenAI Codex / ChatGPT" in thread_msg.content
+    assert "signing in to Codex / ChatGPT again" in thread_msg.content
+    evaluation = next(item for item in session.added if item.__class__.__name__ == "CycleRunEvaluation")
+    assert evaluation.details["status"] == "auth_blocked"
+    assert any(event == "thread_message" for event, _payload in published)
+
+
+@pytest.mark.asyncio
+async def test_execute_cycle_run_valid_codex_preflight_proceeds_to_agent_admission(monkeypatch):
+    from brain.platform.integrations.openai_codex_auth import (
+        OpenAICodexCredential,
+        encode_codex_auth_payload,
+    )
+
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.3-codex")
+    valid_payload = json.dumps(encode_codex_auth_payload(OpenAICodexCredential(
+        access_token="fresh-access",
+        refresh_token="refresh-token-123",
+        account_id="acct_123",
+        expires_at=time.time() + 1800,
+        auth_mode="chatgpt",
+    )))
+    session = _AsyncExecuteCycleSession(run=run, cycle=cycle, idea=idea, expected_run_id=run.id)
+
+    async def fake_resolve_key(active_session, **kwargs):
+        assert active_session is session
+        assert kwargs["provider"] == "openai"
+        return valid_payload, "codex_subscription"
+
+    def fail_refresh(_refresh_token):
+        raise AssertionError("valid Codex token should not refresh during preflight")
+
+    codex_client_calls = []
+
+    def fake_codex_client(*args, **kwargs):
+        codex_client_calls.append((args, kwargs))
+        return object()
+
+    admissions = []
+
+    async def fake_admit(*args, **kwargs):
+        admissions.append(kwargs)
+        return 77
+
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr("brain.platform.integrations.llm._async_resolve_key_from_db", fake_resolve_key)
+    monkeypatch.setattr("brain.platform.integrations.llm.refresh_codex_access_token", fail_refresh)
+    monkeypatch.setattr("brain.platform.integrations.llm.OpenAICodexClient", fake_codex_client)
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fake_admit)
+    monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
+
+    await service.async_execute_cycle_run(run.id)
+
+    assert len(admissions) == 1
+    assert run.status == "running"
+    assert run.run_id == 77
+    assert run.started_at is not None
+    assert cycle.last_status == "running"
+    assert run.context_snapshot["auth_preflight"]["status"] == "passed"
+    assert codex_client_calls[0][0][0] == "fresh-access"
+    assert admissions[0]["metadata"]["launch_envelope"]["origin"] == "scheduled_cycle"
+
+
+@pytest.mark.asyncio
 async def test_execute_cycle_run_creates_execution_thread_when_target_thread_is_busy(monkeypatch):
     target_idea_id = uuid4()
 
@@ -835,7 +1002,7 @@ async def test_execute_cycle_run_creates_execution_thread_when_target_thread_is_
     cycle.timezone = "America/Toronto"
     cycle.target_idea_id = target_idea_id
     cycle.deleted_at = None
-    cycle.model_override = None
+    cycle.model_override = "anthropic/claude-sonnet-4-6"
     cycle.thinking_override = None
 
     target_idea = Idea()

@@ -11,6 +11,10 @@ from sqlalchemy import select
 from brain.systems.cortex.events import publish
 from brain.systems.cortex.thought_lifecycle import ThreadMessageCommand, post_thread_message
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUSES, CYCLE_RUN_TERMINAL_STATUSES
+from brain.systems.cycles.auth_preflight import (
+    CycleAuthPreflightResult,
+    async_preflight_cycle_external_auth,
+)
 from brain.systems.cycles.common import (
     REUSABLE_THREAD_EXECUTION_MODE,
     THREAD_OUTPUT_TARGET_TYPE,
@@ -169,6 +173,39 @@ async def _async_append_cycle_thread_message(
         ),
         parse_message_type=lambda _content, _role: "trigger",
         lifecycle_trigger="auto_cycle_message",
+    )
+    return result.message_payload, result.status_change
+
+
+async def _async_append_cycle_auth_blocked_thread_message(
+    session,
+    idea: Idea,
+    cycle: Cycle,
+    cycle_run: CycleRun,
+    preflight: CycleAuthPreflightResult,
+) -> tuple[dict, dict | None]:
+    metadata = {
+        "source": "cycle",
+        "cycle_id": cycle.id,
+        "cycle_run_id": cycle_run.id,
+        "auth_preflight": preflight.to_dict(),
+    }
+    result = await post_thread_message(
+        session,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=str(idea.id),
+            role="illo",
+            content=preflight.visible_message or "Scheduled Cycle auth blocked.",
+            actor={
+                "org_id": str(cycle.org_id) if cycle.org_id else None,
+                "name": "Illo",
+            },
+            attachments=[],
+            metadata=metadata,
+        ),
+        parse_message_type=lambda _content, _role: "agent_response",
+        lifecycle_trigger="cycle_auth_preflight_blocked",
     )
     return result.message_payload, result.status_change
 
@@ -386,40 +423,64 @@ async def async_execute_cycle_run(run_id: int) -> None:
             config={"ephemeral": target.output_target_ephemeral},
             rationale="Execution output surface for this CycleRun.",
         )
-        run.started_at = datetime.now(timezone.utc)
-        run.status = "running"
         idea_id = idea.id
-        run_metadata = _cycle_run_metadata(cycle, run)
-        run_message = _cycle_run_message(idea, cycle, run)
-        agent_run_id = await _async_admit_cycle_run(
-            uow.session,
-            idea_id=idea.id,
-            message=run_message,
-            priority=1,
-            user_id=cycle_user_id,
-            metadata=run_metadata,
-            cycle_run_id=run.id,
-        )
-        if agent_run_id is None:
+
+        preflight = await async_preflight_cycle_external_auth(uow.session, cycle=cycle)
+        if preflight.status != "skipped":
+            context_snapshot = dict(run.context_snapshot or {})
+            context_snapshot["auth_preflight"] = preflight.to_dict()
+            run.context_snapshot = context_snapshot
+
+        if preflight.blocked:
             await _finalize_cycle_run(
                 run,
                 cycle,
-                status="failed",
-                error="Cycle work admission failed before an agent run was created",
+                status="auth_blocked",
+                error=preflight.visible_message,
                 session=uow.session,
             )
-            return
-        message_payload, status_payload = await _async_append_cycle_thread_message(
-            uow.session,
-            idea,
-            cycle,
-            run,
-            owner,
-        )
-        idea_snapshot = serialize_execution_idea(idea)
-        run.run_id = agent_run_id
-        cycle.last_status = "running"
-        cycle.last_error = None
+            message_payload, status_payload = await _async_append_cycle_auth_blocked_thread_message(
+                uow.session,
+                idea,
+                cycle,
+                run,
+                preflight,
+            )
+            idea_snapshot = serialize_execution_idea(idea)
+        else:
+            run.started_at = datetime.now(timezone.utc)
+            run.status = "running"
+            run_metadata = _cycle_run_metadata(cycle, run)
+            run_message = _cycle_run_message(idea, cycle, run)
+            agent_run_id = await _async_admit_cycle_run(
+                uow.session,
+                idea_id=idea.id,
+                message=run_message,
+                priority=1,
+                user_id=cycle_user_id,
+                metadata=run_metadata,
+                cycle_run_id=run.id,
+            )
+            if agent_run_id is None:
+                await _finalize_cycle_run(
+                    run,
+                    cycle,
+                    status="failed",
+                    error="Cycle work admission failed before an agent run was created",
+                    session=uow.session,
+                )
+                return
+            message_payload, status_payload = await _async_append_cycle_thread_message(
+                uow.session,
+                idea,
+                cycle,
+                run,
+                owner,
+            )
+            idea_snapshot = serialize_execution_idea(idea)
+            run.run_id = agent_run_id
+            cycle.last_status = "running"
+            cycle.last_error = None
     if should_publish_idea and idea_snapshot:
         publish("idea_upserted", {"idea": idea_snapshot})
     if message_payload:
