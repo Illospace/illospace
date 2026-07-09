@@ -328,7 +328,7 @@ async def record_cycle_run_evaluation(
         error=error,
         skip_reason=skip_reason,
     )
-    score = 1 if status == "completed" else 0 if status in {"failed", "degraded"} else None
+    score = 1 if status == "completed" else 0 if status in {"failed", "degraded", "auth_blocked"} else None
     run.self_review_summary = summary
     context_snapshot = json_dict(getattr(run, "context_snapshot", None))
     session.add(
@@ -419,6 +419,9 @@ def cycle_run_evaluation_summary(
     if status == "degraded":
         detail = error or "mission result contract degraded"
         return f"Cycle run degraded and was recorded in the Cycle ledger: {detail}"
+    if status == "auth_blocked":
+        detail = error or "external auth preflight blocked the run"
+        return f"Cycle run was auth-blocked and recorded in the Cycle ledger: {detail}"
     if status == "skipped":
         detail = skip_reason or "unknown skip reason"
         return f"Cycle run was skipped and recorded in the Cycle ledger: {detail}"
