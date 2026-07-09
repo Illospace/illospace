@@ -79,6 +79,28 @@ class TestProviderInference:
         assert _required_openai_auth_mode("openai/gpt-5.6-sol") == "chatgpt"
         assert _required_openai_auth_mode("openai/gpt-5.4") is None
 
+    def test_preview_model_falls_back_only_for_model_availability_errors(self):
+        from brain.systems.runs.direct_loop.model_fallback import (
+            fallback_model_for,
+            is_model_unavailable_error,
+        )
+
+        unsupported = SimpleNamespace(
+            status_code=400,
+            response_body="The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+        )
+        missing = SimpleNamespace(
+            status_code=404,
+            body={"error": {"code": "model_not_found", "message": "Model is not available on this account"}},
+        )
+        expired = SimpleNamespace(status_code=401, response_body="access token expired")
+
+        assert fallback_model_for("openai/gpt-5.6-sol") == "openai/gpt-5.5"
+        assert fallback_model_for("gpt-5.5") is None
+        assert is_model_unavailable_error(unsupported) is True
+        assert is_model_unavailable_error(missing) is True
+        assert is_model_unavailable_error(expired) is False
+
     @patch("brain.systems.runs.direct_loop.final_reply_checker.get_provider")
     @patch("brain.systems.runs.direct_loop.final_reply_checker.resolve_llm_client")
     def test_init_llm_uses_provider_from_model_prefix(self, mock_resolve, mock_get_provider):
@@ -120,6 +142,107 @@ class TestProviderInference:
 
             assert mock_resolve.call_args.kwargs["provider"] == "openai"
             assert mock_resolve.call_args.kwargs["auth_mode"] == "chatgpt"
+
+
+@pytest.mark.asyncio
+async def test_agent_retries_gpt_5_6_on_gpt_5_5_when_account_lacks_entitlement(monkeypatch):
+    from brain.platform.integrations.openai_codex_client import OpenAICodexError
+    from brain.platform.integrations.providers import LLMResponse, TextContentBlock, Usage
+    from brain.systems.runs.direct_agent import run_agent_async
+
+    llm = _mock_llm_client(MagicMock(), provider="openai")
+    llm.auth_mode = "chatgpt"
+    llm.is_oauth = True
+    requests = []
+
+    async def fake_api_call(_provider, request, *_args, **_kwargs):
+        requests.append(request)
+        if len(requests) == 1:
+            raise OpenAICodexError(
+                "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+                status_code=400,
+            )
+        return LLMResponse(
+            content=[TextContentBlock("Fallback succeeded")],
+            stop_reason="end_turn",
+            usage=Usage(input_tokens=3, output_tokens=2),
+            model="gpt-5.5",
+        )
+
+    monkeypatch.setattr("brain.systems.runs.direct_agent.get_provider", lambda *_args: MagicMock())
+    monkeypatch.setattr("brain.systems.runs.direct_agent._api_call_with_retry_async", fake_api_call)
+    monkeypatch.setattr("brain.systems.runs.direct_agent._async_record_api_call", AsyncMock())
+    monkeypatch.setattr(
+        "brain.systems.runs.direct_agent._runtime_async_apply_agent_session_side_effects",
+        AsyncMock(),
+    )
+
+    activity = []
+    result = await run_agent_async(
+        "Test fallback",
+        model="openai/gpt-5.6-sol",
+        thinking="xhigh",
+        tools=[],
+        tool_handlers={},
+        persist_session=False,
+        skip_harvest=True,
+        resolved_llm=llm,
+        on_stream_activity=activity.append,
+    )
+
+    assert result.success is True
+    assert result.output == "Fallback succeeded"
+    assert [request.model for request in requests] == ["gpt-5.6-sol", "gpt-5.5"]
+    assert any("unavailable" in item and "gpt-5.5" in item for item in activity)
+
+
+@pytest.mark.asyncio
+async def test_agent_uses_shared_key_fallback_when_personal_codex_connection_is_missing(monkeypatch):
+    from brain.platform.integrations.providers import LLMResponse, TextContentBlock, Usage
+    from brain.systems.runs.direct_agent import run_agent_async
+
+    llm = _mock_llm_client(MagicMock(), provider="openai")
+    resolve = AsyncMock(
+        side_effect=[
+            RuntimeError("No OpenAI auth found. Connect a Codex subscription or add an org OpenAI key in Illo."),
+            llm,
+        ]
+    )
+    seen_models = []
+
+    async def fake_api_call(_provider, request, *_args, **_kwargs):
+        seen_models.append(request.model)
+        return LLMResponse(
+            content=[TextContentBlock("Shared fallback succeeded")],
+            stop_reason="end_turn",
+            usage=Usage(input_tokens=3, output_tokens=2),
+            model="gpt-5.5",
+        )
+
+    monkeypatch.setattr("brain.systems.runs.direct_agent.async_resolve_llm_client", resolve)
+    monkeypatch.setattr("brain.systems.runs.direct_agent.get_provider", lambda *_args: MagicMock())
+    monkeypatch.setattr("brain.systems.runs.direct_agent._api_call_with_retry_async", fake_api_call)
+    monkeypatch.setattr("brain.systems.runs.direct_agent._async_record_api_call", AsyncMock())
+    monkeypatch.setattr(
+        "brain.systems.runs.direct_agent._runtime_async_apply_agent_session_side_effects",
+        AsyncMock(),
+    )
+
+    result = await run_agent_async(
+        "Test shared fallback",
+        model="openai/gpt-5.6-sol",
+        thinking="xhigh",
+        tools=[],
+        tool_handlers={},
+        persist_session=False,
+        skip_harvest=True,
+        user_id="user-1",
+        org_id="org-1",
+    )
+
+    assert result.success is True
+    assert seen_models == ["gpt-5.5"]
+    assert [call.kwargs["auth_mode"] for call in resolve.await_args_list] == ["chatgpt", None]
 
 class TestLiveGuidance:
     async def test_append_live_guidance_adds_user_message(self):

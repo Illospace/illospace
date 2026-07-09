@@ -31,6 +31,7 @@ export const MODEL_OPTIONS = [
 ] as const satisfies readonly CortexWorkspaceComposerIntentOption[];
 
 export const EFFORT_OPTIONS = [
+  { value: 'none', label: 'None', description: 'No additional reasoning effort' },
   { value: 'low', label: 'Low', description: 'Quick reasoning pass' },
   { value: 'medium', label: 'Medium', description: 'Balanced reasoning depth' },
   { value: 'high', label: 'High', description: 'Deeper reasoning for hard work' },

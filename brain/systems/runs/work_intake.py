@@ -16,7 +16,7 @@ from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
 from brain.systems.runs.store import AsyncAgentRunStore
 
-_VALID_EFFORT_LEVELS = {"low", "medium", "high", "xhigh"}
+_VALID_EFFORT_LEVELS = {"none", "low", "medium", "high", "xhigh"}
 _VALID_MODEL_PROVIDERS = {"anthropic", "openai"}
 THREAD_DISCUSSION_SURFACE = "thread_discussion"
 THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
@@ -178,14 +178,15 @@ def metadata_choice(
 
 def model_policy_from_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
     metadata = metadata or {}
-    policy = {
-        "thinking": metadata_choice(
-            metadata,
-            ("thinking_tier", "effort", "effort_level", "thinking"),
-            _VALID_EFFORT_LEVELS,
-            "high",
-        ),
-    }
+    policy: dict[str, str] = {}
+    thinking = metadata_choice(
+        metadata,
+        ("thinking_tier", "effort", "effort_level", "thinking"),
+        _VALID_EFFORT_LEVELS,
+        "",
+    )
+    if thinking:
+        policy["thinking"] = thinking
     raw_model = metadata.get("model") or metadata.get("model_name")
     if isinstance(raw_model, str) and raw_model.strip():
         policy["model"] = raw_model.strip().replace(":", "/", 1)

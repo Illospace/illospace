@@ -228,7 +228,7 @@ export interface VaultAgentGrantPrompt {
 }
 
 export type CortexExecutionProfile = 'fast' | 'deep';
-export type CortexEffortLevel = 'low' | 'medium' | 'high' | 'xhigh';
+export type CortexEffortLevel = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
 
 export interface AgentRunOptions {
   executionProfile?: CortexExecutionProfile;

@@ -6,13 +6,17 @@
   let {
     modelDraft,
     modelOptions,
+    thinkingOptions,
     canManageSettings,
     onUpdateModel,
+    onUpdateThinking,
   }: {
-    modelDraft: { default: string };
+    modelDraft: { default: string; thinking: string };
     modelOptions: RuntimeOption[];
+    thinkingOptions: RuntimeOption[];
     canManageSettings: boolean;
     onUpdateModel: (value: string) => void;
+    onUpdateThinking: (value: string) => void;
   } = $props();
 </script>
 
@@ -38,6 +42,23 @@
       options={modelOptions}
       disabled={!canManageSettings}
       onValueChange={onUpdateModel}
+    />
+  </div>
+
+  <div class="model-row">
+    <div class="model-copy">
+      <h3>Default effort</h3>
+      <p>Reasoning effort used for new runs unless a composer selection overrides it.</p>
+    </div>
+
+    <RuntimeSelect
+      id="model-thinking"
+      label="Default reasoning effort"
+      labelHidden
+      value={modelDraft.thinking}
+      options={thinkingOptions}
+      disabled={!canManageSettings}
+      onValueChange={onUpdateThinking}
     />
   </div>
 </section>

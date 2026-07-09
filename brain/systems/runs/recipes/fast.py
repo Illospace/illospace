@@ -11,7 +11,11 @@ from brain.systems.runs.status import RunStatus
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 from brain.systems.runs.recipes.base import BaseRunRecipe
-from brain.systems.runs.recipes.shared import default_run_model, project_runtime_workspace_from_ref
+from brain.systems.runs.recipes.shared import (
+    default_run_model,
+    default_run_thinking,
+    project_runtime_workspace_from_ref,
+)
 from brain.systems.runs.recipes.surface_guidance import response_surface_guidance
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
 from brain.systems.personality import agent_profile_prompt_section, soul_prompt_section
@@ -128,7 +132,10 @@ class FastRecipe(BaseRunRecipe):
             user_id=runtime.request.user_id,
             org_id=runtime.request.org_id,
         )
-        thinking = model_policy.get("thinking") or "high"
+        thinking = model_policy.get("thinking") or await default_run_thinking(
+            user_id=runtime.request.user_id,
+            org_id=runtime.request.org_id,
+        )
 
         async def _activity(label: str) -> None:
             await runtime.activity(label)

@@ -23,7 +23,11 @@ from brain.systems.runs.recipes.phase_barrier import (
     review_completed_phase,
 )
 from brain.systems.runs.recipes.scout import ScoutHandoff, scout_request
-from brain.systems.runs.recipes.shared import default_run_model, workspace_root_from_ref
+from brain.systems.runs.recipes.shared import (
+    default_run_model,
+    default_run_thinking,
+    workspace_root_from_ref,
+)
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.verification.evidence import (
     artifact_payloads,
@@ -788,7 +792,12 @@ async def _coordinator_model_and_thinking(runtime: RunRuntime) -> tuple[str, str
             user_id=runtime.request.user_id,
             org_id=runtime.request.org_id,
         )
-    thinking = model_policy.get("coordinator_thinking") or model_policy.get("thinking") or "high"
+    thinking = model_policy.get("coordinator_thinking") or model_policy.get("thinking")
+    if not thinking:
+        thinking = await default_run_thinking(
+            user_id=runtime.request.user_id,
+            org_id=runtime.request.org_id,
+        )
     return str(model), str(thinking)
 
 

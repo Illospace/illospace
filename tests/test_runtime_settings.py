@@ -519,11 +519,51 @@ async def test_runtime_models_default_uses_configured_model(monkeypatch):
     import brain.systems.runtime_settings.models as runtime_models
 
     monkeypatch.setattr(runtime_models, "async_get_default_model", AsyncMock(return_value="gpt-5.5"), raising=False)
+    monkeypatch.setattr(runtime_models, "async_get_default_thinking", AsyncMock(return_value="xhigh"), raising=False)
 
     data = await runtime_models.async_get_runtime_models(MagicMock(), SimpleNamespace(id="user-1", org_id="org-1"))
 
     assert data.default == "gpt-5.5"
+    assert data.thinking == "xhigh"
+    assert any(option.key == "gpt-5.6-sol" for option in data.options)
     assert any(option.key == "gpt-5.5" for option in data.options)
+    assert any(option.key == "none" for option in data.thinking_options)
+    assert any(option.key == "xhigh" for option in data.thinking_options)
+
+
+@pytest.mark.asyncio
+async def test_runtime_models_update_persists_workspace_model_and_effort(monkeypatch):
+    from types import SimpleNamespace
+
+    import brain.systems.runtime_settings.models as runtime_models
+    from brain.systems.runtime_settings.schemas import RuntimeModelsUpdate
+
+    org = SimpleNamespace(memory_model_config={"default_provider": "openai"})
+
+    class FakeSession:
+        async def get(self, _model, identifier):
+            assert identifier == "org-1"
+            return org
+
+        async def flush(self):
+            return None
+
+    expected = SimpleNamespace(default="gpt-5.6-sol", thinking="xhigh")
+    monkeypatch.setattr(
+        runtime_models,
+        "async_get_runtime_models",
+        AsyncMock(return_value=expected),
+    )
+
+    result = await runtime_models.async_update_runtime_models(
+        FakeSession(),
+        SimpleNamespace(id="user-1", org_id="org-1"),
+        RuntimeModelsUpdate(default="gpt-5.6-sol", thinking="xhigh"),
+    )
+
+    assert result is expected
+    assert org.memory_model_config["default_model"] == "openai/gpt-5.6-sol"
+    assert org.memory_model_config["default_thinking"] == "xhigh"
 
 
 @pytest.mark.asyncio

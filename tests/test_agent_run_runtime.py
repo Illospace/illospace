@@ -2896,7 +2896,7 @@ async def _build_cortex_intake_run_request(
     )
 
 
-async def test_work_intake_keeps_fast_high_effort_by_default():
+async def test_work_intake_defers_unspecified_effort_to_workspace_default():
 
     session = _async_work_intake_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
 
@@ -2911,7 +2911,7 @@ async def test_work_intake_keeps_fast_high_effort_by_default():
 
     assert request.profile == "fast"
     assert request.recipe == "fast"
-    assert request.model_policy == {"thinking": "high"}
+    assert request.model_policy == {}
     assert request.metadata["event"] == "thread_reply"
 
 
@@ -3126,10 +3126,24 @@ async def test_work_intake_applies_explicit_model_override():
     )
 
     assert request.model_policy == {
-        "thinking": "high",
         "model": "openai/gpt-5.5",
         "provider": "openai",
     }
+
+
+async def test_work_intake_preserves_explicit_none_effort():
+    session = _async_work_intake_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
+
+    request = await _build_cortex_intake_run_request(
+        session,
+        idea_id="idea-1",
+        event="thread_reply",
+        message="Use no extra reasoning",
+        user_id="u1",
+        metadata={"execution_profile": "fast", "effort": "none"},
+    )
+
+    assert request.model_policy == {"thinking": "none"}
 
 
 async def test_runner_settles_root_run_idea_status():

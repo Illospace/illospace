@@ -14,7 +14,11 @@ from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
 from brain.systems.runs.events import run_event
 from brain.systems.runs.graph import DeepPlan, RunNode
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
-from brain.systems.runs.recipes.shared import default_run_model, workspace_root_from_ref
+from brain.systems.runs.recipes.shared import (
+    default_run_model,
+    default_run_thinking,
+    workspace_root_from_ref,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +144,12 @@ async def review_completed_phase(
             user_id=getattr(runtime.request, "user_id", None),
             org_id=getattr(runtime.request, "org_id", None),
         )
-    thinking = model_policy.get("coordinator_thinking") or model_policy.get("thinking") or "high"
+    thinking = model_policy.get("coordinator_thinking") or model_policy.get("thinking")
+    if not thinking:
+        thinking = await default_run_thinking(
+            user_id=getattr(runtime.request, "user_id", None),
+            org_id=getattr(runtime.request, "org_id", None),
+        )
 
     await runtime.store.append_event(
         run_event(

@@ -91,6 +91,11 @@ from brain.systems.runs.direct_loop.context_recovery import (
 from brain.systems.runs.direct_loop.retry import (
     async_api_call_with_retry as _runtime_async_api_call_with_retry,
 )
+from brain.systems.runs.direct_loop.model_fallback import (
+    fallback_model_for,
+    is_missing_required_model_auth,
+    is_model_unavailable_error,
+)
 from brain.systems.runs.direct_loop.session_effects import (
     async_apply_agent_session_side_effects as _runtime_async_apply_agent_session_side_effects,
 )
@@ -192,6 +197,9 @@ def _required_openai_auth_mode(model: str) -> str | None:
     """Return the OpenAI auth mode required by model availability."""
     normalized = _normalize_model(model).lower()
     return "chatgpt" if normalized == "gpt-5.5" or normalized.startswith("gpt-5.6") else None
+
+
+_AUTO_OPENAI_AUTH_MODE = object()
 
 
 # ── Constants ──────────────────────────────────────────────────
@@ -431,15 +439,21 @@ async def _init_llm_async(
     *,
     org_id: str | None = None,
     resolved_llm=None,
+    auth_mode_override: str | None | object = _AUTO_OPENAI_AUTH_MODE,
 ):
     """Resolve LLM client from async runtime code without sync DB access."""
     if resolved_llm is None:
         requested_provider = infer_provider_from_model(model)
+        auth_mode = (
+            _required_openai_auth_mode(model)
+            if auth_mode_override is _AUTO_OPENAI_AUTH_MODE
+            else auth_mode_override
+        )
         llm = await async_resolve_llm_client(
             user_id=user_id,
             org_id=org_id,
             provider=requested_provider,
-            auth_mode=_required_openai_auth_mode(model) if requested_provider == "openai" else None,
+            auth_mode=auth_mode if requested_provider == "openai" else None,
         )
     else:
         llm = resolved_llm
@@ -1482,16 +1496,43 @@ async def run_agent_async(
             org_id=effective_org_id,
         )
         model = _normalize_model(model)
+        model_fallback_used = False
+        fallback_activity: str | None = None
 
         # Resolve LLM client
-        llm, state.provider, _runtime_extra_headers = await _init_llm_async(
-            effective_user_id,
-            session_id,
-            model,
-            org_id=effective_org_id,
-            resolved_llm=resolved_llm,
-        )
+        try:
+            llm, state.provider, _runtime_extra_headers = await _init_llm_async(
+                effective_user_id,
+                session_id,
+                model,
+                org_id=effective_org_id,
+                resolved_llm=resolved_llm,
+            )
+        except Exception as exc:
+            fallback = fallback_model_for(model)
+            if not fallback or not is_missing_required_model_auth(exc):
+                raise
+            preferred_model = model
+            model = _normalize_model(fallback)
+            llm, state.provider, _runtime_extra_headers = await _init_llm_async(
+                effective_user_id,
+                session_id,
+                model,
+                org_id=effective_org_id,
+                resolved_llm=resolved_llm,
+                auth_mode_override=None,
+            )
+            model_fallback_used = True
+            fallback_activity = f"{preferred_model} requires a personal Codex connection; using {model}"
+            logger.info(
+                "Agent %s: preferred model auth unavailable; falling back %s -> %s",
+                session_id,
+                preferred_model,
+                model,
+            )
         state.provider_name = llm.provider
+        owns_semantic_compactor = semantic_compactor is None
+        owns_thread_handoff_compactor = thread_handoff_compactor is None
         if semantic_compactor is None:
             semantic_compactor = _llm_context_checkpoint_compactor(
                 provider=state.provider,
@@ -1507,7 +1548,9 @@ async def run_agent_async(
                 model=model,
                 provider_name=state.provider_name,
                 session_id=session_id,
-        )
+            )
+        if fallback_activity and on_stream_activity:
+            await _call_optional_async(on_stream_activity, fallback_activity)
 
         # Load existing raw session archive, then use durable handoff + recent messages as active context.
         load_session = load_session or _session_store.async_load_session
@@ -1630,6 +1673,70 @@ async def run_agent_async(
                     )
                     break
                 except Exception as exc:
+                    fallback = fallback_model_for(model)
+                    if (
+                        not model_fallback_used
+                        and fallback
+                        and is_model_unavailable_error(exc)
+                    ):
+                        preferred_model = model
+                        model = _normalize_model(fallback)
+                        model_fallback_used = True
+                        logger.warning(
+                            "Agent %s turn %d: model unavailable; falling back %s -> %s",
+                            session_id,
+                            turn,
+                            preferred_model,
+                            model,
+                        )
+                        await _async_record_api_call(
+                            session_id=session_id,
+                            run_id=run_id,
+                            turn=turn,
+                            model=preferred_model,
+                            context_messages=len(state.messages),
+                            system_prompt_chars=len(json.dumps(system)) if system else 0,
+                            status="model_unavailable",
+                            error=str(exc)[:500],
+                            latency_ms=int((time.time() - _call_start) * 1000),
+                        )
+                        if on_stream_activity:
+                            await _call_optional_async(
+                                on_stream_activity,
+                                f"{preferred_model} is unavailable for this connection; using {model}",
+                            )
+                        if owns_semantic_compactor:
+                            semantic_compactor = _llm_context_checkpoint_compactor(
+                                provider=state.provider,
+                                llm=llm,
+                                model=model,
+                                provider_name=state.provider_name,
+                                session_id=session_id,
+                            )
+                        if owns_thread_handoff_compactor:
+                            thread_handoff_compactor = _llm_thread_handoff_compactor(
+                                provider=state.provider,
+                                llm=llm,
+                                model=model,
+                                provider_name=state.provider_name,
+                                session_id=session_id,
+                            )
+                        request = _build_api_request(
+                            model,
+                            state.messages,
+                            max_tokens,
+                            system,
+                            tools,
+                            reasoning_effort,
+                            _runtime_extra_headers,
+                            state.provider_name,
+                            session_id,
+                            persist_session,
+                            cache_tools=cache_system_prompt,
+                            operation_type=state.operation_type,
+                        )
+                        _call_start = time.time()
+                        continue
                     if overflow_retry_used or not is_context_overflow_error(exc, provider_name=state.provider_name):
                         raise
                     overflow_retry_used = True
