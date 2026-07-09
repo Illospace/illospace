@@ -69,11 +69,14 @@ def github_event_to_envelope(event: str, payload: dict, *, delivery_id=None) -> 
     """
     if event not in _SUPPORTED_EVENTS:
         return None
-    payload = payload or {}
-    action = payload.get("action")
+    if not isinstance(payload, dict):  # a signature-valid but non-object body
+        payload = {}
+    action = payload.get("action") or "event"
     repo = (payload.get("repository") or {}).get("full_name")
     noun, subject = _subject(event, payload)
 
+    # The record anchor is always the issue/PR (node_id + url) so a comment
+    # updates its parent's record rather than forking a new one.
     number = subject.get("number")
     title = subject.get("title")
     url = subject.get("html_url")
@@ -81,15 +84,22 @@ def github_event_to_envelope(event: str, payload: dict, *, delivery_id=None) -> 
     node_id = subject.get("node_id")
     source_updated_at = subject.get("updated_at")
     author = (subject.get("user") or {}).get("login")
+    comment_url = None
 
     if event == "issue_comment":
         comment = payload.get("comment") or {}
-        url = comment.get("html_url") or url
+        # Keep node_id/url anchored to the issue; the comment supplies freshness,
+        # the acting author, and its own url as a separate hint.
+        comment_url = comment.get("html_url")
         author = (comment.get("user") or {}).get("login") or author
         source_updated_at = comment.get("updated_at") or source_updated_at
 
     where = f" #{number}" if number else ""
-    summary = f"GitHub {noun}{where} {action}: {title}".strip() if title else f"GitHub {noun}{where} {action}".strip()
+    summary = (
+        f"GitHub {noun}{where} {action}: {title}".strip()
+        if title
+        else f"GitHub {noun}{where} {action}".strip()
+    )
 
     return {
         "origin": f"github:{repo}" if repo else "github",
@@ -103,6 +113,7 @@ def github_event_to_envelope(event: str, payload: dict, *, delivery_id=None) -> 
             "repo": repo,
             "number": number,
             "url": url,
+            "comment_url": comment_url,
             "state": state,
             "node_id": node_id,
             "author": author,

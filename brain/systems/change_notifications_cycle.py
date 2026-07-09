@@ -40,15 +40,23 @@ def _normalize_event(row) -> dict:
     }
 
 
-async def _load_change_events(session, org_id, since, *, limit: int = 200) -> list:
-    from brain.platform.db.models.domain import DomainEvent
+async def _load_change_events(session, org_id, since, *, limit: int = 500) -> list:
+    import logging
+
     from sqlalchemy import select
+
+    from brain.platform.db.models.domain import DomainEvent
 
     stmt = select(DomainEvent).where(DomainEvent.org_id == org_id)
     if since is not None:
         stmt = stmt.where(DomainEvent.created_at > since)
     stmt = stmt.order_by(DomainEvent.created_at.asc()).limit(limit)
     rows = (await session.execute(stmt)).scalars().all()
+    if len(rows) >= limit:
+        # Non-silent: a full page means more changes exist than this tick surfaced.
+        logging.getLogger("illo.notify").warning(
+            "notify-cycle hit the %s-event page limit; remaining changes surface next tick", limit
+        )
     return [_normalize_event(r) for r in rows]
 
 
@@ -71,6 +79,33 @@ async def _default_post(channel_id, text) -> None:
     await client.post_message(channel=channel_id, text=text)
 
 
+async def _fill_owner_labels(session, events) -> None:
+    """Best-effort ``owner_id`` -> display name so digests don't print raw UUIDs.
+    Guarded: no session or no owners -> no-op; any failure degrades to the id."""
+    if session is None:
+        return
+    owner_ids = {e.get("owner_id") for e in events if e.get("owner_id")}
+    if not owner_ids:
+        return
+    try:
+        from sqlalchemy import select
+
+        from brain.platform.db.models.org import User
+
+        rows = (
+            await session.execute(
+                select(User.id, User.name, User.email).where(User.id.in_(owner_ids))
+            )
+        ).all()
+        labels = {str(r.id): (r.name or r.email or str(r.id)) for r in rows}
+        for event in events:
+            oid = event.get("owner_id")
+            if oid and not event.get("owner_label"):
+                event["owner_label"] = labels.get(str(oid))
+    except Exception:
+        pass  # degrade to the raw id rather than break the tick
+
+
 async def run_notify_cycle(
     session,
     *,
@@ -82,6 +117,7 @@ async def run_notify_cycle(
 ) -> dict:
     """One notify-cycle tick. Returns a small summary of what was sent."""
     events = await _load_change_events(session, org_id, since)
+    await _fill_owner_labels(session, events)
     unclaimed = await _count_unclaimed(session, org_id)
     outbound = render_outbound(events, unclaimed_count=unclaimed, urgent_terms=urgent_terms)
 

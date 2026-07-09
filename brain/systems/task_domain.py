@@ -45,8 +45,8 @@ _DOMAIN_SIGNALS: list[tuple[TaskDomain, re.Pattern[str]]] = [
         TaskDomain.ENGINEERING,
         re.compile(
             r"(?i)\b("
-            r"bug|hotfix|stack ?trace|null|none ?type|exception|regression|"
-            r"refactor\w*|endpoint|api|webhook|function|class|module|library|"
+            r"bug|hotfix|stack ?trace|exception|regression|"
+            r"refactor\w*|endpoint|api|webhook|function|module|library|"
             r"migration|schema|query|database|\bdb\b|sql|cache|queue|"
             r"deploy\w*|rollback|latency|throughput|rate ?limit\w*|"
             r"authentication|\bauth\b|middleware|token|encryption|dependency|"

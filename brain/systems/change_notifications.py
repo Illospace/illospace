@@ -28,6 +28,8 @@ this)::
 
 from __future__ import annotations
 
+import re
+
 # Terms that make a change worth an immediate ping instead of the next digest.
 DEFAULT_URGENT_TERMS = (
     "p0", "sev0", "sev1", "urgent", "critical", "security",
@@ -39,6 +41,27 @@ _NOISE_EVENT_TYPES = frozenset({
     "schema.created", "schema.updated", "record.read", "record.viewed",
 })
 
+# Routine staging->main promotion PRs are part of the normal release rhythm and
+# should not be recurring Slack blockers (per the live triage operating model),
+# unless they are urgent (urgent is checked first).
+_PROMOTION_RE = re.compile(r"(?i)\b(promote\s+staging|staging\s*(?:-+>|→|to)\s*main)\b")
+
+
+def _urgent_regex(terms) -> "re.Pattern":
+    # Word-boundary match so "incident" != "coincidental" and "prod down" !=
+    # "production downtime". Errs away from noise, which is the point.
+    return re.compile(r"\b(" + "|".join(re.escape(t) for t in terms) + r")\b", re.I)
+
+
+_DEFAULT_URGENT_RE = _urgent_regex(DEFAULT_URGENT_TERMS)
+
+
+def _slack_escape(value) -> str:
+    """Escape Slack control chars so an attacker-controlled title can't inject
+    <!channel>/<@user>/<url|label> or corrupt rendering. Slack: only & < >."""
+    text = str(value if value is not None else "")
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 
 def _signals(event: dict) -> str:
     parts = [str(event.get("title", "")), str(event.get("priority", "")), str(event.get("action", ""))]
@@ -47,8 +70,8 @@ def _signals(event: dict) -> str:
 
 
 def is_urgent(event: dict, *, urgent_terms=DEFAULT_URGENT_TERMS) -> bool:
-    signals = _signals(event)
-    return any(term in signals for term in urgent_terms)
+    regex = _DEFAULT_URGENT_RE if urgent_terms is DEFAULT_URGENT_TERMS else _urgent_regex(urgent_terms)
+    return bool(regex.search(_signals(event)))
 
 
 def classify_event(event: dict, *, urgent_terms=DEFAULT_URGENT_TERMS) -> str:
@@ -58,6 +81,8 @@ def classify_event(event: dict, *, urgent_terms=DEFAULT_URGENT_TERMS) -> str:
     if str(event.get("event_type", "")).lower() in _NOISE_EVENT_TYPES:
         return "skip"
     if event.get("noteworthy") is False:
+        return "skip"
+    if _PROMOTION_RE.search(f"{event.get('title', '')} {event.get('action', '')}"):
         return "skip"
     return "digest"
 
@@ -71,16 +96,16 @@ def decide_notifications(events, *, urgent_terms=DEFAULT_URGENT_TERMS) -> dict:
 
 
 def format_line(event: dict) -> str:
-    title = event.get("title") or event.get("object_key") or "(untitled)"
-    action = event.get("action") or event.get("event_type") or "updated"
+    title = _slack_escape(event.get("title") or event.get("object_key") or "(untitled)")
+    action = _slack_escape(event.get("action") or event.get("event_type") or "updated")
     if event.get("owner_id"):
-        owner = event.get("owner_label") or event["owner_id"]
+        owner = _slack_escape(event.get("owner_label") or event["owner_id"])
     else:
         owner = "unclaimed"
     line = f"• {title} — {action} ({owner})"
     url = event.get("url")
     if url:
-        line += f" {url}"
+        line += f" {_slack_escape(url)}"
     return line
 
 

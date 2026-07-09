@@ -154,3 +154,25 @@ class TestNormalizeEvent:
         assert ev["owner_id"] == "u1"
         # p0 label lives under data → urgency must now be detectable
         assert is_urgent(ev) is True
+
+
+class TestReviewFixes:
+    def test_routine_promotion_pr_skipped(self):
+        assert classify_event({"title": "Promote staging to main", "action": "opened"}) == "skip"
+        assert classify_event({"title": "staging -> main", "action": "opened"}) == "skip"
+
+    def test_urgent_promotion_still_immediate(self):
+        assert classify_event({"title": "Promote staging to main", "labels": ["p0"]}) == "immediate"
+
+    def test_normal_pr_not_skipped(self):
+        assert classify_event({"title": "Add pockets to garment card", "action": "opened"}) == "digest"
+
+    def test_word_boundary_urgency_no_false_positive(self):
+        assert is_urgent({"title": "production downtime resolved"}) is False
+        assert is_urgent({"title": "coincidental cleanup"}) is False
+        assert is_urgent({"title": "prod down now"}) is True
+
+    def test_slack_control_chars_escaped(self):
+        line = format_line({"title": "<!channel> ship it", "action": "opened"})
+        assert "<!channel>" not in line
+        assert "&lt;!channel&gt;" in line

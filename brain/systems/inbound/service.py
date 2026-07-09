@@ -889,8 +889,13 @@ async def _queue_illo_triage(
     signal_text = normalized.get("summary") or ""
     repo = _github_repo_from_origin(origin)
     task_domain = classify_task_domain(signal_text)
+    # task_domain (text heuristic) drives the checklist/labeling only. Let the
+    # domain rule reassign ownership ONLY on the GitHub lane (repo present), where
+    # the summary is a real issue/PR title; other lanes route by repo rule or the
+    # connection authority, so a stray keyword in a Slack message can't yank an
+    # item to a domain owner.
     decision = resolve_owner(
-        task_domain=task_domain,
+        task_domain=task_domain if repo else None,
         repo=repo,
         connection_owner_id=context.owner_user_id,
         rules=default_rules(),

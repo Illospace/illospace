@@ -91,19 +91,29 @@ class TestEventToEnvelope:
         assert env["hints"]["number"] == 7
         assert env["idempotency_key"] is None  # no delivery id
 
-    def test_issue_comment_prefers_comment_fields(self):
+    def test_issue_comment_anchors_on_issue_keeps_comment_details(self):
         payload = {
             "action": "created",
             "repository": {"full_name": "o/r"},
-            "issue": {"number": 5, "title": "Bug", "html_url": "issue-url",
+            "issue": {"number": 5, "title": "Bug", "html_url": "issue-url", "node_id": "I_5",
                       "user": {"login": "author"}, "updated_at": "old"},
             "comment": {"html_url": "comment-url", "user": {"login": "commenter"},
                         "updated_at": "2026-07-08T12:00:00Z"},
         }
         env = github_event_to_envelope("issue_comment", payload)
-        assert env["hints"]["url"] == "comment-url"
+        assert env["hints"]["url"] == "issue-url"       # anchor stays the issue
+        assert env["hints"]["node_id"] == "I_5"
+        assert env["hints"]["comment_url"] == "comment-url"
         assert env["hints"]["author"] == "commenter"
         assert env["hints"]["source_updated_at"] == "2026-07-08T12:00:00Z"
+
+    def test_non_dict_payload_does_not_raise(self):
+        env = github_event_to_envelope("issues", "not-a-dict")
+        assert env is not None and env["origin"] == "github"
+
+    def test_missing_action_defaults_to_event(self):
+        env = github_event_to_envelope("issues", {"issue": {"number": 1, "title": "T"}})
+        assert "event" in env["summary"]
 
     def test_unsupported_event_returns_none(self):
         assert github_event_to_envelope("star", {"action": "created"}) is None

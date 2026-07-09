@@ -106,6 +106,11 @@ def default_rules() -> AssignmentRules:
     ``ILLO_PRODUCT_OWNER_USER_ID`` overrides) to that user. Unset owners simply
     produce no rule, so the item falls through to the connection authority or the
     unclaimed pool — never a guess.
+
+    Single-tenant: these owner ids are global, not per-org — fine for the current
+    one-team deployment; revisit if Illo ever routes across multiple orgs. A rule
+    sets the triage *item* owner (who shepherds it), not a GitHub PR reviewer, so
+    it does not conflict with the SOUL norm of nudging the author.
     """
     domain_owners: dict = {}
     biz = os.environ.get("ILLO_BUSINESS_OWNER_USER_ID", "").strip()
