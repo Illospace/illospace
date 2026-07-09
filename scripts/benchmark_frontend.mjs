@@ -21,19 +21,35 @@ const DEFAULT_CHROME_PATHS = [
   '/usr/bin/chromium-browser',
 ].filter(Boolean);
 
+function modalReadyExpression(id, title, readySelector, loadingSelector = null) {
+  return `(() => {
+    const modalTitle = document.querySelector('#workspace-page-modal-title')?.textContent?.trim();
+    const expectedModal = new URLSearchParams(location.search).get('modal');
+    return Boolean(
+      expectedModal === '${id}' &&
+      modalTitle === '${title}' &&
+      document.querySelector('.workspace-page-modal__surface[role="dialog"]') &&
+      document.querySelector('${readySelector}') &&
+      ${loadingSelector ? `!document.querySelector('${loadingSelector}')` : 'true'}
+    );
+  })()`;
+}
+
+const WORKSPACE_READY_EXPRESSION = `(() => {
+  const body = document.body?.textContent || '';
+  return Boolean(
+    document.querySelector('.cortex-page') &&
+    document.querySelector('.workspace-composer-shell') &&
+    !document.querySelector('.loading-overlay') &&
+    body.includes('Benchmark thread 1')
+  );
+})()`;
+
 const SCENARIOS = {
   workspace: {
     name: 'cortex-workspace',
     path: '/cortex',
-    readyExpression: `(() => {
-      const body = document.body?.textContent || '';
-      return Boolean(
-        document.querySelector('.cortex-container') &&
-        document.querySelector('.workspace-composer-shell') &&
-        !document.querySelector('.loading-overlay') &&
-        body.includes('Benchmark thread 1')
-      );
-    })()`,
+    readyExpression: WORKSPACE_READY_EXPRESSION,
   },
   thread: {
     name: 'cortex-thread-direct',
@@ -41,21 +57,53 @@ const SCENARIOS = {
     readyExpression: `(() => {
       const body = document.body?.textContent || '';
       return Boolean(
-        document.querySelector('.thread-stage-shell.ready') &&
+        document.querySelector('.thread-stage-shell .workspace-stage-shell.ready') &&
         document.querySelector('[data-cortex-thread-column="main"]') &&
         !body.includes('Loading thread...') &&
         body.includes('Benchmark assistant reply')
       );
     })()`,
   },
+  cycles: {
+    name: 'cortex-modal-cycles',
+    path: '/cortex?modal=cycles',
+    modalId: 'cycles',
+    readyExpression: modalReadyExpression('cycles', 'Cycles', '.workspace-page-modal__body .cycle-list', '.cycle-row-skeleton'),
+  },
+  skills: {
+    name: 'cortex-modal-skills',
+    path: '/cortex?modal=skills',
+    modalId: 'skills',
+    readyExpression: modalReadyExpression('skills', 'Skills', '.workspace-page-modal__body .skill-list', '.skill-row-skeleton'),
+  },
+  team: {
+    name: 'cortex-modal-team',
+    path: '/cortex?modal=team',
+    modalId: 'team',
+    readyExpression: modalReadyExpression('team', 'Team', '.workspace-page-modal__body .team-member-list', '[aria-label="Team loading"]'),
+  },
+  vault: {
+    name: 'cortex-modal-vault',
+    path: '/cortex?modal=vault',
+    modalId: 'vault',
+    readyExpression: modalReadyExpression('vault', 'Vault', '.workspace-page-modal__body .vault-list', '.vault-row-skeleton'),
+  },
+  system: {
+    name: 'cortex-modal-system',
+    path: '/cortex?modal=system',
+    modalId: 'system',
+    readyExpression: modalReadyExpression('system', 'AI Runtime', '.workspace-page-modal__body .runtime-config-layout', '.system-loading'),
+  },
 };
+
+const ALL_SCENARIO_KEYS = Object.keys(SCENARIOS);
 
 function parseArgs(argv) {
   const options = {
     baseUrl: DEFAULT_BASE_URL,
     runs: 5,
     warmups: 1,
-    scenarios: ['workspace', 'thread'],
+    scenarios: ALL_SCENARIO_KEYS,
     ideas: 120,
     connections: 240,
     streamItems: 80,
@@ -84,7 +132,7 @@ function parseArgs(argv) {
     else if (arg === '--warmups') options.warmups = Number(next());
     else if (arg === '--scenario') {
       const value = next();
-      options.scenarios = value === 'all' ? ['workspace', 'thread'] : value.split(',').map((item) => item.trim());
+      options.scenarios = value === 'all' ? ALL_SCENARIO_KEYS : value.split(',').map((item) => item.trim());
     } else if (arg === '--ideas') options.ideas = Number(next());
     else if (arg === '--connections') options.connections = Number(next());
     else if (arg === '--stream-items') options.streamItems = Number(next());
@@ -126,7 +174,7 @@ Options:
   --base-url URL              Frontend dev/preview URL (default: ${DEFAULT_BASE_URL})
   --runs N                    Measured runs per scenario (default: 5)
   --warmups N                 Warmup runs per scenario before measuring (default: 1)
-  --scenario NAME             workspace, thread, or all (default: all)
+  --scenario NAME             ${ALL_SCENARIO_KEYS.join(', ')}, comma-separated names, or all (default: all)
   --ideas N                   Mock thread count (default: 120)
   --connections N             Mock connection count (default: 240)
   --stream-items N            Mock thread transcript item count (default: 80)
@@ -351,7 +399,10 @@ function buildFixture(options) {
     email: `bench${index + 1}@example.test`,
     color,
     cortex_color: color,
+    role: index === 0 ? 'admin' : 'member',
+    created_at: isoMinutesAgo(10000 - index * 500),
     approved: true,
+    attribution_visible: true,
   }));
 
   const ideas = Array.from({ length: options.ideas }, (_, index) => {
@@ -414,6 +465,125 @@ function buildFixture(options) {
     connections,
     streamItems: buildStreamItems(options.streamItems),
     chat: buildChatFixture(members),
+    runtimeSettings: buildRuntimeSettingsFixture(),
+    teamTokenAnalytics: buildTeamTokenAnalyticsFixture(members),
+  };
+}
+
+function buildRuntimeSettingsFixture() {
+  return {
+    connection: {
+      status: 'connected',
+      setup_required: false,
+      method: 'api_key',
+      source: 'user_openai',
+      label: 'Personal OpenAI connection',
+      detail: 'Deterministic frontend benchmark fixture',
+      has_personal_connection: true,
+      has_org_key: false,
+    },
+    models: {
+      default: 'openai/gpt-5.4',
+      options: [
+        { key: 'openai/gpt-5.4', label: 'GPT-5.4', group: 'OpenAI' },
+      ],
+    },
+    memory: {
+      scope: 'installation',
+      embedder: 'local_cpu',
+      embedding_model: null,
+      embedding_dimensions: 384,
+      embedding_status: 'ready',
+      embedding_detail: 'Local benchmark fixture',
+      indexed_vectors: 128,
+      api_key_statuses: {},
+      reranker: 'weighted',
+      embedder_options: [
+        { key: 'local_cpu', label: 'Local CPU' },
+      ],
+      embedding_model_options: [],
+      reranker_options: [
+        { key: 'weighted', label: 'Weighted' },
+      ],
+    },
+    voice: {
+      provider: 'local',
+      model: 'whisper',
+      source: 'memory',
+      language: 'auto',
+      model_size: 'base',
+      status: 'ready',
+      detail: 'Local benchmark fixture',
+      provider_options: [
+        { key: 'local', label: 'Local' },
+      ],
+      language_options: [
+        { key: 'auto', label: 'Automatic' },
+      ],
+      model_size_options: [
+        { key: 'base', label: 'Base' },
+      ],
+    },
+    permissions: {
+      can_manage_settings: true,
+    },
+  };
+}
+
+function buildTeamTokenAnalyticsFixture(members) {
+  const memberUsage = members.map((member, index) => ({
+    user_id: member.id,
+    runs: 10 + index,
+    api_calls: 20 + index * 2,
+    input_tokens: 10000 + index * 1000,
+    output_tokens: 5000 + index * 500,
+    total_tokens: 15000 + index * 1500,
+    cache_read: 1000 + index * 100,
+    cache_write: 200 + index * 20,
+    estimated_cost: 0.1 + index * 0.01,
+    last_used_at: isoMinutesAgo(index + 1),
+  }));
+  const totals = memberUsage.reduce((total, usage) => ({
+    ...total,
+    runs: total.runs + usage.runs,
+    api_calls: total.api_calls + usage.api_calls,
+    input_tokens: total.input_tokens + usage.input_tokens,
+    output_tokens: total.output_tokens + usage.output_tokens,
+    total_tokens: total.total_tokens + usage.total_tokens,
+    cache_read: total.cache_read + usage.cache_read,
+    cache_write: total.cache_write + usage.cache_write,
+    estimated_cost: total.estimated_cost + usage.estimated_cost,
+    last_used_at: usage.last_used_at,
+  }), {
+    user_id: null,
+    runs: 0,
+    api_calls: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+    cache_read: 0,
+    cache_write: 0,
+    estimated_cost: 0,
+    last_used_at: null,
+  });
+  const unattributed = {
+    user_id: null,
+    runs: 0,
+    api_calls: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+    cache_read: 0,
+    cache_write: 0,
+    estimated_cost: 0,
+    last_used_at: null,
+  };
+  return {
+    window_days: 30,
+    generated_at: new Date().toISOString(),
+    members: memberUsage,
+    unattributed,
+    totals,
   };
 }
 
@@ -525,6 +695,9 @@ function mockApiResponse(method, url, fixture) {
   const methodUpper = method.toUpperCase();
 
   if (pathName === '/api/me') return jsonResponse(200, fixture.user, { label: 'GET /api/me' });
+  if (pathName === '/api/runtime-settings') {
+    return jsonResponse(200, fixture.runtimeSettings, { label: 'GET /api/runtime-settings' });
+  }
   if (pathName === '/api/auth/ws-token') {
     return jsonResponse(200, {
       token: 'bench-token',
@@ -542,6 +715,13 @@ function mockApiResponse(method, url, fixture) {
       label: 'GET /api/cortex/auth/status',
       sidecar: true,
     });
+  }
+
+  if (pathName === '/api/cycles/') {
+    return jsonResponse(200, [], { label: 'GET /api/cycles/' });
+  }
+  if (pathName === '/api/skills/enhanced') {
+    return jsonResponse(200, [], { label: 'GET /api/skills/enhanced' });
   }
 
   if (pathName === '/api/cortex/ideas') {
@@ -629,6 +809,9 @@ function mockApiResponse(method, url, fixture) {
   if (pathName === '/api/team/members') {
     return jsonResponse(200, fixture.members, { label: 'GET /api/team/members', sidecar: true });
   }
+  if (pathName === '/api/team/token-analytics') {
+    return jsonResponse(200, fixture.teamTokenAnalytics, { label: 'GET /api/team/token-analytics' });
+  }
   if (pathName === '/api/workspace-apps/' || pathName === '/api/workspace-apps') {
     return jsonResponse(200, [], { label: 'GET /api/workspace-apps/', sidecar: true });
   }
@@ -671,6 +854,21 @@ function mockApiResponse(method, url, fixture) {
   }
   if (pathName === '/api/chat/notifications') {
     return jsonResponse(200, [], { label: `GET /api/chat/notifications${url.search}`, sidecar: true });
+  }
+
+  if (pathName === '/api/vault/pin-status') {
+    return jsonResponse(200, { has_pin: false, failed_attempts: 0, locked_until: null }, {
+      label: 'GET /api/vault/pin-status',
+    });
+  }
+  if (pathName === '/api/vault/' || pathName === '/api/vault/missing') {
+    return jsonResponse(200, [], { label: `GET ${pathName}` });
+  }
+  if (pathName === '/api/vault/agent-grants' || pathName === '/api/vault/project-bindings') {
+    return jsonResponse(200, [], { label: `GET ${pathName}`, sidecar: true });
+  }
+  if (pathName === '/api/agent-connections') {
+    return jsonResponse(200, [], { label: 'GET /api/agent-connections', sidecar: true });
   }
 
   return jsonResponse(200, fallbackBodyFor(pathName, methodUpper), {
@@ -873,7 +1071,7 @@ async function configurePage(client, fixture, options, apiCalls) {
   await client.send('Fetch.enable', {
     patterns: [{ urlPattern: '*://*/api/*', requestStage: 'Request' }],
   });
-  await client.send('Page.addScriptToEvaluateOnNewDocument', {
+  const instrumentation = await client.send('Page.addScriptToEvaluateOnNewDocument', {
     source: installPageInstrumentationSource(),
   });
 
@@ -935,7 +1133,33 @@ async function configurePage(client, fixture, options, apiCalls) {
   return async () => {
     await Promise.allSettled([...pendingMocks]);
     unsubscribe();
+    if (instrumentation.identifier) {
+      await client.send('Page.removeScriptToEvaluateOnNewDocument', {
+        identifier: instrumentation.identifier,
+      }).catch(() => {});
+    }
   };
+}
+
+function workspaceBootstrapCalls(calls) {
+  return calls.filter((call) => call.method === 'GET' && call.path === '/api/cortex/bootstrap');
+}
+
+function workspaceStartupCalls(calls) {
+  return calls.filter((call) => (
+    call.path === '/api/cortex/bootstrap' ||
+    call.path.startsWith('/api/workspace-apps') ||
+    call.path.startsWith('/api/workspace-pins')
+  ));
+}
+
+function assertRequestContract(condition, scenario, expectation, calls) {
+  if (condition) return;
+  const observed = calls.map((call) => `${call.method} ${call.path}${call.query || ''}`);
+  throw new Error(
+    `Request contract failed for ${scenario.name}: ${expectation}` +
+    `\nObserved API requests:\n${observed.length ? observed.map((call) => `- ${call}`).join('\n') : '- none'}`,
+  );
 }
 
 async function runScenario(client, scenarioKey, fixture, options, measured) {
@@ -991,6 +1215,25 @@ async function runScenario(client, scenarioKey, fixture, options, measured) {
       throw error;
     }
     const readyMs = performance.now() - started;
+    const apiCallsAtReady = [...apiCalls];
+    const bootstrapCallsAtReady = workspaceBootstrapCalls(apiCallsAtReady);
+    const workspaceCallsAtReady = workspaceStartupCalls(apiCallsAtReady);
+
+    if (scenario.modalId) {
+      assertRequestContract(
+        workspaceCallsAtReady.length === 0,
+        scenario,
+        'cold modal readiness must occur before any workspace startup API request',
+        apiCallsAtReady,
+      );
+    } else {
+      assertRequestContract(
+        bootstrapCallsAtReady.length >= 1,
+        scenario,
+        'workspace and direct-thread routes must request workspace bootstrap before readiness',
+        apiCallsAtReady,
+      );
+    }
 
     await sleep(Math.max(80, options.sidecarLatencyMs ?? options.apiLatencyMs) + 80);
     const pageMetrics = await evaluate(client, `(() => {
@@ -1016,16 +1259,81 @@ async function runScenario(client, scenarioKey, fixture, options, measured) {
       };
     })()`);
 
+    const measuredApiCalls = [...apiCalls];
+    const bootstrapCallsBeforeClose = workspaceBootstrapCalls(measuredApiCalls);
+    const workspaceCallsBeforeClose = workspaceStartupCalls(measuredApiCalls);
+    let postCloseReadyMs = null;
+    let postCloseApiCalls = [];
+
+    if (scenario.modalId) {
+      assertRequestContract(
+        workspaceCallsBeforeClose.length === 0,
+        scenario,
+        'the modal measurement phase must not download workspace startup data',
+        measuredApiCalls,
+      );
+
+      const closeClicked = await evaluate(client, `(() => {
+        const close = document.querySelector('.workspace-page-modal__actions [aria-label="Close page"]');
+        if (!(close instanceof HTMLElement)) return false;
+        close.click();
+        return true;
+      })()`);
+      assertRequestContract(
+        closeClicked === true,
+        scenario,
+        'the deterministic close-modal control must be available',
+        measuredApiCalls,
+      );
+
+      const closeStarted = performance.now();
+      await waitForExpression(client, WORKSPACE_READY_EXPRESSION, options.timeoutMs);
+      postCloseReadyMs = performance.now() - closeStarted;
+      await sleep(Math.max(400, (options.sidecarLatencyMs ?? options.apiLatencyMs) + 160));
+
+      postCloseApiCalls = apiCalls.slice(measuredApiCalls.length);
+      const postCloseBootstrapCalls = workspaceBootstrapCalls(postCloseApiCalls);
+      assertRequestContract(
+        postCloseBootstrapCalls.length === 1,
+        scenario,
+        `closing the modal must trigger exactly one workspace bootstrap request; observed ${postCloseBootstrapCalls.length}`,
+        postCloseApiCalls,
+      );
+    }
+
+    const allApiCalls = [...apiCalls];
+    const allErrors = await evaluate(client, 'window.__illoBench?.errors || []').catch(() => []);
+    const requestContract = {
+      kind: scenario.modalId ? 'modal-defers-workspace' : 'workspace-starts-immediately',
+      passed: true,
+      workspaceBootstrapAtReady: bootstrapCallsAtReady.length,
+      workspaceBootstrapBeforeClose: bootstrapCallsBeforeClose.length,
+      workspaceBootstrapPostClose: workspaceBootstrapCalls(postCloseApiCalls).length,
+      workspaceStartupAtReady: workspaceCallsAtReady.length,
+      workspaceStartupBeforeClose: workspaceCallsBeforeClose.length,
+      workspaceStartupPostClose: workspaceStartupCalls(postCloseApiCalls).length,
+      requestsAtReady: apiCallsAtReady.length,
+      requestsMeasured: measuredApiCalls.length,
+      requestsPostClose: postCloseApiCalls.length,
+    };
+
     return {
       scenario: scenario.name,
       measured,
       readyMs,
-      apiCallCount: apiCalls.length,
-      uniqueApiRoutes: new Set(apiCalls.map((call) => call.label)).size,
-      sidecarApiCallCount: apiCalls.filter((call) => call.sidecar).length,
-      unknownApiCalls: apiCalls.filter((call) => call.unknown),
-      apiCalls,
+      postCloseReadyMs,
+      requestContract,
+      apiCallCount: measuredApiCalls.length,
+      postCloseApiCallCount: postCloseApiCalls.length,
+      totalApiCallCount: allApiCalls.length,
+      uniqueApiRoutes: new Set(measuredApiCalls.map((call) => call.label)).size,
+      sidecarApiCallCount: measuredApiCalls.filter((call) => call.sidecar).length,
+      unknownApiCalls: allApiCalls.filter((call) => call.unknown),
+      apiCalls: measuredApiCalls,
+      postCloseApiCalls,
+      allApiCalls,
       ...pageMetrics,
+      errors: [...new Set([...(pageMetrics.errors || []), ...(allErrors || [])])],
     };
   } finally {
     for (const unsubscribe of unsubscribers) await unsubscribe();
@@ -1036,7 +1344,20 @@ async function runScenario(client, scenarioKey, fixture, options, measured) {
 function summarizeScenario(samples) {
   const measuredSamples = samples.filter((sample) => sample.measured);
   const apiLabels = new Map();
+  const allApiLabels = new Map();
+  const postCloseApiLabels = new Map();
+  const unknownApiLabels = new Set();
   const callWindows = [];
+
+  function recordCalls(target, calls) {
+    for (const call of calls) {
+      const entry = target.get(call.label) ?? { count: 0, bytes: 0 };
+      entry.count += 1;
+      entry.bytes += call.bytes;
+      target.set(call.label, entry);
+    }
+  }
+
   for (const sample of measuredSamples) {
     const calls = sample.apiCalls;
     if (calls.length) {
@@ -1045,25 +1366,35 @@ function summarizeScenario(samples) {
         last: Math.max(...calls.map((call) => call.fulfilledAt ?? 0)),
       });
     }
-    for (const call of sample.apiCalls) {
-      const entry = apiLabels.get(call.label) ?? { count: 0, bytes: 0 };
-      entry.count += 1;
-      entry.bytes += call.bytes;
-      apiLabels.set(call.label, entry);
+    recordCalls(apiLabels, calls);
+    recordCalls(allApiLabels, sample.allApiCalls ?? calls);
+    recordCalls(postCloseApiLabels, sample.postCloseApiCalls ?? []);
+    for (const call of sample.unknownApiCalls ?? []) {
+      unknownApiLabels.add(call.label);
     }
   }
-  const routes = [...apiLabels.entries()]
-    .map(([label, entry]) => ({
-      label,
-      total_calls: entry.count,
-      avg_calls_per_run: entry.count / Math.max(measuredSamples.length, 1),
-      avg_kb_per_run: entry.bytes / Math.max(measuredSamples.length, 1) / 1024,
-    }))
-    .sort((a, b) => b.total_calls - a.total_calls || a.label.localeCompare(b.label));
+
+  function routeSummaries(labels) {
+    return [...labels.entries()]
+      .map(([label, entry]) => ({
+        label,
+        total_calls: entry.count,
+        avg_calls_per_run: entry.count / Math.max(measuredSamples.length, 1),
+        avg_kb_per_run: entry.bytes / Math.max(measuredSamples.length, 1) / 1024,
+      }))
+      .sort((a, b) => b.total_calls - a.total_calls || a.label.localeCompare(b.label));
+  }
+
+  const routes = routeSummaries(apiLabels);
+  const allRoutes = routeSummaries(allApiLabels);
+  const postCloseRoutes = routeSummaries(postCloseApiLabels);
 
   return {
     runs: measuredSamples.length,
     ready_ms: summarizeNumbers(measuredSamples.map((sample) => sample.readyMs)),
+    post_close_ready_ms: summarizeNumbers(
+      measuredSamples.map((sample) => sample.postCloseReadyMs ?? 0).filter((value) => value > 0),
+    ),
     fcp_ms: summarizeNumbers(measuredSamples.map((sample) => sample.fcpMs ?? 0).filter((value) => value > 0)),
     lcp_ms: summarizeNumbers(measuredSamples.map((sample) => sample.lcpMs ?? 0).filter((value) => value > 0)),
     api_calls: summarizeNumbers(measuredSamples.map((sample) => sample.apiCalls.length)),
@@ -1072,6 +1403,27 @@ function summarizeScenario(samples) {
     api_kb: summarizeNumbers(measuredSamples.map((sample) => sample.apiCalls.reduce((sum, call) => sum + call.bytes, 0) / 1024)),
     api_window_ms: summarizeNumbers(callWindows.map((window) => window.last - window.first)),
     unique_api_routes: summarizeNumbers(measuredSamples.map((sample) => new Set(sample.apiCalls.map((call) => call.label)).size)),
+    post_close_api_calls: summarizeNumbers(measuredSamples.map((sample) => sample.postCloseApiCalls?.length ?? 0)),
+    total_api_calls: summarizeNumbers(measuredSamples.map((sample) => sample.allApiCalls?.length ?? sample.apiCalls.length)),
+    workspace_bootstrap_at_ready: summarizeNumbers(
+      measuredSamples.map((sample) => sample.requestContract?.workspaceBootstrapAtReady ?? 0),
+    ),
+    workspace_bootstrap_before_close: summarizeNumbers(
+      measuredSamples.map((sample) => sample.requestContract?.workspaceBootstrapBeforeClose ?? 0),
+    ),
+    workspace_bootstrap_post_close: summarizeNumbers(
+      measuredSamples.map((sample) => sample.requestContract?.workspaceBootstrapPostClose ?? 0),
+    ),
+    workspace_startup_at_ready: summarizeNumbers(
+      measuredSamples.map((sample) => sample.requestContract?.workspaceStartupAtReady ?? 0),
+    ),
+    workspace_startup_before_close: summarizeNumbers(
+      measuredSamples.map((sample) => sample.requestContract?.workspaceStartupBeforeClose ?? 0),
+    ),
+    workspace_startup_post_close: summarizeNumbers(
+      measuredSamples.map((sample) => sample.requestContract?.workspaceStartupPostClose ?? 0),
+    ),
+    request_contract_passed: measuredSamples.every((sample) => sample.requestContract?.passed === true),
     dom_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.domNodes)),
     deep_field_feature_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.deepFieldFeatureNodes ?? 0)),
     d3_shadow_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.d3ShadowNodes ?? 0)),
@@ -1081,9 +1433,9 @@ function summarizeScenario(samples) {
     long_task_total_ms: summarizeNumbers(measuredSamples.map((sample) => sample.longTaskTotalMs)),
     max_long_task_ms: summarizeNumbers(measuredSamples.map((sample) => sample.maxLongTaskMs)),
     routes,
-    unknown_routes: routes.filter((route) => route.label.includes('/api/') && measuredSamples.some((sample) =>
-      sample.unknownApiCalls.some((call) => call.label === route.label),
-    )),
+    post_close_routes: postCloseRoutes,
+    all_routes: allRoutes,
+    unknown_routes: allRoutes.filter((route) => unknownApiLabels.has(route.label)),
     errors: [...new Set(measuredSamples.flatMap((sample) => sample.errors || []))],
   };
 }
@@ -1102,13 +1454,15 @@ function printTextReport(result) {
     fcp: scenario.summary.fcp_ms.p50 ? scenario.summary.fcp_ms.p50.toFixed(1) : '-',
     api: scenario.summary.api_calls.p50.toFixed(0),
     routes: scenario.summary.unique_api_routes.p50.toFixed(0),
+    bootstrap: `${scenario.summary.workspace_bootstrap_before_close.p50.toFixed(0)}/${scenario.summary.workspace_bootstrap_post_close.p50.toFixed(0)}`,
+    close: scenario.summary.post_close_ready_ms.p50 ? scenario.summary.post_close_ready_ms.p50.toFixed(1) : '-',
     long: scenario.summary.long_task_total_ms.p95.toFixed(1),
     dom: scenario.summary.dom_nodes.p50.toFixed(0),
     d3: scenario.summary.d3_shadow_nodes.p50.toFixed(0),
     links: scenario.summary.d3_shadow_connections.p50.toFixed(0),
     field: scenario.summary.deep_field_feature_nodes.p50.toFixed(0),
   }));
-  const headers = ['name', 'runs', 'p50', 'p95', 'fcp', 'api', 'routes', 'long', 'dom', 'd3', 'links', 'field'];
+  const headers = ['name', 'runs', 'p50', 'p95', 'fcp', 'api', 'routes', 'bootstrap', 'close', 'long', 'dom', 'd3', 'links', 'field'];
   const widths = Object.fromEntries(headers.map((header) => [
     header,
     Math.max(header.length, ...rows.map((row) => row[header].length)),
@@ -1121,9 +1475,21 @@ function printTextReport(result) {
 
   for (const scenario of result.scenarios) {
     console.log('');
+    console.log(
+      `${scenario.name} request contract: ${scenario.summary.request_contract_passed ? 'PASS' : 'FAIL'} ` +
+      `(workspace bootstrap before-close/post-close ` +
+      `${scenario.summary.workspace_bootstrap_before_close.p50.toFixed(0)}/` +
+      `${scenario.summary.workspace_bootstrap_post_close.p50.toFixed(0)})`,
+    );
     console.log(`${scenario.name} API routes:`);
     for (const route of scenario.summary.routes.slice(0, 20)) {
       console.log(`  ${route.avg_calls_per_run.toFixed(1)}x/run  ${route.label}`);
+    }
+    if (scenario.summary.post_close_routes.length) {
+      console.log('  Post-close API routes:');
+      for (const route of scenario.summary.post_close_routes.slice(0, 20)) {
+        console.log(`    ${route.avg_calls_per_run.toFixed(1)}x/run  ${route.label}`);
+      }
     }
     if (scenario.summary.unknown_routes.length) {
       console.log('  Unknown mocked routes:');

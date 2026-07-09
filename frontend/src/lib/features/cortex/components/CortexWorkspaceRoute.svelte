@@ -99,6 +99,8 @@
   let workspacePageComponentId = $state<WorkspacePageModalId | null>(null);
   let workspacePageLoading = $state(false);
   let workspacePageLoadToken = 0;
+  let workspaceRouteMounted = $state(false);
+  let workspaceStartupStarted = $state(false);
   let lastRequestedIdeaId = $state<string | null>(null);
   let lastSyncedThreadRoute = $state<string | null>(null);
   function requestedThreadIdeaIdFromPage() {
@@ -256,15 +258,44 @@
     }
   }
 
+  function startCortexWorkspace() {
+    if (!browser || !workspaceRouteMounted || workspaceStartupStarted) return;
+
+    const requestedIdeaId = requestedThreadIdeaIdFromPage();
+    initialDirectThreadIdeaId = requestedIdeaId;
+    directThreadUrlPending = Boolean(requestedIdeaId);
+    if (requestedIdeaId) lastRequestedIdeaId = requestedIdeaId;
+
+    workspaceStartupStarted = true;
+    cortex.setupWs();
+    if (!requestedIdeaId) {
+      ensureWorkspacePinsWs();
+      ensureWorkspaceRealtime();
+    }
+
+    void (async () => {
+      if (requestedIdeaId) {
+        await openDirectThreadAndSyncUrl(requestedIdeaId);
+        clearRuntimeReadyOnboardingUrl();
+      } else {
+        await loadWorkspaceSceneSidecars();
+        await maybeSelectIdeaFromUrl();
+      }
+      schedulePostStartupHydration(requestedIdeaId);
+    })();
+  }
+
   async function closeWorkspacePageModal() {
     if (!browser) return;
     await goto(buildCortexHrefWithoutWorkspacePage($page.url.searchParams), {
       keepFocus: true,
       noScroll: true,
     });
+    startCortexWorkspace();
   }
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     const changedAppId = workspaceApps.lastChangedAppId;
     if (!changedAppId || changedAppId === lastAutoOpenedAppId) return;
     if (workspaceApps.lastChangeAction !== 'create') return;
@@ -275,6 +306,7 @@
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (isThreadStageUrl()) return;
     const requestedAppId = requestedWorkspaceAppIdFromPage();
     if (!requestedAppId) {
@@ -298,6 +330,7 @@
       workspacePageComponent = null;
       workspacePageComponentId = null;
       workspacePageLoading = false;
+      if (workspaceRouteMounted) startCortexWorkspace();
       return;
     }
 
@@ -694,6 +727,7 @@
   }
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     threadStage.syncPanelOpen(cortex.panelOpen && Boolean(ThreadStageScreenComponent));
   });
 
@@ -769,10 +803,12 @@
   }
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     syncThreadUrlToStage();
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (!browser || workspaceArrivalSettled || !workspaceArrivalReady) return;
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
       workspaceArrivalActive = false;
@@ -859,6 +895,7 @@
   );
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (!shouldRenderWorkspaceScene) return;
     if (cortex.view === 'list') {
       ensureCortexListViewLoaded();
@@ -868,6 +905,7 @@
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (shouldRenderWorkspaceScene || chatDockExpanded || activeWorkspaceApp) {
       ensureWorkspaceRealtime();
     } else if (cortex.panelOpen) {
@@ -876,16 +914,19 @@
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (cortexSurfaceReady) ensureCortexNotificationsMenuLoaded();
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (!cortexSurfaceReady || ThreadStageScreenComponent || threadStagePrewarmQueued) return;
     threadStagePrewarmQueued = true;
     runWhenBrowserIdle(() => ensureThreadStageScreenLoaded(), 260, 1600);
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (cortexSurfaceReady && !cortex.panelOpen && !chatDockExpanded && !workspaceOverlay.activeWorkspaceAppId) {
       ensureWorkspaceComposerLoaded();
       ensureCortexArchiveBinMenuLoaded();
@@ -893,37 +934,45 @@
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (cortexSurfaceReady && !cortex.panelOpen && !chatDockExpanded && !workspaceOverlay.activeWorkspaceAppId) return;
     resetArchiveDragState();
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (cortex.panelOpen) ensureThreadStageScreenLoaded();
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (cortexSurfaceReady && (chatDockExpanded || chatDockForeground)) {
       ensureCortexChatDockLoaded();
     }
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (!chatDockExpanded && chatDockForeground) chatDockForeground = false;
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (!cortex.panelOpen && activeWorkspaceApp) ensureGeneratedAppRendererLoaded();
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (workspaceOverlay.userMenuAnchor) ensureCortexUserMenuLoaded();
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (workspaceOverlay.workspaceMenuAnchor) ensureCortexWorkspaceMenuLoaded();
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (workspaceOverlay.pinMenuAnchor) ensureCortexWorkspacePinMenuLoaded();
   });
 
@@ -1063,12 +1112,14 @@
   }
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (!cortex.loading) {
       maybeSelectIdeaFromUrl();
     }
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (
       !browser
       || requestedThreadIdeaIdFromPage()
@@ -1085,11 +1136,13 @@
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (!cortex.panelOpen || !cortex.selectedIdea?.id) return;
     syncCanonicalThreadUrl(cortex.selectedIdea.id);
   });
 
   $effect(() => {
+    if (!workspaceStartupStarted) return;
     if (
       !browser
       || runtimeReadyIntroHandled
@@ -1117,25 +1170,8 @@
   });
 
   onMount(() => {
-    const requestedIdeaId = requestedThreadIdeaIdFromPage();
-    initialDirectThreadIdeaId = requestedIdeaId;
-    directThreadUrlPending = Boolean(requestedIdeaId);
-    cortex.setupWs();
-    if (!requestedIdeaId) {
-      ensureWorkspacePinsWs();
-      ensureWorkspaceRealtime();
-    }
-    void (async () => {
-      if (requestedIdeaId) {
-        lastRequestedIdeaId = requestedIdeaId;
-        await openDirectThreadAndSyncUrl(requestedIdeaId);
-        clearRuntimeReadyOnboardingUrl();
-      } else {
-        await loadWorkspaceSceneSidecars();
-        await maybeSelectIdeaFromUrl();
-      }
-      schedulePostStartupHydration(requestedIdeaId);
-    })();
+    workspaceRouteMounted = true;
+    if (!activeWorkspacePageModalId || requestedThreadIdeaIdFromPage()) startCortexWorkspace();
     document.addEventListener('keydown', handleKeydown);
     document.addEventListener('keyup', handleKeyup);
     document.addEventListener('pointerup', handleArchivePointerRelease, { passive: true });
@@ -1144,6 +1180,7 @@
   });
 
   onDestroy(() => {
+    workspaceRouteMounted = false;
     if (runtimeReadyIntroTimer) {
       clearTimeout(runtimeReadyIntroTimer);
       runtimeReadyIntroTimer = null;
@@ -1153,12 +1190,14 @@
     }
     threadStage.cleanup();
     lazyComponents.clear();
-    cortex.teardownWs();
-    workspacePins.teardownWs();
-    workspaceApps.teardown();
-    chat.teardown();
-    notifications.teardown();
-    presence.teardown();
+    if (workspaceStartupStarted) {
+      cortex.teardownWs();
+      workspacePins.teardownWs();
+      workspaceApps.teardown();
+      chat.teardown();
+      notifications.teardown();
+      presence.teardown();
+    }
     document.removeEventListener('keydown', handleKeydown);
     document.removeEventListener('keyup', handleKeyup);
     document.removeEventListener('pointerup', handleArchivePointerRelease);
@@ -1176,6 +1215,7 @@
   style={threadWorkspaceStyle}
 >
   <div class="cortex-workspace" bind:this={workspaceEl}>
+    {#if workspaceStartupStarted}
     <CortexLocalPreviewControls
       workspaceContext={workspaceOverlay.composerContext}
       activeWorkspaceAppId={workspaceOverlay.activeWorkspaceAppId}
@@ -1364,15 +1404,6 @@
       </WorkspaceStageShell>
     {/if}
 
-    {#if activeWorkspacePageModal}
-      <WorkspacePageModal
-        section={activeWorkspacePageModal}
-        PageComponent={workspacePageComponent}
-        loading={workspacePageLoading}
-        onclose={closeWorkspacePageModal}
-      />
-    {/if}
-
     {#if workspaceOverlay.userMenuAnchor && CortexUserMenuComponent}
       <CortexUserMenuComponent anchor={workspaceOverlay.userMenuAnchor} onclose={() => workspaceOverlay.closeUserMenu()} />
     {/if}
@@ -1393,6 +1424,17 @@
         onrename={handleRenameWorkspacePin}
         ondelete={handleDeleteWorkspacePin}
         onclose={() => workspaceOverlay.closePinMenu()}
+      />
+    {/if}
+
+    {/if}
+
+    {#if activeWorkspacePageModal}
+      <WorkspacePageModal
+        section={activeWorkspacePageModal}
+        PageComponent={workspacePageComponent}
+        loading={workspacePageLoading}
+        onclose={closeWorkspacePageModal}
       />
     {/if}
 

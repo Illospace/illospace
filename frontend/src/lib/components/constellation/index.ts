@@ -34,7 +34,6 @@ export { default as ConstellationSearchField } from './ConstellationSearchField.
 export { default as ConstellationSegmentedToggle } from './ConstellationSegmentedToggle.svelte';
 export { default as ConstellationWorkspaceBackdrop } from './ConstellationWorkspaceBackdrop.svelte';
 export { default as ConstellationNavRail } from '../layout/ConstellationNavRail.svelte';
-export { default as SignalBlob } from './SignalBlob.svelte';
 export { buildAstrePrimitiveStyle } from './astrePrimitiveStyle';
 export type { AstrePrimitiveStyleOptions } from './astrePrimitiveStyle';
 export type {
