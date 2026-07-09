@@ -189,7 +189,8 @@ def _normalize_model(model: str) -> str:
 
 def _required_openai_auth_mode(model: str) -> str | None:
     """Return the OpenAI auth mode required by model availability."""
-    return "chatgpt" if _normalize_model(model).lower() == "gpt-5.5" else None
+    normalized = _normalize_model(model).lower()
+    return "chatgpt" if normalized == "gpt-5.5" or normalized.startswith("gpt-5.6") else None
 
 
 # ── Constants ──────────────────────────────────────────────────

@@ -23,6 +23,7 @@ export const EXECUTION_PROFILE_OPTIONS = [
 ] as const satisfies readonly CortexWorkspaceComposerIntentOption[];
 
 export const MODEL_OPTIONS = [
+  { value: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol', description: 'Preview model for eligible personal connections' },
   { value: 'openai/gpt-5.5', label: 'GPT-5.5', description: 'Best quality for hard reasoning' },
   { value: 'openai/gpt-5.4', label: 'GPT-5.4', description: 'Balanced general-purpose model' },
   { value: 'openai/gpt-5.4-mini', label: 'GPT-5.4 Mini', description: 'Fast and economical' },
