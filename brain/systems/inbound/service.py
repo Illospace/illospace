@@ -860,6 +860,16 @@ async def _complete_event_with_illo_triage(
     )
 
 
+def _unclaimed_pool_user_id() -> "str | None":
+    """The configured 'unclaimed pool' owner (``ILLO_UNCLAIMED_POOL_USER_ID``).
+    When set, owner-less triage items park here (visible, claimable) instead of
+    being skipped. Unset -> the pool is off and owner-less items skip as before."""
+    import os
+
+    value = os.environ.get("ILLO_UNCLAIMED_POOL_USER_ID", "").strip()
+    return value or None
+
+
 def _github_repo_from_origin(origin: "str | None") -> "str | None":
     """Extract ``owner/repo`` from a ``github:owner/repo`` origin, else ``None``."""
     if origin and str(origin).lower().startswith("github:"):
@@ -901,15 +911,21 @@ async def _queue_illo_triage(
         rules=default_rules(),
     )
     owner_user_id = decision.user_id
+    unclaimed = False
     if not owner_user_id:
-        # No rule and no connection authority: this belongs in the unclaimed pool.
-        # Enacting a truly owner-less pool needs the ideas.user_id nullability
-        # decision (specs/illo-lifecycle Slice 3); until then, skip as before.
-        return {
-            "status": "skipped",
-            "reason": "missing_authority_user",
-            "task_domain": task_domain.value,
-        }
+        # No rule and no connection authority -> the unclaimed pool. Rather than
+        # loosen ideas.user_id (NOT NULL), park the item on a configured pool user
+        # (ILLO_UNCLAIMED_POOL_USER_ID); teammates claim it by reassigning. With no
+        # pool user configured, preserve the old skip so nothing changes.
+        pool_user_id = _unclaimed_pool_user_id()
+        if not pool_user_id:
+            return {
+                "status": "skipped",
+                "reason": "missing_authority_user",
+                "task_domain": task_domain.value,
+            }
+        owner_user_id = pool_user_id
+        unclaimed = True
 
     title = _truncate(f"Inbound signal needs Illo triage: {origin}", 180)
     idea = Idea(
@@ -936,6 +952,7 @@ async def _queue_illo_triage(
                 "owner_id": owner_user_id,
                 "basis": decision.basis.value,
                 "authority_user_id": context.owner_user_id,
+                "unclaimed": unclaimed,
             },
         },
     )

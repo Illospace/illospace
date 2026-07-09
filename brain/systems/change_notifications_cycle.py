@@ -61,15 +61,30 @@ async def _load_change_events(session, org_id, since, *, limit: int = 500) -> li
 
 
 async def _count_unclaimed(session, org_id) -> int:
-    """Count items parked in the unclaimed pool.
+    """Count open items parked in the unclaimed pool.
 
-    The pull-pool is not enacted yet: ``ideas.user_id`` is NOT NULL, so triage
-    still skips owner-less items rather than persisting an ``unassigned`` idea
-    (see specs/illo-lifecycle Slice 3). There is nothing to count, and a
-    JSONB-path filter here would be a dialect-fragile no-op. Wire the real query
-    when the pool lands.
-    """
-    return 0
+    The pool is the configured ``ILLO_UNCLAIMED_POOL_USER_ID`` owner (see
+    ``inbound/service.py``). Unset, or no session -> 0 (pool off)."""
+    import os
+
+    pool_user = os.environ.get("ILLO_UNCLAIMED_POOL_USER_ID", "").strip()
+    if not pool_user or session is None:
+        return 0
+
+    from sqlalchemy import func, select
+
+    from brain.platform.db.models.idea import Idea
+
+    stmt = (
+        select(func.count())
+        .select_from(Idea)
+        .where(
+            Idea.user_id == pool_user,
+            Idea.org_id == org_id,
+            Idea.archived_at.is_(None),
+        )
+    )
+    return int((await session.execute(stmt)).scalar() or 0)
 
 
 async def _default_post(channel_id, text) -> None:

@@ -176,3 +176,12 @@ class TestReviewFixes:
         line = format_line({"title": "<!channel> ship it", "action": "opened"})
         assert "<!channel>" not in line
         assert "&lt;!channel&gt;" in line
+
+
+class TestUnclaimedPool:
+    async def test_count_zero_when_pool_unset(self, monkeypatch):
+        import brain.systems.change_notifications_cycle as cyc
+
+        monkeypatch.delenv("ILLO_UNCLAIMED_POOL_USER_ID", raising=False)
+        # session is present but the pool is off -> 0 without touching the DB.
+        assert await cyc._count_unclaimed(object(), "org-1") == 0

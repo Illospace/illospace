@@ -2,11 +2,15 @@
 
 ## Next Agent Prompt
 
-**Status (2026-07-09):** All five slices **implemented in code**. Every pure
-logic core is unit-tested (**98 focused tests green**), a code-review pass found
-and fixed **6 self-review bugs**, and the whole suite still **collects with zero
-import errors (3353 tests)**. What remains is deploy/live wiring that a dev
-checkout cannot exercise (GitHub App, live DB, Slack, scheduler registration) —
+**Status (2026-07-09):** All five slices **implemented and shipped in PR #276**
+(2 commits). Pure logic cores are unit-tested (**105 focused tests green**); an
+independent adversarial review found ~10 MED/LOW findings, all **fixed and pushed**
+(commit `76ed45f`). Full suite **3280 passed** (1 pre-existing env-only failure,
+unrelated). Live read-only validation on `illo-dev` confirmed the sync cycle
+(id 2, `0 8,13` "Uwear Ticket Coordinator Check-ins") and that "doc 1155" is live
+`domain_records` id 1155 — the deterministic rules **preserve** its Reda/Axel/JB
+routing rather than override it. What remains is deploy/live wiring a dev checkout
+cannot exercise (GitHub App, live DB/env, Slack, scheduler registration) —
 enumerated per slice below.
 
 **Key implementation decisions (differ from the original slice text):**
@@ -14,11 +18,12 @@ enumerated per slice below.
   decision live in `ideas.agent_details` (existing JSONB); freshness rides the
   record `data` / envelope hints. This avoids risky central-table migrations that
   can't be validated without a live DB. Add a column later if querying needs it.
-- **Unclaimed pool computed but not yet enacted.** `ideas.user_id` is `NOT NULL`,
-  so a truly owner-less item still can't persist. `resolve_owner` returns
-  `unassigned` and triage records it, but the no-rule/no-authority case still
-  skips (as before). Enacting the pull-pool needs the `ideas.user_id` nullability
-  (or sentinel-user) decision — a live-validated change.
+- **Unclaimed pool enacted via a sentinel owner (env-gated).** Rather than loosen
+  `ideas.user_id` (`NOT NULL`), owner-less items park on a configured pool user
+  (`ILLO_UNCLAIMED_POOL_USER_ID`); teammates claim by reassigning. Unset → the old
+  skip (no behavior change). The notify digest counts the pool. Activation: create
+  a pool user + set the env var. (A `NOT NULL`-drop migration is the purer
+  long-term option if preferred.)
 - **New router/cycle are additive and NOT auto-registered**, so they can't affect
   app startup or the scheduler until deliberately wired.
 
@@ -32,8 +37,9 @@ enumerated per slice below.
 - **Slice 3:** set `ILLO_BUSINESS_OWNER_USER_ID` (+ optional
   `ILLO_PRODUCT_OWNER_USER_ID`, `ILLO_REPO_OWNERS`) to turn on rule routing —
   **must be valid user ids in the org, or those triage events fail** (Idea.user_id
-  is a NOT-NULL FK); decide `ideas.user_id` nullability to enact the unclaimed
-  pool; migrate live "1155" prose into the rule table.
+  is a NOT-NULL FK); create an unclaimed-pool user + set
+  `ILLO_UNCLAIMED_POOL_USER_ID` to enact the pool; migrate live "1155" prose into
+  the rule table.
 - **Slice 4:** register a cycle calling `run_notify_cycle(session, org_id=…,
   channel_id=<team channel>, since=<last_run_at>)`; add the urgent-bypass hook at
   triage completion.
