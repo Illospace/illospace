@@ -13,15 +13,18 @@ from brain.systems.cycles import execution as cycle_execution
 from brain.systems.cycles import service
 from brain.app.api.routers import cycles as cycles_router
 from brain.platform.db.models.cycle import Cycle, CycleRun
+from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea
 
 
 class _FakeSession:
-    def __init__(self, agent_run=None, run=None, cycle=None):
+    def __init__(self, agent_run=None, run=None, cycle=None, artifacts=None, events=None):
         self._agent_run = agent_run
         self._run = run
         self._cycle = cycle
+        self._artifacts = list(artifacts or [])
+        self._events = list(events or [])
         self.added = []
 
     def get(self, model, value):
@@ -33,13 +36,53 @@ class _FakeSession:
             return self._cycle
         return None
 
+    def scalars(self, statement):
+        text = str(statement)
+        if "agent_run_artifacts" in text:
+            rows = list(self._artifacts)
+            if "agent_run_artifacts.text =" in text:
+                params = statement.compile().params
+                text_value = next(
+                    (value for key, value in params.items() if key.startswith("text_")),
+                    None,
+                )
+                rows = [row for row in rows if row.text == text_value]
+            rows.sort(
+                key=lambda row: (
+                    row.created_at or datetime.min.replace(tzinfo=timezone.utc),
+                    row.id or 0,
+                ),
+                reverse=True,
+            )
+            return _AllResult(rows)
+        if "agent_run_events" in text:
+            rows = sorted(
+                self._events,
+                key=lambda row: (row.sequence_no or 0, row.id or 0),
+                reverse=True,
+            )
+            return _AllResult(rows)
+        return _AllResult([])
+
     def add(self, value):
         self.added.append(value)
+        if isinstance(value, AgentRunArtifactRow):
+            if value.id is None:
+                value.id = 100 + len(self._artifacts) + 1
+            if value.created_at is None:
+                value.created_at = datetime(2026, 4, 28, 20, 30, tzinfo=timezone.utc)
+            self._artifacts.append(value)
 
 
 class _AsyncFakeSession(_FakeSession):
     async def get(self, model, value):
         return super().get(model, value)
+
+    async def scalars(self, statement):
+        return super().scalars(statement)
+
+    async def flush(self):
+        return None
 
 
 class _ScalarResult:
@@ -994,6 +1037,12 @@ async def test_cycle_busy_thread_detection_uses_agent_run_open_statuses():
 
 def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
     agent_run = AgentRun()
+    agent_run.id = 44
+    agent_run.root_run_id = 44
+    agent_run.user_id = "user-1"
+    agent_run.org_id = "org-1"
+    agent_run.input_message = "Run the Cycle mission"
+    agent_run.model_policy = {}
     agent_run.metadata_ = {"source": "cycle", "cycle_run_id": 12}
 
     cycle_run = CycleRun()
@@ -1012,11 +1061,29 @@ def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
 
     cycle = Cycle()
     cycle.id = 5
+    cycle.prompt = "Run the smoke test. Report evidence health, next action, and self-review."
     cycle.last_status = None
     cycle.last_error = "old"
     cycle.last_run_at = None
 
-    fake_session = _AsyncFakeSession(agent_run=agent_run, run=cycle_run, cycle=cycle)
+    final_answer = AgentRunArtifactRow(
+        id=8,
+        run_id=44,
+        root_run_id=44,
+        artifact_type="final_answer",
+        text=(
+            "I completed the Cycle mission. Evidence health: ok. Workspace evidence "
+            "showed the smoke test was clean. Next action: continue monitoring. "
+            "Self-review summary: contract satisfied."
+        ),
+        created_at=datetime(2026, 4, 28, 20, 25, tzinfo=timezone.utc),
+    )
+    fake_session = _AsyncFakeSession(
+        agent_run=agent_run,
+        run=cycle_run,
+        cycle=cycle,
+        artifacts=[final_answer],
+    )
     monkeypatch.setattr(
         service,
         "UnitOfWork",
@@ -1038,6 +1105,213 @@ def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
     assert evaluation.details["launch_receipts"] == [
         {"kind": "cycle_launch_receipt", "cycle_run_id": 12}
     ]
+    verdict = evaluation.details["mission_result_contract_verdict"]
+    assert verdict["settlement_status"] == "mission_success"
+    assert verdict["candidate_artifact_id"] == 8
+
+
+@pytest.mark.asyncio
+async def test_cycle_contract_gate_repairs_bad_visible_answer_once(monkeypatch):
+    from brain.systems.cycles import contract_gate
+
+    agent_run = AgentRun()
+    agent_run.id = 44
+    agent_run.root_run_id = 44
+    agent_run.user_id = "user-1"
+    agent_run.org_id = "org-1"
+    agent_run.input_message = "Daily Illo Conversation Improvements"
+    agent_run.model_policy = {}
+    agent_run.metadata_ = {"source": "cycle", "cycle_run_id": 12}
+
+    cycle_run = CycleRun()
+    cycle_run.id = 12
+    cycle_run.cycle_id = 5
+    cycle_run.status = "running"
+    cycle_run.prompt_snapshot = (
+        "Daily Illo Conversation Improvements. Produce: 24h readout, failure map, "
+        "codebase implications, proposals, tracking summary, impact loop, next action. "
+        "Include Domain tracking, evidence health, and a short self-review summary."
+    )
+    cycle_run.context_snapshot = {
+        "result_contract": {
+            "kind": "autonomous_cycle_run_result",
+            "required_outputs": [
+                "answer_the_cycle_mission",
+                "summarize_workspace_evidence_or_explicit_gaps",
+                "report_evidence_health",
+                "record_next_action_or_blocker",
+                "short_self_review_summary",
+            ],
+        },
+        "evidence_health": {"status": "pending"},
+    }
+
+    cycle = Cycle()
+    cycle.id = 5
+    cycle.prompt = cycle_run.prompt_snapshot
+
+    bad_answer = AgentRunArtifactRow(
+        id=8,
+        run_id=44,
+        root_run_id=44,
+        artifact_type="final_answer",
+        text=(
+            "Verified current runtime facts:\n"
+            "- I'm Illo, the agent inside an Illospace workspace.\n"
+            "- Runtime scope: workspace-bound, user-bound, and thread-bound."
+        ),
+        created_at=datetime(2026, 4, 28, 20, 25, tzinfo=timezone.utc),
+    )
+    domain_event = AgentRunEventRow(
+        id=4,
+        run_id=44,
+        root_run_id=44,
+        sequence_no=4,
+        event_type="run.tool_completed",
+        payload={
+            "tool_name": "create_domain_record",
+            "result": {"status": "ok", "record_id": 26},
+        },
+    )
+    session = _AsyncFakeSession(
+        agent_run=agent_run,
+        run=cycle_run,
+        cycle=cycle,
+        artifacts=[bad_answer],
+        events=[domain_event],
+    )
+    repair_calls = []
+
+    async def fake_repair(**kwargs):
+        repair_calls.append(kwargs)
+        return (
+            "24h readout: reviewed workspace evidence and Domain records.\n"
+            "Failure map: the visible answer was runtime introspection.\n"
+            "Codebase implications: enforce the Cycle contract before finalization.\n"
+            "Proposals: keep the contract gate and one repair pass.\n"
+            "Tracking summary: Domain record 26 captured the work.\n"
+            "Impact loop: future runs can compare repaired answers to outcomes.\n"
+            "Next action: monitor the next scheduled run.\n"
+            "evidence_health=ok.\n"
+            "Self-review summary: mission result contract satisfied after repair."
+        )
+
+    monkeypatch.setattr(contract_gate, "_async_repair_cycle_contract_answer", fake_repair)
+
+    verdict = await contract_gate.async_prepare_cycle_run_visible_finalization(session, 44)
+
+    assert len(repair_calls) == 1
+    assert repair_calls[0]["candidate_answer"] == bad_answer.text
+    assert "24h readout" in repair_calls[0]["missing_outputs"]
+    assert verdict["repair_attempted"] is True
+    assert verdict["repair_succeeded"] is True
+    assert verdict["settlement_status"] == "mission_success_after_repair"
+    assert verdict["side_effects_succeeded"] is True
+    assert verdict["domain_side_effects_succeeded"] is True
+    latest_answer = session._artifacts[-1]
+    assert latest_answer.artifact_type == "final_answer"
+    assert latest_answer.text.startswith("24h readout")
+    assert "Verified current runtime facts" not in latest_answer.text
+    assert cycle_run.context_snapshot["mission_result_contract_verdict"] == verdict
+
+
+def test_finalize_cycle_run_degrades_when_contract_repair_fails(monkeypatch):
+    from brain.systems.cycles import contract_gate
+
+    agent_run = AgentRun()
+    agent_run.id = 44
+    agent_run.root_run_id = 44
+    agent_run.user_id = "user-1"
+    agent_run.org_id = "org-1"
+    agent_run.input_message = "Daily Illo Conversation Improvements"
+    agent_run.model_policy = {}
+    agent_run.metadata_ = {"source": "cycle", "cycle_run_id": 12}
+
+    cycle_run = CycleRun()
+    cycle_run.id = 12
+    cycle_run.cycle_id = 5
+    cycle_run.status = "running"
+    cycle_run.error = None
+    cycle_run.skip_reason = None
+    cycle_run.prompt_snapshot = (
+        "Daily Illo Conversation Improvements. Produce: 24h readout, failure map, "
+        "codebase implications, proposals, tracking summary, impact loop, next action. "
+        "Include Domain tracking, evidence health, and a short self-review summary."
+    )
+    cycle_run.context_snapshot = {
+        "result_contract": {
+            "kind": "autonomous_cycle_run_result",
+            "required_outputs": [
+                "answer_the_cycle_mission",
+                "summarize_workspace_evidence_or_explicit_gaps",
+                "report_evidence_health",
+                "record_next_action_or_blocker",
+                "short_self_review_summary",
+            ],
+        },
+        "evidence_health": {"status": "pending"},
+    }
+
+    cycle = Cycle()
+    cycle.id = 5
+    cycle.prompt = cycle_run.prompt_snapshot
+    cycle.last_status = None
+    cycle.last_error = None
+    cycle.last_run_at = None
+
+    bad_answer = AgentRunArtifactRow(
+        id=8,
+        run_id=44,
+        root_run_id=44,
+        artifact_type="final_answer",
+        text="Verified current runtime facts:\n- Runtime scope: workspace-bound.",
+        created_at=datetime(2026, 4, 28, 20, 25, tzinfo=timezone.utc),
+    )
+    domain_event = AgentRunEventRow(
+        id=4,
+        run_id=44,
+        root_run_id=44,
+        sequence_no=4,
+        event_type="run.tool_completed",
+        payload={
+            "tool_name": "create_domain_record",
+            "result": {"status": "ok", "record_id": 26},
+        },
+    )
+    fake_session = _AsyncFakeSession(
+        agent_run=agent_run,
+        run=cycle_run,
+        cycle=cycle,
+        artifacts=[bad_answer],
+        events=[domain_event],
+    )
+
+    repair_calls = []
+
+    async def fake_repair(**kwargs):
+        repair_calls.append(kwargs)
+        return "Verified current runtime facts: Git metadata is unavailable right now."
+
+    monkeypatch.setattr(contract_gate, "_async_repair_cycle_contract_answer", fake_repair)
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([fake_session]))
+
+    service.finalize_cycle_run_from_run(44, status="completed")
+
+    assert len(repair_calls) == 1
+    assert cycle_run.status == "degraded"
+    assert cycle.last_status == "degraded"
+    assert cycle_run.error.startswith("mission_contract_failed: missing")
+    latest_answer = fake_session._artifacts[-1].text
+    assert latest_answer.startswith("Cycle run degraded: mission_contract_failed")
+    assert "Verified current runtime facts" not in latest_answer
+    evaluation = next(
+        item for item in fake_session.added if item.__class__.__name__ == "CycleRunEvaluation"
+    )
+    verdict = evaluation.details["mission_result_contract_verdict"]
+    assert verdict["settlement_status"] == "mission_contract_failed"
+    assert verdict["repair_attempted"] is True
+    assert verdict["side_effects_succeeded"] is True
+    assert "24h readout" in verdict["missing_outputs"]
 
 
 def test_finalize_cycle_run_from_run_ignores_non_cycle_run(monkeypatch):

@@ -19,6 +19,11 @@ from brain.systems.cycles.common import (
     validate_nonempty_trimmed,
     validate_thinking_override,
 )
+from brain.systems.cycles.contract_gate import (
+    async_prepare_cycle_run_visible_finalization,
+    cycle_finalization_status_from_verdict,
+    persisted_cycle_contract_verdict,
+)
 from brain.systems.cycles.memory import (
     append_cycle_run_output_target_snapshot,
     async_add_cycle_guidance,
@@ -450,11 +455,19 @@ async def async_finalize_cycle_run_from_run(
         cycle = await uow.session.get(Cycle, run.cycle_id) if run else None
         if not run or not cycle or run.status in TERMINAL_RUN_STATUSES:
             return
+        verdict = persisted_cycle_contract_verdict(run)
+        if status == "completed" and verdict is None:
+            verdict = await async_prepare_cycle_run_visible_finalization(uow.session, int(run_id))
+        final_status, final_error = cycle_finalization_status_from_verdict(
+            status,
+            verdict=verdict,
+            error=error if status == "failed" else None,
+        )
         await _finalize_cycle_run(
             run,
             cycle,
-            status=status,
-            error=error if status == "failed" else None,
+            status=final_status,
+            error=final_error,
             session=uow.session,
         )
 

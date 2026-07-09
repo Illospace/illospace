@@ -21,6 +21,7 @@ from brain.systems.cycles.common import (
     string_or_none,
     validate_nonempty_trimmed,
 )
+from brain.systems.cycles.contract_gate import MISSION_RESULT_CONTRACT_VERDICT_KEY
 from brain.systems.cycles.contracts import (
     cycle_launch_receipt,
     cycle_result_contract,
@@ -327,6 +328,7 @@ async def record_cycle_run_evaluation(
         error=error,
         skip_reason=skip_reason,
     )
+    score = 1 if status == "completed" else 0 if status in {"failed", "degraded"} else None
     run.self_review_summary = summary
     context_snapshot = json_dict(getattr(run, "context_snapshot", None))
     session.add(
@@ -336,7 +338,7 @@ async def record_cycle_run_evaluation(
             evaluator_type=evaluator_type,
             evaluator_id=actor_id(evaluator_id),
             summary=summary,
-            score=1 if status == "completed" else 0 if status == "failed" else None,
+            score=score,
             details={
                 "status": status,
                 "error": error,
@@ -347,6 +349,9 @@ async def record_cycle_run_evaluation(
                 "result_contract": context_snapshot.get("result_contract"),
                 "evidence_health": context_snapshot.get("evidence_health"),
                 "launch_receipts": context_snapshot.get("launch_receipts", []),
+                MISSION_RESULT_CONTRACT_VERDICT_KEY: context_snapshot.get(
+                    MISSION_RESULT_CONTRACT_VERDICT_KEY
+                ),
             },
         )
     )
@@ -411,6 +416,9 @@ def cycle_run_evaluation_summary(
     if status == "failed":
         detail = error or "unknown failure"
         return f"Cycle run failed and was recorded in the Cycle ledger: {detail}"
+    if status == "degraded":
+        detail = error or "mission result contract degraded"
+        return f"Cycle run degraded and was recorded in the Cycle ledger: {detail}"
     if status == "skipped":
         detail = skip_reason or "unknown skip reason"
         return f"Cycle run was skipped and recorded in the Cycle ledger: {detail}"
