@@ -5,6 +5,7 @@
   import GlobalSearch from '$lib/components/layout/GlobalSearch.svelte';
   import { api } from '$lib/api/client';
   import { auth } from '$lib/stores/auth.svelte';
+  import { cortex } from '$lib/stores/cortex.svelte';
   import { theme } from '$lib/stores/theme.svelte';
   import { wsClient } from '$lib/stores/ws.svelte';
   import { requiresPersonalOpenAIOnboarding } from '$lib/utils/runtimeOnboarding';
@@ -96,6 +97,13 @@
 
         try {
           const runtime = await api.runtimeSettings();
+          const workspaceModel = String(runtime.models?.default || '').includes('/')
+            ? String(runtime.models.default)
+            : `openai/${String(runtime.models?.default || 'gpt-5.6-sol')}`;
+          cortex.applyWorkspaceRunDefaults(
+            workspaceModel,
+            runtime.models?.thinking || 'xhigh',
+          );
           if (requiresPersonalOpenAIOnboarding(runtime) && !isSystemPage) {
             goto('/onboarding');
           }

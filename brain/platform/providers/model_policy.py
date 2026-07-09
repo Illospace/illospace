@@ -12,6 +12,7 @@ from brain.platform.integrations.providers import get_active_provider
 
 
 DEFAULT_RUNTIME_PROVIDER = "openai"
+DEFAULT_THINKING_TIER = "high"
 DEFAULT_PROVIDER_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-5.5",
@@ -23,6 +24,7 @@ PROVIDER_MODEL_OPTIONS: dict[str, tuple[str, ...]] = {
         "claude-haiku-4-5",
     ),
     "openai": (
+        "gpt-5.6-sol",
         "gpt-5.5",
         "gpt-5.4-pro",
         "gpt-5.4",
@@ -369,6 +371,11 @@ def _configured_default_model(config: dict[str, Any], provider: str) -> str | No
     return None
 
 
+def _configured_default_thinking(config: dict[str, Any]) -> str | None:
+    value = str(config.get("default_thinking") or "").strip().lower()
+    return value if value in THINKING_MAP else None
+
+
 def get_default_model(
     provider: str | None = None,
     *,
@@ -410,6 +417,36 @@ async def async_get_default_model(
         except Exception:
             pass
     return f"{provider}/{model}" if include_provider_prefix else model
+
+
+async def async_get_default_thinking(
+    session: AsyncSession,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> str:
+    """Return the workspace default reasoning effort."""
+    effective_org_id = await async_resolve_effective_org_id(
+        session,
+        user_id=user_id,
+        org_id=org_id,
+    )
+    if effective_org_id:
+        try:
+            row = (
+                await session.execute(
+                    text("SELECT memory_model_config FROM orgs WHERE id = :org_id LIMIT 1"),
+                    {"org_id": effective_org_id},
+                )
+            ).mappings().first()
+            configured = _configured_default_thinking(
+                dict((row or {}).get("memory_model_config") or {})
+            )
+            if configured:
+                return configured
+        except Exception:
+            pass
+    return DEFAULT_THINKING_TIER
 
 
 def resolve_skill_runtime(

@@ -40,7 +40,9 @@ class RuntimeConnectionRead(BaseModel):
 
 class RuntimeModelsRead(BaseModel):
     default: str
+    thinking: Literal["none", "low", "medium", "high", "xhigh"] = "high"
     options: list[RuntimeOption]
+    thinking_options: list[RuntimeOption] = Field(default_factory=list)
 
 
 class RuntimeMemoryRead(BaseModel):
@@ -207,6 +209,7 @@ class OpenAIOAuthStartResponse(BaseModel):
 
 class RuntimeModelsUpdate(BaseModel):
     default: str = Field(min_length=1)
+    thinking: Literal["none", "low", "medium", "high", "xhigh"] | None = None
 
 
 class RuntimeMemoryUpdate(BaseModel):

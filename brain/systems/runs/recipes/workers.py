@@ -11,7 +11,11 @@ from brain.systems.runs.context import compact_project_reference
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
 from brain.systems.runs.recipes.base import BaseRunRecipe
-from brain.systems.runs.recipes.shared import default_run_model, project_runtime_workspace_from_ref
+from brain.systems.runs.recipes.shared import (
+    default_run_model,
+    default_run_thinking,
+    project_runtime_workspace_from_ref,
+)
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.tools import AsyncRunToolExecutor, ToolRecord, ToolScope, wrap_tool_handlers
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
@@ -90,7 +94,10 @@ class WorkerRecipe(BaseRunRecipe):
             user_id=runtime.request.user_id,
             org_id=runtime.request.org_id,
         )
-        thinking = model_policy.get("thinking") or "high"
+        thinking = model_policy.get("thinking") or await default_run_thinking(
+            user_id=runtime.request.user_id,
+            org_id=runtime.request.org_id,
+        )
         streamed_output = False
 
         async def _activity(label: str) -> None:

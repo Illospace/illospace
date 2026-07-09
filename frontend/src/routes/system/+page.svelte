@@ -20,6 +20,7 @@
   } from '$lib/utils/oauthPopup';
   import { hasPersonalOpenAIRuntimeConnection } from '$lib/utils/runtimeOnboarding';
   import { auth } from '$lib/stores/auth.svelte';
+  import { cortex } from '$lib/stores/cortex.svelte';
 
   import MemoryCard from './MemoryCard.svelte';
   import ModelsCard from './ModelsCard.svelte';
@@ -75,7 +76,7 @@
   let memoryCheck = $state<MemoryCheck | null>(null);
   let notice = $state<NoticeState | null>(null);
   let startingIntro = $state(false);
-  let modelDraft = $state<{ default: string }>({ default: '' });
+  let modelDraft = $state<{ default: string; thinking: string }>({ default: '', thinking: 'high' });
   let memoryDraft = $state<MemoryDraft>({
     embedder: 'local_gpu',
     embedding_model: 'text-embedding-3-small',
@@ -111,6 +112,7 @@
   const hasOrgOpenAIConnection = $derived(Boolean(settings?.connection?.has_org_key));
   const connectionStatus = $derived(settings?.connection?.status ?? 'missing');
   const modelOptions = $derived(settings?.models?.options ?? []);
+  const thinkingOptions = $derived(settings?.models?.thinking_options ?? []);
   const setupMode = $derived($page.url.searchParams.get('setup') === '1');
   const setupCanContinue = $derived(setupMode && connectionStatus === 'connected');
   const memoryVaultProvider = $derived<MemoryVaultProvider>(embeddingProvider(memoryDraft.embedder));
@@ -153,6 +155,7 @@
     settings = next;
     modelDraft = {
       default: next.models.default,
+      thinking: next.models.thinking || 'high',
     };
     memoryDraft = {
       embedder: next.memory.embedder,
@@ -436,6 +439,10 @@
       if (shouldSaveModels) {
         const models = await api.updateRuntimeModels(modelDraft);
         nextSettings = { ...nextSettings, models };
+        cortex.applyWorkspaceRunDefaults(
+          `openai/${models.default}`,
+          models.thinking,
+        );
         saved.push('Model');
       }
       if (shouldSaveMemory) {
@@ -467,6 +474,10 @@
 
   function updateModel(value: string) {
     modelDraft = { ...modelDraft, default: value };
+  }
+
+  function updateThinking(value: string) {
+    modelDraft = { ...modelDraft, thinking: value };
   }
 
   function updateMemoryDraft(key: keyof MemoryDraft, value: string) {
@@ -573,7 +584,10 @@
 
   function modelDraftDirty() {
     if (!settings) return false;
-    return modelDraft.default !== settings.models.default;
+    return (
+      modelDraft.default !== settings.models.default ||
+      modelDraft.thinking !== settings.models.thinking
+    );
   }
 
   function memoryDraftDirty() {
@@ -915,8 +929,10 @@
         <ModelsCard
           {modelDraft}
           {modelOptions}
+          {thinkingOptions}
           {canManageSettings}
           onUpdateModel={updateModel}
+          onUpdateThinking={updateThinking}
         />
       </div>
 

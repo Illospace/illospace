@@ -39,9 +39,31 @@ class TestModelPolicy:
         from brain.platform.providers.model_policy import get_provider_model_options
 
         options = get_provider_model_options("openai")
+        assert "gpt-5.6-sol" in options
         assert "gpt-5.5" in options
         assert "gpt-5.4" in options
         assert "gpt-5-mini" in options
+
+    @pytest.mark.asyncio
+    async def test_org_default_thinking_overrides_runtime_default(self):
+        from brain.platform.providers.model_policy import async_get_default_thinking
+
+        def execute_side_effect(stmt, params=None):
+            sql = str(stmt)
+            if "SELECT org_id FROM users" in sql:
+                return _AsyncMappingResult(first={"org_id": "org-1"})
+            if "SELECT memory_model_config FROM orgs" in sql:
+                return _AsyncMappingResult(
+                    first={"memory_model_config": {"default_thinking": "xhigh"}}
+                )
+            raise AssertionError(f"Unexpected SQL: {sql}")
+
+        thinking = await async_get_default_thinking(
+            _AsyncPolicySession(execute_side_effect),
+            user_id="user-1",
+        )
+
+        assert thinking == "xhigh"
 
     @pytest.mark.asyncio
     async def test_org_default_model_overrides_default(self):

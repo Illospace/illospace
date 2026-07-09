@@ -2,6 +2,7 @@ export type EmbedderKey = 'local_gpu' | 'local_cpu' | 'openai' | 'gemini';
 export type RuntimeVoiceProvider = 'openai' | 'local' | 'gemini';
 export type RuntimeVoiceLanguage = 'auto' | 'en' | 'fr';
 export type RuntimeVoiceModelSize = 'tiny' | 'base' | 'small';
+export type RuntimeThinking = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
 
 export interface RuntimeOption {
   key: string;
@@ -24,7 +25,9 @@ export interface RuntimeSettings {
   };
   models: {
     default: string;
+    thinking: RuntimeThinking;
     options: RuntimeOption[];
+    thinking_options: RuntimeOption[];
   };
   memory: {
     scope?: 'installation';

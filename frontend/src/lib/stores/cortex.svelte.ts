@@ -2,6 +2,7 @@ import { browser, dev } from '$app/environment';
 import { api, type CortexBootstrapPayload } from '$lib/api/client';
 import { auth } from '$lib/stores/auth.svelte';
 import {
+  CORTEX_RUN_SETTINGS_STORAGE_KEYS,
   loadRunSettings,
   normalizeRunOptions as normalizeCortexRunOptions,
   normalizeRunSettings,
@@ -116,8 +117,8 @@ class CortexStore {
   teamMembersLoaded = $state(false);
   view = $state<'canvas' | 'list'>('canvas');
   executionProfile = $state<CortexExecutionProfile>('fast');
-  model = $state<string>('openai/gpt-5.5');
-  effortLevel = $state<CortexEffortLevel>('high');
+  model = $state<string>('openai/gpt-5.6-sol');
+  effortLevel = $state<CortexEffortLevel>('xhigh');
   constellationMode = $state(false);
   canvasOpen = $state(false);
   browserSession = $state<BrowserSessionState | null>(null);
@@ -206,24 +207,35 @@ class CortexStore {
     this.effortLevel = settings.effortLevel;
   }
 
-  private _persistRunSettings() {
-    if (typeof localStorage === 'undefined') return;
-    persistRunSettings(localStorage, this.runSettingsOptions());
-  }
-
   setExecutionProfile(profile: CortexExecutionProfile) {
     this.executionProfile = this._normalizeExecutionProfile(profile);
-    this._persistRunSettings();
+    if (typeof localStorage !== 'undefined') {
+      persistRunSettings(localStorage, { executionProfile: this.executionProfile });
+    }
   }
 
   setModel(model: string) {
     this.model = this._normalizeModel(model);
-    this._persistRunSettings();
+    if (typeof localStorage !== 'undefined') {
+      persistRunSettings(localStorage, { model: this.model });
+    }
   }
 
   setEffortLevel(level: CortexEffortLevel) {
     this.effortLevel = this._normalizeEffortLevel(level);
-    this._persistRunSettings();
+    if (typeof localStorage !== 'undefined') {
+      persistRunSettings(localStorage, { effortLevel: this.effortLevel });
+    }
+  }
+
+  applyWorkspaceRunDefaults(model: string, effortLevel: unknown) {
+    if (typeof localStorage === 'undefined') return;
+    if (localStorage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model) === null) {
+      this.model = this._normalizeModel(model);
+    }
+    if (localStorage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.effortLevel) === null) {
+      this.effortLevel = this._normalizeEffortLevel(effortLevel);
+    }
   }
 
   runSettingsOptions(): Pick<AgentRunOptions, 'executionProfile' | 'model' | 'effortLevel'> {

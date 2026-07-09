@@ -16,7 +16,7 @@ export type CortexRunSettingsInput = {
 
 export type RunSettingsStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
-export const DEFAULT_RUN_MODEL = 'openai/gpt-5.5';
+export const DEFAULT_RUN_MODEL = 'openai/gpt-5.6-sol';
 
 export const CORTEX_RUN_SETTINGS_STORAGE_KEYS = {
   executionProfile: 'illo:cortex:execution-profile',
@@ -27,7 +27,7 @@ export const CORTEX_RUN_SETTINGS_STORAGE_KEYS = {
 export const DEFAULT_CORTEX_RUN_SETTINGS: CortexRunSettings = {
   executionProfile: 'fast',
   model: DEFAULT_RUN_MODEL,
-  effortLevel: 'high',
+  effortLevel: 'xhigh',
 };
 
 export function normalizeExecutionProfile(value: unknown): CortexExecutionProfile {
@@ -41,7 +41,7 @@ export function normalizeModel(value: unknown, fallback = DEFAULT_RUN_MODEL): st
 
 export function normalizeEffortLevel(value: unknown): CortexEffortLevel {
   const normalized = String(value || '').trim().toLowerCase();
-  return normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'xhigh'
+  return normalized === 'none' || normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'xhigh'
     ? normalized
     : 'high';
 }
@@ -101,10 +101,21 @@ export function persistRunSettings(
 ): boolean {
   if (!storage) return false;
   try {
-    const normalized = normalizeRunSettings(settings);
-    storage.setItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.executionProfile, normalized.executionProfile);
-    storage.setItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model, normalized.model);
-    storage.setItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.effortLevel, normalized.effortLevel);
+    if (settings.executionProfile !== undefined) {
+      storage.setItem(
+        CORTEX_RUN_SETTINGS_STORAGE_KEYS.executionProfile,
+        normalizeExecutionProfile(settings.executionProfile),
+      );
+    }
+    if (settings.model !== undefined) {
+      storage.setItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model, normalizeModel(settings.model));
+    }
+    if (settings.effortLevel !== undefined) {
+      storage.setItem(
+        CORTEX_RUN_SETTINGS_STORAGE_KEYS.effortLevel,
+        normalizeEffortLevel(settings.effortLevel),
+      );
+    }
     return true;
   } catch {
     return false;

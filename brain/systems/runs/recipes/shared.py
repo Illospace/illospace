@@ -242,8 +242,27 @@ async def default_run_model(
         )
 
 
+async def default_run_thinking(
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> str:
+    """Return the configured workspace reasoning effort for a run."""
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.providers.model_policy import async_get_default_thinking
+
+    async with UnitOfWork() as uow:
+        return await async_get_default_thinking(
+            uow.session,
+            user_id=user_id,
+            org_id=org_id,
+        )
+
+
 __all__ = [
     "ProjectRuntimeWorkspace",
+    "default_run_model",
+    "default_run_thinking",
     "project_runtime_workspace_from_ref",
     "workspace_root_from_ref",
 ]
