@@ -5,6 +5,14 @@ Self-Assessment — Post-task quality check before presenting work to the user.
 Queries the brain for similar past tasks and their outcomes, checks against
 the pre-flight checklist, and returns a quality assessment.
 
+The checklist has two axes. The *work-mode* axis (code/investigation/delegation)
+selects an engineering quality bar. The *domain* axis
+(``brain/systems/task_domain.py``) recognizes non-engineering work
+(business/product/ops) and overrides that bar with a domain-appropriate one —
+so a launch plan is not graded with "run tests and paste output". Engineering
+and ambiguous tasks keep the work-mode bar; only positive non-engineering
+evidence overrides it.
+
 Usage:
     python3 self_assess.py "task description" "outcome summary"
 
@@ -17,6 +25,8 @@ import re
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
+
+from brain.systems.task_domain import TaskDomain, classify_task_domain
 
 _TASK_PATTERNS = [
     ("delegation", r"(?i)\b(delegat\w*|child.?agent|spawn|orchestrat\w*|parallel|worker|assign)\b"),
@@ -65,6 +75,44 @@ def get_checklist(task_type: str) -> list[str]:
     return _CHECKLISTS.get(task_type, []) + _BASE_CHECKLIST
 
 
+# Domain-specific checklists. These OVERRIDE the work-mode checklist only when we
+# have positive evidence the task is non-engineering, so engineering and
+# ambiguous tasks keep their existing work-mode bar (see brain/systems/task_domain.py).
+_DOMAIN_CHECKLISTS = {
+    TaskDomain.BUSINESS: [
+        "State the objective and who owns the outcome",
+        "Name the deadline or decision date",
+        "Define what 'done' looks like — the concrete deliverable",
+        "Identify who needs to be informed or sign off",
+    ],
+    TaskDomain.PRODUCT: [
+        "State the user problem and the success metric",
+        "Record the decision and its rationale",
+        "List affected surfaces/users and dependencies",
+        "Note what is explicitly out of scope",
+    ],
+    TaskDomain.OPS: [
+        "State the action and its blast radius",
+        "Confirm the rollback / recovery path",
+        "Verify access and prerequisites before acting",
+        "Record what changed for the next on-call",
+    ],
+}
+
+
+def select_checklist(domain: TaskDomain, work_mode: str) -> tuple[list[str], str]:
+    """Return ``(checklist, label)``.
+
+    A non-engineering domain (business/product/ops) overrides the work-mode
+    checklist so the quality bar fits the work. Engineering and ambiguous
+    (``OTHER``) tasks keep their existing work-mode checklist — we only override
+    on positive non-engineering evidence.
+    """
+    if domain in _DOMAIN_CHECKLISTS:
+        return _DOMAIN_CHECKLISTS[domain] + _BASE_CHECKLIST, domain.value
+    return get_checklist(work_mode), work_mode
+
+
 def get_brain_context(query: str) -> dict:
     if os.environ.get("SELF_ASSESS_NO_BRAIN"):
         return {"memories": [], "warnings": [], "guardrails": []}
@@ -76,8 +124,9 @@ def get_brain_context(query: str) -> dict:
 
 
 def assess_quality(task_description: str, outcome_summary: str) -> dict:
-    task_type = classify_task_type(task_description)
-    checklist = get_checklist(task_type)
+    work_mode = classify_task_type(task_description)
+    domain = classify_task_domain(task_description)
+    checklist, checklist_label = select_checklist(domain, work_mode)
     combined = f"{task_description} {outcome_summary}".strip()
 
     brain = get_brain_context(combined) if combined else {"memories": [], "warnings": [], "guardrails": []}
@@ -94,7 +143,10 @@ def assess_quality(task_description: str, outcome_summary: str) -> dict:
     assessment = "concerns" if warnings else "pass"
 
     return {
-        "task_type": task_type,
+        "task_domain": domain.value,
+        # Work-mode axis, kept under the historical "task_type" key for continuity.
+        "task_type": work_mode,
+        "checklist_label": checklist_label,
         "checklist": checklist,
         "warnings": warnings,
         "relevant_lessons": relevant_lessons,
@@ -103,7 +155,13 @@ def assess_quality(task_description: str, outcome_summary: str) -> dict:
 
 
 def format_assessment(result: dict) -> str:
-    parts = [f"[Self-Assessment] Task Type: {result['task_type']} | {result['assessment']}"]
+    domain = result.get("task_domain", "?")
+    label = result.get("checklist_label", result.get("task_type", "?"))
+    header = f"[Self-Assessment] Domain: {domain}"
+    if result.get("task_type") and domain in ("engineering", "other"):
+        header += f" · Mode: {result['task_type']}"
+    header += f" | {result['assessment']}"
+    parts = [header]
     if result["warnings"]:
         parts.append("\n⚠️ WARNINGS:")
         for w in result["warnings"]:
@@ -112,7 +170,7 @@ def format_assessment(result: dict) -> str:
         parts.append("\n🧠 RELEVANT LESSONS:")
         for l in result["relevant_lessons"]:
             parts.append(f"  • {l[:150]}")
-    parts.append(f"\n📋 CHECKLIST ({result['task_type']}):")
+    parts.append(f"\n📋 CHECKLIST ({label}):")
     for item in result["checklist"]:
         parts.append(f"  ☐ {item}")
     return "\n".join(parts)

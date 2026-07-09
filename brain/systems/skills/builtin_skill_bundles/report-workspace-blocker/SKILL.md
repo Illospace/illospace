@@ -22,7 +22,10 @@ unapproved production details in a ticket.
 Load only the evidence needed to make the ticket actionable: the triggering run
 summary, exact error text, relevant command output, repo path, changed files, and
 issue tracker conventions. If the tracker is GitHub and the repo is available,
-use existing repo labels and search recent issues before filing.
+use existing repo labels and search recent issues before filing. For
+non-engineering blockers (product/business/ops), skip the stack-trace and
+`gh issue` framing and record the blocker as a workspace thread or domain record
+instead.
 
 ## Operating Loop
 

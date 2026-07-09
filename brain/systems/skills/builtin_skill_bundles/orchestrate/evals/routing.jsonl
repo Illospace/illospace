@@ -1,2 +1,3 @@
 {"prompt":"Use parallel agents to update backend and frontend independently, then review.","expected":{"route_to":"orchestrate","triggers_include":["parallel workers"]}}
 {"prompt":"Fix this typo in one file.","expected":{"should_not_route_to":["orchestrate"],"reason":"one focused action"}}
+{"prompt":"Use parallel agents to draft the GTM launch plan and the pricing update independently, then review.","expected":{"route_to":"orchestrate","reason":"multiple independent non-engineering deliverables — routing is by deliverable count, not domain"}}

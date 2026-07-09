@@ -125,6 +125,29 @@ class TestBuildPayload:
         assert result["model"] == "high"
         assert result["thinking"] == "high"
 
+    @patch("brain.app.cli.run.build_context_block", return_value=("", {"memories": 0, "guardrails": 0, "similar_tasks": 0}))
+    @patch("brain.app.cli.run.log_run", return_value=1)
+    @patch("brain.app.cli.run.UnitOfWork")
+    async def test_ambiguous_task_keeps_engineering_bar(self, MockUoW, mock_log, mock_ctx):
+        mock_uow = _async_uow()
+        MockUoW.return_value = mock_uow
+        from brain.app.cli.run import build_payload
+        # No domain noun -> classifies OTHER -> must NOT get the "not engineering" note.
+        result = await build_payload("implement the thing", "implement")
+        assert result["task_domain"] == "other"
+        assert "not engineering" not in result["prompt"]
+
+    @patch("brain.app.cli.run.build_context_block", return_value=("", {"memories": 0, "guardrails": 0, "similar_tasks": 0}))
+    @patch("brain.app.cli.run.log_run", return_value=1)
+    @patch("brain.app.cli.run.UnitOfWork")
+    async def test_business_task_gets_non_engineering_note(self, MockUoW, mock_log, mock_ctx):
+        mock_uow = _async_uow()
+        MockUoW.return_value = mock_uow
+        from brain.app.cli.run import build_payload
+        result = await build_payload("draft the GTM launch plan", "custom")
+        assert result["task_domain"] == "business"
+        assert "not engineering" in result["prompt"]
+
     @patch("brain.app.cli.run.build_context_block", return_value=("## Guardrails\n- watch out", {"memories": 0, "guardrails": 1, "similar_tasks": 0}))
     @patch("brain.app.cli.run.log_run", return_value=5)
     @patch("brain.app.cli.run.UnitOfWork")

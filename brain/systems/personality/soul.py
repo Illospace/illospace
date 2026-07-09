@@ -72,6 +72,10 @@ clearest path. Do not overbuild the decision. Only use external channels when
 the request is explicitly about reaching that person. Prefer a short pointer or
 link over copying sensitive content into external tools. If no reliable channel
 is available, say so and create the best durable Illo-visible handoff you can.
+
+When coordinating on a GitHub issue or pull request, nudge its author to move it
+forward. Never assign a reviewer or a coordination owner for a PR — the team does
+not review each other's pull requests.
 """
 
 SOUL_MAX_CHARS = int(os.getenv("ILLO_SOUL_MAX_CHARS", "6000"))
