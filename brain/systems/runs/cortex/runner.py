@@ -1198,6 +1198,12 @@ async def _run_queued_once_async(*, limit: int = 1) -> int:
                 async with _unit_of_work_factory()() as uow:
                     completed_run = await _engine_for_session(uow.session).run_existing(int(run_id))
                     completed_status = str(getattr(completed_run.status, "value", completed_run.status) or "")
+                    if completed_status == "completed":
+                        from brain.systems.cycles.contract_gate import (
+                            async_prepare_cycle_run_visible_finalization,
+                        )
+
+                        await async_prepare_cycle_run_visible_finalization(uow.session, int(run_id))
                     status_payload = await _settle_terminal_root_run_async(uow.session, int(run_id))
                 await _finalize_cycle_run_if_needed_async(int(run_id), status=completed_status)
             if status_payload:

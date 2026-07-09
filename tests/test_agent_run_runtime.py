@@ -1303,6 +1303,17 @@ async def test_runner_delegates_cycle_settlement_for_terminal_run(monkeypatch):
     assert calls == [(99, "completed", None), (101, "failed", "boom")]
 
 
+def test_runner_prepares_cycle_contract_before_visible_terminal_settlement():
+    from brain.systems.runs.cortex import runner
+
+    source = inspect.getsource(runner._run_queued_once_async)
+
+    assert "async_prepare_cycle_run_visible_finalization" in source
+    assert source.index("async_prepare_cycle_run_visible_finalization") < source.index(
+        "_settle_terminal_root_run_async"
+    )
+
+
 async def test_deep_recipe_uses_native_child_runs(monkeypatch):
     import brain.systems.runs.recipes.deep as deep_module
     from brain.systems.runs.domain import AgentRunArtifact
