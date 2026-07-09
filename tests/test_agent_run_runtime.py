@@ -729,6 +729,238 @@ async def test_direct_agent_invocation_uses_async_kernel(monkeypatch):
     assert captured["envelope"].model == "openai/gpt-5.5"
 
 
+def _scheduled_cycle_test_payload():
+    from brain.platform.db.models.cycle import Cycle, CycleRun
+    from brain.platform.db.models.idea import Idea
+    from brain.systems.cycles.prompts import cycle_run_message, cycle_run_metadata
+
+    idea = Idea()
+    idea.id = "idea-1"
+    idea.title = "Daily Illo Conversation Improvements"
+
+    cycle = Cycle()
+    cycle.id = 5
+    cycle.user_id = "user-1"
+    cycle.org_id = "org-1"
+    cycle.name = "Daily Illo Conversation Improvements"
+    cycle.prompt = (
+        "Daily Illo Conversation Improvements. Produce the 7-part improvement review: "
+        "24h readout, failure map, codebase implications, proposals, tracking summary, "
+        "impact loop, and next action. Include evidence health and a short self-review summary."
+    )
+    cycle.model_override = None
+    cycle.thinking_override = None
+
+    run = CycleRun()
+    run.id = 12
+    run.cycle_id = 5
+    run.scheduled_for = datetime(2026, 4, 28, 20, 20, tzinfo=timezone.utc)
+    run.guidance_snapshot = []
+    run.output_targets_snapshot = []
+    run.context_snapshot = {}
+
+    return cycle_run_message(idea, cycle, run), cycle_run_metadata(cycle, run)
+
+
+def _identity_handoff_payload():
+    from brain.systems.context.semantic_compaction import CompactionCheckpoint
+    from brain.systems.context.thread_handoff import ThreadHandoff
+
+    return ThreadHandoff(
+        checkpoint=CompactionCheckpoint(
+            active_objective=(
+                "No unresolved user request remains. The latest request was to answer "
+                "verified Illo identity/source/runtime context using read_self_context."
+            ),
+            completed_work=(
+                "Verified identity/source/runtime context was answered and completed.",
+            ),
+            recent_user_intent="answer verified Illo identity/source/runtime context",
+            verification_status="completed",
+            source="semantic_compactor",
+        ),
+        message_count=2,
+        previous_message_count=0,
+        source="llm_thread_handoff_compactor",
+    ).to_payload()
+
+
+async def test_fast_scheduled_cycle_thread_preview_is_historical_context(monkeypatch):
+    from brain.systems.runs.recipes.fast import FastRecipe
+
+    message, metadata = _scheduled_cycle_test_payload()
+    metadata["thread_context"] = {
+        "formatted": (
+            "Illo: Verified current runtime facts and completed the verified "
+            "Illo identity/source/runtime context request."
+        )
+    }
+    captured = {}
+
+    async def fake_invoke(spec):
+        captured["spec"] = spec
+        return SimpleNamespace(
+            output="24h readout: improvement review completed. Self-review summary: contract satisfied.",
+            success=True,
+            error=None,
+        )
+
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", lambda **kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime("fast", message=message)
+    runtime.request = replace(
+        runtime.request,
+        message=message,
+        metadata=metadata,
+        target_ref={"kind": "cortex_idea", "idea_id": "idea-1"},
+    )
+
+    result = await FastRecipe().execute(runtime)
+
+    assert result.status.value == "completed"
+    system_prompt = captured["spec"].system_prompt
+    assert "Historical thread context before this scheduled Cycle launch" in system_prompt
+    assert "context only; not the current user request" in system_prompt
+    assert "lower than the Result Contract and Cycle Mission" in system_prompt
+    assert "verified Illo identity/source/runtime context" in system_prompt
+    assert "Thread so far, before the current user message" not in system_prompt
+
+
+async def test_scheduled_cycle_handoff_identity_summary_does_not_override_mission(monkeypatch):
+    from brain.platform.integrations.providers import (
+        LLMResponse,
+        StopReason,
+        TextContentBlock,
+        Usage,
+    )
+    from brain.systems.runs import direct_agent
+
+    message, metadata = _scheduled_cycle_test_payload()
+    stale_handoff = _identity_handoff_payload()
+    previous_messages = [
+        {
+            "role": "user",
+            "content": "Can you verify Illo identity/source/runtime context?",
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Verified current runtime facts: Illo identity/source/runtime context completed.",
+                }
+            ],
+        },
+    ]
+
+    class FakeProvider:
+        def __init__(self):
+            self.requests = []
+
+        def is_api_error(self, exc):
+            return False
+
+        def is_retryable_error(self, exc):
+            return False
+
+        def create(self, request):
+            self.requests.append(request)
+            prompt_text = json.dumps(request.messages, default=str)
+            demoted = (
+                "Historical thread handoff summary" in prompt_text
+                and "not the current user request" in prompt_text
+                and "scheduled Cycle result_contract and Cycle Mission" in prompt_text
+            )
+            has_mission = (
+                "## Cycle Mission" in prompt_text
+                and "Daily Illo Conversation Improvements" in prompt_text
+                and "7-part improvement review" in prompt_text
+            )
+            if demoted and has_mission:
+                output = (
+                    "24h readout: reviewed the scheduled improvement window.\n"
+                    "Failure map: stale identity boilerplate is historical context only.\n"
+                    "Codebase implications: scheduled Cycle mission remains authoritative.\n"
+                    "Proposals: keep handoff summaries demoted.\n"
+                    "Tracking summary: improvement review completed.\n"
+                    "Impact loop: compare the next run against the Cycle contract.\n"
+                    "Next action: monitor the next scheduled run.\n"
+                    "Evidence health: ok.\n"
+                    "Self-review summary: mission result contract satisfied."
+                )
+            else:
+                output = (
+                    "Verified current runtime facts: Illo identity/source/runtime context "
+                    "completed."
+                )
+            return LLMResponse(
+                content=[TextContentBlock(output)],
+                stop_reason=StopReason.END_TURN,
+                usage=Usage(input_tokens=1, output_tokens=len(output.split())),
+            )
+
+    async def load_session(_session_id):
+        return previous_messages, None
+
+    async def load_session_handoff(_session_id):
+        return stale_handoff
+
+    async def save_session(*_args, **_kwargs):
+        return None
+
+    async def save_session_handoff(*_args, **_kwargs):
+        return None
+
+    async def record_api_call(**_kwargs):
+        return None
+
+    provider = FakeProvider()
+    monkeypatch.setattr(direct_agent, "get_provider", lambda _provider_name, _client: provider)
+    monkeypatch.setattr(direct_agent, "_async_record_api_call", record_api_call)
+    resolved_llm = SimpleNamespace(
+        provider="openai",
+        client=object(),
+        source="test",
+        auth_mode="api_key",
+        is_oauth=False,
+        token_prefix="test-token",
+        build_request_headers=lambda **_kwargs: {},
+    )
+
+    result = await direct_agent.run_agent_async(
+        message,
+        session_id="agent-run-44",
+        model="openai/gpt-5.4",
+        thinking="low",
+        tools=[],
+        tool_handlers={},
+        max_turns=1,
+        persist_session=True,
+        cache_system_prompt=False,
+        resolved_llm=resolved_llm,
+        metadata=metadata,
+        load_session=load_session,
+        load_session_handoff=load_session_handoff,
+        save_session=save_session,
+        save_session_handoff=save_session_handoff,
+        skip_harvest=True,
+    )
+
+    assert result.success is True
+    assert result.output.startswith("24h readout")
+    assert "Verified current runtime facts" not in result.output
+    assert len(provider.requests) == 1
+    first_request = provider.requests[0]
+    prompt_text = json.dumps(first_request.messages, default=str)
+    assert "Historical thread handoff summary" in prompt_text
+    assert "verified Illo identity/source/runtime context" in prompt_text
+    assert "not the current user request" in prompt_text
+    assert "Daily Illo Conversation Improvements" in prompt_text
+    assert first_request.messages[-1]["content"] == message
+
+
 def test_fast_onboarding_tool_surface_uses_standard_fast_surface(monkeypatch):
     from brain.systems.runs.recipes.fast import _agent_tools_for_runtime
 

@@ -192,19 +192,37 @@ class RunContext:
     skills: list[str] = field(default_factory=list)
     handoff: dict[str, Any] = field(default_factory=dict)
     request_source: dict[str, Any] = field(default_factory=dict)
+    scheduled_result_contract: bool = False
 
     def prompt_context(self) -> str:
         parts: list[str] = []
         if self.thread_context:
             formatted = str(self.thread_context.get("formatted") or "").strip()
             if formatted:
-                parts.append("Thread so far, before the current user message:\n" + formatted)
+                if self.scheduled_result_contract:
+                    parts.append(
+                        "Historical thread context before this scheduled Cycle launch "
+                        "(context only; not the current user request):\n"
+                        "Source priority: lower than the Result Contract and Cycle Mission. "
+                        "Do not infer the current scheduled-run intent from these prior "
+                        "messages or preview summaries.\n"
+                        + formatted
+                    )
+                else:
+                    parts.append("Thread so far, before the current user message:\n" + formatted)
         if self.target_ref:
             parts.append("Target:\n" + compact_project_reference(self.target_ref))
         if self.workspace_ref:
             parts.append("Workspace:\n" + compact_project_reference(self.workspace_ref))
         if self.handoff:
-            parts.append("Handoff:\n" + compact_handoff_reference(self.handoff))
+            if self.scheduled_result_contract:
+                parts.append(
+                    "Historical handoff (context only; lower priority than the Result "
+                    "Contract and Cycle Mission):\n"
+                    + compact_handoff_reference(self.handoff)
+                )
+            else:
+                parts.append("Handoff:\n" + compact_handoff_reference(self.handoff))
         if self.request_source:
             parts.append(
                 "Request Source:\n"
@@ -245,7 +263,39 @@ class RunContextLoader:
             thread_context=dict(thread_context) if isinstance(thread_context, dict) else {},
             request_source=_request_source_from_metadata(metadata),
             skills=_skill_names_from_metadata(metadata, message),
+            scheduled_result_contract=has_scheduled_result_contract(metadata),
         )
 
 
-__all__ = ["RunContext", "RunContextLoader", "compact_project_reference"]
+def has_scheduled_result_contract(metadata: dict[str, Any]) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    contract = metadata.get("contract")
+    contract = contract if isinstance(contract, dict) else {}
+    launch_envelope = metadata.get("launch_envelope")
+    launch_envelope = launch_envelope if isinstance(launch_envelope, dict) else {}
+    context_policy = metadata.get("context_policy")
+    context_policy = context_policy if isinstance(context_policy, dict) else {}
+
+    has_result_contract = bool(
+        contract.get("result")
+        or launch_envelope.get("result_contract")
+        or metadata.get("result_contract")
+    )
+    if not has_result_contract:
+        return False
+    return any((
+        str(metadata.get("source") or "").strip().lower() == "cycle",
+        str(metadata.get("origin") or "").strip().lower() == "cycle",
+        str(contract.get("kind") or "").strip().lower() == "autonomous_cycle_run",
+        str(launch_envelope.get("origin") or "").strip().lower() == "scheduled_cycle",
+        str(context_policy.get("current_instruction_role") or "").strip().lower() == "scheduled_prompt",
+    ))
+
+
+__all__ = [
+    "RunContext",
+    "RunContextLoader",
+    "compact_project_reference",
+    "has_scheduled_result_contract",
+]
