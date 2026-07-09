@@ -305,7 +305,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 from brain.app.api.routers.ws import router as ws_router
 from brain.app.api.routers.auth import router as auth_router
-from brain.app.api.routers import brain, cortex, cortex_intel, memory, skills, vault, system, team, costs, journal, domains, workspace_apps, workspace_pins, onboarding, webhooks
+from brain.app.api.routers import brain, cortex, cortex_intel, memory, skills, vault, system, team, costs, journal, domains, workspace_apps, workspace_pins, onboarding, webhooks, github_webhooks
 from brain.app.api.routers import agent_bridge, agent_connections, agent_mcp
 from brain.app.api.routers import link_previews, launch_handoffs
 from brain.app.api.routers.cycles import router as cycles_router
@@ -328,6 +328,9 @@ app.include_router(agent_connections.router)
 app.include_router(agent_bridge.router)
 app.include_router(agent_mcp.router)
 app.include_router(webhooks.router)
+# GitHub webhook ingress; self-gates with 503 until ILLO_GITHUB_WEBHOOK_SECRET
+# and ILLO_GITHUB_CONNECTION_ID are configured (specs/illo-lifecycle Slice 1).
+app.include_router(github_webhooks.router)
 app.include_router(link_previews.router)
 app.include_router(launch_handoffs.router)
 app.include_router(cycles_router)
