@@ -72,6 +72,13 @@ class TestModelNormalization:
 
 
 class TestProviderInference:
+    def test_direct_agent_requires_chatgpt_auth_for_subscription_models(self):
+        from brain.systems.runs.direct_agent import _required_openai_auth_mode
+
+        assert _required_openai_auth_mode("openai/gpt-5.5") == "chatgpt"
+        assert _required_openai_auth_mode("openai/gpt-5.6-sol") == "chatgpt"
+        assert _required_openai_auth_mode("openai/gpt-5.4") is None
+
     @patch("brain.systems.runs.direct_loop.final_reply_checker.get_provider")
     @patch("brain.systems.runs.direct_loop.final_reply_checker.resolve_llm_client")
     def test_init_llm_uses_provider_from_model_prefix(self, mock_resolve, mock_get_provider):
@@ -94,7 +101,7 @@ class TestProviderInference:
 
     @patch("brain.systems.runs.direct_loop.final_reply_checker.get_provider")
     @patch("brain.systems.runs.direct_loop.final_reply_checker.resolve_llm_client")
-    def test_init_llm_requires_chatgpt_auth_for_gpt_5_5(self, mock_resolve, mock_get_provider):
+    def test_init_llm_requires_chatgpt_auth_for_subscription_models(self, mock_resolve, mock_get_provider):
         from brain.systems.runs.direct_loop.final_reply_checker import _init_llm
 
         llm = MagicMock()
@@ -108,10 +115,11 @@ class TestProviderInference:
         mock_resolve.return_value = llm
         mock_get_provider.return_value = MagicMock()
 
-        _init_llm("user-1", "sess-1", "openai/gpt-5.5")
+        for model in ("openai/gpt-5.5", "openai/gpt-5.6-sol"):
+            _init_llm("user-1", "sess-1", model)
 
-        assert mock_resolve.call_args.kwargs["provider"] == "openai"
-        assert mock_resolve.call_args.kwargs["auth_mode"] == "chatgpt"
+            assert mock_resolve.call_args.kwargs["provider"] == "openai"
+            assert mock_resolve.call_args.kwargs["auth_mode"] == "chatgpt"
 
 class TestLiveGuidance:
     async def test_append_live_guidance_adds_user_message(self):

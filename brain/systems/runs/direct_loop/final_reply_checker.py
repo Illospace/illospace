@@ -124,7 +124,8 @@ class FinalReplyReview:
 
 
 def _required_openai_auth_mode(model: str) -> str | None:
-    return "chatgpt" if normalize_model_name(model).lower() == "gpt-5.5" else None
+    normalized = normalize_model_name(model).lower()
+    return "chatgpt" if normalized == "gpt-5.5" or normalized.startswith("gpt-5.6") else None
 
 
 def _init_llm(
