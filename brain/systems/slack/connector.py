@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from sqlalchemy import select
 
 from brain.platform.async_io import async_http_client
+from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.org import User
 from brain.systems.inbound.service import submit_inbound_envelope
@@ -30,6 +31,7 @@ from brain.systems.slack.ingress import (
 from brain.systems.slack.monitors import monitored_channel_ids
 
 logger = logging.getLogger(__name__)
+SLACK_PROCESSING_STATUS = "is working on it..."
 
 
 @dataclass(frozen=True)
@@ -319,6 +321,7 @@ async def process_socket_payload(
     )
     if envelope is None:
         return {"ack": ack, "ignored": True}
+    existing_run_for_message = await _has_slack_run_for_envelope(session, connection, envelope)
     if envelope.get("origin") == SLACK_CHANNEL_MESSAGE_ORIGIN:
         # Reflex acknowledgement: leave a 👀 on every observed message so the
         # channel knows Illo has seen it, independent of whether the ensuing
@@ -333,7 +336,72 @@ async def process_socket_payload(
             "envelope_id": ack.get("envelope_id"),
         },
     )
+    if (
+        envelope.get("origin") != SLACK_CHANNEL_MESSAGE_ORIGIN
+        and not existing_run_for_message
+        and _admitted_slack_run(inbound)
+    ):
+        await _set_processing_status(config, envelope)
     return {"ack": ack, "ignored": False, "inbound": inbound}
+
+
+def _connection_org_id(connection: ExternalAgentConnectionRow | Mapping[str, Any]) -> str | None:
+    if isinstance(connection, Mapping):
+        return str(connection.get("org_id") or "").strip() or None
+    return str(getattr(connection, "org_id", "") or "").strip() or None
+
+
+def _envelope_idempotency_key(envelope: Mapping[str, Any]) -> str | None:
+    key = str(envelope.get("idempotency_key") or "").strip()
+    return key if key.startswith("slack:") else None
+
+
+async def _has_slack_run_for_envelope(
+    session,
+    connection: ExternalAgentConnectionRow | Mapping[str, Any],
+    envelope: Mapping[str, Any],
+) -> bool:
+    if not callable(getattr(session, "scalar", None)):
+        return False
+    org_id = _connection_org_id(connection)
+    key = _envelope_idempotency_key(envelope)
+    if not org_id or not key:
+        return False
+    stmt = (
+        select(AgentRunRow.id)
+        .where(
+            AgentRunRow.org_id == org_id,
+            AgentRunRow.source_idempotency_scope == "slack",
+            AgentRunRow.source_idempotency_key == key,
+        )
+        .limit(1)
+    )
+    return (await session.scalar(stmt)) is not None
+
+
+def _admitted_slack_run(inbound: Mapping[str, Any]) -> bool:
+    if inbound.get("idempotent_replay"):
+        return False
+    outcome = inbound.get("ilo_outcome")
+    outcome = outcome if isinstance(outcome, Mapping) else {}
+    return outcome.get("operation") == "slack_run_admitted" and outcome.get("run_id") is not None
+
+
+async def _set_processing_status(config: SlackConnectorConfig, envelope: Mapping[str, Any]) -> None:
+    payload = envelope.get("payload") if isinstance(envelope.get("payload"), Mapping) else {}
+    channel_id = str(payload.get("channel_id") or "").strip()
+    thread_ts = str(payload.get("thread_ts") or payload.get("message_ts") or "").strip()
+    if not channel_id or not thread_ts:
+        return
+    try:
+        client = SlackWebClient(config.bot_token, timeout=2.0)
+        await client.set_assistant_status(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            status=SLACK_PROCESSING_STATUS,
+        )
+    except Exception as exc:
+        logger.info("slack_processing_status_failed: %s", exc)
 
 
 async def _acknowledge_monitored_message(

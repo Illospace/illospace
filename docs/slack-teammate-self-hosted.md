@@ -45,6 +45,10 @@ Optional Slack hints:
 - `app_mention` events and every DM are actionable.
 - Top-level channel mentions reply as normal channel messages; mentions inside
   Slack threads reply back into that thread; DMs reply as normal DM messages.
+- Illo sets Slack's native assistant thread status to `is working on it...`
+  after a mention or DM admits a fresh run. This is a transient loading
+  indicator, not a chat reply. Slack clears it when Illo replies or after the
+  platform timeout; Illo also clears it explicitly after posting a reply.
 - Socket Mode envelopes are acknowledged before durable inbound processing.
   This is a transport acknowledgement only, not user-visible Illo speech.
 - User-visible Slack text is model-authored. Illo decides whether to answer a
