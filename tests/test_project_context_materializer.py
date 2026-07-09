@@ -2,6 +2,34 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+
+def test_project_context_materialization_result_is_ready_when_evidence_is_degraded():
+    from brain.systems.cortex.project_context.materializer import ProjectContextMaterializationResult
+
+    result = ProjectContextMaterializationResult(
+        workspaces=[
+            {"name": "/", "path": "/tmp/project-root"},
+            {"name": "repo-a", "path": "/tmp/repo-a"},
+            {"name": "repo-b", "path": "/tmp/repo-b"},
+        ],
+        warnings=["Could not materialize GitHub repository example-org/missing: clone timed out."],
+        degraded_resources=[
+            {
+                "kind": "repo",
+                "name": "example-org/missing",
+                "repo": "example-org/missing",
+                "error": "Could not materialize GitHub repository example-org/missing: clone timed out.",
+            }
+        ],
+    )
+
+    assert result.ready is True
+    assert result.ok is True
+    assert result.status == "degraded"
+    assert result.evidence_health["status"] == "degraded"
+    assert result.evidence_health["degraded_resources"][0]["repo"] == "example-org/missing"
+
+
 def test_thread_attachment_file_is_not_materialized_as_github_workspace():
     from brain.systems.cortex.project_context.materializer import _github_slug_from_resource
 
@@ -297,6 +325,70 @@ def test_runner_materializes_placeholder_projects_as_empty_roots(monkeypatch):
     assert context_ready is True
     assert status_payload is None
     runner.materialize_project_context_workspaces.assert_called_once()
+
+
+def test_runner_starts_when_project_context_materialization_is_degraded(monkeypatch):
+    from brain.systems.cortex.project_context.materializer import ProjectContextMaterializationResult
+    from brain.systems.runs.cortex import runner
+
+    run = SimpleNamespace(
+        id=281,
+        root_run_id=None,
+        user_id="user-1",
+        org_id="org-1",
+        thread_id="idea-281",
+        target_ref={
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {"kind": "repo", "repo": "example-org/repo-a"},
+                    {"kind": "repo", "repo": "example-org/missing-repo"},
+                ],
+            }
+        },
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    result = ProjectContextMaterializationResult(
+        workspaces=[
+            {"name": "/", "path": "/tmp/project-root"},
+            {"name": "example-org/repo-a", "path": "/tmp/repo-a"},
+        ],
+        warnings=["Could not materialize GitHub repository example-org/missing-repo: clone timed out."],
+        degraded_resources=[
+            {
+                "kind": "repo",
+                "repo": "example-org/missing-repo",
+                "error": "Could not materialize GitHub repository example-org/missing-repo: clone timed out.",
+            }
+        ],
+    )
+    mark_failed = AsyncMock()
+
+    monkeypatch.setattr(runner, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(runner, "_async_record_project_activity", AsyncMock())
+    monkeypatch.setattr(runner, "materialize_project_context_workspaces", AsyncMock(return_value=result))
+    monkeypatch.setattr(runner, "_mark_run_failed_after_runner_error_async", mark_failed)
+
+    context_ready, status_payload = runner._materialize_project_context(281)
+
+    assert context_ready is True
+    assert status_payload is None
+    assert result.status == "degraded"
+    mark_failed.assert_not_awaited()
 
 
 async def test_materialize_github_project_context_uses_vault_key_without_persisting_token(tmp_path, monkeypatch):
@@ -680,6 +772,213 @@ async def test_materialize_github_project_context_fails_closed_when_clone_unavai
     assert "Could not materialize GitHub repository example-org/private" in result.errors[0]
     assert run.target_status == "invalid"
     assert run.target_metadata["project_context_snapshot"]["status"] == "invalid"
+    assert run.metadata_["project_context_materialization"]["status"] == "failed"
+
+
+async def test_materialize_multi_repo_context_degrades_when_one_clone_is_unavailable(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    repos = [
+        "example-org/repo-a",
+        "example-org/repo-b",
+        "example-org/missing-repo",
+        "example-org/repo-c",
+    ]
+    run = SimpleNamespace(
+        id=281,
+        user_id="user-1",
+        metadata_={"org_id": "org-1"},
+        target_metadata={
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {
+                        "kind": "repo",
+                        "name": repo,
+                        "repo": repo,
+                        "uri": f"https://github.com/{repo}",
+                    }
+                    for repo in repos
+                ],
+            },
+        },
+        workspace_ref={},
+        target_status="resolved",
+        target_validation_error=None,
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    def fake_clone(slug, destination, *, token, branch):
+        if slug == "example-org/missing-repo":
+            raise RuntimeError("clone timed out")
+        destination.mkdir(parents=True)
+        return {"path": str(destination), "branch": branch or "main", "commit": f"commit-{slug[-1]}"}
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(materializer, "list_secrets", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(materializer, "_clone_github_repo", fake_clone)
+
+    result = await materialize_project_context_workspaces(281, workspace_root=str(tmp_path), user_id="user-1")
+
+    assert result.ready is True
+    assert result.ok is True
+    assert result.status == "degraded"
+    assert result.errors == []
+    assert len(result.workspaces) == 4
+    assert "example-org/missing-repo" in result.warnings[0]
+    assert result.degraded_resources[0]["repo"] == "example-org/missing-repo"
+    assert run.target_status == "resolved"
+    assert run.target_validation_error is None
+    assert run.target_metadata["project_context_snapshot"]["status"] == "validated"
+
+    materialization_payload = run.metadata_["project_context_materialization"]
+    assert materialization_payload["status"] == "degraded"
+    assert materialization_payload["evidence_health"]["status"] == "degraded"
+    assert materialization_payload["degraded_resources"][0]["repo"] == "example-org/missing-repo"
+    assert (
+        run.target_metadata["project_context_snapshot"]["resources"][3]["materialization"]["status"]
+        == "failed"
+    )
+
+    runtime_materialization = run.workspace_ref["project_runtime_context"]["project_context_materialization"]
+    assert runtime_materialization["evidence_health"]["status"] == "degraded"
+    assert runtime_materialization["degraded_resources"][0]["repo"] == "example-org/missing-repo"
+
+
+async def test_materialize_multi_repo_context_stays_materialized_when_all_clones_succeed(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    repos = [f"example-org/repo-{suffix}" for suffix in ("a", "b", "c", "d")]
+    run = SimpleNamespace(
+        id=282,
+        user_id="user-1",
+        metadata_={"org_id": "org-1"},
+        target_metadata={
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {
+                        "kind": "repo",
+                        "name": repo,
+                        "repo": repo,
+                        "uri": f"https://github.com/{repo}",
+                    }
+                    for repo in repos
+                ],
+            },
+        },
+        target_status="resolved",
+        target_validation_error=None,
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    def fake_clone(slug, destination, *, token, branch):
+        destination.mkdir(parents=True)
+        return {"path": str(destination), "branch": branch or "main", "commit": f"commit-{slug[-1]}"}
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(materializer, "list_secrets", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(materializer, "_clone_github_repo", fake_clone)
+
+    result = await materialize_project_context_workspaces(282, workspace_root=str(tmp_path), user_id="user-1")
+
+    assert result.ready is True
+    assert result.status == "materialized"
+    assert result.warnings == []
+    assert result.degraded_resources == []
+    assert len(result.workspaces) == 5
+    assert run.metadata_["project_context_materialization"]["status"] == "materialized"
+    assert run.metadata_["project_context_materialization"]["evidence_health"] == {"status": "ok"}
+
+
+async def test_materialize_required_repo_failure_stays_fail_closed_with_other_usable_repo(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    run = SimpleNamespace(
+        id=283,
+        user_id="user-1",
+        metadata_={"org_id": "org-1"},
+        target_metadata={
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {
+                        "kind": "repo",
+                        "name": "example-org/required-repo",
+                        "repo": "example-org/required-repo",
+                        "uri": "https://github.com/example-org/required-repo",
+                        "required": True,
+                    },
+                    {
+                        "kind": "repo",
+                        "name": "example-org/healthy-repo",
+                        "repo": "example-org/healthy-repo",
+                        "uri": "https://github.com/example-org/healthy-repo",
+                    },
+                ],
+            },
+        },
+        target_status="resolved",
+        target_validation_error=None,
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    def fake_clone(slug, destination, *, token, branch):
+        if slug == "example-org/required-repo":
+            raise RuntimeError("repository unavailable")
+        destination.mkdir(parents=True)
+        return {"path": str(destination), "branch": branch or "main", "commit": "healthy123"}
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(materializer, "list_secrets", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(materializer, "_clone_github_repo", fake_clone)
+
+    result = await materialize_project_context_workspaces(283, workspace_root=str(tmp_path), user_id="user-1")
+
+    assert result.ready is False
+    assert result.status == "failed"
+    assert "example-org/required-repo" in result.errors[0]
+    assert len(result.workspaces) == 2
+    assert run.target_status == "invalid"
     assert run.metadata_["project_context_materialization"]["status"] == "failed"
 
 

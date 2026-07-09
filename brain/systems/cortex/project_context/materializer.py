@@ -55,16 +55,59 @@ _MAX_GIT_CLONE_TIMEOUT_SECONDS = 1800
 class ProjectContextMaterializationResult:
     workspaces: list[dict[str, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    degraded_resources: list[dict[str, str]] = field(default_factory=list)
     resources_checked: int = 0
     empty_project: bool = False
 
     @property
-    def ok(self) -> bool:
+    def ready(self) -> bool:
         return (bool(self.workspaces) or self.empty_project) and not self.errors
+
+    @property
+    def ok(self) -> bool:
+        return self.ready
+
+    @property
+    def status(self) -> str:
+        if not self.ready:
+            return "failed"
+        if self.warnings:
+            return "degraded"
+        return "materialized"
+
+    @property
+    def evidence_health(self) -> dict[str, Any]:
+        if self.status == "degraded":
+            return {
+                "status": "degraded",
+                "warnings": self.warnings[:10],
+                "degraded_resources": self.degraded_resources[:10],
+            }
+        if self.status == "failed":
+            return {"status": "unavailable", "errors": self.errors[:10]}
+        return {"status": "ok"}
 
     def fail(self, message: str) -> "ProjectContextMaterializationResult":
         self.errors.append(message)
         return self
+
+    def degrade(
+        self,
+        message: str,
+        *,
+        resource: dict[str, str],
+    ) -> "ProjectContextMaterializationResult":
+        self.warnings.append(message)
+        self.degraded_resources.append(resource)
+        return self
+
+    def fail_if_no_usable_workspace(self, usable_workspace_count: int) -> None:
+        if usable_workspace_count or not self.warnings:
+            return
+        self.errors.extend(self.warnings)
+        self.warnings.clear()
+        self.degraded_resources.clear()
 
 
 def _clean_text(value: Any) -> str | None:
@@ -115,6 +158,22 @@ def _github_slug_from_resource(resource: dict[str, Any]) -> str | None:
             if slug:
                 return slug
     return None
+
+
+def _resource_failure_is_soft(resource: dict[str, Any]) -> bool:
+    return bool(_github_slug_from_resource(resource)) and resource.get("required") is not True
+
+
+def _degraded_resource_payload(resource: dict[str, Any], error: str) -> dict[str, str]:
+    payload = {"kind": _resource_kind(resource), "error": error}
+    for key, value in (
+        ("id", _clean_text(resource.get("id"))),
+        ("name", _clean_text(resource.get("name") or resource.get("label"))),
+        ("repo", _github_slug_from_resource(resource)),
+    ):
+        if value:
+            payload[key] = value
+    return payload
 
 
 def _normalise_repo_subpath(value: Any) -> str | None:
@@ -901,6 +960,7 @@ async def materialize_project_context_workspaces(
     root_materialization = root_resource.get("materialization") if isinstance(root_resource.get("materialization"), dict) else {}
     root_empty = bool(root_materialization.get("root_empty", True))
     result.empty_project = root_empty
+    usable_workspace_count = 0 if root_empty else 1
 
     for resource in resources:
         if _is_project_root_resource(resource):
@@ -919,8 +979,14 @@ async def materialize_project_context_workspaces(
             materialized_resources.append(resource)
         if workspace:
             workspaces.append(workspace)
+            usable_workspace_count += 1
         if error:
-            result.errors.append(error)
+            if _resource_failure_is_soft(resource):
+                result.degrade(error, resource=_degraded_resource_payload(resource, error))
+            else:
+                result.fail(error)
+
+    result.fail_if_no_usable_workspace(usable_workspace_count)
 
     snapshot["resources"] = materialized_resources
 
@@ -940,12 +1006,14 @@ async def materialize_project_context_workspaces(
         workspace_manifest_payload["resolved_workspace_root"] = default_workspace
     snapshot["project_workspace_manifest"] = workspace_manifest_payload
     result.workspaces = workspaces
-    status = "materialized" if not result.errors else "failed"
     project_context_materialization = {
-        "status": status,
+        "status": result.status,
         "workspaces": workspaces,
         "workspace_manifest": workspace_manifest_payload,
         "errors": result.errors[:10],
+        "warnings": result.warnings[:10],
+        "degraded_resources": result.degraded_resources[:10],
+        "evidence_health": result.evidence_health,
         "empty_project": result.empty_project,
         "seed_resource_count": len(resources),
         "project_root_path_count": int(root_materialization.get("root_path_count") or 0),
