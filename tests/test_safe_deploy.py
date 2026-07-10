@@ -73,6 +73,18 @@ def test_docker_web_proxy_routes_public_webhooks_to_api():
     assert content.count("proxy_pass http://api:8000;") >= 8
 
 
+def test_docker_web_caches_fingerprinted_frontend_assets_immutably():
+    nginx_path = Path(__file__).resolve().parents[1] / "deploy" / "docker" / "web.nginx.conf"
+    content = nginx_path.read_text()
+
+    immutable_location = content.split("location ^~ /_app/immutable/ {", 1)[1].split("}", 1)[0]
+
+    assert "try_files $uri =404;" in immutable_location
+    assert "expires 1y;" in immutable_location
+    assert 'add_header Cache-Control "public, immutable" always;' in immutable_location
+    assert content.index("location ^~ /_app/immutable/") < content.index("location / {")
+
+
 def test_docker_build_context_excludes_local_brain_env():
     dockerignore_path = Path(__file__).resolve().parents[1] / ".dockerignore"
     ignored = {

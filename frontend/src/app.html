@@ -51,6 +51,8 @@
 				if (!location.pathname.startsWith('/cortex')) return;
 				const url = new URL(location.href);
 				const requestedIdeaId = url.searchParams.get('idea');
+				const workspacePageModalIds = new Set(['cycles', 'skills', 'team', 'vault', 'system']);
+				const modalFirst = !requestedIdeaId && workspacePageModalIds.has(url.searchParams.get('modal'));
 				const bootstrapParams = new URLSearchParams();
 				bootstrapParams.set('include', 'core,workspace');
 				const paths = [
@@ -58,9 +60,9 @@
 					'/api/notifications/summary',
 					'/api/notifications?status=unread&limit=50',
 				];
-				if (!requestedIdeaId) {
+				if (!requestedIdeaId && !modalFirst) {
 					paths.splice(1, 0, `/api/cortex/bootstrap?${bootstrapParams.toString()}`);
-				} else {
+				} else if (requestedIdeaId) {
 					const directBootstrapParams = new URLSearchParams();
 					directBootstrapParams.set('include', 'selected_idea,direct_thread');
 					directBootstrapParams.set('idea_id', requestedIdeaId);

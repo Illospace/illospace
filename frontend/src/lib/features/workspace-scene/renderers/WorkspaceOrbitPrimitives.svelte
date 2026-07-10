@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fade } from 'svelte/transition';
-  import { Astre, SignalBlob } from '$lib/components/constellation';
+  import { Astre } from '$lib/components/constellation';
+  import SignalBlob from '$lib/components/constellation/SignalBlob.svelte';
   import WorkspaceAppObject from '$lib/features/workspace-scene/renderers/WorkspaceAppObject.svelte';
   import WorkspacePin from '$lib/features/workspace-scene/renderers/WorkspacePin.svelte';
   import {
