@@ -83,12 +83,19 @@ class TestEventToEnvelope:
                 "number": 7, "title": "Add feature", "html_url": "u",
                 "state": "closed", "node_id": "PR_1",
                 "updated_at": "2026-07-08T11:00:00Z", "user": {"login": "bob"},
+                "merged": True, "base": {"ref": "main"}, "head": {"ref": "staging"},
+                "merge_commit_sha": "abc123", "merged_at": "2026-07-08T11:01:00Z",
             },
         }
         env = github_event_to_envelope("pull_request", payload)
         assert env["hints"]["event"] == "pull_request"
         assert env["hints"]["state"] == "closed"
         assert env["hints"]["number"] == 7
+        assert env["hints"]["merged"] is True
+        assert env["hints"]["base_ref"] == "main"
+        assert env["hints"]["head_ref"] == "staging"
+        assert env["hints"]["merge_commit_sha"] == "abc123"
+        assert env["hints"]["merged_at"] == "2026-07-08T11:01:00Z"
         assert env["idempotency_key"] is None  # no delivery id
 
     def test_issue_comment_anchors_on_issue_keeps_comment_details(self):

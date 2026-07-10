@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 from typing import Any
 
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
     async_create_repo_issue,
+    async_get_pull_request_deploy_info,
     async_get_pull_request,
     async_get_repo_counts,
     async_get_repo_by_slug,
@@ -16,6 +18,17 @@ from brain.systems.cortex.project_context.github import (
     async_list_repo_pull_requests,
     parse_github_repo_slug,
 )
+from brain.systems.deploy_state import (
+    DeployState,
+    as_utc_datetime,
+    classify_refire,
+    derive_deploy_state,
+)
+from brain.systems.deploy_state_config import (
+    deploy_feature_enabled,
+    deploy_settle_window,
+)
+from brain.systems.deploy_state_github import is_ancestor_of
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
 from brain.systems.vault import (
@@ -470,4 +483,169 @@ async def _handle_create_github_issue(
     return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
 
 
-__all__ = ["_handle_read_github_source", "_handle_create_github_issue"]
+async def _maybe_ensure_deploy_fields(repo_slug: str) -> None:
+    """Lazily provision runtime fields when this env-gated feature is armed."""
+    from brain.systems.deploy_state_sweep import ensure_deploy_state_fields
+
+    if not deploy_feature_enabled(repo_slug):
+        return
+    org_id = _clean(getattr(_agent_context, "org_id", None))
+    if not org_id:
+        return
+    try:
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+        async with UnitOfWork() as uow:
+            await ensure_deploy_state_fields(uow.session, org_id=org_id)
+    except Exception:
+        # Schema bootstrap is best-effort for this read tool; GitHub facts remain
+        # useful even if the domain database is temporarily unavailable.
+        return
+
+
+def _parse_github_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, datetime | str):
+        return None
+    return as_utc_datetime(value)
+
+
+def _indeterminate_deploy_result(repo_slug: str, *, error: GitHubConnectorError | None = None) -> str:
+    action = classify_refire(
+        deploy_state=None,
+        ticket_status="Todo",
+        deployed_at=None,
+        now=datetime.now(timezone.utc),
+        settle=deploy_settle_window(),
+    )
+    payload: dict[str, Any] = {
+        "repo": repo_slug,
+        "merged": None,
+        "base_ref": None,
+        "in_staging": None,
+        "in_main": None,
+        "deploy_state": None,
+        "recommended_action": action.value,
+        "indeterminate": True,
+    }
+    if error is not None:
+        payload.update({"error": error.message, "status_code": error.status_code})
+    return json.dumps(payload)
+
+
+async def _handle_check_fix_deploy_state(
+    repo: str | None = None,
+    pr_number: int | None = None,
+    sha: str | None = None,
+    token_secret_key: str | None = None,
+) -> str:
+    """Return the ancestry-derived deploy state for a PR or commit SHA."""
+    repo_slug = parse_github_repo_slug(repo or "")
+    if not repo_slug:
+        return json.dumps({"error": "check_fix_deploy_state requires repo as owner/name or a GitHub URL"})
+    if not deploy_feature_enabled(repo_slug):
+        return json.dumps({
+            "error": "deploy-state checks are disabled for this repository",
+            "repo": repo_slug,
+            "disabled": True,
+        })
+    clean_sha = _clean(sha)
+    try:
+        clean_pr = int(pr_number) if pr_number is not None else None
+    except (TypeError, ValueError):
+        clean_pr = None
+    if (clean_pr is None) == (clean_sha is None):
+        return json.dumps({"error": "check_fix_deploy_state requires exactly one of pr_number or sha"})
+    if clean_pr is not None and clean_pr < 1:
+        return json.dumps({"error": "check_fix_deploy_state requires a positive pr_number"})
+
+    await _maybe_ensure_deploy_fields(repo_slug)
+    candidates = await _github_token_candidates(
+        repo_slug=repo_slug,
+        token_secret_key=token_secret_key,
+    )
+    read_state = _github_read_state()
+    read_candidates = _ordered_read_candidates(candidates, repo_slug=repo_slug, state=read_state)
+    last_error: GitHubConnectorError | None = None
+    for index, candidate in enumerate(read_candidates):
+        token = candidate.get("token")
+        merged: bool | None = None
+        base_ref: str | None = None
+        merged_at: datetime | None = None
+        candidate_sha = clean_sha
+        if clean_pr is not None:
+            try:
+                info = await async_get_pull_request_deploy_info(
+                    repo_slug,
+                    clean_pr,
+                    token=token,
+                )
+            except GitHubConnectorError as exc:
+                last_error = exc
+                if exc.status_code in {401, 404}:
+                    read_state.rejected[(token, repo_slug)] = exc
+                if exc.status_code in {401, 403, 404} and index < len(read_candidates) - 1:
+                    continue
+                return _indeterminate_deploy_result(repo_slug, error=exc)
+            pr = info.get("pull_request") or {}
+            merged = pr.get("merged") if isinstance(pr.get("merged"), bool) else None
+            base_ref = _clean((pr.get("base") or {}).get("ref"))
+            merged_at = _parse_github_datetime(pr.get("merged_at"))
+            head_sha = _clean((pr.get("head") or {}).get("sha"))
+            candidate_sha = (
+                _clean(pr.get("merge_commit_sha")) or head_sha
+                if merged is True
+                else head_sha
+            )
+        if not candidate_sha:
+            return _indeterminate_deploy_result(repo_slug)
+
+        in_staging = await is_ancestor_of(repo_slug, candidate_sha, "staging", token=token)
+        in_main = await is_ancestor_of(repo_slug, candidate_sha, "main", token=token)
+        if (in_staging is None or in_main is None) and index < len(read_candidates) - 1:
+            continue
+        state = derive_deploy_state(
+            merged=merged,
+            base_ref=base_ref,
+            in_staging=in_staging,
+            in_main=in_main,
+        )
+        observed_at = datetime.now(timezone.utc)
+        # A staging PR's merged_at is not the production deploy time, and a
+        # raw SHA has no deploy timestamp. Treat a newly observed main ancestor
+        # as inside settle rather than falsely escalating an unknown timeline.
+        classified_deployed_at = None
+        if state is DeployState.DEPLOYED:
+            classified_deployed_at = (
+                merged_at if str(base_ref or "").casefold() == "main" else observed_at
+            )
+        action = classify_refire(
+            deploy_state=state,
+            ticket_status="Todo",
+            deployed_at=classified_deployed_at,
+            now=observed_at,
+            settle=deploy_settle_window(),
+        )
+        read_state.preferred[repo_slug] = token
+        payload = {
+            "repo": repo_slug,
+            "merged": merged,
+            "base_ref": base_ref,
+            "in_staging": in_staging,
+            "in_main": in_main,
+            "deploy_state": state.value if state else None,
+            "recommended_action": action.value,
+            "indeterminate": in_staging is None or in_main is None,
+            "token_secret_key_used": bool(candidate.get("key_name")),
+            "token_source": candidate.get("source"),
+        }
+        if last_error is not None:
+            payload["fallback_from_status_code"] = last_error.status_code
+        return json.dumps(payload)
+    return _indeterminate_deploy_result(repo_slug, error=last_error)
+
+
+__all__ = [
+    "_handle_check_fix_deploy_state",
+    "_handle_create_github_issue",
+    "_handle_read_github_source",
+]

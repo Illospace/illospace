@@ -94,6 +94,16 @@ def github_event_to_envelope(event: str, payload: dict, *, delivery_id=None) -> 
         author = (comment.get("user") or {}).get("login") or author
         source_updated_at = comment.get("updated_at") or source_updated_at
 
+    merge_hints = {}
+    if event == "pull_request":
+        merge_hints = {
+            "merged": subject.get("merged") is True,
+            "base_ref": (subject.get("base") or {}).get("ref"),
+            "head_ref": (subject.get("head") or {}).get("ref"),
+            "merge_commit_sha": subject.get("merge_commit_sha"),
+            "merged_at": subject.get("merged_at"),
+        }
+
     where = f" #{number}" if number else ""
     summary = (
         f"GitHub {noun}{where} {action}: {title}".strip()
@@ -119,6 +129,7 @@ def github_event_to_envelope(event: str, payload: dict, *, delivery_id=None) -> 
             "author": author,
             # Freshness: GitHub's own last-modified for the subject object.
             "source_updated_at": source_updated_at,
+            **merge_hints,
         },
         "idempotency_key": (f"github:{delivery_id}"[:160] if delivery_id else None),
     }
