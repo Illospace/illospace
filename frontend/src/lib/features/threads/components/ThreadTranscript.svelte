@@ -88,6 +88,7 @@
     onTranscriptScroll,
     onTranscriptReady,
     onScrollToBottom,
+    onShowEarlierHistory,
     onPreviewAttachment,
   }: ThreadTranscriptProps = $props();
 
@@ -360,6 +361,14 @@
       {:else if loading}
         <div class="thread-empty-state thread-loading-state">{loadingLabel}</div>
       {:else if hasTranscript}
+        {#if onShowEarlierHistory}
+          <div class="thread-history-window-control">
+            <ConstellationButton variant="quiet" size="sm" onclick={onShowEarlierHistory}>
+              Show earlier history
+            </ConstellationButton>
+          </div>
+        {/if}
+
         {#each transcriptItems as item, index (`${item.kind}-${item.id ?? index}`)}
           {#if renderTranscriptItem}
             {@render renderTranscriptItem(item)}
@@ -1268,6 +1277,11 @@
     gap: 18px;
     padding-right: 0;
     padding-bottom: var(--thread-composer-clearance);
+  }
+
+  .thread-history-window-control {
+    text-align: center;
+    padding: 2px 0 4px;
   }
 
   .thread-empty-state {

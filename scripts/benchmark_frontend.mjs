@@ -72,9 +72,14 @@ const RARE_PANE_OPEN_BUDGET_MS = 250;
 const DIRECT_THREAD_STARTUP_CALL_BUDGET = 4;
 const DIRECT_THREAD_STARTUP_PAYLOAD_BUDGET_KB = 35.5;
 const DIRECT_ROUTE_P50_GAP_BUDGET_PCT = 5;
-const DIRECT_ROUTE_IMPROVEMENT_TARGET_PCT = 10;
-const DIRECT_ROUTE_IMPROVEMENT_TARGET_MS = 100;
 const MAX_REGRESSION_PCT = 5;
+const THREAD_HISTORY_WINDOW_SIZE = 200;
+const THREAD_HISTORY_REVEAL_BUDGET_MS = 150;
+const THREAD_HISTORY_VIEWPORT_DRIFT_BUDGET_PX = 2;
+const STRESS_READY_IMPROVEMENT_TARGET_PCT = 10;
+const STRESS_DOM_NODE_BUDGET = 4000;
+const STRESS_TASK_P50_BUDGET_MS = 450;
+const STRESS_LONG_TASK_P95_BUDGET_MS = 250;
 const APP_ASSET_RESOURCE_TYPES = new Set(['Script', 'Stylesheet']);
 const VITE_CLIENT_MANIFEST_URL = new URL(
   '../frontend/.svelte-kit/output/client/.vite/manifest.json',
@@ -154,6 +159,7 @@ function parseArgs(argv) {
     allowUnknownApi: false,
     json: false,
     keepChromeProfile: false,
+    manifest: null,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -183,6 +189,7 @@ function parseArgs(argv) {
     else if (arg === '--allow-unknown-api') options.allowUnknownApi = true;
     else if (arg === '--json') options.json = true;
     else if (arg === '--keep-chrome-profile') options.keepChromeProfile = true;
+    else if (arg === '--manifest') options.manifest = next();
     else if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
@@ -222,6 +229,7 @@ Options:
   --phase NAME                Label stored in JSON output (default: current)
   --out PATH                  Write the full JSON report to PATH
   --compare BEFORE,AFTER      Print a before/after win chart from two JSON reports
+  --manifest PATH             Vite client manifest for the target build
   --allow-unknown-api         Do not fail when the app calls an unmocked API route
   --json                      Print machine-readable JSON
 `);
@@ -289,10 +297,10 @@ function manifestEntryAssets(manifest, key) {
     .sort();
 }
 
-async function loadExpectedLazyAssetClosures() {
+async function loadExpectedLazyAssetClosures(manifestPath = VITE_CLIENT_MANIFEST_URL) {
   let manifest;
   try {
-    manifest = JSON.parse(await readFile(VITE_CLIENT_MANIFEST_URL, 'utf8'));
+    manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   } catch (error) {
     throw new Error(
       `The production Vite client manifest is required for lazy asset contracts. Run the frontend build first. ${error.message}`,
@@ -702,7 +710,7 @@ function buildStreamItems(count) {
         type: 'run',
         id: `run-${index}`,
         timestamp: isoMinutesAgo(total - index),
-        title: 'Benchmark run',
+        title: `Benchmark run ${index}`,
         status: 'completed',
         skill_name: 'benchmark-runner',
         model_used: 'gpt-bench',
@@ -1061,6 +1069,18 @@ async function evaluate(client, expression) {
   return result.result?.value;
 }
 
+async function performanceMetrics(client) {
+  const result = await client.send('Performance.getMetrics');
+  return Object.fromEntries((result.metrics ?? []).map((metric) => [metric.name, metric.value]));
+}
+
+function performanceDurationMs(before, after, name) {
+  const start = before[name];
+  const end = after[name];
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  return (end - start) * 1000;
+}
+
 async function waitForExpression(client, expression, timeoutMs) {
   const started = performance.now();
   const deadline = started + timeoutMs;
@@ -1105,6 +1125,8 @@ function installPageInstrumentationSource() {
   return `(() => {
     window.__illoBench = {
       longTasks: [],
+      longTaskObserverAvailable: false,
+      longTaskObserverError: null,
       largestContentfulPaint: null,
       errors: [],
       wsMessages: [],
@@ -1118,15 +1140,22 @@ function installPageInstrumentationSource() {
     });
 
     try {
-      new PerformanceObserver((list) => {
+      if (!PerformanceObserver.supportedEntryTypes?.includes('longtask')) {
+        throw new Error('longtask entries are unsupported');
+      }
+      const longTaskObserver = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
           window.__illoBench.longTasks.push({
             startTime: entry.startTime,
             duration: entry.duration,
           });
         }
-      }).observe({ entryTypes: ['longtask'] });
-    } catch {}
+      });
+      longTaskObserver.observe({ entryTypes: ['longtask'] });
+      window.__illoBench.longTaskObserverAvailable = true;
+    } catch (error) {
+      window.__illoBench.longTaskObserverError = String(error?.message || error);
+    }
 
     try {
       new PerformanceObserver((list) => {
@@ -1221,6 +1250,7 @@ async function configurePage(client, fixture, options, apiCalls) {
   await client.send('Page.enable');
   await client.send('Runtime.enable');
   await client.send('Network.enable');
+  await client.send('Performance.enable');
   await client.send('Fetch.enable', {
     patterns: [{ urlPattern: '*://*/api/*', requestStage: 'Request' }],
   });
@@ -1289,6 +1319,7 @@ async function configurePage(client, fixture, options, apiCalls) {
         identifier: instrumentation.identifier,
       }).catch(() => {});
     }
+    await client.send('Performance.disable').catch(() => {});
   };
 }
 
@@ -1323,7 +1354,7 @@ function assertRequestContract(condition, scenario, expectation, calls) {
   );
 }
 
-function directThreadRequestContract(callsAtReady, scenario) {
+function directThreadRequestContract(callsAtReady, scenario, streamItems) {
   const bootstrapCalls = workspaceBootstrapCalls(callsAtReady);
   const directBootstrapCalls = directThreadBootstrapCalls(callsAtReady, scenario.ideaId);
   const directBootstrap = directBootstrapCalls[0] ?? null;
@@ -1340,6 +1371,7 @@ function directThreadRequestContract(callsAtReady, scenario) {
     Number.isFinite(meCall.fulfilledAt) &&
     directBootstrap.startedAt < meCall.fulfilledAt
   );
+  const payloadBudgetKb = streamItems <= 80 ? DIRECT_THREAD_STARTUP_PAYLOAD_BUDGET_KB : null;
 
   return {
     kind: 'direct-thread-startup',
@@ -1348,11 +1380,12 @@ function directThreadRequestContract(callsAtReady, scenario) {
       bootstrapBeforeMeFulfilled &&
       deferredCallsAtReady === 0 &&
       callsAtReady.length <= DIRECT_THREAD_STARTUP_CALL_BUDGET &&
-      startupPayloadKb <= DIRECT_THREAD_STARTUP_PAYLOAD_BUDGET_KB,
+      (payloadBudgetKb === null || startupPayloadKb <= payloadBudgetKb),
     bootstrapBeforeMeFulfilled,
     deferredCallsAtReady,
     startupCalls: callsAtReady.length,
     startupPayloadKb,
+    payloadBudgetKb,
   };
 }
 
@@ -1505,6 +1538,114 @@ async function verifyDirectThreadComposer(client, apiCalls, timeoutMs) {
     message,
     sendReadyMs: performance.now() - sendStartedAt,
   };
+}
+
+async function measureThreadHistoryContract(client, scenario, options) {
+  if (!scenario.directThread) return { kind: 'not-applicable', passed: true, reveals: [] };
+
+  return evaluate(client, `(async () => {
+    const total = ${Math.max(options.streamItems, 1)};
+    const batch = ${THREAD_HISTORY_WINDOW_SIZE};
+    const transcript = document.querySelector('.thread-content');
+    if (!(transcript instanceof HTMLElement)) return {
+      kind: 'thread-history-window', passed: false, error: 'transcript unavailable', reveals: [],
+    };
+    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+    const roots = () => [...document.querySelectorAll(
+      '.message-stack > .thread-message, .message-stack > .run-insert',
+    )];
+    const historyButton = () => document.querySelector('.thread-history-window-control button');
+    const controlVisible = () => historyButton() instanceof HTMLButtonElement;
+    const idFor = (root) => Number(
+      (root.textContent || '').match(/Benchmark (?:assistant reply|user prompt|run) (\\d+)/)?.[1],
+    );
+    const snapshot = () => {
+      const rows = roots();
+      const ids = rows.map(idFor).filter(Number.isFinite);
+      const unique = new Set(ids);
+      const firstExpected = total - ids.length;
+      return {
+        rendered: rows.length,
+        ids,
+        unique: unique.size,
+        duplicates: ids.length - unique.size,
+        valid: ids.length === rows.length && ids.every((id, index) => id === firstExpected + index),
+      };
+    };
+    const rootFor = (id) => roots().find((root) => idFor(root) === id) ?? null;
+    const waitForReveal = async (previous) => {
+      const deadline = performance.now() + ${Math.min(options.timeoutMs, 5000)};
+      while (performance.now() < deadline) {
+        const button = historyButton();
+        if (snapshot().unique > previous && button?.getAttribute('aria-busy') !== 'true') return true;
+        await frame();
+      }
+      return false;
+    };
+
+    const initial = snapshot();
+    const controlInitiallyVisible = controlVisible();
+    const reveals = [];
+    for (let index = 0; index <= Math.ceil(total / batch); index += 1) {
+      const button = historyButton();
+      if (!(button instanceof HTMLButtonElement)) break;
+      transcript.scrollTop = 0;
+      transcript.dispatchEvent(new Event('scroll'));
+      await frame();
+      const before = snapshot();
+      const anchorId = before.ids[0];
+      const anchorBefore = rootFor(anchorId);
+      const topBefore = anchorBefore?.getBoundingClientRect().top;
+      const startedAt = performance.now();
+      button.click();
+      const settled = await waitForReveal(before.unique);
+      await frame();
+      const after = snapshot();
+      const beforeSet = new Set(before.ids);
+      const afterSet = new Set(after.ids);
+      const added = after.ids.filter((id) => !beforeSet.has(id)).length;
+      const removed = before.ids.filter((id) => !afterSet.has(id)).length;
+      const topAfter = rootFor(anchorId)?.getBoundingClientRect().top;
+      const drift = Number.isFinite(topBefore) && Number.isFinite(topAfter)
+        ? Math.abs(topAfter - topBefore) : null;
+      const expectedAdded = Math.min(batch, total - before.unique);
+      const behaviorPassed = settled && added === expectedAdded && removed === 0 &&
+        after.duplicates === 0 && after.valid && controlVisible() === (after.unique < total) && drift !== null;
+      reveals.push({
+        revealMs: performance.now() - startedAt,
+        viewportDriftPx: drift,
+        beforeItems: before.unique,
+        afterItems: after.unique,
+        addedItems: added,
+        removedItems: removed,
+        behaviorPassed,
+      });
+      if (!settled || after.unique <= before.unique) break;
+    }
+
+    const final = snapshot();
+    const expectedInitial = Math.min(total, batch);
+    const expectedReveals = Math.max(0, Math.ceil(total / batch) - 1);
+    const initialWindowPassed = initial.unique === expectedInitial &&
+      initial.rendered === expectedInitial && initial.duplicates === 0 && initial.valid;
+    const controlVisibilityPassed = controlInitiallyVisible === (total > batch);
+    const repeatedRevealPassed = reveals.length === expectedReveals &&
+      reveals.every((reveal) => reveal.behaviorPassed) &&
+      final.unique === total && final.rendered === total && final.duplicates === 0 &&
+      final.valid && !controlVisible();
+
+    return {
+      kind: 'thread-history-window',
+      passed: initialWindowPassed && controlVisibilityPassed && repeatedRevealPassed,
+      initialRenderedIdentityCount: initial.unique,
+      initialRenderedItemCount: initial.rendered,
+      initialWindowPassed,
+      controlVisibilityPassed,
+      finalRenderedIdentityCount: final.unique,
+      repeatedRevealPassed,
+      reveals,
+    };
+  })()`);
 }
 
 async function measureLazyAssetContract(
@@ -1775,6 +1916,7 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
       origin,
       storageTypes: 'local_storage,indexeddb,websql,service_workers,cache_storage',
     }).catch(() => {});
+    const performanceMetricsBefore = await performanceMetrics(client);
 
     const targetUrl = new URL(scenario.path, options.baseUrl).toString();
     const started = performance.now();
@@ -1792,7 +1934,7 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
     const bootstrapCallsAtReady = workspaceBootstrapCalls(apiCallsAtReady);
     const workspaceCallsAtReady = workspaceStartupCalls(apiCallsAtReady);
     const directStartupContract = scenario.directThread
-      ? directThreadRequestContract(apiCallsAtReady, scenario)
+      ? directThreadRequestContract(apiCallsAtReady, scenario, options.streamItems)
       : null;
 
     if (scenario.modalId) {
@@ -1825,15 +1967,28 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
         primitiveBlobs: document.querySelectorAll('[data-constellation-signal-id]').length,
         fcpMs: paints['first-contentful-paint'] ?? null,
         lcpMs: bench.largestContentfulPaint?.startTime ?? null,
-        longTaskCount: bench.longTasks?.length ?? 0,
-        longTaskTotalMs: (bench.longTasks || []).reduce((sum, task) => sum + task.duration, 0),
-        maxLongTaskMs: Math.max(0, ...(bench.longTasks || []).map((task) => task.duration)),
+        longTaskObserverAvailable: bench.longTaskObserverAvailable === true,
+        longTaskObserverError: bench.longTaskObserverError ?? null,
+        longTaskCount: bench.longTaskObserverAvailable ? bench.longTasks.length : null,
+        longTaskTotalMs: bench.longTaskObserverAvailable
+          ? bench.longTasks.reduce((sum, task) => sum + task.duration, 0)
+          : null,
+        maxLongTaskMs: bench.longTaskObserverAvailable
+          ? Math.max(0, ...bench.longTasks.map((task) => task.duration))
+          : null,
         errors: bench.errors || [],
         wsMessages: bench.wsMessages || [],
         transferSize: navigation?.transferSize ?? 0,
         decodedBodySize: navigation?.decodedBodySize ?? 0,
       };
     })()`);
+    const performanceMetricsAfter = await performanceMetrics(client);
+    const taskDurationMs = performanceDurationMs(
+      performanceMetricsBefore,
+      performanceMetricsAfter,
+      'TaskDuration',
+    );
+    const historyContract = await measureThreadHistoryContract(client, scenario, options);
 
     const measuredApiCalls = [...apiCalls];
     const bootstrapCallsBeforeClose = workspaceBootstrapCalls(measuredApiCalls);
@@ -1911,6 +2066,7 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
       postCloseReadyMs,
       requestContract,
       lazyAssetContract,
+      historyContract,
       apiCallCount: measuredApiCalls.length,
       postCloseApiCallCount: postCloseApiCalls.length,
       totalApiCallCount: allApiCalls.length,
@@ -1921,6 +2077,7 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
       postCloseApiCalls,
       allApiCalls,
       ...pageMetrics,
+      taskDurationMs,
       errors: [...new Set([...(pageMetrics.errors || []), ...(allErrors || [])])],
     };
   } finally {
@@ -2004,6 +2161,25 @@ function summarizeScenario(samples) {
   const directStartupSamples = measuredSamples.filter(
     (sample) => sample.requestContract?.kind === 'direct-thread-startup',
   );
+  const historySamples = measuredSamples.filter(
+    (sample) => sample.historyContract?.kind === 'thread-history-window',
+  );
+  const historyReveals = historySamples.flatMap(
+    (sample) => sample.historyContract.reveals ?? [],
+  );
+  const historyRevealArraysAvailable = historySamples.length > 0 && historySamples.every(
+    (sample) => Array.isArray(sample.historyContract.reveals),
+  );
+  const historyValues = (items, key) => items
+    .map((item) => item[key])
+    .filter(Number.isFinite);
+  const summarizeHistory = (key) => {
+    const values = historyValues(historySamples.map((sample) => sample.historyContract), key);
+    return values.length > 0 && values.length === historySamples.length
+      ? summarizeNumbers(values)
+      : null;
+  };
+  const revealValues = (key) => historyValues(historyReveals, key);
   const defaultPaneKinds = ['activity-initial', 'discussion', 'handoff-summary', 'activity'];
   const defaultPaneReadyMs = Object.fromEntries(defaultPaneKinds.map((kind) => [
     kind,
@@ -2013,6 +2189,15 @@ function summarizeScenario(samples) {
         .map((interaction) => interaction.readyMs) ?? []
     ))),
   ]));
+  const finiteValues = (key) => measuredSamples
+    .map((sample) => sample[key])
+    .filter(Number.isFinite);
+  const fcpValues = finiteValues('fcpMs').filter((value) => value > 0);
+  const taskDurationValues = finiteValues('taskDurationMs');
+  const longTaskCountValues = finiteValues('longTaskCount');
+  const longTaskTotalValues = finiteValues('longTaskTotalMs');
+  const maxLongTaskValues = finiteValues('maxLongTaskMs');
+  const domNodeValues = finiteValues('domNodes');
 
   return {
     runs: measuredSamples.length,
@@ -2020,7 +2205,8 @@ function summarizeScenario(samples) {
     post_close_ready_ms: summarizeNumbers(
       measuredSamples.map((sample) => sample.postCloseReadyMs ?? 0).filter((value) => value > 0),
     ),
-    fcp_ms: summarizeNumbers(measuredSamples.map((sample) => sample.fcpMs ?? 0).filter((value) => value > 0)),
+    fcp_available: fcpValues.length === measuredSamples.length,
+    fcp_ms: summarizeNumbers(fcpValues),
     lcp_ms: summarizeNumbers(measuredSamples.map((sample) => sample.lcpMs ?? 0).filter((value) => value > 0)),
     api_calls: summarizeNumbers(measuredSamples.map((sample) => sample.apiCalls.length)),
     sidecar_api_calls: summarizeNumbers(measuredSamples.map((sample) => sample.apiCalls.filter((call) => call.sidecar).length)),
@@ -2119,14 +2305,36 @@ function summarizeScenario(samples) {
         .map((sample) => sample.lazyAssetContract.composerContract?.sendReadyMs ?? 0)
         .filter((value) => value > 0),
     ),
-    dom_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.domNodes)),
+    thread_history_contract_passed: measuredSamples.every(
+      (sample) => sample.historyContract?.passed === true,
+    ),
+    thread_history_initial_rendered_identity_count: summarizeHistory('initialRenderedIdentityCount'),
+    thread_history_initial_rendered_item_count: summarizeHistory('initialRenderedItemCount'),
+    thread_history_final_rendered_identity_count: summarizeHistory('finalRenderedIdentityCount'),
+    thread_history_reveal_available: historyRevealArraysAvailable &&
+      revealValues('revealMs').length === historyReveals.length,
+    thread_history_reveal_ms: summarizeNumbers(revealValues('revealMs')),
+    thread_history_viewport_drift_available: historyRevealArraysAvailable &&
+      revealValues('viewportDriftPx').length === historyReveals.length,
+    thread_history_viewport_drift_px: summarizeNumbers(revealValues('viewportDriftPx')),
+    dom_nodes_available: domNodeValues.length === measuredSamples.length,
+    dom_nodes: summarizeNumbers(domNodeValues),
     deep_field_feature_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.deepFieldFeatureNodes ?? 0)),
     d3_shadow_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.d3ShadowNodes ?? 0)),
     d3_shadow_bubbles: summarizeNumbers(measuredSamples.map((sample) => sample.d3ShadowBubbles ?? 0)),
     d3_shadow_connections: summarizeNumbers(measuredSamples.map((sample) => sample.d3ShadowConnections ?? 0)),
     primitive_blobs: summarizeNumbers(measuredSamples.map((sample) => sample.primitiveBlobs ?? 0)),
-    long_task_total_ms: summarizeNumbers(measuredSamples.map((sample) => sample.longTaskTotalMs)),
-    max_long_task_ms: summarizeNumbers(measuredSamples.map((sample) => sample.maxLongTaskMs)),
+    task_duration_available: taskDurationValues.length === measuredSamples.length,
+    task_duration_ms: summarizeNumbers(taskDurationValues),
+    long_task_observer_available: measuredSamples.every(
+      (sample) => sample.longTaskObserverAvailable === true,
+    ),
+    long_task_observer_errors: [...new Set(
+      measuredSamples.map((sample) => sample.longTaskObserverError).filter(Boolean),
+    )],
+    long_task_count: summarizeNumbers(longTaskCountValues),
+    long_task_total_ms: summarizeNumbers(longTaskTotalValues),
+    max_long_task_ms: summarizeNumbers(maxLongTaskValues),
     routes,
     post_close_routes: postCloseRoutes,
     all_routes: allRoutes,
@@ -2146,7 +2354,9 @@ function printTextReport(result) {
     runs: String(scenario.summary.runs),
     p50: scenario.summary.ready_ms.p50.toFixed(1),
     p95: scenario.summary.ready_ms.p95.toFixed(1),
-    fcp: scenario.summary.fcp_ms.p50 ? scenario.summary.fcp_ms.p50.toFixed(1) : '-',
+    fcp: summaryMetricAvailable(scenario.summary, 'fcp_available', 'fcp_ms')
+      ? scenario.summary.fcp_ms.p50.toFixed(1)
+      : '-',
     api: scenario.summary.api_calls.p50.toFixed(0),
     routes: scenario.summary.unique_api_routes.p50.toFixed(0),
     bootstrap: `${scenario.summary.workspace_bootstrap_before_close.p50.toFixed(0)}/${scenario.summary.workspace_bootstrap_post_close.p50.toFixed(0)}`,
@@ -2154,13 +2364,18 @@ function printTextReport(result) {
     pane75: scenario.summary.rare_pane_first_open_ms.p75
       ? scenario.summary.rare_pane_first_open_ms.p75.toFixed(1)
       : '-',
-    long: scenario.summary.long_task_total_ms.p95.toFixed(1),
+    task: summaryMetricAvailable(scenario.summary, 'task_duration_available', 'task_duration_ms')
+      ? scenario.summary.task_duration_ms.p50.toFixed(1)
+      : '-',
+    long: summaryMetricAvailable(scenario.summary, 'long_task_observer_available', 'long_task_count')
+      ? scenario.summary.max_long_task_ms.p95.toFixed(1)
+      : '-',
     dom: scenario.summary.dom_nodes.p50.toFixed(0),
     d3: scenario.summary.d3_shadow_nodes.p50.toFixed(0),
     links: scenario.summary.d3_shadow_connections.p50.toFixed(0),
     field: scenario.summary.deep_field_feature_nodes.p50.toFixed(0),
   }));
-  const headers = ['name', 'runs', 'p50', 'p95', 'fcp', 'api', 'routes', 'bootstrap', 'close', 'pane75', 'long', 'dom', 'd3', 'links', 'field'];
+  const headers = ['name', 'runs', 'p50', 'p95', 'fcp', 'api', 'routes', 'bootstrap', 'close', 'pane75', 'task', 'long', 'dom', 'd3', 'links', 'field'];
   const widths = Object.fromEntries(headers.map((header) => [
     header,
     Math.max(header.length, ...rows.map((row) => row[header].length)),
@@ -2193,11 +2408,21 @@ function printTextReport(result) {
       `${scenario.summary.workspace_bootstrap_post_close.p50.toFixed(0)})`,
     );
     if (SCENARIOS[scenario.key]?.directThread) {
+      const historyCounts = threadHistoryCounts(scenario.summary);
       console.log(
         `${scenario.name} startup: ${scenario.summary.startup_api_calls.p50.toFixed(0)} calls/` +
         `${scenario.summary.startup_api_kb.p50.toFixed(2)}KB ` +
-        `(budgets <=${DIRECT_THREAD_STARTUP_CALL_BUDGET}/<=${DIRECT_THREAD_STARTUP_PAYLOAD_BUDGET_KB}KB); ` +
+        `(call budget <=${DIRECT_THREAD_STARTUP_CALL_BUDGET}` +
+        `${result.config.streamItems <= 80 ? `; normal payload budget <=${DIRECT_THREAD_STARTUP_PAYLOAD_BUDGET_KB}KB` : ''}); ` +
         `bootstrap before /api/me ${scenario.summary.direct_bootstrap_before_me_fulfilled ? 'PASS' : 'FAIL'}`,
+      );
+      console.log(
+        `${scenario.name} history markers: ${scenario.summary.thread_history_contract_passed ? 'PASS' : 'FAIL'} ` +
+        `(initial identities/rendered ${Number.isFinite(historyCounts.initialIdentities?.p50) ? historyCounts.initialIdentities.p50.toFixed(0) : '-'}/` +
+        `${Number.isFinite(historyCounts.initialItems?.p50) ? historyCounts.initialItems.p50.toFixed(0) : '-'}; ` +
+        `reveal p95 ${scenario.summary.thread_history_reveal_ms.p95.toFixed(1)}ms; ` +
+        `drift max ${scenario.summary.thread_history_viewport_drift_px.max.toFixed(1)}px; ` +
+        `final identities ${Number.isFinite(historyCounts.finalIdentities?.p50) ? historyCounts.finalIdentities.p50.toFixed(0) : '-'})`,
       );
     }
     if (scenario.summary.lazy_asset_observation_ms > 0) {
@@ -2261,31 +2486,125 @@ function scenarioByName(result, name) {
   return result.scenarios.find((scenario) => scenario.name === name || scenario.key === name);
 }
 
+function summaryMetricAvailable(summary, availabilityKey, metricKey) {
+  if (Object.hasOwn(summary, availabilityKey)) return summary[availabilityKey] === true;
+  const metric = summary[metricKey];
+  return Boolean(
+    metric && Number.isFinite(metric.p50) && Number.isFinite(metric.p95) && metric.max > 0,
+  );
+}
+
+function summaryMetricValue(summary, availabilityKey, metricKey, percentileName) {
+  if (!summaryMetricAvailable(summary, availabilityKey, metricKey)) return null;
+  const value = summary[metricKey]?.[percentileName];
+  return Number.isFinite(value) ? value : null;
+}
+
+function threadHistoryCounts(summary) {
+  const value = (currentKey, legacyKey) => Object.hasOwn(summary, currentKey)
+    ? summary[currentKey]
+    : summary[legacyKey] ?? null;
+  return {
+    initialIdentities: value(
+      'thread_history_initial_rendered_identity_count',
+      'thread_history_initial_raw_items',
+    ),
+    initialItems: value(
+      'thread_history_initial_rendered_item_count',
+      'thread_history_initial_rendered_items',
+    ),
+    finalIdentities: value(
+      'thread_history_final_rendered_identity_count',
+      'thread_history_final_raw_items',
+    ),
+  };
+}
+
+function directThreadHistoryFailures(key, summary) {
+  const failures = [];
+  if (summary.thread_history_contract_passed !== true) {
+    failures.push(`${key}: thread history window behavior contract failed`);
+  }
+
+  const counts = threadHistoryCounts(summary);
+  for (const [label, metric] of [
+    ['initial rendered identity count', counts.initialIdentities],
+    ['initial rendered item count', counts.initialItems],
+    ['final rendered identity count', counts.finalIdentities],
+  ]) {
+    if (![metric?.p50, metric?.p95, metric?.max].every(Number.isFinite)) {
+      failures.push(`${key}: ${label} unavailable`);
+    }
+  }
+
+  for (const [label, availabilityKey, metricKey] of [
+    ['history reveal', 'thread_history_reveal_available', 'thread_history_reveal_ms'],
+    ['history viewport drift', 'thread_history_viewport_drift_available', 'thread_history_viewport_drift_px'],
+  ]) {
+    const metric = summary[metricKey];
+    const metricAvailable = metric && [metric.p50, metric.p95, metric.max].every(Number.isFinite);
+    const observerAvailable = !Object.hasOwn(summary, availabilityKey) ||
+      summary[availabilityKey] === true;
+    if (!observerAvailable || !metricAvailable) failures.push(`${key}: ${label} unavailable`);
+  }
+  return failures;
+}
+
 function pctDelta(before, after) {
   if (!before) return 0;
   return ((after - before) / before) * 100;
 }
 
-function majorImprovement(before, after) {
-  return before > 0 && (
-    (before - after) / before * 100 >= DIRECT_ROUTE_IMPROVEMENT_TARGET_PCT ||
-    before - after >= DIRECT_ROUTE_IMPROVEMENT_TARGET_MS
-  );
-}
-
 const COMPARISON_CONFIG_KEYS = [
   'runs', 'warmups', 'ideas', 'connections', 'streamItems', 'apiLatencyMs', 'sidecarLatencyMs',
+  'timeoutMs', 'allowUnknownApi',
 ];
 
 function comparisonSignature(result, scenarioKeys) {
   return JSON.stringify({
-    ...Object.fromEntries(COMPARISON_CONFIG_KEYS.map((key) => [key, result.config[key]])),
+    ...Object.fromEntries(COMPARISON_CONFIG_KEYS.map((key) => [
+      key,
+      key === 'allowUnknownApi' ? result.config[key] === true : result.config[key],
+    ])),
     scenarios: result.config.scenarios.filter((key) => scenarioKeys.includes(key)),
   });
 }
 
 function withinRegressionBudget(before, after) {
   return before > 0 && pctDelta(before, after) <= MAX_REGRESSION_PCT;
+}
+
+function isThreadHistoryStressConfig(config) {
+  return config.ideas === 1500 &&
+    config.connections === 3000 &&
+    config.streamItems === 1000 &&
+    config.apiLatencyMs === 100;
+}
+
+function stressAbsoluteFailures(key, summary) {
+  const failures = [];
+  const metrics = [
+    ['CDP TaskDuration', summaryMetricAvailable(summary, 'task_duration_available', 'task_duration_ms'), summary.task_duration_ms?.p50, STRESS_TASK_P50_BUDGET_MS, 'ms'],
+    ['LongTask p95', summaryMetricAvailable(summary, 'long_task_observer_available', 'long_task_count'), summary.max_long_task_ms?.p95, STRESS_LONG_TASK_P95_BUDGET_MS, 'ms'],
+    ['DOM nodes max', summaryMetricAvailable(summary, 'dom_nodes_available', 'dom_nodes'), summary.dom_nodes?.max, STRESS_DOM_NODE_BUDGET, ''],
+    ['history reveal p95', summaryMetricAvailable(summary, 'thread_history_reveal_available', 'thread_history_reveal_ms'), summary.thread_history_reveal_ms?.p95, THREAD_HISTORY_REVEAL_BUDGET_MS, 'ms'],
+    ['history viewport drift max', summaryMetricAvailable(summary, 'thread_history_viewport_drift_available', 'thread_history_viewport_drift_px'), summary.thread_history_viewport_drift_px?.max, THREAD_HISTORY_VIEWPORT_DRIFT_BUDGET_PX, 'px'],
+  ];
+  for (const [metric, available, value, budget, unit] of metrics) {
+    if (!available || !Number.isFinite(value)) failures.push(`${key}: ${metric} unavailable`);
+    else if (value > budget) failures.push(`${key}: ${metric} ${value.toFixed(1)}${unit} > ${budget}${unit}`);
+  }
+
+  const historyCounts = threadHistoryCounts(summary);
+  for (const [label, count] of [
+    ['initial rendered identity count', historyCounts.initialIdentities],
+    ['initial rendered item count', historyCounts.initialItems],
+  ]) {
+    if (Number.isFinite(count?.max) && count.max > THREAD_HISTORY_WINDOW_SIZE) {
+      failures.push(`${key}: ${label} exceeds ${THREAD_HISTORY_WINDOW_SIZE}`);
+    }
+  }
+  return failures;
 }
 
 function comparisonFailures(before, after, scenarioKeys) {
@@ -2310,13 +2629,35 @@ function comparisonFailures(before, after, scenarioKeys) {
     if (!summary.composer_contract_passed) failures.push(`${key}: composer contract failed`);
     if (summary.errors.length) failures.push(`${key}: browser errors observed`);
 
+    const directThread = Boolean(SCENARIOS[key]?.directThread);
+    const stress = directThread && isThreadHistoryStressConfig(after.config);
+    if (directThread) failures.push(...directThreadHistoryFailures(key, summary));
+
     const beforeReady = beforeScenario.summary.ready_ms;
     const afterReady = summary.ready_ms;
     const readyMetrics = [['p50', beforeReady.p50, afterReady.p50], ['p95', beforeReady.p95, afterReady.p95]];
-    const majorReady = readyMetrics.map(([, beforeValue, afterValue]) => majorImprovement(beforeValue, afterValue));
     const stableReady = readyMetrics.map(([, beforeValue, afterValue]) => withinRegressionBudget(beforeValue, afterValue));
-    if (key === 'thread' && !majorReady.every(Boolean)) failures.push(`${key}: p50/p95 missed major improvement`);
-    if (key !== 'thread' && !stableReady.every(Boolean)) failures.push(`${key}: ready regression >${MAX_REGRESSION_PCT}%`);
+    if (!stress && !stableReady.every(Boolean)) failures.push(`${key}: ready regression >${MAX_REGRESSION_PCT}%`);
+    const beforeFcp = summaryMetricValue(beforeScenario.summary, 'fcp_available', 'fcp_ms', 'p50');
+    const afterFcp = summaryMetricValue(summary, 'fcp_available', 'fcp_ms', 'p50');
+    if (!stress && (beforeFcp === null || afterFcp === null)) {
+      failures.push(`${key}: comparable FCP unavailable`);
+    } else if (!stress && !withinRegressionBudget(beforeFcp, afterFcp)) {
+      failures.push(`${key}: FCP p50 regression >${MAX_REGRESSION_PCT}%`);
+    }
+
+    if (stress) {
+      for (const [percentileName, beforeValue, afterValue] of readyMetrics) {
+        const improvementPct = -pctDelta(beforeValue, afterValue);
+        if (improvementPct < STRESS_READY_IMPROVEMENT_TARGET_PCT) {
+          failures.push(
+            `${key}: ready ${percentileName} improved ${improvementPct.toFixed(1)}% < ` +
+            `${STRESS_READY_IMPROVEMENT_TARGET_PCT}%`,
+          );
+        }
+      }
+      failures.push(...stressAbsoluteFailures(key, summary));
+    }
 
     const paneMetrics = [
       ['Vault first-open', beforeScenario.summary.rare_pane_first_open_ms.p75, summary.rare_pane_first_open_ms.p75],
@@ -2343,19 +2684,25 @@ function printComparison(before, after, scenarioKeys) {
     if (!scenarioKeys.includes(afterScenario.key)) continue;
     const beforeScenario = scenarioByName(before, afterScenario.name);
     if (!beforeScenario) continue;
+    const beforeSummary = beforeScenario.summary;
+    const afterSummary = afterScenario.summary;
     const metrics = [
-      ['ready p50', beforeScenario.summary.ready_ms.p50, afterScenario.summary.ready_ms.p50, 'ms'],
-      ['ready p95', beforeScenario.summary.ready_ms.p95, afterScenario.summary.ready_ms.p95, 'ms'],
-      ['FCP p50', beforeScenario.summary.fcp_ms.p50, afterScenario.summary.fcp_ms.p50, 'ms'],
-      ['API calls p50', beforeScenario.summary.api_calls.p50, afterScenario.summary.api_calls.p50, ''],
-      ['API KB p50', beforeScenario.summary.api_kb.p50, afterScenario.summary.api_kb.p50, 'KB'],
-      ['rare pane first-open p75', beforeScenario.summary.rare_pane_first_open_ms?.p75 ?? 0, afterScenario.summary.rare_pane_first_open_ms?.p75 ?? 0, 'ms'],
-      ['DOM nodes p50', beforeScenario.summary.dom_nodes.p50, afterScenario.summary.dom_nodes.p50, ''],
-      ['D3 shadow nodes p50', beforeScenario.summary.d3_shadow_nodes?.p50 ?? 0, afterScenario.summary.d3_shadow_nodes?.p50 ?? 0, ''],
-      ['D3 shadow bubbles p50', beforeScenario.summary.d3_shadow_bubbles?.p50 ?? 0, afterScenario.summary.d3_shadow_bubbles?.p50 ?? 0, ''],
-      ['D3 shadow links p50', beforeScenario.summary.d3_shadow_connections?.p50 ?? 0, afterScenario.summary.d3_shadow_connections?.p50 ?? 0, ''],
-      ['field feature nodes p50', beforeScenario.summary.deep_field_feature_nodes.p50, afterScenario.summary.deep_field_feature_nodes.p50, ''],
-      ['long task p95', beforeScenario.summary.long_task_total_ms.p95, afterScenario.summary.long_task_total_ms.p95, 'ms'],
+      ['ready p50', beforeSummary.ready_ms.p50, afterSummary.ready_ms.p50, 'ms'],
+      ['ready p95', beforeSummary.ready_ms.p95, afterSummary.ready_ms.p95, 'ms'],
+      ['FCP p50', summaryMetricValue(beforeSummary, 'fcp_available', 'fcp_ms', 'p50'), summaryMetricValue(afterSummary, 'fcp_available', 'fcp_ms', 'p50'), 'ms'],
+      ['API calls p50', beforeSummary.api_calls.p50, afterSummary.api_calls.p50, ''],
+      ['API KB p50', beforeSummary.api_kb.p50, afterSummary.api_kb.p50, 'KB'],
+      ['rare pane first-open p75', beforeSummary.rare_pane_first_open_ms?.p75 ?? 0, afterSummary.rare_pane_first_open_ms?.p75 ?? 0, 'ms'],
+      ['DOM nodes p50', beforeSummary.dom_nodes.p50, afterSummary.dom_nodes.p50, ''],
+      ['D3 shadow nodes p50', beforeSummary.d3_shadow_nodes?.p50 ?? 0, afterSummary.d3_shadow_nodes?.p50 ?? 0, ''],
+      ['D3 shadow bubbles p50', beforeSummary.d3_shadow_bubbles?.p50 ?? 0, afterSummary.d3_shadow_bubbles?.p50 ?? 0, ''],
+      ['D3 shadow links p50', beforeSummary.d3_shadow_connections?.p50 ?? 0, afterSummary.d3_shadow_connections?.p50 ?? 0, ''],
+      ['field feature nodes p50', beforeSummary.deep_field_feature_nodes.p50, afterSummary.deep_field_feature_nodes.p50, ''],
+      ['CDP task p50', summaryMetricValue(beforeSummary, 'task_duration_available', 'task_duration_ms', 'p50'), summaryMetricValue(afterSummary, 'task_duration_available', 'task_duration_ms', 'p50'), 'ms'],
+      ['long task p95', summaryMetricValue(beforeSummary, 'long_task_observer_available', 'max_long_task_ms', 'p95'), summaryMetricValue(afterSummary, 'long_task_observer_available', 'max_long_task_ms', 'p95'), 'ms'],
+      ['history initial rendered identities p50', threadHistoryCounts(beforeSummary).initialIdentities?.p50 ?? null, threadHistoryCounts(afterSummary).initialIdentities?.p50 ?? null, ''],
+      ['history reveal p95', beforeSummary.thread_history_reveal_ms?.p95 ?? 0, afterSummary.thread_history_reveal_ms?.p95 ?? 0, 'ms'],
+      ['history drift max', beforeSummary.thread_history_viewport_drift_px?.max ?? 0, afterSummary.thread_history_viewport_drift_px?.max ?? 0, 'px'],
     ];
     for (const [metric, beforeValue, afterValue, unit] of metrics) {
       rows.push({
@@ -2363,13 +2710,21 @@ function printComparison(before, after, scenarioKeys) {
         metric,
         before: beforeValue,
         after: afterValue,
-        delta: pctDelta(beforeValue, afterValue),
+        delta: Number.isFinite(beforeValue) && Number.isFinite(afterValue)
+          ? pctDelta(beforeValue, afterValue)
+          : null,
         unit,
       });
     }
   }
 
   for (const row of rows) {
+    if (row.delta === null) {
+      const beforeValue = Number.isFinite(row.before) ? `${row.before.toFixed(1)}${row.unit}` : 'unavailable';
+      const afterValue = Number.isFinite(row.after) ? `${row.after.toFixed(1)}${row.unit}` : 'unavailable';
+      console.log(`${row.scenario} ${row.metric}: ${beforeValue} -> ${afterValue}`);
+      continue;
+    }
     const arrow = row.delta <= 0 ? 'win' : 'reg';
     console.log(`${row.scenario} ${row.metric}: ${row.before.toFixed(1)}${row.unit} -> ${row.after.toFixed(1)}${row.unit} (${arrow} ${Math.abs(row.delta).toFixed(1)}%)`);
   }
@@ -2396,7 +2751,7 @@ async function main() {
   }
 
   const fixture = buildFixture(options);
-  const lazyAssetClosures = await loadExpectedLazyAssetClosures();
+  const lazyAssetClosures = await loadExpectedLazyAssetClosures(options.manifest ?? VITE_CLIENT_MANIFEST_URL);
   const chrome = await launchChrome(options);
   const client = new CdpClient(chrome.pageWsUrl);
   await client.connect();
@@ -2434,6 +2789,7 @@ async function main() {
         apiLatencyMs: options.apiLatencyMs,
         sidecarLatencyMs: options.sidecarLatencyMs,
         timeoutMs: options.timeoutMs,
+        allowUnknownApi: options.allowUnknownApi,
         lazyAssetManifest: {
           threadStageModuleId: lazyAssetClosures.threadStage.moduleId,
           threadStageAssetCount: lazyAssetClosures.threadStage.assets.length,
@@ -2461,6 +2817,14 @@ async function main() {
       scenario.summary.rare_pane_first_open_ms.p75 > 0 &&
       scenario.summary.rare_pane_first_open_budget_passed === false
     ));
+    const threadFailures = result.scenarios.flatMap((scenario) => {
+      if (!SCENARIOS[scenario.key]?.directThread) return [];
+      const failures = directThreadHistoryFailures(scenario.key, scenario.summary);
+      if (isThreadHistoryStressConfig(result.config)) {
+        failures.push(...stressAbsoluteFailures(scenario.key, scenario.summary));
+      }
+      return failures;
+    });
 
     if (options.out) {
       await mkdir(path.dirname(options.out), { recursive: true });
@@ -2480,6 +2844,9 @@ async function main() {
           `${scenario.summary.rare_pane_first_open_budget_ms}ms`
         )).join('\n')}`,
       );
+    }
+    if (threadFailures.length) {
+      throw new Error(`Thread benchmark contract failed:\n${threadFailures.map((failure) => `- ${failure}`).join('\n')}`);
     }
   } finally {
     client.close();
