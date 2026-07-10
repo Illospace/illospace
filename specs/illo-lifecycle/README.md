@@ -43,6 +43,12 @@ enumerated per slice below.
 - **Slice 4:** register a cycle calling `run_notify_cycle(session, org_id=…,
   channel_id=<team channel>, since=<last_run_at>)`; add the urgent-bypass hook at
   triage completion.
+- **Slice 5:** set `ILLO_DEPLOY_SWEEP_REPOS` (watched repos) to arm the
+  promotion sweep (+ optional `ILLO_DEPLOY_SETTLE_MINUTES` /
+  `ILLO_DEPLOY_QUIET_HOURS` overrides); apply the deploy-state ladder delta to
+  live doc 1155 (**coordinate with the parallel digest-contract edit to the
+  same doc**); verification tick rides Slice 4's cycle registration; decide
+  the optional Rollbar read-only token (Vault) for API-backed quiet checks.
 
 **Before ending your pass:** update this section.
 
@@ -55,6 +61,9 @@ enumerated per slice below.
 - [x] Slice 3 — resolve_owner + rules, wired into triage; live: env owner id + pool nullability
 - [x] Slice 4 — notify decision/digest + `run_notify_cycle`; live: register cycle + urgent hook
 - [x] Review pass — 6 self-review bugs found + fixed (98 focused tests green)
+- [ ] Slice 5 — deploy-state & post-deploy verification (spec authored
+  2026-07-10 after the Rollbar #2206 → #904 re-fire case; implementation in
+  progress)
 - [ ] Live activation (per checklist above) — Reda / infra
 
 ---
@@ -181,9 +190,12 @@ Slice 2  Typed task-type (no infra dep) ──┐   │
 Slice 1  Webhook freshness (needs App) ──┐│   │
 Slice 3  Deterministic assignment ───────┘│   │  (depends on Slice 2)
 Slice 4  Proactive Slack notify ──────────┘   │  (depends on Slice 1)
+Slice 5  Deploy-state & verification ─────┘   │  (composes with 1 + 4)
                                               └─ Slice 0 routes/bump retired by Slices 3/1
 ```
 Slices 1 and 2 are largely parallel. 3 depends on 2. 4 depends on 1.
+Slice 5's sweep rides Slice 1's webhook lane and its verification tick rides
+Slice 4's cycle; its pure cores and prose are independent of both.
 
 ## Review map (where the human looks per slice)
 - **Slice 0:** a business/PM issue routes to Reda; freshness window observably < 1h.
