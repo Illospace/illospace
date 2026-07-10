@@ -506,8 +506,34 @@ class AsyncDomainService:
         reason: str | None = None,
     ) -> DomainRecord:
         domain = await self.get_domain(org_id, domain_id)
-        obj = await self.get_object_type(domain.id, object_key)
+        # Serialize create/upsert decisions for this object type. Without this
+        # lock, two concurrent observations can both pass the application-level
+        # uniqueness check before either inserts its PR record.
+        obj = await self.get_object_type(domain.id, object_key, for_update=True)
         fields = await self.list_fields(obj.id)
+        natural_key = _tracker_pr_natural_key(fields, data)
+        if natural_key is not None:
+            existing = await self._find_active_tracker_pr_records(
+                org_id,
+                domain.id,
+                obj.id,
+                fields,
+                natural_key,
+            )
+            if existing:
+                return await self._merge_tracker_pr_records(
+                    org_id,
+                    domain.id,
+                    existing,
+                    data=data,
+                    title=title,
+                    actor_id=actor_id,
+                    actor_kind=actor_kind,
+                    run_id=run_id,
+                    idea_id=idea_id,
+                    reason=reason,
+                )
+
         normalized = self.validate_record_data(fields, data)
         record = DomainRecord(
             org_id=org_id,
@@ -538,6 +564,85 @@ class AsyncDomainService:
         )
         await self.session.refresh(record)
         return record
+
+    async def _find_active_tracker_pr_records(
+        self,
+        org_id: str,
+        domain_id: int,
+        object_type_id: int,
+        fields: Sequence[DomainFieldDefinition],
+        natural_key: tuple[str, str],
+    ) -> list[DomainRecord]:
+        stmt = (
+            select(DomainRecord)
+            .where(
+                DomainRecord.org_id == org_id,
+                DomainRecord.domain_id == domain_id,
+                DomainRecord.object_type_id == object_type_id,
+                DomainRecord.archived_at.is_(None),
+            )
+            .order_by(DomainRecord.id)
+        )
+        records = (await self.session.scalars(stmt)).all()
+        return [
+            record
+            for record in records
+            if _tracker_pr_natural_key(fields, record.data or {}) == natural_key
+        ]
+
+    async def _merge_tracker_pr_records(
+        self,
+        org_id: str,
+        domain_id: int,
+        records: Sequence[DomainRecord],
+        *,
+        data: dict[str, Any],
+        title: str | None,
+        actor_id: str | None,
+        actor_kind: str,
+        run_id: int | None,
+        idea_id: str | None,
+        reason: str | None,
+    ) -> DomainRecord:
+        # Domain record ids are monotonically assigned, so the lowest id is the
+        # deterministic proxy for the earliest-created canonical row.
+        canonical, *duplicates = sorted(records, key=lambda record: record.id)
+        merged_data = dict(canonical.data or {})
+        for duplicate in duplicates:
+            for key, value in (duplicate.data or {}).items():
+                if _is_empty(merged_data.get(key)) and not _is_empty(value):
+                    merged_data[key] = value
+        # The current observation is authoritative for every field it supplies.
+        merged_data.update(data)
+
+        canonical = await self.update_record(
+            org_id,
+            domain_id,
+            canonical.id,
+            data_patch=merged_data,
+            title=title,
+            actor_id=actor_id,
+            actor_kind=actor_kind,
+            run_id=run_id,
+            idea_id=idea_id,
+            reason=reason,
+        )
+        for duplicate in duplicates:
+            merge_reason = f"Merged duplicate PR record into record {canonical.id}"
+            if reason:
+                merge_reason = f"{reason} | {merge_reason}"
+            await self.remove_record(
+                org_id,
+                domain_id,
+                duplicate.id,
+                mode="archive",
+                actor_id=actor_id,
+                actor_kind=actor_kind,
+                run_id=run_id,
+                idea_id=idea_id,
+                reason=merge_reason,
+            )
+        return canonical
 
     async def update_record(
         self,
@@ -799,13 +904,21 @@ class AsyncDomainService:
         stmt = stmt.order_by(DomainEvent.created_at.desc(), DomainEvent.id.desc()).limit(max(1, min(limit, 200)))
         return (await self.session.scalars(stmt)).all()
 
-    async def get_object_type(self, domain_id: int, object_key: str) -> DomainObjectType:
+    async def get_object_type(
+        self,
+        domain_id: int,
+        object_key: str,
+        *,
+        for_update: bool = False,
+    ) -> DomainObjectType:
         key = _normalize_key(object_key, "object key")
         stmt = select(DomainObjectType).where(
             DomainObjectType.domain_id == domain_id,
             DomainObjectType.key == key,
             DomainObjectType.archived_at.is_(None),
         )
+        if for_update:
+            stmt = stmt.with_for_update()
         obj = (await self.session.scalars(stmt)).first()
         if obj is None:
             raise DomainNotFound(f"Object type '{key}' not found")
@@ -1111,6 +1224,67 @@ def _title_from_key(key: str) -> str:
 
 def _is_empty(value: Any) -> bool:
     return value is None or value == ""
+
+
+def _tracker_pr_natural_key(
+    fields: Iterable[DomainFieldDefinition],
+    data: Mapping[str, Any],
+) -> tuple[str, str] | None:
+    field_keys = {field.key for field in fields}
+    if not {"repo", "pr_number"}.issubset(field_keys):
+        return None
+
+    repo = _normalize_repo_identity(data.get("repo"))
+    pr_number = _normalize_pr_number(data.get("pr_number"))
+    if repo and pr_number:
+        return repo, pr_number
+
+    if "pr_url" in field_keys:
+        return _github_pr_key_from_url(data.get("pr_url"))
+    return None
+
+
+def _normalize_repo_identity(value: Any) -> str | None:
+    repo = str(value or "").strip().rstrip("/")
+    if not repo:
+        return None
+    repo = re.sub(r"^git@github\.com:", "", repo, flags=re.IGNORECASE)
+    repo = re.sub(r"^(?:https?://)?github\.com/", "", repo, flags=re.IGNORECASE)
+    repo = repo.rstrip("/")
+    if repo.lower().endswith(".git"):
+        repo = repo[:-4]
+    return repo.casefold() or None
+
+
+def _normalize_pr_number(value: Any) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    pr_number = str(value).strip().removeprefix("#").strip()
+    if not pr_number:
+        return None
+    if pr_number.isdigit():
+        return str(int(pr_number))
+    return pr_number.casefold()
+
+
+def _github_pr_key_from_url(value: Any) -> tuple[str, str] | None:
+    pr_url = str(value or "").strip()
+    match = re.match(
+        r"^https?://github\.com/([^/]+)/([^/]+)/pull/([^/?#]+)",
+        pr_url,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    repo = _normalize_repo_identity(f"{match.group(1)}/{match.group(2)}")
+    pr_number = _normalize_pr_number(match.group(3))
+    if not repo or not pr_number:
+        return None
+    return repo, pr_number
 
 
 def _coerce_field_value(field: DomainFieldDefinition, value: Any) -> Any:
