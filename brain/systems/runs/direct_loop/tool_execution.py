@@ -127,7 +127,24 @@ def _truncate_middle_text(text: str, max_chars: int) -> str:
 def truncate_tool_result_text(tool_name: str, result_text: str) -> str:
     """Apply the registry output budget to model-visible tool results."""
     budget = output_budget_chars_for_tool(tool_name)
-    return _truncate_middle_text(result_text, budget)
+    if budget <= 0 or len(result_text) <= budget:
+        return result_text
+
+    def truncation_note(shown: int) -> str:
+        return (
+            "\n[System: output exceeded this tool's visible budget and was middle-truncated "
+            f"({shown} of {len(result_text)} chars shown). Treat this as INCOMPLETE evidence: absence from "
+            "the visible portion is not absence from the data. Before relying on this listing, "
+            "re-read with narrower filters (search/status/person), compact format, a smaller limit, "
+            "or pagination.]"
+        )
+
+    reserved_note = truncation_note(budget)
+    body_budget = budget - len(reserved_note)
+    if body_budget < 200:
+        return _truncate_middle_text(result_text, budget)
+    body = _truncate_middle_text(result_text, body_budget)
+    return body + truncation_note(len(body))
 
 
 def _extract_model_visible_tool_content(result: Any) -> tuple[Any, Any | None]:

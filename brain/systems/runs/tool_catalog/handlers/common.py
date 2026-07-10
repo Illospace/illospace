@@ -144,7 +144,15 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         },
         "query_records": {
             "required": ["domain_id"],
-            "optional": ["object_key", "search", "limit", "include_archived"],
+            "optional": [
+                "object_key",
+                "search",
+                "format",
+                "fields",
+                "order",
+                "limit",
+                "include_archived",
+            ],
             "effect": "read records in a domain",
         },
         "get_record": {"required": ["domain_id", "record_id"], "optional": [], "effect": "read one record"},

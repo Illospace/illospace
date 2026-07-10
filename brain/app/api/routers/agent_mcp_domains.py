@@ -51,6 +51,23 @@ DOMAIN_MCP_TOOLS: dict[str, dict[str, Any]] = {
                     "type": "string",
                     "description": "Optional text search when listing records.",
                 },
+                "format": {
+                    "type": "string",
+                    "enum": ["full", "compact"],
+                    "default": "full",
+                    "description": "Record serialization used when include_records is true.",
+                },
+                "fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Data field keys to include when format is compact.",
+                },
+                "order": {
+                    "type": "string",
+                    "enum": ["updated_desc", "updated_asc"],
+                    "default": "updated_desc",
+                    "description": "Record ordering used when include_records is true.",
+                },
                 "filters": {
                     "type": "object",
                     "description": (
@@ -170,6 +187,14 @@ def _clean_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _clean_string_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("fields must be an array of strings")
+    return list(value)
+
+
 def _bounded_limit(value: Any, default: int = 25, maximum: int = 100) -> int:
     try:
         return max(1, min(int(value or default), maximum))
@@ -203,6 +228,14 @@ async def _tool_inspect_domains(
     service = AsyncDomainService(db)
     include_archived = bool(arguments.get("include_archived", False))
     limit = _bounded_limit(arguments.get("limit"))
+    record_format = str(arguments.get("format") or "full").strip().lower()
+    if record_format not in {"full", "compact"}:
+        raise ValueError("format must be 'full' or 'compact'")
+    record_order = str(arguments.get("order") or "updated_desc").strip().lower()
+    if record_order not in {"updated_desc", "updated_asc"}:
+        raise ValueError("order must be 'updated_desc' or 'updated_asc'")
+    record_fields = _clean_string_list(arguments.get("fields"))
+    record_filters = _clean_dict(arguments.get("filters"))
     domain = await _resolve_domain(
         service,
         org_id=principal.org_id,
@@ -225,18 +258,42 @@ async def _tool_inspect_domains(
             await service.get_record(principal.org_id, domain.id, record_id)
         )
     if bool(arguments.get("include_records", False)):
-        payload["records"] = [
-            await service.serialize_record(record)
-            for record in await service.list_records(
-                principal.org_id,
-                domain.id,
-                object_key=_clean_optional_string(arguments.get("object_key")),
-                search=_clean_optional_string(arguments.get("search")),
-                filters=_clean_dict(arguments.get("filters")),
-                include_archived=include_archived,
-                limit=limit,
-            )
-        ]
+        object_key = _clean_optional_string(arguments.get("object_key"))
+        search = _clean_optional_string(arguments.get("search"))
+        record_rows = await service.list_records(
+            principal.org_id,
+            domain.id,
+            object_key=object_key,
+            search=search,
+            filters=record_filters,
+            include_archived=include_archived,
+            limit=limit,
+            order=record_order,
+        )
+        if record_format == "compact":
+            records = [
+                await service.serialize_record_compact(record, fields=record_fields)
+                for record in record_rows
+            ]
+        else:
+            records = [await service.serialize_record(record) for record in record_rows]
+        total = await service.count_records(
+            principal.org_id,
+            domain.id,
+            object_key=object_key,
+            search=search,
+            include_archived=include_archived,
+            filters=record_filters,
+        )
+        payload.update(
+            {
+                "records": records,
+                "returned": len(records),
+                "total_matching": total,
+                "order": record_order,
+                "format": record_format,
+            }
+        )
     if bool(arguments.get("include_relations", False)):
         payload["relations"] = [
             await service.serialize_relation(relation)

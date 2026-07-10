@@ -62,8 +62,18 @@ DOMAIN_TOOLS = [
                 },
                 "fields": {
                     "type": "array",
-                    "description": "Field definitions for add_object.",
-                    "items": {"type": "object"},
+                    "description": (
+                        "Field definitions for add_object. For format='compact' query_records, data field "
+                        "keys to include per record (e.g. ['status','assignee','priority','external_id']). "
+                        "When omitted in compact mode, all short scalar data fields are included. Long "
+                        "values are trimmed."
+                    ),
+                    "items": {
+                        "oneOf": [
+                            {"type": "object"},
+                            {"type": "string"},
+                        ]
+                    },
                 },
                 "relations": {
                     "type": "array",
@@ -80,6 +90,25 @@ DOMAIN_TOOLS = [
                     "description": "Relation type definition for add_relation_type.",
                 },
                 "search": {"type": "string", "description": "Search text for query_records."},
+                "format": {
+                    "type": "string",
+                    "enum": ["full", "compact"],
+                    "default": "full",
+                    "description": (
+                        "Record serialization for query_records. 'compact' returns "
+                        "id/object_key/title/version/updated_at plus selected short data fields - use it "
+                        "for listings and sweeps so results stay complete within output budgets."
+                    ),
+                },
+                "order": {
+                    "type": "string",
+                    "enum": ["updated_desc", "updated_asc"],
+                    "default": "updated_desc",
+                    "description": (
+                        "Sort for query_records. 'updated_asc' returns stalest records first (use for "
+                        "staleness sweeps)."
+                    ),
+                },
                 "limit": {"type": "integer", "default": 50, "description": "Maximum records/events to return."},
                 "include_archived": {"type": "boolean", "default": False},
                 "record_id": {"type": "integer", "description": "Record id for get/update/remove/events."},

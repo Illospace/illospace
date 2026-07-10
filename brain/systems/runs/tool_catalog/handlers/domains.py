@@ -23,12 +23,14 @@ async def _handle_manage_domain(
     slug: str | None = None,
     description: str | None = None,
     objects: list[dict] | None = None,
-    fields: list[dict] | None = None,
+    fields: list[dict] | list[str] | None = None,
     relations: list[dict] | None = None,
     object_key: str | None = None,
     field: dict | None = None,
     relation_type: dict | None = None,
     search: str | None = None,
+    format: str = "full",
+    order: str = "updated_desc",
     limit: int = 50,
     include_archived: bool = False,
     record_id: int | None = None,
@@ -139,18 +141,48 @@ async def _handle_manage_domain(
                 return json.dumps({"relation_type": await service.serialize_relation_type(added)}, default=str)
 
             if action == "query_records":
-                records = [
-                    await service.serialize_record(record)
-                    for record in await service.list_records(
-                        org_id,
-                        domain.id,
-                        object_key=object_key,
-                        search=search,
-                        include_archived=include_archived,
-                        limit=limit,
-                    )
-                ]
-                return json.dumps({"records": records}, default=str)
+                record_format = str(format or "full").strip().lower()
+                if record_format not in {"full", "compact"}:
+                    raise DomainError("format must be 'full' or 'compact'")
+                record_order = str(order or "updated_desc").strip().lower()
+                compact_fields = None
+                if record_format == "compact" and fields is not None:
+                    if not all(isinstance(item, str) for item in fields):
+                        raise DomainError("fields must contain only strings for format='compact'")
+                    compact_fields = fields
+                record_rows = await service.list_records(
+                    org_id,
+                    domain.id,
+                    object_key=object_key,
+                    search=search,
+                    include_archived=include_archived,
+                    limit=limit,
+                    order=record_order,
+                )
+                if record_format == "compact":
+                    records = [
+                        await service.serialize_record_compact(record, fields=compact_fields)
+                        for record in record_rows
+                    ]
+                else:
+                    records = [await service.serialize_record(record) for record in record_rows]
+                total = await service.count_records(
+                    org_id,
+                    domain.id,
+                    object_key=object_key,
+                    search=search,
+                    include_archived=include_archived,
+                )
+                return json.dumps(
+                    {
+                        "records": records,
+                        "returned": len(records),
+                        "total_matching": total,
+                        "order": record_order,
+                        "format": record_format,
+                    },
+                    default=str,
+                )
 
             if action == "get_record":
                 if record_id is None:

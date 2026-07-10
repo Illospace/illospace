@@ -67,7 +67,7 @@ async def _request(method: str, path: str, *, session: _AsyncSession | None = No
 async def test_hosted_mcp_inspect_domains_reads_schema_and_optional_records():
     session = _AsyncSession()
     domain = SimpleNamespace(id=3, slug="crm", name="CRM")
-    record = SimpleNamespace(id=9, title="Acme")
+    record = SimpleNamespace(id=9, title="Acme", data={"status": "active", "body": "x" * 500})
     relation = SimpleNamespace(id=4)
     event = SimpleNamespace(id=7, event_type="record.created")
 
@@ -102,8 +102,9 @@ async def test_hosted_mcp_inspect_domains_reads_schema_and_optional_records():
             filters=None,
             include_archived=False,
             limit=100,
+            order="updated_desc",
         ):
-            assert (org_id, domain_id, object_key, search, filters, include_archived, limit) == (
+            assert (org_id, domain_id, object_key, search, filters, include_archived, limit, order) == (
                 "org-1",
                 3,
                 "company",
@@ -111,11 +112,36 @@ async def test_hosted_mcp_inspect_domains_reads_schema_and_optional_records():
                 {"assignee": "Reda"},
                 False,
                 2,
+                "updated_asc",
             )
             return [record]
 
         async def serialize_record(self, item):
             return {"id": item.id, "title": item.title}
+
+        async def serialize_record_compact(self, item, *, fields=None):
+            assert fields == ["status"]
+            return {"id": item.id, "title": item.title, "data": {"status": item.data["status"]}}
+
+        async def count_records(
+            self,
+            org_id,
+            domain_id,
+            *,
+            object_key=None,
+            search=None,
+            include_archived=False,
+            filters=None,
+        ):
+            assert (org_id, domain_id, object_key, search, include_archived, filters) == (
+                "org-1",
+                3,
+                "company",
+                "acme",
+                False,
+                {"assignee": "Reda"},
+            )
+            return 5
 
         async def list_relations(
             self,
@@ -170,6 +196,9 @@ async def test_hosted_mcp_inspect_domains_reads_schema_and_optional_records():
                             "object_key": "company",
                             "search": "acme",
                             "filters": {"assignee": "Reda"},
+                            "format": "compact",
+                            "fields": ["status"],
+                            "order": "updated_asc",
                             "include_records": True,
                             "include_relations": True,
                             "include_events": True,
@@ -184,7 +213,11 @@ async def test_hosted_mcp_inspect_domains_reads_schema_and_optional_records():
     payload = json.loads(response.json()["result"]["content"][0]["text"])
     assert payload == {
         "domain": {"id": 3, "slug": "crm", "objects": [{"key": "company"}]},
-        "records": [{"id": 9, "title": "Acme"}],
+        "records": [{"id": 9, "title": "Acme", "data": {"status": "active"}}],
+        "returned": 1,
+        "total_matching": 5,
+        "order": "updated_asc",
+        "format": "compact",
         "relations": [{"id": 4}],
         "events": [{"id": 7, "event_type": "record.created"}],
     }
