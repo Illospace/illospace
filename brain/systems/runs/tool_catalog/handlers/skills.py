@@ -107,15 +107,6 @@ def _safe_skill_asset_path(path: str | None) -> str:
     return str(pure)
 
 
-def _resolve_skill(repo: Any, *, skill_id: int | None = None, skill_name: str | None = None) -> Any:
-    if skill_id is not None:
-        return repo.get_or_raise(int(skill_id))
-    name = str(skill_name or "").strip()
-    if name:
-        return repo.get_by_name_or_raise(name)
-    raise ValueError("skill_id or skill_name is required")
-
-
 async def _async_resolve_skill(repo: Any, *, skill_id: int | None = None, skill_name: str | None = None) -> Any:
     if skill_id is not None:
         return await repo.a_get_or_raise(int(skill_id))
@@ -365,77 +356,6 @@ async def _handle_create_many_skills(
         "failed_count": failed_count,
         "results": results,
     }
-
-
-async def _handle_manage_skill_asset(
-    skill_name: str,
-    path: str,
-    action: str = "upsert",
-    content: str = "",
-    asset_kind: str | None = None,
-    mime_type: str | None = None,
-    loading_budget_tokens: int | None = None,
-) -> dict:
-    """Add, update, or delete a package asset for an installed skill."""
-    action = (action or "upsert").strip().lower()
-    if action not in {"upsert", "delete"}:
-        return {"ok": False, "error": "action must be 'upsert' or 'delete'"}
-
-    try:
-        from brain.platform.db.repositories.skill_bundles import SkillBundleRepository
-        from brain.platform.db.repositories.skills import SkillRepository
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        from brain.platform.db.services.skill_bundle_io import AsyncSkillBundleIOService
-
-        async with UnitOfWork() as uow:
-            skills = SkillRepository(uow.session)
-            bundles = SkillBundleRepository(uow.session)
-            skill = await skills.a_get_by_name(skill_name)
-            if skill is None:
-                return {"ok": False, "error": f"Skill '{skill_name}' not found"}
-            service = AsyncSkillBundleIOService(skills, bundles)
-            if action == "delete":
-                updated = await service.delete_skill_asset(
-                    skill.id,
-                    path=path,
-                    user_id=getattr(_agent_context, "user_id", None),
-                    org_id=getattr(_agent_context, "org_id", None),
-                    installed_by_user_id=getattr(_agent_context, "user_id", None),
-                )
-                return {
-                    "ok": True,
-                    "action": "delete",
-                    "skill_id": updated.id,
-                    "name": updated.name,
-                    "path": path,
-                    "bundle_version_id": updated.bundle_version_id,
-                    "effective_digest": updated.effective_digest,
-                }
-            asset = await service.upsert_skill_asset(
-                skill.id,
-                path=path,
-                content=content,
-                asset_kind=asset_kind,
-                mime_type=mime_type,
-                loading_budget_tokens=loading_budget_tokens,
-                user_id=getattr(_agent_context, "user_id", None),
-                org_id=getattr(_agent_context, "org_id", None),
-                installed_by_user_id=getattr(_agent_context, "user_id", None),
-            )
-            return {
-                "ok": True,
-                "action": "upsert",
-                "skill_id": skill.id,
-                "name": skill.name,
-                "path": asset.path,
-                "asset_kind": asset.asset_kind,
-                "mime_type": asset.mime_type,
-                "size_bytes": asset.size_bytes,
-                "bundle_version_id": asset.bundle_version_id,
-            }
-    except Exception as e:
-        logger.error("Failed to manage skill asset '%s:%s': %s", skill_name, path, e)
-        return {"ok": False, "error": str(e)}
 
 
 async def _handle_manage_skill(

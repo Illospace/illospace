@@ -51,13 +51,6 @@ from brain.platform.providers.model_policy import (
     infer_provider_from_model,
 )
 from brain.systems.runs import introspection as run_introspection
-from brain.systems.runs.direct_loop.final_reply import (
-    cache_final_reply_review,
-    cached_final_reply_review,
-    extract_latest_user_intent,
-    normalize_final_reply_candidate,
-    parse_checker_payload,
-)
 from brain.systems.runs.direct_loop.final_reply_checker import (
     review_candidate_final_reply as _runtime_review_candidate_final_reply,
     review_final_reply_once as _runtime_review_final_reply_once,
@@ -308,50 +301,6 @@ def _messages_without_inline_attachment_binary(messages: list[dict]) -> list[dic
     return sanitized
 
 
-def _agent_context_window_tokens(model: str) -> int:
-    """Return the active context window used for local compaction decisions."""
-    from brain.systems.context.budget import resolve_model_context_budget
-
-    return resolve_model_context_budget(model=model).context_window_tokens
-
-
-def _agent_auto_compact_token_limit(model: str) -> int:
-    from brain.systems.context.budget import resolve_model_context_budget
-
-    return resolve_model_context_budget(model=model).auto_compact_threshold_tokens
-
-
-def _agent_auto_compact_target_tokens(model: str) -> int:
-    from brain.systems.context.budget import resolve_model_context_budget
-
-    return resolve_model_context_budget(model=model).target_tokens
-
-
-def _extract_latest_user_intent(message: str) -> str:
-    """Extract the latest user request from coordinator task wrappers when present."""
-    return extract_latest_user_intent(message)
-
-
-def _parse_checker_payload(raw_output: str) -> dict | None:
-    """Parse checker output as either compact tokens or structured JSON."""
-    return parse_checker_payload(raw_output)
-
-
-def _normalize_final_reply_candidate(candidate_output: str) -> str:
-    """Normalize candidate text so identical replies reuse the same checker verdict."""
-    return normalize_final_reply_candidate(candidate_output)
-
-
-def _get_cached_final_reply_review(candidate_output: str) -> dict | None:
-    """Return a cached checker verdict for the same candidate reply when present."""
-    return cached_final_reply_review(_agent_context, candidate_output)
-
-
-def _cache_final_reply_review(candidate_output: str, review: dict) -> dict:
-    """Persist the checker verdict for the current candidate reply on AgentRun context."""
-    return cache_final_reply_review(_agent_context, candidate_output, review)
-
-
 def review_candidate_final_reply(
     *,
     user_request: str,
@@ -569,26 +518,6 @@ def _is_tool_result_user(msg: dict) -> bool:
             for b in content
         )
     return False
-
-
-def _trim_session_messages(messages: list[dict], session_id: str) -> list[dict]:
-    """Trim old messages while preserving tool-pair boundaries."""
-    from brain.systems.context.compaction import compact_session_messages
-
-    result, report = compact_session_messages(
-        messages,
-        max_messages=_MAX_PERSISTED_MESSAGES,
-        session_id=session_id,
-        keep_early=2,
-    )
-    logger.info(
-        "Session %s: compacted %d old messages (kept %d, strategy=%s)",
-        session_id,
-        report.omitted_count,
-        len(result),
-        report.strategy,
-    )
-    return result
 
 
 def _semantic_compactor_from_metadata(metadata: dict):
@@ -1196,20 +1125,6 @@ def _make_result(
         error=error,
         worker_results=worker_results,
         post_completion_tasks=post_completion_tasks,
-    )
-
-
-def _check_gate_violations(
-    tool_name: str, block_id: str, gates: _GateState,
-    tool_handlers: dict,
-) -> dict | None:
-    """Check if a tool call is blocked by gates. Returns error tool_result or None."""
-    return _runtime_check_gate_violations(
-        tool_name,
-        block_id,
-        gates,
-        tool_handlers,
-        gated_tool_names=_GATED_TOOL_NAMES,
     )
 
 

@@ -174,13 +174,6 @@ def _freshness_signal_from_memory(
     }
 
 
-def _model_to_dict(model: Any) -> dict[str, Any]:
-    data: dict[str, Any] = {}
-    for column in model.__table__.columns:
-        data[column.name] = getattr(model, column.name)
-    return data
-
-
 def _node_to_quality_dict(node: MemoryNode) -> dict[str, Any]:
     stale = node.freshness_status in {"stale", "expired"}
     confidence = float(node.confidence or 0.0)

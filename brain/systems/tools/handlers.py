@@ -711,24 +711,6 @@ def _reader_model(user_id: str | None = None, org_id: str | None = None) -> str:
     return model
 
 
-def _read_file_excerpt(path: str, max_chars: int = 6000, workspace_root: str | None = None) -> tuple[str | None, int | None, str | None]:
-    """Read a bounded excerpt from a file under workspace rules."""
-    try:
-        resolved = _resolve_path(path, workspace_root=workspace_root)
-    except ValueError as exc:
-        return None, None, str(exc)
-
-    if not os.path.isfile(resolved):
-        return None, None, f"File not found: {path}"
-
-    try:
-        with open(resolved, "r", errors="replace") as f:
-            text = f.read()
-        return text[:max_chars], len(text.splitlines()), None
-    except Exception as exc:
-        return None, None, str(exc)
-
-
 def _read_file_lines(path: str, workspace_root: str | None = None) -> tuple[list[str] | None, str | None]:
     try:
         resolved = _resolve_path(path, workspace_root=workspace_root)
@@ -741,21 +723,6 @@ def _read_file_lines(path: str, workspace_root: str | None = None) -> tuple[list
             return f.read().splitlines(), None
     except Exception as exc:
         return None, str(exc)
-
-
-def _keyword_lines(text: str, question: str, limit: int = 3) -> list[dict]:
-    keywords = [w.lower() for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", question or "")]
-    if not keywords:
-        return []
-
-    results = []
-    for lineno, line in enumerate(text.splitlines(), 1):
-        lower = line.lower()
-        score = sum(1 for kw in keywords if kw in lower)
-        if score:
-            results.append({"line": lineno, "score": score, "text": line.strip()[:200]})
-    results.sort(key=lambda item: (-item["score"], item["line"]))
-    return results[:limit]
 
 
 def _build_file_outline(summary: dict) -> str:
@@ -995,47 +962,6 @@ def handle_build_implementation_map(
         "likely_entrypoints": likely_entrypoints,
         "likely_edit_zones": likely_edit_zones[:12],
         "file_count": len(selected),
-    }
-
-
-def _fallback_file_answer(path: str, question: str, summary: dict, text: str) -> dict:
-    keyword_hits = _keyword_lines(text, question, limit=3)
-    relevant_ranges = []
-    citations = []
-    for hit in keyword_hits:
-        start = max(1, hit["line"] - 2)
-        end = hit["line"] + 2
-        relevant_ranges.append({"start_line": start, "end_line": end, "reason": hit["text"]})
-        citations.append({"path": path, "start_line": start, "end_line": end, "reason": hit["text"]})
-
-    key_symbols = [item.get("name") for item in (summary.get("functions") or [])[:8]]
-    key_symbols += [item.get("name") for item in (summary.get("classes") or [])[:5]]
-
-    answer_parts = []
-    if summary.get("functions") or summary.get("classes"):
-        answer_parts.append(
-            f"{path} exposes {len(summary.get('functions') or [])} top-level functions and "
-            f"{len(summary.get('classes') or [])} classes."
-        )
-    if keyword_hits:
-        answer_parts.append(
-            "Most relevant lines: "
-            + ", ".join(f"{hit['line']}" for hit in keyword_hits)
-            + "."
-        )
-    elif summary.get("docstring"):
-        answer_parts.append(f"Docstring summary: {summary['docstring'][:180]}")
-    else:
-        answer_parts.append("No strong keyword match found; use raw read for exact verification.")
-
-    return {
-        "answer": " ".join(answer_parts),
-        "key_symbols": [name for name in key_symbols if name][:10],
-        "relevant_ranges": relevant_ranges,
-        "citations": citations,
-        "risks": ["Use read_file before editing to verify exact implementation details."],
-        "confidence": 0.45 if keyword_hits else 0.25,
-        "model": "deterministic-fallback",
     }
 
 

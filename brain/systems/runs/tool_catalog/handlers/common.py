@@ -57,36 +57,6 @@ _MAX_PARALLEL_BATCH_OPERATIONS = int(os.environ.get("AGENT_PARALLEL_BATCH_MAX_OP
 _MAX_PARALLEL_BATCH_WORKERS = int(os.environ.get("AGENT_PARALLEL_BATCH_MAX_WORKERS", "6"))
 _ACTION_MANIFEST_TOOL_NAMES = action_manifest_tool_names()
 
-_CONCRETE_BLOCKER_MARKERS = (
-    "relation \"cycles\" does not exist",
-    "undefinedtable",
-    "table does not exist",
-    "missing table",
-    "missing schema",
-    "schema blocker",
-    "migration",
-    "worker_unavailable",
-    "unavailable service",
-    "service unavailable",
-    "startup timeout",
-    "invalid x-api-key",
-    "api key",
-    "credential",
-    "permission denied",
-)
-
-_BLOCKED_REPLY_MARKERS = (
-    "blocked",
-    "cannot",
-    "can't",
-    "couldn't",
-    "could not",
-    "failed",
-    "error",
-    "unavailable",
-    "missing",
-)
-
 _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
     "manage_cycle": {
         "list": {"required": [], "optional": [], "effect": "read scheduled cycles"},
@@ -577,14 +547,6 @@ def _cycle_schema_missing_payload(exc: Exception) -> dict:
     }
 
 
-def _looks_like_concrete_blocker_reply(reply: str, execution_context: str | None = None) -> bool:
-    text = f"{reply}\n{execution_context or ''}".lower()
-    return (
-        any(marker in text for marker in _BLOCKED_REPLY_MARKERS)
-        and any(marker in text for marker in _CONCRETE_BLOCKER_MARKERS)
-)
-
-
 def _coerce_agent_run_id(value) -> int | None:
     try:
         return int(value) if value else None
@@ -883,27 +845,6 @@ def _get_current_worker_name() -> str:
         return worker_name
     run = getattr(_agent_context, "run", None)
     return run.skill_used or "coordinator" if run else "unknown"
-
-
-def _coerce_issue_number(value: object) -> int | None:
-    if value is None or value == "":
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
-    return None
-
-
-def _attach_issue_number(artifact: dict, issue_number: int | None) -> dict:
-    normalized = dict(artifact)
-    if (
-        issue_number is not None
-        and normalized.get("issue_number") is None
-        and normalized.get("type") in {"branch", "pr", "merge"}
-    ):
-        normalized["issue_number"] = issue_number
-    return normalized
 
 
 def _persist_execution_artifacts(artifacts: list[dict], run_id: int | None = None) -> None:

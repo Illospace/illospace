@@ -507,39 +507,6 @@ def _summarize_trimmed_messages(messages: list[dict]) -> str:
 # ── Cache Management ──────────────────────────────────────────
 
 
-def _microcompact(messages: list[dict], keep_recent: int = 6) -> None:
-    """Clear old tool_result content to prevent context blowup.
-
-    Preserves: assistant text, tool_use blocks (the model's intent),
-    thinking blocks, and recent tool results the model may still reference.
-    Only clears: raw data from tool results older than keep_recent messages.
-
-    This is safe because the model already consumed the information and
-    incorporated it into its subsequent reasoning. The assistant's own
-    text and thinking blocks (which contain extracted insights) are never
-    touched.
-    """
-    if len(messages) <= keep_recent:
-        return
-    cutoff = len(messages) - keep_recent
-    cleared = 0
-    for msg in messages[:cutoff]:
-        if msg.get("role") != "user":
-            continue
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict) or block.get("type") != "tool_result":
-                continue
-            old = block.get("content", "")
-            if isinstance(old, str) and len(old) > 200:
-                block["content"] = "[Previous tool output cleared]"
-                cleared += 1
-    if cleared:
-        logger.debug("Microcompact: cleared %d old tool results (kept recent %d msgs)", cleared, keep_recent)
-
-
 def _clear_message_cache_breakpoints(messages: list[dict]) -> None:
     """Remove cache_control from all message blocks.
 

@@ -67,16 +67,10 @@ The current system is roughly:
   - Ranks candidate memories/summaries, logs decisions, marks lazy-load candidates, and records usefulness.
 - `brain/systems/memory/retrieval_pools.py`
   - Runs exploit/explore/narrative retrieval pools.
-- `brain/systems/cognition/graph.py`
-  - Wraps graph-augmented recall and memory neighborhoods.
-- `brain/systems/cognition/consolidate.py` and `brain/systems/cognition/dag_compaction.py`
-  - Consolidate episodic memories into semantic/procedural summaries and compact memory DAGs.
 - `brain/systems/memory/truth_maintenance.py`, `source_freshness.py`, `conflict_scout.py`, `conflict_resolver.py`
   - Maintain freshness, contradiction, review, and truth status.
 - `brain/app/mcp/server.py`
   - Exposes `brain_recall` as graph-augmented memory search and `brain_encode` as memory write.
-- `brain/systems/cognition/frame.py`
-  - Builds run context and preloads memory into the frame.
 - `brain/systems/learning/context_evals.py`
   - Evaluates selected memory usage and stale/conflicted inclusion.
 
@@ -747,17 +741,11 @@ If this were a true rewrite, these are the affected areas.
   - Replace query preprocessing with query-kind and cue-seeding.
 - `brain/systems/memory/retrieval_pools.py`
   - Delete. Fold exploration into active policy actions.
-- `brain/systems/cognition/graph.py`
-  - Replace graph recall wrapper with graph action service.
-- `brain/systems/cognition/frame.py`
-  - Replace memory preloading with evidence-pack construction.
 - `brain/app/mcp/server.py`
   - Replace `brain_recall` and `brain_encode` implementation with thin wrappers over reconstructive memory tools.
 
 ### Rebuild Around The New Model
 
-- `brain/systems/cognition/consolidate.py`
-- `brain/systems/cognition/dag_compaction.py`
 - `brain/systems/memory/truth_maintenance.py`
 - `brain/systems/memory/source_freshness.py`
 - `brain/systems/memory/conflict_scout.py`

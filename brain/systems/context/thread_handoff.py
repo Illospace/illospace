@@ -38,29 +38,6 @@ def _payload_digest(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
-def _message_summary(message: dict, *, limit: int = 280) -> str:
-    role = str(message.get("role") or "message")
-    content = message.get("content")
-    if isinstance(content, str):
-        text = " ".join(content.split())
-    elif isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if not isinstance(block, Mapping):
-                continue
-            block_type = block.get("type")
-            if block_type == "text":
-                parts.append(str(block.get("text") or ""))
-            elif block_type == "tool_use":
-                parts.append(f"tool_use:{block.get('name') or 'tool'}")
-            elif block_type == "tool_result":
-                parts.append(f"tool_result:{str(block.get('content') or '')[:120]}")
-        text = " ".join(" ".join(parts).split())
-    else:
-        text = ""
-    return f"{role}: {text[:limit]}" if text else f"{role}: <non-text content>"
-
-
 @dataclass(frozen=True)
 class ThreadHandoff:
     """Compact durable summary of a persistent thread up to a message count."""

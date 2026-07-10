@@ -803,50 +803,6 @@ def _context_usefulness_payload(source: AfterRunLearningSource) -> dict[str, Any
     )
 
 
-def _skill_reference_from_trajectory(
-    trajectory: Mapping[str, Any],
-    *,
-    fallback_skill_name: str | None = None,
-    skill_repo: Any | None = None,
-) -> AfterRunSkillReference | None:
-    selected: dict[str, Any] = {}
-    context_pack = _mapping(trajectory.get("context_pack"))
-    sections = _mapping(context_pack.get("sections"))
-    selected_skills = _mapping(sections.get("selected_skills"))
-    content = _mapping(selected_skills.get("content"))
-    if isinstance(content.get("selected"), Mapping):
-        selected = dict(content["selected"])
-    skill_record = _mapping(selected.get("skill_record"))
-    name = _text(selected.get("name")) or _text(skill_record.get("name")) or _text(fallback_skill_name)
-    if not name:
-        return None
-
-    resolved = None
-    effective_digest = _text(skill_record.get("effective_digest")) or _text(skill_record.get("bundle_digest"))
-    if skill_repo is not None and not effective_digest:
-        try:
-            resolved = skill_repo.get_by_name(name)
-            if resolved is not None:
-                effective_digest = _text(getattr(resolved, "effective_digest", None)) or _text(
-                    getattr(resolved, "bundle_digest", None)
-                )
-        except Exception as exc:
-            logger.debug("skill lookup skipped for after-run queue skill=%s: %s", name, exc)
-
-    return AfterRunSkillReference(
-        skill_id=getattr(resolved, "id", None),
-        skill_name=name,
-        skill_effective_digest=effective_digest,
-        bundle_namespace=_text(skill_record.get("bundle_namespace")) or getattr(resolved, "bundle_namespace", None),
-        bundle_name=_text(skill_record.get("bundle_name")) or getattr(resolved, "bundle_name", None),
-        bundle_version=_text(skill_record.get("skill_version")) or getattr(resolved, "version", None),
-        bundle_digest=_text(skill_record.get("bundle_digest")) or getattr(resolved, "bundle_digest", None),
-        task_class=_text(_mapping(trajectory.get("input_envelope")).get("event")),
-        tool_risk_class=_tool_risk_class(trajectory),
-        action_risk_class=_action_risk_class(trajectory),
-    )
-
-
 def _task_class(source: AfterRunLearningSource) -> str | None:
     if source.skill and source.skill.task_class:
         return source.skill.task_class
@@ -921,33 +877,6 @@ def _cost_bucket(cost_usd: float | None) -> str | None:
     if cost_usd < 2.00:
         return "large"
     return "xlarge"
-
-
-def _tool_risk_class(trajectory: Mapping[str, Any]) -> str | None:
-    risks = {
-        _text(action.get("risk"))
-        for action in trajectory.get("action_manifests") or []
-        if isinstance(action, Mapping)
-    }
-    risks.discard(None)
-    if not risks:
-        return None
-    if "high" in risks:
-        return "high"
-    if "medium" in risks:
-        return "medium"
-    return "low"
-
-
-def _action_risk_class(trajectory: Mapping[str, Any]) -> str | None:
-    actions = [action for action in trajectory.get("action_manifests") or [] if isinstance(action, Mapping)]
-    if not actions:
-        return None
-    if any(action.get("approval_required") for action in actions):
-        return "approval_required"
-    if any(_text(action.get("outcome_status")) not in {None, "completed", "success"} for action in actions):
-        return "non_success_action"
-    return "audit_only"
 
 
 __all__ = [

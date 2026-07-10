@@ -408,7 +408,6 @@ Approved or ported core primitives:
 - `Astre`: user or agent source marker on the orbit canvas.
 - `SignalBlob`: thought, request, or thread node on the workspace.
 - `ConstellationPresenceSeed`: compact identity marker for messages, rows, and stacks.
-- `ConstellationPresenceStack`: overlapping active-user presence using seeds.
 - `ConstellationAstrePalette`: ownership color picker rendered as mini astres.
 - `ConstellationComposer`: primary workspace and thread input surface.
 - `ConstellationButton`: authored text button for workspace, toolbar, and thread actions.

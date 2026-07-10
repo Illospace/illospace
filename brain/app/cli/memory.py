@@ -116,18 +116,6 @@ async def query_memories(
     }
 
 
-async def _query_with_pools(
-    query: str,
-    limit: int = 5,
-    org_id: str | None = None,
-    user_id: str | None = None,
-    attention_debug: bool = False,
-    expand_lazy_load: bool | None = None,
-) -> dict:
-    del attention_debug, expand_lazy_load
-    return await query_memories(query=query, limit=limit, org_id=org_id, user_id=user_id)
-
-
 async def get_memory(memory_id: int) -> dict | None:
     """Get a single memory with its edges."""
     async with UnitOfWork() as uow:
