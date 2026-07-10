@@ -32,6 +32,7 @@ from brain.systems.deploy_state_config import (
     deploy_feature_enabled,
     deploy_quiet_window,
     deploy_settle_window,
+    deploy_ticket_object_keys,
 )
 from brain.systems.deploy_state_github import is_ancestor_of
 from brain.systems.user_domains.service import AsyncDomainService
@@ -94,7 +95,7 @@ def _append_progress_note(data: Mapping[str, object], line: str) -> str | None:
 
 
 async def ensure_deploy_state_fields(session, *, org_id: str) -> dict:
-    """Idempotently add optional deploy fields to every active github_ticket type."""
+    """Idempotently add optional deploy fields to every active ticket type."""
     object_types = (
         await session.scalars(
             select(DomainObjectType)
@@ -102,7 +103,7 @@ async def ensure_deploy_state_fields(session, *, org_id: str) -> dict:
             .where(
                 Domain.org_id == str(org_id),
                 Domain.archived_at.is_(None),
-                DomainObjectType.key == "github_ticket",
+                DomainObjectType.key.in_(deploy_ticket_object_keys()),
                 DomainObjectType.archived_at.is_(None),
             )
             .order_by(DomainObjectType.id)
@@ -139,7 +140,7 @@ async def _ticket_records(
     fix_pr_prefix: str | None = None,
     fix_pr: str | None = None,
 ) -> list[DomainRecord]:
-    """Select github_ticket records by deploy-state and/or fix-PR identity.
+    """Select ticket records by deploy-state and/or fix-PR identity.
 
     Selection keys on where the FIX lives (``fix_pr`` is repo-qualified), not
     on the ticket's own ``repo`` field — an app ticket fixed by a backend PR
@@ -153,7 +154,7 @@ async def _ticket_records(
             DomainRecord.org_id == str(org_id),
             DomainRecord.archived_at.is_(None),
             Domain.archived_at.is_(None),
-            DomainObjectType.key == "github_ticket",
+            DomainObjectType.key.in_(deploy_ticket_object_keys()),
             DomainObjectType.archived_at.is_(None),
         )
     )

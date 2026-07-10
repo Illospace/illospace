@@ -492,14 +492,27 @@ async def _maybe_ensure_deploy_fields(repo_slug: str) -> None:
     org_id = _clean(getattr(_agent_context, "org_id", None))
     if not org_id:
         return
+    import logging
+
     try:
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
         async with UnitOfWork() as uow:
-            await ensure_deploy_state_fields(uow.session, org_id=org_id)
+            summary = await ensure_deploy_state_fields(uow.session, org_id=org_id)
+        if not summary.get("object_types"):
+            # Zero matches is a schema/config mismatch (e.g. the tracker's
+            # object key differs) — the failure mode a silent pass hides.
+            logging.getLogger("illo.deploy_state").warning(
+                "ensure_deploy_state_fields matched no ticket object types for org %s",
+                org_id,
+            )
     except Exception:
         # Schema bootstrap is best-effort for this read tool; GitHub facts remain
         # useful even if the domain database is temporarily unavailable.
+        logging.getLogger("illo.deploy_state").warning(
+            "deploy-state field bootstrap failed; continuing with GitHub facts only",
+            exc_info=True,
+        )
         return
 
 

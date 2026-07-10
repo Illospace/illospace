@@ -71,13 +71,13 @@ async def session(async_sqlite_session_factory):
     )
 
 
-async def _domain(session, *, name="Engineering"):
+async def _domain(session, *, name="Engineering", object_key="github_ticket"):
     return await AsyncDomainService(session).create_domain(
         ORG_ID,
         name=name,
         objects=[
             {
-                "key": "github_ticket",
+                "key": object_key,
                 "name": "GitHub Ticket",
                 "title_field": "title",
                 "fields": [
@@ -125,6 +125,34 @@ async def test_ensure_fields_is_runtime_id_agnostic_and_idempotent(session):
     deploy_fields = [field for field in fields if field.key == "deploy_state"]
     assert len(deploy_fields) == 2
     assert all(field.options == ["staging", "prod_pending", "deployed", "verified"] for field in deploy_fields)
+
+
+async def test_ensure_fields_matches_live_ticket_object_key(session, monkeypatch):
+    """The deployed tracker's object key is `ticket`, not `github_ticket` —
+    both must match by default, and the env override must narrow it."""
+    live_shaped = await _domain(session, name="Live Tracker", object_key="ticket")
+    unrelated = await _domain(session, name="Docs", object_key="doc_page")
+
+    result = await ensure_deploy_state_fields(session, org_id=ORG_ID)
+    assert result == {"object_types": 1, "fields_added": len(DEPLOY_STATE_FIELD_DEFINITIONS)}
+    added = (
+        await session.scalars(
+            select(DomainFieldDefinition).where(DomainFieldDefinition.key == "deploy_state")
+        )
+    ).all()
+    assert [field.domain_id for field in added] == [live_shaped.id]
+
+    monkeypatch.setenv("ILLO_DEPLOY_TICKET_OBJECT_KEYS", "doc_page")
+    narrowed = await ensure_deploy_state_fields(session, org_id=ORG_ID)
+    assert narrowed["object_types"] == 1  # now the doc_page type instead
+    assert unrelated.id in {
+        field.domain_id
+        for field in (
+            await session.scalars(
+                select(DomainFieldDefinition).where(DomainFieldDefinition.key == "deploy_state")
+            )
+        ).all()
+    }
 
 
 async def test_promotion_sweep_flips_only_confirmed_records(session, monkeypatch):
