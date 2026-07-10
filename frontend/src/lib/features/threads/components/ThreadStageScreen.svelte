@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { browser } from '$app/environment';
   import { page } from '$app/stores';
   import { ConstellationComposerOrb, ConstellationIcon } from '$lib/components/constellation';
   import { auth } from '$lib/stores/auth.svelte';
@@ -17,6 +18,7 @@
   import {
     buildProjectContextMessageAttachment,
     extractIdeaProjectContext,
+    validateProjectContextResources,
     type ProjectContextPickerState,
   } from '$lib/utils/projectContext';
   import { ATTACHMENT_INPUT_ACCEPT } from '$lib/utils/attachmentPreview';
@@ -49,6 +51,7 @@
     type ThreadStageRightDockAddMenuItem,
     type ThreadStageRightDockSingletonKind,
     type ThreadStageRightDockTab,
+    type ThreadStageRightDockTabKind,
   } from '$lib/features/threads/controllers/threadSidePanelController';
   import { threadStreamController } from '$lib/features/threads/controllers/threadStreamController';
   import { threadUrl } from '$lib/features/threads/domain/threadLinks';
@@ -66,32 +69,15 @@
   } from '$lib/components/chat/conversationScroll';
   import { onDestroy, onMount, tick } from 'svelte';
 
-  import BrowserThoughtPanel from '$lib/features/browser-sessions/components/BrowserThoughtPanel.svelte';
-  import ThreadCyclesPane from '$lib/features/cycles/components/ThreadCyclesPane.svelte';
-  import ProjectContextPicker from '$lib/features/composer/components/ProjectContextPicker.svelte';
-  import WorkspaceVoiceRecording from '$lib/features/composer/components/WorkspaceVoiceRecording.svelte';
-  import SkillMentionOverlay from '$lib/features/composer/components/SkillMentionOverlay.svelte';
-  import SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
-  import { WorkspaceVoiceDictationController } from '$lib/features/composer/controllers/workspaceVoiceDictation.svelte.ts';
+  import type SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
+  import type { WorkspaceVoiceDictationController as WorkspaceVoiceDictationControllerInstance } from '$lib/features/composer/controllers/workspaceVoiceDictation.svelte.ts';
   import { resizeComposerTextareaToContent } from '$lib/features/composer/domain/composerTextareaSizing';
-  import ThreadAttachmentPreviewPane from '$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte';
-  import ThreadCodeReviewPane from '$lib/features/threads/components/ThreadCodeReviewPane.svelte';
-  import ProjectDraftStatePanel from '$lib/features/threads/components/ProjectDraftStatePanel.svelte';
-  import ThreadProjectFilePreviewPane from '$lib/features/threads/components/ThreadProjectFilePreviewPane.svelte';
   import ThreadDiscussionPane from '$lib/features/threads/components/ThreadDiscussionPane.svelte';
   import ThreadStageShell, { type ThreadPeripherySignal } from '$lib/features/threads/components/ThreadStageShell.svelte';
   import ThreadUtilityContent from '$lib/features/threads/components/ThreadUtilityContent.svelte';
   import WorkspaceComposerAdapter from '$lib/features/composer/components/WorkspaceComposerAdapter.svelte';
-  import ThreadAppsPane from '$lib/features/workspace-apps/components/ThreadAppsPane.svelte';
-  import VaultPage from '../../../../routes/vault/+page.svelte';
   import ThreadTranscript from './ThreadTranscript.svelte';
   import ThreadStageRightDock from './ThreadStageRightDock.svelte';
-  import {
-    applyRunSetting,
-    buildRunSettingsGroups,
-    STEERING_INTENT_OPTIONS,
-    type ActiveRunMessageIntent,
-  } from '$lib/features/composer/domain/runSettings';
   import {
     accentTone,
     buildThreadTranscriptItems,
@@ -107,6 +93,13 @@
     CortexThreadStageImageAttachment,
     CortexThreadStageTranscriptItem,
   } from '$lib/features/threads/domain/threadTranscriptAdapter';
+
+  type ActiveRunMessageIntent = 'steer' | 'queue';
+
+  const STEERING_INTENT_OPTIONS = [
+    { value: 'steer', label: 'Steer', description: 'Guide the active run', icon: 'reply-thread' },
+    { value: 'queue', label: 'Queue', description: 'Run after this reply', icon: 'queue' },
+  ] as const;
 
   let {
     entering = false,
@@ -182,6 +175,206 @@
   let threadArchiving = $state(false);
   let threadLinkCopying = $state(false);
   let lastAutoOpenedThreadAppId = $state<string | null>(null);
+  let buildRunSettingsGroups = $state.raw<
+    typeof import('$lib/features/composer/domain/runSettings').buildRunSettingsGroups | null
+  >(null);
+  let threadStageDestroyed = false;
+  let voiceDictationLoading = $state(false);
+  let voiceDictation = $state.raw<WorkspaceVoiceDictationControllerInstance | null>(null);
+  let WorkspaceVoiceRecordingComponent = $state<
+    typeof import('$lib/features/composer/components/WorkspaceVoiceRecording.svelte').default | null
+  >(null);
+  let SlashAutocompleteComponent = $state<
+    typeof import('$lib/features/composer/components/SlashAutocomplete.svelte').default | null
+  >(null);
+  let SkillMentionOverlayComponent = $state<
+    typeof import('$lib/features/composer/components/SkillMentionOverlay.svelte').default | null
+  >(null);
+  let projectContextPickerRequestedOpen = $state(false);
+  let ProjectContextPickerComponent = $state<
+    typeof import('$lib/features/composer/components/ProjectContextPicker.svelte').default | null
+  >(null);
+  let BrowserThoughtPanelComponent = $state<
+    typeof import('$lib/features/browser-sessions/components/BrowserThoughtPanel.svelte').default | null
+  >(null);
+  let ThreadCyclesPaneComponent = $state<
+    typeof import('$lib/features/cycles/components/ThreadCyclesPane.svelte').default | null
+  >(null);
+  let ProjectDraftStatePanelComponent = $state<
+    typeof import('$lib/features/threads/components/ProjectDraftStatePanel.svelte').default | null
+  >(null);
+  let ThreadAttachmentPreviewPaneComponent = $state<
+    typeof import('$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte').default | null
+  >(null);
+  let ThreadCodeReviewPaneComponent = $state<
+    typeof import('$lib/features/threads/components/ThreadCodeReviewPane.svelte').default | null
+  >(null);
+  let ThreadProjectFilePreviewPaneComponent = $state<
+    typeof import('$lib/features/threads/components/ThreadProjectFilePreviewPane.svelte').default | null
+  >(null);
+  let ThreadAppsPaneComponent = $state<
+    typeof import('$lib/features/workspace-apps/components/ThreadAppsPane.svelte').default | null
+  >(null);
+  let VaultPageComponent = $state<
+    typeof import('../../../../routes/vault/+page.svelte').default | null
+  >(null);
+  let threadLazyModuleRegistryLoad: Promise<
+    typeof import('$lib/features/threads/controllers/threadLazyModuleRegistry')
+  > | null = null;
+
+  function threadLazyModuleRegistry() {
+    threadLazyModuleRegistryLoad ??=
+      import('$lib/features/threads/controllers/threadLazyModuleRegistry');
+    return threadLazyModuleRegistryLoad;
+  }
+
+  const lazyThreadModuleLoaders = {
+    'run-settings': async () => {
+      const registry = await threadLazyModuleRegistry();
+      buildRunSettingsGroups = (await registry.loadRunSettings()).buildRunSettingsGroups;
+    },
+    'composer-text-tools': async () => {
+      const registry = await threadLazyModuleRegistry();
+      const [{ default: SlashAutocomplete }, { default: SkillMentionOverlay }] =
+        await registry.loadComposerTextTools();
+      SlashAutocompleteComponent = SlashAutocomplete;
+      SkillMentionOverlayComponent = SkillMentionOverlay;
+      await tick();
+      if (slashToken) slashRef?.filter(slashToken.query);
+    },
+    'voice-dictation': async () => {
+      const registry = await threadLazyModuleRegistry();
+      const [{ WorkspaceVoiceDictationController }, { default: WorkspaceVoiceRecording }] =
+        await registry.loadVoiceDictation();
+      const controller = new WorkspaceVoiceDictationController({
+        getDraft: () => inputValue,
+        setDraft: (next) => {
+          inputValue = next;
+          void tick().then(autoGrowTextarea);
+        },
+        submit: send,
+        onError: (message) => ui.toast(message, 'error'),
+        onSettled: () => tick().then(autoGrowTextarea),
+        focusDraft: () => requestAnimationFrame(() => textareaEl?.focus()),
+      });
+      await controller.loadSettings();
+      if (threadStageDestroyed) {
+        controller.destroy();
+        return;
+      }
+      voiceDictation = controller;
+      WorkspaceVoiceRecordingComponent = WorkspaceVoiceRecording;
+    },
+    'project-context': async () => {
+      const registry = await threadLazyModuleRegistry();
+      ProjectContextPickerComponent = (await registry.loadProjectContextPicker()).default;
+    },
+    'browser': async () => {
+      const registry = await threadLazyModuleRegistry();
+      BrowserThoughtPanelComponent = (await registry.loadBrowserThoughtPanel()).default;
+    },
+    'cycles': async () => {
+      const registry = await threadLazyModuleRegistry();
+      ThreadCyclesPaneComponent = (await registry.loadThreadCyclesPane()).default;
+    },
+    'project': async () => {
+      const registry = await threadLazyModuleRegistry();
+      ProjectDraftStatePanelComponent = (await registry.loadProjectDraftStatePanel()).default;
+    },
+    'preview': async () => {
+      const registry = await threadLazyModuleRegistry();
+      ThreadAttachmentPreviewPaneComponent = (await registry.loadThreadAttachmentPreviewPane()).default;
+    },
+    'code-review': async () => {
+      const registry = await threadLazyModuleRegistry();
+      ThreadCodeReviewPaneComponent = (await registry.loadThreadCodeReviewPane()).default;
+    },
+    'file-preview': async () => {
+      const registry = await threadLazyModuleRegistry();
+      ThreadProjectFilePreviewPaneComponent = (
+        await registry.loadThreadProjectFilePreviewPane()
+      ).default;
+    },
+    'app': async () => {
+      const registry = await threadLazyModuleRegistry();
+      ThreadAppsPaneComponent = (await registry.loadThreadAppsPane()).default;
+    },
+    'vault': async () => {
+      const registry = await threadLazyModuleRegistry();
+      VaultPageComponent = (await registry.loadVaultPage()).default;
+    },
+  } as const;
+  type LazyThreadModuleKind = keyof typeof lazyThreadModuleLoaders;
+  type LazyThreadPaneKind = Exclude<
+    LazyThreadModuleKind,
+    'composer-text-tools' | 'project-context' | 'run-settings' | 'voice-dictation'
+  >;
+
+  const lazyThreadPaneKinds = new Set<string>([
+    'browser',
+    'cycles',
+    'project',
+    'preview',
+    'code-review',
+    'file-preview',
+    'app',
+    'vault',
+  ] satisfies LazyThreadPaneKind[]);
+  const lazyThreadModuleLabels = {
+    'run-settings': 'run settings',
+    'composer-text-tools': 'composer text tools',
+    'voice-dictation': 'voice dictation',
+    'project-context': 'project context',
+    browser: 'browser',
+    cycles: 'cycles',
+    project: 'project',
+    preview: 'attachment preview',
+    'code-review': 'code review',
+    'file-preview': 'file preview',
+    app: 'app',
+    vault: 'vault',
+  } satisfies Record<LazyThreadModuleKind, string>;
+  const activeThreadModuleLoads = new Map<LazyThreadModuleKind, Promise<void>>();
+  let loadedThreadModules = $state<Partial<Record<LazyThreadModuleKind, true>>>({});
+  let threadModuleLoadErrors = $state<Partial<Record<LazyThreadModuleKind, string>>>({});
+
+  function isLazyThreadPaneKind(
+    kind: ThreadStageRightDockTabKind | null | undefined,
+  ): kind is LazyThreadPaneKind {
+    return Boolean(kind && lazyThreadPaneKinds.has(kind));
+  }
+
+  function ensureThreadModuleLoaded(kind: LazyThreadModuleKind) {
+    if (!browser || loadedThreadModules[kind]) return Promise.resolve();
+    const activeLoad = activeThreadModuleLoads.get(kind);
+    if (activeLoad) return activeLoad;
+
+    threadModuleLoadErrors[kind] = undefined;
+    const load = lazyThreadModuleLoaders[kind]();
+    const trackedLoad = load
+      .then(() => {
+        loadedThreadModules[kind] = true;
+      })
+      .catch((error: unknown) => {
+        console.error(`Failed to load the ${lazyThreadModuleLabels[kind]} thread module`, error);
+        threadModuleLoadErrors[kind] = `The ${lazyThreadModuleLabels[kind]} module could not load.`;
+      })
+      .finally(() => {
+        activeThreadModuleLoads.delete(kind);
+      });
+
+    activeThreadModuleLoads.set(kind, trackedLoad);
+    return trackedLoad;
+  }
+
+  function ensureThreadPaneLoaded(kind: LazyThreadPaneKind) {
+    ensureThreadModuleLoaded(kind);
+  }
+
+  function openLazyProjectContextPicker() {
+    projectContextPickerRequestedOpen = true;
+    ensureThreadModuleLoaded('project-context');
+  }
 
   const THREAD_STAGE_MIN_THREAD_WIDTH = 380;
   const THREAD_STAGE_DEFAULT_GUTTER = 24;
@@ -192,8 +385,57 @@
     working: 'Working',
     done: 'Unread',
   };
+  const RUN_SETTING_MODEL_LABELS: Record<string, string> = {
+    'openai/gpt-5.6-sol': 'GPT-5.6 Sol',
+    'openai/gpt-5.5': 'GPT-5.5',
+    'openai/gpt-5.4': 'GPT-5.4',
+    'openai/gpt-5.4-mini': 'GPT-5.4 Mini',
+    'openai/gpt-5-mini': 'GPT-5 Mini',
+  };
+
+  function buildRunSettingsPlaceholderGroups(values: {
+    mode: string;
+    model: string;
+    effort: string;
+  }) {
+    return [
+      {
+        key: 'mode',
+        label: 'Mode',
+        options: [{ value: values.mode, label: values.mode === 'deep' ? 'Deep' : 'Fast' }],
+        value: values.mode,
+        ariaLabel: 'Mode',
+      },
+      {
+        key: 'model',
+        label: 'Model',
+        options: [{ value: values.model, label: RUN_SETTING_MODEL_LABELS[values.model] ?? values.model }],
+        value: values.model,
+        ariaLabel: 'Model',
+      },
+      {
+        key: 'effort',
+        label: 'Effort',
+        options: [{
+          value: values.effort,
+          label: values.effort === 'xhigh'
+            ? 'xHigh'
+            : `${values.effort.slice(0, 1).toUpperCase()}${values.effort.slice(1)}`,
+        }],
+        value: values.effort,
+        ariaLabel: 'Effort',
+      },
+    ];
+  }
 
   let idea = $derived(cortex.selectedIdea);
+  const runSettingsGroups = $derived(
+    (buildRunSettingsGroups ?? buildRunSettingsPlaceholderGroups)({
+      mode: cortex.executionProfile,
+      model: cortex.model,
+      effort: cortex.effortLevel,
+    }),
+  );
 
   const statusLabel = $derived(
     STATUS_LABELS[idea?.status ?? 'idle'] ?? (idea?.status ? idea.status.replaceAll('_', ' ') : 'Idle'),
@@ -220,6 +462,17 @@
     ].join(';'),
   );
   const activeSidePanelTab = $derived(activeThreadSidePanelTab(sidePanelTabs, activeSidePanelTabId));
+
+  $effect(() => {
+    const activeKind = activeSidePanelTab?.kind;
+    if (isLazyThreadPaneKind(activeKind)) ensureThreadPaneLoaded(activeKind);
+  });
+
+  $effect(() => {
+    if (slashToken || hasSkillMention(inputValue)) {
+      void ensureThreadModuleLoaded('composer-text-tools');
+    }
+  });
   const projectDraftRunId = $derived.by(() => {
     const run = runInfo ?? latestRun;
     const id = run?.run_id ?? run?.id ?? null;
@@ -254,19 +507,33 @@
     ),
   );
   const codeReviewSignature = $derived.by(() => codeReviewFiles.map((file) => file.path).join('|'));
-  const voiceDictation = new WorkspaceVoiceDictationController({
-    getDraft: () => inputValue,
-    setDraft: (next) => {
-      inputValue = next;
-      void tick().then(autoGrowTextarea);
-    },
-    submit: send,
-    onError: (message) => ui.toast(message, 'error'),
-    onSettled: () => tick().then(autoGrowTextarea),
-    focusDraft: () => requestAnimationFrame(() => textareaEl?.focus()),
-  });
-  const isVoiceRecording = $derived(voiceDictation.isRecording);
-  const voiceControlDisabled = $derived(sending || voiceDictation.controlDisabled);
+  const isVoiceRecording = $derived(voiceDictation?.isRecording ?? false);
+  const voiceControlLabel = $derived(
+    voiceDictation?.controlLabel ?? (voiceDictationLoading ? 'Loading voice dictation' : 'Start dictation'),
+  );
+  const voiceControlTitle = $derived(
+    voiceDictation?.controlTitle
+      ?? (voiceDictationLoading ? 'Loading voice settings...' : 'Load voice dictation'),
+  );
+  const voiceControlDisabled = $derived(
+    sending || voiceDictationLoading || Boolean(voiceDictation?.controlDisabled),
+  );
+
+  function startLoadedVoiceDictation() {
+    if (voiceDictation?.isReady) voiceDictation.toggle();
+  }
+
+  async function toggleVoiceDictation() {
+    if (voiceDictation) {
+      voiceDictation.toggle();
+      return;
+    }
+
+    voiceDictationLoading = true;
+    await ensureThreadModuleLoaded('voice-dictation');
+    voiceDictationLoading = false;
+    startLoadedVoiceDictation();
+  }
 
   function ideaDisplayTitle(source: { display_title?: string | null; title?: string | null }): string {
     return source.display_title?.trim() || source.title?.trim() || 'Untitled thread';
@@ -477,6 +744,26 @@
   const existingProjectContext = $derived(extractIdeaProjectContext(idea));
   const latestIdeaProjectContextAttachment = $derived(ideaProjectContextAttachments[0] ?? null);
   const visibleProjectContext = $derived(latestIdeaProjectContextAttachment?.snapshot ?? existingProjectContext);
+  const lazyProjectContextLabel = $derived(
+    visibleProjectContext?.selected_profile_name?.trim()
+      || visibleProjectContext?.profile_name?.trim()
+      || visibleProjectContext?.name?.trim()
+      || 'Project Context',
+  );
+
+  $effect(() => {
+    if (ProjectContextPickerComponent) return;
+
+    const snapshot = visibleProjectContext;
+    const resources = snapshot?.resources ?? snapshot?.targets ?? [];
+    const validation = validateProjectContextResources(Array.isArray(resources) ? resources : []);
+    handlePendingProjectContextState({
+      snapshot,
+      valid: validation.valid,
+      error: validation.errors[0] ?? null,
+      resourceCount: Array.isArray(resources) ? resources.length : 0,
+    });
+  });
 
   async function loadIdeaProjectContext(ideaId: string) {
     if (ideaProjectContextLoadedForIdeaId === ideaId || ideaProjectContextLoadingForIdeaId === ideaId) return;
@@ -613,11 +900,16 @@
   }
 
   function setRunSetting(key: string, value: string) {
-    applyRunSetting(key, value, {
-      setExecutionProfile: (nextValue) => cortex.setExecutionProfile(nextValue),
-      setModel: (nextValue) => cortex.setModel(nextValue),
-      setEffortLevel: (nextValue) => cortex.setEffortLevel(nextValue),
-    });
+    if (key === 'mode' && (value === 'fast' || value === 'deep')) {
+      cortex.setExecutionProfile(value);
+    }
+    if (key === 'model') cortex.setModel(value);
+    if (
+      key === 'effort'
+      && (value === 'none' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh')
+    ) {
+      cortex.setEffortLevel(value);
+    }
   }
 
   function setActiveRunMessageIntent(value: string) {
@@ -787,7 +1079,7 @@
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       if (isVoiceRecording) {
-        void voiceDictation.send();
+        void voiceDictation?.send();
         return;
       }
       void send();
@@ -994,6 +1286,7 @@
       inputValue = '';
       void tick().then(autoGrowTextarea);
       projectContextError = '';
+      projectContextPickerRequestedOpen = false;
       ideaProjectContextAttachments = [];
       ideaProjectContextLoadedForIdeaId = null;
       ideaProjectContextLoadingForIdeaId = null;
@@ -1067,13 +1360,13 @@
     };
   });
 
-  onMount(async () => {
+  onMount(() => {
     document.addEventListener('click', handleDocClick);
-    await voiceDictation.loadSettings();
   });
 
   onDestroy(() => {
-    voiceDictation.destroy();
+    threadStageDestroyed = true;
+    voiceDictation?.destroy();
     document.removeEventListener('click', handleDocClick);
     if (transcriptScrollFrame !== null) {
       cancelAnimationFrame(transcriptScrollFrame);
@@ -1110,14 +1403,16 @@
 
       {#snippet editor()}
         <div class="thread-bridge-editor">
-          <SlashAutocomplete
-            bind:this={slashRef}
-            visible={Boolean(slashToken)}
-            anchor={textareaEl}
-            oninput={applySlashCommand}
-          />
-          {#if hasSkillMention(inputValue)}
-            <SkillMentionOverlay value={inputValue} scrollTop={textareaScrollTop} />
+          {#if SlashAutocompleteComponent}
+            <SlashAutocompleteComponent
+              bind:this={slashRef}
+              visible={Boolean(slashToken)}
+              anchor={textareaEl}
+              oninput={applySlashCommand}
+            />
+          {/if}
+          {#if SkillMentionOverlayComponent && hasSkillMention(inputValue)}
+            <SkillMentionOverlayComponent value={inputValue} scrollTop={textareaScrollTop} />
           {/if}
 
           <input
@@ -1160,18 +1455,15 @@
         disabled={sending}
         className="cortex-thread-composer-adapter"
         sendLabel={activeRunSendLabel()}
-        settingsGroups={buildRunSettingsGroups({
-          mode: cortex.executionProfile,
-          model: cortex.model,
-          effort: cortex.effortLevel,
-        })}
+        settingsGroups={runSettingsGroups}
+        onSettingsOpen={() => ensureThreadModuleLoaded('run-settings')}
         onSettingsChange={setRunSetting}
         settingsAriaLabel="Mode, Model, and Effort"
         secondaryIntentOptions={activeFastRun() ? STEERING_INTENT_OPTIONS : undefined}
         secondaryIntentValue={activeFastRun() ? activeRunMessageIntent : undefined}
         secondaryIntentAriaLabel="Message intent"
         onSecondaryIntentChange={setActiveRunMessageIntent}
-        onSubmit={() => (isVoiceRecording ? void voiceDictation.send() : void send())}
+        onSubmit={() => (isVoiceRecording ? void voiceDictation?.send() : void send())}
         onStop={() => void threadStreamController.cancelAll()}
         onAttach={() => fileInputEl?.click()}
         onRemoveAttachment={removeAttachment}
@@ -1181,30 +1473,62 @@
         editor={editor}
       >
         {#snippet extraLeadingControls()}
-          <ProjectContextPicker
-            mode="thread"
-            currentSnapshot={visibleProjectContext}
-            contextKey={idea?.id ?? ''}
-            onStateChange={handlePendingProjectContextState}
-            onOpenChange={(open) => { if (open) void ensureIdeaProjectContextLoaded(); }}
-          />
+          {#if ProjectContextPickerComponent}
+            <ProjectContextPickerComponent
+              mode="thread"
+              initialOpen={projectContextPickerRequestedOpen}
+              currentSnapshot={visibleProjectContext}
+              contextKey={idea?.id ?? ''}
+              onStateChange={handlePendingProjectContextState}
+              onOpenChange={(open) => {
+                projectContextPickerRequestedOpen = open;
+                if (open) void ensureIdeaProjectContextLoaded();
+              }}
+            />
+          {:else}
+            <button
+              class="lazy-project-context-trigger"
+              class:invalid={!pendingProjectContextState.valid}
+              class:loading={projectContextPickerRequestedOpen}
+              type="button"
+              aria-expanded="false"
+              aria-haspopup="dialog"
+              aria-label={threadModuleLoadErrors['project-context']
+                ? `Retry Project Context. ${threadModuleLoadErrors['project-context']}`
+                : lazyProjectContextLabel}
+              onclick={openLazyProjectContextPicker}
+            >
+              <ConstellationIcon name="folder" size={15} stroke={1.9} />
+              <span>
+                {threadModuleLoadErrors['project-context']
+                  ? 'Retry Project Context'
+                  : projectContextPickerRequestedOpen
+                    ? 'Loading Project Context...'
+                    : lazyProjectContextLabel}
+              </span>
+              <ConstellationIcon name="chevron-down" size={12} stroke={1.9} />
+            </button>
+          {/if}
           {#if projectContextError}
             <span class="project-context-inline-error">{projectContextError}</span>
           {/if}
         {/snippet}
         {#snippet footerStatus()}
-          {#if isVoiceRecording}
-            <WorkspaceVoiceRecording elapsedMs={voiceDictation.elapsedMs} levels={voiceDictation.audioLevels} />
+          {#if isVoiceRecording && voiceDictation && WorkspaceVoiceRecordingComponent}
+            <WorkspaceVoiceRecordingComponent
+              elapsedMs={voiceDictation.elapsedMs}
+              levels={voiceDictation.audioLevels}
+            />
           {/if}
         {/snippet}
         {#snippet extraTrailingControls()}
           <ConstellationComposerOrb
-            label={voiceDictation.controlLabel}
-            title={voiceDictation.controlTitle}
+            label={voiceControlLabel}
+            title={voiceControlTitle}
             disabled={voiceControlDisabled}
             variant="bare"
             onclick={() => {
-              if (!sending) voiceDictation.toggle();
+              if (!sending) void toggleVoiceDictation();
             }}
           >
             <ConstellationIcon name={isVoiceRecording ? 'stop' : 'mic'} size={18} stroke={2} />
@@ -1214,8 +1538,23 @@
     </div>
   {/snippet}
 
+  {#snippet lazyPaneStatus(kind: LazyThreadPaneKind)}
+    <div class="thread-lazy-pane-state" role={threadModuleLoadErrors[kind] ? 'alert' : 'status'}>
+      <span>
+        {threadModuleLoadErrors[kind] ?? `Loading ${lazyThreadModuleLabels[kind]}...`}
+      </span>
+      {#if threadModuleLoadErrors[kind]}
+        <button type="button" onclick={() => ensureThreadPaneLoaded(kind)}>Retry</button>
+      {/if}
+    </div>
+  {/snippet}
+
   {#snippet browserPane()}
-    <BrowserThoughtPanel onPreviewAttachment={openPreviewTab} />
+    {#if BrowserThoughtPanelComponent}
+      <BrowserThoughtPanelComponent onPreviewAttachment={openPreviewTab} />
+    {:else}
+      {@render lazyPaneStatus('browser')}
+    {/if}
   {/snippet}
 
   {#snippet utilityPane()}
@@ -1232,13 +1571,21 @@
   {#snippet projectPane()}
     <div class="thread-utility-surface">
       <div class="thread-utility-surface-body">
-        <ProjectDraftStatePanel {idea} runId={projectDraftRunId} />
+        {#if ProjectDraftStatePanelComponent}
+          <ProjectDraftStatePanelComponent {idea} runId={projectDraftRunId} />
+        {:else}
+          {@render lazyPaneStatus('project')}
+        {/if}
       </div>
     </div>
   {/snippet}
 
   {#snippet previewPane()}
-    <ThreadAttachmentPreviewPane attachment={dockPreviewAttachment} />
+    {#if ThreadAttachmentPreviewPaneComponent}
+      <ThreadAttachmentPreviewPaneComponent attachment={dockPreviewAttachment} />
+    {:else}
+      {@render lazyPaneStatus('preview')}
+    {/if}
   {/snippet}
 
   {#snippet discussionPane()}
@@ -1246,64 +1593,84 @@
   {/snippet}
 
   {#snippet appsPane()}
-    <ThreadAppsPane
-      apps={threadArtifactApps}
-      selectedAppId={selectedThreadApp?.id ?? null}
-      onSelectApp={handleThreadAppSelect}
-    />
+    {#if ThreadAppsPaneComponent}
+      <ThreadAppsPaneComponent
+        apps={threadArtifactApps}
+        selectedAppId={selectedThreadApp?.id ?? null}
+        onSelectApp={handleThreadAppSelect}
+      />
+    {:else}
+      {@render lazyPaneStatus('app')}
+    {/if}
   {/snippet}
 
   {#snippet codeReviewPane()}
-    <ThreadCodeReviewPane
-      files={codeReviewFiles}
-      latestRunStatus={latestRun?.status ?? null}
-      onPreviewFile={openCodeReviewFilePreview}
-    />
+    {#if ThreadCodeReviewPaneComponent}
+      <ThreadCodeReviewPaneComponent
+        files={codeReviewFiles}
+        latestRunStatus={latestRun?.status ?? null}
+        onPreviewFile={openCodeReviewFilePreview}
+      />
+    {:else}
+      {@render lazyPaneStatus('code-review')}
+    {/if}
   {/snippet}
 
   {#snippet filePreviewPane()}
-    <ThreadProjectFilePreviewPane
-      {idea}
-      runId={activeFilePreviewRunId ?? projectDraftRunId}
-      filePath={activeFilePreviewPath}
-    />
+    {#if ThreadProjectFilePreviewPaneComponent}
+      <ThreadProjectFilePreviewPaneComponent
+        {idea}
+        runId={activeFilePreviewRunId ?? projectDraftRunId}
+        filePath={activeFilePreviewPath}
+      />
+    {:else}
+      {@render lazyPaneStatus('file-preview')}
+    {/if}
   {/snippet}
 
   {#snippet vaultPane()}
     <div class="thread-vault-surface">
-      <VaultPage
-        embedded
-        initialCreatePrefill={activeVaultSecretPrompt
-          ? {
-              id: activeVaultSecretPrompt.id,
-              keyName: activeVaultSecretPrompt.key_name,
-              description: activeVaultSecretPrompt.description,
-              category: activeVaultSecretPrompt.category,
-            }
-          : null}
-        initialAgentGrantPrompt={activeVaultAgentGrantPrompt
-          ? {
-              id: activeVaultAgentGrantPrompt.id,
-              grantId: activeVaultAgentGrantPrompt.grant_id,
-              keyName: activeVaultAgentGrantPrompt.key_name,
-              reason: activeVaultAgentGrantPrompt.reason,
-            }
-          : null}
-        onInitialCreateSaved={(promptId) => {
-          if (promptId) cortex.clearVaultSecretPrompt(promptId);
-        }}
-        onInitialAgentGrantHandled={(promptId) => {
-          if (promptId) cortex.clearVaultAgentGrantPrompt(promptId);
-        }}
-      />
+      {#if VaultPageComponent}
+        <VaultPageComponent
+          embedded
+          initialCreatePrefill={activeVaultSecretPrompt
+            ? {
+                id: activeVaultSecretPrompt.id,
+                keyName: activeVaultSecretPrompt.key_name,
+                description: activeVaultSecretPrompt.description,
+                category: activeVaultSecretPrompt.category,
+              }
+            : null}
+          initialAgentGrantPrompt={activeVaultAgentGrantPrompt
+            ? {
+                id: activeVaultAgentGrantPrompt.id,
+                grantId: activeVaultAgentGrantPrompt.grant_id,
+                keyName: activeVaultAgentGrantPrompt.key_name,
+                reason: activeVaultAgentGrantPrompt.reason,
+              }
+            : null}
+          onInitialCreateSaved={(promptId) => {
+            if (promptId) cortex.clearVaultSecretPrompt(promptId);
+          }}
+          onInitialAgentGrantHandled={(promptId) => {
+            if (promptId) cortex.clearVaultAgentGrantPrompt(promptId);
+          }}
+        />
+      {:else}
+        {@render lazyPaneStatus('vault')}
+      {/if}
     </div>
   {/snippet}
 
   {#snippet cyclesPane()}
-    <ThreadCyclesPane
-      focusCycleId={cortex.cyclePanelSignal?.ideaId === idea?.id ? cortex.cyclePanelSignal.cycleId : null}
-      refreshSerial={cortex.cyclePanelSignal?.ideaId === idea?.id ? cortex.cyclePanelSignal.serial : null}
-    />
+    {#if ThreadCyclesPaneComponent}
+      <ThreadCyclesPaneComponent
+        focusCycleId={cortex.cyclePanelSignal?.ideaId === idea?.id ? cortex.cyclePanelSignal.cycleId : null}
+        refreshSerial={cortex.cyclePanelSignal?.ideaId === idea?.id ? cortex.cyclePanelSignal.serial : null}
+      />
+    {:else}
+      {@render lazyPaneStatus('cycles')}
+    {/if}
   {/snippet}
 
   <ThreadStageShell
@@ -1465,6 +1832,31 @@
   .thread-utility-surface-body > :global(*) {
     flex: 1 1 auto;
     min-height: 0;
+  }
+
+  .thread-lazy-pane-state {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    min-width: 0;
+    min-height: 160px;
+    color: var(--constellation-utility-panel-muted-text, rgba(228, 235, 244, 0.56));
+    font-size: 12px;
+    text-align: center;
+  }
+
+  .thread-lazy-pane-state button {
+    border: 1px solid
+      var(--constellation-utility-panel-header-border, rgba(255, 255, 255, 0.1));
+    border-radius: 999px;
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.05);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
   }
 
   .thread-vault-surface {
@@ -1648,6 +2040,37 @@
 
   .project-context-inline-error {
     color: #d4808f;
+  }
+
+  .lazy-project-context-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 30px;
+    max-width: 100%;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    padding: 0 4px;
+    background: transparent;
+    color: var(--constellation-select-chip-trigger-bare-text);
+    font-family: var(--constellation-font-sans);
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .lazy-project-context-trigger:hover {
+    color: var(--constellation-select-chip-trigger-hover-text);
+  }
+
+  .lazy-project-context-trigger.invalid {
+    border-color: rgba(212, 128, 143, 0.55);
+    background: rgba(212, 128, 143, 0.12);
+  }
+
+  .lazy-project-context-trigger.loading {
+    cursor: progress;
   }
 
   .thread-bridge-editor {

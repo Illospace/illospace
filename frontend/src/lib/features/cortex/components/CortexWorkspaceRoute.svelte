@@ -119,7 +119,6 @@
   let directThreadUrlPending = $state(Boolean(requestedThreadIdeaIdFromPage()));
   let lastAutoOpenedAppId = $state<string | null>(null);
   let lastRouteOpenedWorkspaceAppId = $state<string | null>(null);
-  let threadStagePrewarmQueued = false;
   let CortexArchiveBinMenuComponent = $state<typeof import('$lib/features/cortex/components/ArchiveBinMenu.svelte').default | null>(null);
   let WorkspaceSceneComponent = $state<typeof import('$lib/features/workspace-scene/components/WorkspaceScene.svelte').default | null>(null);
   let CortexChatDockSeamComponent = $state<typeof import('$lib/features/cortex/components/chat/ChatDockSeam.svelte').default | null>(null);
@@ -916,13 +915,6 @@
   $effect(() => {
     if (!workspaceStartupStarted) return;
     if (cortexSurfaceReady) ensureCortexNotificationsMenuLoaded();
-  });
-
-  $effect(() => {
-    if (!workspaceStartupStarted) return;
-    if (!cortexSurfaceReady || ThreadStageScreenComponent || threadStagePrewarmQueued) return;
-    threadStagePrewarmQueued = true;
-    runWhenBrowserIdle(() => ensureThreadStageScreenLoaded(), 260, 1600);
   });
 
   $effect(() => {

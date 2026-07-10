@@ -77,6 +77,7 @@ export interface WorkspaceComposerAdapterProps {
   onSecondaryIntentChange?: (value: string) => void;
   secondaryIntentAriaLabel?: string;
   settingsGroups?: readonly CortexWorkspaceComposerSettingsGroup[];
+  onSettingsOpen?: () => void | Promise<void>;
   onSettingsChange?: (key: string, value: string) => void;
   settingsAriaLabel?: string;
   attachments?: readonly CortexWorkspaceComposerAttachment[];

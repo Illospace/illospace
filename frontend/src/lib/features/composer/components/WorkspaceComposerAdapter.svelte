@@ -38,6 +38,7 @@
     onSecondaryIntentChange,
     secondaryIntentAriaLabel = 'Mode',
     settingsGroups,
+    onSettingsOpen,
     onSettingsChange,
     settingsAriaLabel = 'Mode, Model, and Effort',
     attachments = [],
@@ -70,7 +71,12 @@
   let settingsRootEl: HTMLDivElement | undefined = $state();
   let selectedMode = $state<string>('');
   let settingsOpen = $state(false);
-  let activeSettingsGroupKey = $state<string | null>(null);
+  let settingsOpenRequested = false;
+  let settingsMenuLoadError = $state(false);
+  let settingsMenuLoad: Promise<void> | null = null;
+  let WorkspaceComposerSettingsMenuComponent = $state<
+    typeof import('./WorkspaceComposerSettingsMenu.svelte').default | null
+  >(null);
   let settingsCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
   const isWorking = $derived(actionState === 'working');
@@ -135,16 +141,6 @@
     if (!selectModeOptions.some((option) => option.value === selectedMode)) {
       selectedMode = nextModeValue;
     }
-  });
-
-  $effect(() => {
-    if (!settingsGroups?.length) {
-      activeSettingsGroupKey = null;
-      return;
-    }
-
-    const hasActiveGroup = settingsGroups.some((group) => group.key === activeSettingsGroupKey);
-    if (!activeSettingsGroupKey || !hasActiveGroup) activeSettingsGroupKey = settingsGroups[0]?.key ?? null;
   });
 
   $effect(() => {
@@ -281,32 +277,54 @@
     return group.options.find((option) => option.value === group.value) ?? group.options[0] ?? null;
   }
 
-  function selectedSettingsLabel(group: { label: string; options: readonly { value: string; label: string }[]; value?: string }) {
-    const option = selectedSettingsOption(group);
-    return option ? `${group.label}: ${option.label}` : group.label;
-  }
-
   function cancelSettingsClose() {
     if (!settingsCloseTimer) return;
     clearTimeout(settingsCloseTimer);
     settingsCloseTimer = null;
   }
 
-  function openSettingsMenu(groupKey?: string) {
+  async function ensureSettingsMenuLoaded() {
+    if (WorkspaceComposerSettingsMenuComponent) return;
+    if (settingsMenuLoad) return settingsMenuLoad;
+
+    settingsMenuLoadError = false;
+    settingsMenuLoad = import('./WorkspaceComposerSettingsMenu.svelte')
+      .then((module) => {
+        WorkspaceComposerSettingsMenuComponent = module.default;
+      })
+      .catch((error: unknown) => {
+        console.error('Failed to load composer run settings', error);
+        settingsMenuLoadError = true;
+      })
+      .finally(() => {
+        settingsMenuLoad = null;
+      });
+    return settingsMenuLoad;
+  }
+
+  async function prepareSettingsMenu() {
+    await onSettingsOpen?.();
+    await ensureSettingsMenuLoaded();
+    if (settingsOpenRequested && WorkspaceComposerSettingsMenuComponent) settingsOpen = true;
+  }
+
+  function openSettingsMenu() {
     if (disabled || !showSettingsPicker) return;
     cancelSettingsClose();
-    activeSettingsGroupKey = groupKey ?? activeSettingsGroupKey ?? settingsGroups?.[0]?.key ?? null;
-    settingsOpen = true;
+    settingsOpenRequested = true;
+    void prepareSettingsMenu();
   }
 
   function closeSettingsMenu() {
     cancelSettingsClose();
+    settingsOpenRequested = false;
     settingsOpen = false;
   }
 
   function queueSettingsMenuClose() {
     cancelSettingsClose();
     settingsCloseTimer = setTimeout(() => {
+      settingsOpenRequested = false;
       settingsOpen = false;
       settingsCloseTimer = null;
     }, 120);
@@ -314,15 +332,11 @@
 
   function toggleSettingsOpen() {
     if (disabled || !showSettingsPicker) return;
-    if (settingsOpen) {
+    if (settingsOpen || settingsOpenRequested) {
       closeSettingsMenu();
       return;
     }
     openSettingsMenu();
-  }
-
-  function setActiveSettingsGroup(key: string) {
-    activeSettingsGroupKey = key;
   }
 
   function handleSettingsChange(key: string, nextValue: string) {
@@ -510,73 +524,18 @@
                     onclick={toggleSettingsOpen}
                   >
                     <ConstellationIcon name="settings" size={14} stroke={1.9} />
-                    <span class="composer-settings-trigger-label">{settingsSummary}</span>
+                    <span class="composer-settings-trigger-label">
+                      {settingsMenuLoadError ? 'Retry settings' : settingsSummary}
+                    </span>
                     <ConstellationIcon name="chevron-down" size={12} stroke={1.9} className="composer-settings-chevron" />
                   </button>
 
-                  {#if settingsOpen}
-                    <div role="menu" class="composer-settings-menu" aria-label={settingsAriaLabel}>
-                      <div class="composer-settings-primary" role="group" aria-label="Run setting categories">
-                        {#each settingsGroups as group (group.key)}
-                          <button
-                            type="button"
-                            class:composer-settings-group-trigger={true}
-                            class:is-active={activeSettingsGroupKey === group.key}
-                            role="menuitem"
-                            aria-haspopup="menu"
-                            aria-expanded={activeSettingsGroupKey === group.key}
-                            onpointerenter={() => setActiveSettingsGroup(group.key)}
-                            onfocus={() => setActiveSettingsGroup(group.key)}
-                            onclick={() => setActiveSettingsGroup(group.key)}
-                          >
-                            <span class="composer-settings-group-label">{group.label}</span>
-                            <span class="composer-settings-group-value">{selectedSettingsOption(group)?.label ?? ''}</span>
-                          </button>
-                        {/each}
-                      </div>
-
-                      <div class="composer-settings-secondary">
-                        {#each settingsGroups as group (group.key)}
-                          {@const isActiveGroup = activeSettingsGroupKey === group.key}
-                          <div
-                            class:composer-settings-group-panel={true}
-                            class:is-active={isActiveGroup}
-                            aria-label={group.ariaLabel ?? group.label}
-                            aria-hidden={isActiveGroup ? undefined : 'true'}
-                          >
-                            <div class="composer-settings-heading">{selectedSettingsLabel(group)}</div>
-                            <div class="composer-settings-options">
-                              {#each group.options as option}
-                                {@const isActive = option.value === (selectedSettingsOption(group)?.value ?? '')}
-                                <button
-                                  type="button"
-                                  role="menuitemradio"
-                                  aria-checked={isActive}
-                                  title={option.description ?? option.label}
-                                  class:composer-settings-option={true}
-                                  class:is-active={isActive}
-                                  tabindex={isActiveGroup ? 0 : -1}
-                                  onclick={() => handleSettingsChange(group.key, option.value)}
-                                >
-                                  <span class="composer-settings-option-main">
-                                    {#if option.icon}
-                                      <ConstellationIcon name={option.icon} size={14} stroke={1.9} />
-                                    {/if}
-                                    <span class="composer-settings-option-copy">
-                                      <span class="composer-settings-option-label">{option.label}</span>
-                                      {#if option.description}
-                                        <span class="composer-settings-option-description">{option.description}</span>
-                                      {/if}
-                                    </span>
-                                  </span>
-                                  <span class="composer-settings-option-indicator" aria-hidden="true"></span>
-                                </button>
-                              {/each}
-                            </div>
-                          </div>
-                        {/each}
-                      </div>
-                    </div>
+                  {#if settingsOpen && WorkspaceComposerSettingsMenuComponent}
+                    <WorkspaceComposerSettingsMenuComponent
+                      groups={settingsGroups}
+                      ariaLabel={settingsAriaLabel}
+                      onSettingsChange={handleSettingsChange}
+                    />
                   {/if}
                 </div>
               {/if}
@@ -984,9 +943,7 @@
     cursor: default;
   }
 
-  .composer-settings-trigger:focus-visible,
-  .composer-settings-group-trigger:focus-visible,
-  .composer-settings-option:focus-visible {
+  .composer-settings-trigger:focus-visible {
     outline: 2px solid var(--constellation-control-focus-ring);
     outline-offset: 2px;
   }
@@ -1012,184 +969,6 @@
     transform: rotate(180deg);
   }
 
-  .composer-settings-menu {
-    position: absolute;
-    left: 0;
-    bottom: calc(100% + 8px);
-    z-index: 32;
-    display: grid;
-    grid-template-columns: 128px minmax(220px, 1fr);
-    gap: 6px;
-    width: min(386px, calc(100vw - 32px));
-    max-width: min(520px, calc(100vw - 32px));
-    padding: 7px;
-    border: 1px solid var(--composer-menu-border);
-    border-radius: 14px;
-    background: var(--composer-menu-background);
-    box-shadow: var(--composer-menu-shadow);
-    color: var(--constellation-color-text-primary);
-  }
-
-  .composer-settings-primary,
-  .composer-settings-secondary {
-    min-width: 0;
-  }
-
-  .composer-settings-primary {
-    display: grid;
-    align-content: start;
-    gap: 3px;
-    padding-right: 5px;
-    border-right: 1px solid color-mix(in oklab, var(--composer-menu-border), transparent 38%);
-  }
-
-  .composer-settings-secondary {
-    position: relative;
-    display: grid;
-    align-items: start;
-    min-height: 150px;
-  }
-
-  .composer-settings-group-trigger {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    column-gap: 12px;
-    min-height: 32px;
-    padding: 6px 7px;
-    border: 0;
-    border-radius: 9px;
-    background: transparent;
-    color: var(--constellation-select-chip-option-text);
-    font: inherit;
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .composer-settings-group-trigger:hover,
-  .composer-settings-group-trigger.is-active {
-    background: var(--composer-menu-option-hover-background);
-  }
-
-  .composer-settings-group-trigger.is-active {
-    color: var(--constellation-select-chip-trigger-hover-text);
-  }
-
-  .composer-settings-group-label {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 12px;
-    font-weight: 650;
-  }
-
-  .composer-settings-group-value {
-    max-width: 78px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--composer-menu-supporting-text);
-    font-size: 10.5px;
-  }
-
-  .composer-settings-group-panel {
-    display: grid;
-    gap: 4px;
-    grid-area: 1 / 1;
-    min-width: 0;
-    opacity: 0;
-    pointer-events: none;
-    visibility: hidden;
-  }
-
-  .composer-settings-group-panel.is-active {
-    opacity: 1;
-    pointer-events: auto;
-    visibility: visible;
-  }
-
-  .composer-settings-heading {
-    padding: 0 4px;
-    color: var(--composer-menu-supporting-text);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-  }
-
-  .composer-settings-options {
-    display: grid;
-    gap: 3px;
-  }
-
-  .composer-settings-option {
-    display: inline-flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    min-height: 34px;
-    padding: 7px 8px;
-    border: 0;
-    border-radius: 9px;
-    background: transparent;
-    color: var(--constellation-select-chip-option-text);
-    font: inherit;
-    font-size: 12px;
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .composer-settings-option:hover {
-    background: var(--composer-menu-option-hover-background);
-  }
-
-  .composer-settings-option.is-active {
-    background: var(--composer-menu-option-active-background);
-  }
-
-  .composer-settings-option-main {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    min-width: 0;
-  }
-
-  .composer-settings-option-copy {
-    display: grid;
-    gap: 1px;
-    min-width: 0;
-  }
-
-  .composer-settings-option-label,
-  .composer-settings-option-description {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .composer-settings-option-label {
-    font-weight: 650;
-  }
-
-  .composer-settings-option-description {
-    color: var(--composer-menu-supporting-text);
-    font-size: 10.5px;
-    line-height: 1.2;
-  }
-
-  .composer-settings-option-indicator {
-    width: 6px;
-    height: 6px;
-    border-radius: 999px;
-    background: transparent;
-    flex-shrink: 0;
-  }
-
-  .composer-settings-option.is-active .composer-settings-option-indicator {
-    background: var(--constellation-select-chip-indicator-active-background);
-  }
-
   @container composer-controls (max-width: 230px) {
     .composer-chip-group :global(.constellation-select-chip-trigger),
     .composer-chip-group :global(.project-context-chip),
@@ -1201,11 +980,6 @@
     .composer-settings-chip.is-open::before {
       left: -220px;
       right: -10px;
-    }
-
-    .composer-settings-menu {
-      left: auto;
-      right: 0;
     }
 
     .composer-chip-group :global(.constellation-select-chip-trigger-label),

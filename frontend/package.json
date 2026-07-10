@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "check:thread-stage-bundle": "node scripts/check-thread-stage-bundle.mjs",
     "preview": "vite preview",
     "test": "node --test src/lib/utils/*.test.js",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",

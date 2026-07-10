@@ -16,9 +16,9 @@
     attachmentUrl,
     normalizeServerUploadPreviewUrl,
   } from '$lib/utils/attachmentPreview';
-  import ObjectReferencePreviewList from '$lib/features/threads/components/ObjectReferencePreviewList.svelte';
-  import StreamVisualBlock from '$lib/features/threads/components/StreamVisualBlock.svelte';
+  import LazyStreamVisualBlock from '$lib/features/threads/components/LazyStreamVisualBlock.svelte';
   import ThreadAuthorMark from '$lib/features/threads/components/ThreadAuthorMark.svelte';
+  import LazyObjectReferencePreviewList from '$lib/features/threads/components/LazyObjectReferencePreviewList.svelte';
 
   import {
     getCortexThreadRunStatusGlyph,
@@ -442,7 +442,7 @@
                     {#each item.attachments as attachment, attachmentIndex (`${getAttachmentKey(attachment, attachmentIndex)}`)}
                       {#if attachment.kind === 'visual'}
                         <section class="thread-visual-surface">
-                          <StreamVisualBlock block={attachment.block} />
+                          <LazyStreamVisualBlock block={attachment.block} />
                         </section>
                       {:else if attachment.kind === 'image'}
                         <button
@@ -476,7 +476,7 @@
                   </div>
                 {/if}
 
-                <ObjectReferencePreviewList
+                <LazyObjectReferencePreviewList
                   objectReferences={item.objectReferences}
                   threadReferences={item.threadReferences}
                   containerClass="thread-message-thread-previews"
@@ -486,7 +486,7 @@
             </article>
           {:else if item.kind === 'visual'}
             <section class="thread-visual-surface">
-              <StreamVisualBlock block={item.block} />
+              <LazyStreamVisualBlock block={item.block} />
             </section>
           {:else if item.kind === 'run'}
             {@const orderedSteps = orderCortexThreadRunSteps(item.runSteps ?? [])}
