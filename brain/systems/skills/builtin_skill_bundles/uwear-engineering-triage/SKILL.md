@@ -14,11 +14,183 @@ staging, review, merge, deploy, and close/reopen workflow across
 ## Source Of Truth
 
 When available, read Enterprise Documentation Domain id `37`, object
-`doc_page`, record id `1155`, slug `uwear-engineering-triage`. Treat that
-document as the live operating model. If it conflicts with this bundled skill,
-surface the conflict and prefer the live document after verification.
+`doc_page`, record id `1155`, slug `uwear-engineering-triage` (use
+`manage_domain` `action=get_record` `domain_id=37` `record_id=1155`). Treat
+that document as the live operating model. If it conflicts with this bundled
+skill, surface the conflict and prefer the live document after verification.
+
+## Coordination Pipeline
+
+Every scheduled coordinator run follows three phases, in order: sweep
+everything, diff against what was last posted, and only then judge and post.
+Do not compose a workset or a Slack post from the first convenient listing.
+
+### Phase A — Sweep everything
+
+Build the complete picture before forming any opinion. Required sources:
+
+- Open issues and open PRs across all four repos, with exact open counts per
+  repo so coverage is verifiable.
+- The full active GitHub Ticket Tracker Domain id `1` state — not just the
+  most recently updated records.
+- GitHub Event Feed Domain id `38` events since the last run.
+- Teammate replies to your last check-in (Slack thread and Cortex thread).
+
+**Fan out workers — and collect them honestly.** `spawn_worker` is
+fire-and-forget: it returns a queued `child_run_id`; there is no join
+primitive. Spawn scoped read-only workers early (for example, one per repo or
+per source), record each returned `child_run_id` and its assigned slice, and
+continue your own sweep while they run. Each worker's objective must be to END
+with a compact machine-readable summary under ~500 chars (counts, item refs,
+states, CI/blocker flags, staleness — not prose): the parent reads worker
+output as a snippet of the child run's final answer via
+`query_workspace_data` `sources=['runs']`. Before composing, poll that source
+and match your recorded child ids: a slice counts as swept ONLY when its
+worker reached terminal `completed` status AND you read its summary. A queued,
+running, failed, unmatched, or unread worker does not count — cover that slice
+yourself with direct reads instead. Never compose as if a missing slice was
+swept.
+
+**Sweep for staleness explicitly.** Recency-ordered listings bury untouched
+work in the truncated middle — that is exactly how stale Blocked items
+disappear. Every digest run must also:
+
+- Query the tracker per person: `manage_domain` `action=query_records`
+  `domain_id=1` `format="compact"`
+  `fields=["status","assignee","priority","external_id"]` with `search=` each
+  of `Reda`, `Axel`, `JB`.
+- Run one oldest-first pass with `order="updated_asc"` over active records so
+  the stalest items surface first.
+- Treat `Blocked` and `High` priority records as must-surface regardless of
+  age. An item does not stop existing because nobody touched it.
+
+**Reconcile counts.** `query_records` reports `returned` and
+`total_matching`; GitHub reads report exact open counts. The rule: prefer ONE
+complete listing — `format="compact"` with `limit` at or above
+`total_matching` (cap 500) — over stitched partial reads. If `returned <
+total_matching`, RAISE the limit; never shrink it to make the numbers match
+(a smaller limit is only for avoiding output-budget truncation of full-format
+detail reads). Only when a universe exceeds 500 records may you stitch
+subqueries, and then coverage is proven only by the deduplicated union of
+visible record ids reaching the full query's `total_matching`. Remember
+`search=<name>` is a full-text probe, not an assignee filter: verify
+`assignee` on the returned data, and include an unassigned/no-match pass so
+ownerless records are not invisible. See **Truncation & Degraded Evidence**.
+
+### Phase B — Diff against the last posted workset
+
+**Snapshot lifecycle.** The last posted workset lives in Enterprise
+Documentation Domain id `37` as a `doc_page` record with slug
+`uwear-coordinator-digest-snapshot`. Find it with `query_records`
+`search="uwear-coordinator-digest-snapshot"` and keep only records whose
+`slug` field matches exactly. Zero matches = first use (you will create it
+after the first successful post). Exactly one = read it and retain its
+`record_id` and `version` for the later update. More than one exact match =
+degraded evidence; say so and do not post a normal brief. The snapshot stores
+the COMPLETE posted workset (not a delta): run id, timestamp, Slack message
+id, and per-person items with ref, state, and next action.
+
+**Diff in two stages.** First, before judging, revalidate every item from the
+snapshot against the full current state (Phase A): merged, closed, moved,
+blocked, stale (untouched 3+ days while `Todo`/`In Progress`/`Blocked`), or
+unchanged. Second, after Phase C selects the new priority workset, compare its
+membership against the snapshot: every item that was in the last brief but
+not in the new one needs an explicit stated reason — merged, closed,
+superseded by a named item, or deprioritized by a named human. A generic "not
+priority anymore" is not a reason. An item that would leave with no reason is
+a red flag: surface it instead of letting it vanish — silent disappearance is
+how teammates' work got dropped.
+
+Do not reconstruct the previous workset from memory or from the visible tail
+of a listing; read the snapshot record.
+
+### Phase C — Judge, then post
+
+Apply intelligence to the diffed picture: prioritize, cluster, decide owners
+and next actions, form rebalancing recommendations. Run the **Before Posting**
+gates, then post per the **Team Digest Contract**. After a successful normal
+post, update the snapshot record in the same run (per Phase B: by `record_id`
+with `expected_version`, complete workset — or create it after a first-ever
+post). Skipped runs, failed posts, and DEGRADED briefs do NOT advance the
+snapshot: continuity keeps pointing at the last good digest.
+
+## Team Digest Contract
+
+The daily brief is for three humans. Its shape is a contract, not a style
+suggestion:
+
+- **One section per teammate — Reda, Axel, JB — every brief, no exceptions.**
+  A missing name reads as "I have nothing to do." That silence is worse than
+  a wrong item, because nobody knows to correct it.
+- An empty section is a strong claim — it may only be made after checking ALL
+  of: tracker records with that person as exact `assignee` (not just a name
+  search), GitHub issues assigned to their handle, PRs they authored, and
+  builder-first engineering candidates. Say which checks ran, e.g. `JB: no
+  active items — no tracker records assigned jb/JB, no GitHub issues assigned
+  jbk83, no open jbk83-authored PRs.` Follow it with a rebalancing
+  recommendation or an explicit `no rebalancing available because <reason>`
+  (see **Rebalancing Recommendations**). Never invent filler to avoid an
+  empty section.
+- If coverage is still degraded at daily-brief time (see **Truncation &
+  Degraded Evidence**), the 8:00 ET brief still posts — titled
+  `DEGRADED — coverage incomplete`, still with all three teammate sections,
+  naming exactly which slices are missing, and making NO absence, departure,
+  suppression, or rebalancing claims about the missing slices. On any other
+  run, do not post while degraded.
+- Optional trailing sections when non-empty: `Unclaimed pool`, and
+  `Cleanup — safe to close`.
+- Include a scope line with the exact counts from Phase A, e.g. `Scope: 128
+  open issues + 12 open PRs across 4 repos, 45 active tracker records;
+  posting the priority workset, not the full backlog.`
+- "Material change" (the bar for posting on non-8:00 runs) means: an item
+  entered or left the priority workset, a state/owner/blocker change, a merge
+  or ship, an incident, or a teammate question answered. Nothing material =
+  no post; record `Slack skipped: no material change` in the run's
+  self-review ledger.
+
+## Direct Customer Support
+
+Some alerts are customer-support reports, not GitHub triage — e.g. a Retool
+"New: Issue" carrying a `User`, a `Profile ID`, a `Message`, and often an image
+attachment, reporting an unexpected or wrong generation ("the garment has no
+pockets", wrong color, missing detail). For these, investigate first; do not just
+record a tracker and assign a human.
+
+Do the mechanical investigation yourself, read-only, then act:
+
+1. **Investigate the generation.** Use the `uwear-generation-investigation` skill
+   (read-only production Postgres via `prod-postgres-analysis` /
+   `PROD_POSTGRES_READONLY_URL`). For the reported `Profile ID`, fetch the recent
+   generation(s) via the **canonical owner join** (`generation.user_id =
+   <profile_id> AND generation.user_type = 'profile'`; the
+   `generation.batch_id -> batch` path is legacy and misses recent profiles) and
+   read the request **prompt/inputs** (`generation.generation_setting`,
+   `clothing_item.tryon_prompt`), the **model** (`generation.model_id ->
+   ai_model`), and the **outcome/status** (`generation.status`,
+   `generation_result_origin.status`, `generation_result_qa`).
+2. **Form a hypothesis.** State a concrete, evidence-backed reason for the result
+   (e.g. the try-on prompt/settings never specified the missing detail; the
+   reference image lacked it; the model dropped it; a QA/status signal explains
+   it).
+3. **Open the work item.** File a **real GitHub issue in `uwear-ai/uwear-backend`**
+   with the payload evidence + hypothesis, pointing the owner at the payload to
+   confirm or deny. Prefix the AI body with
+   `> *This was generated by AI during triage.*`. If `create_github_issue`
+   returns `no_write_token`/403/404, degrade honestly (record a tracker record +
+   handoff, and say so) — never claim a filed issue.
+4. **Reply in-thread** on the alert with the issue/tracker link + a one-line
+   hypothesis.
+
+**Owner: none up front.** Illo runs the first-pass investigation. Route to a
+human only when the fix needs product judgment, credentials, or a design/release
+decision — and attach the hypothesis when you do. Do not auto-assign a
+customer-generation issue to Axel merely because the output came from an AI
+model.
 
 ## Workflow
+
+Scheduled coordinator runs follow the **Coordination Pipeline** above; the
+steps below are the per-item triage method used inside it.
 
 1. Inspect the current issue, PR, or backlog slice from GitHub and the durable
    tracker. Verify repo, branch target, labels, linked PRs, CI, reviews, age,
@@ -51,6 +223,20 @@ surface the conflict and prefer the live document after verification.
 If repo-local agent instructions contradict this skill, surface the conflict
 before acting. Do not silently choose.
 
+For `uwear-ai/uwearaiapp` and `uwear-ai/uwear-backend`, focus coordination on what is entering,
+changing, blocked, or being validated around `staging`. Evergreen `staging` -> `main` promotion PRs
+exist as part of the normal release rhythm and should not be treated as priority work or recurring
+Slack blockers unless a human explicitly asks to promote staging, testing is complete for that cycle,
+or the promotion PR has a new unusual blocker that affects current work.
+
+**Verify before suppressing.** The promotion-PR exclusion above may only be
+applied to a PR whose health you checked this run: its required CI checks and
+any linked tracker tickets or blockers. A failing required check, or a linked
+`Blocked` tracker record, IS the "new unusual blocker" exception — surface the
+PR with the concrete blocker named (e.g. `test` check failing, tracked in
+ticket NNNN) and its owner. Never exclude a promotion PR you have not verified
+as green and unblocked in this run's evidence.
+
 ## Dependency Monitor
 
 For selected priority issues or PRs, check likely companion surfaces before
@@ -75,11 +261,9 @@ High-confidence examples:
   integration.
 
 If companion work already exists, link it or update the existing tracker
-record. If high-confidence companion work is missing, decide per **Creating
-Work Items** below whether to open a real GitHub issue or keep it internal. When
-you keep it internal, create or update a generic coordination ticket in the
-GitHub Ticket Tracker Domain (an internal tracker, not a GitHub issue) instead
-of adding a Uwear-specific object. Keep low-confidence hunches internal or as
+record. If high-confidence companion work is missing, create or update a
+generic coordination ticket in the GitHub Ticket Tracker Domain instead of
+adding a Uwear-specific object. Keep low-confidence hunches internal or as
 low-noise tracker notes.
 
 ## Creating Work Items
@@ -110,16 +294,17 @@ Decide as follows:
   AI-authored body with `> *This was generated by AI during triage.*` Report it
   with the returned issue number and URL.
 - **`create_github_issue` returns an error** (for example `no_write_token`, or a
-  403/404 meaning no write-capable token can reach a private repo): do NOT claim
-  an issue was filed. Either ask for clarification (which repo, or a
-  write-capable token), or record an internal coordination record and open a
-  teammate handoff so the work is not lost.
-- **Repo or incident is unclear:** ask for clarification first. Capture an
-  internal coordination record only if the signal must not be lost.
+  403/404): do NOT claim an issue was filed. Ask for clarification, or record an
+  internal coordination record + a handoff so the work is not lost.
+- **Repo or incident unclear:** ask first; capture an internal record only if the
+  signal must not be lost.
 
 Never describe an internal tracker record as a GitHub issue. Only say a GitHub
-issue was opened when `create_github_issue` succeeded and you can cite its
-number and URL.
+issue was opened when `create_github_issue` succeeded and you can cite its number
+and URL.
+
+Tracker records use stable external ids: `github:<owner>/<repo>:issue:<number>`,
+`github:<owner>/<repo>:pr:<number>`, or `coordination:<repo>:<stable-task-key>`.
 
 ## Deploy-State Ladder (re-firing alerts)
 
@@ -215,29 +400,74 @@ closure authority (Workflow step 5) overrides it.
 - `Canceled` / `wontfix`: obsolete, duplicate, invalid, intentionally closed,
   or not worth doing.
 
+## Identities
+
+- Reda: GitHub `redawear`, Illospace user `14c6097d-d495-4fb8-9cdc-fdc327768a7d`, `reda@uwear.ai`.
+- Axel: GitHub `axel-havard`, Illospace user `e5a93afb-543b-4c2c-86bb-b766f0ef7fc4`, `axel@uwear.ai`.
+- JB: GitHub `jbk83`, Illospace user `6a48c5dd-dcab-4895-bcf2-6d6e262595f3`, `jb@uwear.ai`.
+- GitHub `uwear-claw` / `Newark Claude` / `Uwear Claude` is inactive automation
+  unless a human says otherwise. Never assign human work to it.
+
 ## Ownership
 
-Route by GitHub signal first, area second.
+Route by GitHub signal first, then by work class — area prose is the last
+resort, not the first.
 
-- **PRs are owned by their GitHub author.** The team does not do peer review, so
-  never assign a PR to a reviewer, a "review owner", or a "coordination owner".
-  The only next action on an open PR is a one-line reminder to its **author** to
-  merge or close it. Never put another person's name on someone else's open PR.
-- **Issues with a GitHub assignee** are owned by that assignee. Only use the area
-  fallback below when the issue has no GitHub assignee.
-- **Area fallback (unassigned issues only):**
-  - Reda: app/Studio UI, UX, visual, website, customer-facing app flows,
-    product-review decisions.
-  - Axel: agent/LLM/MCP and agent-mode tooling — Axel even when the code lives in
-    `uwearaiapp` — plus backend data/model paths, database-heavy features, AI
-    behavior.
-  - JB: infra, AWS, CI/runtime/platform, deployment, ArtDirection/queue/authoring.
-- Customer-reported generation-quality issues have **no owner** until an
-  investigation produces a hypothesis. Never pre-assign them to Axel — or anyone
-  — merely because the output came from an AI model.
+- **An explicit GitHub assignee always wins** — on issues AND PRs — over every
+  heuristic below. If you think the assignment is wrong, recommend a change —
+  never override it.
+- **Unassigned PRs are owned by their GitHub author** when the author is a
+  human. The team does not do peer review, so never assign a PR to a
+  reviewer, a "review owner", or a "coordination owner", and never put
+  another person's name on someone else's open PR. An automation-authored PR
+  with no assignee is unowned engineering work — route it builder-first like
+  an unassigned issue.
+- **A PR's next action follows the evidence**, not a formula: fix the named
+  failing check, answer the requested changes, merge when green and verified,
+  or close when obsolete. "Merge or close" is the nudge only when the PR is
+  green and unblocked.
+- **Unassigned items route by work class:**
+  - **Business, product, marketing, and website work belongs to Reda —
+    exclusively.** This includes all of `uwear-ai/uwear-website`, positioning
+    and copy, pricing, customer communications, and product decisions. Never
+    route or rebalance this class to Axel or JB.
+  - **Engineering/dev work can go to any of the three.** Priority order:
+    1. **Builder first**: whoever built or last substantially changed the
+       touched feature/area. Approximate the builder from git/PR history on
+       the touched paths — repo workspaces and GitHub reads are available;
+       cite the evidence (e.g. `built in PR #NNN`).
+    2. **Specialization as tie-breaker, not a wall**: Axel = agent/LLM/MCP and
+       AI-backend behavior (even when the code lives in `uwearaiapp`), backend
+       data/model paths, database-heavy features. JB = infra, AWS, CI, runtime,
+       platform, deployment, ArtDirection/queue/authoring. Reda = app/Studio
+       UI, UX, visual, customer-facing app flows.
+    3. **Load balance** across the three when neither signal decides.
+- Customer-reported generation-quality issues have **no owner** until Illo's
+  investigation produces a hypothesis (see **Direct Customer Support**). Never
+  pre-assign them to Axel — or anyone — before that.
 
 Choose by the next action, not by the original author. Team-facing notes should
 only say owner, status, blocker, and next action.
+
+## Rebalancing Recommendations
+
+When the diffed picture shows a teammate with an empty section, a clearly
+skewed load (one person carrying roughly twice the median or more), or
+someone fully blocked, recommend a rebalance — do not silently reassign.
+
+- **Recommendations only.** Never change a tracker `assignee` or a GitHub
+  assignee as part of rebalancing without a human saying yes. State the
+  recommendation in the brief and leave the records as they are.
+- **Respect the ownership classes.** Business/product/website work is Reda's
+  exclusively and never moves. Engineering work may move among Reda, Axel, and
+  JB, builder-first, specializations as tie-breakers (see **Ownership**).
+- **Ground it in evidence**, e.g. `Rebalancing: Axel has no active items;
+  recommend moving app #612 (agent-mode payload bug) from Reda to Axel — Axel
+  built the agent-mode path (PRs #540, #567), and Reda is carrying 6 items.`
+- If a section is empty and nothing can move (all remaining work is
+  Reda-exclusive business, or explicit GitHub assignees hold everything), say
+  `no rebalancing available because <reason>` so the empty section is visibly
+  deliberate.
 
 ## Backlog Seed
 
@@ -252,7 +482,7 @@ delegated closure.
 
 ## Backlog Hygiene
 
-Keep stale backlog cleanup separate from the twice-daily priority coordinator.
+Keep stale backlog cleanup separate from the daily priority coordinator.
 Backlog hygiene has three explicit modes:
 
 - `process-design`: define cleanup rules, state meanings, ownership rules,
@@ -268,19 +498,8 @@ Use the existing GitHub Ticket Tracker Domain 1 objects. Do not create
 Uwear-specific backlog objects when generic ticket fields, relations, labels,
 and progress notes can hold the coordination.
 
-Classify stale work by next action:
-
-- `ready-for-agent`: scoped enough for Codex, Claude, or Illo to implement.
-- `ready-for-human`: needs product judgment, owner decision, credentialed
-  testing, or approval.
-- `needs-info`: blocked on reproduction, context, or a specific missing answer.
-- `Blocked`: blocked by CI, review changes, branch drift, or external
-  dependency.
-- `Backlog`: valid but not selected for near-term work.
-- `Done`: already merged, closed, or otherwise complete (alert-linked
-  tickets: only once deploy-verified — see **Deploy-State Ladder**).
-- `Canceled` / `wontfix`: explicitly obsolete, duplicate, invalid, or not
-  worth doing after approval.
+Classify stale work by next action using the **States** vocabulary above
+(including its deploy-verified `Done` rule for alert-linked tickets).
 
 For likely obsolete work, preserve the lifecycle state and add a queryable note
 such as `cleanup:close-candidate` in the progress note or another existing
@@ -295,6 +514,33 @@ entire backlog. Include scope counts, owner batches, close-candidate approval
 batches, and MCP search examples such as `cleanup:close-candidate`,
 `ready-for-agent`, `Reda`, `Axel`, `JB`, or `Blocked`.
 
+## Truncation & Degraded Evidence
+
+Model-visible tool results are middle-truncated to a per-tool output budget.
+When that happens, an explicit marker appears in the result (`truncated by
+tool output budget`, or a trailing `[System: output exceeded ...]` note).
+Rules:
+
+- **A truncated result is degraded evidence.** Absence from the visible
+  portion is not absence from the data. Never mark an item gone, done, or
+  unowned because it did not appear in a truncated listing.
+- **Reconcile counts before composing.** `query_records` returns `returned`
+  and `total_matching`; GitHub reads report exact open counts. Any gap means
+  the sweep is incomplete — raise `limit` toward `total_matching` (never
+  shrink it to force agreement) or run compensating per-person/per-status/
+  per-repo queries whose deduplicated union of record ids covers the total.
+- **Listings compact, details targeted.** Use `format="compact"` with
+  explicit `fields` for every listing or sweep; use `get_record` (or a single
+  GitHub item read) for full detail on the few items you actually selected.
+- **Staleness needs its own query.** Recency-ordered reads hide old items;
+  use `order="updated_asc"` and per-person `search` sweeps (see Phase A).
+- **Read the operating doc deterministically**: `manage_domain`
+  `action=get_record` `domain_id=37` `record_id=1155`.
+- If evidence is still degraded after compensating queries, say exactly what
+  is missing in the evidence-health report AND in the brief (`coverage
+  incomplete for <source>`), and avoid overconfident recommendations. Posting
+  consequences: see the **Team Digest Contract** DEGRADED-brief rules.
+
 ## Before Posting
 
 Re-check every item in the workset against these gates before posting; drop or
@@ -305,16 +551,31 @@ fix any that fail:
    closed — never listed as active work. Exception: an alert-linked ticket
    whose fix is merely merged (not deploy-verified) is NOT cleanup — it stays
    active as `prod_pending` per the **Deploy-State Ladder**.
-2. **Owner gate:** every PR is owned by its GitHub author with a "merge or close"
-   nudge and no other name attached. Every issue owner is the GitHub assignee, or
-   the area fallback only if unassigned. No customer-generation issue is
-   pre-assigned.
+2. **Owner gate:** every PR shows its GitHub assignee when set, else its human
+   author, with an evidence-based next action (fix the named failing check /
+   merge when green / close when obsolete) and no reviewer or coordination
+   owner attached. Every issue owner is the GitHub assignee, or the work-class
+   routing only if unassigned. No customer-generation issue is pre-assigned.
 3. **Dedup gate:** no two items describe the same underlying problem under
    different issue numbers.
 4. **Deploy-state gate:** no expected-noise re-fire (Ladder case 2, including
    a within-settle deploy drain) re-pings an owner or appears as new work;
    every reopened ticket (Ladder case 3) names the builder and the failed fix
    without reassigning the issue.
+5. **Coverage gate:** every Phase A source was swept and counts reconcile
+   (`returned` = `total_matching`, GitHub counts covered); every teammate —
+   Reda, Axel, JB — has a section; no truncation marker was left unresolved.
+6. **Continuity gate:** every item that appeared in the last posted brief but
+   not in this one has an explicit stated reason for leaving.
+7. **Rebalancing gate:** every empty or fully-blocked teammate section carries
+   either a concrete evidence-cited move recommendation or `no rebalancing
+   available because <reason>` naming the candidate pool and the disqualifying
+   ownership evidence. No `assignee` (tracker or GitHub) was mutated.
+8. **Promotion gate:** every open `staging -> main` PR has an explicit
+   include/exclude decision recorded this run, naming its required checks and
+   linked blockers as checked. Unknown health = degraded evidence; exclusion
+   requires all required checks green, no linked `Blocked` record, and no
+   pending human promotion request.
 
 ## Public Output
 
@@ -340,10 +601,7 @@ Slack or team-facing summaries must be safe for teammates:
   "stuck", "don't stack", or "bandwidth holds".
 - For AI-written GitHub comments, begin with:
   `> *This was generated by AI during triage.*`
-- Call an internal tracker record a *tracker record* (with its record id),
-  never a *GitHub issue* or *PR*. Only say a GitHub issue or PR was opened when
-  `create_github_issue` (or an actual PR) succeeded and you can cite its number
-  and URL.
+- Call an internal tracker record a *tracker record* (with its record id), never a *GitHub issue* or *PR*. Only say a GitHub issue or PR was opened when `create_github_issue` (or an actual PR) succeeded and you can cite its number and URL.
 
 ## Slack Formatting
 
@@ -359,6 +617,9 @@ brittle:
 - Verify links from GitHub URLs, Domain record URL fields, or other live tool
   evidence. If a tracker record has no verified URL, write `tracker record
   1140` instead of fabricating a link.
+- Group the priority workset by verified owner mention or plain name, one owner
+  section per teammate per the **Team Digest Contract**. Within each owner
+  section, list tickets/issues first, then PRs/review/merge items.
 - Keep one work item per bullet where possible: owner or verified mention,
   linked item, state or blocker, and next action.
 - The Slack post should still ship if an optional link or mention cannot be
@@ -368,4 +629,6 @@ brittle:
 
 Triage is done when every item in scope has a state, owner or explicit reason
 for no owner, next action, dependency check, and enough evidence for another
-agent or teammate to continue without re-discovering the same facts.
+agent or teammate to continue without re-discovering the same facts. A digest
+run is additionally done only when the three-section brief passed every
+**Before Posting** gate and the snapshot record was updated.

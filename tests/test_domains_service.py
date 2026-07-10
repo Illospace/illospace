@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
 import re
 
 import pytest
@@ -601,3 +603,189 @@ async def test_relations_validate_object_types(session):
             source_record_id=hook.id,
             target_record_id=trial.id,
         )
+
+
+async def test_serialize_record_compact_projects_fields_in_caller_order_and_trims(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="Compact Records",
+        objects=[
+            {
+                "key": "ticket",
+                "title_field": "title",
+                "fields": [
+                    {"key": "title", "field_type": "text", "required": True},
+                    {"key": "status", "field_type": "text"},
+                    {"key": "details", "field_type": "long_text"},
+                    {"key": "metadata", "field_type": "json"},
+                ],
+            }
+        ],
+    )
+    metadata = {"notes": "m" * 250}
+    record = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "ticket",
+        data={
+            "title": "Compact me",
+            "status": "open",
+            "details": "d" * 250,
+            "metadata": metadata,
+        },
+    )
+
+    compact = await service.serialize_record_compact(
+        record,
+        fields=["missing", "metadata", "details", "status"],
+    )
+
+    assert list(compact) == ["id", "object_key", "title", "version", "updated_at", "data"]
+    assert compact["object_key"] == "ticket"
+    assert list(compact["data"]) == ["metadata", "details", "status"]
+    assert compact["data"]["metadata"] == f"{json.dumps(metadata, default=str)[:200]}…"
+    assert compact["data"]["details"] == f"{'d' * 200}…"
+    assert compact["data"]["status"] == "open"
+    assert "archived_at" not in compact
+    assert (await service.serialize_record_compact(record, fields=[]))["data"] == {}
+
+
+async def test_serialize_record_compact_defaults_to_short_scalars(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="Compact Defaults",
+        objects=[
+            {
+                "key": "item",
+                "title_field": "short_text",
+                "fields": [
+                    {"key": "short_text", "field_type": "text", "required": True},
+                    {"key": "boundary_text", "field_type": "long_text"},
+                    {"key": "long_text", "field_type": "long_text"},
+                    {"key": "count", "field_type": "number"},
+                    {"key": "ratio", "field_type": "number"},
+                    {"key": "enabled", "field_type": "boolean"},
+                    {"key": "nothing", "field_type": "text"},
+                    {"key": "metadata", "field_type": "json"},
+                ],
+            }
+        ],
+    )
+    record = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "item",
+        data={
+            "short_text": "short",
+            "boundary_text": "b" * 120,
+            "long_text": "l" * 121,
+            "count": 7,
+            "ratio": 1.5,
+            "enabled": True,
+            "metadata": ["nested"],
+        },
+    )
+
+    compact = await service.serialize_record_compact(record)
+
+    assert compact["data"] == {
+        "short_text": "short",
+        "boundary_text": "b" * 120,
+        "count": 7,
+        "ratio": 1.5,
+        "enabled": True,
+        "nothing": None,
+    }
+
+
+async def test_list_records_supports_oldest_first_order_and_rejects_invalid_order(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="Ordered Records",
+        objects=[
+            {
+                "key": "item",
+                "title_field": "title",
+                "fields": [{"key": "title", "field_type": "text", "required": True}],
+            }
+        ],
+    )
+    newest = await service.create_record(ORG_ID, domain.id, "item", data={"title": "Newest"})
+    oldest = await service.create_record(ORG_ID, domain.id, "item", data={"title": "Oldest"})
+    middle = await service.create_record(ORG_ID, domain.id, "item", data={"title": "Middle"})
+    oldest.updated_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    middle.updated_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    newest.updated_at = datetime(2024, 1, 3, tzinfo=timezone.utc)
+    await session.flush()
+
+    records = await service.list_records(ORG_ID, domain.id, order="updated_asc")
+
+    assert [record.id for record in records] == [oldest.id, middle.id, newest.id]
+    with pytest.raises(DomainError, match="updated_desc.*updated_asc"):
+        await service.list_records(ORG_ID, domain.id, order="oldest_first")
+
+
+async def test_count_records_matches_list_scope_without_limit_or_order(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="Counted Records",
+        objects=[
+            {
+                "key": "ticket",
+                "title_field": "title",
+                "fields": [{"key": "title", "field_type": "text", "required": True}],
+            },
+            {
+                "key": "note",
+                "title_field": "title",
+                "fields": [{"key": "title", "field_type": "text", "required": True}],
+            },
+        ],
+    )
+    await service.create_record(ORG_ID, domain.id, "ticket", data={"title": "Alpha ticket"})
+    await service.create_record(ORG_ID, domain.id, "ticket", data={"title": "Beta ticket"})
+    await service.create_record(ORG_ID, domain.id, "note", data={"title": "Alpha note"})
+    archived = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "ticket",
+        data={"title": "Alpha archived"},
+    )
+    await service.remove_record(ORG_ID, domain.id, archived.id, mode="archive")
+
+    records = await service.list_records(ORG_ID, domain.id)
+    assert await service.count_records(ORG_ID, domain.id) == len(records) == 3
+    ticket_records = await service.list_records(ORG_ID, domain.id, object_key="ticket")
+    assert await service.count_records(ORG_ID, domain.id, object_key="ticket") == len(ticket_records) == 2
+    alpha_tickets = await service.list_records(
+        ORG_ID,
+        domain.id,
+        object_key="ticket",
+        search=" alpha ",
+    )
+    assert await service.count_records(
+        ORG_ID,
+        domain.id,
+        object_key="ticket",
+        search=" alpha ",
+    ) == len(alpha_tickets) == 1
+    all_alpha_tickets = await service.list_records(
+        ORG_ID,
+        domain.id,
+        object_key="ticket",
+        search="alpha",
+        include_archived=True,
+    )
+    assert await service.count_records(
+        ORG_ID,
+        domain.id,
+        object_key="ticket",
+        search="alpha",
+        include_archived=True,
+    ) == len(all_alpha_tickets) == 2
+    assert len(await service.list_records(ORG_ID, domain.id, limit=1)) == 1
+    assert await service.count_records(ORG_ID, domain.id) == 3

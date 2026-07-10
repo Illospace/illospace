@@ -351,7 +351,12 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "reversibility": "variable",
         "action_manifest": True,
         "expected_effect": "read or mutate org-wide domain schema and records",
-        "output_budget_chars": 14_000,
+        # Must carry get_record reads of doc_page operating documents (the
+        # coordinator playbook, record 1155, is ~37K chars JSON-wrapped and was
+        # middle-truncated at lower budgets). Listings are protected separately
+        # by format="compact" + returned/total_matching counts; an overflow here
+        # is loud (degraded-evidence note) rather than silent.
+        "output_budget_chars": 40_000,
     },
     "manage_inbound": {
         "permission": "manage_inbound",

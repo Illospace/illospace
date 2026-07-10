@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
+import json
 import re
 from typing import Any, Iterable, Sequence
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.domain import (
@@ -457,27 +458,76 @@ class AsyncDomainService:
         filters: Mapping[str, Any] | None = None,
         include_archived: bool = False,
         limit: int = 100,
+        order: str = "updated_desc",
     ) -> Sequence[DomainRecord]:
-        domain = await self.get_domain(org_id, domain_id)
-        stmt = select(DomainRecord).where(
-            DomainRecord.org_id == org_id,
-            DomainRecord.domain_id == domain.id,
+        if order not in {"updated_desc", "updated_asc"}:
+            raise DomainError("order must be 'updated_desc' or 'updated_asc'")
+        where_clauses = await self._record_where_clauses(
+            org_id,
+            domain_id,
+            object_key=object_key,
+            search=search,
+            include_archived=include_archived,
         )
-        if object_key:
-            obj = await self.get_object_type(domain.id, object_key)
-            stmt = stmt.where(DomainRecord.object_type_id == obj.id)
-        if not include_archived:
-            stmt = stmt.where(DomainRecord.archived_at.is_(None))
-        if search and search.strip():
-            stmt = stmt.where(DomainRecord.search_text.ilike(f"%{search.strip()}%"))
+        stmt = select(DomainRecord).where(*where_clauses)
         max_results = max(1, min(int(limit), 500))
-        stmt = stmt.order_by(DomainRecord.updated_at.desc(), DomainRecord.id.desc()).limit(
-            500 if filters else max_results
-        )
+        if order == "updated_asc":
+            stmt = stmt.order_by(DomainRecord.updated_at.asc(), DomainRecord.id.asc())
+        else:
+            stmt = stmt.order_by(DomainRecord.updated_at.desc(), DomainRecord.id.desc())
+        stmt = stmt.limit(500 if filters else max_results)
         records = (await self.session.scalars(stmt)).all()
         if filters:
             return [record for record in records if _record_matches_filters(record, filters)][:max_results]
         return records
+
+    async def count_records(
+        self,
+        org_id: str,
+        domain_id: int,
+        *,
+        object_key: str | None = None,
+        search: str | None = None,
+        include_archived: bool = False,
+        filters: Mapping[str, Any] | None = None,
+    ) -> int:
+        where_clauses = await self._record_where_clauses(
+            org_id,
+            domain_id,
+            object_key=object_key,
+            search=search,
+            include_archived=include_archived,
+        )
+        if filters:
+            records = (
+                await self.session.scalars(select(DomainRecord).where(*where_clauses))
+            ).all()
+            return sum(_record_matches_filters(record, filters) for record in records)
+        stmt = select(func.count()).select_from(DomainRecord).where(*where_clauses)
+        return int(await self.session.scalar(stmt) or 0)
+
+    async def _record_where_clauses(
+        self,
+        org_id: str,
+        domain_id: int,
+        *,
+        object_key: str | None,
+        search: str | None,
+        include_archived: bool,
+    ) -> list[Any]:
+        domain = await self.get_domain(org_id, domain_id)
+        where_clauses = [
+            DomainRecord.org_id == org_id,
+            DomainRecord.domain_id == domain.id,
+        ]
+        if object_key:
+            obj = await self.get_object_type(domain.id, object_key)
+            where_clauses.append(DomainRecord.object_type_id == obj.id)
+        if not include_archived:
+            where_clauses.append(DomainRecord.archived_at.is_(None))
+        if search and search.strip():
+            where_clauses.append(DomainRecord.search_text.ilike(f"%{search.strip()}%"))
+        return where_clauses
 
     async def get_record(self, org_id: str, domain_id: int, record_id: int) -> DomainRecord:
         await self.get_domain(org_id, domain_id)
@@ -1065,6 +1115,46 @@ class AsyncDomainService:
             "created_at": record.created_at,
             "updated_at": record.updated_at,
         }
+
+    async def serialize_record_compact(
+        self,
+        record: DomainRecord,
+        *,
+        fields: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        obj = await self.session.get(DomainObjectType, record.object_type_id)
+        data = record.data if isinstance(record.data, dict) else {}
+        if fields is None:
+            projected_data = {
+                key: value
+                for key, value in data.items()
+                if value is None
+                or isinstance(value, bool | int | float)
+                or isinstance(value, str) and len(value) <= 120
+            }
+        else:
+            projected_data = {}
+            for key in fields:
+                if key not in data:
+                    continue
+                value = data[key]
+                if isinstance(value, dict | list):
+                    value = json.dumps(value, default=str)
+                if isinstance(value, str) and len(value) > 200:
+                    value = f"{value[:200]}…"
+                projected_data[key] = value
+
+        payload = {
+            "id": record.id,
+            "object_key": obj.key if obj else None,
+            "title": record.title,
+            "version": record.version,
+            "updated_at": record.updated_at,
+        }
+        if record.archived_at is not None:
+            payload["archived_at"] = record.archived_at
+        payload["data"] = projected_data
+        return payload
 
     async def serialize_relation(self, relation: DomainRelation) -> dict[str, Any]:
         relation_type = await self.session.get(DomainRelationType, relation.relation_type_id)

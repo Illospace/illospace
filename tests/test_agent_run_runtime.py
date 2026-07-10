@@ -3743,3 +3743,89 @@ async def test_runner_carries_same_run_discussion_attachments_into_timeline_fina
     assert payload == {"ok": True}
     assert isinstance(captured_command, TerminalRunSettlementCommand)
     assert captured_command.attachments == [attachment]
+
+
+def _cycle_run_message_with_prompt(prompt: str) -> str:
+    from brain.platform.db.models.cycle import Cycle, CycleRun
+    from brain.platform.db.models.idea import Idea
+    from brain.systems.cycles.prompts import cycle_run_message
+
+    idea = Idea()
+    idea.id = "idea-mission"
+    idea.title = "Mission Budget"
+
+    cycle = Cycle()
+    cycle.id = 9
+    cycle.user_id = "user-1"
+    cycle.org_id = "org-1"
+    cycle.name = "Mission Budget"
+    cycle.prompt = prompt
+    cycle.model_override = None
+    cycle.thinking_override = None
+
+    run = CycleRun()
+    run.id = 21
+    run.cycle_id = 9
+    run.scheduled_for = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+    run.guidance_snapshot = []
+    run.output_targets_snapshot = []
+    run.context_snapshot = {}
+
+    return cycle_run_message(idea, cycle, run)
+
+
+def test_cycle_run_message_carries_full_mission_past_legacy_2000_cap():
+    prompt = "z" * 8_000
+
+    message = _cycle_run_message_with_prompt(prompt)
+
+    assert prompt in message
+    assert "[Cycle mission truncated for launch" not in message
+
+
+def test_cycle_run_message_truncates_oversized_mission_loudly():
+    from brain.systems.cycles.prompts import _MISSION_SEED_MAX_CHARS
+
+    prompt = "z" * (_MISSION_SEED_MAX_CHARS + 500)
+
+    message = _cycle_run_message_with_prompt(prompt)
+
+    assert "z" * _MISSION_SEED_MAX_CHARS in message
+    assert prompt not in message
+    assert "[Cycle mission truncated for launch: 500 chars omitted." in message
+
+
+def test_truncate_tool_result_text_appends_degraded_evidence_note(monkeypatch):
+    from brain.systems.runs.direct_loop import tool_execution
+
+    monkeypatch.setattr(tool_execution, "output_budget_chars_for_tool", lambda name: 2_000)
+
+    result = tool_execution.truncate_tool_result_text("manage_domain", "x" * 5_000)
+
+    assert len(result) <= 2_000
+    assert "[System: output exceeded this tool's visible budget" in result
+    assert result.endswith("or pagination.]")
+    assert "of 5000 chars shown" in result
+    assert "chars truncated by tool output budget" in result
+
+
+def test_truncate_tool_result_text_under_budget_is_unchanged(monkeypatch):
+    from brain.systems.runs.direct_loop import tool_execution
+
+    monkeypatch.setattr(tool_execution, "output_budget_chars_for_tool", lambda name: 2_000)
+
+    text = "x" * 1_999
+
+    assert tool_execution.truncate_tool_result_text("manage_domain", text) == text
+
+
+def test_truncate_tool_result_text_tiny_budget_skips_note(monkeypatch):
+    from brain.systems.runs.direct_loop import tool_execution
+
+    monkeypatch.setattr(tool_execution, "output_budget_chars_for_tool", lambda name: 250)
+
+    result = tool_execution.truncate_tool_result_text("manage_domain", "x" * 5_000)
+
+    assert len(result) <= 250
+    assert "[System:" not in result
+    assert "chars truncated by tool output budget" in result

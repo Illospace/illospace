@@ -14,6 +14,7 @@ from brain.systems.cycles.contracts import (
 )
 
 CYCLE_LAUNCH_ENVELOPE_VERSION = 1
+_MISSION_SEED_MAX_CHARS = 12_000
 
 
 def cycle_launch_envelope(cycle: Cycle, run: CycleRun) -> dict:
@@ -101,7 +102,18 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         "## Cycle Memory\n"
         f"{_json_block(cycle_memory_payload(run))}\n\n"
         "## Cycle Mission\n"
-        f"{cycle.prompt[:2000]}"
+        f"{_mission_block(cycle.prompt)}"
+    )
+
+
+def _mission_block(prompt: str) -> str:
+    if len(prompt) <= _MISSION_SEED_MAX_CHARS:
+        return prompt
+    omitted = len(prompt) - _MISSION_SEED_MAX_CHARS
+    return (
+        f"{prompt[:_MISSION_SEED_MAX_CHARS]}\n\n"
+        f"[Cycle mission truncated for launch: {omitted} chars omitted. The full mission remains "
+        "authoritative - read it with manage_cycle before deviating from it.]"
     )
 
 
