@@ -50,6 +50,11 @@ x-illo-env: &illo-env
   ILLO_UNCLAIMED_POOL_USER_ID: ${ILLO_UNCLAIMED_POOL_USER_ID:-}
   ILLO_GITHUB_WEBHOOK_SECRET: ${ILLO_GITHUB_WEBHOOK_SECRET:-}
   ILLO_GITHUB_CONNECTION_ID: ${ILLO_GITHUB_CONNECTION_ID:-}
+  # Slice 5 deploy-state: watched repos arm the promotion sweep, ladder
+  # fields, and check_fix_deploy_state tool. Empty default = feature off.
+  ILLO_DEPLOY_SWEEP_REPOS: ${ILLO_DEPLOY_SWEEP_REPOS:-}
+  ILLO_DEPLOY_SETTLE_MINUTES: ${ILLO_DEPLOY_SETTLE_MINUTES:-}
+  ILLO_DEPLOY_QUIET_HOURS: ${ILLO_DEPLOY_QUIET_HOURS:-}
 
 x-backend-service: &backend-service
   image: ${ILLO_API_IMAGE:-ghcr.io/illospace/api:latest}
