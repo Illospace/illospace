@@ -165,6 +165,264 @@ async def test_list_records_filters_by_data_fields_and_record_metadata(session):
     assert [record.id for record in records] == [reda.id]
 
 
+async def _create_pr_tracker(service: AsyncDomainService) -> Domain:
+    return await service.create_domain(
+        ORG_ID,
+        name="GitHub Pull Request Tracker",
+        objects=[
+            {
+                "key": "pull_request",
+                "name": "Pull Request",
+                "title_field": "title",
+                "fields": [
+                    {"key": "title", "field_type": "text", "required": True},
+                    {"key": "repo", "field_type": "text", "required": True},
+                    {"key": "pr_number", "field_type": "number", "required": True},
+                    {"key": "pr_url", "field_type": "url"},
+                    {
+                        "key": "status",
+                        "field_type": "enum",
+                        "options": ["open", "in_review", "merged"],
+                    },
+                    {"key": "sync_source", "field_type": "text"},
+                    {"key": "reviewer", "field_type": "text"},
+                ],
+            }
+        ],
+    )
+
+
+async def _insert_legacy_pr_record(
+    session,
+    service: AsyncDomainService,
+    domain: Domain,
+    *,
+    title: str,
+    repo: str,
+    pr_number: int,
+    **data,
+) -> DomainRecord:
+    obj = await service.get_object_type(domain.id, "pull_request")
+    fields = await service.list_fields(obj.id)
+    normalized = service.validate_record_data(
+        fields,
+        {"title": title, "repo": repo, "pr_number": pr_number, **data},
+    )
+    record = DomainRecord(
+        org_id=ORG_ID,
+        domain_id=domain.id,
+        object_type_id=obj.id,
+        title=title,
+        data=normalized,
+        search_text=title.lower(),
+    )
+    session.add(record)
+    await session.flush()
+    await session.refresh(record)
+    return record
+
+
+async def test_pr_tracker_create_record_upserts_repo_and_pr_number(session):
+    service = AsyncDomainService(session)
+    domain = await _create_pr_tracker(service)
+
+    created = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "pull_request",
+        data={
+            "title": "Fix coordinator writes",
+            "repo": "Illospace/illospace",
+            "pr_number": 84,
+            "status": "open",
+            "sync_source": "mission-control",
+        },
+    )
+    observed_again = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "pull_request",
+        data={
+            "title": "Fix coordinator writes",
+            "repo": "Illospace/illospace",
+            "pr_number": 84,
+            "status": "in_review",
+            "sync_source": "mission-control",
+        },
+    )
+
+    records = await service.list_records(
+        ORG_ID,
+        domain.id,
+        object_key="pull_request",
+    )
+    assert [record.id for record in records] == [created.id]
+    assert observed_again.id == created.id
+    assert observed_again.version == 2
+    assert observed_again.data["status"] == "in_review"
+
+
+async def test_pr_tracker_upsert_normalizes_two_evidence_sources(session):
+    service = AsyncDomainService(session)
+    domain = await _create_pr_tracker(service)
+
+    from_sync = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "pull_request",
+        data={
+            "title": "Fix coordinator writes",
+            "repo": "https://github.com/Illospace/illospace.git",
+            "pr_number": "84",
+            "pr_url": "https://github.com/Illospace/illospace/pull/84",
+            "status": "open",
+            "sync_source": "mission-control",
+        },
+    )
+    from_live_github = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "pull_request",
+        data={
+            "title": "Fix coordinator writes",
+            "repo": "illospace/illospace",
+            "pr_number": 84,
+            "pr_url": "https://github.com/illospace/illospace/pull/84",
+            "status": "in_review",
+            "sync_source": "live-github",
+        },
+    )
+
+    records = await service.list_records(
+        ORG_ID,
+        domain.id,
+        object_key="pull_request",
+    )
+    assert len(records) == 1
+    assert from_live_github.id == from_sync.id
+    assert records[0].data["sync_source"] == "live-github"
+
+
+async def test_pr_tracker_write_merges_legacy_duplicates_into_lowest_id(session):
+    service = AsyncDomainService(session)
+    domain = await _create_pr_tracker(service)
+    canonical = await _insert_legacy_pr_record(
+        session,
+        service,
+        domain,
+        title="Fix coordinator writes",
+        repo="Illospace/illospace",
+        pr_number=84,
+        status="open",
+        sync_source="mission-control",
+    )
+    duplicate = await _insert_legacy_pr_record(
+        session,
+        service,
+        domain,
+        title="PR #84",
+        repo="illospace/illospace",
+        pr_number=84,
+        status="in_review",
+        sync_source="live-github",
+        reviewer="Reda",
+    )
+
+    merged = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "pull_request",
+        data={
+            "title": "Fix coordinator writes",
+            "repo": "Illospace/illospace",
+            "pr_number": 84,
+            "status": "merged",
+            "sync_source": "github-event",
+        },
+    )
+
+    active = await service.list_records(
+        ORG_ID,
+        domain.id,
+        object_key="pull_request",
+    )
+    assert [record.id for record in active] == [canonical.id]
+    assert merged.id == canonical.id < duplicate.id
+    assert merged.data["status"] == "merged"
+    assert merged.data["reviewer"] == "Reda"
+    assert (await session.get(DomainRecord, duplicate.id)).archived_at is not None
+
+
+async def test_legacy_pr_duplicates_can_still_be_archived_explicitly(session):
+    service = AsyncDomainService(session)
+    domain = await _create_pr_tracker(service)
+    canonical = await _insert_legacy_pr_record(
+        session,
+        service,
+        domain,
+        title="Fix coordinator writes",
+        repo="Illospace/illospace",
+        pr_number=84,
+    )
+    duplicate = await _insert_legacy_pr_record(
+        session,
+        service,
+        domain,
+        title="PR #84",
+        repo="Illospace/illospace",
+        pr_number=84,
+    )
+
+    repair = await service.remove_record(
+        ORG_ID,
+        domain.id,
+        duplicate.id,
+        mode="archive",
+        reason="Legacy duplicate repair",
+    )
+
+    active = await service.list_records(
+        ORG_ID,
+        domain.id,
+        object_key="pull_request",
+    )
+    assert repair["archived"] is True
+    assert [record.id for record in active] == [canonical.id]
+
+
+async def test_pr_tracker_distinct_pr_numbers_create_distinct_records(session):
+    service = AsyncDomainService(session)
+    domain = await _create_pr_tracker(service)
+
+    first = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "pull_request",
+        data={
+            "title": "Fix coordinator writes",
+            "repo": "Illospace/illospace",
+            "pr_number": 84,
+        },
+    )
+    second = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "pull_request",
+        data={
+            "title": "Keep archive repair",
+            "repo": "Illospace/illospace",
+            "pr_number": 85,
+        },
+    )
+
+    records = await service.list_records(
+        ORG_ID,
+        domain.id,
+        object_key="pull_request",
+    )
+    assert {record.id for record in records} == {first.id, second.id}
+
+
 async def test_domain_events_drop_non_uuid_idea_ids(session):
     service = AsyncDomainService(session)
     domain = await service.create_domain(
