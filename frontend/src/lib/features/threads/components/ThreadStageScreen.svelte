@@ -53,7 +53,6 @@
     type ThreadStageRightDockTab,
     type ThreadStageRightDockTabKind,
   } from '$lib/features/threads/controllers/threadSidePanelController';
-  import { threadStreamController } from '$lib/features/threads/controllers/threadStreamController';
   import { threadUrl } from '$lib/features/threads/domain/threadLinks';
   import {
     findSlashCommandToken,
@@ -67,6 +66,7 @@
     scrollConversationToBottom,
     shouldShowConversationScrollCue,
   } from '$lib/components/chat/conversationScroll';
+  import { buildThreadStreamWindow, type ThreadStreamWindowCursor } from '$lib/utils/threadStreamOrdering';
   import { onDestroy, onMount, tick } from 'svelte';
 
   import type SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
@@ -153,6 +153,7 @@
   let transcriptEl: HTMLDivElement | undefined = $state();
   let threadDragOver = $state(false);
   let userScrolledUp = $state(false);
+  let threadStreamWindowState = $state<{ ideaId: string; cursor: ThreadStreamWindowCursor } | null>(null);
   let programmaticScroll = false;
   let showTranscriptScrollCue = $state(false);
   let transcriptScrollFrame: number | null = null;
@@ -791,16 +792,25 @@
     if (state.valid) projectContextError = '';
   }
 
+  const threadStreamWindow = $derived.by(() =>
+    buildThreadStreamWindow(
+      visibleStreamItems,
+      String(idea?.id ?? '') === threadStreamWindowState?.ideaId
+        ? threadStreamWindowState.cursor
+        : null,
+    ),
+  );
+
   const transcriptItems = $derived.by((): CortexThreadStageTranscriptItem[] =>
     buildThreadTranscriptItems({
       idea,
-      stream: cortex.stream,
+      stream: threadStreamWindow.items,
       themeMode: theme.mode === 'light' ? 'light' : 'dark',
       runInfo,
       latestRun,
       currentUser: auth.user,
-      onApproveRun: (runId) => void threadStreamController.approveRun(runId),
-      onDenyRun: (runId) => void threadStreamController.denyRun(runId),
+      onApproveRun: (runId) => void cortex.approveRun(runId),
+      onDenyRun: (runId) => void cortex.denyRun(runId),
     }),
   );
 
@@ -828,7 +838,7 @@
   }
 
   function keepTranscriptPinnedToBottom() {
-    if (!transcriptEl || userScrolledUp) {
+    if (!transcriptEl || userScrolledUp || programmaticScroll) {
       syncTranscriptScrollCue();
       return;
     }
@@ -852,6 +862,34 @@
     showTranscriptScrollCue = shouldShowConversationScrollCue(transcriptEl);
   }
 
+  async function showEarlierHistory() {
+    const cursor = threadStreamWindow.previousCursor;
+    const element = transcriptEl;
+    const threadId = idea?.id == null ? null : String(idea.id);
+    if (programmaticScroll || !cursor || !element || !threadId) return;
+    const previousScrollTop = element.scrollTop;
+    const previousScrollHeight = element.scrollHeight;
+    programmaticScroll = true;
+    userScrolledUp = true;
+    if (transcriptScrollFrame !== null) {
+      cancelAnimationFrame(transcriptScrollFrame);
+      transcriptScrollFrame = null;
+    }
+    threadStreamWindowState = { ideaId: threadId, cursor };
+
+    try {
+      await tick();
+      if (String(idea?.id ?? '') !== threadId || transcriptEl !== element) return;
+      element.scrollTop = Math.max(0, previousScrollTop + element.scrollHeight - previousScrollHeight);
+    } finally {
+      programmaticScroll = false;
+      if (String(idea?.id ?? '') === threadId && transcriptEl === element) {
+        userScrolledUp = !conversationIsNearBottom(element, CONVERSATION_SCROLL_BOTTOM_THRESHOLD);
+        syncTranscriptScrollCue();
+      }
+    }
+  }
+
   async function send() {
     const text = inputValue.trim();
     if ((!text && pendingAttachments.length === 0) || sending) return;
@@ -872,7 +910,7 @@
     const queueAfterTarget = fastSteerTarget && activeRunMessageIntent === 'queue';
     pendingAttachments = [];
     try {
-      await threadStreamController.sendReply(text || '(attachment)', attachments, {
+      await cortex.sendMessage(text || '(attachment)', attachments, {
         executionProfile: cortex.executionProfile,
         skipRun: Boolean(fastSteerTarget && !queueAfterTarget),
         metadata: fastSteerTarget
@@ -1280,6 +1318,9 @@
   $effect(() => {
     const currentIdeaId = idea?.id ?? null;
     if (currentIdeaId !== lastSelectedIdeaId) {
+      if (currentIdeaId && String(currentIdeaId) !== threadStreamWindowState?.ideaId) {
+        threadStreamWindowState = null;
+      }
       pendingInitialScrollIdeaId = currentIdeaId;
       lastSelectedIdeaId = currentIdeaId;
       pendingAttachments = [];
@@ -1463,7 +1504,7 @@
         secondaryIntentAriaLabel="Message intent"
         onSecondaryIntentChange={setActiveRunMessageIntent}
         onSubmit={() => (isVoiceRecording ? void voiceDictation?.send() : void send())}
-        onStop={() => void threadStreamController.cancelAll()}
+        onStop={() => void cortex.cancelAll()}
         onAttach={() => fileInputEl?.click()}
         onRemoveAttachment={removeAttachment}
         onDrop={handleDrop}
@@ -1698,6 +1739,7 @@
             replyDock={replyDock}
             onTranscriptScroll={handleScrollEvent}
             onScrollToBottom={() => scrollToBottom(true)}
+            onShowEarlierHistory={threadStreamWindow.previousCursor ? showEarlierHistory : undefined}
             onPreviewAttachment={openPreviewTab}
             onTranscriptReady={(element) => {
               transcriptEl = element;

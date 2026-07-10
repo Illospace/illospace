@@ -250,6 +250,7 @@ export interface ThreadTranscriptProps {
   onTranscriptScroll?: (event: Event) => void;
   onTranscriptReady?: (element: HTMLDivElement | undefined) => void;
   onScrollToBottom?: () => void;
+  onShowEarlierHistory?: () => void;
   onPreviewAttachment?: (attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment) => void;
 }
 
