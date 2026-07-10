@@ -1,5 +1,10 @@
 # Slice 5 activation artifact — live doc 1155 delta
 
+> **APPLIED 2026-07-10 16:37 UTC as doc 1155 v6.** The digest-contract session
+> wrote v6 from the post-merge bundled SKILL.md, which already contained every
+> edit below (verified byte-identical modulo trailing whitespace). Do NOT
+> re-apply. This file stays as the record of what changed and why.
+
 The runtime source of truth for triage prose is Enterprise Documentation
 (Domain 37) record **1155**, slug `uwear-engineering-triage`. The bundled
 [SKILL.md](../../../brain/systems/skills/builtin_skill_bundles/uwear-engineering-triage/SKILL.md)
