@@ -119,7 +119,17 @@ def test_invalid_modal_keeps_workspace_bootstrap_preload():
     assert "/api/cortex/bootstrap?include=core%2Cworkspace" in paths
 
 
-def test_direct_thread_keeps_direct_bootstrap_even_with_valid_modal():
-    paths = _preloaded_paths("https://illo.test/cortex?modal=cycles&idea=idea-1")
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://illo.test/cortex?modal=cycles&idea=idea-1",
+        "https://illo.test/threads/idea-1",
+    ],
+)
+def test_direct_thread_preloads_only_auth_and_direct_bootstrap(url: str):
+    paths = _preloaded_paths(url)
 
-    assert "/api/cortex/bootstrap?include=selected_idea%2Cdirect_thread&idea_id=idea-1" in paths
+    assert paths == [
+        "/api/me",
+        "/api/cortex/bootstrap?include=selected_idea%2Cdirect_thread&idea_id=idea-1",
+    ]
