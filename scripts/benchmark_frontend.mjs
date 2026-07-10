@@ -45,6 +45,36 @@ const WORKSPACE_READY_EXPRESSION = `(() => {
   );
 })()`;
 
+const THREAD_READY_EXPRESSION = `(() => {
+  const body = document.body?.textContent || '';
+  return Boolean(
+    document.querySelector('.thread-stage-shell .workspace-stage-shell.ready') &&
+    document.querySelector('[data-cortex-thread-column="main"]') &&
+    !body.includes('Loading thread...') &&
+    body.includes('Benchmark assistant reply')
+  );
+})()`;
+
+const VAULT_PANE_READY_EXPRESSION = `(() => Boolean(
+  document.querySelector('.cortex-thread-stage-right-dock[data-dock-state="vault"]') &&
+  document.querySelector('.right-dock-content[data-active-tab="vault"] .vault-list') &&
+  !document.querySelector('.right-dock-content[data-active-tab="vault"] .vault-row-skeleton')
+))()`;
+
+const VAULT_PANE_MOUNTED_EXPRESSION = `(() => Boolean(
+  document.querySelector('.cortex-thread-stage-right-dock[data-dock-state="vault"]') &&
+  document.querySelector('.right-dock-content[data-active-tab="vault"] .vault-constellation-frame') &&
+  !document.querySelector('.right-dock-content[data-active-tab="vault"] .thread-lazy-pane-state')
+))()`;
+
+const THREAD_STAGE_PREWARM_OBSERVATION_MS = 2200;
+const RARE_PANE_OPEN_BUDGET_MS = 250;
+const APP_ASSET_RESOURCE_TYPES = new Set(['Script', 'Stylesheet']);
+const VITE_CLIENT_MANIFEST_URL = new URL(
+  '../frontend/.svelte-kit/output/client/.vite/manifest.json',
+  import.meta.url,
+);
+
 const SCENARIOS = {
   workspace: {
     name: 'cortex-workspace',
@@ -54,15 +84,7 @@ const SCENARIOS = {
   thread: {
     name: 'cortex-thread-direct',
     path: '/cortex?idea=idea-1',
-    readyExpression: `(() => {
-      const body = document.body?.textContent || '';
-      return Boolean(
-        document.querySelector('.thread-stage-shell .workspace-stage-shell.ready') &&
-        document.querySelector('[data-cortex-thread-column="main"]') &&
-        !body.includes('Loading thread...') &&
-        body.includes('Benchmark assistant reply')
-      );
-    })()`,
+    readyExpression: THREAD_READY_EXPRESSION,
   },
   cycles: {
     name: 'cortex-modal-cycles',
@@ -207,14 +229,83 @@ function percentile(values, pct) {
 
 function summarizeNumbers(values) {
   if (!values.length) {
-    return { min: 0, p50: 0, avg: 0, p95: 0, max: 0 };
+    return { min: 0, p50: 0, p75: 0, avg: 0, p95: 0, max: 0 };
   }
   return {
     min: Math.min(...values),
     p50: percentile(values, 0.5),
+    p75: percentile(values, 0.75),
     avg: values.reduce((sum, value) => sum + value, 0) / values.length,
     p95: percentile(values, 0.95),
     max: Math.max(...values),
+  };
+}
+
+function manifestEntry(manifest, predicate, label) {
+  const matches = Object.entries(manifest).filter(([key, entry]) => predicate(key, entry));
+  if (matches.length !== 1) {
+    throw new Error(`Expected one ${label} entry in the Vite client manifest; found ${matches.length}`);
+  }
+  return matches[0][0];
+}
+
+function manifestAssetClosure(manifest, rootKey) {
+  const visited = new Set();
+  const assets = new Set();
+
+  function visit(key) {
+    if (visited.has(key)) return;
+    const entry = manifest[key];
+    if (!entry) throw new Error(`Vite client manifest is missing imported entry ${key}`);
+    visited.add(key);
+    if (entry.file) assets.add(`/${entry.file}`);
+    for (const css of entry.css ?? []) assets.add(`/${css}`);
+    for (const importedKey of entry.imports ?? []) visit(importedKey);
+  }
+
+  visit(rootKey);
+  return [...assets].sort();
+}
+
+function manifestEntryAssets(manifest, key) {
+  const entry = manifest[key];
+  return [entry.file ? `/${entry.file}` : null, ...(entry.css ?? []).map((css) => `/${css}`)]
+    .filter(Boolean)
+    .sort();
+}
+
+async function loadExpectedLazyAssetClosures() {
+  let manifest;
+  try {
+    manifest = JSON.parse(await readFile(VITE_CLIENT_MANIFEST_URL, 'utf8'));
+  } catch (error) {
+    throw new Error(
+      `The production Vite client manifest is required for lazy asset contracts. Run the frontend build first. ${error.message}`,
+    );
+  }
+
+  const threadStageKey = manifestEntry(
+    manifest,
+    (_key, entry) => entry.name === 'ThreadStageScreen' && entry.isDynamicEntry === true,
+    'ThreadStageScreen dynamic module',
+  );
+  const vaultKey = manifestEntry(
+    manifest,
+    (_key, entry) => entry.src === 'src/routes/vault/+page.svelte' && entry.isDynamicEntry === true,
+    'Vault page dynamic module',
+  );
+
+  return {
+    threadStage: {
+      moduleId: threadStageKey,
+      assets: manifestAssetClosure(manifest, threadStageKey),
+      entryAssets: manifestEntryAssets(manifest, threadStageKey),
+    },
+    vault: {
+      moduleId: vaultKey,
+      assets: manifestAssetClosure(manifest, vaultKey),
+      entryAssets: manifestEntryAssets(manifest, vaultKey),
+    },
   };
 }
 
@@ -716,6 +807,9 @@ function mockApiResponse(method, url, fixture) {
       sidecar: true,
     });
   }
+  if (pathName === '/api/cortex/notify' && methodUpper === 'POST') {
+    return jsonResponse(200, { ok: true }, { label: 'POST /api/cortex/notify', sidecar: true });
+  }
 
   if (pathName === '/api/cycles/') {
     return jsonResponse(200, [], { label: 'GET /api/cycles/' });
@@ -770,6 +864,44 @@ function mockApiResponse(method, url, fixture) {
   const unifiedStreamMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/unified-stream$/);
   if (unifiedStreamMatch) {
     return jsonResponse(200, fixture.streamItems, { label: 'GET /api/cortex/ideas/{idea_id}/unified-stream' });
+  }
+  const threadMessageMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/thread$/);
+  if (threadMessageMatch && methodUpper === 'POST') {
+    return jsonResponse(200, {
+      id: 'benchmark-composer-message',
+      idea_id: threadMessageMatch[1],
+      role: 'user',
+      content: 'Benchmark direct-thread composer contract',
+      attachments: [],
+      metadata: {},
+      created_at: new Date().toISOString(),
+    }, { label: 'POST /api/cortex/ideas/{idea_id}/thread' });
+  }
+  const ideaStatusMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/status$/);
+  if (ideaStatusMatch && methodUpper === 'PATCH') {
+    return jsonResponse(200, {
+      ...(fixture.ideas.find((idea) => idea.id === ideaStatusMatch[1]) ?? fixture.ideas[0]),
+      status: 'queued',
+    }, { label: 'PATCH /api/cortex/ideas/{idea_id}/status', sidecar: true });
+  }
+  const discussionMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/discussion$/);
+  if (discussionMatch && methodUpper === 'GET') {
+    return jsonResponse(200, [], { label: 'GET /api/cortex/ideas/{idea_id}/discussion', sidecar: true });
+  }
+  const handoffSummaryMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/handoff-summary$/);
+  if (handoffSummaryMatch && methodUpper === 'GET') {
+    return jsonResponse(200, { found: false }, {
+      label: 'GET /api/cortex/ideas/{idea_id}/handoff-summary',
+      sidecar: true,
+    });
+  }
+  const activityTimelineMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/activity-timeline$/);
+  if (activityTimelineMatch) {
+    return jsonResponse(200, [], { label: 'GET /api/cortex/ideas/{idea_id}/activity-timeline', sidecar: true });
+  }
+  const runHistoryMatch = pathName.match(/^\/api\/cortex\/run\/history\/([^/]+)$/);
+  if (runHistoryMatch) {
+    return jsonResponse(200, [], { label: 'GET /api/cortex/run/history/{idea_id}', sidecar: true });
   }
   const browserSessionMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/browser\/session$/);
   if (browserSessionMatch && methodUpper === 'GET') {
@@ -830,6 +962,12 @@ function mockApiResponse(method, url, fixture) {
   }
   if (pathName === '/api/notifications') {
     return jsonResponse(200, [], { label: `GET /api/notifications${url.search}`, sidecar: true });
+  }
+  if (pathName === '/api/notifications/preferences') {
+    return jsonResponse(200, {
+      sound_enabled: true,
+      message_notifications_enabled: true,
+    }, { label: 'GET /api/notifications/preferences', sidecar: true });
   }
 
   if (pathName === '/api/chat/bootstrap') {
@@ -1162,9 +1300,371 @@ function assertRequestContract(condition, scenario, expectation, calls) {
   );
 }
 
-async function runScenario(client, scenarioKey, fixture, options, measured) {
+function isAppAssetRequest(params, baseUrl) {
+  if (!APP_ASSET_RESOURCE_TYPES.has(params.type)) return false;
+  try {
+    return new URL(params.request.url).origin === new URL(baseUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+function assetUrlSet(requests) {
+  return new Set(requests.map((request) => request.url));
+}
+
+function assetPathSet(requests) {
+  return new Set(requests.map((request) => request.path));
+}
+
+function displayAssetUrl(url, baseUrl) {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === new URL(baseUrl).origin
+      ? `${parsed.pathname}${parsed.search}`
+      : parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function verifyManifestDeferredAssets(
+  expectedClosure,
+  expectedEntryAssets,
+  assetRequests,
+  selectionStartedAt,
+) {
+  const beforeSelection = assetPathSet(
+    assetRequests.filter((request) => request.startedAt < selectionStartedAt),
+  );
+  const afterSelection = assetPathSet(
+    assetRequests.filter((request) => request.startedAt >= selectionStartedAt),
+  );
+  const sharedBeforeSelection = expectedClosure.filter((asset) => beforeSelection.has(asset));
+  const deferredBeforeSelection = expectedClosure.filter((asset) => !beforeSelection.has(asset));
+  const missingAfterSelection = deferredBeforeSelection.filter((asset) => !afterSelection.has(asset));
+  return {
+    expectedClosure,
+    expectedEntryAssets,
+    entryAssetsBeforeSelection: expectedEntryAssets.filter((asset) => beforeSelection.has(asset)),
+    entryAssetsMissingAfterSelection: expectedEntryAssets.filter((asset) => !afterSelection.has(asset)),
+    sharedBeforeSelection,
+    deferredBeforeSelection,
+    requestedAfterSelection: deferredBeforeSelection.filter((asset) => afterSelection.has(asset)),
+    missingAfterSelection,
+  };
+}
+
+function assertAssetContract(condition, scenario, expectation, assetRequests, baseUrl) {
+  if (condition) return;
+  const observed = [...assetUrlSet(assetRequests)].map((url) => displayAssetUrl(url, baseUrl));
+  throw new Error(
+    `Asset contract failed for ${scenario.name}: ${expectation}` +
+    `\nObserved app script/style assets:\n${observed.length ? observed.map((url) => `- ${url}`).join('\n') : '- none'}`,
+  );
+}
+
+async function activateDefaultThreadPane(client, label, kind, readyExpression, timeoutMs) {
+  const startedAt = performance.now();
+  const clicked = await evaluate(client, `(() => {
+    const tab = document.querySelector('button[role="tab"][title="${label}"]');
+    if (!(tab instanceof HTMLElement)) return false;
+    tab.click();
+    return true;
+  })()`);
+  if (!clicked) throw new Error(`Default thread pane tab ${label} is unavailable`);
+  await waitForExpression(
+    client,
+    `(() => Boolean(
+      document.querySelector('.right-dock-content[data-active-tab="${kind}"]') &&
+      (${readyExpression}) &&
+      !document.querySelector('.right-dock-content[data-active-tab="${kind}"] .thread-lazy-pane-state')
+    ))()`,
+    timeoutMs,
+  );
+  return { pane: kind, readyMs: performance.now() - startedAt };
+}
+
+async function waitForApiCall(calls, startIndex, predicate, timeoutMs) {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    const match = calls.slice(startIndex).find(predicate);
+    if (match) return match;
+    await sleep(25);
+  }
+  throw new Error('Timed out waiting for the deterministic composer API call');
+}
+
+async function verifyDirectThreadComposer(client, apiCalls, timeoutMs) {
+  const message = 'Benchmark direct-thread composer contract';
+  const apiStartIndex = apiCalls.length;
+  const sendStartedAt = performance.now();
+  const typed = await evaluate(client, `(() => {
+    const textarea = document.querySelector('.thread-bridge-textarea');
+    if (!(textarea instanceof HTMLTextAreaElement)) return false;
+    const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+    valueSetter?.call(textarea, ${JSON.stringify(message)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    return textarea.value === ${JSON.stringify(message)};
+  })()`);
+  if (!typed) throw new Error('The direct-thread composer could not type its deterministic message');
+  await waitForExpression(
+    client,
+    `(() => {
+      const send = document.querySelector('button[aria-label="Send"]');
+      return send instanceof HTMLButtonElement && !send.disabled;
+    })()`,
+    timeoutMs,
+  );
+  const submitted = await evaluate(client, `(() => {
+    const send = document.querySelector('button[aria-label="Send"]');
+    if (!(send instanceof HTMLButtonElement) || send.disabled) return false;
+    send.click();
+    return true;
+  })()`);
+  if (!submitted) throw new Error('The direct-thread composer could not type and submit its deterministic message');
+
+  await waitForApiCall(
+    apiCalls,
+    apiStartIndex,
+    (call) => call.method === 'POST' && /^\/api\/cortex\/ideas\/[^/]+\/thread$/.test(call.path),
+    timeoutMs,
+  );
+  await waitForApiCall(
+    apiCalls,
+    apiStartIndex,
+    (call) => call.method === 'GET' && /^\/api\/cortex\/ideas\/[^/]+\/unified-stream$/.test(call.path),
+    timeoutMs,
+  );
+  await waitForExpression(
+    client,
+    `(() => {
+      const textarea = document.querySelector('.thread-bridge-textarea');
+      return textarea instanceof HTMLTextAreaElement && textarea.value === '' && !textarea.disabled;
+    })()`,
+    timeoutMs,
+  );
+  return {
+    passed: true,
+    message,
+    sendReadyMs: performance.now() - sendStartedAt,
+  };
+}
+
+async function measureLazyAssetContract(
+  client,
+  scenarioKey,
+  scenario,
+  assetRequests,
+  apiCalls,
+  options,
+  lazyAssetClosures,
+) {
+  if (scenarioKey !== 'workspace' && scenarioKey !== 'thread') {
+    return { kind: 'not-applicable', passed: true };
+  }
+
+  await sleep(THREAD_STAGE_PREWARM_OBSERVATION_MS);
+
+  if (scenarioKey === 'workspace') {
+    const selectionStartedAt = performance.now();
+    const threadClicked = await evaluate(client, `(() => {
+      const thread = document.querySelector('[data-constellation-signal-id="idea-1"]');
+      if (!(thread instanceof HTMLElement)) return false;
+      thread.click();
+      return true;
+    })()`);
+    assertAssetContract(
+      threadClicked === true,
+      scenario,
+      'the deterministic workspace thread control must be available after the prewarm observation window',
+      assetRequests,
+      options.baseUrl,
+    );
+
+    await waitForExpression(client, THREAD_READY_EXPRESSION, options.timeoutMs);
+    const firstOpenMs = performance.now() - selectionStartedAt;
+    const manifestProof = verifyManifestDeferredAssets(
+      lazyAssetClosures.threadStage.assets,
+      lazyAssetClosures.threadStage.entryAssets,
+      assetRequests,
+      selectionStartedAt,
+    );
+    assertAssetContract(
+      manifestProof.entryAssetsBeforeSelection.length === 0 &&
+        manifestProof.entryAssetsMissingAfterSelection.length === 0 &&
+        manifestProof.deferredBeforeSelection.length > 0 &&
+        manifestProof.missingAfterSelection.length === 0,
+      scenario,
+      `the manifest-derived ThreadStage entry assets must remain absent for ${THREAD_STAGE_PREWARM_OBSERVATION_MS}ms and every deferred closure asset must load after thread selection; entry assets before selection: ${manifestProof.entryAssetsBeforeSelection.join(', ') || 'none'}; missing after selection: ${[...manifestProof.entryAssetsMissingAfterSelection, ...manifestProof.missingAfterSelection].join(', ') || 'none'}`,
+      assetRequests,
+      options.baseUrl,
+    );
+
+    return {
+      kind: 'thread-stage-loads-on-selection',
+      passed: true,
+      observationMs: THREAD_STAGE_PREWARM_OBSERVATION_MS,
+      assetsBeforeSelection: assetPathSet(
+        assetRequests.filter((request) => request.startedAt < selectionStartedAt),
+      ).size,
+      manifestModuleId: lazyAssetClosures.threadStage.moduleId,
+      manifestExpectedAssetCount: manifestProof.expectedClosure.length,
+      manifestExpectedAssets: manifestProof.expectedClosure,
+      manifestExpectedEntryAssets: manifestProof.expectedEntryAssets,
+      manifestEntryAssetsBeforeSelection: manifestProof.entryAssetsBeforeSelection,
+      manifestSharedAssetCountBeforeSelection: manifestProof.sharedBeforeSelection.length,
+      manifestDeferredAssetsBeforeSelection: manifestProof.deferredBeforeSelection,
+      selectionTriggeredAssetCount: manifestProof.requestedAfterSelection.length,
+      selectionTriggeredAssets: manifestProof.requestedAfterSelection,
+      threadStageFirstOpenMs: firstOpenMs,
+    };
+  }
+
+  const panelClicked = await evaluate(client, `(() => {
+    const toggle = document.querySelector('button[aria-label="Show side panel"]');
+    if (!(toggle instanceof HTMLElement)) return false;
+    toggle.click();
+    return true;
+  })()`);
+  assertAssetContract(
+    panelClicked === true,
+    scenario,
+    'the deterministic side-panel toggle must be available',
+    assetRequests,
+    options.baseUrl,
+  );
+  await waitForExpression(
+    client,
+    `Boolean(document.querySelector('.cortex-thread-stage-right-dock'))`,
+    options.timeoutMs,
+  );
+
+  const defaultPaneInteractions = [];
+  await waitForExpression(
+    client,
+    `(() => {
+      const body = document.querySelector('.right-dock-content[data-active-tab="activity"]')?.textContent || '';
+      return Boolean(
+        document.querySelector('.right-dock-content[data-active-tab="activity"] .panel-utility-content-bare') &&
+        !body.includes('Loading activity')
+      );
+    })()`,
+    options.timeoutMs,
+  );
+  defaultPaneInteractions.push({ pane: 'activity-initial', readyMs: 0 });
+  defaultPaneInteractions.push(await activateDefaultThreadPane(
+    client,
+    'Discussion',
+    'discussion',
+    `document.querySelector('.right-dock-content[data-active-tab="discussion"] .thread-discussion-pane')`,
+    options.timeoutMs,
+  ));
+  defaultPaneInteractions.push(await activateDefaultThreadPane(
+    client,
+    'Handoff',
+    'handoff-summary',
+    `document.querySelector('.right-dock-content[data-active-tab="handoff-summary"] .panel-utility-content-bare') &&
+      !(document.querySelector('.right-dock-content[data-active-tab="handoff-summary"]')?.textContent || '').includes('Loading handoff')`,
+    options.timeoutMs,
+  ));
+  defaultPaneInteractions.push(await activateDefaultThreadPane(
+    client,
+    'Activity',
+    'activity',
+    `document.querySelector('.right-dock-content[data-active-tab="activity"] .panel-utility-content-bare') &&
+      !(document.querySelector('.right-dock-content[data-active-tab="activity"]')?.textContent || '').includes('Loading activity')`,
+    options.timeoutMs,
+  ));
+
+  const addMenuClicked = await evaluate(client, `(() => {
+    const add = document.querySelector('button[aria-label="Add side panel tab"]');
+    if (!(add instanceof HTMLElement)) return false;
+    add.click();
+    return true;
+  })()`);
+  assertAssetContract(
+    addMenuClicked === true,
+    scenario,
+    'the deterministic add-pane control must be available',
+    assetRequests,
+    options.baseUrl,
+  );
+  await waitForExpression(
+    client,
+    `Boolean(document.querySelector('.right-dock-add-menu[aria-label="Add side panel tab"]'))`,
+    options.timeoutMs,
+  );
+  await sleep(120);
+
+  const selectionStartedAt = performance.now();
+  const rarePaneClicked = await evaluate(client, `(() => {
+    const items = [...document.querySelectorAll('.right-dock-add-menu [role="menuitem"]')];
+    const vault = items.find((item) => item.querySelector('strong')?.textContent?.trim() === 'Vault');
+    if (!(vault instanceof HTMLElement)) return false;
+    vault.click();
+    return true;
+  })()`);
+  assertAssetContract(
+    rarePaneClicked === true,
+    scenario,
+    'the deterministic Vault pane menu item must be available',
+    assetRequests,
+    options.baseUrl,
+  );
+
+  await waitForExpression(client, VAULT_PANE_MOUNTED_EXPRESSION, options.timeoutMs);
+  const firstOpenMs = performance.now() - selectionStartedAt;
+  const manifestProof = verifyManifestDeferredAssets(
+    lazyAssetClosures.vault.assets,
+    lazyAssetClosures.vault.entryAssets,
+    assetRequests,
+    selectionStartedAt,
+  );
+  assertAssetContract(
+    manifestProof.entryAssetsBeforeSelection.length === 0 &&
+      manifestProof.entryAssetsMissingAfterSelection.length === 0 &&
+      manifestProof.deferredBeforeSelection.length > 0 &&
+      manifestProof.missingAfterSelection.length === 0,
+    scenario,
+    `the manifest-derived Vault entry assets must be absent before selection and every deferred closure asset must be fetched by the first selection; entry assets before selection: ${manifestProof.entryAssetsBeforeSelection.join(', ') || 'none'}; missing after selection: ${[...manifestProof.entryAssetsMissingAfterSelection, ...manifestProof.missingAfterSelection].join(', ') || 'none'}`,
+    assetRequests,
+    options.baseUrl,
+  );
+  await waitForExpression(client, VAULT_PANE_READY_EXPRESSION, options.timeoutMs);
+  const dataReadyMs = performance.now() - selectionStartedAt;
+  const composerContract = await verifyDirectThreadComposer(client, apiCalls, options.timeoutMs);
+
+  return {
+    kind: 'rare-pane-loads-on-selection',
+    passed: true,
+    observationMs: THREAD_STAGE_PREWARM_OBSERVATION_MS,
+    pane: 'vault',
+    assetsBeforeSelection: assetPathSet(
+      assetRequests.filter((request) => request.startedAt < selectionStartedAt),
+    ).size,
+    manifestModuleId: lazyAssetClosures.vault.moduleId,
+    manifestExpectedAssetCount: manifestProof.expectedClosure.length,
+    manifestExpectedAssets: manifestProof.expectedClosure,
+    manifestExpectedEntryAssets: manifestProof.expectedEntryAssets,
+    manifestEntryAssetsBeforeSelection: manifestProof.entryAssetsBeforeSelection,
+    manifestSharedAssetCountBeforeSelection: manifestProof.sharedBeforeSelection.length,
+    manifestDeferredAssetsBeforeSelection: manifestProof.deferredBeforeSelection,
+    rarePaneAssetsBeforeSelection: 0,
+    selectionTriggeredAssetCount: manifestProof.requestedAfterSelection.length,
+    selectionTriggeredAssets: manifestProof.requestedAfterSelection,
+    rarePaneFirstOpenMs: firstOpenMs,
+    rarePaneDataReadyMs: dataReadyMs,
+    rarePaneFirstOpenBudgetMs: RARE_PANE_OPEN_BUDGET_MS,
+    defaultPaneInteractions,
+    composerContract,
+  };
+}
+
+async function runScenario(client, scenarioKey, fixture, options, measured, lazyAssetClosures) {
   const scenario = SCENARIOS[scenarioKey];
   const apiCalls = [];
+  const assetRequests = [];
   const unsubscribers = [];
   const requestUrls = new Map();
   const networkFailures = [];
@@ -1172,6 +1672,14 @@ async function runScenario(client, scenarioKey, fixture, options, measured) {
   unsubscribers.push(
     client.on('Network.requestWillBeSent', (params) => {
       requestUrls.set(params.requestId, params.request?.url);
+      if (isAppAssetRequest(params, options.baseUrl)) {
+        assetRequests.push({
+          url: params.request.url,
+          path: new URL(params.request.url).pathname,
+          type: params.type,
+          startedAt: performance.now(),
+        });
+      }
     }),
     client.on('Network.loadingFailed', (params) => {
       networkFailures.push({
@@ -1262,6 +1770,15 @@ async function runScenario(client, scenarioKey, fixture, options, measured) {
     const measuredApiCalls = [...apiCalls];
     const bootstrapCallsBeforeClose = workspaceBootstrapCalls(measuredApiCalls);
     const workspaceCallsBeforeClose = workspaceStartupCalls(measuredApiCalls);
+    const lazyAssetContract = await measureLazyAssetContract(
+      client,
+      scenarioKey,
+      scenario,
+      assetRequests,
+      apiCalls,
+      options,
+      lazyAssetClosures,
+    );
     let postCloseReadyMs = null;
     let postCloseApiCalls = [];
 
@@ -1323,6 +1840,7 @@ async function runScenario(client, scenarioKey, fixture, options, measured) {
       readyMs,
       postCloseReadyMs,
       requestContract,
+      lazyAssetContract,
       apiCallCount: measuredApiCalls.length,
       postCloseApiCallCount: postCloseApiCalls.length,
       totalApiCallCount: allApiCalls.length,
@@ -1388,6 +1906,36 @@ function summarizeScenario(samples) {
   const routes = routeSummaries(apiLabels);
   const allRoutes = routeSummaries(allApiLabels);
   const postCloseRoutes = routeSummaries(postCloseApiLabels);
+  const threadStageFirstOpenMs = summarizeNumbers(
+    measuredSamples
+      .map((sample) => sample.lazyAssetContract?.threadStageFirstOpenMs ?? 0)
+      .filter((value) => value > 0),
+  );
+  const rarePaneFirstOpenMs = summarizeNumbers(
+    measuredSamples
+      .map((sample) => sample.lazyAssetContract?.rarePaneFirstOpenMs ?? 0)
+      .filter((value) => value > 0),
+  );
+  const rarePaneDataReadyMs = summarizeNumbers(
+    measuredSamples
+      .map((sample) => sample.lazyAssetContract?.rarePaneDataReadyMs ?? 0)
+      .filter((value) => value > 0),
+  );
+  const selectionTriggeredAssets = [...new Set(
+    measuredSamples.flatMap((sample) => sample.lazyAssetContract?.selectionTriggeredAssets ?? []),
+  )].sort();
+  const directThreadContractSamples = measuredSamples.filter(
+    (sample) => sample.lazyAssetContract?.kind === 'rare-pane-loads-on-selection',
+  );
+  const defaultPaneKinds = ['activity-initial', 'discussion', 'handoff-summary', 'activity'];
+  const defaultPaneReadyMs = Object.fromEntries(defaultPaneKinds.map((kind) => [
+    kind,
+    summarizeNumbers(directThreadContractSamples.flatMap((sample) => (
+      sample.lazyAssetContract.defaultPaneInteractions
+        ?.filter((interaction) => interaction.pane === kind)
+        .map((interaction) => interaction.readyMs) ?? []
+    ))),
+  ]));
 
   return {
     runs: measuredSamples.length,
@@ -1424,6 +1972,71 @@ function summarizeScenario(samples) {
       measuredSamples.map((sample) => sample.requestContract?.workspaceStartupPostClose ?? 0),
     ),
     request_contract_passed: measuredSamples.every((sample) => sample.requestContract?.passed === true),
+    lazy_asset_contract_passed: measuredSamples.every((sample) => sample.lazyAssetContract?.passed === true),
+    lazy_asset_observation_ms: Math.max(
+      0,
+      ...measuredSamples.map((sample) => sample.lazyAssetContract?.observationMs ?? 0),
+    ),
+    assets_before_lazy_selection: summarizeNumbers(
+      measuredSamples
+        .map((sample) => sample.lazyAssetContract?.assetsBeforeSelection ?? 0)
+        .filter((value) => value > 0),
+    ),
+    selection_triggered_asset_count: summarizeNumbers(
+      measuredSamples
+        .map((sample) => sample.lazyAssetContract?.selectionTriggeredAssetCount ?? 0)
+        .filter((value) => value > 0),
+    ),
+    selection_triggered_assets: selectionTriggeredAssets,
+    manifest_expected_asset_count: summarizeNumbers(
+      measuredSamples
+        .map((sample) => sample.lazyAssetContract?.manifestExpectedAssetCount ?? 0)
+        .filter((value) => value > 0),
+    ),
+    manifest_expected_entry_assets: [...new Set(
+      measuredSamples.flatMap(
+        (sample) => sample.lazyAssetContract?.manifestExpectedEntryAssets ?? [],
+      ),
+    )].sort(),
+    manifest_entry_assets_before_selection: [...new Set(
+      measuredSamples.flatMap(
+        (sample) => sample.lazyAssetContract?.manifestEntryAssetsBeforeSelection ?? [],
+      ),
+    )].sort(),
+    manifest_shared_asset_count_before_selection: summarizeNumbers(
+      measuredSamples
+        .map((sample) => sample.lazyAssetContract?.manifestSharedAssetCountBeforeSelection ?? 0)
+        .filter((value) => value > 0),
+    ),
+    manifest_deferred_assets_before_selection: [...new Set(
+      measuredSamples.flatMap(
+        (sample) => sample.lazyAssetContract?.manifestDeferredAssetsBeforeSelection ?? [],
+      ),
+    )].sort(),
+    thread_stage_first_open_ms: threadStageFirstOpenMs,
+    rare_pane_assets_before_selection: summarizeNumbers(
+      measuredSamples
+        .filter((sample) => sample.lazyAssetContract?.kind === 'rare-pane-loads-on-selection')
+        .map((sample) => sample.lazyAssetContract?.rarePaneAssetsBeforeSelection ?? 0),
+    ),
+    rare_pane_first_open_ms: rarePaneFirstOpenMs,
+    rare_pane_data_ready_ms: rarePaneDataReadyMs,
+    rare_pane_first_open_budget_ms: RARE_PANE_OPEN_BUDGET_MS,
+    rare_pane_first_open_budget_passed: rarePaneFirstOpenMs.p75 === 0 || rarePaneFirstOpenMs.p75 <= RARE_PANE_OPEN_BUDGET_MS,
+    default_pane_contract_passed: directThreadContractSamples.every((sample) => (
+      defaultPaneKinds.every((kind) => (
+        sample.lazyAssetContract.defaultPaneInteractions?.some((interaction) => interaction.pane === kind)
+      ))
+    )),
+    default_pane_ready_ms: defaultPaneReadyMs,
+    composer_contract_passed: directThreadContractSamples.every(
+      (sample) => sample.lazyAssetContract.composerContract?.passed === true,
+    ),
+    composer_send_ready_ms: summarizeNumbers(
+      directThreadContractSamples
+        .map((sample) => sample.lazyAssetContract.composerContract?.sendReadyMs ?? 0)
+        .filter((value) => value > 0),
+    ),
     dom_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.domNodes)),
     deep_field_feature_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.deepFieldFeatureNodes ?? 0)),
     d3_shadow_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.d3ShadowNodes ?? 0)),
@@ -1456,13 +2069,16 @@ function printTextReport(result) {
     routes: scenario.summary.unique_api_routes.p50.toFixed(0),
     bootstrap: `${scenario.summary.workspace_bootstrap_before_close.p50.toFixed(0)}/${scenario.summary.workspace_bootstrap_post_close.p50.toFixed(0)}`,
     close: scenario.summary.post_close_ready_ms.p50 ? scenario.summary.post_close_ready_ms.p50.toFixed(1) : '-',
+    pane75: scenario.summary.rare_pane_first_open_ms.p75
+      ? scenario.summary.rare_pane_first_open_ms.p75.toFixed(1)
+      : '-',
     long: scenario.summary.long_task_total_ms.p95.toFixed(1),
     dom: scenario.summary.dom_nodes.p50.toFixed(0),
     d3: scenario.summary.d3_shadow_nodes.p50.toFixed(0),
     links: scenario.summary.d3_shadow_connections.p50.toFixed(0),
     field: scenario.summary.deep_field_feature_nodes.p50.toFixed(0),
   }));
-  const headers = ['name', 'runs', 'p50', 'p95', 'fcp', 'api', 'routes', 'bootstrap', 'close', 'long', 'dom', 'd3', 'links', 'field'];
+  const headers = ['name', 'runs', 'p50', 'p95', 'fcp', 'api', 'routes', 'bootstrap', 'close', 'pane75', 'long', 'dom', 'd3', 'links', 'field'];
   const widths = Object.fromEntries(headers.map((header) => [
     header,
     Math.max(header.length, ...rows.map((row) => row[header].length)),
@@ -1481,6 +2097,38 @@ function printTextReport(result) {
       `${scenario.summary.workspace_bootstrap_before_close.p50.toFixed(0)}/` +
       `${scenario.summary.workspace_bootstrap_post_close.p50.toFixed(0)})`,
     );
+    if (scenario.summary.lazy_asset_observation_ms > 0) {
+      console.log(
+        `${scenario.name} lazy asset contract: ${scenario.summary.lazy_asset_contract_passed ? 'PASS' : 'FAIL'} ` +
+        `(observed ${scenario.summary.lazy_asset_observation_ms.toFixed(0)}ms; ` +
+        `manifest closure ${scenario.summary.manifest_expected_asset_count.p50.toFixed(0)}; ` +
+        `entry assets before ${scenario.summary.manifest_entry_assets_before_selection.length}; ` +
+        `shared before ${scenario.summary.manifest_shared_asset_count_before_selection.p50.toFixed(0)}; ` +
+        `deferred and fetched ${scenario.summary.selection_triggered_asset_count.p50.toFixed(0)})`,
+      );
+      for (const asset of scenario.summary.selection_triggered_assets) {
+        console.log(`  on selection: ${asset}`);
+      }
+    }
+    if (scenario.summary.rare_pane_first_open_ms.p75 > 0) {
+      console.log(
+        `${scenario.name} Vault first-open p75: ${scenario.summary.rare_pane_first_open_ms.p75.toFixed(1)}ms ` +
+        `(budget <=${scenario.summary.rare_pane_first_open_budget_ms}ms: ` +
+        `${scenario.summary.rare_pane_first_open_budget_passed ? 'PASS' : 'FAIL'}; ` +
+        `rare assets before selection ${scenario.summary.rare_pane_assets_before_selection.max.toFixed(0)}; ` +
+        `full data p75 ${scenario.summary.rare_pane_data_ready_ms.p75.toFixed(1)}ms)`,
+      );
+      console.log(
+        `${scenario.name} default pane contract: ${scenario.summary.default_pane_contract_passed ? 'PASS' : 'FAIL'} ` +
+        `(Discussion p75 ${scenario.summary.default_pane_ready_ms.discussion.p75.toFixed(1)}ms; ` +
+        `Handoff p75 ${scenario.summary.default_pane_ready_ms['handoff-summary'].p75.toFixed(1)}ms; ` +
+        `Activity p75 ${scenario.summary.default_pane_ready_ms.activity.p75.toFixed(1)}ms)`,
+      );
+      console.log(
+        `${scenario.name} composer contract: ${scenario.summary.composer_contract_passed ? 'PASS' : 'FAIL'} ` +
+        `(type, submit, POST, refresh p75 ${scenario.summary.composer_send_ready_ms.p75.toFixed(1)}ms)`,
+      );
+    }
     console.log(`${scenario.name} API routes:`);
     for (const route of scenario.summary.routes.slice(0, 20)) {
       console.log(`  ${route.avg_calls_per_run.toFixed(1)}x/run  ${route.label}`);
@@ -1528,6 +2176,7 @@ function printComparison(before, after) {
       ['FCP p50', beforeScenario.summary.fcp_ms.p50, afterScenario.summary.fcp_ms.p50, 'ms'],
       ['API calls p50', beforeScenario.summary.api_calls.p50, afterScenario.summary.api_calls.p50, ''],
       ['API KB p50', beforeScenario.summary.api_kb.p50, afterScenario.summary.api_kb.p50, 'KB'],
+      ['rare pane first-open p75', beforeScenario.summary.rare_pane_first_open_ms?.p75 ?? 0, afterScenario.summary.rare_pane_first_open_ms?.p75 ?? 0, 'ms'],
       ['DOM nodes p50', beforeScenario.summary.dom_nodes.p50, afterScenario.summary.dom_nodes.p50, ''],
       ['D3 shadow nodes p50', beforeScenario.summary.d3_shadow_nodes?.p50 ?? 0, afterScenario.summary.d3_shadow_nodes?.p50 ?? 0, ''],
       ['D3 shadow bubbles p50', beforeScenario.summary.d3_shadow_bubbles?.p50 ?? 0, afterScenario.summary.d3_shadow_bubbles?.p50 ?? 0, ''],
@@ -1565,6 +2214,7 @@ async function main() {
   }
 
   const fixture = buildFixture(options);
+  const lazyAssetClosures = await loadExpectedLazyAssetClosures();
   const chrome = await launchChrome(options);
   const client = new CdpClient(chrome.pageWsUrl);
   await client.connect();
@@ -1576,7 +2226,14 @@ async function main() {
       const totalRuns = options.warmups + options.runs;
       for (let index = 0; index < totalRuns; index += 1) {
         const measured = index >= options.warmups;
-        const sample = await runScenario(client, scenarioKey, fixture, options, measured);
+        const sample = await runScenario(
+          client,
+          scenarioKey,
+          fixture,
+          options,
+          measured,
+          lazyAssetClosures,
+        );
         samples.push(sample);
       }
       samplesByScenario.set(scenarioKey, samples);
@@ -1595,6 +2252,14 @@ async function main() {
         apiLatencyMs: options.apiLatencyMs,
         sidecarLatencyMs: options.sidecarLatencyMs,
         timeoutMs: options.timeoutMs,
+        lazyAssetManifest: {
+          threadStageModuleId: lazyAssetClosures.threadStage.moduleId,
+          threadStageAssetCount: lazyAssetClosures.threadStage.assets.length,
+          threadStageEntryAssetCount: lazyAssetClosures.threadStage.entryAssets.length,
+          vaultModuleId: lazyAssetClosures.vault.moduleId,
+          vaultAssetCount: lazyAssetClosures.vault.assets.length,
+          vaultEntryAssetCount: lazyAssetClosures.vault.entryAssets.length,
+        },
       },
       scenarios: options.scenarios.map((scenarioKey) => {
         const samples = samplesByScenario.get(scenarioKey) ?? [];
@@ -1611,6 +2276,10 @@ async function main() {
     if (unknownRoutes.length && !options.allowUnknownApi) {
       throw new Error(`Unknown mocked API routes detected:\n${unknownRoutes.map((route) => `- ${route.label}`).join('\n')}`);
     }
+    const failedPerformanceContracts = result.scenarios.filter((scenario) => (
+      scenario.summary.rare_pane_first_open_ms.p75 > 0 &&
+      scenario.summary.rare_pane_first_open_budget_passed === false
+    ));
 
     if (options.out) {
       await mkdir(path.dirname(options.out), { recursive: true });
@@ -1621,6 +2290,15 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     } else {
       printTextReport(result);
+    }
+
+    if (failedPerformanceContracts.length) {
+      throw new Error(
+        `Rare pane first-open budget failed:\n${failedPerformanceContracts.map((scenario) => (
+          `- ${scenario.name}: p75 ${scenario.summary.rare_pane_first_open_ms.p75.toFixed(1)}ms > ` +
+          `${scenario.summary.rare_pane_first_open_budget_ms}ms`
+        )).join('\n')}`,
+      );
     }
   } finally {
     client.close();

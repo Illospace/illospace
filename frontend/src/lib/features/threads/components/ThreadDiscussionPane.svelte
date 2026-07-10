@@ -6,7 +6,7 @@
   import ChatStateView from '$lib/components/chat/ChatStateView.svelte';
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
   import type { ConstellationIconName } from '$lib/components/constellation/ConstellationIcon.svelte';
-  import ObjectReferencePreviewList from '$lib/features/threads/components/ObjectReferencePreviewList.svelte';
+  import LazyObjectReferencePreviewList from '$lib/features/threads/components/LazyObjectReferencePreviewList.svelte';
   import {
     CONVERSATION_SCROLL_BOTTOM_THRESHOLD,
     conversationIsNearBottom,
@@ -576,7 +576,7 @@
                 {/each}
               </div>
             {/if}
-            <ObjectReferencePreviewList
+            <LazyObjectReferencePreviewList
               objectReferences={comment.object_references}
               threadReferences={comment.thread_references}
               compact

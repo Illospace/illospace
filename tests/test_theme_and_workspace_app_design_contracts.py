@@ -380,8 +380,9 @@ def test_thread_stage_open_motion_keeps_cortex_static():
     panel_open_rule = re.search(r"\.panel-open \.cortex-main\s*\{(?P<body>.*?)\}", page, re.DOTALL)
     panel_overlay_rule = re.search(r"\.panel-open \.cortex-main::after\s*\{(?P<body>.*?)\}", page, re.DOTALL)
 
-    assert "threadStagePrewarmQueued" in page
-    assert "runWhenBrowserIdle(() => ensureThreadStageScreenLoaded()" in page
+    assert "threadStagePrewarmQueued" not in page
+    assert "runWhenBrowserIdle(() => ensureThreadStageScreenLoaded()" not in page
+    assert "if (cortex.panelOpen) ensureThreadStageScreenLoaded();" in page
     assert "threadStage.syncPanelOpen(cortex.panelOpen && Boolean(ThreadStageScreenComponent))" in page
     assert "clip-path:" not in shell_style
     assert "thread-origin-bloom" not in thread_shell
