@@ -15,7 +15,6 @@ export type { ConstellationPageTabOption } from './ConstellationPageTabs.svelte'
 export { default as ConstellationPanel } from './ConstellationPanel.svelte';
 export { default as ConstellationPill } from './ConstellationPill.svelte';
 export { default as ConstellationPresenceSeed } from './ConstellationPresenceSeed.svelte';
-export { default as ConstellationPresenceStack } from './ConstellationPresenceStack.svelte';
 export { default as ConstellationSelect } from './ConstellationSelect.svelte';
 export type { ConstellationSelectOption } from './ConstellationSelect.svelte';
 export { default as ConstellationSelectChip } from './ConstellationSelectChip.svelte';

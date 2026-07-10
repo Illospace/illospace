@@ -1066,16 +1066,6 @@ async def get_vault_access_log(
 # Missing secret tracking
 # ---------------------------------------------------------------------------
 
-def _record_missing(
-    key_name: str,
-    *,
-    actor_user_id: str | None = None,
-    org_id: str | None = None,
-) -> None:
-    """Record that a secret was requested but not found."""
-    raise RuntimeError("Use _async_record_missing()")
-
-
 async def _async_record_missing(
     key_name: str,
     *,
@@ -1923,10 +1913,6 @@ async def async_revoke_vault_token(org_id: str, actor_user_id: str, token: str |
             session.revoked_at = _utcnow()
 
 
-async def _get_config(key: str) -> str | None:
-    return await async_get_config(key)
-
-
 async def async_get_config(key: str) -> str | None:
     async with UnitOfWork() as uow:
         result = await uow.session.scalars(
@@ -1934,10 +1920,6 @@ async def async_get_config(key: str) -> str | None:
         )
         config = result.first()
         return config.value if config else None
-
-
-async def _set_config(key: str, value: str) -> None:
-    await async_set_config(key, value)
 
 
 async def async_set_config(key: str, value: str) -> None:
@@ -1952,10 +1934,6 @@ async def async_set_config(key: str, value: str) -> None:
             config.updated_at = now
         else:
             uow.session.add(VaultConfig(key=key, value=value, updated_at=now))
-
-
-async def _delete_config(key: str) -> None:
-    await async_delete_config(key)
 
 
 async def async_delete_config(key: str) -> None:

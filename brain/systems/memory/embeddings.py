@@ -81,11 +81,6 @@ def _is_embedding_worker_unavailable_error(exc: Exception) -> bool:
     )
 
 
-def _is_embedding_worker_loading_error(exc: Exception) -> bool:
-    """Backward-compatible name for older tests/callers."""
-    return _is_embedding_worker_unavailable_error(exc)
-
-
 def _embedding_worker_needs_load_request(exc: Exception) -> bool:
     message = str(exc).lower()
     return any(state in message for state in ("failed", "stopped", "registered"))

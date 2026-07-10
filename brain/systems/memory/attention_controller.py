@@ -212,10 +212,6 @@ def _candidate_identity(candidate: dict[str, Any]) -> tuple[str, int | None]:
     return str(source), item_id
 
 
-def _candidate_lookup_key(candidate: dict[str, Any]) -> tuple[str, int | None]:
-    return _candidate_identity(candidate)
-
-
 def _is_lazy_load_eligible(candidate: "AttentionCandidate", *, stage: str) -> bool:
     if candidate.selected_key is None:
         return False

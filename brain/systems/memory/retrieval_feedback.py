@@ -247,14 +247,6 @@ async def _adjust_salience_uow(uow, memory_id: int, delta: float) -> None:
     mem.confidence = max(0.0, min(1.0, adjusted / 10.0))
 
 
-async def _record_pool_outcome(
-    pool_name: str, *, hit: bool, org_id: str | None = None
-) -> None:
-    """Record a pool outcome via RetrievalPoolStatsRepository (standalone)."""
-    async with UnitOfWork() as uow:
-        await _record_pool_outcome_uow(uow, pool_name, hit=hit, org_id=org_id)
-
-
 async def _record_pool_outcome_uow(
     uow, pool_name: str, *, hit: bool, org_id: str | None = None
 ) -> None:

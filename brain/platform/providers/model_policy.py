@@ -213,17 +213,6 @@ async def _async_load_skill_routing_row(
         return None
 
 
-def _resolve_effective_org_id(
-    *,
-    user_id: str | None = None,
-    org_id: str | None = None,
-) -> str | None:
-    del user_id
-    if org_id:
-        return org_id
-    return None
-
-
 async def async_resolve_effective_org_id(
     session: AsyncSession,
     *,

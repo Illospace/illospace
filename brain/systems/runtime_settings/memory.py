@@ -354,14 +354,6 @@ def _standard_openai_api_key(token: str | None) -> str | None:
     return None
 
 
-def _current_api_provider() -> str:
-    return get_embedding_runtime_config(include_secret=False).provider
-
-
-async def _async_current_api_provider(session: AsyncSession) -> str:
-    return (await async_get_embedding_runtime_config(session, include_secret=False)).provider
-
-
 def _installation_embedding_api_key(provider: str) -> str | None:
     key = _read_persisted_embedding_api_key(_provider_key(provider)) or ""
     key = (key or "").strip()

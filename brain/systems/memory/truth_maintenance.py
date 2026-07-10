@@ -406,11 +406,6 @@ def normalize_memory_claim_metadata(value: Any) -> dict[str, Any]:
     }
 
 
-def _memory_tier(value: Any) -> str:
-    data = _object_to_dict(value)
-    return str(data.get("memory_tier") or "episodic").strip().lower()
-
-
 def can_promote_memory(
     *,
     from_tier: str,

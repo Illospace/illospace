@@ -195,14 +195,6 @@ async def _require_trace_run(
     return run
 
 
-def _artifact_kind(artifact: Any) -> str:
-    if isinstance(artifact, dict):
-        return str(artifact.get("type") or artifact.get("kind") or "unknown")
-    if isinstance(artifact, str):
-        return "text"
-    return "unknown"
-
-
 def _call_value(call: Any, key: str) -> Any:
     if isinstance(call, dict):
         return call.get(key)
@@ -373,29 +365,6 @@ async def _trace_tool_summary_for_run(
         "count": sum(row["calls"] for row in tools),
         "tools": sorted(tools, key=lambda row: row["calls"], reverse=True),
     }
-
-
-def _trace_verifier_summary(rows: list[Any]) -> dict[str, Any]:
-    statuses: dict[str, int] = defaultdict(int)
-    latest = []
-    for row in rows:
-        statuses[row.status or "unknown"] += 1
-        if len(latest) < 10:
-            latest.append(
-                {
-                    "id": row.id,
-                    "trace_id": row.trace_id or trace_id_for_run_id(row.run_id),
-                    "run_id": row.run_id,
-                    "node_id": getattr(row, "node_id", None),
-                    "bundle_name": row.bundle_name,
-                    "verifier_type": row.verifier_type,
-                    "status": row.status,
-                    "severity": row.severity,
-                    "started_at": _trace_iso(row.started_at),
-                    "completed_at": _trace_iso(row.completed_at),
-                }
-            )
-    return {"count": len(rows), "statuses": dict(statuses), "latest": latest}
 
 
 async def _trace_verifier_summary_for_run(
