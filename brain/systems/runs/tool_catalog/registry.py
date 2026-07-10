@@ -351,11 +351,14 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "reversibility": "variable",
         "action_manifest": True,
         "expected_effect": "read or mutate org-wide domain schema and records",
-        # Must carry get_record reads of doc_page operating documents (the
-        # coordinator playbook, record 1155, is ~37K chars JSON-wrapped and was
-        # middle-truncated at lower budgets). Listings are protected separately
-        # by format="compact" + returned/total_matching counts; an overflow here
-        # is loud (degraded-evidence note) rather than silent.
+        # Must carry get_record reads of doc_page operating documents. The
+        # coordinator playbook (record 1155) was split into a ~31K core plus
+        # on-demand mode records (~2.5K each, fetched per its On-demand Run
+        # Modes section), so the core reads ~33K JSON-wrapped. 40K stays: the
+        # headroom is what stops budget-chasing — future growth belongs in the
+        # on-demand records, not in a bigger core. Listings are protected
+        # separately by format="compact" + returned/total_matching counts; an
+        # overflow here is loud (degraded-evidence note) rather than silent.
         "output_budget_chars": 40_000,
     },
     "manage_inbound": {

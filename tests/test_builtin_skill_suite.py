@@ -51,7 +51,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.1.0"
+    assert bundle.manifest.version == "1.3.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -71,11 +71,17 @@ def test_uwear_triage_skill_distinguishes_internal_tracker_from_real_github_issu
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
     procedure = bundle.skill_markdown
 
-    assert "## Creating Work Items" in procedure
+    # The core keeps the always-on invariants; the filing decision tree is an
+    # on-demand playbook (see test_uwear_triage_on_demand_run_mode_split).
     assert "create_github_issue" in procedure
-    assert "Never describe an internal tracker record as a GitHub issue" in procedure
+    unwrapped = " ".join(procedure.split())
+    assert "never describe an internal tracker record as a GitHub issue" in unwrapped
+
+    playbook = _uwear_triage_asset(bundle, "references/creating-work-items.md")
+    assert "## Creating Work Items" in playbook
+    assert "Never describe an internal tracker record as a GitHub issue" in playbook
     # The graceful-degradation branch must be spelled out, not just the happy path.
-    assert "no_write_token" in procedure
+    assert "no_write_token" in playbook
 
 
 def test_uwear_triage_skill_keeps_slack_formatting_contract():
@@ -98,15 +104,68 @@ def test_uwear_triage_skill_keeps_backlog_hygiene_contract():
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
     procedure = bundle.skill_markdown
 
-    assert "## Backlog Hygiene" in procedure
+    # The core pointer names the three hygiene modes; the full contract is an
+    # on-demand playbook.
     assert "`process-design`" in procedure
     assert "`no-write-audit`" in procedure
     assert "`live-hygiene-run`" in procedure
-    assert "cleanup:close-candidate" in procedure
-    assert "Do not create" in procedure
-    assert "Uwear-specific backlog objects" in procedure
-    assert "do not close them" in procedure
-    assert "silently" in procedure
+
+    playbook = _uwear_triage_asset(bundle, "references/backlog-maintenance.md")
+    assert "## Backlog Seed" in playbook
+    assert "## Backlog Hygiene" in playbook
+    assert "cleanup:close-candidate" in playbook
+    assert "Do not create" in playbook
+    assert "Uwear-specific backlog objects" in playbook
+    assert "do not close them" in playbook
+    assert "silently" in playbook
+
+
+def _uwear_triage_asset(bundle: Any, path: str) -> str:
+    asset = next((item for item in bundle.assets if item.path == path), None)
+    assert asset is not None, f"missing bundle asset: {path}"
+    assert asset.content_text, f"bundle asset has no inline text: {path}"
+    return asset.content_text
+
+
+def test_uwear_triage_on_demand_run_mode_split():
+    """The coordinator core doc must stay small enough to read untruncated.
+
+    The live mirror (Domain 37 record 1155) is fetched whole through
+    manage_domain's output budget (40K chars, JSON-wrapped) on every scheduled
+    coordinator run. Rarely-needed run modes live in on-demand playbooks —
+    bundle `references/` assets mirrored as separate Domain 37 records — so
+    growth goes there, not into the core. If this size gate trips, move
+    content into an on-demand playbook instead of raising budgets.
+    """
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    procedure = bundle.skill_markdown
+
+    assert len(procedure) < 34_000
+    assert "## On-demand Run Modes" in procedure
+
+    # The moved sections must not silently grow back into the core.
+    for moved_heading in (
+        "## Direct Customer Support",
+        "## Creating Work Items",
+        "## Backlog Seed",
+        "## Backlog Hygiene",
+    ):
+        assert moved_heading not in procedure
+
+    for path in (
+        "references/customer-support.md",
+        "references/creating-work-items.md",
+        "references/backlog-maintenance.md",
+    ):
+        # The core names each playbook asset path, and every playbook carries
+        # the provenance preamble pointing back at the core doc.
+        assert f"`{path}`" in procedure
+        playbook = _uwear_triage_asset(bundle, path)
+        assert "> On-demand mode playbook" in playbook
+        assert "record `1155`" in playbook
 
 
 def test_builtin_skills_have_structured_routing_metadata():
