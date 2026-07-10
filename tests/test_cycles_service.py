@@ -19,6 +19,13 @@ from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea
 
 
+RAW_PROVIDER_ERROR = (
+    "An error occurred while processing your request. You can retry your request, or contact us "
+    "through our help center at help.openai.com if the error persists. Please include the request "
+    "ID `a7dd7556-test` in your message. | server_error | server_error"
+)
+
+
 class _FakeSession:
     def __init__(self, agent_run=None, run=None, cycle=None, artifacts=None, events=None):
         self._agent_run = agent_run
@@ -1279,6 +1286,38 @@ def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
     assert verdict["candidate_artifact_id"] == 8
 
 
+def test_cycle_contract_rejects_raw_provider_error_as_visible_answer():
+    from brain.systems.cycles.contract_gate import evaluate_cycle_result_contract
+
+    review = evaluate_cycle_result_contract(
+        candidate_answer=RAW_PROVIDER_ERROR,
+        result_contract={"kind": "autonomous_cycle_run_result", "required_outputs": []},
+        mission="",
+        evidence_packet={},
+    )
+
+    assert review["approved"] is False
+    assert review["missing_outputs"] == ["visible_final_answer"]
+    assert review["provider_error"] == "server_error"
+    assert "help.openai.com" not in review["candidate_summary"]
+
+
+def test_cycle_contract_rejects_empty_answer_with_captured_provider_exception():
+    from brain.systems.cycles.contract_gate import evaluate_cycle_result_contract
+
+    review = evaluate_cycle_result_contract(
+        candidate_answer=None,
+        result_contract={"kind": "autonomous_cycle_run_result", "required_outputs": []},
+        mission="",
+        evidence_packet={},
+        provider_exception=RuntimeError("upstream request failed | overloaded_error"),
+    )
+
+    assert review["approved"] is False
+    assert review["missing_outputs"] == ["visible_final_answer"]
+    assert review["provider_error"] == "overloaded_error"
+
+
 @pytest.mark.asyncio
 async def test_cycle_contract_gate_repairs_bad_visible_answer_once(monkeypatch):
     from brain.systems.cycles import contract_gate
@@ -1481,6 +1520,85 @@ def test_finalize_cycle_run_degrades_when_contract_repair_fails(monkeypatch):
     assert verdict["repair_attempted"] is True
     assert verdict["side_effects_succeeded"] is True
     assert "24h readout" in verdict["missing_outputs"]
+
+
+@pytest.mark.asyncio
+async def test_cycle_contract_provider_error_degrades_without_leaking_and_preserves_side_effects(
+    monkeypatch,
+):
+    from brain.systems.cycles import contract_gate
+
+    agent_run = AgentRun()
+    agent_run.id = 44
+    agent_run.root_run_id = 44
+    agent_run.user_id = "user-1"
+    agent_run.org_id = "org-1"
+    agent_run.input_message = "Record the daily tracker update."
+    agent_run.model_policy = {}
+    agent_run.metadata_ = {"source": "cycle", "cycle_run_id": 12}
+
+    cycle_run = CycleRun()
+    cycle_run.id = 12
+    cycle_run.cycle_id = 5
+    cycle_run.status = "running"
+    cycle_run.prompt_snapshot = "Record the daily tracker update."
+    cycle_run.context_snapshot = {
+        "result_contract": {
+            "kind": "autonomous_cycle_run_result",
+            "required_outputs": [],
+        }
+    }
+
+    cycle = Cycle()
+    cycle.id = 5
+    cycle.prompt = cycle_run.prompt_snapshot
+
+    provider_error_artifact = AgentRunArtifactRow(
+        id=8,
+        run_id=44,
+        root_run_id=44,
+        artifact_type="final_answer",
+        text=RAW_PROVIDER_ERROR,
+        created_at=datetime(2026, 4, 28, 20, 25, tzinfo=timezone.utc),
+    )
+    tracker_event = AgentRunEventRow(
+        id=4,
+        run_id=44,
+        root_run_id=44,
+        sequence_no=4,
+        event_type="run.tool_completed",
+        payload={
+            "tool_name": "create_domain_record",
+            "result": {"status": "ok", "record_id": 26},
+        },
+    )
+    session = _AsyncFakeSession(
+        agent_run=agent_run,
+        run=cycle_run,
+        cycle=cycle,
+        artifacts=[provider_error_artifact],
+        events=[tracker_event],
+    )
+    repair_calls = []
+
+    async def fake_repair(**kwargs):
+        repair_calls.append(kwargs)
+        return RAW_PROVIDER_ERROR
+
+    monkeypatch.setattr(contract_gate, "_async_repair_cycle_contract_answer", fake_repair)
+
+    verdict = await contract_gate.async_prepare_cycle_run_visible_finalization(session, 44)
+
+    assert len(repair_calls) == 1
+    assert verdict["settlement_status"] == "mission_contract_failed"
+    assert verdict["provider_error"] == "server_error"
+    assert verdict["side_effects_succeeded"] is True
+    assert verdict["domain_side_effects_succeeded"] is True
+    degraded_answer = session._artifacts[-1].text
+    assert "upstream model provider failed with server_error" in degraded_answer
+    assert "create_domain_record" in degraded_answer
+    assert "remain applied" in degraded_answer
+    assert all("help.openai.com" not in str(artifact.text or "") for artifact in session._artifacts)
 
 
 def test_finalize_cycle_run_from_run_ignores_non_cycle_run(monkeypatch):

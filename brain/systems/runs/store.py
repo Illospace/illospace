@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 import threading
 from typing import Any
 
@@ -10,6 +11,11 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.platform.integrations.provider_error_sentinel import (
+    PROVIDER_ERROR_SENTINEL_PREFIX,
+    provider_error_kind,
+    safe_provider_error_sentinel,
+)
 from brain.systems.runs.domain import (
     AgentRun,
     AgentRunArtifact,
@@ -29,6 +35,8 @@ from brain.platform.db.models.agent_run import (
     AgentRunEventRow,
     AgentRunRow,
 )
+
+logger = logging.getLogger(__name__)
 
 _STEERING_SUBMITTED_EVENT = "run.steering_submitted"
 _STEERING_CURSOR_METADATA_KEY = "steering_cursor_sequence_no"
@@ -600,19 +608,42 @@ class AsyncAgentRunStore:
                 await self.session.commit()
             return row
 
+    async def safe_cycle_provider_error_text(self, run_id: int, text_value: str) -> str:
+        if text_value.startswith(PROVIDER_ERROR_SENTINEL_PREFIX):
+            return text_value
+        detected_provider_error = provider_error_kind(text_value)
+        if not detected_provider_error:
+            return text_value
+        run = await self.session.get(AgentRunRow, int(run_id))
+        metadata = dict(getattr(run, "metadata_", None) or {}) if run is not None else {}
+        if metadata.get("source") != "cycle" and not metadata.get("cycle_run_id"):
+            return text_value
+        logger.error(
+            "cycle_provider_error_text_blocked run_id=%s raw_error=%s",
+            run_id,
+            text_value,
+        )
+        return safe_provider_error_sentinel(detected_provider_error)
+
     async def append_artifact(self, artifact: AgentRunArtifact) -> AgentRunArtifactRow:
         artifact_type = (
             artifact.artifact_type.value
             if isinstance(artifact.artifact_type, ArtifactType)
             else str(artifact.artifact_type)
         )
+        artifact_text = artifact.text
+        if artifact_type == ArtifactType.FINAL_ANSWER.value and artifact_text is not None:
+            artifact_text = await self.safe_cycle_provider_error_text(
+                int(artifact.run_id),
+                str(artifact_text),
+            )
         row = AgentRunArtifactRow(
             run_id=artifact.run_id,
             root_run_id=artifact.root_run_id or artifact.run_id,
             artifact_type=artifact_type,
             title=artifact.title,
             payload=dict(artifact.payload or {}),
-            text=artifact.text,
+            text=artifact_text,
             uri=artifact.uri,
             visibility=(
                 artifact.visibility.value
@@ -642,6 +673,7 @@ class AsyncAgentRunStore:
         text_value = str(text_value or "")
         if not text_value:
             return None
+        text_value = await self.safe_cycle_provider_error_text(int(run_id), text_value)
         existing = (
             await self.session.scalars(
                 select(AgentRunArtifactRow)

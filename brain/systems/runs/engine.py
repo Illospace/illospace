@@ -289,10 +289,20 @@ class AsyncAgentRunEngine:
             return await self.store.set_status(run.id, result_status)
         if result_status == RunStatus.FAILED:
             if result.output:
-                await self.store.append_final_answer_once(run.id, result.output, root_run_id=run.root_run_id)
+                artifact = await self.store.append_final_answer_once(
+                    run.id,
+                    result.output,
+                    root_run_id=run.root_run_id,
+                )
+                safe_output = str(getattr(artifact, "text", None) or result.output)
                 if not await self.store.has_event_type(run.id, "run.text_delta"):
                     await self.store.append_event(
-                        run_event(run.id, "run.text_completed", {"text": result.output}, root_run_id=run.root_run_id)
+                        run_event(
+                            run.id,
+                            "run.text_completed",
+                            {"text": safe_output},
+                            root_run_id=run.root_run_id,
+                        )
                     )
             return await self.fail(run.id, result.output or "recipe_failed")
         if result_status == RunStatus.CANCELED:
@@ -313,10 +323,20 @@ class AsyncAgentRunEngine:
         if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
             return to_domain(row)
         if output:
-            await self.store.append_final_answer_once(run_id, output, root_run_id=row.root_run_id)
+            artifact = await self.store.append_final_answer_once(
+                run_id,
+                output,
+                root_run_id=row.root_run_id,
+            )
+            safe_output = str(getattr(artifact, "text", None) or output)
             if not await self.store.has_event_type(run_id, "run.text_delta"):
                 await self.store.append_event(
-                    run_event(run_id, "run.text_completed", {"text": output}, root_run_id=row.root_run_id)
+                    run_event(
+                        run_id,
+                        "run.text_completed",
+                        {"text": safe_output},
+                        root_run_id=row.root_run_id,
+                    )
                 )
         await self.store.append_event(
             run_event(run_id, "run.completed", {"status": status.value}, root_run_id=row.root_run_id)
@@ -327,8 +347,11 @@ class AsyncAgentRunEngine:
         row = await self.store.require_run(run_id)
         if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
             return to_domain(row)
-        await self.store.append_event(run_event(run_id, "run.failed", {"error": error}, root_run_id=row.root_run_id))
-        return await self.store.set_status(run_id, RunStatus.FAILED, reason=error)
+        safe_error = await self.store.safe_cycle_provider_error_text(run_id, str(error or ""))
+        await self.store.append_event(
+            run_event(run_id, "run.failed", {"error": safe_error}, root_run_id=row.root_run_id)
+        )
+        return await self.store.set_status(run_id, RunStatus.FAILED, reason=safe_error)
 
     async def cancel(self, run_id: int, *, reason: str | None = None) -> AgentRun:
         row = await self.store.require_run(run_id)

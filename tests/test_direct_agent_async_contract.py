@@ -31,6 +31,75 @@ def _response(text: str):
     return SimpleNamespace(stop_reason="end_turn", content=[block], usage=usage)
 
 
+async def test_scheduled_cycle_retries_provider_error_text_before_returning_safe_sentinel(
+    monkeypatch,
+):
+    from brain.systems.runs import direct_agent
+
+    raw_provider_error = (
+        "An error occurred while processing your request. Contact help.openai.com with request ID "
+        "req-primary-cycle. | server_error | server_error"
+    )
+    provider_calls = []
+    streamed_deltas = []
+
+    class FakeStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            yield SimpleNamespace(type="text", text=raw_provider_error)
+
+        def get_final_message(self):
+            return _response(raw_provider_error)
+
+    class FakeProvider:
+        def stream(self, request):
+            provider_calls.append(request)
+            return FakeStream()
+
+        def create(self, _request):
+            raise AssertionError("Cycle primary calls with activity hooks should use streaming")
+
+        def is_api_error(self, _exc):
+            return False
+
+        def is_retryable_error(self, _exc):
+            return False
+
+    monkeypatch.setattr(direct_agent, "get_provider", lambda *_args, **_kwargs: FakeProvider())
+    monkeypatch.setattr(direct_agent, "_PROVIDER_ERROR_TEXT_RETRY_DELAYS", (0,))
+
+    result = await direct_agent.run_agent_async(
+        message="Run the scheduled Cycle mission",
+        model="claude-sonnet-4-6",
+        tools=[],
+        persist_session=False,
+        session_id="cycle-provider-error-retry",
+        resolved_llm=_FakeLLM(),
+        on_stream_activity=lambda _label: None,
+        on_stream_delta=streamed_deltas.append,
+        metadata={
+            "execution_provenance": {
+                "source": "cycle",
+                "contract": {
+                    "kind": "autonomous_cycle_run",
+                    "result": {"kind": "autonomous_cycle_run_result"},
+                },
+            }
+        },
+    )
+
+    assert len(provider_calls) == 2
+    assert result.success is True
+    assert result.output == "upstream_provider_error: server_error"
+    assert "help.openai.com" not in result.output
+    assert streamed_deltas == []
+
+
 async def test_run_agent_async_basic_completion_uses_async_session_hooks(monkeypatch):
     from brain.systems.runs import direct_agent
 

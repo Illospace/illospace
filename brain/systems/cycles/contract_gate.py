@@ -10,6 +10,10 @@ from typing import Any
 
 from sqlalchemy import select
 
+from brain.platform.integrations.provider_error_sentinel import (
+    provider_error_kind,
+    safe_provider_error_sentinel,
+)
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.cycle import Cycle, CycleRun
 
@@ -162,18 +166,23 @@ def _satisfies_required_output(
 
 def evaluate_cycle_result_contract(
     *,
-    candidate_answer: str,
+    candidate_answer: str | None,
     result_contract: dict[str, Any],
     mission: str,
     evidence_packet: dict[str, Any] | None = None,
+    provider_exception: BaseException | str | None = None,
 ) -> dict[str, Any]:
     """Return a deterministic verdict for a candidate scheduled-Cycle visible answer."""
 
     evidence_packet = _json_dict(evidence_packet)
     normalized_candidate = _normalize_text(candidate_answer)
+    detected_provider_error = provider_error_kind(
+        candidate_answer,
+        provider_exception=provider_exception,
+    )
     missing: list[str] = []
 
-    if not normalized_candidate:
+    if not normalized_candidate or detected_provider_error:
         missing.append("visible_final_answer")
     if _looks_like_introspection_boilerplate(candidate_answer):
         missing.append("candidate_is_runtime_introspection")
@@ -204,7 +213,12 @@ def evaluate_cycle_result_contract(
     return {
         "approved": not missing,
         "missing_outputs": missing,
-        "candidate_summary": _candidate_summary(candidate_answer),
+        "candidate_summary": (
+            safe_provider_error_sentinel(detected_provider_error)
+            if detected_provider_error
+            else _candidate_summary(candidate_answer)
+        ),
+        "provider_error": detected_provider_error,
     }
 
 
@@ -301,6 +315,14 @@ async def _append_final_answer_artifact_once(
     payload: dict[str, Any],
 ) -> AgentRunArtifactRow:
     text_value = str(text or "")
+    detected_provider_error = provider_error_kind(text_value)
+    if detected_provider_error:
+        logger.error(
+            "cycle_provider_error_final_answer_append_blocked run_id=%s raw_error=%s",
+            getattr(agent_run, "id", None),
+            text_value,
+        )
+        text_value = safe_provider_error_sentinel(detected_provider_error)
     existing = (
         await session.scalars(
             select(AgentRunArtifactRow)
@@ -342,6 +364,17 @@ def _event_result_preview(event: AgentRunEventRow, *, limit: int = 600) -> str:
     payload = _json_dict(getattr(event, "payload", None))
     value = payload.get("result") or payload.get("result_preview") or payload.get("error") or ""
     return _candidate_summary(value, limit=limit)
+
+
+def _captured_provider_error(evidence_packet: dict[str, Any]) -> str | None:
+    for event in reversed(_json_list(evidence_packet.get("recent_events"))):
+        event_data = _json_dict(event)
+        if event_data.get("event_type") != "run.failed":
+            continue
+        error = str(event_data.get("result_preview") or "").strip()
+        if provider_error_kind(error):
+            return error
+    return None
 
 
 async def _cycle_contract_evidence_packet(
@@ -512,7 +545,37 @@ async def _async_repair_cycle_contract_answer(
         return None
 
 
-def _degraded_visible_answer(missing_outputs: list[str]) -> str:
+def _completed_side_effect_names(evidence_packet: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    for event in _json_list(evidence_packet.get("recent_events")):
+        event_data = _json_dict(event)
+        if event_data.get("event_type") != "run.tool_completed" or event_data.get("is_error"):
+            continue
+        name = str(event_data.get("tool_name") or "").strip()
+        if name:
+            names.append(name)
+    return _dedupe(names)
+
+
+def _degraded_visible_answer(
+    missing_outputs: list[str],
+    *,
+    provider_error: str | None = None,
+    evidence_packet: dict[str, Any] | None = None,
+) -> str:
+    if provider_error:
+        side_effect_names = _completed_side_effect_names(_json_dict(evidence_packet))
+        side_effect_sentence = (
+            "Side effects completed before the provider failure remain applied: "
+            f"{', '.join(side_effect_names[:8])}."
+            if side_effect_names
+            else "No completed side effects were recorded before the provider failure."
+        )
+        return (
+            "Cycle run degraded: mission_contract_failed. The upstream model provider failed "
+            f"with {provider_error} after a bounded retry, so no safe visible mission answer "
+            f"was produced. {side_effect_sentence}"
+        )
     missing = ", ".join(missing_outputs[:8]) if missing_outputs else "required Cycle outputs"
     return (
         "Cycle run degraded: mission_contract_failed. The run completed side effects, "
@@ -542,12 +605,16 @@ def _base_verdict(
         "visible_answer_source": "candidate" if initial_review.get("approved") else None,
         "side_effects_succeeded": bool(evidence_packet.get("side_effects_succeeded")),
         "domain_side_effects_succeeded": bool(evidence_packet.get("domain_side_effects_succeeded")),
+        "provider_error": initial_review.get("provider_error"),
     }
 
 
 async def async_prepare_cycle_run_visible_finalization(
     session: Any,
     agent_run_id: int,
+    *,
+    provider_exception: BaseException | str | None = None,
+    provider_errors_only: bool = False,
 ) -> dict[str, Any] | None:
     """Ensure a scheduled Cycle final answer satisfies its result contract before visibility."""
 
@@ -579,11 +646,39 @@ async def async_prepare_cycle_run_visible_finalization(
         cycle_run=cycle_run,
         cycle=cycle,
     )
+    captured_provider_exception = provider_exception or _captured_provider_error(evidence_packet)
+    detected_provider_error = provider_error_kind(
+        candidate_answer,
+        provider_exception=captured_provider_exception,
+    )
+    if provider_errors_only and not detected_provider_error:
+        return None
+    if detected_provider_error:
+        raw_provider_error = candidate_answer or str(captured_provider_exception or "")
+        logger.error(
+            "cycle_provider_error_final_answer_blocked run_id=%s artifact_id=%s raw_error=%s",
+            int(agent_run.id),
+            getattr(artifact, "id", None),
+            raw_provider_error,
+        )
+        candidate_answer = safe_provider_error_sentinel(detected_provider_error)
+        if artifact is not None:
+            artifact.text = candidate_answer
+            artifact.visibility = "internal"
+            artifact_payload = _json_dict(getattr(artifact, "payload", None))
+            artifact_payload.update(
+                {
+                    "provider_error": detected_provider_error,
+                    "blocked_from_visibility": True,
+                }
+            )
+            artifact.payload = artifact_payload
     initial_review = evaluate_cycle_result_contract(
         candidate_answer=candidate_answer,
         result_contract=result_contract,
         mission=mission,
         evidence_packet=evidence_packet,
+        provider_exception=captured_provider_exception,
     )
     verdict = _base_verdict(
         candidate_answer=candidate_answer,
@@ -616,6 +711,12 @@ async def async_prepare_cycle_run_visible_finalization(
             mission=mission,
             evidence_packet=evidence_packet,
         )
+        if repair_review.get("provider_error"):
+            logger.error(
+                "cycle_contract_repair_provider_error run_id=%s raw_error=%s",
+                int(agent_run.id),
+                repair_answer,
+            )
         if repair_review["approved"]:
             repaired_artifact = await _append_final_answer_artifact_once(
                 session,
@@ -643,7 +744,11 @@ async def async_prepare_cycle_run_visible_finalization(
         verdict["final_missing_outputs"] = list(repair_review["missing_outputs"])
 
     missing_outputs = list(verdict.get("final_missing_outputs") or verdict["missing_outputs"])
-    degraded_answer = _degraded_visible_answer(missing_outputs)
+    degraded_answer = _degraded_visible_answer(
+        missing_outputs,
+        provider_error=verdict.get("provider_error"),
+        evidence_packet=evidence_packet,
+    )
     degraded_artifact = await _append_final_answer_artifact_once(
         session,
         agent_run,
@@ -673,10 +778,15 @@ def cycle_finalization_status_from_verdict(
     verdict: dict[str, Any] | None,
     error: str | None = None,
 ) -> tuple[str, str | None]:
-    if requested_status != "completed":
-        return requested_status, error
-    if _json_dict(verdict).get("settlement_status") == "mission_contract_failed":
-        missing = _json_list(_json_dict(verdict).get("final_missing_outputs"))
+    verdict_data = _json_dict(verdict)
+    contract_failed = verdict_data.get("settlement_status") == "mission_contract_failed"
+    provider_error = str(verdict_data.get("provider_error") or "").strip()
+    if contract_failed and (requested_status == "completed" or provider_error):
+        missing = _json_list(verdict_data.get("final_missing_outputs"))
+        if provider_error:
+            return "degraded", f"mission_contract_failed: upstream provider {provider_error}"
         detail = ", ".join(str(item) for item in missing[:8]) or "required Cycle outputs"
         return "degraded", f"mission_contract_failed: missing {detail}"
+    if requested_status != "completed":
+        return requested_status, error
     return requested_status, error
