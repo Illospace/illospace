@@ -505,8 +505,8 @@ async def async_finalize_cycle_run_from_run(
     if status not in {"completed", "failed"}:
         return
     async with UnitOfWork() as uow:
-        run = await uow.session.get(AgentRun, run_id)
-        metadata = run.metadata_ if run else None
+        agent_run = await uow.session.get(AgentRun, run_id)
+        metadata = agent_run.metadata_ if agent_run else None
         if not isinstance(metadata, dict) or metadata.get("source") != "cycle":
             return
         cycle_run_id = metadata.get("cycle_run_id")
@@ -519,6 +519,12 @@ async def async_finalize_cycle_run_from_run(
         verdict = persisted_cycle_contract_verdict(run)
         if status == "completed" and verdict is None:
             verdict = await async_prepare_cycle_run_visible_finalization(uow.session, int(run_id))
+        elif status == "failed" and verdict is None:
+            verdict = await async_prepare_cycle_run_visible_finalization(
+                uow.session,
+                int(run_id),
+                provider_errors_only=True,
+            )
         final_status, final_error = cycle_finalization_status_from_verdict(
             status,
             verdict=verdict,

@@ -42,6 +42,10 @@ from brain.platform.integrations.llm import (
 from brain.platform.async_io import run_blocking
 from brain.platform.integrations.providers import get_provider
 from brain.platform.integrations.providers import ContentBlockType, LLMRequest, MessageRole, StopReason
+from brain.platform.integrations.provider_error_sentinel import (
+    provider_error_kind,
+    safe_provider_error_sentinel,
+)
 from brain.platform.providers.model_policy import (
     async_get_default_model,
     infer_provider_from_model,
@@ -1227,6 +1231,7 @@ def _tool_is_available(tools: list[dict] | None, tool_name: str | None) -> bool:
 # ── API Call ──────────────────────────────────────────────────
 
 _API_RETRY_DELAYS = (2, 5, 10)
+_PROVIDER_ERROR_TEXT_RETRY_DELAYS = (1,)
 
 
 async def _api_call_with_retry_async(
@@ -1665,12 +1670,45 @@ async def run_agent_async(
 
             # API call with retry on transient 500s, plus one emergency context compaction retry.
             overflow_retry_used = False
+            provider_error_text_attempt = 0
+            detected_provider_error = None
             while True:
                 try:
+                    # Scheduled Cycles settle through the contract gate; withholding live text
+                    # deltas keeps an upstream error body from becoming a public interim answer.
+                    visible_stream_delta = None if scheduled_result_contract else on_stream_delta
                     response = await _api_call_with_retry_async(
-                        state.provider, request, llm, cancel_event, on_stream_activity, on_stream_delta,
+                        state.provider, request, llm, cancel_event, on_stream_activity, visible_stream_delta,
                         session_id, turn, state.tokens, start_time, state.tool_calls_made, _call_start,
                     )
+                    response_text = _extract_text(
+                        [{"role": "assistant", "content": _content_to_dicts(response.content)}]
+                    ).strip()
+                    detected_provider_error = (
+                        provider_error_kind(response_text) if scheduled_result_contract else None
+                    )
+                    if detected_provider_error:
+                        logger.error(
+                            "Agent %s turn %d: Cycle provider error text blocked "
+                            "(kind=%s, attempt=%d/%d): %s",
+                            session_id,
+                            turn,
+                            detected_provider_error,
+                            provider_error_text_attempt + 1,
+                            len(_PROVIDER_ERROR_TEXT_RETRY_DELAYS) + 1,
+                            response_text,
+                        )
+                        if provider_error_text_attempt < len(_PROVIDER_ERROR_TEXT_RETRY_DELAYS):
+                            delay = _PROVIDER_ERROR_TEXT_RETRY_DELAYS[provider_error_text_attempt]
+                            provider_error_text_attempt += 1
+                            if on_stream_activity:
+                                await _call_optional_async(
+                                    on_stream_activity,
+                                    f"Upstream model provider failed; retrying in {delay}s…",
+                                )
+                            await asyncio.sleep(max(0.0, float(delay)))
+                            _call_start = time.time()
+                            continue
                     break
                 except Exception as exc:
                     fallback = fallback_model_for(model)
@@ -1821,11 +1859,22 @@ async def run_agent_async(
                 cache_write=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
                 context_messages=len(state.messages),
                 system_prompt_chars=len(json.dumps(system)) if system else 0,
-                status="tool_use" if response.stop_reason == StopReason.TOOL_USE else "success",
+                status=(
+                    "provider_error_text"
+                    if detected_provider_error
+                    else "tool_use" if response.stop_reason == StopReason.TOOL_USE else "success"
+                ),
                 stop_reason=str(response.stop_reason), latency_ms=_call_ms,
             )
 
             content_dicts = _content_to_dicts(response.content)
+            if detected_provider_error:
+                content_dicts = [
+                    {
+                        "type": "text",
+                        "text": safe_provider_error_sentinel(detected_provider_error),
+                    }
+                ]
             if (
                 response.stop_reason == StopReason.END_TURN
                 and getattr(response.usage, "output_tokens", 0) > 0

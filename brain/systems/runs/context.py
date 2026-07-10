@@ -267,7 +267,7 @@ class RunContextLoader:
         )
 
 
-def has_scheduled_result_contract(metadata: dict[str, Any]) -> bool:
+def _has_scheduled_result_contract(metadata: dict[str, Any]) -> bool:
     if not isinstance(metadata, dict):
         return False
     contract = metadata.get("contract")
@@ -291,6 +291,17 @@ def has_scheduled_result_contract(metadata: dict[str, Any]) -> bool:
         str(launch_envelope.get("origin") or "").strip().lower() == "scheduled_cycle",
         str(context_policy.get("current_instruction_role") or "").strip().lower() == "scheduled_prompt",
     ))
+
+
+def has_scheduled_result_contract(metadata: dict[str, Any]) -> bool:
+    """Recognize Cycle contracts at intake and inside recipe execution metadata."""
+
+    if _has_scheduled_result_contract(metadata):
+        return True
+    execution_provenance = metadata.get("execution_provenance") if isinstance(metadata, dict) else None
+    return isinstance(execution_provenance, dict) and _has_scheduled_result_contract(
+        execution_provenance
+    )
 
 
 __all__ = [

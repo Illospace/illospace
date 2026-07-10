@@ -152,6 +152,83 @@ async def test_claim_and_completion_are_idempotent(session_factory):
     assert events.count("run.completed") == 1
 
 
+async def test_cycle_final_answer_store_never_persists_raw_provider_error(session_factory):
+    from brain.systems.runs.artifacts import final_answer_artifact
+
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    run = await store.create_run(
+        _run_request(
+            thread_id="thread-1",
+            message="scheduled mission",
+            metadata={
+                "source": "cycle",
+                "cycle_run_id": 12,
+                "contract": {"result": {"kind": "autonomous_cycle_run_result"}},
+            },
+        )
+    )
+    raw_provider_error = (
+        "An error occurred while processing your request. Contact help.openai.com with request ID "
+        "req-store-guard. | server_error | server_error"
+    )
+
+    artifact = await store.append_final_answer_once(run.id, raw_provider_error)
+    direct_artifact = await store.append_artifact(final_answer_artifact(run.id, raw_provider_error))
+
+    assert artifact is not None
+    assert artifact.text == "upstream_provider_error: server_error"
+    assert "help.openai.com" not in artifact.text
+    assert direct_artifact.text == "upstream_provider_error: server_error"
+    assert "help.openai.com" not in direct_artifact.text
+
+
+async def test_failed_cycle_engine_events_do_not_surface_raw_provider_error(session_factory):
+    raw_provider_error = (
+        "An error occurred while processing your request. Contact help.openai.com with request ID "
+        "req-engine-guard. | server_error | server_error"
+    )
+
+    class ProviderFailureRecipe:
+        async def execute(self, _runtime: RunRuntime) -> RunRecipeResult:
+            return RunRecipeResult(output=raw_provider_error, status=RunStatus.FAILED)
+
+    session = session_factory()
+    result = await AsyncAgentRunEngine(
+        session,
+        recipes={"fast": ProviderFailureRecipe()},
+    ).run(
+        _run_request(
+            thread_id="thread-1",
+            message="scheduled mission",
+            metadata={
+                "source": "cycle",
+                "cycle_run_id": 12,
+                "contract": {"result": {"kind": "autonomous_cycle_run_result"}},
+            },
+        )
+    )
+
+    artifacts = list(
+        (
+            await session.scalars(
+                select(AgentRunArtifactRow).where(AgentRunArtifactRow.run_id == result.id)
+            )
+        ).all()
+    )
+    events = list(
+        (
+            await session.scalars(
+                select(AgentRunEventRow).where(AgentRunEventRow.run_id == result.id)
+            )
+        ).all()
+    )
+
+    assert result.status == RunStatus.FAILED
+    assert artifacts[-1].text == "upstream_provider_error: server_error"
+    assert all("help.openai.com" not in str(event.payload) for event in events)
+
+
 async def test_post_completion_tasks_run_after_terminal_completion(session_factory):
     session = session_factory()
     started = asyncio.Event()
