@@ -22,6 +22,16 @@ between "merged" and `Done`. Record 1238 shows the data gap: Rollbar #2206 and
 fix PR #905 exist only as prose in `body`/`progress_note` — nothing structured
 for a dedup ladder to key on.
 
+The case study then advanced to exactly the state this slice models, while the
+spec was being written: Axel confirmed #2206 as **deployment drift** — the
+real fix is PR #860, merged to *staging* 2026-07-07 (merge `d9980489`,
+compare `main...d9980489` = diverged ⇒ not in prod) — closed hotfix #905
+unmerged as unnecessary, and closed issue #904 as "known". Under this slice
+that ticket is `deploy_state=prod_pending` with `fix_pr=uwear-ai/uwear-backend#860`
+and **cannot be `Done`** (not deployed, not verified); today, closed-with-
+live-alert is precisely the armed done-reappeared trap: the next #2206
+re-fire meets a closed ticket and binary dedup would refile it.
+
 ## Contract unlocked
 
 A re-firing alert is never blindly skipped and never refiled. Triage branches
