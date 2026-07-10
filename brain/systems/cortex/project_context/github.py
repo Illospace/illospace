@@ -224,6 +224,7 @@ def _pull_request_detail_payload(pr: dict[str, Any]) -> dict[str, Any]:
         "mergeable": pr.get("mergeable"),
         "mergeable_state": pr.get("mergeable_state"),
         "merged": bool(pr.get("merged")),
+        "merge_commit_sha": pr.get("merge_commit_sha"),
         "commits": pr.get("commits"),
         "changed_files": pr.get("changed_files"),
         "additions": pr.get("additions"),
@@ -510,6 +511,53 @@ async def async_get_pull_request(
         "pull_request": _pull_request_detail_payload(pr if isinstance(pr, dict) else {}),
         "checks": _check_runs_payload(checks),
     }
+
+
+async def async_get_pull_request_deploy_info(
+    slug: str,
+    pull_number: int,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Read only the PR facts needed for deploy-state ancestry checks."""
+    owner, repo = slug.split("/", 1)
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        pr = await _async_request(
+            client,
+            "GET",
+            f"/repos/{owner}/{repo}/pulls/{pull_number}",
+            token=token,
+        )
+    detail = _pull_request_detail_payload(pr if isinstance(pr, dict) else {})
+    return {
+        "repo": slug,
+        "pull_request": detail,
+    }
+
+
+async def async_compare_commits(
+    slug: str,
+    base: str,
+    head: str,
+    *,
+    token: str | None = None,
+) -> str:
+    """Return GitHub's compare status for ``base...head``."""
+    owner, repo = slug.split("/", 1)
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        payload = await _async_request(
+            client,
+            "GET",
+            f"/repos/{owner}/{repo}/compare/{base}...{head}",
+            token=token,
+        )
+    status = payload.get("status") if isinstance(payload, dict) else None
+    if status not in {"identical", "behind", "ahead", "diverged"}:
+        raise GitHubConnectorError(
+            status_code=502,
+            message="GitHub compare response omitted a recognized status.",
+        )
+    return str(status)
 
 
 async def async_get_repo_counts(

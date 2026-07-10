@@ -18,6 +18,29 @@ from __future__ import annotations
 from brain.systems.change_notifications import DEFAULT_URGENT_TERMS, render_outbound
 
 
+async def _maybe_run_deploy_verification(session, org_id) -> dict | None:
+    """Run the additive close-only verifier when deploy-state is armed."""
+    import logging
+    from datetime import datetime, timezone
+
+    from brain.systems.deploy_state_config import deploy_feature_enabled
+
+    if session is None or not deploy_feature_enabled():
+        return None
+    try:
+        from brain.systems.deploy_state_sweep import run_deploy_verification
+
+        async with session.begin_nested():
+            return await run_deploy_verification(
+                session,
+                org_id=org_id,
+                now=datetime.now(timezone.utc),
+            )
+    except Exception:
+        logging.getLogger("illo.notify").exception("deploy verification failed safely")
+        return None
+
+
 def _normalize_event(row) -> dict:
     """Map a DomainEvent row to the notify event shape. Defensive: the record
     ``after`` snapshot is domain-schema-specific, so every field has a fallback."""
@@ -131,6 +154,7 @@ async def run_notify_cycle(
     post=None,
 ) -> dict:
     """One notify-cycle tick. Returns a small summary of what was sent."""
+    verification = await _maybe_run_deploy_verification(session, org_id)
     events = await _load_change_events(session, org_id, since)
     await _fill_owner_labels(session, events)
     unclaimed = await _count_unclaimed(session, org_id)
@@ -142,9 +166,12 @@ async def run_notify_cycle(
     if outbound["digest"]:
         await sender(channel_id, outbound["digest"])
 
-    return {
+    summary = {
         "events": len(events),
         "immediate": len(outbound["immediate"]),
         "digest_posted": bool(outbound["digest"]),
         "unclaimed": unclaimed,
     }
+    if verification is not None:
+        summary["verification"] = verification
+    return summary

@@ -42,6 +42,7 @@ from brain.systems.runs.tool_catalog.handlers.cycles import _handle_manage_cycle
 from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
 from brain.systems.runs.tool_catalog.handlers.inbound import _handle_manage_inbound
 from brain.systems.runs.tool_catalog.handlers.github import (
+    _handle_check_fix_deploy_state,
     _handle_create_github_issue,
     _handle_read_github_source,
 )
@@ -272,6 +273,10 @@ def _get_tool_handlers(
         "create_github_issue": lambda **kw: _patched_private(
             "_handle_create_github_issue",
             _handle_create_github_issue,
+        )(**kw),
+        "check_fix_deploy_state": lambda **kw: _patched_private(
+            "_handle_check_fix_deploy_state",
+            _handle_check_fix_deploy_state,
         )(**kw),
         "read_thread_messages": _handle_read_thread_messages,
         "post_chat_message": lambda **kw: _patched_private(

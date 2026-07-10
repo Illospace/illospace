@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
@@ -277,6 +279,12 @@ async def submit_inbound_envelope(
             envelope=normalized,
             projection=projection,
         )
+        await _maybe_run_deploy_sweep(
+            session,
+            org_id=context.org_id,
+            actor_user_id=context.owner_user_id,
+            normalized=normalized,
+        )
         return await _complete_event(
             session,
             event,
@@ -335,6 +343,61 @@ async def submit_inbound_envelope(
             error=str(exc),
             reasoning_summary=str(exc),
         )
+
+
+async def _maybe_run_deploy_sweep(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    actor_user_id: str | None = None,
+    normalized: Mapping[str, Any],
+) -> dict | None:
+    """Best-effort deploy hook; never lets lifecycle wiring fail ingestion."""
+    if normalized.get("kind") != "github_event":
+        return None
+    hints = normalized.get("hints") or {}
+    if not isinstance(hints, Mapping):
+        return None
+    repo = str(hints.get("repo") or "").strip()
+    from brain.systems.deploy_state_config import deploy_feature_enabled
+
+    if (
+        not deploy_feature_enabled(repo)
+        or hints.get("event") != "pull_request"
+        or hints.get("merged") is not True
+    ):
+        return None
+    try:
+        from brain.systems.deploy_state_sweep import run_deploy_sweep
+        from brain.systems.runs.execution_context import bind_agent_context
+        from brain.systems.runs.tool_catalog.handlers.github import _github_token_candidates
+
+        try:
+            with bind_agent_context({"user_id": actor_user_id, "org_id": org_id}):
+                candidates = await _github_token_candidates(
+                    repo_slug=repo,
+                    token_secret_key=None,
+                )
+        except Exception:
+            logging.getLogger("illo.inbound").exception(
+                "GitHub read-token selection failed; deploy sweep will try public access"
+            )
+            candidates = [{"token": None}]
+        ancestry_tokens = [candidate.get("token") for candidate in candidates]
+
+        async with session.begin_nested():
+            return await run_deploy_sweep(
+                session,
+                org_id=str(org_id),
+                repo=repo,
+                merge_event=hints,
+                ancestry_tokens=ancestry_tokens,
+            )
+    except Exception:
+        logging.getLogger("illo.inbound").exception(
+            "deploy sweep failed safely for inbound GitHub event"
+        )
+        return None
 
 
 async def match_source_policy(

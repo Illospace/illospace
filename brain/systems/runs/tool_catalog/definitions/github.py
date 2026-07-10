@@ -117,6 +117,37 @@ GITHUB_TOOLS = [
             "required": ["repo", "title"],
         },
     },
+    {
+        "name": "check_fix_deploy_state",
+        "description": (
+            "Read GitHub commit ancestry to check whether a fix PR or commit is merged, on staging, "
+            "or deployed to main. Returns an indeterminate result when GitHub cannot be reached or "
+            "no available read token can see the repository; it never guesses closed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository as owner/name, GitHub URL, or git remote URL.",
+                },
+                "pr_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Fix pull request number. Provide this or sha, not both.",
+                },
+                "sha": {
+                    "type": "string",
+                    "description": "Fix merge commit SHA. Provide this or pr_number, not both.",
+                },
+                "token_secret_key": {
+                    "type": "string",
+                    "description": "Optional Vault secret key containing a GitHub read token.",
+                },
+            },
+            "required": ["repo"],
+        },
+    },
 ]
 
 

@@ -183,6 +183,68 @@ def test_monitored_channel_admits_third_party_bot_alert():
     assert envelope["origin"] == "slack.channel_message"
 
 
+def test_attachment_only_bot_alert_surfaces_fallback_into_monitor_prompt():
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
+    fallback = (
+        "<https://app.rollbar.com/a/uwear/fix/item/Uwear-API/2206|"
+        "#2206 100th error: ClientError: 400 INVALID_ARGUMENT>"
+    )
+    envelope = normalize_slack_socket_event(
+        _socket_mode_channel_message(
+            user="",
+            bot_id="B_ROLLBAR",
+            app_id="A_ROLLBAR",
+            text="",
+            attachments=[
+                {"fallback": fallback},
+                {"title": "secondary alert context"},
+                {"fallback": "ignored third attachment"},
+            ],
+        ),
+        bot_user_id="BILLO",
+        monitored_channels={"C_ALERTS"},
+    )
+
+    assert envelope is not None
+    assert fallback in envelope["payload"]["text"]
+    assert "secondary alert context" in envelope["payload"]["text"]
+    assert "ignored third attachment" not in envelope["payload"]["text"]
+    assert fallback in envelope["summary"]
+
+    work = build_slack_work_intake_payload(
+        org_id="org1",
+        authority_user_id="user1",
+        payload=envelope["payload"],
+    )
+    assert fallback in work["payload"]["thread_message"]
+    assert f"Message text: {fallback}" in work["payload"]["run_message"]
+
+
+def test_attachment_previews_are_bounded_to_two_by_500_chars():
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    envelope = normalize_slack_socket_event(
+        _socket_mode_channel_message(
+            user="",
+            bot_id="B_ROLLBAR",
+            app_id="A_ROLLBAR",
+            text="",
+            attachments=[
+                {"fallback": "a" * 600},
+                {"title": "b" * 600},
+                {"fallback": "c" * 600},
+            ],
+        ),
+        bot_user_id="BILLO",
+        monitored_channels={"C_ALERTS"},
+    )
+
+    assert envelope is not None
+    assert envelope["payload"]["text"] == f"{'a' * 500}\n{'b' * 500}"
+
+
 def test_monitored_channel_mention_still_routes_as_mention():
     from brain.systems.slack.ingress import normalize_slack_socket_event
 

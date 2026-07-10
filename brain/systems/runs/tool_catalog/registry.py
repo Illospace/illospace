@@ -318,6 +318,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
     },
+    "check_fix_deploy_state": {
+        "permission": "read_workspace",
+        "risk_class": "low",
+        "side_effect_class": "read_only",
+        "reversibility": "none",
+        "expected_effect": "read GitHub ancestry to classify a fix's deploy state",
+        "output_budget_chars": 8_000,
+        "evidence_emitter": True,
+    },
     "create_github_issue": {
         "permission": "write_workspace",
         "risk_class": "high",

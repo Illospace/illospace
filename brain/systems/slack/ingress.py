@@ -7,6 +7,8 @@ from typing import Any, Mapping
 SLACK_MESSAGE_ENVELOPE_KIND = "slack_message"
 SLACK_CHANNEL_MESSAGE_ORIGIN = "slack.channel_message"
 MAX_SLACK_TEXT_CHARS = 4000
+MAX_SLACK_ATTACHMENT_PREVIEW_CHARS = 500
+MAX_SLACK_ATTACHMENT_PREVIEWS = 2
 
 _IGNORED_MESSAGE_SUBTYPES = {
     "bot_message",
@@ -20,6 +22,28 @@ _IGNORED_MESSAGE_SUBTYPES = {
 
 def _bounded_text(value: Any, *, limit: int = MAX_SLACK_TEXT_CHARS) -> str:
     return str(value or "")[:limit]
+
+
+def _event_text(event: Mapping[str, Any]) -> str:
+    """Surface attachment-only bot alerts without changing ordinary messages."""
+    text = _bounded_text(event.get("text"))
+    if text.strip():
+        return text
+    previews: list[str] = []
+    attachments = event.get("attachments")
+    if not isinstance(attachments, list):
+        return text
+    for attachment in attachments[:MAX_SLACK_ATTACHMENT_PREVIEWS]:
+        if not isinstance(attachment, Mapping):
+            continue
+        preview = attachment.get("fallback") or attachment.get("title")
+        bounded = _bounded_text(
+            preview,
+            limit=MAX_SLACK_ATTACHMENT_PREVIEW_CHARS,
+        ).strip()
+        if bounded:
+            previews.append(bounded)
+    return _bounded_text("\n".join(previews))
 
 
 def _socket_payload(socket_payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -207,6 +231,7 @@ def normalize_slack_socket_event(
         "visibility": "public",
     }
     permalink = str(event.get("permalink") or "").strip() or None
+    message_text = _event_text(event)
     normalized_payload = {
         "event_kind": _event_kind(origin),
         "origin": origin,
@@ -219,7 +244,7 @@ def normalize_slack_socket_event(
         "thread_ts": thread_ts,
         "slack_user_id": slack_user_id,
         "bot_user_id": resolved_bot_user_id,
-        "text": _bounded_text(event.get("text")),
+        "text": message_text,
         "permalink": permalink,
         "event_id": event_id or None,
         "event_time": payload.get("event_time"),
@@ -231,7 +256,7 @@ def normalize_slack_socket_event(
         "kind": SLACK_MESSAGE_ENVELOPE_KIND,
         "origin": origin,
         "payload": normalized_payload,
-        "summary": _bounded_text(event.get("text"), limit=500),
+        "summary": _bounded_text(message_text, limit=500),
         "hints": {
             "surface": {
                 "kind": "slack",

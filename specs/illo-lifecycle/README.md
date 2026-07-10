@@ -2,7 +2,20 @@
 
 ## Next Agent Prompt
 
-**Status (2026-07-09):** All five slices **implemented and shipped in PR #276**
+**Status (2026-07-10):** Slice 5 (deploy-state & post-deploy verification,
+[slices/05-deploy-state.md](slices/05-deploy-state.md)) is **code-complete on
+this branch**: pure core + sweep + verification + `check_fix_deploy_state`
+tool + prose ladder (SKILL.md/monitor prompt), Codex-implemented and
+Claude-reviewed, fast suite green (3438 passed, 9 pre-existing
+`test_llm_worker` env failures), and the ladder **verified live** by two
+READ-ONLY illo-dev dry runs (952-pattern): run 1088 pre-promotion → expected
+noise / zero refiles / zero pings + promotion recommendation; run 1089
+post-promotion → reopen #904 + escalate to the builder (axel-havard). Live
+activation gates below; the doc-1155 delta
+([slices/05-doc-1155-delta.md](slices/05-doc-1155-delta.md)) awaits approval
+and must merge after/with the parallel digest-contract edit to record 1155.
+
+**Prior status (2026-07-09):** All five slices **implemented and shipped in PR #276**
 (2 commits). Pure logic cores are unit-tested (**105 focused tests green**); an
 independent adversarial review found ~10 MED/LOW findings, all **fixed and pushed**
 (commit `76ed45f`). Full suite **3280 passed** (1 pre-existing env-only failure,
@@ -45,10 +58,13 @@ enumerated per slice below.
   triage completion.
 - **Slice 5:** set `ILLO_DEPLOY_SWEEP_REPOS` (watched repos) to arm the
   promotion sweep (+ optional `ILLO_DEPLOY_SETTLE_MINUTES` /
-  `ILLO_DEPLOY_QUIET_HOURS` overrides); apply the deploy-state ladder delta to
-  live doc 1155 (**coordinate with the parallel digest-contract edit to the
-  same doc**); verification tick rides Slice 4's cycle registration; decide
-  the optional Rollbar read-only token (Vault) for API-backed quiet checks.
+  `ILLO_DEPLOY_QUIET_HOURS` overrides); ensure the Slice-1 source
+  policy/projection **covers `pull_request` events** — the sweep hook runs on
+  the post-projection ingest path, so unprojected merge envelopes never reach
+  it; apply the deploy-state ladder delta to live doc 1155
+  (**coordinate with the parallel digest-contract edit to the same doc**);
+  verification tick rides Slice 4's cycle registration; decide the optional
+  Rollbar read-only token (Vault) for API-backed quiet checks.
 
 **Before ending your pass:** update this section.
 
@@ -61,9 +77,10 @@ enumerated per slice below.
 - [x] Slice 3 — resolve_owner + rules, wired into triage; live: env owner id + pool nullability
 - [x] Slice 4 — notify decision/digest + `run_notify_cycle`; live: register cycle + urgent hook
 - [x] Review pass — 6 self-review bugs found + fixed (98 focused tests green)
-- [ ] Slice 5 — deploy-state & post-deploy verification (spec authored
-  2026-07-10 after the Rollbar #2206 → #904 re-fire case; implementation in
-  progress)
+- [x] Slice 5 — deploy-state & post-deploy verification (spec + code +
+  prose, 2026-07-10, from the Rollbar #2206 → #904 re-fire case; ladder
+  dry-run-verified on illo-dev, runs 1088/1089); live: env + doc 1155 delta
+  + Rollbar-token decision
 - [ ] Live activation (per checklist above) — Reda / infra
 
 ---

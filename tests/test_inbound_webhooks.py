@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -121,6 +122,9 @@ async def _seed_connection(
         session.add(Org(id=ORG_ID, name="Test Org", slug="test-org"))
     if await session.get(User, USER_ID) is None:
         session.add(User(id=USER_ID, org_id=ORG_ID, name="Reda", email="reda@example.com"))
+    # Flush so the org/user rows exist before the connection's FKs reference
+    # them — Postgres enforces the ordering; SQLite's no-FK default hides it.
+    await session.flush()
     connection = ExternalAgentConnectionRow(
         id=connection_id,
         org_id=ORG_ID,
@@ -1127,6 +1131,230 @@ async def test_domain_projection_creates_updates_and_dedupes_domain_records(sess
     domain_events = await domain_service.list_events(ORG_ID, domain.id, record_id=record_id)
     assert [event.event_type for event in domain_events] == ["record.updated", "record.created"]
     assert all(str(event.reason).startswith("inbound_event:") for event in domain_events)
+
+
+@pytest.mark.requires_db
+async def test_merged_github_projection_triggers_one_deploy_sweep_and_replay_is_inert(
+    session, monkeypatch
+):
+    import brain.systems.deploy_state_sweep as deploy_sweep
+
+    repo = "uwear-ai/uwear-backend"
+    monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", repo)
+    principal = await _seed_connection(session)
+    domain_service = AsyncDomainService(session)
+    domain = await domain_service.create_domain(
+        ORG_ID,
+        name="GitHub Tickets",
+        objects=[
+            {
+                "key": "github_ticket",
+                "title_field": "external_id",
+                "fields": [
+                    {"key": "external_id", "field_type": "text", "required": True},
+                    {"key": "repo", "field_type": "text"},
+                ],
+            }
+        ],
+    )
+    policy = await inbound.create_source_policy(
+        session,
+        org_id=ORG_ID,
+        connection_id=CONNECTION_ID,
+        name="GitHub events to Domain",
+        origin_patterns=["github:*"],
+        envelope_kinds=["github_event"],
+        allowed_actions=["domain_projection.upsert"],
+    )
+    await inbound.create_domain_projection(
+        session,
+        org_id=ORG_ID,
+        connection_id=CONNECTION_ID,
+        policy_id=str(policy.id),
+        domain_id=domain.id,
+        object_key="github_ticket",
+        external_id_path="hints.node_id",
+        external_id_field="external_id",
+        field_mapping={"repo": "hints.repo"},
+    )
+    calls = []
+
+    async def fake_sweep(session_arg, *, org_id, repo, merge_event, ancestry_tokens):
+        calls.append((session_arg, org_id, repo, dict(merge_event), ancestry_tokens))
+        return {"updated": 0}
+
+    monkeypatch.setattr(deploy_sweep, "run_deploy_sweep", fake_sweep)
+    envelope = {
+        "origin": f"github:{repo}",
+        "kind": "github_event",
+        "payload": {"pull_request": {"number": 859}},
+        "hints": {
+            "provider": "github",
+            "event": "pull_request",
+            "action": "closed",
+            "repo": repo,
+            "number": 859,
+            "node_id": "PR_859",
+            "merged": True,
+            "base_ref": "main",
+            "head_ref": "staging",
+            "merge_commit_sha": "promotion-sha",
+            "merged_at": "2026-07-10T12:00:00Z",
+        },
+        "idempotency_key": "github:delivery-859",
+    }
+
+    first = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope=envelope,
+    )
+    replay = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope=envelope,
+    )
+
+    assert first["status"] == "processed"
+    assert replay["idempotent_replay"] is True
+    assert len(calls) == 1
+    assert calls[0][1:3] == (ORG_ID, repo)
+    assert calls[0][4] == [None]
+
+
+@pytest.mark.requires_db
+async def test_postgres_merged_main_envelope_flips_record_and_emits_domain_event(
+    db_session, monkeypatch
+):
+    import brain.systems.deploy_state_sweep as deploy_sweep
+    import brain.systems.runs.tool_catalog.handlers.github as github_handlers
+
+    repo = "uwear-ai/uwear-backend"
+    monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", repo)
+    monkeypatch.setattr(
+        github_handlers,
+        "_github_token_candidates",
+        AsyncMock(return_value=[{"token": None, "source": "public"}]),
+    )
+    monkeypatch.setattr(
+        deploy_sweep,
+        "is_ancestor_of",
+        AsyncMock(return_value=True),
+    )
+    principal = await _seed_connection(db_session)
+    domain_service = AsyncDomainService(db_session)
+    domain = await domain_service.create_domain(
+        ORG_ID,
+        name="Deploy Sweep Integration",
+        slug="deploy-sweep-integration",
+        objects=[
+            {
+                "key": "github_ticket",
+                "title_field": "title",
+                "fields": [
+                    {"key": "external_id", "field_type": "text", "required": True},
+                    {"key": "title", "field_type": "text", "required": True},
+                    {"key": "repo", "field_type": "text"},
+                    {
+                        "key": "status",
+                        "field_type": "enum",
+                        "options": ["Todo", "In Progress", "Done"],
+                    },
+                    {"key": "progress_note", "field_type": "long_text"},
+                ],
+            }
+        ],
+    )
+    from brain.systems.deploy_state_sweep import ensure_deploy_state_fields
+
+    first_fields = await ensure_deploy_state_fields(db_session, org_id=ORG_ID)
+    second_fields = await ensure_deploy_state_fields(db_session, org_id=ORG_ID)
+    assert first_fields["fields_added"] == 10
+    assert second_fields["fields_added"] == 0
+    record = await domain_service.create_record(
+        ORG_ID,
+        domain.id,
+        "github_ticket",
+        title="Production alert",
+        data={
+            "external_id": "PR_859",
+            "title": "Production alert",
+            "repo": repo,
+            "status": "Todo",
+            "progress_note": "fix merged to staging",
+            "fix_pr": f"{repo}#905",
+            "fix_merge_sha": "fix-sha",
+            "fix_merged_at": "2026-07-09T12:00:00Z",
+            "deploy_state": "prod_pending",
+        },
+    )
+    policy = await inbound.create_source_policy(
+        db_session,
+        org_id=ORG_ID,
+        connection_id=CONNECTION_ID,
+        name="GitHub deploy projection",
+        origin_patterns=["github:*"],
+        envelope_kinds=["github_event"],
+        allowed_actions=["domain_projection.upsert"],
+    )
+    await inbound.create_domain_projection(
+        db_session,
+        org_id=ORG_ID,
+        connection_id=CONNECTION_ID,
+        policy_id=str(policy.id),
+        domain_id=domain.id,
+        object_key="github_ticket",
+        external_id_path="hints.node_id",
+        external_id_field="external_id",
+        field_mapping={"repo": "hints.repo"},
+    )
+    envelope = {
+        "origin": f"github:{repo}",
+        "kind": "github_event",
+        "payload": {"pull_request": {"number": 859}},
+        "hints": {
+            "event": "pull_request",
+            "action": "closed",
+            "repo": repo,
+            "number": 859,
+            "node_id": "PR_859",
+            "merged": True,
+            "base_ref": "main",
+            "head_ref": "staging",
+            "merge_commit_sha": "promotion-sha",
+            "merged_at": "2026-07-10T12:00:00Z",
+        },
+        "idempotency_key": "github:deploy-integration-859",
+    }
+
+    first = await inbound.submit_inbound_envelope(
+        db_session,
+        connection=principal,
+        envelope=envelope,
+    )
+    version_after_first = record.version
+    replay = await inbound.submit_inbound_envelope(
+        db_session,
+        connection=principal,
+        envelope=envelope,
+    )
+
+    await db_session.refresh(record)
+    assert first["status"] == "processed"
+    assert replay["idempotent_replay"] is True
+    assert record.version == version_after_first
+    assert record.data["deploy_state"] == "deployed"
+    assert record.data["deployed_at"] == "2026-07-10T12:00:00+00:00"
+    sweep_events = (
+        await db_session.scalars(
+            select(DomainEvent).where(
+                DomainEvent.record_id == record.id,
+                DomainEvent.reason == "deploy_sweep:promotion",
+            )
+        )
+    ).all()
+    assert len(sweep_events) == 1
+    assert sweep_events[0].patch["deploy_state"] == "deployed"
 
 
 async def test_domain_projection_requires_explicit_policy_action_permission(session):

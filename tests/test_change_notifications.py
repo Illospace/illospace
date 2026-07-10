@@ -131,6 +131,44 @@ class TestNotifyCycleOrchestration:
         assert any("Prod down" in text for _, text in sent)
         assert any("1 item waiting" in text for _, text in sent)
 
+    async def test_verification_is_inert_when_deploy_feature_unset(self, monkeypatch):
+        import brain.systems.change_notifications_cycle as cyc
+
+        monkeypatch.delenv("ILLO_DEPLOY_SWEEP_REPOS", raising=False)
+        monkeypatch.setattr(cyc, "_load_change_events", lambda *a, **k: _async_value([]))
+        monkeypatch.setattr(cyc, "_count_unclaimed", lambda *a, **k: _async_value(0))
+
+        result = await cyc.run_notify_cycle(
+            object(), org_id="o", channel_id="C123", post=lambda *a: _async_value(None)
+        )
+        assert result == {
+            "events": 0,
+            "immediate": 0,
+            "digest_posted": False,
+            "unclaimed": 0,
+        }
+
+    async def test_verification_is_additive_and_safe(self, monkeypatch):
+        import brain.systems.change_notifications_cycle as cyc
+
+        monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", "o/r")
+        monkeypatch.setattr(cyc, "_load_change_events", lambda *a, **k: _async_value([]))
+        monkeypatch.setattr(cyc, "_count_unclaimed", lambda *a, **k: _async_value(0))
+        monkeypatch.setattr(
+            cyc,
+            "_maybe_run_deploy_verification",
+            lambda *a, **k: _async_value({"verified": 2}),
+        )
+
+        result = await cyc.run_notify_cycle(
+            object(), org_id="o", channel_id="C123", post=lambda *a: _async_value(None)
+        )
+        assert result["verification"] == {"verified": 2}
+
+
+async def _async_value(value):
+    return value
+
 
 class TestNormalizeEvent:
     def test_reads_user_fields_from_data_not_top_level(self):
