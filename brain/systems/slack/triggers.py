@@ -257,7 +257,10 @@ def slack_channel_monitor_message(
         "- A genuine automated alert (Sentry, Rollbar, CI) or a user-reported problem that is "
         "ticket-worthy AND the target repo and incident are both clear: open a REAL GitHub issue "
         "with create_github_issue in the correct uwear-ai repo. Load the 'uwear-engineering-triage' "
-        "skill (brain_skills then skill_view) first for routing/ownership rules, then optionally "
+        "skill (brain_skills then skill_view) first for routing/ownership rules, and before filing "
+        "fetch its on-demand 'creating work items' playbook per the skill's On-demand Run Modes "
+        "section (a Domain 37 doc_page record; skill_asset references/creating-work-items.md as "
+        "fallback), then optionally "
         "post a brief Slack note with post_slack_reply citing the issue number and URL.",
         "- An alert that matches an EXISTING ticket or issue (same Rollbar id/error signature): "
         "do NOT refile and do NOT blindly skip — follow the triage skill's Deploy-State Ladder: "
