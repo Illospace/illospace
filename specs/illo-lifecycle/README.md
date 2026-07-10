@@ -11,9 +11,10 @@ Claude-reviewed, fast suite green (3438 passed, 9 pre-existing
 READ-ONLY illo-dev dry runs (952-pattern): run 1088 pre-promotion → expected
 noise / zero refiles / zero pings + promotion recommendation; run 1089
 post-promotion → reopen #904 + escalate to the builder (axel-havard). Live
-activation gates below; the doc-1155 delta
-([slices/05-doc-1155-delta.md](slices/05-doc-1155-delta.md)) awaits approval
-and must merge after/with the parallel digest-contract edit to record 1155.
+activation gates below. The doc-1155 delta
+([slices/05-doc-1155-delta.md](slices/05-doc-1155-delta.md)) is **applied**:
+live doc v6 (2026-07-10) carries both this slice's ladder and the parallel
+digest-contract edits, verified identical to the bundled SKILL.md.
 
 **Prior status (2026-07-09):** All five slices **implemented and shipped in PR #276**
 (2 commits). Pure logic cores are unit-tested (**105 focused tests green**); an
@@ -61,10 +62,11 @@ enumerated per slice below.
   `ILLO_DEPLOY_QUIET_HOURS` overrides); ensure the Slice-1 source
   policy/projection **covers `pull_request` events** — the sweep hook runs on
   the post-projection ingest path, so unprojected merge envelopes never reach
-  it; apply the deploy-state ladder delta to live doc 1155
-  (**coordinate with the parallel digest-contract edit to the same doc**);
-  verification tick rides Slice 4's cycle registration; decide the optional
-  Rollbar read-only token (Vault) for API-backed quiet checks.
+  it; ~~apply the deploy-state ladder delta to live doc 1155~~ **done — doc
+  v6 (2026-07-10) carries it**; verification tick rides Slice 4's cycle
+  registration; optional Rollbar read-only token (Vault) for API-backed quiet
+  checks — **Reda decided 2026-07-10: skip for now**, Slack-inference default
+  stands.
 
 **Before ending your pass:** update this section.
 
