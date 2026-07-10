@@ -20,17 +20,19 @@ from brain.systems.cortex.project_context.github import (
 from brain.systems.vault.runtime_secrets import RuntimeSecretUnavailable
 
 # Minted installation tokens carry issues:write (to file issues) plus read-only
-# contents + pull_requests, so the same App token serves read_github_source
-# PR-listing and project-bound git-clone/source reads. This lets the legacy
+# contents, pull_requests, and checks, so the same App token serves
+# read_github_source PR-listing/detail (including check-runs) and project-bound
+# git-clone/source reads. This lets the legacy
 # personal-PAT read fallbacks (GITHUB_TOKEN__AXEL_LEGACY via GH_TOKEN, and the
 # static GITHUB_TOKEN) be retired. The added scopes are read-only: the App can
-# read PRs/contents but cannot push or open PRs, so the write blast-radius stays
+# read PRs/contents/check-runs but cannot push or open PRs, so the write blast-radius stays
 # issues-only and no GitHub re-approval is required (the installation already
-# holds Contents/Pull-requests read&write).
+# holds Contents/Pull-requests read&write and Checks read).
 DEFAULT_INSTALLATION_PERMISSIONS: dict[str, str] = {
     "issues": "write",
     "contents": "read",
     "pull_requests": "read",
+    "checks": "read",
 }
 _CACHE_FRESHNESS_WINDOW = timedelta(minutes=5)
 _PEM_HASH_PREFIX_LENGTH = 16

@@ -206,7 +206,7 @@ async def test_mint_cache_separates_repositories_and_permissions(monkeypatch, rs
         permissions={"metadata": "read"},
     ) == "metadata-token"
 
-    default_scope = {"issues": "write", "contents": "read", "pull_requests": "read"}
+    default_scope = {"issues": "write", "contents": "read", "pull_requests": "read", "checks": "read"}
     assert [request["json"] for request in requests] == [
         {"repositories": ["uwear-backend"], "permissions": default_scope},
         {"repositories": ["uwear-mobile"], "permissions": default_scope},
