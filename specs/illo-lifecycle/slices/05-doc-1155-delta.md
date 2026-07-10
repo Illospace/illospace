@@ -21,12 +21,13 @@ In **## Creating Work Items**, replace the bullet beginning
 `…never split one error/Rollbar alert into multiple issues.` with:
 
 > - **One problem = one issue — check before filing.** Before calling
->   `create_github_issue`, search open AND recently-closed GitHub issues and
->   Domain 1 tracker records for the same error signature, Rollbar id (prefer
->   the structured `rollbar_item` field), endpoint, profile id, or root cause.
->   If a match exists — even if closed or `Done` — do NOT file a new issue and
->   do NOT blindly skip: follow the **Deploy-State Ladder** below. Never split
->   one error/Rollbar alert into multiple issues.
+>   `create_github_issue`, search open AND closed GitHub issues and Domain 1
+>   tracker records for the same error signature, Rollbar id (prefer the
+>   structured `rollbar_item` field — an exact `rollbar_item`/signature match
+>   has no recency cutoff), endpoint, profile id, or root cause. If a match
+>   exists — even if closed or `Done` — do NOT file a new issue and do NOT
+>   blindly skip: follow the **Deploy-State Ladder** below. Never split one
+>   error/Rollbar alert into multiple issues.
 
 ## Edit 2 — insert two sections before `## States`
 
@@ -50,9 +51,28 @@ In **## States**, replace the `Done` bullet with:
 
 In **## Before Posting**, append gate 4 after the dedup gate:
 
-> 4. **Deploy-state gate:** no expected-noise re-fire (Ladder case 2) re-pings
->    an owner or appears as new work; every reopened ticket (Ladder case 3)
->    names the builder and the failed fix.
+> 4. **Deploy-state gate:** no expected-noise re-fire (Ladder case 2, including
+>    a within-settle deploy drain) re-pings an owner or appears as new work;
+>    every reopened ticket (Ladder case 3) names the builder and the failed fix
+>    without reassigning the issue.
+
+## Edit 5 — legacy "merged = Done" clauses gain the deploy-verified qualifier
+
+Three older clauses equate a merged PR with done and would let an agent close
+or hide a staging-only alert ticket; qualify each exactly as the bundled
+SKILL.md now does:
+
+- **## Backlog Hygiene**, the `Done` classification bullet → append
+  "(alert-linked tickets: only once deploy-verified — see **Deploy-State
+  Ladder**)".
+- **## Before Posting** gate 1 (state gate) → append the exception sentence:
+  "Exception: an alert-linked ticket whose fix is merely merged (not
+  deploy-verified) is NOT cleanup — it stays active as `prod_pending` per the
+  **Deploy-State Ladder**."
+- **## Public Output**, the `Done` item bullet → "(linked PR merged — and,
+  for an alert-linked ticket, deploy-verified per the **Deploy-State
+  Ladder**)", and the close-the-issue parenthetical gains "— never for an
+  alert-linked ticket that is not yet deploy-verified".
 
 ## After applying
 

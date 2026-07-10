@@ -132,16 +132,33 @@ async def test_promotion_sweep_flips_only_confirmed_records(session, monkeypatch
     domain = await _domain(session)
     await ensure_deploy_state_fields(session, org_id=ORG_ID)
     shipped = await _record(
-        session, domain, title="Shipped", deploy_state="prod_pending", fix_merge_sha="in-main"
+        session, domain, title="Shipped", deploy_state="prod_pending",
+        fix_merge_sha="in-main", fix_pr=f"{REPO}#801",
     )
     post_cutoff = await _record(
-        session, domain, title="Post cutoff", deploy_state="prod_pending", fix_merge_sha="after-cutoff"
+        session, domain, title="Post cutoff", deploy_state="prod_pending",
+        fix_merge_sha="after-cutoff", fix_pr=f"{REPO}#802",
     )
     unknown = await _record(
-        session, domain, title="Unknown", deploy_state="prod_pending", fix_merge_sha="unknown"
+        session, domain, title="Unknown", deploy_state="prod_pending",
+        fix_merge_sha="unknown", fix_pr=f"{REPO}#803",
     )
     staging = await _record(
-        session, domain, title="Staging", deploy_state="staging", fix_merge_sha="on-staging"
+        session, domain, title="Staging", deploy_state="staging",
+        fix_merge_sha="on-staging", fix_pr=f"{REPO}#804",
+    )
+    # An app-repo ticket fixed by a PR in THIS repo: swept by fix_pr identity,
+    # not the ticket's own repo field.
+    cross_repo = await _record(
+        session, domain, title="Cross repo", repo="uwear-ai/uwearaiapp",
+        deploy_state="prod_pending", fix_merge_sha="in-main",
+        fix_pr=f"{REPO}#805",
+    )
+    # A ticket whose fix lives in ANOTHER repo must not be touched by this
+    # repo's promotion even though its own repo field matches.
+    other_fix_repo = await _record(
+        session, domain, title="Other fix repo", deploy_state="prod_pending",
+        fix_merge_sha="in-main", fix_pr="uwear-ai/uwearaiapp#42",
     )
 
     async def fake_ancestry(repo, sha, branch):
@@ -172,12 +189,17 @@ async def test_promotion_sweep_flips_only_confirmed_records(session, monkeypatch
     await session.refresh(post_cutoff)
     await session.refresh(unknown)
     await session.refresh(staging)
+    await session.refresh(cross_repo)
+    await session.refresh(other_fix_repo)
     assert shipped.data["deploy_state"] == "deployed"
     assert shipped.data["deployed_at"] == NOW.isoformat()
     assert post_cutoff.data["deploy_state"] == "prod_pending"
     assert unknown.data["deploy_state"] == "prod_pending"
     assert staging.data["deploy_state"] == "prod_pending"
-    assert summary["deployed"] == 1
+    assert cross_repo.data["deploy_state"] == "deployed"
+    assert other_fix_repo.data["deploy_state"] == "prod_pending"
+    assert other_fix_repo.data["deployed_at"] is None
+    assert summary["deployed"] == 2
     assert summary["prod_pending"] == 1
     assert summary["indeterminate"] == 1
 

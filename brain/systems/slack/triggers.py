@@ -262,8 +262,10 @@ def slack_channel_monitor_message(
         "- An alert that matches an EXISTING ticket or issue (same Rollbar id/error signature): "
         "do NOT refile and do NOT blindly skip — follow the triage skill's Deploy-State Ladder: "
         "note occurrences while unfixed; a fix merged to staging but not promoted is expected "
-        "noise (annotate, no owner re-ping); a fix deployed to prod that still fires means the "
-        "fix did not work — reopen the ticket and escalate to the fix author.",
+        "noise (annotate, no owner re-ping, even if the ticket was closed early); a fix deployed "
+        "to prod that still fires PAST the settle window (~30 min after deploy) means the fix "
+        "did not work — reopen the ticket and escalate to the fix author (re-fires inside the "
+        "settle window are expected drain noise).",
         "- Ticket-worthy but the repo/incident is unclear, or create_github_issue reports "
         "no write-capable token can reach the repo (no_write_token / 403 / 404): do NOT claim a "
         "GitHub issue was filed. Ask for clarification with post_slack_reply, or record an internal "

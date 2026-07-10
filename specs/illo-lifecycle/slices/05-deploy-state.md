@@ -95,12 +95,16 @@ degrade open, never fail closed (the PR #287 convention).
      - `staging`/`prod_pending` → `EXPECTED_NOISE` (annotate the ticket,
        optional one-time thread reply "known — fixed by PR #X merged to
        staging, ships with next weekly promotion"; **never refile, never
-       re-ping the owner**; milestone here additionally yields
-       `RECOMMEND_PROMOTION`);
+       re-ping the owner** — and a merely-staged fix wins over a stale `Done`:
+       the prematurely closed ticket is quietly normalized, never escalated;
+       a milestone on a `prod_pending` fix additionally yields
+       `RECOMMEND_PROMOTION`, `staging` having upgraded to `prod_pending` on
+       the triage touch);
      - `deployed` within settle → `EXPECTED_NOISE` (deploy draining);
-     - `deployed` past settle, or `verified`, or ticket already `Done` →
-       `REOPEN_ESCALATE` (this is why blind dedup-suppression is unacceptable,
-       and it retires the done-reappeared refile bug).
+     - `deployed` past settle, or `verified`, or ticket `Done` with no
+       merely-staged fix → `REOPEN_ESCALATE` (this is why blind
+       dedup-suppression is unacceptable, and it retires the done-reappeared
+       refile bug).
    - `classify_merge_event(hints) -> MergeKind` — `promotion` (base main, head
      staging), `hotfix` (base main, other head), `fix_to_staging`, `other`.
 2. **Record fields (runtime rows, no migration)** — the domain writer rejects
@@ -127,7 +131,9 @@ degrade open, never fail closed (the PR #287 convention).
    inbound path right after projection when an envelope carries
    merged-to-main hints for a watched repo (`ILLO_DEPLOY_SWEEP_REPOS`,
    comma-separated; unset = off, the standing inert-until-wired convention).
-   For each Domain-1 record of that repo with `deploy_state` in
+   For each Domain-1 record **whose `fix_pr` lives in that repo** (fix-repo
+   identity, not the ticket's own `repo` field — an app ticket fixed by a
+   backend PR is swept by the backend promotion) with `deploy_state` in
    {`staging`,`prod_pending`}: ancestry-check its `fix_merge_sha` against
    main; flip to `deployed` + `deployed_at` when confirmed. Writes go through
    `AsyncDomainService` (the one domain writer) with `expected_version`; the
@@ -249,3 +255,7 @@ degrade open, never fail closed (the PR #287 convention).
   a DM after N ignored recommendations.
 - The Rollbar read-token decision (item 9) — with it, verification can also
   run occurrence-count deltas instead of pure quiet/not-quiet.
+- Revert detection: ancestry can't see reverts (a reverted fix still passes
+  the compare check). Today the prose handles it (clear `deploy_state` when a
+  revert is linked); mechanical revert detection would need commit-message or
+  linked-PR heuristics.

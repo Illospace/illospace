@@ -13,7 +13,7 @@ import logging
 from datetime import datetime
 from typing import Awaitable, Mapping, Protocol, Sequence
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from brain.platform.db.models.domain import (
     Domain,
@@ -135,10 +135,16 @@ async def _ticket_records(
     session,
     *,
     org_id: str,
-    repo: str | None = None,
     states: set[str] | None = None,
+    fix_pr_prefix: str | None = None,
     fix_pr: str | None = None,
 ) -> list[DomainRecord]:
+    """Select github_ticket records by deploy-state and/or fix-PR identity.
+
+    Selection keys on where the FIX lives (``fix_pr`` is repo-qualified), not
+    on the ticket's own ``repo`` field — an app ticket fixed by a backend PR
+    must be swept by the backend promotion, not the app one.
+    """
     stmt = (
         select(DomainRecord)
         .join(DomainObjectType, DomainObjectType.id == DomainRecord.object_type_id)
@@ -151,11 +157,15 @@ async def _ticket_records(
             DomainObjectType.archived_at.is_(None),
         )
     )
-    if repo is not None:
-        stmt = stmt.where(_json_text(session, "repo") == repo)
     conditions = []
     if states:
-        conditions.append(_json_text(session, "deploy_state").in_(states))
+        state_arm = _json_text(session, "deploy_state").in_(states)
+        if fix_pr_prefix:
+            state_arm = and_(
+                state_arm,
+                _json_text(session, "fix_pr").like(f"{fix_pr_prefix}%"),
+            )
+        conditions.append(state_arm)
     if fix_pr:
         conditions.append(_json_text(session, "fix_pr") == fix_pr)
     if conditions:
@@ -227,8 +237,8 @@ async def _sweep_main_merge(
     records = await _ticket_records(
         session,
         org_id=org_id,
-        repo=repo,
         states={DeployState.STAGING.value, DeployState.PROD_PENDING.value},
+        fix_pr_prefix=f"{repo}#",
         fix_pr=fix_pr,
     )
     for record in records:

@@ -33,8 +33,11 @@ SETTLE = timedelta(minutes=30)
         (DeployState.DEPLOYED, "Todo", None, LadderAction.REOPEN_ESCALATE),
         (DeployState.VERIFIED, "Todo", NOW - timedelta(days=2), LadderAction.REOPEN_ESCALATE),
         (None, "Done", None, LadderAction.REOPEN_ESCALATE),
-        (DeployState.STAGING, "Done", None, LadderAction.REOPEN_ESCALATE),
-        (DeployState.PROD_PENDING, "Done", None, LadderAction.REOPEN_ESCALATE),
+        # A merely-staged fix wins over a stale Done: re-firing before
+        # promotion is expected noise even on a prematurely closed ticket
+        # (the caller normalizes the status quietly; no builder escalation).
+        (DeployState.STAGING, "Done", None, LadderAction.EXPECTED_NOISE),
+        (DeployState.PROD_PENDING, "Done", None, LadderAction.EXPECTED_NOISE),
         (DeployState.DEPLOYED, "Done", NOW - timedelta(minutes=1), LadderAction.REOPEN_ESCALATE),
         (DeployState.VERIFIED, "Done", NOW, LadderAction.REOPEN_ESCALATE),
     ],
@@ -69,10 +72,11 @@ def test_full_state_settle_milestone_status_matrix(state, inside_settle, milesto
         now=NOW,
         settle=SETTLE,
     )
-    if status == "Done" or state is DeployState.VERIFIED:
-        expected = LadderAction.REOPEN_ESCALATE
-    elif state in {DeployState.STAGING, DeployState.PROD_PENDING}:
+    if state in {DeployState.STAGING, DeployState.PROD_PENDING}:
+        # Pre-promotion fixes are expected noise even on a stale Done ticket.
         expected = LadderAction.EXPECTED_NOISE
+    elif status == "Done" or state is DeployState.VERIFIED:
+        expected = LadderAction.REOPEN_ESCALATE
     elif state is DeployState.DEPLOYED:
         expected = (
             LadderAction.EXPECTED_NOISE

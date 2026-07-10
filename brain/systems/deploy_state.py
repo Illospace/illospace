@@ -145,14 +145,20 @@ def classify_refire(
     now: datetime,
     settle: timedelta,
 ) -> LadderAction:
-    """Classify an alert re-fire against the latest known fix attempt."""
+    """Classify an alert re-fire against the latest known fix attempt.
+
+    A merely-staged fix wins over a stale ``Done``: re-firing while the fix
+    awaits promotion is expected noise even when the ticket was closed
+    prematurely — the caller normalizes the invalid status quietly instead of
+    escalating to a builder who has nothing new to act on.
+    """
     state = _coerce_deploy_state(deploy_state)
+    if state in {DeployState.STAGING, DeployState.PROD_PENDING}:
+        return LadderAction.EXPECTED_NOISE
     if str(ticket_status or "").casefold() == "done":
         return LadderAction.REOPEN_ESCALATE
     if state is DeployState.VERIFIED:
         return LadderAction.REOPEN_ESCALATE
-    if state in {DeployState.STAGING, DeployState.PROD_PENDING}:
-        return LadderAction.EXPECTED_NOISE
     if state is DeployState.DEPLOYED:
         deployed = as_utc_datetime(deployed_at)
         current = as_utc_datetime(now)
