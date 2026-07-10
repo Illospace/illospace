@@ -1,6 +1,6 @@
 <script lang="ts">
   import { browser } from '$app/environment';
-  import { goto } from '$app/navigation';
+  import { goto, replaceState as replaceNavigationState } from '$app/navigation';
   import { page } from '$app/stores';
   import { onMount, onDestroy, type Component } from 'svelte';
   import { fly } from 'svelte/transition';
@@ -1058,11 +1058,19 @@
 
   function syncCanonicalThreadUrl(ideaId: string | null | undefined): boolean {
     if (!browser || !ideaId) return false;
-    const nextRoute = buildSyncedThreadRouteHref(ideaId, $page.url.searchParams);
-    const current = `${$page.url.pathname}${$page.url.search}${$page.url.hash}`;
-    lastSyncedThreadRoute = nextRoute;
+    const currentUrl = new URL(window.location.href);
+    const nextRoute = buildSyncedThreadRouteHref(ideaId, currentUrl.searchParams);
+    const current = `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`;
     if (current === nextRoute) return false;
-    const replaceState = $page.url.pathname.startsWith('/threads/') || Boolean($page.url.searchParams.get('idea'));
+    lastSyncedThreadRoute = nextRoute;
+    if (
+      currentUrl.pathname === '/cortex'
+      && currentUrl.searchParams.get(CORTEX_THREAD_PARAM) === ideaId
+    ) {
+      replaceNavigationState(nextRoute, $page.state);
+      return false;
+    }
+    const replaceState = currentUrl.pathname.startsWith('/threads/') || Boolean(currentUrl.searchParams.get('idea'));
     directThreadUrlPending = true;
     void goto(nextRoute, {
       replaceState,
