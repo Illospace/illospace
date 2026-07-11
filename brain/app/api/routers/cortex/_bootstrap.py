@@ -61,7 +61,6 @@ def _dump_payload(value: Any) -> Any:
 async def cortex_bootstrap(
     include: str | None = "core",
     idea_id: str | None = None,
-    include_debug: bool = False,
     provider: str | None = None,
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
@@ -113,14 +112,10 @@ async def cortex_bootstrap(
     if "direct_thread" in include_set:
         if not idea_id:
             raise HTTPException(status_code=400, detail="idea_id is required when include contains direct_thread")
-        payload["direct_thread"] = {
-            "idea_id": idea_id,
-            "stream": await unified_stream_payload(
-                idea_id=idea_id,
-                include_debug=include_debug,
-                user=user,
-            ),
-        }
+        payload["direct_thread"] = await unified_stream_payload(
+            idea_id=idea_id,
+            user=user,
+        )
     if "auth_status" in include_set:
         try:
             payload["auth_status"] = await async_get_provider_auth_status(

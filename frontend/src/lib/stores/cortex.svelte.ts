@@ -1,5 +1,5 @@
 import { browser, dev } from '$app/environment';
-import { api, type CortexBootstrapPayload } from '$lib/api/client';
+import { api, type CortexBootstrapPayload, type ThreadStreamPage } from '$lib/api/client';
 import { auth } from '$lib/stores/auth.svelte';
 import {
   CORTEX_RUN_SETTINGS_STORAGE_KEYS,
@@ -53,6 +53,7 @@ import {
   applyAgentTextDeltaToStream,
   applyRunCompletedToStream,
   mergeLiveStreamState,
+  mergeThreadStreamPageItems,
   runUiEventKey,
   type CortexRunStreamItem,
 } from '$lib/utils/cortexRunStream';
@@ -106,6 +107,8 @@ export interface CortexCreateIdeaOptions {
   displayTitle?: string | null;
 }
 
+type ThreadHistoryState = { nextBefore?: string | null; loadingOlder?: boolean; error?: string | null };
+
 class CortexStore {
   ideas = $state<Idea[]>([]);
   connections = $state<Connection[]>([]);
@@ -147,7 +150,9 @@ class CortexStore {
   archivedIdeasLoading = $state(false);
 
   private _wsUnsubs: (() => void)[] = [];
-  private _streamVersion = 0;
+  private _selectionEpoch = 0;
+  private _headStreamRequest = 0;
+  private _threadHistory = $state<ThreadHistoryState>({});
   private _pendingStreamRefresh: ReturnType<typeof setTimeout> | null = null;
   private _selectedIdeaReconcile: ReturnType<typeof setInterval> | null = null;
   private _ideasSnapshotReconcile: ReturnType<typeof setInterval> | null = null;
@@ -293,10 +298,10 @@ class CortexStore {
 
   private _hydrateSelectedIdeaSidecars(id: string, version: number) {
     this._runWhenIdle(() => {
-      if (this.selectedIdeaId !== id || this._streamVersion !== version) return;
+      if (this.selectedIdeaId !== id || this._selectionEpoch !== version) return;
 
       api.getBrowserSession(id).then((browserSession) => {
-        if (this.selectedIdeaId !== id || this._streamVersion !== version) return;
+        if (this.selectedIdeaId !== id || this._selectionEpoch !== version) return;
         this.browserSession = browserSession;
         this.browserFrame = null;
         this.browserDiscovery = null;
@@ -530,16 +535,16 @@ class CortexStore {
   private _scheduleSelectedBrowserSessionRefresh(delayMs = 450) {
     if (!this.selectedIdeaId || this.browserSession?.id || this._pendingBrowserSessionRefresh) return;
     const ideaId = this.selectedIdeaId;
-    const version = this._streamVersion;
+    const version = this._selectionEpoch;
     this._pendingBrowserSessionRefresh = setTimeout(() => {
       this._pendingBrowserSessionRefresh = null;
-      if (this.selectedIdeaId !== ideaId || this._streamVersion !== version || this.browserSession?.id) {
+      if (this.selectedIdeaId !== ideaId || this._selectionEpoch !== version || this.browserSession?.id) {
         return;
       }
       api.getBrowserSession(ideaId).then((browserSession) => {
         if (
           this.selectedIdeaId !== ideaId
-          || this._streamVersion !== version
+          || this._selectionEpoch !== version
           || !browserSession?.id
           || this.browserSession?.id
         ) {
@@ -702,6 +707,75 @@ class CortexStore {
       (item) => this._isActiveRunItem(item as StreamItem),
       mergeRunProgressSnapshot,
     ) as StreamItem[];
+  }
+
+  threadHistoryHasMore(ideaId: string): boolean {
+    return this.selectedIdeaId === ideaId && typeof this._threadHistory.nextBefore === 'string';
+  }
+
+  threadHistoryLoadingOlder(ideaId: string): boolean {
+    return this.selectedIdeaId === ideaId && this._threadHistory.loadingOlder === true;
+  }
+
+  threadHistoryError(ideaId: string): string | null {
+    return this.selectedIdeaId === ideaId ? this._threadHistory.error ?? null : null;
+  }
+
+  private _resetThreadHistory(): number {
+    this._selectionEpoch += 1;
+    this._threadHistory = {};
+    return this._selectionEpoch;
+  }
+
+  private _currentThreadRequest(ideaId: string, epoch: number, pageIdeaId = ideaId): boolean {
+    return pageIdeaId === ideaId && this.selectedIdeaId === ideaId && this._selectionEpoch === epoch;
+  }
+
+  private _applyThreadStreamPage(
+    ideaId: string,
+    epoch: number,
+    page: Pick<ThreadStreamPage, 'idea_id' | 'items' | 'next_before'>,
+    mode: 'initial' | 'head' | 'older',
+  ): boolean {
+    if (!this._currentThreadRequest(ideaId, epoch, page.idea_id)) return false;
+
+    const effectiveMode = this._threadHistory.nextBefore === undefined ? 'initial' : mode;
+    const pagedItems = mergeThreadStreamPageItems(
+      this.stream as CortexRunStreamItem[],
+      page.items as CortexRunStreamItem[],
+      effectiveMode,
+    );
+    const mergedItems = this._mergeLiveStreamState(pagedItems as StreamItem[], ideaId);
+    this.stream = mergedItems;
+
+    if (effectiveMode !== 'head') {
+      this._threadHistory = { nextBefore: page.next_before, loadingOlder: false, error: null };
+    }
+
+    this._reconcileIdeaStatusFromStream(ideaId, mergedItems);
+    if (this._hasActiveRuns(mergedItems) || this._selectedIdeaLooksWorking(ideaId)) {
+      this._ensureSelectedIdeaReconcile();
+    } else {
+      this._stopSelectedIdeaReconcile();
+    }
+    if (this._hasWorkingIdeas()) this._ensureIdeasSnapshotReconcile();
+    else this._stopIdeasSnapshotReconcile();
+
+    if (effectiveMode === 'initial') {
+      this._maybeApplyVaultSecretPromptFromStream(ideaId, mergedItems);
+      this._maybeApplyVaultAgentGrantPromptFromStream(ideaId, mergedItems);
+      this.browserFrame = null;
+      this.browserDiscovery = null;
+      this.browserExtraction = null;
+      const selected = this.ideas.find((idea) => idea.id === ideaId);
+      if (selected?.status === 'done' && !this._isLocalPreviewIdeaId(ideaId)) {
+        this._markIdeaSeen(ideaId, this._ideaRevision(selected));
+        this._setIdeaPatch(ideaId, { status: 'idle' });
+      }
+      this.streamLoading = false;
+      this._hydrateSelectedIdeaSidecars(ideaId, epoch);
+    }
+    return true;
   }
 
   private _selectedIdeaLooksWorking(id: string): boolean {
@@ -980,12 +1054,6 @@ class CortexStore {
     return this.ideas.find((i) => i.id === this.selectedIdeaId);
   }
 
-  typingInIdea(ideaId: string): string[] {
-    return [...this.typingUsers.values()]
-      .filter((t) => t.idea_id === ideaId)
-      .map((t) => t.user_id);
-  }
-
   get filteredIdeas(): Idea[] {
     let result = this.ideas;
     if (this.filters.statuses.size > 0) {
@@ -1135,35 +1203,13 @@ class CortexStore {
     }
   }
 
-  private _applyLoadedStream(id: string, version: number, items: StreamItem[]) {
-    if (this.selectedIdeaId !== id || this._streamVersion !== version) return false;
-    const mergedItems = this._mergeLiveStreamState(items, id);
-    this.stream = mergedItems;
-    this._maybeApplyVaultSecretPromptFromStream(id, mergedItems);
-    this._maybeApplyVaultAgentGrantPromptFromStream(id, mergedItems);
-    this._reconcileIdeaStatusFromStream(id, mergedItems);
-    this.browserFrame = null;
-    this.browserDiscovery = null;
-    this.browserExtraction = null;
-    const selected = this.ideas.find((i) => i.id === id);
-    if (selected?.status === 'done' && !this._isLocalPreviewIdeaId(id)) {
-      this._markIdeaSeen(id, this._ideaRevision(selected));
-      this._setIdeaPatch(id, { status: 'idle' });
-    }
-    if (this._hasActiveRuns(mergedItems) || this._selectedIdeaLooksWorking(id)) {
-      this._ensureSelectedIdeaReconcile();
-    } else {
-      this._stopSelectedIdeaReconcile();
-    }
-    if (this._hasWorkingIdeas()) this._ensureIdeasSnapshotReconcile();
-    else this._stopIdeasSnapshotReconcile();
-    this.streamLoading = false;
-
-    this._hydrateSelectedIdeaSidecars(id, version);
-    return true;
-  }
-
   async loadDirectThread(id: string): Promise<boolean> {
+    if (this.selectedIdeaId === id && this._threadHistory.nextBefore !== undefined) {
+      this.panelOpen = true;
+      this.canvasOpen = false;
+      await this._refreshSelectedStream();
+      return this.selectedIdeaId === id;
+    }
     if (this._isLocalPreviewIdeaId(id)) {
       await this.selectIdea(id);
       return this.selectedIdeaId === id;
@@ -1177,7 +1223,7 @@ class CortexStore {
       this.browserDiscovery = null;
       this.browserExtraction = null;
     }
-    const version = ++this._streamVersion;
+    const epoch = this._resetThreadHistory();
     this._seenRunUiEvents.clear();
     if (this.vaultSecretPrompt?.idea_id && this.vaultSecretPrompt.idea_id !== id) {
       this.vaultSecretPrompt = null;
@@ -1196,12 +1242,10 @@ class CortexStore {
         include: ['selected_idea', 'direct_thread'],
         ideaId: id,
       });
-      if (
-        !bootstrap?.selected_idea
-        || !Array.isArray(bootstrap?.direct_thread?.stream)
-      ) {
-        throw new Error('Incomplete cortex direct-thread bootstrap');
+      if (!bootstrap?.selected_idea || !bootstrap.direct_thread) {
+        throw Error();
       }
+      if (bootstrap.direct_thread.idea_id !== id) throw Error();
       const selectedIdea = this._normalizeIdea(bootstrap.selected_idea);
       const remainingIdeas = this.ideas.filter((idea) => idea.id !== selectedIdea.id);
       this.ideas = [selectedIdea, ...remainingIdeas];
@@ -1209,10 +1253,12 @@ class CortexStore {
         this.teamMembers = this._normalizeTeamMembers(this.teamMembers);
         this.teamMembersLoaded = true;
       }
-      const applied = this._applyLoadedStream(id, version, bootstrap.direct_thread.stream);
+      const applied = this._applyThreadStreamPage(id, epoch, bootstrap.direct_thread, 'initial');
       return applied || this.selectedIdeaId === id;
     } catch {
+      if (!this._currentThreadRequest(id, epoch)) return this.selectedIdeaId === id;
       await this._load({ loadTeamMembers: false });
+      if (!this._currentThreadRequest(id, epoch)) return this.selectedIdeaId === id;
       const activeIdea = this.ideas.find((idea) => idea.id === id && !idea.archived_at);
       if (activeIdea) {
         await this.selectIdea(id);
@@ -1223,7 +1269,7 @@ class CortexStore {
     } finally {
       this.loading = false;
       this._initialLoadDone = true;
-      if (this.selectedIdeaId === id && this._streamVersion === version) {
+      if (this._currentThreadRequest(id, epoch)) {
         this.streamLoading = false;
       }
     }
@@ -1231,7 +1277,7 @@ class CortexStore {
 
   async selectIdea(id: string | null) {
     if (id === null) {
-      this._streamVersion += 1;
+      this._resetThreadHistory();
       if (this.browserSession?.id) {
         wsClient.send('browser_unsubscribe', { session_id: this.browserSession.id });
       }
@@ -1258,6 +1304,12 @@ class CortexStore {
       this.stream = [];
       return;
     }
+    if (this.selectedIdeaId === id && this._threadHistory.nextBefore !== undefined) {
+      this.panelOpen = true;
+      this.canvasOpen = false;
+      await this._refreshSelectedStream();
+      return;
+    }
     if (this.browserSession?.id && this.browserSession.idea_id !== id) {
       wsClient.send('browser_unsubscribe', { session_id: this.browserSession.id });
       this.browserSession = null;
@@ -1265,7 +1317,7 @@ class CortexStore {
       this.browserDiscovery = null;
       this.browserExtraction = null;
     }
-    const version = ++this._streamVersion;
+    const epoch = this._resetThreadHistory();
     this._seenRunUiEvents.clear();
     if (this.vaultSecretPrompt?.idea_id && this.vaultSecretPrompt.idea_id !== id) {
       this.vaultSecretPrompt = null;
@@ -1288,11 +1340,11 @@ class CortexStore {
     if (this._isLocalPreviewIdeaId(id)) {
       const idea = selectedIdea;
       if (idea) {
-        this._applyLoadedStream(
-          id,
-          version,
-          buildLocalPreviewThreadStream(idea, this.teamMembers) as StreamItem[],
-        );
+        this._applyThreadStreamPage(id, epoch, {
+          idea_id: id,
+          items: buildLocalPreviewThreadStream(idea, this.teamMembers) as StreamItem[],
+          next_before: null,
+        }, 'initial');
       } else {
         this.streamLoading = false;
       }
@@ -1300,13 +1352,16 @@ class CortexStore {
     }
 
     try {
-      const items = await api.unifiedStream(id);
-      // Guard: user may have switched ideas while we were fetching
-      this._applyLoadedStream(id, version, items);
+      const page = await api.unifiedStream(id);
+      if (!this._applyThreadStreamPage(id, epoch, page, 'initial')) {
+        throw Error();
+      }
     } catch (err: any) {
-      ui.toast(err.detail || 'Failed to load thread', 'error');
+      if (this._currentThreadRequest(id, epoch)) {
+        ui.toast(err.detail || 'Failed to load thread', 'error');
+      }
     } finally {
-      if (this.selectedIdeaId === id && this._streamVersion === version) {
+      if (this._currentThreadRequest(id, epoch)) {
         this.streamLoading = false;
       }
     }
@@ -1637,9 +1692,7 @@ class CortexStore {
       this.ideas = this.ideas.filter((i) => i.id !== id);
       if (!this._hasWorkingIdeas()) this._stopIdeasSnapshotReconcile();
       if (this.selectedIdeaId === id) {
-        this.selectedIdeaId = null;
-        this.panelOpen = false;
-        this.stream = [];
+        await this.selectIdea(null);
       }
     } catch (err: any) {
       ui.toast(err.detail || 'Failed to delete idea', 'error');
@@ -1663,17 +1716,6 @@ class CortexStore {
       const idea = this.ideas.find((i) => i.id === id);
       if (idea) { idea.position_x = x; idea.position_y = y; }
     } catch { /* silent — position is best-effort */ }
-  }
-
-  async updateIdeaOwner(id: string, userId: string) {
-    try {
-      const updated = await api.updateIdea(id, { user_id: userId });
-      this._upsertIdea(updated);
-      return updated;
-    } catch (e) {
-      console.error('Failed to update idea owner:', e);
-      throw e;
-    }
   }
 
   async updateIdeaOrbitAnchor(id: string, anchorType: string | null, anchorId: string | null) {
@@ -1709,23 +1751,44 @@ class CortexStore {
   }
 
   private async _refreshSelectedStream() {
-    if (!this.selectedIdeaId) return;
-    if (this._isLocalPreviewIdeaId(this.selectedIdeaId)) return;
-    const version = ++this._streamVersion;
+    const ideaId = this.selectedIdeaId;
+    if (!ideaId || this.streamLoading || this._isLocalPreviewIdeaId(ideaId)) return;
+    const epoch = this._selectionEpoch;
+    const headRequest = ++this._headStreamRequest;
     try {
-      const items = await api.unifiedStream(this.selectedIdeaId);
-      // Only apply if no newer request has been issued
-      if (this._streamVersion === version) {
-        const mergedItems = this._mergeLiveStreamState(items, this.selectedIdeaId);
-        this.stream = mergedItems;
-        this._reconcileIdeaStatusFromStream(this.selectedIdeaId, mergedItems);
-        const hasActiveRun = this._hasActiveRuns(mergedItems);
-        if (hasActiveRun || this._selectedIdeaLooksWorking(this.selectedIdeaId)) this._ensureSelectedIdeaReconcile();
-        else this._stopSelectedIdeaReconcile();
-        if (this._hasWorkingIdeas()) this._ensureIdeasSnapshotReconcile();
-        else this._stopIdeasSnapshotReconcile();
-      }
+      const page = await api.unifiedStream(ideaId);
+      if (headRequest !== this._headStreamRequest) return;
+      this._applyThreadStreamPage(ideaId, epoch, page, 'head');
     } catch { /* silent */ }
+  }
+
+  async loadOlderThreadHistory(ideaId: string): Promise<boolean> {
+    const before = this._threadHistory.nextBefore;
+    if (
+      this.selectedIdeaId !== ideaId ||
+      typeof before !== 'string' ||
+      this._threadHistory.loadingOlder
+    ) return false;
+
+    const epoch = this._selectionEpoch;
+    this._threadHistory = { nextBefore: before, loadingOlder: true, error: null };
+    try {
+      const page = await api.unifiedStream(ideaId, { before });
+      const applied = this._applyThreadStreamPage(ideaId, epoch, page, 'older');
+      if (!applied && this._currentThreadRequest(ideaId, epoch)) {
+        throw Error();
+      }
+      return applied;
+    } catch (error: any) {
+      if (this._currentThreadRequest(ideaId, epoch)) {
+        this._threadHistory = {
+          nextBefore: before,
+          loadingOlder: false,
+          error: error?.detail || 'Failed to load older thread history',
+        };
+      }
+      return false;
+    }
   }
 
   private _scheduleSelectedStreamRefresh(delayMs = 250) {
@@ -1826,16 +1889,6 @@ class CortexStore {
     this._wsUnsubs = [];
   }
 
-  toggleFilter(status: string) {
-    const next = new Set(this.filters.statuses);
-    if (next.has(status)) next.delete(status);
-    else next.add(status);
-    this.filters = { ...this.filters, statuses: next };
-  }
-
-  setSearch(q: string) {
-    this.filters = { ...this.filters, search: q };
-  }
 }
 
 export const cortex = new CortexStore();

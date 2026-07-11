@@ -68,7 +68,7 @@ function cursorIndex<T extends ThreadStreamOrderingItem>(items: readonly T[], cu
 export function buildThreadStreamWindow<T extends ThreadStreamOrderingItem>(
   items: readonly T[],
   before: ThreadStreamWindowCursor | null = null,
-): { items: T[]; previousCursor: ThreadStreamWindowCursor | null; hasEarlier: boolean } {
+): { items: T[]; startCursor: ThreadStreamWindowCursor; previousCursor: ThreadStreamWindowCursor | null } {
   const protectedItems = protectedIndices(items);
   let start = before ? cursorIndex(items, before) : Math.max(0, items.length - THREAD_STREAM_WINDOW_BATCH_SIZE);
   if (before) {
@@ -79,10 +79,11 @@ export function buildThreadStreamWindow<T extends ThreadStreamOrderingItem>(
     }
   }
   const hasEarlier = items.some((_, index) => index < start && !protectedItems.has(index));
+  const startCursor = { index: start, key: items.length ? itemKey(items[start]) : '' };
   return {
     items: items.filter((_, index) => index >= start || protectedItems.has(index)),
-    previousCursor: hasEarlier ? { index: start, key: itemKey(items[start]) } : null,
-    hasEarlier,
+    startCursor,
+    previousCursor: hasEarlier ? startCursor : null,
   };
 }
 

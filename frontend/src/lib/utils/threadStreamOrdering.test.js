@@ -19,7 +19,7 @@ test('windows newest 200 and repeated cursors reveal the complete stream', () =>
   let window = buildThreadStreamWindow(stream);
   const sizes = [window.items.length];
   assert.deepEqual(window.items, stream.slice(800));
-  while (window.hasEarlier) {
+  while (window.previousCursor) {
     assert.ok(window.previousCursor);
     window = buildThreadStreamWindow(stream, window.previousCursor);
     sizes.push(window.items.length);
@@ -88,7 +88,7 @@ test('one previous cursor crosses a retained protected span to reveal 200 hidden
   const newlyVisible = expanded.items.filter((item) => !initial.items.includes(item) && !item.metadata?.run_id);
   assert.equal(newlyVisible.length, 200);
   assert.equal(newlyVisible[0].id, 'message-50');
-  assert.equal(expanded.hasEarlier, true);
+  assert.ok(expanded.previousCursor);
 });
 
 test('places queued follow-up messages after the run reply they are waiting for', () => {
