@@ -1,9 +1,10 @@
 """Slice 02 (illo-handoff-packets): dual-audience packet composer.
 
 Contract under test: deterministic dual render (human brief + handoff
-input), and the review-hardened idempotency model — the revision hashes the
-COMPOSE OUTPUT (dossier + ask + criteria + owner + target), so any input
-that changes the packet changes the key; unchanged truth reuses it.
+input), the review-hardened idempotency model — the revision hashes EVERY
+persisted, launch-affecting field — and cross-family review regressions:
+cumulative truncation markers, strict brief cap, structured trimming
+totals, launch-line fill safety.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from brain.systems.briefing.compose import (
     LAUNCH_URL_PLACEHOLDER,
     UNCLAIMED_LABEL,
     compose_packet,
+    fill_launch_url,
 )
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "briefing"
@@ -67,7 +69,9 @@ def test_brief_shape_and_placeholder():
     assert "uwear-backend#346" in lines[2] and "uwear-backend#347" in lines[2]
     assert lines[3].startswith("*Prior decisions:* Reda: rerun the 41")
     assert lines[4].startswith("*Ask:* fix the melted-hands batch")
-    assert "context trimmed" in lines[4]  # fixture omits 2 slack items
+    # Fixture drops 2 slack items AND shortens 2 excerpts — both must show.
+    assert "2 items omitted" in lines[4]
+    assert "2 excerpts shortened" in lines[4]
     assert lines[-1] == f"Launch: {LAUNCH_URL_PLACEHOLDER}"
 
 
@@ -93,6 +97,10 @@ def test_handoff_input_carries_dossier_and_provenance():
     assert {"record", "slack_thread", "github_issue"}.issubset(sources)
     omission_parts = [part for part in handoff.context_parts if part["source"] == "omissions"]
     assert omission_parts and omission_parts[0]["notes"]
+    # Agent audience sees the marker inline plus the structured fields.
+    truncated_parts = [part for part in handoff.context_parts if part.get("truncated")]
+    assert truncated_parts
+    assert all("chars)" in part["excerpt"] for part in truncated_parts)
 
 
 def test_revision_stable_for_identical_inputs():
@@ -106,10 +114,25 @@ def test_revision_stable_for_identical_inputs():
         {"owner_user_id": "8b6f3f7e-0000-0000-0000-000000000002"},
         {"target_tool": "claude"},
         {"acceptance_criteria": ["new criterion"]},
+        # Cross-family review finding 1: persisted launch-affecting fields
+        # MUST rotate the key — a stale row would launch the wrong repo/branch.
+        {"repo_origin_url": "https://github.com/uwear/other-repo.git"},
+        {"branch_hint": "hotfix/other-branch"},
+        {"source_surface": "slack"},
+        {"source_ref": {"channel": "C0OTHER"}},
     ],
 )
-def test_revision_changes_when_packet_content_changes(change):
+def test_revision_changes_when_persisted_content_changes(change):
     assert _compose().idempotency_key != _compose(**change).idempotency_key
+
+
+def test_revision_ignores_display_only_and_audit_only_fields():
+    # owner_label is display-only (derived from owner_user_id at post time);
+    # created_by_user_id is audit-only — identical content re-minted by a
+    # different actor SHOULD reuse the row.
+    base = _compose()
+    assert base.idempotency_key == _compose(owner_label="Renamed Axel").idempotency_key
+    assert base.idempotency_key == _compose(created_by_user_id="illo-2").idempotency_key
 
 
 def test_revision_changes_when_dossier_truth_changes():
@@ -140,23 +163,73 @@ def test_idempotency_key_fits_column_for_pathological_job_ref():
     assert packet.idempotency_key.endswith(packet.revision)
 
 
-def test_brief_cap_tightens_narrative_never_launch_or_omissions():
+def test_brief_narrative_marker_is_cumulative_never_understating():
+    # A dossier-level cut followed by a brief-level cut must report the
+    # TOTAL distance from the raw source (cross-family review finding 2).
+    body = "lorem ipsum dolor sit amet " * 200  # ~5400 chars
+    normalized = " ".join(body.split())
+    dossier = assemble_dossier(
+        [SourcePiece(source="record", ref="r1", title="big", body=body, weight=5)],
+        job_ref="idea:9",
+        budget=DossierBudget(excerpt_chars=600),
+    )
+    packet = _compose(dossier)
+    narrative_line = packet.human_brief.splitlines()[1]
+    head = narrative_line.removeprefix("*What happened:* ").split(" … (+")[0]
+    reported = int(narrative_line.rsplit("(+", 1)[1].split(" chars")[0])
+    assert normalized.startswith(head)
+    assert reported == len(normalized) - len(head)  # exact, cumulative
+    assert reported > dossier.sections[0].items[0].omitted_chars  # brief cut added to it
+
+
+def test_fully_shed_sections_count_in_trimming_note():
+    pieces = [SourcePiece(source="record", ref="r1", title="t", body="word " * 30, weight=5)] + [
+        SourcePiece(source="evidence", ref=f"e{i}", title="e", body="word " * 40)
+        for i in range(10)
+    ]
+    dossier = assemble_dossier(
+        pieces, job_ref="idea:9",
+        budget=DossierBudget(total_chars=250, excerpt_chars=120, max_items_per_source=10),
+    )
+    packet = _compose(dossier)
+    ask_line = [line for line in packet.human_brief.splitlines() if line.startswith("*Ask:*")][0]
+    assert "10 items omitted" in ask_line  # not "1" — structured totals, not string counts
+
+
+def test_brief_cap_is_strict_under_adversarial_inputs():
     noisy = assemble_dossier(
         [
-            SourcePiece(source="record", ref="r1", title="T " * 40, body="word " * 400, weight=5),
-            SourcePiece(source="decision", ref="d1", title="d", body="decide " * 120),
+            SourcePiece(source="record", ref="r1", title="T " * 60, body="word " * 400, weight=5),
+            SourcePiece(source="decision", ref="d1", title="d", body="decide " * 200),
+            SourcePiece(source="github_issue", ref="uwear-backend#" + "9" * 60, title="i", body="x"),
         ]
         + [
-            SourcePiece(source="slack_thread", ref=f"s{i}", title="m", body="chat " * 50)
+            SourcePiece(source="slack_thread", ref=f"s{i}", title="m", body="chat " * 80)
             for i in range(9)
         ],
         job_ref="idea:9",
         budget=DossierBudget(max_items_per_source=2, excerpt_chars=580),
     )
-    packet = _compose(noisy, ask="a very long ask " * 20)
-    assert len(packet.human_brief) <= BRIEF_CHAR_CAP + 200  # structural overhead is bounded
+    packet = _compose(noisy, ask="a very long ask " * 40, owner_label="Some Very Long Owner Label Here")
+    assert len(packet.human_brief) <= BRIEF_CHAR_CAP  # exact contract, no slack
     assert packet.human_brief.splitlines()[-1] == f"Launch: {LAUNCH_URL_PLACEHOLDER}"
     assert "context trimmed" in packet.human_brief
+
+
+def test_fill_launch_url_replaces_only_the_final_line():
+    # Even when interpolated fields contain the placeholder text, only the
+    # final launch line is filled (cross-family review finding 8).
+    packet = _compose(ask=f"echo {LAUNCH_URL_PLACEHOLDER} into the thread", owner_label=LAUNCH_URL_PLACEHOLDER)
+    filled = fill_launch_url(packet.human_brief, "https://illo.example/api/launch-handoffs/h1/launch?target=codex")
+    lines = filled.splitlines()
+    assert lines[-1] == "Launch: https://illo.example/api/launch-handoffs/h1/launch?target=codex"
+    assert LAUNCH_URL_PLACEHOLDER in lines[0]  # owner's literal text untouched
+    assert LAUNCH_URL_PLACEHOLDER in lines[4]  # ask's literal text untouched
+
+
+def test_fill_launch_url_rejects_tampered_brief():
+    with pytest.raises(ValueError):
+        fill_launch_url("no launch line here", "https://example.com")
 
 
 def test_requires_ask():

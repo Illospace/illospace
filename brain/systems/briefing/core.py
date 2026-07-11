@@ -68,9 +68,21 @@ class SourcePiece:
 class DossierItem:
     ref: str
     title: str
-    excerpt: str
-    truncated: bool  # body was cut; the excerpt carries the visible marker
+    excerpt: str  # marker-FREE kept text; render via rendered_excerpt
+    truncated: bool  # body was cut
     omitted_chars: int  # raw chars removed by the cut (0 when not truncated)
+
+    @property
+    def rendered_excerpt(self) -> str:
+        """The excerpt with its visible truncation marker, for text audiences.
+
+        Structured consumers (and honest re-cutters — see compose) work from
+        the marker-free ``excerpt`` + ``omitted_chars`` so markers are never
+        parsed back or double-counted.
+        """
+        if not self.truncated:
+            return self.excerpt
+        return f"{self.excerpt}{render_marker(self.omitted_chars)}"
 
 
 @dataclass(frozen=True)
@@ -91,9 +103,13 @@ class DossierBudget:
     excerpt_chars: int = 600
 
     def __post_init__(self) -> None:
-        for name in ("total_chars", "source_chars", "max_items_per_source", "excerpt_chars"):
+        for name in ("total_chars", "source_chars", "max_items_per_source"):
             if int(getattr(self, name)) <= 0:
                 raise ValueError(f"DossierBudget.{name} must be positive")
+        # Below the floor a cap cannot hold both content and an honest
+        # marker, so tiny caps are a config error, not a silent overshoot.
+        if int(self.excerpt_chars) < _MIN_EXCERPT_CHARS:
+            raise ValueError(f"DossierBudget.excerpt_chars must be >= {_MIN_EXCERPT_CHARS}")
         for source, cap in dict(self.source_overrides).items():
             if int(cap) <= 0:
                 raise ValueError(f"DossierBudget.source_overrides[{source!r}] must be positive")
@@ -168,19 +184,35 @@ def _ts_utc(piece: SourcePiece) -> datetime:
 
 
 def _ordered_pieces(pieces: Sequence[SourcePiece]) -> list[SourcePiece]:
-    """weight desc, then newest first, then ref/title asc — via stable sorts."""
-    ordered = sorted(pieces, key=lambda p: (_normalize_text(p.ref), _normalize_text(p.title)))
+    """weight desc, then newest first, then ref/title/body asc — via stable sorts.
+
+    The normalized body participates in the final tiebreak so that two
+    same-ref pieces with identical metadata but different bodies pick the
+    same dedupe winner regardless of input order.
+    """
+    ordered = sorted(
+        pieces,
+        key=lambda p: (_normalize_text(p.ref), _normalize_text(p.title), _normalize_text(p.body)),
+    )
     ordered.sort(key=_ts_utc, reverse=True)
     ordered.sort(key=lambda p: p.weight, reverse=True)
     return ordered
 
 
-def _cut(text: str, cap: int) -> tuple[str, bool, int]:
-    """Cut ``text`` to at most ``cap`` chars at a word boundary, marker included.
+def render_marker(omitted_chars: int) -> str:
+    """The one visible truncation-marker format. Render-only — never parsed."""
+    return f" … (+{omitted_chars} chars)"
 
-    Returns ``(excerpt, truncated, omitted_chars)``. A single token longer
-    than the cap is hard-cut — there is no boundary to respect — but the
-    marker still reports the loss.
+
+def cut_text(text: str, cap: int) -> tuple[str, bool, int]:
+    """Cut ``text`` so that head + marker fit within ``cap`` chars.
+
+    Returns ``(head, truncated, omitted_chars)`` with the head MARKER-FREE —
+    callers render via :func:`render_marker` / ``rendered_excerpt`` so
+    re-cutters can accumulate honest totals instead of re-cutting rendered
+    markers. Cuts land on a word boundary; a single token longer than the
+    cap is hard-cut (no boundary to respect), and the marker still reports
+    the loss. ``cap`` below ``_MIN_EXCERPT_CHARS`` is a caller bug.
     """
     if len(text) <= cap:
         return text, False, 0
@@ -190,12 +222,11 @@ def _cut(text: str, cap: int) -> tuple[str, bool, int]:
     if boundary > 0:
         head = head[:boundary]
     head = head.rstrip()
-    omitted = len(text) - len(head)
-    return f"{head} … (+{omitted} chars)", True, omitted
+    return head, True, len(text) - len(head)
 
 
 def _item_from_piece(piece: SourcePiece, *, excerpt_cap: int) -> DossierItem:
-    excerpt, truncated, omitted = _cut(_normalize_text(piece.body), excerpt_cap)
+    excerpt, truncated, omitted = cut_text(_normalize_text(piece.body), excerpt_cap)
     return DossierItem(
         ref=_normalize_text(piece.ref),
         title=_normalize_text(piece.title),
@@ -206,7 +237,7 @@ def _item_from_piece(piece: SourcePiece, *, excerpt_cap: int) -> DossierItem:
 
 
 def _render_item(item: DossierItem) -> str:
-    return f"- [{item.ref}] {item.title}: {item.excerpt}"
+    return f"- [{item.ref}] {item.title}: {item.rendered_excerpt}"
 
 
 def _plural(count: int, noun: str) -> str:
@@ -226,8 +257,11 @@ def _render(
     sections: Sequence[DossierSection],
     omissions: Sequence[str],
 ) -> str:
+    # Empty sections stay on the Dossier for structured accounting (their
+    # omitted_count must survive for downstream honest totals) but render
+    # only through the omissions footer.
     parts = [f"# {headline}", f"job: {job_ref}"]
-    parts.extend(_render_section(section) for section in sections)
+    parts.extend(_render_section(section) for section in sections if section.items)
     if omissions:
         parts.append("Omitted: " + "; ".join(omissions))
     return "\n\n".join(parts)
@@ -361,10 +395,11 @@ def assemble_dossier(
     omissions: list[str] = []
     final_sections: list[DossierSection] = []
     for section in fitted:
-        if section.items:
-            final_sections.append(section)
-            if section.omitted_count:
-                omissions.append(f"{section.source}: {_plural(section.omitted_count, 'item')} omitted (budget)")
+        if not section.items and not section.omitted_count:
+            continue  # nothing kept, nothing lost — no accounting to carry
+        final_sections.append(section)
+        if section.items and section.omitted_count:
+            omissions.append(f"{section.source}: {_plural(section.omitted_count, 'item')} omitted (budget)")
         elif section.omitted_count:
             omissions.append(f"{section.source}: all {_plural(section.omitted_count, 'item')} omitted (budget)")
 

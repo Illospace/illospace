@@ -2,16 +2,20 @@
 
 ## Next Agent Prompt
 
-**Status (2026-07-10):** Slices 01+02 implemented and green —
+**Status (2026-07-11):** Slices 01+02 implemented, cross-family reviewed,
+hardened, and green —
 `brain/systems/briefing/{core,compose}.py` (pure), CLI probe
 (`python -m brain.systems.briefing --fixture
 tests/fixtures/briefing/uwear_bug.json [--compose --ask …]`), 31 unit
 tests + golden snapshot; architecture-boundary gate green; full fast suite
 green (only the 9 pre-existing `test_llm_worker` env failures).
-Claude-implemented under the Codex-unavailable fallback. **Next pickup:
-run the queued cross-family `codex exec` review over slices 01+02 + this
-spec (window was exhausted 2026-07-10 ~23:00; resets ~23:38), fold
-findings, THEN start [slices/03-gather-wiring.md](slices/03-gather-wiring.md).**
+Claude-implemented; **Codex cross-family review completed 2026-07-11**
+(9 findings: 3 HIGH — revision hash omitted persisted repo/branch/
+provenance fields; double-cut markers under-reported omitted chars;
+fully-shed sections lost structured counts — all 9 folded, each with a
+regression test; 51 briefing tests green). **Next pickup:
+[slices/03-gather-wiring.md](slices/03-gather-wiring.md)** — Codex
+implements per the routing rules, Claude directs and reviews.
 
 **Implementation decisions that refine slice texts (01):**
 - `DossierItem.truncated` (+ `omitted_chars`), not the sketch's
@@ -36,11 +40,32 @@ findings, THEN start [slices/03-gather-wiring.md](slices/03-gather-wiring.md).**
   truncated, omitted_chars}`) plus a trailing
   `{"source": "omissions", "notes": […]}` part when anything was trimmed
   (the sketch's per-part `omitted_count` was redundant).
-- The brief's `BRIEF_CHAR_CAP` governs the narrative; structural lines
-  (owner, evidence refs, decisions, omissions note, launch line) are exempt
-  bounded overhead — same stance as the dossier core.
+- `BRIEF_CHAR_CAP` (1200) is a STRICT bound on the whole brief, enforced by
+  a deterministic tighten cascade (narrative → ask → decisions → evidence →
+  headline, each to a floor, each cut leaving a marker); the launch line and
+  trimming note are never sacrificed.
 - Human brief carries a literal `{launch_url}` placeholder; mint (slice 05)
-  fills it after `create_launch_handoff` returns the real URL.
+  fills it via `fill_launch_url()` which replaces ONLY the final launch
+  line (interpolated fields containing the placeholder text stay literal).
+
+**Post-review hardening (Codex cross-family pass, 2026-07-11 — 9 findings folded):**
+- `DossierItem.excerpt` is marker-FREE; text audiences render via
+  `rendered_excerpt`. Markers are render-only (`render_marker`), never
+  parsed back — brief-level re-cuts accumulate `omitted_chars` so a marker
+  can never under-report the distance from the raw source.
+- Fully-shed sections stay on `Dossier.sections` (empty, with
+  `omitted_count`) for structured accounting; they render only through the
+  omissions footer. The brief's trimming note sums structured counts —
+  dropped items AND shortened excerpts — never rendered strings.
+- The revision hash covers every persisted launch-affecting field
+  (+ repo_origin_url, branch_hint, source_surface, source_ref). Named
+  exclusions: org_id (key already org-scoped), created_by_user_id
+  (audit-only; identical content re-minted by another actor SHOULD reuse),
+  owner_label (display-only, derived fresh from owner_user_id). Slice 05
+  must pass STABLE provenance in source_ref (origin thread, not event).
+- Dedupe winner is deterministic under complete metadata ties (normalized
+  body joins the ordering key); `excerpt_chars` has a 40-char floor
+  (below it a cap can't hold content + an honest marker).
 
 You are implementing the coordinator upgrade: at every routing moment
 (triage assignment, notify nudge, digest line) Illo attaches a **handoff

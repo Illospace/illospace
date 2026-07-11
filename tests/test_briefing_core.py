@@ -2,8 +2,9 @@
 
 The contract under test: deterministic, budgeted, deduplicated assembly
 where every cut is visible — markers on truncated excerpts, counts on
-dropped items, human-readable omission lines. See
-specs/illo-handoff-packets/slices/01-dossier-core.md.
+dropped items, human-readable omission lines. Includes the cross-family
+review regressions (dupe-tie determinism, tiny-cap contract, fully-shed
+section accounting). See specs/illo-handoff-packets/slices/01.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from brain.systems.briefing import (
     assemble_dossier,
 )
 from brain.systems.briefing.__main__ import main as briefing_cli
+from brain.systems.briefing.core import _render_section, cut_text, render_marker
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "briefing"
 _T0 = datetime(2026, 7, 9, 9, 0, tzinfo=timezone.utc)
@@ -50,11 +52,13 @@ def test_requires_job_ref():
         assemble_dossier([], job_ref="  ", budget=_budget())
 
 
-def test_budget_validation_rejects_non_positive():
+def test_budget_validation_rejects_non_positive_and_tiny_excerpt_caps():
     with pytest.raises(ValueError):
         DossierBudget(total_chars=0)
     with pytest.raises(ValueError):
         DossierBudget(source_overrides={"slack_thread": -5})
+    with pytest.raises(ValueError):
+        DossierBudget(excerpt_chars=39)  # below the honest-marker floor
 
 
 def test_source_priority_order_and_unknown_sources_last():
@@ -97,6 +101,17 @@ def test_deterministic_regardless_of_input_order():
         assert again == baseline
 
 
+def test_duplicate_winner_is_deterministic_under_complete_metadata_tie():
+    # Same ref, weight, ts, title — only the bodies differ. The winner must
+    # not depend on input order (cross-family review finding).
+    alpha = _piece("slack_thread", "s1", ts=_T0, body="alpha")
+    bravo = _piece("slack_thread", "s1", ts=_T0, body="bravo")
+    forward = assemble_dossier([alpha, bravo], job_ref="idea:1", budget=_budget())
+    reverse = assemble_dossier([bravo, alpha], job_ref="idea:1", budget=_budget())
+    assert forward == reverse
+    assert forward.sections[0].items[0].excerpt == "alpha"
+
+
 def test_dedupe_by_source_and_ref_is_not_an_omission():
     pieces = [
         _piece("slack_thread", "s1", title="first", ts=_T0 + timedelta(minutes=1)),
@@ -137,12 +152,14 @@ def test_excerpt_cut_at_word_boundary_with_visible_marker():
     item = dossier.sections[0].items[0]
     assert item.truncated
     assert item.omitted_chars > 0
-    assert len(item.excerpt) <= 200
-    assert f"(+{item.omitted_chars} chars)" in item.excerpt
-    head = item.excerpt.split(" … ")[0]
-    # No mid-word cut: the kept head must be a prefix of the body ending at a boundary.
-    assert body.startswith(head)
-    assert body[len(head)] == " "
+    assert len(item.rendered_excerpt) <= 200
+    assert item.rendered_excerpt.endswith(f"(+{item.omitted_chars} chars)")
+    # excerpt is the marker-free head; no mid-word cut.
+    assert item.excerpt == item.rendered_excerpt.split(" … ")[0]
+    assert body.startswith(item.excerpt)
+    assert body[len(item.excerpt)] == " "
+    # Honest accounting: head + omitted == whole normalized body.
+    assert len(item.excerpt) + item.omitted_chars == len(" ".join(body.split()))
 
 
 def test_single_giant_token_hard_cuts_but_still_marks():
@@ -152,8 +169,18 @@ def test_single_giant_token_hard_cuts_but_still_marks():
     )
     item = dossier.sections[0].items[0]
     assert item.truncated
-    assert len(item.excerpt) <= 120
-    assert "chars)" in item.excerpt
+    assert len(item.rendered_excerpt) <= 120
+    assert "chars)" in item.rendered_excerpt
+
+
+@pytest.mark.parametrize("cap", [40, 41, 55, 80, 120, 300, 600])
+def test_cut_contract_holds_across_cap_range(cap):
+    for body in ("word " * 200, "y" * 900, "short"):
+        head, truncated, omitted = cut_text(" ".join(body.split()), cap)
+        rendered = f"{head}{render_marker(omitted)}" if truncated else head
+        assert len(rendered) <= cap
+        if truncated:
+            assert omitted == len(" ".join(body.split())) - len(head)
 
 
 def test_source_budget_sheds_tail_items_but_keeps_one():
@@ -182,7 +209,7 @@ def test_lone_oversized_item_is_recut_to_fit_source_budget():
     section = dossier.sections[0]
     assert len(section.items) == 1
     assert section.items[0].truncated
-    assert len(section.items[0].excerpt) < 900
+    assert len(_render_section(section)) <= 260  # the real rendered artifact fits
 
 
 def test_total_budget_sheds_lowest_priority_first_and_keeps_top_item():
@@ -193,13 +220,29 @@ def test_total_budget_sheds_lowest_priority_first_and_keeps_top_item():
         _piece("evidence", "e2", body="word " * 50),
     ]
     tight = assemble_dossier(pieces, job_ref="idea:1", budget=_budget(total_chars=700, excerpt_chars=250))
-    sources = [section.source for section in tight.sections]
-    assert "record" in sources  # top section survives
+    rendered_sources = [section.source for section in tight.sections if section.items]
+    assert "record" in rendered_sources  # top section survives
     dropped = [entry for entry in tight.omissions if entry.startswith("evidence")]
     assert dropped, f"expected evidence to shed first, got omissions={tight.omissions}"
-    # The whole render honors what it promised: content within budget means
-    # the dossier never exceeds total by more than the exempt footer.
     assert tight.total_chars <= 700 + len("Omitted: " + "; ".join(tight.omissions)) + 2
+
+
+def test_fully_shed_section_keeps_structured_accounting():
+    # Ten evidence items forced out entirely by a tight total budget must
+    # remain countable on the Dossier (cross-family review finding), while
+    # rendering only through the omissions footer.
+    pieces = [_piece("record", "r1", body="word " * 30, weight=5)] + [
+        _piece("evidence", f"e{i}", body="word " * 40) for i in range(10)
+    ]
+    dossier = assemble_dossier(
+        pieces, job_ref="idea:1", budget=_budget(total_chars=250, excerpt_chars=120, max_items_per_source=10)
+    )
+    evidence = next(section for section in dossier.sections if section.source == "evidence")
+    assert evidence.items == ()
+    assert evidence.omitted_count == 10
+    assert "evidence: all 10 items omitted (budget)" in dossier.omissions
+    assert "## evidence" not in dossier.render_text()
+    assert "all 10 items omitted" in dossier.render_text()
 
 
 def test_headline_defaults_to_top_item_title():

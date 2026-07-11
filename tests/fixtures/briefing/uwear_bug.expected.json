@@ -22,7 +22,7 @@
         {
           "ref": "slack:C0PROD/p1751964840",
           "title": "JB in #prod-support",
-          "excerpt": "customer Maison L. says half of yesterday's batch came out with melted hands again, batch from their profile. They flagged it in the shared channel this morning and want a rerun before their … (+243 chars)",
+          "excerpt": "customer Maison L. says half of yesterday's batch came out with melted hands again, batch from their profile. They flagged it in the shared channel this morning and want a rerun before their",
           "truncated": true,
           "omitted_chars": 243
         },
@@ -49,7 +49,7 @@
         {
           "ref": "uwear-backend#346",
           "title": "Backfill default_model for profiles touched by preference migration",
-          "excerpt": "41/96 generations in batch 8841 ran on the legacy fallback model because the profile default_model column was nulled by migration 341. Repro: select id from generation where batch_id = 8841 and … (+159 chars)",
+          "excerpt": "41/96 generations in batch 8841 ran on the legacy fallback model because the profile default_model column was nulled by migration 341. Repro: select id from generation where batch_id = 8841 and",
           "truncated": true,
           "omitted_chars": 159
         }
