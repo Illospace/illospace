@@ -263,9 +263,7 @@ async def _handle_spawn_worker(
     async with UnitOfWork() as uow:
         store = AsyncAgentRunStore(uow.session)
         parent = await store.require_run(parent_run_id)
-        existing = await store.child_run_for_step(parent.id, step_key)
-        deduplicated = existing is not None
-        child = await store.create_child_run(
+        child, created = await store.create_child_run_with_result(
             parent,
             recipe=RunRecipe.WORKER,
             message=child_message,
@@ -277,21 +275,23 @@ async def _handle_spawn_worker(
             model_policy=dict(parent.model_policy or {}),
             metadata=worker_metadata,
         )
-        await store.append_event(
-            run_event(
-                int(parent.id),
-                "run.worker_spawned",
-                {
-                    "child_run_id": child.id,
-                    "step_key": step_key,
-                    "headless": bool(headless),
-                    "role": assignment.role,
-                    "objective": assignment.objective,
-                },
-                root_run_id=parent.root_run_id or parent.id,
-                producer="spawn_worker",
+        deduplicated = not created
+        if created:
+            await store.append_event(
+                run_event(
+                    int(parent.id),
+                    "run.worker_spawned",
+                    {
+                        "child_run_id": child.id,
+                        "step_key": step_key,
+                        "headless": bool(headless),
+                        "role": assignment.role,
+                        "objective": assignment.objective,
+                    },
+                    root_run_id=parent.root_run_id or parent.id,
+                    producer="spawn_worker",
+                )
             )
-        )
 
     return json.dumps(
         {

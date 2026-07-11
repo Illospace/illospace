@@ -33,7 +33,7 @@ from brain.systems.runs.project_execution_env import (
     redact_sensitive_output,
 )
 from brain.systems.runs.secret_mounts import SECRET_ENV_SCHEMA
-from brain.platform.async_io import run_blocking, run_subprocess_sync
+from brain.platform.async_io import run_blocking, run_subprocess_sync, run_tool_blocking
 
 logger = logging.getLogger("agent.tools")
 
@@ -270,7 +270,8 @@ async def handle_semantic_search(query: str, scope: str = "both", limit: int = 5
 
             async with UnitOfWork() as uow:
                 runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            code_results = _semantic_code_search(
+            code_results = await run_tool_blocking(
+                _semantic_code_search,
                 query,
                 limit=limit,
                 workspace_root=workspace_root,
@@ -1055,11 +1056,11 @@ async def handle_summarize_file_for_task(
     workspace_root: str | None = None,
 ) -> dict:
     """Answer a narrow question about one file with bounded context."""
-    summary = handle_file_summary(path, workspace_root=workspace_root)
+    summary = await run_tool_blocking(handle_file_summary, path, workspace_root=workspace_root)
     if "error" in summary:
         return {"error": summary["error"]}
 
-    lines, error = _read_file_lines(path, workspace_root=workspace_root)
+    lines, error = await run_tool_blocking(_read_file_lines, path, workspace_root=workspace_root)
     if error:
         return {"error": error}
     total_lines = len(lines or [])
@@ -1121,7 +1122,8 @@ async def handle_summarize_files_for_task(
     workspace_root: str | None = None,
 ) -> dict:
     """Answer a narrow question across multiple files with bounded synthesis."""
-    implementation_map = handle_build_implementation_map(
+    implementation_map = await run_tool_blocking(
+        handle_build_implementation_map,
         question,
         paths=paths,
         max_files=max_files,
@@ -1133,10 +1135,10 @@ async def handle_summarize_files_for_task(
     selected = []
     ranked_paths = [item["path"] for item in implementation_map.get("files_ranked", [])]
     for raw_path in ranked_paths[: max(1, min(max_files, 12))]:
-        summary = handle_file_summary(raw_path, workspace_root=workspace_root)
+        summary = await run_tool_blocking(handle_file_summary, raw_path, workspace_root=workspace_root)
         if "error" in summary:
             continue
-        lines, error = _read_file_lines(raw_path, workspace_root=workspace_root)
+        lines, error = await run_tool_blocking(_read_file_lines, raw_path, workspace_root=workspace_root)
         if error:
             continue
         chunks = _select_relevant_chunks(lines or [], question, summary, max_chunks=2)

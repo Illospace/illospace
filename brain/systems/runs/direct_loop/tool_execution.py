@@ -10,10 +10,21 @@ import logging
 import os
 from typing import Any, Callable
 
+from brain.platform.async_io import (
+    InvocationProbe,
+    bind_invocation_probe,
+    invoke_maybe_async,
+    mark_side_effect_started,
+)
 from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
-from brain.systems.runs.tool_catalog.registry import output_budget_chars_for_tool
+from brain.systems.runs.tool_catalog.registry import (
+    action_policy_for_tool,
+    get_tool_registration,
+    output_budget_chars_for_tool,
+)
 
 logger = logging.getLogger("agent")
+_background_tool_tasks: set[asyncio.Task[ResolvedToolCall]] = set()
 
 _DEFAULT_TOOL_TIMEOUT_SECONDS = 180.0
 _DEFAULT_TOOL_TIMEOUT_GRACE_SECONDS = 5.0
@@ -111,6 +122,17 @@ def _timeout_result(request: PendingToolCall, timeout_seconds: float) -> Resolve
         ),
         is_error=True,
     )
+
+
+def _must_finish_before_reporting(request: PendingToolCall) -> bool:
+    """Return whether a still-running call could make a retry unsafe."""
+    registration = get_tool_registration(request.tool_name)
+    if registration is None:
+        return bool(getattr(request.handler, "_action_manifest_audited", False))
+    if action_policy_for_tool(request.tool_name, kwargs=request.tool_input) is None:
+        return False
+    side_effect = str(getattr(registration.side_effect_class, "value", registration.side_effect_class))
+    return side_effect not in {"read_only", "read_only_external"}
 
 
 def _truncate_middle_text(text: str, max_chars: int) -> str:
@@ -246,7 +268,7 @@ async def async_invoke_tool_handler(
 ):
     """Execute a tool handler with optional propagated AgentRun context."""
     with _BoundAgentContext(agent_context, threadlocal_context):
-        return await async_run_tool_awaitable(handler(**tool_input))
+        return await invoke_maybe_async(handler, **tool_input)
 
 
 def invoke_tool_handler(
@@ -268,6 +290,8 @@ async def _async_resolve_tool_call_once(
 ) -> ResolvedToolCall:
     """Execute one tool request and normalize success/error handling."""
     try:
+        if not getattr(request.handler, "_illo_marks_side_effect_start", False):
+            mark_side_effect_started()
         result = await async_invoke_tool_handler(
             request.handler,
             request.tool_input,
@@ -319,18 +343,78 @@ async def async_resolve_tool_call(
 ) -> ResolvedToolCall:
     """Execute one tool request with an async watchdog timeout."""
     timeout_seconds = _tool_timeout_seconds(request.tool_name, request.tool_input)
-    call = _async_resolve_tool_call_once(
-        request,
-        agent_context=agent_context,
-        threadlocal_context=threadlocal_context,
-    )
+    probe = InvocationProbe()
+
+    async def call_with_probe():
+        with bind_invocation_probe(probe):
+            return await _async_resolve_tool_call_once(
+                request,
+                agent_context=agent_context,
+                threadlocal_context=threadlocal_context,
+            )
+
+    call = call_with_probe()
     if timeout_seconds is None:
         return await call
+    must_finish = _must_finish_before_reporting(request)
+    task = asyncio.create_task(call, name=f"tool-{request.tool_name}-blocking-boundary")
     try:
-        return await asyncio.wait_for(call, timeout=timeout_seconds)
-    except TimeoutError:
-        logger.warning("Tool %s timed out after %.2fs", request.tool_name, timeout_seconds)
-        return _timeout_result(request, timeout_seconds)
+        done, _ = await asyncio.wait({task}, timeout=timeout_seconds)
+    except asyncio.CancelledError:
+        blocking_active, blocking_started = probe.blocking_snapshot()
+        blocking_unavoidable = blocking_active and blocking_started
+        action_started = probe.side_effect_started and (
+            not blocking_active or blocking_started
+        )
+        if must_finish and action_started:
+            _track_background_tool_task(task)
+        elif blocking_unavoidable:
+            task.cancel()
+            _track_background_tool_task(task)
+        else:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        raise
+    if task in done:
+        return task.result()
+    blocking_active, blocking_started = probe.blocking_snapshot()
+    blocking_unavoidable = blocking_active and blocking_started
+    action_started = probe.side_effect_started and (
+        not blocking_active or blocking_started
+    )
+    if must_finish and action_started:
+        logger.warning(
+            "Tool %s exceeded its %.2fs watchdog; waiting for a definitive action outcome",
+            request.tool_name,
+            timeout_seconds,
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            _track_background_tool_task(task)
+            raise
+    task.cancel()
+    if blocking_unavoidable:
+        _track_background_tool_task(task)
+    else:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        if task.done() and not task.cancelled():
+            return task.result()
+    logger.warning("Tool %s timed out after %.2fs", request.tool_name, timeout_seconds)
+    return _timeout_result(request, timeout_seconds)
+
+
+def _track_background_tool_task(task: asyncio.Task[ResolvedToolCall]) -> None:
+    if task.done():
+        return
+    _background_tool_tasks.add(task)
+    task.add_done_callback(_background_tool_tasks.discard)
 
 
 def _resolve_tool_call_sync(

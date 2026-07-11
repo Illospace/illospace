@@ -19,6 +19,7 @@ import uuid
 import inspect
 
 from brain.kernel import config as brain_config
+from brain.platform.async_io import invoke_maybe_async
 from brain.systems.runs import actions as action_audit
 from brain.systems.runs.evidence import normalize_tool_call_evidence
 from brain.systems.runs.execution_artifacts import (
@@ -946,9 +947,7 @@ def _record_tool_evidence(tool_name: str, args: dict | None, result: object) -> 
 def _wrap_tool_evidence(tool_name: str, handler):
     """Wrap a handler so successful backend tool output becomes evidence."""
     async def wrapper(*args, **kwargs):
-        result = handler(*args, **kwargs)
-        if inspect.isawaitable(result):
-            result = await result
+        result = await invoke_maybe_async(handler, *args, **kwargs)
         evidence_args = dict(kwargs)
         if args:
             evidence_args["_args"] = list(args)
