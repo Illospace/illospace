@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from hashlib import sha256
 import logging
+import os
 import threading
 from typing import Any
+import uuid
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +57,23 @@ _DEFERRED_RUN_ACTIVE_STATUS_VALUES = frozenset({
     RunStatus.VERIFYING.value,
 })
 _SOURCE_IDEMPOTENCY_METADATA_KEYS = ("idempotency_key", "idempotencyKey")
+_CREATABLE_RUN_STATUSES = frozenset({RunStatus.QUEUED, RunStatus.STARTING})
+_CHILD_CREATION_TOKEN_METADATA_KEY = "parent_step_creation_token"
+_UNSET = object()
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionClaim:
+    """Durable ownership fence for one recipe execution attempt."""
+
+    run_id: int
+    token: str
+    attempt: int
+    lost: asyncio.Event = field(default_factory=asyncio.Event, compare=False, repr=False)
+
+
+class ExecutionClaimLost(RuntimeError):
+    """Raised when an execution owner loses its durable fencing claim."""
 
 
 _EVENT_LOCKS_GUARD = threading.Lock()
@@ -65,6 +88,32 @@ def _event_lock(run_id: int) -> threading.RLock:
             _EVENT_LOCKS[int(run_id)] = lock
         return lock
 
+
+def _creatable_run_status(value: RunStatus | str) -> RunStatus:
+    try:
+        status = value if isinstance(value, RunStatus) else RunStatus(str(value).strip().lower())
+    except ValueError as exc:
+        raise ValueError(f"Unsupported initial run status: {value!r}") from exc
+    if status not in _CREATABLE_RUN_STATUSES:
+        raise ValueError(
+            f"Initial run status must be queued or starting, got {status.value!r}"
+        )
+    return status
+
+
+def _parent_step_key_hash(step_key: str | None) -> str | None:
+    normalized = str(step_key or "").strip()
+    return sha256(normalized.encode()).hexdigest() if normalized else None
+
+
+async def _await_uninterruptibly(awaitable):
+    task = asyncio.create_task(awaitable)
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
 
 
 def to_domain(row: AgentRunRow) -> AgentRun:
@@ -176,10 +225,47 @@ class AsyncAgentRunStore:
         )
         return (await self.session.scalars(stmt)).first()
 
-    async def create_run(self, request: AgentRunRequest) -> AgentRun:
+    async def _run_for_parent_step(
+        self,
+        *,
+        parent_run_id: int | None,
+        parent_step_key_hash: str | None,
+    ) -> AgentRunRow | None:
+        if parent_run_id is None or not parent_step_key_hash:
+            return None
+        stmt = (
+            select(AgentRunRow)
+            .where(
+                AgentRunRow.parent_run_id == int(parent_run_id),
+                AgentRunRow.parent_step_key_hash == str(parent_step_key_hash),
+            )
+            .order_by(AgentRunRow.id.asc())
+            .limit(1)
+        )
+        return (await self.session.scalars(stmt)).first()
+
+    async def create_run(
+        self,
+        request: AgentRunRequest,
+        *,
+        initial_status: RunStatus | str = RunStatus.QUEUED,
+        parent_step_key_hash: str | None = None,
+    ) -> AgentRun:
         profile = request.normalized_profile
         recipe = request.normalized_recipe
-        source_idempotency_scope, source_idempotency_key = _source_idempotency_parts(request)
+        status = _creatable_run_status(initial_status)
+        parent_step_key_hash = str(parent_step_key_hash or "").strip() or None
+        existing = await self._run_for_parent_step(
+            parent_run_id=request.parent_run_id,
+            parent_step_key_hash=parent_step_key_hash,
+        )
+        if existing is not None:
+            return to_domain(existing)
+        source_idempotency_scope, source_idempotency_key = (
+            _source_idempotency_parts(request)
+            if request.parent_run_id is None
+            else (None, None)
+        )
         existing = await self._run_for_source_idempotency(
             org_id=request.org_id,
             scope=source_idempotency_scope,
@@ -196,7 +282,7 @@ class AsyncAgentRunStore:
             root_run_id=request.root_run_id,
             profile=profile.value,
             recipe=recipe.value,
-            status=RunStatus.QUEUED.value,
+            status=status.value,
             input_message=request.message,
             target_ref=dict(request.target_ref or {}),
             workspace_ref=dict(request.workspace_ref or {}),
@@ -204,6 +290,8 @@ class AsyncAgentRunStore:
             metadata_=dict(request.metadata or {}),
             source_idempotency_scope=source_idempotency_scope,
             source_idempotency_key=source_idempotency_key,
+            parent_step_key_hash=parent_step_key_hash,
+            started_at=datetime.now(timezone.utc) if status == RunStatus.STARTING else None,
         )
         try:
             async with self.session.begin_nested():
@@ -214,6 +302,12 @@ class AsyncAgentRunStore:
                     row.root_run_id = row.id
                 await self.session.flush()
         except IntegrityError:
+            existing = await self._run_for_parent_step(
+                parent_run_id=request.parent_run_id,
+                parent_step_key_hash=parent_step_key_hash,
+            )
+            if existing is not None:
+                return to_domain(existing)
             existing = await self._run_for_source_idempotency(
                 org_id=request.org_id,
                 scope=source_idempotency_scope,
@@ -226,52 +320,130 @@ class AsyncAgentRunStore:
             run_event(
                 row.id,
                 "run.created",
-                {"profile": profile.value, "recipe": recipe.value},
+                {"profile": profile.value, "recipe": recipe.value, "status": status.value},
                 root_run_id=row.root_run_id,
             )
         )
         return to_domain(row)
 
-    async def create_child_run(self, parent: AgentRun | AgentRunRow, **kwargs: Any) -> AgentRun:
+    async def create_child_run(
+        self,
+        parent: AgentRun | AgentRunRow,
+        *,
+        initial_status: RunStatus | str = RunStatus.QUEUED,
+        **kwargs: Any,
+    ) -> AgentRun:
+        child, _created = await self.create_child_run_with_result(
+            parent,
+            initial_status=initial_status,
+            **kwargs,
+        )
+        return child
+
+    async def create_child_run_with_result(
+        self,
+        parent: AgentRun | AgentRunRow,
+        *,
+        initial_status: RunStatus | str = RunStatus.QUEUED,
+        **kwargs: Any,
+    ) -> tuple[AgentRun, bool]:
+        status = _creatable_run_status(initial_status)
         parent_run = parent if isinstance(parent, AgentRunRow) else await self.require_run(parent.id)
         recipe = kwargs["recipe"]
         recipe_value = recipe.value if isinstance(recipe, RunRecipe) else str(recipe)
         step_key = kwargs.get("step_key")
         thread_id = kwargs.get("thread_id") or parent_run.thread_id
         metadata_payload = dict(kwargs.get("metadata") or {})
-        if step_key:
-            metadata_payload["parent_step_key"] = step_key
-            existing = await self.child_run_for_step(parent_run.id, step_key)
-            if existing is not None:
-                return to_domain(existing)
-        child = await self.create_run(
-            AgentRunRequest(
-                org_id=parent_run.org_id,
-                user_id=parent_run.user_id,
-                thread_id=str(thread_id),
-                parent_run_id=parent_run.id,
-                root_run_id=parent_run.root_run_id or parent_run.id,
-                profile=kwargs.get("profile") or parent_run.profile,
-                recipe=recipe_value,
-                message=kwargs["message"],
-                target_ref=dict(
-                    kwargs["target_ref"]
-                    if kwargs.get("target_ref") is not None
-                    else parent_run.target_ref or {}
+        creation_token = uuid.uuid4().hex if step_key else None
+        auto_commit = self.auto_commit
+        commit_at_end = auto_commit or status == RunStatus.STARTING
+        self.auto_commit = False
+        try:
+            # Python's sqlite3 legacy transaction mode does not begin a real
+            # outer transaction for SELECT before SAVEPOINT. Force one so the
+            # nested idempotent insert cannot commit ahead of its parent event.
+            if self._dialect_name() == "sqlite":
+                await self.session.execute(
+                    update(AgentRunRow)
+                    .where(AgentRunRow.id == int(parent_run.id))
+                    .values(updated_at=AgentRunRow.updated_at)
+                )
+            else:
+                await self.session.execute(
+                    select(AgentRunRow.id)
+                    .where(AgentRunRow.id == int(parent_run.id))
+                    .with_for_update()
+                )
+            if step_key:
+                metadata_payload["parent_step_key"] = step_key
+                metadata_payload[_CHILD_CREATION_TOKEN_METADATA_KEY] = creation_token
+                existing = await self.child_run_for_step(parent_run.id, step_key)
+                if existing is not None:
+                    child = to_domain(existing)
+                    await self._append_child_created_once(parent_run, child, step_key)
+                    if commit_at_end:
+                        await self.session.commit()
+                    return child, False
+            child = await self.create_run(
+                AgentRunRequest(
+                    org_id=parent_run.org_id,
+                    user_id=parent_run.user_id,
+                    thread_id=str(thread_id),
+                    parent_run_id=parent_run.id,
+                    root_run_id=parent_run.root_run_id or parent_run.id,
+                    profile=kwargs.get("profile") or parent_run.profile,
+                    recipe=recipe_value,
+                    message=kwargs["message"],
+                    target_ref=dict(
+                        kwargs["target_ref"]
+                        if kwargs.get("target_ref") is not None
+                        else parent_run.target_ref or {}
+                    ),
+                    workspace_ref=dict(
+                        kwargs["workspace_ref"]
+                        if kwargs.get("workspace_ref") is not None
+                        else parent_run.workspace_ref or {}
+                    ),
+                    model_policy=dict(
+                        kwargs["model_policy"]
+                        if kwargs.get("model_policy") is not None
+                        else parent_run.model_policy or {}
+                    ),
+                    metadata=metadata_payload,
                 ),
-                workspace_ref=dict(
-                    kwargs["workspace_ref"]
-                    if kwargs.get("workspace_ref") is not None
-                    else parent_run.workspace_ref or {}
-                ),
-                model_policy=dict(
-                    kwargs["model_policy"]
-                    if kwargs.get("model_policy") is not None
-                    else parent_run.model_policy or {}
-                ),
-                metadata=metadata_payload,
+                initial_status=status,
+                parent_step_key_hash=_parent_step_key_hash(step_key),
             )
-        )
+            created_here = not step_key or child.metadata.get(_CHILD_CREATION_TOKEN_METADATA_KEY) == creation_token
+            await self._append_child_created_once(parent_run, child, step_key)
+            if commit_at_end:
+                await self.session.commit()
+            return child, created_here
+        except BaseException:
+            await self.session.rollback()
+            raise
+        finally:
+            self.auto_commit = auto_commit
+
+    async def _append_child_created_once(
+        self,
+        parent_run: AgentRunRow,
+        child: AgentRun,
+        step_key: str | None,
+    ) -> bool:
+        existing_events = (
+            await self.session.scalars(
+                select(AgentRunEventRow).where(
+                    AgentRunEventRow.run_id == int(parent_run.id),
+                    AgentRunEventRow.event_type == "run.child_created",
+                )
+            )
+        ).all()
+        if any(
+            int((event.payload or {}).get("child_run_id") or 0) == int(child.id)
+            for event in existing_events
+        ):
+            return False
         await self.append_event(
             run_event(
                 parent_run.id,
@@ -280,9 +452,15 @@ class AsyncAgentRunStore:
                 root_run_id=parent_run.root_run_id or parent_run.id,
             )
         )
-        return child
+        return True
 
     async def child_run_for_step(self, parent_run_id: int, step_key: str) -> AgentRunRow | None:
+        hashed = await self._run_for_parent_step(
+            parent_run_id=parent_run_id,
+            parent_step_key_hash=_parent_step_key_hash(step_key),
+        )
+        if hashed is not None:
+            return hashed
         rows = (
             await self.session.scalars(
                 select(AgentRunRow)
@@ -295,6 +473,209 @@ class AsyncAgentRunStore:
             if str(metadata.get("parent_step_key") or "") == str(step_key):
                 return row
         return None
+
+    @asynccontextmanager
+    async def execution_lease(self, run_id: int):
+        """Claim one fenced recipe attempt without pinning a DB connection."""
+        run_id = int(run_id)
+        token = uuid.uuid4().hex
+        await self.session.commit()
+        observed_owner = False
+        claim: ExecutionClaim | None = None
+        try:
+            while claim is None:
+                row = await self.refresh_run(run_id)
+                status = coerce_run_status(row.status, default=RunStatus.FAILED)
+                if status in TERMINAL_RUN_STATUSES:
+                    await self.session.rollback()
+                    yield None
+                    return
+                if observed_owner and status == RunStatus.PAUSED and not row.execution_token:
+                    await self.session.rollback()
+                    yield None
+                    return
+                claim = await self._try_acquire_execution_claim(
+                    row,
+                    token=token,
+                )
+                if claim is not None:
+                    break
+                observed_owner = True
+                if not await self._wait_for_execution_retry(run_id):
+                    yield None
+                    return
+        except BaseException:
+            await _await_uninterruptibly(self.session.rollback())
+            if claim is not None:
+                await _await_uninterruptibly(self._release_execution_claim(claim))
+            raise
+
+        try:
+            yield claim
+        except BaseException:
+            await _await_uninterruptibly(self.session.rollback())
+            raise
+        else:
+            await _await_uninterruptibly(self.session.commit())
+        finally:
+            await _await_uninterruptibly(self._release_execution_claim(claim))
+
+    async def _try_acquire_execution_claim(
+        self,
+        row: AgentRunRow,
+        *,
+        token: str,
+    ) -> ExecutionClaim | None:
+        auto_commit = self.auto_commit
+        self.auto_commit = False
+        try:
+            return await self._try_acquire_execution_claim_transaction(row, token=token)
+        except BaseException:
+            await _await_uninterruptibly(self.session.rollback())
+            raise
+        finally:
+            self.auto_commit = auto_commit
+
+    async def _try_acquire_execution_claim_transaction(
+        self,
+        row: AgentRunRow,
+        *,
+        token: str,
+    ) -> ExecutionClaim | None:
+        status = coerce_run_status(row.status, default=RunStatus.FAILED)
+        if status in TERMINAL_RUN_STATUSES:
+            return None
+        now = datetime.now(timezone.utc)
+        initial_attempt = int(row.execution_attempt or 0)
+        attempt = initial_attempt + 1
+        result = await self.session.execute(
+            update(AgentRunRow)
+            .where(
+                AgentRunRow.id == int(row.id),
+                AgentRunRow.status == status.value,
+                AgentRunRow.execution_attempt == initial_attempt,
+                AgentRunRow.status.in_(_DEFERRED_RUN_ACTIVE_STATUS_VALUES),
+                AgentRunRow.execution_token.is_(None),
+            )
+            .values(
+                status=RunStatus.RUNNING.value,
+                execution_token=str(token),
+                execution_attempt=attempt,
+                started_at=row.started_at or now,
+                updated_at=now,
+            )
+            .returning(AgentRunRow.id)
+            .execution_options(synchronize_session=False)
+        )
+        if result.scalar_one_or_none() is None:
+            await self.session.rollback()
+            return None
+
+        root_run_id = row.root_run_id or row.id
+        if status == RunStatus.QUEUED:
+            await self.append_event(
+                status_changed_event(
+                    row.id,
+                    from_status=RunStatus.QUEUED.value,
+                    to_status=RunStatus.STARTING.value,
+                    root_run_id=root_run_id,
+                    reason="claimed",
+                )
+            )
+            await self.append_event(
+                status_changed_event(
+                    row.id,
+                    from_status=RunStatus.STARTING.value,
+                    to_status=RunStatus.RUNNING.value,
+                    root_run_id=root_run_id,
+                )
+            )
+        elif status != RunStatus.RUNNING:
+            await self.append_event(
+                status_changed_event(
+                    row.id,
+                    from_status=status.value,
+                    to_status=RunStatus.RUNNING.value,
+                    root_run_id=root_run_id,
+                )
+            )
+        lifecycle_event = (
+            "run.resumed"
+            if status in {RunStatus.RUNNING, RunStatus.PAUSED, RunStatus.VERIFYING}
+            else "run.started"
+        )
+        await self.append_event(
+            run_event(
+                row.id,
+                lifecycle_event,
+                {"from_status": status.value, "execution_attempt": attempt},
+                root_run_id=root_run_id,
+            )
+        )
+        await self.session.commit()
+        return ExecutionClaim(run_id=int(row.id), token=str(token), attempt=attempt)
+
+    async def refresh_run(self, run_id: int) -> AgentRunRow:
+        row = (
+            await self.session.scalars(
+                select(AgentRunRow)
+                .where(AgentRunRow.id == int(run_id))
+                .execution_options(populate_existing=True)
+            )
+        ).one_or_none()
+        if row is None:
+            raise LookupError(f"Run {run_id} not found")
+        return row
+
+    async def _wait_for_execution_retry(self, run_id: int) -> bool:
+        try:
+            timeout_seconds = max(1.0, float(os.getenv("AGENT_RUN_LEASE_WAIT_SECONDS", "900")))
+        except ValueError:
+            timeout_seconds = 900.0
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        delay = 0.05
+        while True:
+            row = await self.refresh_run(run_id)
+            status = coerce_run_status(row.status, default=RunStatus.FAILED)
+            active_token = str(row.execution_token or "")
+            await self.session.rollback()
+            if status in TERMINAL_RUN_STATUSES or (
+                status == RunStatus.PAUSED and not active_token
+            ):
+                return False
+            if not active_token:
+                return True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError(f"Timed out waiting for AgentRun {run_id} execution owner")
+            await asyncio.sleep(min(delay, remaining))
+            delay = min(1.0, delay * 1.7)
+
+    async def assert_execution_claim(self, claim: ExecutionClaim) -> AgentRunRow:
+        row = await self.refresh_run(claim.run_id)
+        if (
+            claim.lost.is_set()
+            or str(row.execution_token or "") != claim.token
+            or int(row.execution_attempt or 0) != claim.attempt
+            or coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES
+        ):
+            raise ExecutionClaimLost(
+                f"AgentRun {claim.run_id} execution claim {claim.attempt} is no longer current"
+            )
+        return row
+
+    async def _release_execution_claim(self, claim: ExecutionClaim) -> None:
+        await self.session.execute(
+            update(AgentRunRow)
+            .where(
+                AgentRunRow.id == claim.run_id,
+                AgentRunRow.execution_token == claim.token,
+                AgentRunRow.execution_attempt == claim.attempt,
+            )
+            .values(execution_token=None)
+        )
+        await self.session.commit()
 
     async def child_runs(self, parent_run_id: int) -> list[AgentRunRow]:
         result = await self.session.scalars(
@@ -471,35 +852,121 @@ class AsyncAgentRunStore:
     async def step_completed(self, run_id: int, step_key: str) -> bool:
         return step_key in ((await self.cursor_for_run(run_id)).get("completed_steps") or {})
 
-    async def set_status(self, run_id: int, status: RunStatus | str, *, reason: str | None = None) -> AgentRun:
-        row = await self.require_run(run_id)
+    async def set_status(
+        self,
+        run_id: int,
+        status: RunStatus | str,
+        *,
+        reason: str | None = None,
+        execution_claim: ExecutionClaim | None = None,
+    ) -> AgentRun:
+        run, _changed = await self.set_status_with_result(
+            run_id,
+            status,
+            reason=reason,
+            execution_claim=execution_claim,
+        )
+        return run
+
+    async def set_status_with_result(
+        self,
+        run_id: int,
+        status: RunStatus | str,
+        *,
+        reason: str | None = None,
+        execution_claim: ExecutionClaim | None = None,
+        expected_updated_at: datetime | None | object = _UNSET,
+        expected_execution_token: str | None | object = _UNSET,
+        expected_execution_attempt: int | object = _UNSET,
+        rollback_on_conflict: bool = True,
+    ) -> tuple[AgentRun, bool]:
+        if execution_claim is not None and execution_claim.lost.is_set():
+            raise ExecutionClaimLost(
+                f"AgentRun {run_id} execution claim {execution_claim.attempt} is no longer current"
+            )
+        row = await self.refresh_run(run_id)
+        persisted_status = coerce_run_status(row.status, default=RunStatus.FAILED)
+        if execution_claim is not None and (
+            str(row.execution_token or "") != execution_claim.token
+            or int(row.execution_attempt or 0) != execution_claim.attempt
+            or persisted_status in TERMINAL_RUN_STATUSES
+        ):
+            execution_claim.lost.set()
+            raise ExecutionClaimLost(
+                f"AgentRun {run_id} execution claim {execution_claim.attempt} is no longer current"
+            )
+        if persisted_status in TERMINAL_RUN_STATUSES:
+            return to_domain(row), False
         current, target = ensure_run_transition(row.status, status)
         if current == target:
-            return to_domain(row)
+            if execution_claim is not None:
+                await self.assert_execution_claim(execution_claim)
+            return to_domain(row), False
         now = datetime.now(timezone.utc)
-        row.status = target.value
+        values: dict[str, Any] = {
+            "status": target.value,
+            "updated_at": now,
+        }
         if target == RunStatus.STARTING:
-            row.started_at = row.started_at or now
+            values["started_at"] = row.started_at or now
         elif target == RunStatus.PAUSED:
-            row.paused_at = now
+            values["paused_at"] = now
         elif target == RunStatus.COMPLETED:
-            row.completed_at = now
+            values["completed_at"] = now
         elif target == RunStatus.FAILED:
-            row.failed_at = now
+            values["failed_at"] = now
         elif target == RunStatus.CANCELED:
-            row.canceled_at = now
+            values["canceled_at"] = now
+        if target in TERMINAL_RUN_STATUSES or target == RunStatus.PAUSED:
+            values["execution_token"] = None
+
+        predicates = [
+            AgentRunRow.id == int(run_id),
+            AgentRunRow.status == current.value,
+        ]
+        if execution_claim is not None:
+            predicates.extend([
+                AgentRunRow.execution_token == execution_claim.token,
+                AgentRunRow.execution_attempt == execution_claim.attempt,
+            ])
+        if expected_updated_at is not _UNSET:
+            predicates.append(AgentRunRow.updated_at == expected_updated_at)
+        if expected_execution_token is not _UNSET:
+            predicates.append(AgentRunRow.execution_token == expected_execution_token)
+        if expected_execution_attempt is not _UNSET:
+            predicates.append(AgentRunRow.execution_attempt == int(expected_execution_attempt))
+        result = await self.session.execute(
+            update(AgentRunRow)
+            .where(*predicates)
+            .values(**values)
+            .returning(AgentRunRow.id)
+            .execution_options(synchronize_session=False)
+        )
+        if result.scalar_one_or_none() is None:
+            if rollback_on_conflict:
+                await self.session.rollback()
+            if execution_claim is not None:
+                execution_claim.lost.set()
+                raise ExecutionClaimLost(
+                    f"AgentRun {run_id} execution claim {execution_claim.attempt} lost a status race"
+                )
+            return to_domain(await self.refresh_run(run_id)), False
+
         await self.append_event(
             status_changed_event(
-                row.id,
+                int(run_id),
                 from_status=current.value,
                 to_status=target.value,
                 root_run_id=row.root_run_id,
                 reason=reason,
             )
         )
+        row = await self.refresh_run(run_id)
         if target in TERMINAL_RUN_STATUSES:
             await _reconcile_inbound_triage_run_if_needed(self.session, row)
-        return to_domain(row)
+        if self.auto_commit:
+            await self.session.commit()
+        return to_domain(row), True
 
     async def append_steering(
         self,
@@ -576,11 +1043,9 @@ class AsyncAgentRunStore:
 
     async def append_event(self, event: AgentRunEvent) -> AgentRunEventRow:
         with _event_lock(int(event.run_id)):
-            if self._dialect_name() == "postgresql":
-                await self.session.execute(
-                    text("SELECT pg_advisory_xact_lock(:run_id)"),
-                    {"run_id": int(event.run_id)},
-                )
+            await self.lock_event_stream(
+                int(event.run_id),
+            )
             sequence_no = event.sequence_no
             if sequence_no is None:
                 sequence_no = int(
@@ -607,6 +1072,56 @@ class AsyncAgentRunStore:
             if self.auto_commit:
                 await self.session.commit()
             return row
+
+    async def lock_event_stream(self, run_id: int) -> None:
+        """Serialize event writers for one run."""
+        if self._dialect_name() != "postgresql":
+            return
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(:run_id)"),
+            {"run_id": int(run_id)},
+        )
+
+    async def try_lock_event_stream(self, run_id: int) -> bool:
+        """Try to fence one event stream without waiting into a lock cycle."""
+        if self._dialect_name() != "postgresql":
+            return True
+        return bool(
+            await self.session.scalar(
+                text("SELECT pg_try_advisory_xact_lock(:run_id)"),
+                {"run_id": int(run_id)},
+            )
+        )
+
+    async def lock_run_liveness(
+        self,
+        run_id: int,
+        root_run_id: int | None = None,
+    ) -> tuple[AgentRunRow, AgentRunRow | None] | None:
+        """Fence heartbeat and event writes while stale evidence is revalidated."""
+        run_id = int(run_id)
+        root_run_id = int(root_run_id or run_id)
+        lock_ids = sorted({run_id, root_run_id})
+        if self._dialect_name() == "sqlite":
+            await self.session.execute(
+                update(AgentRunRow)
+                .where(AgentRunRow.id.in_(lock_ids))
+                .values(updated_at=AgentRunRow.updated_at)
+            )
+        else:
+            locked_rows = await self.session.scalars(
+                select(AgentRunRow)
+                .where(AgentRunRow.id.in_(lock_ids))
+                .order_by(AgentRunRow.id.asc())
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            locked_rows.all()
+        if not await self.try_lock_event_stream(run_id):
+            return None
+        row = await self.refresh_run(run_id)
+        root_row = row if root_run_id == run_id else await self.get_run(root_run_id)
+        return row, root_row
 
     async def safe_cycle_provider_error_text(self, run_id: int, text_value: str) -> str:
         if text_value.startswith(PROVIDER_ERROR_SENTINEL_PREFIX):
@@ -758,7 +1273,12 @@ class AsyncAgentRunStore:
         return older_active is not None
 
     async def _locked_run(self, run_id: int) -> AgentRunRow:
-        stmt = select(AgentRunRow).where(AgentRunRow.id == int(run_id)).limit(1)
+        stmt = (
+            select(AgentRunRow)
+            .where(AgentRunRow.id == int(run_id))
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
         if self._dialect_name() == "postgresql":
             stmt = stmt.with_for_update()
         row = (await self.session.scalars(stmt)).first()
@@ -771,7 +1291,12 @@ class AsyncAgentRunStore:
         return str(getattr(getattr(bind, "dialect", None), "name", "") or "")
 
 
-__all__ = ["AsyncAgentRunStore", "to_domain"]
+__all__ = [
+    "AsyncAgentRunStore",
+    "ExecutionClaim",
+    "ExecutionClaimLost",
+    "to_domain",
+]
 
 
 def _jsonable(value: Any) -> Any:

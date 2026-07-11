@@ -136,6 +136,10 @@ async def review_completed_phase(
     if metadata.get("disable_phase_barrier_review") is True:
         return PhaseBarrierDecision.no_change("Phase barrier review disabled for this run.")
 
+    pending_worker_ids = _pending_worker_node_ids(plan)
+    if not pending_worker_ids:
+        return PhaseBarrierDecision.no_change("No pending worker nodes remain to revise.")
+
     payload = _review_payload(plan, node, node_results)
     model_policy = dict(getattr(runtime.request, "model_policy", {}) or {})
     model = model_policy.get("coordinator_model") or model_policy.get("model")
@@ -155,7 +159,7 @@ async def review_completed_phase(
         run_event(
             runtime.run.id,
             "run.phase_review_started",
-            {"node_id": node.id, "completed_node_id": node.id, "pending_nodes": _pending_node_ids(plan)},
+            {"node_id": node.id, "completed_node_id": node.id, "pending_nodes": pending_worker_ids},
             root_run_id=runtime.run.root_run_id,
             producer="deep",
         )
@@ -210,6 +214,7 @@ def apply_phase_barrier_decision(plan: DeepPlan, decision: PhaseBarrierDecision)
         return plan, ()
 
     nodes = list(plan.nodes)
+    blocked_node_ids = set(plan.blocked_node_ids())
     applied: list[dict[str, Any]] = []
     for revision in decision.revisions:
         index = next((idx for idx, node in enumerate(nodes) if node.id == revision.node_id), None)
@@ -219,6 +224,9 @@ def apply_phase_barrier_decision(plan: DeepPlan, decision: PhaseBarrierDecision)
         node = nodes[index]
         if not node.is_pending:
             applied.append({"node_id": node.id, "status": "ignored", "reason": "node_not_pending"})
+            continue
+        if node.id in blocked_node_ids:
+            applied.append({"node_id": node.id, "status": "ignored", "reason": "node_blocked"})
             continue
         if _node_kind(node) != "worker":
             applied.append({"node_id": node.id, "status": "ignored", "reason": "node_not_worker"})
@@ -300,6 +308,7 @@ def plan_revision_artifact(
 
 def _review_payload(plan: DeepPlan, node: RunNode, node_results: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
     completed_result = dict(node_results.get(node.id) or {})
+    blocked_node_ids = set(plan.blocked_node_ids())
     return {
         "objective": plan.objective,
         "completed_phase": {
@@ -314,8 +323,9 @@ def _review_payload(plan: DeepPlan, node: RunNode, node_results: Mapping[str, di
         "pending_nodes": [
             node.to_payload()
             for node in plan.pending_nodes()
-            if _node_kind(node) == "worker"
+            if _node_kind(node) == "worker" and node.id not in blocked_node_ids
         ],
+        "blocked_node_ids": sorted(blocked_node_ids),
         "plan": plan.to_payload(),
         "instructions": (
             "Revise only pending worker nodes. Do not alter completed nodes. "
@@ -398,8 +408,13 @@ def _node_revision_snapshot(node: RunNode) -> dict[str, Any]:
     }
 
 
-def _pending_node_ids(plan: DeepPlan) -> list[str]:
-    return [node.id for node in plan.pending_nodes()]
+def _pending_worker_node_ids(plan: DeepPlan) -> list[str]:
+    blocked_node_ids = set(plan.blocked_node_ids())
+    return [
+        node.id
+        for node in plan.pending_nodes()
+        if _node_kind(node) == "worker" and node.id not in blocked_node_ids
+    ]
 
 
 def _node_kind(node: RunNode) -> str:

@@ -215,6 +215,44 @@ def test_low_risk_action_executes_under_enforced_policy(monkeypatch):
     assert completions == [{"manifest_id": 1, "outcome_status": "succeeded", "outcome_error": None}]
 
 
+@pytest.mark.asyncio
+async def test_action_manifest_wrapper_offloads_sync_handler(monkeypatch):
+    import asyncio
+    import time
+
+    from brain.systems.runs.actions import wrap_action_manifest_audit
+
+    monkeypatch.setenv("AGENT_ACTION_POLICY_MODE", "enforce")
+    records, completions, record, complete = _capture_manifests()
+    stop_ticker = asyncio.Event()
+    ticker_count = 0
+
+    async def ticker():
+        nonlocal ticker_count
+        while not stop_ticker.is_set():
+            ticker_count += 1
+            await asyncio.sleep(0.01)
+
+    def handler(**kwargs):
+        time.sleep(0.1)
+        return {"ok": True, **kwargs}
+
+    wrapped = wrap_action_manifest_audit("web_fetch", handler, context_factory=_manifest_context)
+    ticker_task = asyncio.create_task(ticker())
+    try:
+        with patch("brain.systems.runs.actions.record_action_manifest", side_effect=record), \
+             patch("brain.systems.runs.actions.complete_action_manifest", side_effect=complete):
+            result = await wrapped(url="https://example.com")
+    finally:
+        stop_ticker.set()
+        await ticker_task
+
+    assert result == {"ok": True, "url": "https://example.com"}
+    assert ticker_count >= 3
+    assert len(records) == 1
+    assert completions == [{"manifest_id": 1, "outcome_status": "succeeded", "outcome_error": None}]
+
+
 def test_denied_action_does_not_invoke_handler(monkeypatch):
     from brain.systems.runs.actions import wrap_action_manifest_audit
 

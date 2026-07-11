@@ -58,9 +58,11 @@ async def _main_async() -> int:
                 recipes={"deep": DeepRecipe(), "scout": ScoutRecipe(), "worker": SmokeWorkerRecipe()},
             ).run(
                 AgentRunRequest(
+                    org_id="bench",
                     thread_id="bench-deep-child-runs",
                     message="Implement a tiny smoke task and verify evidence.",
                     profile="deep",
+                    model_policy={"model": "openai/benchmark", "thinking": "low"},
                     metadata={"deep_workers": [{"role": "smoke", "objective": "Produce deterministic worker evidence."}]},
                 )
             )
@@ -97,7 +99,7 @@ def _patch_offline_invocations() -> None:
     import brain.systems.runs.recipes.deep as deep_module
     import brain.systems.runs.recipes.phase_barrier as phase_barrier_module
 
-    def _invoke(spec):
+    async def _invoke(spec):
         session_id = str(getattr(spec, "session_id", "") or "")
         if "phase-review" in session_id:
             return SimpleNamespace(
@@ -106,8 +108,8 @@ def _patch_offline_invocations() -> None:
             )
         return SimpleNamespace(output="Deep completed using native AgentRun workers.", success=True)
 
-    deep_module.invoke_direct_agent = _invoke
-    phase_barrier_module.invoke_direct_agent = _invoke
+    deep_module.invoke_direct_agent_async = _invoke
+    phase_barrier_module.invoke_direct_agent_async = _invoke
 
 
 async def _session_factory():

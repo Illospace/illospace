@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import inspect
 import logging
@@ -15,7 +16,12 @@ from brain.systems.runs.context import RunContextLoader
 from brain.systems.runs.domain import AgentRun, AgentRunRequest, ArtifactType, RunProfile, RunRecipe
 from brain.systems.runs.events import activity_event, run_event, text_delta_event
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
-from brain.systems.runs.store import AsyncAgentRunStore, to_domain
+from brain.systems.runs.store import (
+    AsyncAgentRunStore,
+    ExecutionClaim,
+    ExecutionClaimLost,
+    to_domain,
+)
 from brain.systems.runs.stream import RunStream
 from brain.systems.runs.steering import SteeringInbox, SteeringMessage
 from brain.systems.runs.tools import AsyncRunToolExecutor
@@ -160,6 +166,7 @@ class RunRuntime:
     ) -> AgentRun:
         return await self.store.create_child_run(
             self.run,
+            initial_status=RunStatus.STARTING,
             recipe=recipe,
             message=message,
             profile=profile or self.request.profile,
@@ -234,7 +241,42 @@ class AsyncAgentRunEngine:
         return await self.store.set_status(run_id, RunStatus.PAUSED, reason=reason)
 
     async def run_existing(self, run_id: int) -> AgentRun:
-        row = await self.store.require_run(run_id)
+        execution_lease = getattr(self.store, "execution_lease", None)
+        if callable(execution_lease):
+            post_completion_tasks: list[Callable[[], Awaitable[Any]]] = []
+            try:
+                async with execution_lease(run_id) as execution_claim:
+                    if execution_claim is None:
+                        refresh_run = getattr(self.store, "refresh_run", None)
+                        row = await refresh_run(run_id) if callable(refresh_run) else await self.store.require_run(run_id)
+                        return to_domain(row)
+                    completed = await self._run_existing_owned(
+                        run_id,
+                        execution_claim=execution_claim,
+                        deferred_post_completion_tasks=post_completion_tasks,
+                    )
+            except ExecutionClaimLost:
+                await self.store.session.rollback()
+                refresh_run = getattr(self.store, "refresh_run", None)
+                row = await refresh_run(run_id) if callable(refresh_run) else await self.store.require_run(run_id)
+                return to_domain(row)
+            for task in post_completion_tasks:
+                _schedule_post_completion_task(run_id, task)
+            return completed
+        return await self._run_existing_owned(run_id)
+
+    async def _run_existing_owned(
+        self,
+        run_id: int,
+        *,
+        execution_claim: ExecutionClaim | None = None,
+        deferred_post_completion_tasks: list[Callable[[], Awaitable[Any]]] | None = None,
+    ) -> AgentRun:
+        row = (
+            await self.store.assert_execution_claim(execution_claim)
+            if execution_claim is not None
+            else await self.store.require_run(run_id)
+        )
         if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
             return to_domain(row)
         if not str(row.org_id or "").strip():
@@ -242,6 +284,7 @@ class AsyncAgentRunEngine:
                 row.id,
                 RunStatus.FAILED,
                 reason="AgentRun missing workspace org_id",
+                execution_claim=execution_claim,
             )
         request = AgentRunRequest(
             org_id=row.org_id,
@@ -257,7 +300,7 @@ class AsyncAgentRunEngine:
             model_policy=dict(row.model_policy or {}),
             metadata=dict(row.metadata_ or {}),
         )
-        run = await self._enter_running(row)
+        run = to_domain(row) if execution_claim is not None else await self._enter_running(row)
         cancel_event = self.cancel_event_factory(run.id) if self.cancel_event_factory else None
         runtime = RunRuntime(
             run=run,
@@ -273,43 +316,56 @@ class AsyncAgentRunEngine:
         )
         recipe = self.recipes.get(request.normalized_recipe.value)
         if recipe is None:
-            return await self.fail(run.id, f"No recipe registered for {request.normalized_recipe.value!r}")
+            return await self.fail(
+                run.id,
+                f"No recipe registered for {request.normalized_recipe.value!r}",
+                execution_claim=execution_claim,
+            )
         try:
             result = recipe.execute(runtime)
             if inspect.isawaitable(result):
                 result = await result
         except Exception as exc:
-            return await self.fail(run.id, str(exc))
+            return await self.fail(run.id, str(exc), execution_claim=execution_claim)
         for artifact in result.artifacts:
             await self.store.append_artifact(artifact)
         if await cancel_event_is_set(cancel_event):
-            return await self.cancel(run.id, reason="user_canceled")
+            return await self.cancel(
+                run.id,
+                reason="user_canceled",
+                execution_claim=execution_claim,
+            )
         result_status = RunStatus(result.status)
         if result_status == RunStatus.PAUSED:
-            return await self.store.set_status(run.id, result_status)
+            return await self.store.set_status(
+                run.id,
+                result_status,
+                execution_claim=execution_claim,
+            )
         if result_status == RunStatus.FAILED:
-            if result.output:
-                artifact = await self.store.append_final_answer_once(
-                    run.id,
-                    result.output,
-                    root_run_id=run.root_run_id,
-                )
-                safe_output = str(getattr(artifact, "text", None) or result.output)
-                if not await self.store.has_event_type(run.id, "run.text_delta"):
-                    await self.store.append_event(
-                        run_event(
-                            run.id,
-                            "run.text_completed",
-                            {"text": safe_output},
-                            root_run_id=run.root_run_id,
-                        )
-                    )
-            return await self.fail(run.id, result.output or "recipe_failed")
+            return await self.fail(
+                run.id,
+                result.output or "recipe_failed",
+                final_output=result.output or None,
+                execution_claim=execution_claim,
+            )
         if result_status == RunStatus.CANCELED:
-            return await self.cancel(run.id, reason=result.output or None)
-        completed = await self.complete(run.id, output=result.output, status=result_status)
-        for task in result.post_completion_tasks:
-            _schedule_post_completion_task(run.id, task)
+            return await self.cancel(
+                run.id,
+                reason=result.output or None,
+                execution_claim=execution_claim,
+            )
+        completed = await self.complete(
+            run.id,
+            output=result.output,
+            status=result_status,
+            execution_claim=execution_claim,
+        )
+        if deferred_post_completion_tasks is None:
+            for task in result.post_completion_tasks:
+                _schedule_post_completion_task(run.id, task)
+        else:
+            deferred_post_completion_tasks.extend(result.post_completion_tasks)
         return completed
 
     async def complete(
@@ -318,47 +374,121 @@ class AsyncAgentRunEngine:
         *,
         output: str = "",
         status: RunStatus = RunStatus.COMPLETED,
+        execution_claim: ExecutionClaim | None = None,
     ) -> AgentRun:
-        row = await self.store.require_run(run_id)
-        if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
-            return to_domain(row)
-        if output:
-            artifact = await self.store.append_final_answer_once(
+        async with self._atomic_terminal_write():
+            row = await self.store.require_run(run_id)
+            if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
+                return to_domain(row)
+            completed = await self.store.set_status(
                 run_id,
-                output,
-                root_run_id=row.root_run_id,
+                status,
+                execution_claim=execution_claim,
             )
-            safe_output = str(getattr(artifact, "text", None) or output)
-            if not await self.store.has_event_type(run_id, "run.text_delta"):
-                await self.store.append_event(
-                    run_event(
-                        run_id,
-                        "run.text_completed",
-                        {"text": safe_output},
-                        root_run_id=row.root_run_id,
-                    )
+            if completed.status != status:
+                return completed
+            if output:
+                artifact = await self.store.append_final_answer_once(
+                    run_id,
+                    output,
+                    root_run_id=row.root_run_id,
                 )
-        await self.store.append_event(
-            run_event(run_id, "run.completed", {"status": status.value}, root_run_id=row.root_run_id)
-        )
-        return await self.store.set_status(run_id, status)
+                safe_output = str(getattr(artifact, "text", None) or output)
+                if not await self.store.has_event_type(run_id, "run.text_delta"):
+                    await self.store.append_event(
+                        run_event(
+                            run_id,
+                            "run.text_completed",
+                            {"text": safe_output},
+                            root_run_id=row.root_run_id,
+                        )
+                    )
+            await self.store.append_event(
+                run_event(run_id, "run.completed", {"status": status.value}, root_run_id=row.root_run_id)
+            )
+            return completed
 
-    async def fail(self, run_id: int, error: str) -> AgentRun:
-        row = await self.store.require_run(run_id)
-        if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
-            return to_domain(row)
-        safe_error = await self.store.safe_cycle_provider_error_text(run_id, str(error or ""))
-        await self.store.append_event(
-            run_event(run_id, "run.failed", {"error": safe_error}, root_run_id=row.root_run_id)
-        )
-        return await self.store.set_status(run_id, RunStatus.FAILED, reason=safe_error)
+    async def fail(
+        self,
+        run_id: int,
+        error: str,
+        *,
+        final_output: str | None = None,
+        execution_claim: ExecutionClaim | None = None,
+    ) -> AgentRun:
+        async with self._atomic_terminal_write():
+            row = await self.store.require_run(run_id)
+            if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
+                return to_domain(row)
+            safe_error = await self.store.safe_cycle_provider_error_text(run_id, str(error or ""))
+            failed = await self.store.set_status(
+                run_id,
+                RunStatus.FAILED,
+                reason=safe_error,
+                execution_claim=execution_claim,
+            )
+            if failed.status != RunStatus.FAILED:
+                return failed
+            if final_output:
+                artifact = await self.store.append_final_answer_once(
+                    run_id,
+                    final_output,
+                    root_run_id=row.root_run_id,
+                )
+                safe_output = str(getattr(artifact, "text", None) or final_output)
+                if not await self.store.has_event_type(run_id, "run.text_delta"):
+                    await self.store.append_event(
+                        run_event(
+                            run_id,
+                            "run.text_completed",
+                            {"text": safe_output},
+                            root_run_id=row.root_run_id,
+                        )
+                    )
+            await self.store.append_event(
+                run_event(run_id, "run.failed", {"error": safe_error}, root_run_id=row.root_run_id)
+            )
+            return failed
 
-    async def cancel(self, run_id: int, *, reason: str | None = None) -> AgentRun:
-        row = await self.store.require_run(run_id)
-        if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
-            return to_domain(row)
-        await self.store.append_event(run_event(run_id, "run.canceled", {"reason": reason}, root_run_id=row.root_run_id))
-        return await self.store.set_status(run_id, RunStatus.CANCELED, reason=reason)
+    async def cancel(
+        self,
+        run_id: int,
+        *,
+        reason: str | None = None,
+        execution_claim: ExecutionClaim | None = None,
+    ) -> AgentRun:
+        async with self._atomic_terminal_write():
+            row = await self.store.require_run(run_id)
+            if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
+                return to_domain(row)
+            canceled = await self.store.set_status(
+                run_id,
+                RunStatus.CANCELED,
+                reason=reason,
+                execution_claim=execution_claim,
+            )
+            if canceled.status != RunStatus.CANCELED:
+                return canceled
+            await self.store.append_event(
+                run_event(run_id, "run.canceled", {"reason": reason}, root_run_id=row.root_run_id)
+            )
+            return canceled
+
+    @asynccontextmanager
+    async def _atomic_terminal_write(self):
+        """Keep terminal status, output, and semantic events in one transaction."""
+        auto_commit = self.store.auto_commit
+        self.store.auto_commit = False
+        try:
+            yield
+        except BaseException:
+            await self.store.session.rollback()
+            raise
+        else:
+            if auto_commit:
+                await self.store.session.commit()
+        finally:
+            self.store.auto_commit = auto_commit
 
     async def _enter_running(self, row) -> AgentRun:
         status = coerce_run_status(row.status, default=RunStatus.FAILED)

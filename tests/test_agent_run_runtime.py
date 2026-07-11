@@ -43,6 +43,7 @@ class _Store:
         self.events = []
         self.artifacts = []
         self.created_requests = []
+        self.child_initial_statuses = []
         self.runs = {}
         self.children_by_step = {}
         self.completed_steps = {}
@@ -57,11 +58,12 @@ class _Store:
         self.artifacts.append(artifact)
         return _AwaitableValue(artifact)
 
-    def create_run(self, request):
+    def create_run(self, request, *, initial_status=None):
         from brain.systems.runs.domain import AgentRun
         from brain.systems.runs.ids import trace_id_for_run_id
         from brain.systems.runs.status import RunStatus
 
+        status = initial_status or RunStatus.QUEUED
         run_id = 100 + len(self.created_requests)
         run = AgentRun(
             id=run_id,
@@ -70,7 +72,7 @@ class _Store:
             input_message=request.message,
             profile=request.normalized_profile,
             recipe=request.normalized_recipe,
-            status=RunStatus.QUEUED,
+            status=status,
             org_id=request.org_id,
             user_id=request.user_id,
             parent_run_id=request.parent_run_id,
@@ -97,6 +99,7 @@ class _Store:
         model_policy=None,
         metadata=None,
         thread_id=None,
+        initial_status=None,
     ):
         from brain.systems.runs.domain import AgentRunRequest
         from brain.systems.runs.events import run_event
@@ -106,6 +109,7 @@ class _Store:
         metadata_payload = dict(metadata or {})
         if step_key:
             metadata_payload["parent_step_key"] = step_key
+        self.child_initial_statuses.append(initial_status)
         child = self.create_run(
             AgentRunRequest(
                 org_id=parent.org_id,
@@ -120,7 +124,8 @@ class _Store:
                 workspace_ref=dict(workspace_ref if workspace_ref is not None else parent.workspace_ref or {}),
                 model_policy=dict(model_policy if model_policy is not None else parent.model_policy or {}),
                 metadata=metadata_payload,
-            )
+            ),
+            initial_status=initial_status,
         ).value
         if step_key:
             self.children_by_step[step_key] = child
@@ -1325,7 +1330,8 @@ def test_headless_worker_policy_uses_canonical_disabled_tools():
     }
 
 
-async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monkeypatch):
+@pytest.mark.parametrize("created_here", [True, False])
+async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monkeypatch, created_here):
     from brain.systems.runs.domain import RunProfile, RunRecipe
     from brain.systems.runs.execution_context import bind_agent_context
     import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
@@ -1366,10 +1372,10 @@ async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monke
             assert step_key == "spawn_worker:bug-report"
             return None
 
-        async def create_child_run(self, parent_arg, **kwargs):
+        async def create_child_run_with_result(self, parent_arg, **kwargs):
             assert parent_arg is parent
             create_kwargs.update(kwargs)
-            return child
+            return child, created_here
 
         async def append_event(self, event):
             events.append(event)
@@ -1390,6 +1396,7 @@ async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monke
 
     assert payload["ok"] is True
     assert payload["child_run_id"] == child.id
+    assert payload["deduplicated"] is (not created_here)
     assert payload["next_action"]["repeat_guard"] == {
         "tool": "spawn_worker",
         "same_objective": "do_not_repeat",
@@ -1403,7 +1410,9 @@ async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monke
         "cortex_reply",
         "post_ai_timeline_message",
     }
-    assert [event.event_type for event in events] == ["run.worker_spawned"]
+    assert [event.event_type for event in events] == (
+        ["run.worker_spawned"] if created_here else []
+    )
 
 
 async def test_spawn_worker_handler_prefers_runtime_run_id_over_stale_context(monkeypatch):
@@ -1446,10 +1455,10 @@ async def test_spawn_worker_handler_prefers_runtime_run_id_over_stale_context(mo
             assert parent_id == current_parent.id
             return None
 
-        async def create_child_run(self, parent_arg, **kwargs):
+        async def create_child_run_with_result(self, parent_arg, **kwargs):
             assert parent_arg is current_parent
             created.update(kwargs)
-            return child
+            return child, True
 
         async def append_event(self, event):
             assert event.run_id == current_parent.id
@@ -1588,6 +1597,7 @@ async def test_deep_recipe_uses_native_child_runs(monkeypatch):
     ]
     assert len(worker_requests) == 2
     assert [request.parent_run_id for request in worker_requests] == [42, 42]
+    assert store.child_initial_statuses == [RunStatus.STARTING] * 3
     assert executed == [100, 101, 102]
     assert result.status.value == "completed"
     assert "Deep completed using native AgentRun workers." in result.output
@@ -1615,8 +1625,7 @@ async def test_deep_recipe_uses_native_child_runs(monkeypatch):
         for event in store.events
         if event.event_type == "run.phase_review_started"
     ]
-    assert "investigate" in reviewed_nodes
-    assert "execute" in reviewed_nodes
+    assert reviewed_nodes == ["scout"]
     worker_completion_positions = [
         index
         for index, event in enumerate(store.events)
@@ -1629,7 +1638,93 @@ async def test_deep_recipe_uses_native_child_runs(monkeypatch):
         if event.event_type == "run.phase_review_started"
         and event.payload.get("completed_node_id") in {"investigate", "execute"}
     ]
-    assert max(worker_completion_positions) < min(worker_review_positions)
+    assert worker_completion_positions
+    assert worker_review_positions == []
+
+
+@pytest.mark.asyncio
+async def test_phase_review_skips_failed_topologies_with_only_blocked_workers(monkeypatch):
+    from brain.systems.runs.graph import DeepPlan, RunNode
+    from brain.systems.runs.recipes.phase_barrier import review_completed_phase
+
+    async def unexpected_review(_spec):
+        raise AssertionError("blocked worker topology must not invoke the coordinator model")
+
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.phase_barrier.invoke_direct_agent_async",
+        unexpected_review,
+    )
+    runtime = _runtime("deep")
+    plans = (
+        (
+            DeepPlan(
+                nodes=(
+                    RunNode(id="scout", kind="scout", recipe="scout", status="failed"),
+                    RunNode(id="investigate", depends_on=("scout",)),
+                    RunNode(id="execute", depends_on=("investigate",)),
+                )
+            ),
+            "scout",
+        ),
+        (
+            DeepPlan(
+                nodes=(
+                    RunNode(id="scout", kind="scout", recipe="scout", status="completed"),
+                    RunNode(id="investigate", status="failed", depends_on=("scout",)),
+                    RunNode(id="execute", depends_on=("investigate",)),
+                )
+            ),
+            "investigate",
+        ),
+    )
+
+    for plan, completed_node_id in plans:
+        decision = await review_completed_phase(
+            runtime,
+            plan,
+            plan.require_node(completed_node_id),
+            {completed_node_id: {"status": "failed"}},
+        )
+        assert decision.revisions == ()
+        assert decision.summary == "No pending worker nodes remain to revise."
+
+    assert not any(event.event_type == "run.phase_review_started" for event in runtime.store.events)
+
+
+@pytest.mark.asyncio
+async def test_phase_review_payload_excludes_blocked_workers(monkeypatch):
+    from brain.systems.runs.graph import DeepPlan, RunNode
+    from brain.systems.runs.recipes.phase_barrier import review_completed_phase
+
+    captured = {}
+
+    async def capture_review(spec):
+        captured.update(json.loads(spec.message))
+        return SimpleNamespace(output='{"summary":"keep going","revisions":[]}', success=True)
+
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.phase_barrier.invoke_direct_agent_async",
+        capture_review,
+    )
+    plan = DeepPlan(
+        nodes=(
+            RunNode(id="scout", kind="scout", recipe="scout", status="completed"),
+            RunNode(id="failed", status="failed", depends_on=("scout",)),
+            RunNode(id="blocked", depends_on=("failed",)),
+            RunNode(id="independent", depends_on=("scout",)),
+        )
+    )
+    runtime = _runtime("deep")
+
+    await review_completed_phase(
+        runtime,
+        plan,
+        plan.require_node("failed"),
+        {"failed": {"status": "failed"}},
+    )
+
+    assert [node["id"] for node in captured["pending_nodes"]] == ["independent"]
+    assert captured["blocked_node_ids"] == ["blocked"]
 
 
 async def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkeypatch):
@@ -2645,6 +2740,41 @@ async def test_runtime_tool_executor_audits_high_risk_actions_autonomously(monke
     assert completions == [{"manifest_id": 1, "outcome_status": "succeeded", "outcome_error": None}]
 
 
+async def test_runtime_tool_executor_offloads_sync_handlers():
+    import time
+
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+
+    runtime = _runtime("worker")
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
+    stop_ticker = asyncio.Event()
+    ticker_count = 0
+
+    async def ticker():
+        nonlocal ticker_count
+        while not stop_ticker.is_set():
+            ticker_count += 1
+            await asyncio.sleep(0.01)
+
+    def blocking_handler(**kwargs):
+        time.sleep(0.1)
+        return {"ok": True, **kwargs}
+
+    ticker_task = asyncio.create_task(ticker())
+    try:
+        result = await executor.execute(
+            42,
+            ToolExecution(name="read_file", args={"path": "README.md"}, handler=blocking_handler),
+            root_run_id=42,
+        )
+    finally:
+        stop_ticker.set()
+        await ticker_task
+
+    assert result == {"ok": True, "path": "README.md"}
+    assert ticker_count >= 3
+
+
 @pytest.mark.asyncio
 async def test_direct_loop_returns_timeout_as_tool_error(monkeypatch):
     from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
@@ -2660,6 +2790,624 @@ async def test_direct_loop_returns_timeout_as_tool_error(monkeypatch):
     assert resolved.is_error is True
     assert "slow_tool" in resolved.result_text
     assert "timed out" in resolved.result_text
+
+
+@pytest.mark.asyncio
+async def test_direct_loop_cancels_production_async_adapter_at_timeout(monkeypatch):
+    import brain.systems.runs.tool_handlers as tool_handlers
+    from brain.platform.async_io import callable_uses_blocking_thread
+    from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
+    from brain.systems.runs.tool_catalog.handlers.composition import _get_tool_handlers
+
+    monkeypatch.setenv("AGENT_TOOL_TIMEOUT_SECONDS", "0.02")
+    canceled = asyncio.Event()
+
+    async def slow_manage_cycle(**_kwargs):
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            canceled.set()
+            raise
+
+    monkeypatch.setattr(tool_handlers, "_handle_manage_cycle", slow_manage_cycle)
+    handler = _get_tool_handlers()["manage_cycle"]
+
+    assert callable_uses_blocking_thread(handler) is False
+    resolved = await async_resolve_tool_call(
+        PendingToolCall("tool-1", "manage_cycle", {"action": "list"}, handler)
+    )
+
+    assert resolved.is_error is True
+    assert "timed out" in resolved.result_text
+    assert canceled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_direct_loop_detects_unmarked_sync_adapter_returning_coroutine(monkeypatch):
+    from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
+
+    monkeypatch.setenv("AGENT_TOOL_TIMEOUT_SECONDS", "0.02")
+    canceled = asyncio.Event()
+
+    def unmarked_adapter():
+        async def inner():
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                canceled.set()
+                raise
+
+        return inner()
+
+    resolved = await async_resolve_tool_call(
+        PendingToolCall("tool-1", "unregistered_read", {}, unmarked_adapter)
+    )
+
+    assert resolved.is_error is True
+    assert "timed out" in resolved.result_text
+    assert canceled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_direct_loop_caller_cancellation_cancels_pure_async_read(monkeypatch):
+    import brain.systems.runs.direct_loop.tool_execution as tool_execution
+
+    started = asyncio.Event()
+    canceled = asyncio.Event()
+
+    async def never_finishes():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            canceled.set()
+            raise
+
+    task = asyncio.create_task(
+        tool_execution.async_resolve_tool_call(
+            tool_execution.PendingToolCall("tool-1", "unregistered_read", {}, never_finishes)
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+
+    assert canceled.is_set()
+    assert not tool_execution._background_tool_tasks
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_still_drains_submitted_sync_handler():
+    import threading
+    import time
+
+    from brain.platform.async_io import invoke_maybe_async
+
+    started = threading.Event()
+    finished = threading.Event()
+
+    def slow_handler():
+        started.set()
+        time.sleep(0.08)
+        finished.set()
+        return {"ok": True}
+
+    task = asyncio.create_task(invoke_maybe_async(slow_handler))
+    while not started.is_set():
+        await asyncio.sleep(0.001)
+    task.cancel()
+    await asyncio.sleep(0.005)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_before_sync_tool_admission_never_runs_handler(monkeypatch):
+    from brain.platform.async_io import invoke_maybe_async
+
+    class SaturatedAdmission:
+        def acquire(self, *, blocking):
+            assert blocking is False
+            return False
+
+    called = False
+
+    def handler():
+        nonlocal called
+        called = True
+
+    monkeypatch.setenv("AGENT_SYNC_TOOL_ADMISSION_TIMEOUT_SECONDS", "1")
+    monkeypatch.setattr(
+        "brain.platform.async_io._TOOL_ADMISSION",
+        SaturatedAdmission(),
+    )
+    task = asyncio.create_task(invoke_maybe_async(handler))
+    await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_cancelled_queued_sync_handler_never_starts(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import brain.platform.async_io as async_io
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    admission = threading.BoundedSemaphore(2)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_called = threading.Event()
+
+    def occupy_worker():
+        first_started.set()
+        assert release_first.wait(timeout=1)
+
+    def queued_handler():
+        second_called.set()
+
+    monkeypatch.setattr(async_io, "_TOOL_EXECUTOR", executor)
+    monkeypatch.setattr(async_io, "_TOOL_ADMISSION", admission)
+    first = asyncio.create_task(async_io.invoke_maybe_async(occupy_worker))
+    second = None
+    try:
+        while not first_started.is_set():
+            await asyncio.sleep(0.001)
+        second = asyncio.create_task(async_io.invoke_maybe_async(queued_handler))
+        await asyncio.sleep(0.02)
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        release_first.set()
+        await first
+        await asyncio.sleep(0.02)
+    finally:
+        release_first.set()
+        if not first.done():
+            await first
+        executor.shutdown(wait=True)
+
+    assert not second_called.is_set()
+
+
+@pytest.mark.asyncio
+async def test_direct_loop_cancels_mutation_before_sync_admission(monkeypatch):
+    from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
+
+    class SaturatedAdmission:
+        def acquire(self, *, blocking):
+            assert blocking is False
+            return False
+
+    called = False
+
+    def handler(action):
+        nonlocal called
+        assert action == "create"
+        called = True
+        return {"ok": True}
+
+    monkeypatch.setenv("AGENT_TOOL_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("AGENT_SYNC_TOOL_ADMISSION_TIMEOUT_SECONDS", "1")
+    monkeypatch.setattr("brain.platform.async_io._TOOL_ADMISSION", SaturatedAdmission())
+    task = asyncio.create_task(
+        async_resolve_tool_call(
+            PendingToolCall("tool-1", "manage_cycle", {"action": "create"}, handler)
+        )
+    )
+    await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.02)
+
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_direct_loop_cancels_later_queued_mutation_after_completed_blocking_phase(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import brain.platform.async_io as async_io
+    from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    admission = threading.BoundedSemaphore(2)
+    preflight_done = asyncio.Event()
+    allow_mutation = asyncio.Event()
+    occupier_started = threading.Event()
+    release_occupier = threading.Event()
+    mutation_called = threading.Event()
+
+    def occupy_worker():
+        occupier_started.set()
+        assert release_occupier.wait(timeout=1)
+
+    def mutate():
+        mutation_called.set()
+        return {"ok": True}
+
+    async def handler(action):
+        assert action == "create"
+        await async_io.run_tool_blocking(lambda: "preflight")
+        preflight_done.set()
+        await allow_mutation.wait()
+        return await async_io.run_tool_blocking(mutate)
+
+    monkeypatch.setattr(async_io, "_TOOL_EXECUTOR", executor)
+    monkeypatch.setattr(async_io, "_TOOL_ADMISSION", admission)
+    resolver = asyncio.create_task(
+        async_resolve_tool_call(
+            PendingToolCall("tool-1", "manage_cycle", {"action": "create"}, handler)
+        )
+    )
+    occupier = None
+    try:
+        await preflight_done.wait()
+        occupier = asyncio.create_task(async_io.invoke_maybe_async(occupy_worker))
+        while not occupier_started.is_set():
+            await asyncio.sleep(0.001)
+        allow_mutation.set()
+        await asyncio.sleep(0.02)
+        resolver.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await resolver
+        release_occupier.set()
+        await occupier
+        await asyncio.sleep(0.02)
+    finally:
+        release_occupier.set()
+        if occupier is not None and not occupier.done():
+            await occupier
+        executor.shutdown(wait=True)
+
+    assert not mutation_called.is_set()
+
+
+@pytest.mark.asyncio
+async def test_direct_loop_cancels_mutation_during_async_audit_preflight(monkeypatch):
+    from brain.systems.runs.actions import wrap_action_manifest_audit
+    from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
+
+    preflight_started = asyncio.Event()
+    preflight_canceled = asyncio.Event()
+    mutation_called = False
+
+    async def record_manifest(_manifest):
+        preflight_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            preflight_canceled.set()
+            raise
+
+    async def mutation(path, content):
+        nonlocal mutation_called
+        mutation_called = True
+        return {"path": path, "bytes": len(content)}
+
+    wrapped = wrap_action_manifest_audit(
+        "write_file",
+        mutation,
+        context_factory=lambda: {"run_id": 42, "org_id": "org-1"},
+    )
+    monkeypatch.setattr("brain.systems.runs.actions.record_action_manifest", record_manifest)
+    task = asyncio.create_task(
+        async_resolve_tool_call(
+            PendingToolCall(
+                "tool-1",
+                "write_file",
+                {"path": "note.txt", "content": "hello"},
+                wrapped,
+            )
+        )
+    )
+    await preflight_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+
+    assert preflight_canceled.is_set()
+    assert mutation_called is False
+
+
+@pytest.mark.asyncio
+async def test_direct_loop_watchdog_tracks_public_blocking_helper(monkeypatch):
+    import threading
+    import time
+
+    from brain.platform.async_io import run_tool_blocking
+    from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
+
+    monkeypatch.setenv("AGENT_TOOL_TIMEOUT_SECONDS", "0.02")
+    finished = threading.Event()
+
+    def slow_read():
+        time.sleep(0.12)
+        finished.set()
+        return {"ok": True}
+
+    async def handler():
+        return await run_tool_blocking(slow_read)
+
+    started_at = time.monotonic()
+    resolved = await async_resolve_tool_call(
+        PendingToolCall("tool-1", "unregistered_read", {}, handler)
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert resolved.is_error is True
+    assert "timed out" in resolved.result_text
+    assert elapsed < 0.08
+    assert not finished.is_set()
+    assert finished.wait(timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_direct_loop_waits_for_sync_action_before_reporting_outcome(monkeypatch):
+    import time
+
+    from brain.systems.runs.actions import wrap_action_manifest_audit
+    from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
+
+    monkeypatch.setenv("AGENT_TOOL_TIMEOUT_SECONDS", "0.02")
+    records = []
+    completions = []
+    completed = asyncio.Event()
+
+    def record(manifest):
+        records.append(manifest.to_db_values())
+        return 1
+
+    def complete(manifest_id, **kwargs):
+        completions.append({"manifest_id": manifest_id, **kwargs})
+        completed.set()
+
+    def slow_handler(action):
+        assert action == "create"
+        time.sleep(0.1)
+        return {"ok": True}
+
+    wrapped = wrap_action_manifest_audit(
+        "manage_cycle",
+        slow_handler,
+        context_factory=lambda: {"run_id": 42, "org_id": "org-1"},
+    )
+    monkeypatch.setattr("brain.systems.runs.actions.record_action_manifest", record)
+    monkeypatch.setattr("brain.systems.runs.actions.complete_action_manifest", complete)
+
+    resolved = await async_resolve_tool_call(
+        PendingToolCall("tool-1", "manage_cycle", {"action": "create"}, wrapped)
+    )
+
+    assert resolved.is_error is False
+    assert json.loads(resolved.result_text) == {"ok": True}
+    assert completed.is_set()
+    assert len(records) == 1
+    assert completions == [{"manifest_id": 1, "outcome_status": "succeeded", "outcome_error": None}]
+
+
+@pytest.mark.asyncio
+async def test_direct_loop_waits_for_async_mutation_before_reporting_outcome(monkeypatch):
+    from brain.systems.runs.actions import wrap_action_manifest_audit
+    from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
+
+    monkeypatch.setenv("AGENT_TOOL_TIMEOUT_SECONDS", "0.02")
+    completions = []
+
+    async def slow_mutation(action):
+        assert action == "create"
+        await asyncio.sleep(0.05)
+        return {"ok": True}
+
+    wrapped = wrap_action_manifest_audit(
+        "manage_cycle",
+        slow_mutation,
+        context_factory=lambda: {"run_id": 42, "org_id": "org-1"},
+    )
+    monkeypatch.setattr("brain.systems.runs.actions.record_action_manifest", lambda _manifest: 1)
+    monkeypatch.setattr(
+        "brain.systems.runs.actions.complete_action_manifest",
+        lambda manifest_id, **kwargs: completions.append({"manifest_id": manifest_id, **kwargs}),
+    )
+
+    resolved = await async_resolve_tool_call(
+        PendingToolCall("tool-1", "manage_cycle", {"action": "create"}, wrapped)
+    )
+
+    assert resolved.is_error is False
+    assert json.loads(resolved.result_text) == {"ok": True}
+    assert completions == [{"manifest_id": 1, "outcome_status": "succeeded", "outcome_error": None}]
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_after_watchdog_does_not_abort_async_mutation(monkeypatch):
+    from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
+
+    monkeypatch.setenv("AGENT_TOOL_TIMEOUT_SECONDS", "0.02")
+    started = asyncio.Event()
+    completed = asyncio.Event()
+    canceled = asyncio.Event()
+
+    async def mutation(action):
+        assert action == "create"
+        started.set()
+        try:
+            await asyncio.sleep(0.1)
+            completed.set()
+            return {"ok": True}
+        except asyncio.CancelledError:
+            canceled.set()
+            raise
+
+    task = asyncio.create_task(
+        async_resolve_tool_call(
+            PendingToolCall("tool-1", "manage_cycle", {"action": "create"}, mutation)
+        )
+    )
+    await started.wait()
+    await asyncio.sleep(0.04)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(completed.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert not canceled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_sync_action_cancellation_drains_handler_and_audit(monkeypatch):
+    import threading
+    import time
+
+    from brain.systems.runs.actions import wrap_action_manifest_audit
+
+    started = threading.Event()
+    finished = threading.Event()
+    completions = []
+
+    def slow_mutation(action):
+        assert action == "create"
+        started.set()
+        time.sleep(0.08)
+        finished.set()
+        return {"ok": True}
+
+    wrapped = wrap_action_manifest_audit(
+        "manage_cycle",
+        slow_mutation,
+        context_factory=lambda: {"run_id": 42, "org_id": "org-1"},
+    )
+    monkeypatch.setattr("brain.systems.runs.actions.record_action_manifest", lambda _manifest: 1)
+    monkeypatch.setattr(
+        "brain.systems.runs.actions.complete_action_manifest",
+        lambda manifest_id, **kwargs: completions.append({"manifest_id": manifest_id, **kwargs}),
+    )
+
+    task = asyncio.create_task(wrapped(action="create"))
+    while not started.is_set():
+        await asyncio.sleep(0.001)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert finished.is_set()
+    assert completions == [{"manifest_id": 1, "outcome_status": "succeeded", "outcome_error": None}]
+
+
+@pytest.mark.asyncio
+async def test_runtime_tool_cleanup_waits_for_canceled_sync_handler(monkeypatch):
+    import threading
+    import time
+
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+    from brain.systems.runs.workspace_tool_runtime import WorkspaceToolRuntimeMaterialization
+
+    started = threading.Event()
+    finished = threading.Event()
+    cleaned = []
+    materialization = WorkspaceToolRuntimeMaterialization()
+    materialization.cleanup = lambda: cleaned.append(finished.is_set())
+
+    async def fake_materialization(*_args, **_kwargs):
+        return materialization
+
+    def slow_handler(**_kwargs):
+        started.set()
+        time.sleep(0.08)
+        finished.set()
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tools.resolve_workspace_tool_runtime",
+        fake_materialization,
+    )
+    monkeypatch.setattr("brain.systems.runs.tools.record_action_manifest", lambda _manifest: None)
+    runtime = _runtime("worker")
+    task = asyncio.create_task(
+        AsyncRunToolExecutor(runtime.store).execute(
+            42,
+            ToolExecution(name="exec_command", args={"command": "echo ok"}, handler=slow_handler),
+            root_run_id=42,
+        )
+    )
+    while not started.is_set():
+        await asyncio.sleep(0.001)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert finished.is_set()
+    assert cleaned == [True]
+    assert [
+        event.event_type
+        for event in runtime.store.events
+        if event.event_type in {"run.tool_completed", "run.tool_failed"}
+    ] == ["run.tool_completed"]
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_executor_rejects_overload_without_using_default_pool(monkeypatch):
+    from brain.platform.async_io import ToolExecutorOverloaded, invoke_maybe_async
+
+    class SaturatedAdmission:
+        def acquire(self, *, blocking):
+            assert blocking is False
+            return False
+
+    monkeypatch.setenv("AGENT_SYNC_TOOL_ADMISSION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setattr(
+        "brain.platform.async_io._TOOL_ADMISSION",
+        SaturatedAdmission(),
+    )
+
+    with pytest.raises(ToolExecutorOverloaded, match="capacity is saturated"):
+        await invoke_maybe_async(lambda: {"ok": True})
+
+
+@pytest.mark.asyncio
+async def test_production_file_summary_handler_keeps_event_loop_responsive(monkeypatch):
+    import time
+
+    import brain.systems.tools.handlers as extended_handlers
+    from brain.systems.runs.tool_catalog.handlers.composition import _get_tool_handlers
+
+    def slow_file_summary(path, workspace_root=None):
+        time.sleep(0.08)
+        return {"path": path, "workspace_root": workspace_root}
+
+    monkeypatch.setattr(extended_handlers, "handle_file_summary", slow_file_summary)
+    handler = _get_tool_handlers(workspace_root="/tmp/work")["file_summary"]
+    ticker_count = 0
+    stop_ticker = asyncio.Event()
+
+    async def ticker():
+        nonlocal ticker_count
+        while not stop_ticker.is_set():
+            ticker_count += 1
+            await asyncio.sleep(0.005)
+
+    ticker_task = asyncio.create_task(ticker())
+    try:
+        result = await handler(path="README.md")
+    finally:
+        stop_ticker.set()
+        await ticker_task
+
+    assert result == {"path": "README.md", "workspace_root": "/tmp/work"}
+    assert ticker_count >= 5
 
 
 async def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_result_artifact(monkeypatch):

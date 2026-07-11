@@ -61,6 +61,7 @@ async def _main_async() -> int:
             async with session_factory() as session:
                 run = await AsyncAgentRunEngine(session, recipes={"fast": ReadmeRecipe()}, stream=stream).run(
                     AgentRunRequest(
+                        org_id="bench",
                         thread_id="bench-fast-readme",
                         message="What is in the README?",
                         profile="fast",
