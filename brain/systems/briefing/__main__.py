@@ -4,6 +4,7 @@ Usage::
 
     python -m brain.systems.briefing --fixture tests/fixtures/briefing/uwear_bug.json
     python -m brain.systems.briefing --fixture … --json   # JSON only (golden refresh)
+    python -m brain.systems.briefing --fixture … --compose --ask "fix the batch"
 
 Fixture shape: ``{"job_ref": str, "headline"?: str, "budget"?: {…},
 "pieces": [{"source", "ref", "title", "body", "ts"?: ISO-8601, "weight"?}]}``.
@@ -35,6 +36,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m brain.systems.briefing")
     parser.add_argument("--fixture", required=True, help="path to a fixture JSON file")
     parser.add_argument("--json", action="store_true", help="print the JSON dump only")
+    parser.add_argument("--compose", action="store_true", help="also render the packet (slice 02)")
+    parser.add_argument("--ask", default="take a pass", help="the ask line for --compose")
+    parser.add_argument("--owner", default=None, help="owner label for --compose")
     args = parser.parse_args(argv)
 
     data = json.loads(Path(args.fixture).read_text())
@@ -45,6 +49,18 @@ def main(argv: list[str] | None = None) -> int:
         headline=data.get("headline"),
     )
     dump = json.dumps(dossier.to_dict(), indent=2, ensure_ascii=False)
+    if args.compose:
+        from dataclasses import asdict
+
+        from brain.systems.briefing.compose import compose_packet
+
+        packet = compose_packet(
+            dossier, org_id="cli-probe", ask=args.ask, owner_label=args.owner
+        )
+        print(packet.human_brief)
+        print()
+        print(json.dumps(asdict(packet.handoff_input), indent=2, ensure_ascii=False, default=str))
+        return 0
     if args.json:
         print(dump)
     else:

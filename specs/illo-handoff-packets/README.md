@@ -2,15 +2,16 @@
 
 ## Next Agent Prompt
 
-**Status (2026-07-10):** Slice 01 implemented and green — pure core at
-`brain/systems/briefing/core.py`, CLI probe (`python -m
-brain.systems.briefing --fixture tests/fixtures/briefing/uwear_bug.json`),
-18 unit tests + golden snapshot in `tests/test_briefing_core.py`;
-architecture-boundary gate green; Claude-implemented under the
-Codex-unavailable fallback. Next pickup:
-[slices/02-packet-composer.md](slices/02-packet-composer.md). A
-cross-family `codex exec` review of slice 01 + the spec is queued for when
-the Codex window resets; fold its findings in before starting slice 03.
+**Status (2026-07-10):** Slices 01+02 implemented and green —
+`brain/systems/briefing/{core,compose}.py` (pure), CLI probe
+(`python -m brain.systems.briefing --fixture
+tests/fixtures/briefing/uwear_bug.json [--compose --ask …]`), 31 unit
+tests + golden snapshot; architecture-boundary gate green; full fast suite
+green (only the 9 pre-existing `test_llm_worker` env failures).
+Claude-implemented under the Codex-unavailable fallback. **Next pickup:
+run the queued cross-family `codex exec` review over slices 01+02 + this
+spec (window was exhausted 2026-07-10 ~23:00; resets ~23:38), fold
+findings, THEN start [slices/03-gather-wiring.md](slices/03-gather-wiring.md).**
 
 **Implementation decisions that refine slice texts (01):**
 - `DossierItem.truncated` (+ `omitted_chars`), not the sketch's
@@ -25,6 +26,21 @@ the Codex window resets; fold its findings in before starting slice 03.
   cap.
 - Duplicates collapsed by `(source, ref)` are not counted as omissions
   (same object, still cited once); empty refs are never deduped.
+
+**Implementation decisions that refine slice texts (02):**
+- `compose_packet` gained `org_id` / `created_by_user_id` /
+  `source_surface` / `source_ref` / `acceptance_criteria` /
+  `owner_user_id` params — `LaunchHandoffCreateInput` requires them; the
+  sketch's signature was incomplete.
+- `context_parts` = one part per item (`{source, ref, title, excerpt,
+  truncated, omitted_chars}`) plus a trailing
+  `{"source": "omissions", "notes": […]}` part when anything was trimmed
+  (the sketch's per-part `omitted_count` was redundant).
+- The brief's `BRIEF_CHAR_CAP` governs the narrative; structural lines
+  (owner, evidence refs, decisions, omissions note, launch line) are exempt
+  bounded overhead — same stance as the dossier core.
+- Human brief carries a literal `{launch_url}` placeholder; mint (slice 05)
+  fills it after `create_launch_handoff` returns the real URL.
 
 You are implementing the coordinator upgrade: at every routing moment
 (triage assignment, notify nudge, digest line) Illo attaches a **handoff
@@ -46,7 +62,7 @@ explicitly rejected (see Direction below).
 
 ### Global TODO
 - [x] Slice 01 — dossier core (pure assembly + budgets + truncation honesty)
-- [ ] Slice 02 — packet composer (dual-audience render + idempotency)
+- [x] Slice 02 — packet composer (dual-audience render + idempotency)
 - [ ] Slice 03 — gather wiring (read-only source adapters)
 - [ ] Slice 04 — claude launch target (launch page; codex redirect preserved)
 - [ ] Slice 05 — triage-moment minting (env-gated)
