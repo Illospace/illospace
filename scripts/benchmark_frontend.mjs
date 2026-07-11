@@ -84,6 +84,7 @@ const STRESS_READY_IMPROVEMENT_TARGET_PCT = 10;
 const STRESS_DOM_NODE_BUDGET = 4000;
 const STRESS_TASK_P50_BUDGET_MS = 450;
 const STRESS_LONG_TASK_P95_BUDGET_MS = 250;
+const WORKSPACE_IDLE_WAKE_BUDGET_MS = 34;
 const APP_ASSET_RESOURCE_TYPES = new Set(['Script', 'Stylesheet']);
 const VITE_CLIENT_MANIFEST_URL = new URL(
   '../frontend/.svelte-kit/output/client/.vite/manifest.json',
@@ -165,6 +166,9 @@ function parseArgs(argv) {
     json: false,
     keepChromeProfile: false,
     manifest: null,
+    workspaceIdle: false,
+    idleSettleMs: 10_000,
+    idleWindowMs: 10_000,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -196,6 +200,9 @@ function parseArgs(argv) {
     else if (arg === '--json') options.json = true;
     else if (arg === '--keep-chrome-profile') options.keepChromeProfile = true;
     else if (arg === '--manifest') options.manifest = next();
+    else if (arg === '--workspace-idle') options.workspaceIdle = true;
+    else if (arg === '--idle-settle-ms') options.idleSettleMs = Number(next());
+    else if (arg === '--idle-window-ms') options.idleWindowMs = Number(next());
     else if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
@@ -214,6 +221,12 @@ function parseArgs(argv) {
   if (!Number.isFinite(options.ideas) || options.ideas < 1) throw new Error('--ideas must be >= 1');
   if (!Number.isFinite(options.connections) || options.connections < 0) throw new Error('--connections must be >= 0');
   if (!Number.isFinite(options.streamItems) || options.streamItems < 0) throw new Error('--stream-items must be >= 0');
+  if (![options.idleSettleMs, options.idleWindowMs].every((value) => Number.isFinite(value) && value >= 0)) {
+    throw new Error('workspace idle durations must be >= 0');
+  }
+  if (options.workspaceIdle && options.scenarios.some((scenario) => !['workspace', 'threadCanonical'].includes(scenario))) {
+    throw new Error('--workspace-idle supports only workspace and threadCanonical scenarios');
+  }
   if (!['legacy', 'paged'].includes(options.streamContract)) {
     throw new Error('--stream-contract must be legacy or paged');
   }
@@ -240,6 +253,9 @@ Options:
   --out PATH                  Write the full JSON report to PATH
   --compare BEFORE,AFTER      Print a before/after win chart from two JSON reports
   --manifest PATH             Vite client manifest for the target build
+  --workspace-idle            Measure settled workspace/browser idle behavior
+  --idle-settle-ms N          Settle delay before idle measurement (default: 10000)
+  --idle-window-ms N          Idle measurement window (default: 10000)
   --allow-unknown-api         Do not fail when the app calls an unmocked API route
   --json                      Print machine-readable JSON
 `);
@@ -892,6 +908,7 @@ function mockApiResponse(method, url, fixture) {
   if (pathName === '/api/cortex/ideas') {
     return jsonResponse(200, fixture.ideas, { label: 'GET /api/cortex/ideas' });
   }
+  if (pathName === '/api/cortex/ideas/positions' && methodUpper === 'PUT') return jsonResponse(200, { ok: true }, { label: 'PUT /api/cortex/ideas/positions', sidecar: true });
   if (pathName === '/api/cortex/bootstrap') {
     const include = new Set(
       (url.searchParams.get('include') || 'core')
@@ -1148,6 +1165,151 @@ function performanceDurationMs(before, after, name) {
   return (end - start) * 1000;
 }
 
+async function workspaceIdleSnapshot(client) {
+  return evaluate(client, `(() => {
+    const value = window.__illoBench?.workspaceIdle;
+    return value ? { available: value.available, rafExecuted: value.rafExecuted,
+      signalStyleWrites: value.signalStyleWrites } : { available: false };
+  })()`);
+}
+
+function workspaceIdleCounterDelta(before, after) {
+  return {
+    rafCallbacks: after.rafExecuted - before.rafExecuted,
+    signalStyleWrites: after.signalStyleWrites - before.signalStyleWrites,
+  };
+}
+
+async function measureWorkspaceIdleWindow(client, durationMs) {
+  const beforeSnapshot = await workspaceIdleSnapshot(client);
+  const beforePerformance = await performanceMetrics(client);
+  await sleep(durationMs);
+  const afterPerformance = await performanceMetrics(client);
+  const afterSnapshot = await workspaceIdleSnapshot(client);
+  const counters = workspaceIdleCounterDelta(beforeSnapshot, afterSnapshot);
+  const taskDurationMs = performanceDurationMs(beforePerformance, afterPerformance, 'TaskDuration');
+  const scriptDurationMs = performanceDurationMs(beforePerformance, afterPerformance, 'ScriptDuration');
+  return {
+    available: beforeSnapshot.available === true && afterSnapshot.available === true &&
+      [taskDurationMs, scriptDurationMs, counters.rafCallbacks, counters.signalStyleWrites].every(Number.isFinite),
+    taskDurationMs,
+    scriptDurationMs,
+    ...counters,
+  };
+}
+
+async function setWorkspaceIdleVisibility(client, state) {
+  return evaluate(client, `window.__illoBench?.workspaceIdle?.setVisibilityState?.(${JSON.stringify(state)}) ?? null`);
+}
+
+async function measureWorkspaceIdleHiddenControl(client, hiddenMs) {
+  let restored = false;
+  try {
+    const hiddenState = await setWorkspaceIdleVisibility(client, 'hidden');
+    if (hiddenState !== 'hidden') return { available: false, reason: 'visibility override did not enter hidden state' };
+    await sleep(100);
+    const hiddenBefore = await workspaceIdleSnapshot(client);
+    await sleep(hiddenMs);
+    const hiddenAfter = await workspaceIdleSnapshot(client);
+    const visibleState = await setWorkspaceIdleVisibility(client, 'visible');
+    restored = visibleState === 'visible';
+    const visibleBefore = await workspaceIdleSnapshot(client);
+    await sleep(500);
+    const visibleAfter = await workspaceIdleSnapshot(client);
+    return {
+      available: restored && hiddenBefore.available && hiddenAfter.available,
+      ...workspaceIdleCounterDelta(hiddenBefore, hiddenAfter),
+      resumeRafCallbacks: visibleAfter.rafExecuted - visibleBefore.rafExecuted,
+      resumeSignalStyleWrites: visibleAfter.signalStyleWrites - visibleBefore.signalStyleWrites,
+    };
+  } finally {
+    if (!restored) await setWorkspaceIdleVisibility(client, 'visible').catch(() => {});
+  }
+}
+
+async function waitForWorkspaceIdleProbe(client, timeoutMs) {
+  await waitForExpression(
+    client,
+    `(() => {
+      const probe = window.__illoBench?.workspaceIdle?.activeProbe;
+      return Number.isFinite(probe?.firstRafMs) && Number.isFinite(probe?.firstSignalStyleMs);
+    })()`,
+    timeoutMs,
+  ).catch(() => null);
+  return evaluate(client, 'window.__illoBench?.workspaceIdle?.activeProbe ?? null');
+}
+
+async function finishWorkspaceWakeProbe(client, matchedExpression = 'true') {
+  const probe = await waitForWorkspaceIdleProbe(client, 1_200);
+  const matched = await evaluate(client, matchedExpression);
+  const wakeTimestamps = [probe?.firstRafMs, probe?.firstSignalStyleMs];
+  const available = matched === true && wakeTimestamps.every(Number.isFinite);
+  return { available, resumeMs: available ? Math.max(...wakeTimestamps) : null };
+}
+
+async function measureWorkspaceMutationWake(client) {
+  const dispatched = await evaluate(client, `(() => {
+    const telemetry = window.__illoBench?.workspaceIdle;
+    const socket = telemetry?.sockets?.find((candidate) => candidate.readyState === 1);
+    const signal = document.querySelector('[data-constellation-signal-id="idea-2"]');
+    if (!telemetry || !socket || !(signal instanceof HTMLElement)) return null;
+    telemetry.beginProbe();
+    socket.__dispatch({
+      type: 'message',
+      data: JSON.stringify({ type: 'idea_updated', idea_id: 'idea-2', fields: { status: 'done' } }),
+    });
+    return true;
+  })()`);
+  if (!dispatched) return { available: false };
+  return finishWorkspaceWakeProbe(client,
+    `document.querySelector('[data-constellation-signal-id="idea-2"]')?.classList.contains('constellation-signal-blob-cue-attention') === true`,
+  );
+}
+
+async function measureWorkspaceDragWake(client) {
+  const target = await evaluate(client, `(() => {
+    const telemetry = window.__illoBench?.workspaceIdle;
+    const signal = document.querySelector('[data-constellation-signal-id="idea-3"]') ||
+      document.querySelector('[data-constellation-signal-id]');
+    if (!telemetry || !(signal instanceof HTMLElement)) return null;
+    const rect = signal.getBoundingClientRect();
+    telemetry.beginProbe();
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    };
+  })()`);
+  if (!target) return { available: false };
+  await client.send('Input.dispatchMouseEvent', {
+    type: 'mousePressed', x: target.x, y: target.y, button: 'left', buttons: 1, clickCount: 1,
+  });
+  await client.send('Input.dispatchMouseEvent', {
+    type: 'mouseMoved', x: target.x + 36, y: target.y + 18, button: 'left', buttons: 1,
+  });
+  const probe = await finishWorkspaceWakeProbe(client);
+  await client.send('Input.dispatchMouseEvent', {
+    type: 'mouseReleased', x: target.x + 36, y: target.y + 18, button: 'left', buttons: 0, clickCount: 1,
+  });
+  return probe;
+}
+
+async function measureWorkspaceIdleContract(client, scenario, options) {
+  await sleep(options.idleSettleMs);
+  const idle = await measureWorkspaceIdleWindow(client, options.idleWindowMs);
+  const hidden = await measureWorkspaceIdleHiddenControl(client, 2_000);
+  if (scenario.directThread) return { available: idle.available && hidden.available, idle, hidden };
+  const mutation = await measureWorkspaceMutationWake(client);
+  await sleep(6_500);
+  const drag = await measureWorkspaceDragWake(client);
+  return {
+    available: idle.available && hidden.available && mutation.available && drag.available,
+    idle,
+    hidden,
+    mutation,
+    drag,
+  };
+}
+
 async function waitForExpression(client, expression, timeoutMs) {
   const started = performance.now();
   const deadline = started + timeoutMs;
@@ -1188,7 +1350,7 @@ async function waitForExpression(client, expression, timeoutMs) {
   );
 }
 
-function installPageInstrumentationSource() {
+function installPageInstrumentationSource(workspaceIdle = false) {
   return `(() => {
     window.__illoBench = {
       longTasks: [],
@@ -1198,6 +1360,59 @@ function installPageInstrumentationSource() {
       errors: [],
       wsMessages: [],
     };
+
+    ${workspaceIdle ? `
+    const idle = window.__illoBench.workspaceIdle = {
+      available: true,
+      rafExecuted: 0,
+      signalStyleWrites: 0,
+      activeProbe: null,
+      sockets: [],
+    };
+
+    idle.beginProbe = () => idle.activeProbe = { startedAt: performance.now(), firstRafMs: null, firstSignalStyleMs: null };
+
+    const nativeRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = (callback) => nativeRequestAnimationFrame((timestamp) => {
+        idle.rafExecuted += 1;
+        const probe = idle.activeProbe;
+        if (probe && probe.firstRafMs === null) probe.firstRafMs = performance.now() - probe.startedAt;
+        return callback(timestamp);
+      });
+
+    try {
+      const mutationObserver = new MutationObserver((records) => {
+        for (const record of records) {
+          if (!(record.target instanceof Element) || !record.target.matches('[data-constellation-signal-id]')) continue;
+          idle.signalStyleWrites += 1;
+          const probe = idle.activeProbe;
+          if (probe && probe.firstSignalStyleMs === null) probe.firstSignalStyleMs = performance.now() - probe.startedAt;
+        }
+      });
+      mutationObserver.observe(document, { subtree: true, attributes: true, attributeFilter: ['style'] });
+    } catch (error) {
+      idle.available = false;
+      window.__illoBench.errors.push('workspace idle mutation observer: ' + String(error?.message || error));
+    }
+
+    try {
+      const nativeVisibilityState = document.visibilityState;
+      let visibilityOverride = null;
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => visibilityOverride ?? nativeVisibilityState,
+      });
+      idle.setVisibilityState = (state) => {
+        if (state !== 'visible' && state !== 'hidden') throw new Error('unsupported visibility state');
+        visibilityOverride = state;
+        document.dispatchEvent(new Event('visibilitychange'));
+        return document.visibilityState;
+      };
+    } catch (error) {
+      idle.available = false;
+      window.__illoBench.errors.push('workspace idle visibility override: ' + String(error?.message || error));
+    }
+    ` : ''}
 
     window.addEventListener('error', (event) => {
       window.__illoBench.errors.push(String(event.message || 'unknown error'));
@@ -1256,6 +1471,7 @@ function installPageInstrumentationSource() {
         this.onerror = null;
         this.onclose = null;
         this.__listeners = new Map();
+        window.__illoBench.workspaceIdle?.sockets.push(this);
         queueMicrotask(() => {
           if (this.readyState !== BenchWebSocket.CONNECTING) return;
           this.readyState = BenchWebSocket.OPEN;
@@ -1322,7 +1538,7 @@ async function configurePage(client, fixture, options, apiCalls) {
     patterns: [{ urlPattern: '*://*/api/*', requestStage: 'Request' }],
   });
   const instrumentation = await client.send('Page.addScriptToEvaluateOnNewDocument', {
-    source: installPageInstrumentationSource(),
+    source: installPageInstrumentationSource(options.workspaceIdle),
   });
 
   const pendingMocks = new Set();
@@ -2066,6 +2282,9 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
         decodedBodySize: navigation?.decodedBodySize ?? 0,
       };
     })()`);
+    const workspaceIdleContract = options.workspaceIdle
+      ? await measureWorkspaceIdleContract(client, scenario, options)
+      : null;
     const performanceMetricsAfter = await performanceMetrics(client);
     const taskDurationMs = performanceDurationMs(
       performanceMetricsBefore,
@@ -2171,6 +2390,7 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
       readyMs,
       postCloseReadyMs,
       requestContract,
+      workspaceIdleContract,
       lazyAssetContract,
       historyContract,
       apiCallCount: measuredApiCalls.length,
@@ -2307,6 +2527,37 @@ function summarizeScenario(samples) {
   const longTaskTotalValues = finiteValues('longTaskTotalMs');
   const maxLongTaskValues = finiteValues('maxLongTaskMs');
   const domNodeValues = finiteValues('domNodes');
+  const workspaceIdleSamples = measuredSamples
+    .map((sample) => sample.workspaceIdleContract)
+    .filter(Boolean);
+  const workspaceIdleValues = (path) => workspaceIdleSamples
+    .map((sample) => path.reduce((value, key) => value?.[key], sample))
+    .filter(Number.isFinite);
+  const summarizeWorkspaceIdle = (path) => summarizeNumbers(workspaceIdleValues(path));
+  const workspaceInteractionSamples = workspaceIdleSamples.filter((sample) => sample.mutation);
+  const workspaceIdleTelemetryAvailable = workspaceIdleSamples.length === measuredSamples.length &&
+    workspaceIdleSamples.every((sample) => sample.available === true);
+  const workspaceIdleNoPeriodicWake = workspaceIdleSamples.length === measuredSamples.length &&
+    workspaceIdleSamples.every((sample) => (
+    sample.idle?.available === true &&
+    sample.idle.rafCallbacks === 0 &&
+    sample.idle.signalStyleWrites === 0 &&
+    sample.hidden?.available === true &&
+    sample.hidden.rafCallbacks === 0 &&
+    sample.hidden.signalStyleWrites === 0 &&
+    sample.hidden.resumeRafCallbacks === 0 &&
+    sample.hidden.resumeSignalStyleWrites === 0
+  ));
+  const wakeSummary = (key) => summarizeNumbers(
+    workspaceInteractionSamples.map((sample) => sample[key]?.resumeMs).filter(Number.isFinite),
+  );
+  const mutationWake = wakeSummary('mutation');
+  const dragWake = wakeSummary('drag');
+  const workspaceIdleInteractionContractPassed = workspaceInteractionSamples.length === 0 || (
+    workspaceInteractionSamples.length === measuredSamples.length &&
+    workspaceInteractionSamples.every((sample) => sample.mutation?.available && sample.drag?.available) &&
+    mutationWake.p95 <= WORKSPACE_IDLE_WAKE_BUDGET_MS && dragWake.p95 <= WORKSPACE_IDLE_WAKE_BUDGET_MS
+  );
 
   return {
     runs: measuredSamples.length,
@@ -2477,6 +2728,15 @@ function summarizeScenario(samples) {
     long_task_count: summarizeNumbers(longTaskCountValues),
     long_task_total_ms: summarizeNumbers(longTaskTotalValues),
     max_long_task_ms: summarizeNumbers(maxLongTaskValues),
+    workspace_idle_telemetry_available: workspaceIdleTelemetryAvailable,
+    workspace_idle_no_periodic_wake: workspaceIdleNoPeriodicWake,
+    workspace_idle_interaction_contract_passed: workspaceIdleInteractionContractPassed,
+    workspace_idle_task_duration_ms: summarizeWorkspaceIdle(['idle', 'taskDurationMs']),
+    workspace_idle_script_duration_ms: summarizeWorkspaceIdle(['idle', 'scriptDurationMs']),
+    workspace_idle_raf_callbacks: summarizeWorkspaceIdle(['idle', 'rafCallbacks']),
+    workspace_idle_signal_style_writes: summarizeWorkspaceIdle(['idle', 'signalStyleWrites']),
+    workspace_idle_mutation_resume_ms: mutationWake,
+    workspace_idle_drag_resume_ms: dragWake,
     routes,
     post_close_routes: postCloseRoutes,
     all_routes: allRoutes,
@@ -2722,7 +2982,7 @@ function pctDelta(before, after) {
 
 const COMPARISON_CONFIG_KEYS = [
   'runs', 'warmups', 'ideas', 'connections', 'streamItems', 'apiLatencyMs', 'sidecarLatencyMs',
-  'timeoutMs', 'allowUnknownApi',
+  'timeoutMs', 'allowUnknownApi', 'workspaceIdle', 'idleSettleMs', 'idleWindowMs',
 ];
 
 function comparisonSignature(result, scenarioKeys) {
@@ -2841,11 +3101,12 @@ function paginationAbsoluteFailures(key, summary, config) {
 function comparisonFailures(before, after, scenarioKeys) {
   const failures = [];
   const paginationComparison = isPaginationComparison(before, after);
+  const workspaceIdleComparison = before.config.workspaceIdle === true && after.config.workspaceIdle === true;
   const hasStreamContract = Boolean(before.config.streamContract || after.config.streamContract);
   if (comparisonSignature(before, scenarioKeys) !== comparisonSignature(after, scenarioKeys)) {
     failures.push('before/after benchmark config signatures differ');
   }
-  if (hasStreamContract && !paginationComparison) {
+  if (hasStreamContract && !paginationComparison && !workspaceIdleComparison) {
     failures.push('pagination comparison requires legacy before and paged after contracts');
   }
 
@@ -2885,6 +3146,31 @@ function comparisonFailures(before, after, scenarioKeys) {
       failures.push(`${key}: comparable FCP unavailable`);
     } else if ((!stress || paginationComparison) && !withinRegressionBudget(beforeFcp, afterFcp)) {
       failures.push(`${key}: FCP p50 regression >${MAX_REGRESSION_PCT}%`);
+    }
+
+    if (workspaceIdleComparison) {
+      if (!beforeScenario.summary.workspace_idle_telemetry_available || !summary.workspace_idle_telemetry_available) {
+        failures.push(`${key}: workspace idle telemetry unavailable`);
+      }
+      if (!directThread) {
+        const reductions = [
+          ['rAF callbacks', 'workspace_idle_raf_callbacks', 95],
+          ['signal style writes', 'workspace_idle_signal_style_writes', 95],
+          ['ScriptDuration', 'workspace_idle_script_duration_ms', 80],
+          ['TaskDuration', 'workspace_idle_task_duration_ms', 40],
+        ];
+        for (const [label, metric, target] of reductions) {
+          const beforeValue = beforeScenario.summary[metric]?.p50;
+          const afterValue = summary[metric]?.p50;
+          if (!Number.isFinite(beforeValue) || !Number.isFinite(afterValue) || beforeValue <= 0) {
+            failures.push(`${key}: comparable idle ${label} unavailable`);
+          } else if (-pctDelta(beforeValue, afterValue) < target) {
+            failures.push(`${key}: idle ${label} reduction <${target}%`);
+          }
+        }
+        if (!summary.workspace_idle_no_periodic_wake) failures.push(`${key}: settled workspace JS woke periodically`);
+        if (!summary.workspace_idle_interaction_contract_passed) failures.push(`${key}: interaction wake p95 >${WORKSPACE_IDLE_WAKE_BUDGET_MS}ms`);
+      }
     }
 
     if (stress && !paginationComparison) {
@@ -3055,6 +3341,7 @@ async function main() {
         sidecarLatencyMs: options.sidecarLatencyMs,
         timeoutMs: options.timeoutMs,
         allowUnknownApi: options.allowUnknownApi,
+        workspaceIdle: options.workspaceIdle, idleSettleMs: options.idleSettleMs, idleWindowMs: options.idleWindowMs,
         lazyAssetManifest: {
           threadStageModuleId: lazyAssetClosures.threadStage.moduleId,
           threadStageAssetCount: lazyAssetClosures.threadStage.assets.length,
@@ -3082,6 +3369,11 @@ async function main() {
       scenario.summary.rare_pane_first_open_ms.p75 > 0 &&
       scenario.summary.rare_pane_first_open_budget_passed === false
     ));
+    const idleTelemetryFailures = options.workspaceIdle
+      ? result.scenarios
+          .filter((scenario) => scenario.summary.workspace_idle_telemetry_available !== true)
+          .map((scenario) => `${scenario.key}: telemetry unavailable`)
+      : [];
     const threadFailures = result.scenarios.flatMap((scenario) => {
       if (!SCENARIOS[scenario.key]?.directThread) return [];
       const failures = directThreadHistoryFailures(scenario.key, scenario.summary);
@@ -3121,6 +3413,9 @@ async function main() {
     }
     if (threadFailures.length) {
       throw new Error(`Thread benchmark contract failed:\n${threadFailures.map((failure) => `- ${failure}`).join('\n')}`);
+    }
+    if (idleTelemetryFailures.length) {
+      throw new Error(`Workspace idle telemetry failed:\n${idleTelemetryFailures.map((failure) => `- ${failure}`).join('\n')}`);
     }
   } finally {
     client.close();
