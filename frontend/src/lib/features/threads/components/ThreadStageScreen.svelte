@@ -1295,7 +1295,6 @@
       nextBrowserTabIndex = 1;
       dockPreviewAttachment = null;
       onBrowserOpenChange?.(false);
-      if (currentIdeaId) void loadIdeaProjectContext(currentIdeaId);
     }
   });
 

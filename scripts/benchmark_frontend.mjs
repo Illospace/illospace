@@ -69,6 +69,12 @@ const VAULT_PANE_MOUNTED_EXPRESSION = `(() => Boolean(
 
 const THREAD_STAGE_PREWARM_OBSERVATION_MS = 2200;
 const RARE_PANE_OPEN_BUDGET_MS = 250;
+const DIRECT_THREAD_STARTUP_CALL_BUDGET = 4;
+const DIRECT_THREAD_STARTUP_PAYLOAD_BUDGET_KB = 35.5;
+const DIRECT_ROUTE_P50_GAP_BUDGET_PCT = 5;
+const DIRECT_ROUTE_IMPROVEMENT_TARGET_PCT = 10;
+const DIRECT_ROUTE_IMPROVEMENT_TARGET_MS = 100;
+const MAX_REGRESSION_PCT = 5;
 const APP_ASSET_RESOURCE_TYPES = new Set(['Script', 'Stylesheet']);
 const VITE_CLIENT_MANIFEST_URL = new URL(
   '../frontend/.svelte-kit/output/client/.vite/manifest.json',
@@ -84,6 +90,15 @@ const SCENARIOS = {
   thread: {
     name: 'cortex-thread-direct',
     path: '/cortex?idea=idea-1',
+    directThread: true,
+    ideaId: 'idea-1',
+    readyExpression: THREAD_READY_EXPRESSION,
+  },
+  threadCanonical: {
+    name: 'cortex-thread-direct-canonical',
+    path: '/threads/idea-1',
+    directThread: true,
+    ideaId: 'idea-1',
     readyExpression: THREAD_READY_EXPRESSION,
   },
   cycles: {
@@ -1215,52 +1230,47 @@ async function configurePage(client, fixture, options, apiCalls) {
 
   const pendingMocks = new Set();
   const unsubscribe = client.on('Fetch.requestPaused', (params) => {
+    const requestUrl = new URL(params.request.url);
+    const startedAt = performance.now();
+    const response = mockApiResponse(params.request.method, requestUrl, fixture);
+    const bodyText = JSON.stringify(response.body);
+    const call = {
+      method: params.request.method,
+      path: requestUrl.pathname,
+      query: requestUrl.search,
+      label: response.label,
+      status: response.status,
+      bytes: Buffer.byteLength(bodyText),
+      startedAt,
+      fulfilledAt: null,
+      durationMs: null,
+      critical: !response.sidecar,
+      sidecar: response.sidecar,
+      unknown: response.unknown,
+    };
+    apiCalls.push(call);
     const task = (async () => {
-      const requestUrl = new URL(params.request.url);
-      const startedAt = performance.now();
-      const response = mockApiResponse(params.request.method, requestUrl, fixture);
+      const body = Buffer.from(bodyText).toString('base64');
       const latencyMs = latencyForResponse(response, options);
       if (latencyMs > 0) await sleep(latencyMs);
-      const bodyText = JSON.stringify(response.body);
-      const body = Buffer.from(bodyText).toString('base64');
-      const fulfilledAt = performance.now();
-      const call = {
-        method: params.request.method,
-        path: requestUrl.pathname,
-        query: requestUrl.search,
-        label: response.label,
-        status: response.status,
-        bytes: Buffer.byteLength(bodyText),
-        startedAt,
-        fulfilledAt,
-        durationMs: fulfilledAt - startedAt,
-        critical: !response.sidecar,
-        sidecar: response.sidecar,
-        unknown: response.unknown,
-      };
-      apiCalls.push(call);
       await client.send('Fetch.fulfillRequest', {
         requestId: params.requestId,
         responseCode: response.status,
         responseHeaders: Object.entries(response.headers).map(([name, value]) => ({ name, value })),
         body,
       });
+      call.fulfilledAt = performance.now();
+      call.durationMs = call.fulfilledAt - call.startedAt;
     })().catch(async (error) => {
       await client.send('Fetch.failRequest', {
         requestId: params.requestId,
         errorReason: 'Failed',
       }).catch(() => {});
-      apiCalls.push({
-        method: params.request.method,
-        path: new URL(params.request.url).pathname,
-        query: new URL(params.request.url).search,
-        label: 'mock-error',
-        status: 0,
-        bytes: 0,
-        sidecar: true,
-        unknown: true,
-        error: error.message,
-      });
+      call.status = 0;
+      call.fulfilledAt = performance.now();
+      call.durationMs = call.fulfilledAt - call.startedAt;
+      call.unknown = true;
+      call.error = error.message;
     }).finally(() => {
       pendingMocks.delete(task);
     });
@@ -1269,7 +1279,10 @@ async function configurePage(client, fixture, options, apiCalls) {
   });
 
   return async () => {
-    await Promise.allSettled([...pendingMocks]);
+    while (pendingMocks.size > 0) {
+      await Promise.allSettled([...pendingMocks]);
+      await sleep(0);
+    }
     unsubscribe();
     if (instrumentation.identifier) {
       await client.send('Page.removeScriptToEvaluateOnNewDocument', {
@@ -1281,6 +1294,16 @@ async function configurePage(client, fixture, options, apiCalls) {
 
 function workspaceBootstrapCalls(calls) {
   return calls.filter((call) => call.method === 'GET' && call.path === '/api/cortex/bootstrap');
+}
+
+function directThreadBootstrapCalls(calls, ideaId) {
+  return workspaceBootstrapCalls(calls).filter((call) => {
+    const params = new URLSearchParams(call.query);
+    const includes = new Set((params.get('include') || '').split(','));
+    return includes.has('selected_idea') &&
+      includes.has('direct_thread') &&
+      params.get('idea_id') === ideaId;
+  });
 }
 
 function workspaceStartupCalls(calls) {
@@ -1298,6 +1321,39 @@ function assertRequestContract(condition, scenario, expectation, calls) {
     `Request contract failed for ${scenario.name}: ${expectation}` +
     `\nObserved API requests:\n${observed.length ? observed.map((call) => `- ${call}`).join('\n') : '- none'}`,
   );
+}
+
+function directThreadRequestContract(callsAtReady, scenario) {
+  const bootstrapCalls = workspaceBootstrapCalls(callsAtReady);
+  const directBootstrapCalls = directThreadBootstrapCalls(callsAtReady, scenario.ideaId);
+  const directBootstrap = directBootstrapCalls[0] ?? null;
+  const meCall = callsAtReady.find((call) => call.method === 'GET' && call.path === '/api/me') ?? null;
+  const startupPayloadKb = callsAtReady.reduce((sum, call) => sum + call.bytes, 0) / 1024;
+  const deferredCallsAtReady = callsAtReady.filter((call) => (
+    call.path.startsWith('/api/notifications') ||
+    call.path === '/api/chat/notifications' ||
+    call.path.includes('/project-context')
+  )).length;
+  const bootstrapBeforeMeFulfilled = Boolean(
+    directBootstrap &&
+    meCall &&
+    Number.isFinite(meCall.fulfilledAt) &&
+    directBootstrap.startedAt < meCall.fulfilledAt
+  );
+
+  return {
+    kind: 'direct-thread-startup',
+    passed: bootstrapCalls.length === 1 &&
+      directBootstrapCalls.length === 1 &&
+      bootstrapBeforeMeFulfilled &&
+      deferredCallsAtReady === 0 &&
+      callsAtReady.length <= DIRECT_THREAD_STARTUP_CALL_BUDGET &&
+      startupPayloadKb <= DIRECT_THREAD_STARTUP_PAYLOAD_BUDGET_KB,
+    bootstrapBeforeMeFulfilled,
+    deferredCallsAtReady,
+    startupCalls: callsAtReady.length,
+    startupPayloadKb,
+  };
 }
 
 function isAppAssetRequest(params, baseUrl) {
@@ -1661,6 +1717,15 @@ async function measureLazyAssetContract(
   };
 }
 
+async function parkPageBetweenRuns(client, timeoutMs) {
+  await client.send('Page.navigate', { url: 'about:blank' });
+  await waitForExpression(
+    client,
+    `location.href === 'about:blank' && document.readyState === 'complete'`,
+    Math.min(timeoutMs, 5000),
+  );
+}
+
 async function runScenario(client, scenarioKey, fixture, options, measured, lazyAssetClosures) {
   const scenario = SCENARIOS[scenarioKey];
   const apiCalls = [];
@@ -1726,6 +1791,9 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
     const apiCallsAtReady = [...apiCalls];
     const bootstrapCallsAtReady = workspaceBootstrapCalls(apiCallsAtReady);
     const workspaceCallsAtReady = workspaceStartupCalls(apiCallsAtReady);
+    const directStartupContract = scenario.directThread
+      ? directThreadRequestContract(apiCallsAtReady, scenario)
+      : null;
 
     if (scenario.modalId) {
       assertRequestContract(
@@ -1734,7 +1802,7 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
         'cold modal readiness must occur before any workspace startup API request',
         apiCallsAtReady,
       );
-    } else {
+    } else if (!scenario.directThread) {
       assertRequestContract(
         bootstrapCallsAtReady.length >= 1,
         scenario,
@@ -1821,8 +1889,10 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
     const allApiCalls = [...apiCalls];
     const allErrors = await evaluate(client, 'window.__illoBench?.errors || []').catch(() => []);
     const requestContract = {
-      kind: scenario.modalId ? 'modal-defers-workspace' : 'workspace-starts-immediately',
-      passed: true,
+      ...(directStartupContract ?? {
+        kind: scenario.modalId ? 'modal-defers-workspace' : 'workspace-starts-immediately',
+        passed: true,
+      }),
       workspaceBootstrapAtReady: bootstrapCallsAtReady.length,
       workspaceBootstrapBeforeClose: bootstrapCallsBeforeClose.length,
       workspaceBootstrapPostClose: workspaceBootstrapCalls(postCloseApiCalls).length,
@@ -1854,8 +1924,12 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
       errors: [...new Set([...(pageMetrics.errors || []), ...(allErrors || [])])],
     };
   } finally {
-    for (const unsubscribe of unsubscribers) await unsubscribe();
-    await client.send('Fetch.disable').catch(() => {});
+    try {
+      await parkPageBetweenRuns(client, options.timeoutMs);
+    } finally {
+      for (const unsubscribe of unsubscribers) await unsubscribe();
+      await client.send('Fetch.disable').catch(() => {});
+    }
   }
 }
 
@@ -1927,6 +2001,9 @@ function summarizeScenario(samples) {
   const directThreadContractSamples = measuredSamples.filter(
     (sample) => sample.lazyAssetContract?.kind === 'rare-pane-loads-on-selection',
   );
+  const directStartupSamples = measuredSamples.filter(
+    (sample) => sample.requestContract?.kind === 'direct-thread-startup',
+  );
   const defaultPaneKinds = ['activity-initial', 'discussion', 'handoff-summary', 'activity'];
   const defaultPaneReadyMs = Object.fromEntries(defaultPaneKinds.map((kind) => [
     kind,
@@ -1970,6 +2047,11 @@ function summarizeScenario(samples) {
     ),
     workspace_startup_post_close: summarizeNumbers(
       measuredSamples.map((sample) => sample.requestContract?.workspaceStartupPostClose ?? 0),
+    ),
+    startup_api_calls: summarizeNumbers(directStartupSamples.map((sample) => sample.requestContract.startupCalls)),
+    startup_api_kb: summarizeNumbers(directStartupSamples.map((sample) => sample.requestContract.startupPayloadKb)),
+    direct_bootstrap_before_me_fulfilled: directStartupSamples.every(
+      (sample) => sample.requestContract.bootstrapBeforeMeFulfilled,
     ),
     request_contract_passed: measuredSamples.every((sample) => sample.requestContract?.passed === true),
     lazy_asset_contract_passed: measuredSamples.every((sample) => sample.lazyAssetContract?.passed === true),
@@ -2089,6 +2171,19 @@ function printTextReport(result) {
     console.log(headers.map((header) => row[header].padEnd(widths[header])).join('  '));
   }
 
+  const legacy = scenarioByName(result, 'thread');
+  const canonical = scenarioByName(result, 'threadCanonical');
+  if (legacy && canonical) {
+    const parityGap = Math.abs(canonical.summary.ready_ms.p50 - legacy.summary.ready_ms.p50) /
+      legacy.summary.ready_ms.p50 * 100;
+    console.log('');
+    console.log(
+      `Canonical/legacy direct-route p50 parity: ` +
+      `${parityGap < DIRECT_ROUTE_P50_GAP_BUDGET_PCT ? 'PASS' : 'FAIL'} ` +
+      `(${parityGap.toFixed(1)}% gap; budget <${DIRECT_ROUTE_P50_GAP_BUDGET_PCT}%)`,
+    );
+  }
+
   for (const scenario of result.scenarios) {
     console.log('');
     console.log(
@@ -2097,6 +2192,14 @@ function printTextReport(result) {
       `${scenario.summary.workspace_bootstrap_before_close.p50.toFixed(0)}/` +
       `${scenario.summary.workspace_bootstrap_post_close.p50.toFixed(0)})`,
     );
+    if (SCENARIOS[scenario.key]?.directThread) {
+      console.log(
+        `${scenario.name} startup: ${scenario.summary.startup_api_calls.p50.toFixed(0)} calls/` +
+        `${scenario.summary.startup_api_kb.p50.toFixed(2)}KB ` +
+        `(budgets <=${DIRECT_THREAD_STARTUP_CALL_BUDGET}/<=${DIRECT_THREAD_STARTUP_PAYLOAD_BUDGET_KB}KB); ` +
+        `bootstrap before /api/me ${scenario.summary.direct_bootstrap_before_me_fulfilled ? 'PASS' : 'FAIL'}`,
+      );
+    }
     if (scenario.summary.lazy_asset_observation_ms > 0) {
       console.log(
         `${scenario.name} lazy asset contract: ${scenario.summary.lazy_asset_contract_passed ? 'PASS' : 'FAIL'} ` +
@@ -2163,11 +2266,81 @@ function pctDelta(before, after) {
   return ((after - before) / before) * 100;
 }
 
-function printComparison(before, after) {
+function majorImprovement(before, after) {
+  return before > 0 && (
+    (before - after) / before * 100 >= DIRECT_ROUTE_IMPROVEMENT_TARGET_PCT ||
+    before - after >= DIRECT_ROUTE_IMPROVEMENT_TARGET_MS
+  );
+}
+
+const COMPARISON_CONFIG_KEYS = [
+  'runs', 'warmups', 'ideas', 'connections', 'streamItems', 'apiLatencyMs', 'sidecarLatencyMs',
+];
+
+function comparisonSignature(result, scenarioKeys) {
+  return JSON.stringify({
+    ...Object.fromEntries(COMPARISON_CONFIG_KEYS.map((key) => [key, result.config[key]])),
+    scenarios: result.config.scenarios.filter((key) => scenarioKeys.includes(key)),
+  });
+}
+
+function withinRegressionBudget(before, after) {
+  return before > 0 && pctDelta(before, after) <= MAX_REGRESSION_PCT;
+}
+
+function comparisonFailures(before, after, scenarioKeys) {
+  const failures = [];
+  if (comparisonSignature(before, scenarioKeys) !== comparisonSignature(after, scenarioKeys)) {
+    failures.push('before/after benchmark config signatures differ');
+  }
+
+  for (const key of scenarioKeys) {
+    const beforeScenario = scenarioByName(before, key);
+    const afterScenario = scenarioByName(after, key);
+    if (!beforeScenario || !afterScenario) {
+      failures.push(`${key}: missing before or after scenario`);
+      continue;
+    }
+
+    const { summary } = afterScenario;
+    if (!summary.request_contract_passed) failures.push(`${key}: request contract failed`);
+    if (!summary.lazy_asset_contract_passed) failures.push(`${key}: lazy asset contract failed`);
+    if (!summary.rare_pane_first_open_budget_passed) failures.push(`${key}: rare pane budget failed`);
+    if (!summary.default_pane_contract_passed) failures.push(`${key}: default pane contract failed`);
+    if (!summary.composer_contract_passed) failures.push(`${key}: composer contract failed`);
+    if (summary.errors.length) failures.push(`${key}: browser errors observed`);
+
+    const beforeReady = beforeScenario.summary.ready_ms;
+    const afterReady = summary.ready_ms;
+    const readyMetrics = [['p50', beforeReady.p50, afterReady.p50], ['p95', beforeReady.p95, afterReady.p95]];
+    const majorReady = readyMetrics.map(([, beforeValue, afterValue]) => majorImprovement(beforeValue, afterValue));
+    const stableReady = readyMetrics.map(([, beforeValue, afterValue]) => withinRegressionBudget(beforeValue, afterValue));
+    if (key === 'thread' && !majorReady.every(Boolean)) failures.push(`${key}: p50/p95 missed major improvement`);
+    if (key !== 'thread' && !stableReady.every(Boolean)) failures.push(`${key}: ready regression >${MAX_REGRESSION_PCT}%`);
+
+    const paneMetrics = [
+      ['Vault first-open', beforeScenario.summary.rare_pane_first_open_ms.p75, summary.rare_pane_first_open_ms.p75],
+      ['Vault data-ready', beforeScenario.summary.rare_pane_data_ready_ms.p75, summary.rare_pane_data_ready_ms.p75],
+      ['Discussion', beforeScenario.summary.default_pane_ready_ms.discussion.p75, summary.default_pane_ready_ms.discussion.p75],
+      ['Handoff', beforeScenario.summary.default_pane_ready_ms['handoff-summary'].p75, summary.default_pane_ready_ms['handoff-summary'].p75],
+      ['Activity', beforeScenario.summary.default_pane_ready_ms.activity.p75, summary.default_pane_ready_ms.activity.p75],
+      ['Composer', beforeScenario.summary.composer_send_ready_ms.p75, summary.composer_send_ready_ms.p75],
+    ];
+    for (const [metric, beforeValue, afterValue] of paneMetrics) {
+      if (beforeValue > 0 && afterValue > 0 && !withinRegressionBudget(beforeValue, afterValue)) {
+        failures.push(`${key}: ${metric} p75 regressed >${MAX_REGRESSION_PCT}%`);
+      }
+    }
+  }
+  return failures;
+}
+
+function printComparison(before, after, scenarioKeys) {
   console.log(`Frontend benchmark wins: ${before.config.phase || 'before'} -> ${after.config.phase || 'after'}`);
   console.log('');
   const rows = [];
   for (const afterScenario of after.scenarios) {
+    if (!scenarioKeys.includes(afterScenario.key)) continue;
     const beforeScenario = scenarioByName(before, afterScenario.name);
     if (!beforeScenario) continue;
     const metrics = [
@@ -2200,6 +2373,12 @@ function printComparison(before, after) {
     const arrow = row.delta <= 0 ? 'win' : 'reg';
     console.log(`${row.scenario} ${row.metric}: ${row.before.toFixed(1)}${row.unit} -> ${row.after.toFixed(1)}${row.unit} (${arrow} ${Math.abs(row.delta).toFixed(1)}%)`);
   }
+
+  const failures = comparisonFailures(before, after, scenarioKeys);
+  console.log('');
+  console.log(`Acceptance contract: ${failures.length ? 'FAIL' : 'PASS'}`);
+  for (const failure of failures) console.log(`  FAIL ${failure}`);
+  return failures;
 }
 
 async function main() {
@@ -2209,7 +2388,10 @@ async function main() {
     if (!beforePath || !afterPath) throw new Error('--compare expects BEFORE,AFTER');
     const before = JSON.parse(await readFile(beforePath, 'utf8'));
     const after = JSON.parse(await readFile(afterPath, 'utf8'));
-    printComparison(before, after);
+    const failures = printComparison(before, after, options.scenarios);
+    if (failures.length) {
+      throw new Error('Frontend benchmark acceptance contract failed');
+    }
     return;
   }
 
@@ -2271,7 +2453,6 @@ async function main() {
         };
       }),
     };
-
     const unknownRoutes = result.scenarios.flatMap((scenario) => scenario.summary.unknown_routes);
     if (unknownRoutes.length && !options.allowUnknownApi) {
       throw new Error(`Unknown mocked API routes detected:\n${unknownRoutes.map((route) => `- ${route.label}`).join('\n')}`);
