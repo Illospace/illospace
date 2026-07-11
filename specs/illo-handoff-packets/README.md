@@ -2,11 +2,29 @@
 
 ## Next Agent Prompt
 
-**Status (2026-07-10):** Spec drafted, adversarially reviewed (14 findings,
-all integrated — see Drafting provenance), no slices implemented. Start at
-[slices/01-dossier-core.md](slices/01-dossier-core.md). A cross-family
-`codex exec` re-review is queued for when the Codex window resets; fold its
-findings in before starting slice 03.
+**Status (2026-07-10):** Slice 01 implemented and green — pure core at
+`brain/systems/briefing/core.py`, CLI probe (`python -m
+brain.systems.briefing --fixture tests/fixtures/briefing/uwear_bug.json`),
+18 unit tests + golden snapshot in `tests/test_briefing_core.py`;
+architecture-boundary gate green; Claude-implemented under the
+Codex-unavailable fallback. Next pickup:
+[slices/02-packet-composer.md](slices/02-packet-composer.md). A
+cross-family `codex exec` review of slice 01 + the spec is queued for when
+the Codex window resets; fold its findings in before starting slice 03.
+
+**Implementation decisions that refine slice texts (01):**
+- `DossierItem.truncated` (+ `omitted_chars`), not the sketch's
+  `omitted: bool` — the item is present, its body was cut; "omitted" is
+  reserved for dropped things.
+- `assemble_dossier(pieces, *, job_ref, budget, headline=None)` — the
+  sketch omitted `job_ref`/`headline` params its own `Dossier` fields
+  require.
+- Budgets govern content; section headers/markers/omissions footer are
+  exempt bounded overhead (never trim the evidence of a cut to fit a cap);
+  a lone oversized item is re-cut down to a 40-char floor, floor wins over
+  cap.
+- Duplicates collapsed by `(source, ref)` are not counted as omissions
+  (same object, still cited once); empty refs are never deduped.
 
 You are implementing the coordinator upgrade: at every routing moment
 (triage assignment, notify nudge, digest line) Illo attaches a **handoff
@@ -27,7 +45,7 @@ explicitly rejected (see Direction below).
   NOT `codex review`, it can recurse and self-kill) on your diff.
 
 ### Global TODO
-- [ ] Slice 01 — dossier core (pure assembly + budgets + truncation honesty)
+- [x] Slice 01 — dossier core (pure assembly + budgets + truncation honesty)
 - [ ] Slice 02 — packet composer (dual-audience render + idempotency)
 - [ ] Slice 03 — gather wiring (read-only source adapters)
 - [ ] Slice 04 — claude launch target (launch page; codex redirect preserved)

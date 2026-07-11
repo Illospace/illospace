@@ -1,0 +1,124 @@
+{
+  "job_ref": "domain_record:1238",
+  "headline": "Maison L. batch 8841 melted hands",
+  "sections": [
+    {
+      "source": "record",
+      "omitted_count": 0,
+      "items": [
+        {
+          "ref": "domain_record:1238",
+          "title": "Maison L. batch 8841 melted hands",
+          "excerpt": "Tracker record for the melted-hands regression. Owner: axel. State: fix merged, prod_pending. Affected: 41 of 96 generations in batch 8841.",
+          "truncated": false,
+          "omitted_chars": 0
+        }
+      ]
+    },
+    {
+      "source": "slack_thread",
+      "omitted_count": 2,
+      "items": [
+        {
+          "ref": "slack:C0PROD/p1751964840",
+          "title": "JB in #prod-support",
+          "excerpt": "customer Maison L. says half of yesterday's batch came out with melted hands again, batch from their profile. They flagged it in the shared channel this morning and want a rerun before their … (+243 chars)",
+          "truncated": true,
+          "omitted_chars": 243
+        },
+        {
+          "ref": "slack:C0PROD/p1751967000",
+          "title": "Axel status",
+          "excerpt": "fix is up as uwear-backend#347, waiting on merge.",
+          "truncated": false,
+          "omitted_chars": 0
+        },
+        {
+          "ref": "slack:C0PROD/p1751966000",
+          "title": "JB follow-up",
+          "excerpt": "customer pinged again, any ETA?",
+          "truncated": false,
+          "omitted_chars": 0
+        }
+      ]
+    },
+    {
+      "source": "github_issue",
+      "omitted_count": 0,
+      "items": [
+        {
+          "ref": "uwear-backend#346",
+          "title": "Backfill default_model for profiles touched by preference migration",
+          "excerpt": "41/96 generations in batch 8841 ran on the legacy fallback model because the profile default_model column was nulled by migration 341. Repro: select id from generation where batch_id = 8841 and … (+159 chars)",
+          "truncated": true,
+          "omitted_chars": 159
+        }
+      ]
+    },
+    {
+      "source": "github_pr",
+      "omitted_count": 0,
+      "items": [
+        {
+          "ref": "uwear-backend#347",
+          "title": "Restore default_model backfill + regression test",
+          "excerpt": "Backfills default_model for affected profiles, adds regression test, includes repro query output for the 41 affected generations.",
+          "truncated": false,
+          "omitted_chars": 0
+        }
+      ]
+    },
+    {
+      "source": "deploy_state",
+      "omitted_count": 0,
+      "items": [
+        {
+          "ref": "deploy:uwear-backend#347",
+          "title": "Deploy ladder",
+          "excerpt": "merged -> prod_pending. Promotion sweep armed; post-deploy verification will spot-check 6 of 41 rerun generations.",
+          "truncated": false,
+          "omitted_chars": 0
+        }
+      ]
+    },
+    {
+      "source": "decision",
+      "omitted_count": 0,
+      "items": [
+        {
+          "ref": "slack:C0PROD/p1751965900",
+          "title": "Rerun decision",
+          "excerpt": "Reda: rerun the 41 affected generations now (~$4 credits) instead of waiting for the customer to ask.",
+          "truncated": false,
+          "omitted_chars": 0
+        }
+      ]
+    },
+    {
+      "source": "posthog",
+      "omitted_count": 0,
+      "items": [
+        {
+          "ref": "posthog:insight:melted-hands",
+          "title": "Complaint rate insight",
+          "excerpt": "Unknown-source piece: must sort after all known sources and shed first under total budget pressure.",
+          "truncated": false,
+          "omitted_chars": 0
+        }
+      ]
+    }
+  ],
+  "total_chars": 1871,
+  "budget": {
+    "total_chars": 4000,
+    "source_chars": 900,
+    "source_overrides": {
+      "slack_thread": 700
+    },
+    "max_items_per_source": 3,
+    "excerpt_chars": 220
+  },
+  "omissions": [
+    "slack_thread: 2 items omitted (budget)"
+  ]
+}
