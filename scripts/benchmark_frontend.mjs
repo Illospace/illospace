@@ -10,6 +10,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { gzipSync } from 'node:zlib';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:5178';
 const DEFAULT_CHROME_PATHS = [
@@ -74,6 +75,9 @@ const DIRECT_THREAD_STARTUP_PAYLOAD_BUDGET_KB = 35.5;
 const DIRECT_ROUTE_P50_GAP_BUDGET_PCT = 5;
 const MAX_REGRESSION_PCT = 5;
 const THREAD_HISTORY_WINDOW_SIZE = 200;
+const THREAD_PAGE_RAW_BUDGET_BYTES = 180 * 1024;
+const THREAD_PAGE_FETCH_BUDGET_MS = 250;
+const THREAD_STARTUP_PAYLOAD_REDUCTION_TARGET_PCT = 75;
 const THREAD_HISTORY_REVEAL_BUDGET_MS = 150;
 const THREAD_HISTORY_VIEWPORT_DRIFT_BUDGET_PX = 2;
 const STRESS_READY_IMPROVEMENT_TARGET_PCT = 10;
@@ -149,6 +153,7 @@ function parseArgs(argv) {
     ideas: 120,
     connections: 240,
     streamItems: 80,
+    streamContract: 'paged',
     apiLatencyMs: 0,
     sidecarLatencyMs: null,
     timeoutMs: 20000,
@@ -179,6 +184,7 @@ function parseArgs(argv) {
     } else if (arg === '--ideas') options.ideas = Number(next());
     else if (arg === '--connections') options.connections = Number(next());
     else if (arg === '--stream-items') options.streamItems = Number(next());
+    else if (arg === '--stream-contract') options.streamContract = next();
     else if (arg === '--api-latency-ms') options.apiLatencyMs = Number(next());
     else if (arg === '--sidecar-latency-ms') options.sidecarLatencyMs = Number(next());
     else if (arg === '--timeout-ms') options.timeoutMs = Number(next());
@@ -208,6 +214,9 @@ function parseArgs(argv) {
   if (!Number.isFinite(options.ideas) || options.ideas < 1) throw new Error('--ideas must be >= 1');
   if (!Number.isFinite(options.connections) || options.connections < 0) throw new Error('--connections must be >= 0');
   if (!Number.isFinite(options.streamItems) || options.streamItems < 0) throw new Error('--stream-items must be >= 0');
+  if (!['legacy', 'paged'].includes(options.streamContract)) {
+    throw new Error('--stream-contract must be legacy or paged');
+  }
   return options;
 }
 
@@ -222,6 +231,7 @@ Options:
   --ideas N                   Mock thread count (default: 120)
   --connections N             Mock connection count (default: 240)
   --stream-items N            Mock thread transcript item count (default: 80)
+  --stream-contract NAME      legacy full array or paged response (default: paged)
   --api-latency-ms N          Artificial latency for every mocked API call (default: 0)
   --sidecar-latency-ms N      Latency for non-critical sidecar calls (default: api latency)
   --timeout-ms N              Per-run ready timeout (default: 20000)
@@ -578,6 +588,7 @@ function buildFixture(options) {
     ideas,
     connections,
     streamItems: buildStreamItems(options.streamItems),
+    streamContract: options.streamContract,
     chat: buildChatFixture(members),
     runtimeSettings: buildRuntimeSettingsFixture(),
     teamTokenAnalytics: buildTeamTokenAnalyticsFixture(members),
@@ -788,7 +799,40 @@ function buildChatFixture(members) {
   };
 }
 
+function threadStreamPage(streamItems, ideaId, before = null, limit = THREAD_HISTORY_WINDOW_SIZE) {
+  const cursorMatch = before?.match(/^bench-before-(\d+)$/) ?? null;
+  if (before && !cursorMatch) return null;
+  const end = cursorMatch ? Number(cursorMatch[1]) : streamItems.length;
+  if (!Number.isInteger(end) || end < 0 || end > streamItems.length) return null;
+  const start = Math.max(0, end - limit);
+  return {
+    idea_id: ideaId,
+    items: streamItems.slice(start, end),
+    has_more: start > 0,
+    next_before: start > 0 ? `bench-before-${start}` : null,
+  };
+}
+
+function mockThreadStreamPayload(fixture, ideaId, url, direct = false) {
+  if (fixture.streamContract === 'legacy') {
+    return direct
+      ? { idea_id: ideaId, stream: fixture.streamItems }
+      : fixture.streamItems;
+  }
+  const requestedLimit = Number(url.searchParams.get('limit') || THREAD_HISTORY_WINDOW_SIZE);
+  if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > THREAD_HISTORY_WINDOW_SIZE) {
+    return null;
+  }
+  return threadStreamPage(
+    fixture.streamItems,
+    ideaId,
+    url.searchParams.get('before'),
+    requestedLimit,
+  );
+}
+
 function jsonResponse(status, body, extra = {}) {
+  const threadPayloadText = extra.threadPayload ? JSON.stringify(extra.threadPayload) : null;
   return {
     status,
     body,
@@ -800,6 +844,10 @@ function jsonResponse(status, body, extra = {}) {
     label: extra.label,
     sidecar: Boolean(extra.sidecar),
     unknown: Boolean(extra.unknown),
+    threadPageKind: extra.threadPageKind ?? null,
+    threadPageItems: extra.threadPageItems ?? null,
+    threadPayloadBytes: threadPayloadText ? Buffer.byteLength(threadPayloadText) : null,
+    threadPayloadGzipBytes: threadPayloadText ? gzipSync(threadPayloadText).byteLength : null,
   };
 }
 
@@ -870,13 +918,20 @@ function mockApiResponse(method, url, fixture) {
       auth_status: include.has('auth_status') ? { setup_required: false, configured: true, provider: 'openai' } : null,
       meta: { include: [...include].sort() },
     };
+    let directThreadPayload = null;
     if (include.has('direct_thread')) {
-      body.direct_thread = {
-        idea_id: url.searchParams.get('idea_id') || 'idea-1',
-        stream: fixture.streamItems,
-      };
+      const ideaId = url.searchParams.get('idea_id') || 'idea-1';
+      directThreadPayload = mockThreadStreamPayload(fixture, ideaId, url, true);
+      body.direct_thread = directThreadPayload;
     }
-    return jsonResponse(200, body, { label: 'GET /api/cortex/bootstrap' });
+    return jsonResponse(200, body, {
+      label: 'GET /api/cortex/bootstrap',
+      threadPayload: directThreadPayload,
+      threadPageKind: directThreadPayload ? 'initial' : null,
+      threadPageItems: directThreadPayload
+        ? (directThreadPayload.items?.length ?? directThreadPayload.stream?.length ?? null)
+        : null,
+    });
   }
   if (pathName === '/api/cortex/connections') {
     return jsonResponse(200, fixture.connections, { label: 'GET /api/cortex/connections' });
@@ -886,7 +941,19 @@ function mockApiResponse(method, url, fixture) {
   }
   const unifiedStreamMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/unified-stream$/);
   if (unifiedStreamMatch) {
-    return jsonResponse(200, fixture.streamItems, { label: 'GET /api/cortex/ideas/{idea_id}/unified-stream' });
+    const payload = mockThreadStreamPayload(fixture, unifiedStreamMatch[1], url);
+    if (!payload) {
+      return jsonResponse(422, { detail: 'Invalid benchmark thread page cursor or limit' }, {
+        label: 'GET /api/cortex/ideas/{idea_id}/unified-stream',
+      });
+    }
+    const before = url.searchParams.get('before');
+    return jsonResponse(200, payload, {
+      label: 'GET /api/cortex/ideas/{idea_id}/unified-stream',
+      threadPayload: payload,
+      threadPageKind: fixture.streamContract === 'paged' ? (before ? 'older' : 'head') : 'legacy',
+      threadPageItems: payload.items?.length ?? payload.length,
+    });
   }
   const threadMessageMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/thread$/);
   if (threadMessageMatch && methodUpper === 'POST') {
@@ -1271,6 +1338,11 @@ async function configurePage(client, fixture, options, apiCalls) {
       label: response.label,
       status: response.status,
       bytes: Buffer.byteLength(bodyText),
+      gzipBytes: gzipSync(bodyText).byteLength,
+      threadPageKind: response.threadPageKind,
+      threadPageItems: response.threadPageItems,
+      threadPayloadBytes: response.threadPayloadBytes,
+      threadPayloadGzipBytes: response.threadPayloadGzipBytes,
       startedAt,
       fulfilledAt: null,
       durationMs: null,
@@ -1354,7 +1426,7 @@ function assertRequestContract(condition, scenario, expectation, calls) {
   );
 }
 
-function directThreadRequestContract(callsAtReady, scenario, streamItems) {
+function directThreadRequestContract(callsAtReady, scenario, streamItems, streamContract) {
   const bootstrapCalls = workspaceBootstrapCalls(callsAtReady);
   const directBootstrapCalls = directThreadBootstrapCalls(callsAtReady, scenario.ideaId);
   const directBootstrap = directBootstrapCalls[0] ?? null;
@@ -1386,6 +1458,12 @@ function directThreadRequestContract(callsAtReady, scenario, streamItems) {
     startupCalls: callsAtReady.length,
     startupPayloadKb,
     payloadBudgetKb,
+    streamContract,
+    initialBootstrapBytes: directBootstrap?.bytes ?? null,
+    initialBootstrapGzipBytes: directBootstrap?.gzipBytes ?? null,
+    initialThreadPayloadBytes: directBootstrap?.threadPayloadBytes ?? null,
+    initialThreadPayloadGzipBytes: directBootstrap?.threadPayloadGzipBytes ?? null,
+    initialThreadItems: directBootstrap?.threadPageItems ?? null,
   };
 }
 
@@ -1573,6 +1651,7 @@ async function measureThreadHistoryContract(client, scenario, options) {
       };
     };
     const rootFor = (id) => roots().find((root) => idFor(root) === id) ?? null;
+    const bench = window.__illoBench || {};
     const waitForReveal = async (previous) => {
       const deadline = performance.now() + ${Math.min(options.timeoutMs, 5000)};
       while (performance.now() < deadline) {
@@ -1596,6 +1675,7 @@ async function measureThreadHistoryContract(client, scenario, options) {
       const anchorId = before.ids[0];
       const anchorBefore = rootFor(anchorId);
       const topBefore = anchorBefore?.getBoundingClientRect().top;
+      const longTaskStart = bench.longTasks?.length ?? 0;
       const startedAt = performance.now();
       button.click();
       const settled = await waitForReveal(before.unique);
@@ -1608,6 +1688,7 @@ async function measureThreadHistoryContract(client, scenario, options) {
       const topAfter = rootFor(anchorId)?.getBoundingClientRect().top;
       const drift = Number.isFinite(topBefore) && Number.isFinite(topAfter)
         ? Math.abs(topAfter - topBefore) : null;
+      const revealLongTasks = (bench.longTasks || []).slice(longTaskStart);
       const expectedAdded = Math.min(batch, total - before.unique);
       const behaviorPassed = settled && added === expectedAdded && removed === 0 &&
         after.duplicates === 0 && after.valid && controlVisible() === (after.unique < total) && drift !== null;
@@ -1618,6 +1699,9 @@ async function measureThreadHistoryContract(client, scenario, options) {
         afterItems: after.unique,
         addedItems: added,
         removedItems: removed,
+        longTaskCount: revealLongTasks.length,
+        longTaskTotalMs: revealLongTasks.reduce((sum, task) => sum + task.duration, 0),
+        maxLongTaskMs: Math.max(0, ...revealLongTasks.map((task) => task.duration)),
         behaviorPassed,
       });
       if (!settled || after.unique <= before.unique) break;
@@ -1643,6 +1727,7 @@ async function measureThreadHistoryContract(client, scenario, options) {
       controlVisibilityPassed,
       finalRenderedIdentityCount: final.unique,
       repeatedRevealPassed,
+      longTaskObserverAvailable: bench.longTaskObserverAvailable === true,
       reveals,
     };
   })()`);
@@ -1678,7 +1763,6 @@ async function measureLazyAssetContract(
       assetRequests,
       options.baseUrl,
     );
-
     await waitForExpression(client, THREAD_READY_EXPRESSION, options.timeoutMs);
     const firstOpenMs = performance.now() - selectionStartedAt;
     const manifestProof = verifyManifestDeferredAssets(
@@ -1934,7 +2018,7 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
     const bootstrapCallsAtReady = workspaceBootstrapCalls(apiCallsAtReady);
     const workspaceCallsAtReady = workspaceStartupCalls(apiCallsAtReady);
     const directStartupContract = scenario.directThread
-      ? directThreadRequestContract(apiCallsAtReady, scenario, options.streamItems)
+      ? directThreadRequestContract(apiCallsAtReady, scenario, options.streamItems, options.streamContract)
       : null;
 
     if (scenario.modalId) {
@@ -1988,7 +2072,29 @@ async function runScenario(client, scenarioKey, fixture, options, measured, lazy
       performanceMetricsAfter,
       'TaskDuration',
     );
+    const historyApiStartIndex = apiCalls.length;
+    const historyPerformanceBefore = await performanceMetrics(client);
+    const historyStartedAt = performance.now();
     const historyContract = await measureThreadHistoryContract(client, scenario, options);
+    const historyPerformanceAfter = await performanceMetrics(client);
+    historyContract.wallMs = performance.now() - historyStartedAt;
+    historyContract.taskDurationMs = performanceDurationMs(
+      historyPerformanceBefore,
+      historyPerformanceAfter,
+      'TaskDuration',
+    );
+    const olderPageCalls = apiCalls.slice(historyApiStartIndex).filter(
+      (call) => call.threadPageKind === 'older',
+    );
+    historyContract.remotePageRequestCount = olderPageCalls.length;
+    historyContract.remotePageBytes = olderPageCalls.map((call) => call.threadPayloadBytes);
+    historyContract.remotePageGzipBytes = olderPageCalls.map((call) => call.threadPayloadGzipBytes);
+    historyContract.remotePageFetchMs = olderPageCalls.map((call) => call.durationMs);
+    historyContract.remotePageItems = olderPageCalls.map((call) => call.threadPageItems);
+    historyContract.reveals.forEach((reveal, index) => {
+      reveal.fetchMs = olderPageCalls[index]?.durationMs ?? null;
+      reveal.postFetchMs = Number.isFinite(reveal.fetchMs) ? reveal.revealMs - reveal.fetchMs : null;
+    });
 
     const measuredApiCalls = [...apiCalls];
     const bootstrapCallsBeforeClose = workspaceBootstrapCalls(measuredApiCalls);
@@ -2180,6 +2286,9 @@ function summarizeScenario(samples) {
       : null;
   };
   const revealValues = (key) => historyValues(historyReveals, key);
+  const remotePageValues = (key) => historySamples.flatMap(
+    (sample) => sample.historyContract[key] ?? [],
+  ).filter(Number.isFinite);
   const defaultPaneKinds = ['activity-initial', 'discussion', 'handoff-summary', 'activity'];
   const defaultPaneReadyMs = Object.fromEntries(defaultPaneKinds.map((kind) => [
     kind,
@@ -2236,6 +2345,21 @@ function summarizeScenario(samples) {
     ),
     startup_api_calls: summarizeNumbers(directStartupSamples.map((sample) => sample.requestContract.startupCalls)),
     startup_api_kb: summarizeNumbers(directStartupSamples.map((sample) => sample.requestContract.startupPayloadKb)),
+    initial_direct_bootstrap_bytes: summarizeNumbers(
+      directStartupSamples.map((sample) => sample.requestContract.initialBootstrapBytes).filter(Number.isFinite),
+    ),
+    initial_direct_bootstrap_gzip_bytes: summarizeNumbers(
+      directStartupSamples.map((sample) => sample.requestContract.initialBootstrapGzipBytes).filter(Number.isFinite),
+    ),
+    initial_thread_payload_bytes: summarizeNumbers(
+      directStartupSamples.map((sample) => sample.requestContract.initialThreadPayloadBytes).filter(Number.isFinite),
+    ),
+    initial_thread_payload_gzip_bytes: summarizeNumbers(
+      directStartupSamples.map((sample) => sample.requestContract.initialThreadPayloadGzipBytes).filter(Number.isFinite),
+    ),
+    initial_thread_items: summarizeNumbers(
+      directStartupSamples.map((sample) => sample.requestContract.initialThreadItems).filter(Number.isFinite),
+    ),
     direct_bootstrap_before_me_fulfilled: directStartupSamples.every(
       (sample) => sample.requestContract.bootstrapBeforeMeFulfilled,
     ),
@@ -2317,6 +2441,24 @@ function summarizeScenario(samples) {
     thread_history_viewport_drift_available: historyRevealArraysAvailable &&
       revealValues('viewportDriftPx').length === historyReveals.length,
     thread_history_viewport_drift_px: summarizeNumbers(revealValues('viewportDriftPx')),
+    thread_history_task_duration_available: historySamples.every(
+      (sample) => Number.isFinite(sample.historyContract.taskDurationMs),
+    ),
+    thread_history_task_duration_ms: summarizeNumbers(
+      historySamples.map((sample) => sample.historyContract.taskDurationMs).filter(Number.isFinite),
+    ),
+    thread_history_long_task_observer_available: historySamples.every(
+      (sample) => sample.historyContract.longTaskObserverAvailable === true,
+    ),
+    thread_history_max_long_task_ms: summarizeNumbers(revealValues('maxLongTaskMs')),
+    thread_history_post_fetch_ms: summarizeNumbers(revealValues('postFetchMs')),
+    thread_history_remote_page_requests: summarizeNumbers(
+      historySamples.map((sample) => sample.historyContract.remotePageRequestCount).filter(Number.isFinite),
+    ),
+    thread_history_remote_page_bytes: summarizeNumbers(remotePageValues('remotePageBytes')),
+    thread_history_remote_page_gzip_bytes: summarizeNumbers(remotePageValues('remotePageGzipBytes')),
+    thread_history_remote_page_fetch_ms: summarizeNumbers(remotePageValues('remotePageFetchMs')),
+    thread_history_remote_page_items: summarizeNumbers(remotePageValues('remotePageItems')),
     dom_nodes_available: domNodeValues.length === measuredSamples.length,
     dom_nodes: summarizeNumbers(domNodeValues),
     deep_field_feature_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.deepFieldFeatureNodes ?? 0)),
@@ -2417,12 +2559,33 @@ function printTextReport(result) {
         `bootstrap before /api/me ${scenario.summary.direct_bootstrap_before_me_fulfilled ? 'PASS' : 'FAIL'}`,
       );
       console.log(
+        `${scenario.name} initial thread payload: ` +
+        `${(scenario.summary.initial_thread_payload_bytes.p50 / 1024).toFixed(2)}KB raw/` +
+        `${(scenario.summary.initial_thread_payload_gzip_bytes.p50 / 1024).toFixed(2)}KB gzip; ` +
+        `${scenario.summary.initial_thread_items.p50.toFixed(0)} items; ` +
+        `contract ${result.config.streamContract}`,
+      );
+      console.log(
         `${scenario.name} history markers: ${scenario.summary.thread_history_contract_passed ? 'PASS' : 'FAIL'} ` +
         `(initial identities/rendered ${Number.isFinite(historyCounts.initialIdentities?.p50) ? historyCounts.initialIdentities.p50.toFixed(0) : '-'}/` +
         `${Number.isFinite(historyCounts.initialItems?.p50) ? historyCounts.initialItems.p50.toFixed(0) : '-'}; ` +
         `reveal p95 ${scenario.summary.thread_history_reveal_ms.p95.toFixed(1)}ms; ` +
         `drift max ${scenario.summary.thread_history_viewport_drift_px.max.toFixed(1)}px; ` +
         `final identities ${Number.isFinite(historyCounts.finalIdentities?.p50) ? historyCounts.finalIdentities.p50.toFixed(0) : '-'})`,
+      );
+      console.log(
+        `${scenario.name} remote history: ` +
+        `${scenario.summary.thread_history_remote_page_requests.p50.toFixed(0)} pages; ` +
+        `page max ${(scenario.summary.thread_history_remote_page_bytes.max / 1024).toFixed(2)}KB raw/` +
+        `${(scenario.summary.thread_history_remote_page_gzip_bytes.max / 1024).toFixed(2)}KB gzip; ` +
+        `fetch p95 ${scenario.summary.thread_history_remote_page_fetch_ms.p95.toFixed(1)}ms`,
+      );
+      console.log(
+        `${scenario.name} history work: ` +
+        `CDP task p50/p95 ${scenario.summary.thread_history_task_duration_ms.p50.toFixed(1)}/` +
+        `${scenario.summary.thread_history_task_duration_ms.p95.toFixed(1)}ms; ` +
+        `post-fetch p95 ${scenario.summary.thread_history_post_fetch_ms.p95.toFixed(1)}ms; ` +
+        `long task max ${scenario.summary.thread_history_max_long_task_ms.max.toFixed(1)}ms`,
       );
     }
     if (scenario.summary.lazy_asset_observation_ms > 0) {
@@ -2540,6 +2703,8 @@ function directThreadHistoryFailures(key, summary) {
   for (const [label, availabilityKey, metricKey] of [
     ['history reveal', 'thread_history_reveal_available', 'thread_history_reveal_ms'],
     ['history viewport drift', 'thread_history_viewport_drift_available', 'thread_history_viewport_drift_px'],
+    ['history CDP task duration', 'thread_history_task_duration_available', 'thread_history_task_duration_ms'],
+    ['history long task', 'thread_history_long_task_observer_available', 'thread_history_max_long_task_ms'],
   ]) {
     const metric = summary[metricKey];
     const metricAvailable = metric && [metric.p50, metric.p95, metric.max].every(Number.isFinite);
@@ -2581,13 +2746,13 @@ function isThreadHistoryStressConfig(config) {
     config.apiLatencyMs === 100;
 }
 
-function stressAbsoluteFailures(key, summary) {
+function stressAbsoluteFailures(key, summary, revealBudgetMs = THREAD_HISTORY_REVEAL_BUDGET_MS) {
   const failures = [];
   const metrics = [
     ['CDP TaskDuration', summaryMetricAvailable(summary, 'task_duration_available', 'task_duration_ms'), summary.task_duration_ms?.p50, STRESS_TASK_P50_BUDGET_MS, 'ms'],
     ['LongTask p95', summaryMetricAvailable(summary, 'long_task_observer_available', 'long_task_count'), summary.max_long_task_ms?.p95, STRESS_LONG_TASK_P95_BUDGET_MS, 'ms'],
     ['DOM nodes max', summaryMetricAvailable(summary, 'dom_nodes_available', 'dom_nodes'), summary.dom_nodes?.max, STRESS_DOM_NODE_BUDGET, ''],
-    ['history reveal p95', summaryMetricAvailable(summary, 'thread_history_reveal_available', 'thread_history_reveal_ms'), summary.thread_history_reveal_ms?.p95, THREAD_HISTORY_REVEAL_BUDGET_MS, 'ms'],
+    ['history reveal p95', summaryMetricAvailable(summary, 'thread_history_reveal_available', 'thread_history_reveal_ms'), summary.thread_history_reveal_ms?.p95, revealBudgetMs, 'ms'],
     ['history viewport drift max', summaryMetricAvailable(summary, 'thread_history_viewport_drift_available', 'thread_history_viewport_drift_px'), summary.thread_history_viewport_drift_px?.max, THREAD_HISTORY_VIEWPORT_DRIFT_BUDGET_PX, 'px'],
   ];
   for (const [metric, available, value, budget, unit] of metrics) {
@@ -2607,10 +2772,81 @@ function stressAbsoluteFailures(key, summary) {
   return failures;
 }
 
+function isPaginationComparison(before, after) {
+  return before.config.streamContract === 'legacy' && after.config.streamContract === 'paged';
+}
+
+function paginationAbsoluteFailures(key, summary, config) {
+  const failures = [];
+  const bootstrapBytes = summary.initial_direct_bootstrap_bytes;
+  const threadPayloadBytes = summary.initial_thread_payload_bytes;
+  const initialItems = summary.initial_thread_items;
+  for (const [label, metric] of [
+    ['initial direct bootstrap bytes', bootstrapBytes],
+    ['initial thread payload bytes', threadPayloadBytes],
+    ['initial thread items', initialItems],
+  ]) {
+    if (!metric || ![metric.p50, metric.p95, metric.max].every(Number.isFinite) || metric.max <= 0) {
+      failures.push(`${key}: ${label} unavailable`);
+    }
+  }
+  if (Number.isFinite(bootstrapBytes?.max) && bootstrapBytes.max > THREAD_PAGE_RAW_BUDGET_BYTES) {
+    failures.push(`${key}: initial direct bootstrap exceeds ${THREAD_PAGE_RAW_BUDGET_BYTES} bytes`);
+  }
+  const expectedInitialItems = Math.min(config.streamItems, THREAD_HISTORY_WINDOW_SIZE);
+  if (Number.isFinite(initialItems?.min) && (
+    initialItems.min !== expectedInitialItems || initialItems.max !== expectedInitialItems
+  )) {
+    failures.push(`${key}: initial page must contain exactly ${expectedInitialItems} items`);
+  }
+
+  const expectedOlderPages = Math.max(
+    0,
+    Math.ceil(config.streamItems / THREAD_HISTORY_WINDOW_SIZE) - 1,
+  );
+  const pageRequests = summary.thread_history_remote_page_requests;
+  if (!pageRequests || ![pageRequests.min, pageRequests.max].every(Number.isFinite)) {
+    failures.push(`${key}: remote page request count unavailable`);
+  } else if (pageRequests.min !== expectedOlderPages || pageRequests.max !== expectedOlderPages) {
+    failures.push(`${key}: expected ${expectedOlderPages} remote pages`);
+  }
+  if (expectedOlderPages > 0) {
+    const pageBytes = summary.thread_history_remote_page_bytes;
+    const fetchMs = summary.thread_history_remote_page_fetch_ms;
+    const postFetchMs = summary.thread_history_post_fetch_ms;
+    const pageItems = summary.thread_history_remote_page_items;
+    for (const [label, metric] of [
+      ['remote page bytes', pageBytes],
+      ['remote page fetch', fetchMs],
+      ['remote page post-fetch work', postFetchMs],
+      ['remote page items', pageItems],
+    ]) {
+      if (!metric || ![metric.p50, metric.p95, metric.max].every(Number.isFinite) || metric.max <= 0) {
+        failures.push(`${key}: ${label} unavailable`);
+      }
+    }
+    if (Number.isFinite(pageBytes?.max) && pageBytes.max > THREAD_PAGE_RAW_BUDGET_BYTES) {
+      failures.push(`${key}: remote page exceeds ${THREAD_PAGE_RAW_BUDGET_BYTES} bytes`);
+    }
+    if (Number.isFinite(fetchMs?.p95) && fetchMs.p95 > THREAD_PAGE_FETCH_BUDGET_MS) {
+      failures.push(`${key}: remote page fetch p95 exceeds ${THREAD_PAGE_FETCH_BUDGET_MS}ms`);
+    }
+    if (Number.isFinite(pageItems?.max) && pageItems.max > THREAD_HISTORY_WINDOW_SIZE) {
+      failures.push(`${key}: remote page exceeds ${THREAD_HISTORY_WINDOW_SIZE} items`);
+    }
+  }
+  return failures;
+}
+
 function comparisonFailures(before, after, scenarioKeys) {
   const failures = [];
+  const paginationComparison = isPaginationComparison(before, after);
+  const hasStreamContract = Boolean(before.config.streamContract || after.config.streamContract);
   if (comparisonSignature(before, scenarioKeys) !== comparisonSignature(after, scenarioKeys)) {
     failures.push('before/after benchmark config signatures differ');
+  }
+  if (hasStreamContract && !paginationComparison) {
+    failures.push('pagination comparison requires legacy before and paged after contracts');
   }
 
   for (const key of scenarioKeys) {
@@ -2632,21 +2868,26 @@ function comparisonFailures(before, after, scenarioKeys) {
     const directThread = Boolean(SCENARIOS[key]?.directThread);
     const stress = directThread && isThreadHistoryStressConfig(after.config);
     if (directThread) failures.push(...directThreadHistoryFailures(key, summary));
+    if (directThread && after.config.streamContract === 'paged') {
+      failures.push(...paginationAbsoluteFailures(key, summary, after.config));
+    }
 
     const beforeReady = beforeScenario.summary.ready_ms;
     const afterReady = summary.ready_ms;
     const readyMetrics = [['p50', beforeReady.p50, afterReady.p50], ['p95', beforeReady.p95, afterReady.p95]];
     const stableReady = readyMetrics.map(([, beforeValue, afterValue]) => withinRegressionBudget(beforeValue, afterValue));
-    if (!stress && !stableReady.every(Boolean)) failures.push(`${key}: ready regression >${MAX_REGRESSION_PCT}%`);
+    if ((!stress || paginationComparison) && !stableReady.every(Boolean)) {
+      failures.push(`${key}: ready regression >${MAX_REGRESSION_PCT}%`);
+    }
     const beforeFcp = summaryMetricValue(beforeScenario.summary, 'fcp_available', 'fcp_ms', 'p50');
     const afterFcp = summaryMetricValue(summary, 'fcp_available', 'fcp_ms', 'p50');
-    if (!stress && (beforeFcp === null || afterFcp === null)) {
+    if ((!stress || paginationComparison) && (beforeFcp === null || afterFcp === null)) {
       failures.push(`${key}: comparable FCP unavailable`);
-    } else if (!stress && !withinRegressionBudget(beforeFcp, afterFcp)) {
+    } else if ((!stress || paginationComparison) && !withinRegressionBudget(beforeFcp, afterFcp)) {
       failures.push(`${key}: FCP p50 regression >${MAX_REGRESSION_PCT}%`);
     }
 
-    if (stress) {
+    if (stress && !paginationComparison) {
       for (const [percentileName, beforeValue, afterValue] of readyMetrics) {
         const improvementPct = -pctDelta(beforeValue, afterValue);
         if (improvementPct < STRESS_READY_IMPROVEMENT_TARGET_PCT) {
@@ -2656,20 +2897,35 @@ function comparisonFailures(before, after, scenarioKeys) {
           );
         }
       }
-      failures.push(...stressAbsoluteFailures(key, summary));
     }
+    if (stress) failures.push(...stressAbsoluteFailures(
+      key,
+      summary,
+      paginationComparison ? THREAD_PAGE_FETCH_BUDGET_MS : THREAD_HISTORY_REVEAL_BUDGET_MS,
+    ));
 
-    const paneMetrics = [
-      ['Vault first-open', beforeScenario.summary.rare_pane_first_open_ms.p75, summary.rare_pane_first_open_ms.p75],
-      ['Vault data-ready', beforeScenario.summary.rare_pane_data_ready_ms.p75, summary.rare_pane_data_ready_ms.p75],
-      ['Discussion', beforeScenario.summary.default_pane_ready_ms.discussion.p75, summary.default_pane_ready_ms.discussion.p75],
-      ['Handoff', beforeScenario.summary.default_pane_ready_ms['handoff-summary'].p75, summary.default_pane_ready_ms['handoff-summary'].p75],
-      ['Activity', beforeScenario.summary.default_pane_ready_ms.activity.p75, summary.default_pane_ready_ms.activity.p75],
-      ['Composer', beforeScenario.summary.composer_send_ready_ms.p75, summary.composer_send_ready_ms.p75],
-    ];
-    for (const [metric, beforeValue, afterValue] of paneMetrics) {
-      if (beforeValue > 0 && afterValue > 0 && !withinRegressionBudget(beforeValue, afterValue)) {
-        failures.push(`${key}: ${metric} p75 regressed >${MAX_REGRESSION_PCT}%`);
+    if (directThread && paginationComparison) {
+      if (before.config.streamItems > THREAD_HISTORY_WINDOW_SIZE) {
+        const beforeBootstrap = beforeScenario.summary.initial_direct_bootstrap_bytes?.p50;
+        const afterBootstrap = summary.initial_direct_bootstrap_bytes?.p50;
+        if (!Number.isFinite(beforeBootstrap) || !Number.isFinite(afterBootstrap) || beforeBootstrap <= 0) {
+          failures.push(`${key}: comparable initial direct bootstrap bytes unavailable`);
+        } else if (-pctDelta(beforeBootstrap, afterBootstrap) < THREAD_STARTUP_PAYLOAD_REDUCTION_TARGET_PCT) {
+          failures.push(`${key}: initial direct bootstrap reduction <${THREAD_STARTUP_PAYLOAD_REDUCTION_TARGET_PCT}%`);
+        }
+      }
+
+      const regressionMetrics = [
+        ['DOM p50', beforeScenario.summary.dom_nodes?.p50, summary.dom_nodes?.p50],
+        ['CDP task p50', summaryMetricValue(beforeScenario.summary, 'task_duration_available', 'task_duration_ms', 'p50'), summaryMetricValue(summary, 'task_duration_available', 'task_duration_ms', 'p50')],
+        ['Long task p95', summaryMetricValue(beforeScenario.summary, 'long_task_observer_available', 'max_long_task_ms', 'p95'), summaryMetricValue(summary, 'long_task_observer_available', 'max_long_task_ms', 'p95')],
+      ];
+      for (const [metric, beforeValue, afterValue] of regressionMetrics) {
+        if (!Number.isFinite(beforeValue) || !Number.isFinite(afterValue)) {
+          failures.push(`${key}: comparable ${metric} unavailable`);
+        } else if (!withinRegressionBudget(beforeValue, afterValue)) {
+          failures.push(`${key}: ${metric} regression >${MAX_REGRESSION_PCT}%`);
+        }
       }
     }
   }
@@ -2692,6 +2948,8 @@ function printComparison(before, after, scenarioKeys) {
       ['FCP p50', summaryMetricValue(beforeSummary, 'fcp_available', 'fcp_ms', 'p50'), summaryMetricValue(afterSummary, 'fcp_available', 'fcp_ms', 'p50'), 'ms'],
       ['API calls p50', beforeSummary.api_calls.p50, afterSummary.api_calls.p50, ''],
       ['API KB p50', beforeSummary.api_kb.p50, afterSummary.api_kb.p50, 'KB'],
+      ['initial bootstrap KB p50', beforeSummary.initial_direct_bootstrap_bytes?.p50 / 1024, afterSummary.initial_direct_bootstrap_bytes?.p50 / 1024, 'KB'],
+      ['initial thread payload KB p50', beforeSummary.initial_thread_payload_bytes?.p50 / 1024, afterSummary.initial_thread_payload_bytes?.p50 / 1024, 'KB'],
       ['rare pane first-open p75', beforeSummary.rare_pane_first_open_ms?.p75 ?? 0, afterSummary.rare_pane_first_open_ms?.p75 ?? 0, 'ms'],
       ['DOM nodes p50', beforeSummary.dom_nodes.p50, afterSummary.dom_nodes.p50, ''],
       ['D3 shadow nodes p50', beforeSummary.d3_shadow_nodes?.p50 ?? 0, afterSummary.d3_shadow_nodes?.p50 ?? 0, ''],
@@ -2703,6 +2961,12 @@ function printComparison(before, after, scenarioKeys) {
       ['history initial rendered identities p50', threadHistoryCounts(beforeSummary).initialIdentities?.p50 ?? null, threadHistoryCounts(afterSummary).initialIdentities?.p50 ?? null, ''],
       ['history reveal p95', beforeSummary.thread_history_reveal_ms?.p95 ?? 0, afterSummary.thread_history_reveal_ms?.p95 ?? 0, 'ms'],
       ['history drift max', beforeSummary.thread_history_viewport_drift_px?.max ?? 0, afterSummary.thread_history_viewport_drift_px?.max ?? 0, 'px'],
+      ['history CDP task p95', beforeSummary.thread_history_task_duration_ms?.p95, afterSummary.thread_history_task_duration_ms?.p95, 'ms'],
+      ['history long task max', beforeSummary.thread_history_max_long_task_ms?.max, afterSummary.thread_history_max_long_task_ms?.max, 'ms'],
+      ['history post-fetch p95', beforeSummary.thread_history_post_fetch_ms?.p95, afterSummary.thread_history_post_fetch_ms?.p95, 'ms'],
+      ['remote pages p50', beforeSummary.thread_history_remote_page_requests?.p50, afterSummary.thread_history_remote_page_requests?.p50, ''],
+      ['remote page KB max', beforeSummary.thread_history_remote_page_bytes?.max / 1024, afterSummary.thread_history_remote_page_bytes?.max / 1024, 'KB'],
+      ['remote fetch p95', beforeSummary.thread_history_remote_page_fetch_ms?.p95, afterSummary.thread_history_remote_page_fetch_ms?.p95, 'ms'],
     ];
     for (const [metric, beforeValue, afterValue, unit] of metrics) {
       rows.push({
@@ -2786,6 +3050,7 @@ async function main() {
         ideas: options.ideas,
         connections: options.connections,
         streamItems: options.streamItems,
+        streamContract: options.streamContract,
         apiLatencyMs: options.apiLatencyMs,
         sidecarLatencyMs: options.sidecarLatencyMs,
         timeoutMs: options.timeoutMs,
@@ -2820,8 +3085,17 @@ async function main() {
     const threadFailures = result.scenarios.flatMap((scenario) => {
       if (!SCENARIOS[scenario.key]?.directThread) return [];
       const failures = directThreadHistoryFailures(scenario.key, scenario.summary);
+      if (result.config.streamContract === 'paged') {
+        failures.push(...paginationAbsoluteFailures(scenario.key, scenario.summary, result.config));
+      }
       if (isThreadHistoryStressConfig(result.config)) {
-        failures.push(...stressAbsoluteFailures(scenario.key, scenario.summary));
+        failures.push(...stressAbsoluteFailures(
+          scenario.key,
+          scenario.summary,
+          result.config.streamContract === 'paged'
+            ? THREAD_PAGE_FETCH_BUDGET_MS
+            : THREAD_HISTORY_REVEAL_BUDGET_MS,
+        ));
       }
       return failures;
     });

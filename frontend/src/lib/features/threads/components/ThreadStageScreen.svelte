@@ -87,11 +87,12 @@
     timeAgo,
     visibleThreadStreamItems,
   } from '$lib/features/threads/domain/threadStreamAdapter';
-  import type {
-    CortexThreadStageFileAttachment,
-    CortexThreadStageHeaderStatusState,
-    CortexThreadStageImageAttachment,
-    CortexThreadStageTranscriptItem,
+  import {
+    canShowEarlierThreadHistory,
+    type CortexThreadStageFileAttachment,
+    type CortexThreadStageHeaderStatusState,
+    type CortexThreadStageImageAttachment,
+    type CortexThreadStageTranscriptItem,
   } from '$lib/features/threads/domain/threadTranscriptAdapter';
 
   type ActiveRunMessageIntent = 'steer' | 'queue';
@@ -154,7 +155,8 @@
   let threadDragOver = $state(false);
   let userScrolledUp = $state(false);
   let threadStreamWindowState = $state<{ ideaId: string; cursor: ThreadStreamWindowCursor } | null>(null);
-  let programmaticScroll = false;
+  let threadHistoryOperationToken = 0;
+  let programmaticScroll = $state(false);
   let showTranscriptScrollCue = $state(false);
   let transcriptScrollFrame: number | null = null;
   let projectContextError = $state('');
@@ -792,13 +794,23 @@
     if (state.valid) projectContextError = '';
   }
 
+  const selectedThreadId = $derived(idea?.id == null ? null : String(idea.id));
   const threadStreamWindow = $derived.by(() =>
     buildThreadStreamWindow(
       visibleStreamItems,
-      String(idea?.id ?? '') === threadStreamWindowState?.ideaId
+      selectedThreadId === threadStreamWindowState?.ideaId
         ? threadStreamWindowState.cursor
         : null,
     ),
+  );
+  const remoteHistoryHasMore = $derived(Boolean(selectedThreadId && cortex.threadHistoryHasMore(selectedThreadId)));
+  const canShowEarlierHistory = $derived(
+    programmaticScroll && userScrolledUp
+    || canShowEarlierThreadHistory(threadStreamWindow.previousCursor, remoteHistoryHasMore),
+  );
+  const earlierHistoryState = $derived(
+    selectedThreadId && ((programmaticScroll && userScrolledUp) || cortex.threadHistoryLoadingOlder(selectedThreadId)) ? 'loading'
+      : selectedThreadId && !threadStreamWindow.previousCursor && cortex.threadHistoryError(selectedThreadId) ? 'error' : 'idle',
   );
 
   const transcriptItems = $derived.by((): CortexThreadStageTranscriptItem[] =>
@@ -865,28 +877,46 @@
   async function showEarlierHistory() {
     const cursor = threadStreamWindow.previousCursor;
     const element = transcriptEl;
-    const threadId = idea?.id == null ? null : String(idea.id);
-    if (programmaticScroll || !cursor || !element || !threadId) return;
-    const previousScrollTop = element.scrollTop;
-    const previousScrollHeight = element.scrollHeight;
+    const threadId = selectedThreadId;
+    if (programmaticScroll || earlierHistoryState === 'loading' || !element || !threadId
+      || !canShowEarlierHistory) return;
+    const operationToken = ++threadHistoryOperationToken;
+    const scrollBottom = element.scrollHeight - element.scrollTop;
+    const anchor = element.querySelector<HTMLElement>('.thread-history-window-control + *');
+    const anchorTop = anchor?.getBoundingClientRect().top ?? 0;
     programmaticScroll = true;
     userScrolledUp = true;
     if (transcriptScrollFrame !== null) {
       cancelAnimationFrame(transcriptScrollFrame);
       transcriptScrollFrame = null;
     }
-    threadStreamWindowState = { ideaId: threadId, cursor };
 
     try {
-      await tick();
-      if (String(idea?.id ?? '') !== threadId || transcriptEl !== element) return;
-      element.scrollTop = Math.max(0, previousScrollTop + element.scrollHeight - previousScrollHeight);
+      threadStreamWindowState = { ideaId: threadId, cursor: cursor ?? threadStreamWindow.startCursor };
+      if (!cursor) await cortex.loadOlderThreadHistory(threadId);
     } finally {
-      programmaticScroll = false;
-      if (String(idea?.id ?? '') === threadId && transcriptEl === element) {
-        userScrolledUp = !conversationIsNearBottom(element, CONVERSATION_SCROLL_BOTTOM_THRESHOLD);
-        syncTranscriptScrollCue();
-      }
+      await tick();
+      requestAnimationFrame(() => {
+        if (operationToken !== threadHistoryOperationToken || selectedThreadId !== threadId) return;
+        if (transcriptEl === element) {
+          if (anchor?.isConnected) {
+            element.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+          } else {
+            element.scrollTop = element.scrollHeight - scrollBottom;
+          }
+        }
+        requestAnimationFrame(() => {
+          if (operationToken !== threadHistoryOperationToken || selectedThreadId !== threadId) return;
+          if (transcriptEl === element) {
+            if (anchor?.isConnected) {
+              element.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+            }
+            userScrolledUp = !conversationIsNearBottom(element, CONVERSATION_SCROLL_BOTTOM_THRESHOLD);
+            syncTranscriptScrollCue();
+          }
+          programmaticScroll = false;
+        });
+      });
     }
   }
 
@@ -1318,6 +1348,8 @@
   $effect(() => {
     const currentIdeaId = idea?.id ?? null;
     if (currentIdeaId !== lastSelectedIdeaId) {
+      threadHistoryOperationToken += 1;
+      programmaticScroll = false;
       if (currentIdeaId && String(currentIdeaId) !== threadStreamWindowState?.ideaId) {
         threadStreamWindowState = null;
       }
@@ -1406,6 +1438,7 @@
 
   onDestroy(() => {
     threadStageDestroyed = true;
+    threadHistoryOperationToken += 1;
     voiceDictation?.destroy();
     document.removeEventListener('click', handleDocClick);
     if (transcriptScrollFrame !== null) {
@@ -1739,7 +1772,8 @@
             replyDock={replyDock}
             onTranscriptScroll={handleScrollEvent}
             onScrollToBottom={() => scrollToBottom(true)}
-            onShowEarlierHistory={threadStreamWindow.previousCursor ? showEarlierHistory : undefined}
+            onShowEarlierHistory={canShowEarlierHistory ? showEarlierHistory : undefined}
+            {earlierHistoryState}
             onPreviewAttachment={openPreviewTab}
             onTranscriptReady={(element) => {
               transcriptEl = element;

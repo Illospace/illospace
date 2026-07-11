@@ -89,6 +89,7 @@
     onTranscriptReady,
     onScrollToBottom,
     onShowEarlierHistory,
+    earlierHistoryState = 'idle',
     onPreviewAttachment,
   }: ThreadTranscriptProps = $props();
 
@@ -360,16 +361,17 @@
         {@render transcriptSlot()}
       {:else if loading}
         <div class="thread-empty-state thread-loading-state">{loadingLabel}</div>
-      {:else if hasTranscript}
+      {:else}
         {#if onShowEarlierHistory}
-          <div class="thread-history-window-control">
-            <ConstellationButton variant="quiet" size="sm" onclick={onShowEarlierHistory}>
-              Show earlier history
+          <div class="thread-history-window-control" aria-live="polite">
+            <ConstellationButton variant="quiet" size="sm" loading={earlierHistoryState === 'loading'} loadingLabel="Loading earlier history" onclick={onShowEarlierHistory}>
+              {earlierHistoryState === 'error' ? 'Retry earlier history' : 'Show earlier history'}
             </ConstellationButton>
           </div>
         {/if}
 
-        {#each transcriptItems as item, index (`${item.kind}-${item.id ?? index}`)}
+        {#if hasTranscript}
+          {#each transcriptItems as item, index (`${item.kind}-${item.id ?? index}`)}
           {#if renderTranscriptItem}
             {@render renderTranscriptItem(item)}
           {:else if item.kind === 'message'}
@@ -929,9 +931,10 @@
               {/if}
             </section>
           {/if}
-        {/each}
-      {:else}
-        <div class="thread-empty-state">{emptyLabel}</div>
+          {/each}
+        {:else}
+          <div class="thread-empty-state">{emptyLabel}</div>
+        {/if}
       {/if}
     </div>
 

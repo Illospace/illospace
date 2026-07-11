@@ -251,8 +251,14 @@ export interface ThreadTranscriptProps {
   onTranscriptReady?: (element: HTMLDivElement | undefined) => void;
   onScrollToBottom?: () => void;
   onShowEarlierHistory?: () => void;
+  earlierHistoryState?: 'idle' | 'loading' | 'error';
   onPreviewAttachment?: (attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment) => void;
 }
+
+export const canShowEarlierThreadHistory = (localCursor: unknown, remoteHasMore: boolean) => Boolean(localCursor || remoteHasMore);
+
+export const ownsThreadHistoryOperation = (operation: { threadId: string; token: number }, threadId: string | null, token: number) =>
+  operation.threadId === threadId && operation.token === token;
 
 export function getCortexThreadRunStatusLabel(status: CortexThreadStageRunStatus): string {
   switch (status) {
