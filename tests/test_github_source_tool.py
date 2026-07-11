@@ -426,6 +426,7 @@ async def test_pull_request_reader_fetches_details_and_checks_with_same_token():
                         {"name": "lint", "status": "completed", "conclusion": "failure"},
                     ],
                 },
+                {"state": "failure", "statuses": []},
             ]
         ),
     ) as request:
@@ -439,14 +440,166 @@ async def test_pull_request_reader_fetches_details_and_checks_with_same_token():
     assert result["pull_request"]["mergeable_state"] == "clean"
     assert result["checks"]["status"] == "failure"
     assert result["checks"]["total_count"] == 2
+    assert {
+        key: result["checks"][key]
+        for key in ("total", "success", "failure", "pending")
+    } == {"total": 2, "success": 1, "failure": 1, "pending": 0}
+    assert result["combined_status"] == "failure"
     assert [call.args[2] for call in request.await_args_list] == [
         "/repos/uwear-ai/uwear-backend/pulls/42",
         "/repos/uwear-ai/uwear-backend/commits/abc123/check-runs",
+        "/repos/uwear-ai/uwear-backend/commits/abc123/status",
     ]
     assert [call.kwargs["token"] for call in request.await_args_list] == [
         "primary-token",
         "primary-token",
+        "primary-token",
     ]
+
+
+@pytest.mark.asyncio
+async def test_get_pull_request_uses_project_bound_token_for_mergeability_and_ci():
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_resolve_project_bound_env_tokens",
+        new=AsyncMock(return_value={"GITHUB_TOKEN": "app-token"}),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_secrets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(
+            side_effect=[
+                {
+                    "number": 859,
+                    "state": "open",
+                    "mergeable": True,
+                    "mergeable_state": "clean",
+                    "head": {"sha": "head859"},
+                },
+                {
+                    "total_count": 2,
+                    "check_runs": [
+                        {"name": "unit", "status": "completed", "conclusion": "success"},
+                        {"name": "lint", "status": "completed", "conclusion": "success"},
+                    ],
+                },
+                {"state": "success", "statuses": []},
+            ]
+        ),
+    ) as request:
+        result = json.loads(
+            await _handle_read_github_source(
+                action="get_pull_request",
+                repo="uwear-ai/uwear-backend",
+                number=859,
+            )
+        )
+
+    assert result["pull_request"]["mergeable_state"] == "clean"
+    assert result["checks"] == {
+        "status": "success",
+        "total_count": 2,
+        "total": 2,
+        "success": 2,
+        "failure": 0,
+        "pending": 0,
+        "check_runs": [
+            {
+                "name": "unit",
+                "status": "completed",
+                "conclusion": "success",
+                "details_url": None,
+                "started_at": None,
+                "completed_at": None,
+            },
+            {
+                "name": "lint",
+                "status": "completed",
+                "conclusion": "success",
+                "details_url": None,
+                "started_at": None,
+                "completed_at": None,
+            },
+        ],
+    }
+    assert result["combined_status"] == "success"
+    assert result["token_source"] == "project_binding:GITHUB_TOKEN"
+    assert [call.args[2] for call in request.await_args_list] == [
+        "/repos/uwear-ai/uwear-backend/pulls/859",
+        "/repos/uwear-ai/uwear-backend/commits/head859/check-runs",
+        "/repos/uwear-ai/uwear-backend/commits/head859/status",
+    ]
+    assert all(call.kwargs["token"] == "app-token" for call in request.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_pull_request_checks_action_reads_checks_and_combined_status():
+    with patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_get_pull_request_checks",
+        new=AsyncMock(
+            return_value={
+                "repo": "uwear-ai/uwear-backend",
+                "sha": "abc123",
+                "checks": {"total": 1, "success": 0, "failure": 0, "pending": 1},
+                "combined_status": "pending",
+            }
+        ),
+    ) as get_checks:
+        result = json.loads(
+            await _handle_read_github_source(
+                action="pull_request_checks",
+                repo="uwear-ai/uwear-backend",
+                sha="abc123",
+            )
+        )
+
+    assert result["checks"] == {"total": 1, "success": 0, "failure": 0, "pending": 1}
+    assert result["combined_status"] == "pending"
+    get_checks.assert_awaited_once_with(
+        "uwear-ai/uwear-backend",
+        "abc123",
+        token=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pull_request_detail_reports_all_denied_token_sources():
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_resolve_project_bound_env_tokens",
+        new=AsyncMock(
+            return_value={
+                "GITHUB_TOKEN": "primary-token",
+                "GITHUB_TOKEN__AXEL": "secondary-token",
+            }
+        ),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_secrets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_get_pull_request",
+        new=AsyncMock(
+            side_effect=[
+                GitHubConnectorError(status_code=403, message="Forbidden"),
+                GitHubConnectorError(status_code=404, message="Not visible"),
+            ]
+        ),
+    ):
+        result = json.loads(
+            await _handle_read_github_source(
+                action="get_pull_request",
+                repo="uwear-ai/uwear-backend",
+                number=859,
+            )
+        )
+
+    assert result == {
+        "error": "Not visible",
+        "status_code": 404,
+        "attempted_token_sources": [
+            "project_binding:GITHUB_TOKEN",
+            "project_binding:GITHUB_TOKEN__AXEL",
+        ],
+    }
 
 
 @pytest.mark.asyncio

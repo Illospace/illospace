@@ -266,9 +266,23 @@ def _check_runs_payload(data: Any) -> dict[str, Any]:
     else:
         status = "unknown"
     total_count = data.get("total_count") if isinstance(data, dict) else None
+    success_conclusions = {"success", "neutral", "skipped"}
+    success = sum(
+        run.get("status") == "completed" and run.get("conclusion") in success_conclusions
+        for run in check_runs
+    )
+    failure = sum(
+        run.get("status") == "completed" and run.get("conclusion") in failure_conclusions
+        for run in check_runs
+    )
+    pending = len(check_runs) - success - failure
     return {
         "status": status,
         "total_count": int(total_count) if isinstance(total_count, int) else len(check_runs),
+        "total": len(check_runs),
+        "success": success,
+        "failure": failure,
+        "pending": pending,
         "check_runs": check_runs,
     }
 
@@ -470,7 +484,7 @@ async def async_get_pull_request(
     *,
     token: str | None = None,
 ) -> dict[str, Any]:
-    """Read one pull request and its head commit's check runs with one identity."""
+    """Read one pull request and its head commit's CI state with one identity."""
 
     owner, repo = slug.split("/", 1)
     async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
@@ -484,33 +498,69 @@ async def async_get_pull_request(
         head_sha = head.get("sha") if isinstance(head, dict) else None
         if not head_sha:
             raise GitHubConnectorError(status_code=502, message="GitHub pull request response omitted the head SHA.")
-        checks = await _async_request(
-            client,
-            "GET",
-            f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
-            token=token,
-            params={"per_page": GITHUB_ITEM_LIMIT, "page": 1},
-        )
-        total_checks = checks.get("total_count") if isinstance(checks, dict) else None
-        check_runs = checks.get("check_runs") if isinstance(checks, dict) else None
-        if isinstance(total_checks, int) and isinstance(check_runs, list):
-            page_count = (total_checks + GITHUB_ITEM_LIMIT - 1) // GITHUB_ITEM_LIMIT
-            for page in range(2, page_count + 1):
-                page_data = await _async_request(
-                    client,
-                    "GET",
-                    f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
-                    token=token,
-                    params={"per_page": GITHUB_ITEM_LIMIT, "page": page},
-                )
-                page_runs = page_data.get("check_runs") if isinstance(page_data, dict) else None
-                if isinstance(page_runs, list):
-                    check_runs.extend(page_runs)
+        ci = await _async_get_pull_request_checks(client, slug, head_sha, token=token)
     return {
         "repo": slug,
         "pull_request": _pull_request_detail_payload(pr if isinstance(pr, dict) else {}),
-        "checks": _check_runs_payload(checks),
+        "checks": ci["checks"],
+        "combined_status": ci["combined_status"],
     }
+
+
+async def _async_get_pull_request_checks(
+    client: httpx.AsyncClient,
+    slug: str,
+    sha: str,
+    *,
+    token: str | None,
+) -> dict[str, Any]:
+    owner, repo = slug.split("/", 1)
+    checks = await _async_request(
+        client,
+        "GET",
+        f"/repos/{owner}/{repo}/commits/{sha}/check-runs",
+        token=token,
+        params={"per_page": GITHUB_ITEM_LIMIT, "page": 1},
+    )
+    total_checks = checks.get("total_count") if isinstance(checks, dict) else None
+    check_runs = checks.get("check_runs") if isinstance(checks, dict) else None
+    if isinstance(total_checks, int) and isinstance(check_runs, list):
+        page_count = (total_checks + GITHUB_ITEM_LIMIT - 1) // GITHUB_ITEM_LIMIT
+        for page in range(2, page_count + 1):
+            page_data = await _async_request(
+                client,
+                "GET",
+                f"/repos/{owner}/{repo}/commits/{sha}/check-runs",
+                token=token,
+                params={"per_page": GITHUB_ITEM_LIMIT, "page": page},
+            )
+            page_runs = page_data.get("check_runs") if isinstance(page_data, dict) else None
+            if isinstance(page_runs, list):
+                check_runs.extend(page_runs)
+    combined = await _async_request(
+        client,
+        "GET",
+        f"/repos/{owner}/{repo}/commits/{sha}/status",
+        token=token,
+    )
+    return {
+        "repo": slug,
+        "sha": sha,
+        "checks": _check_runs_payload(checks),
+        "combined_status": combined.get("state") if isinstance(combined, dict) else None,
+    }
+
+
+async def async_get_pull_request_checks(
+    slug: str,
+    sha: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Read check runs and the combined commit status for a PR head SHA."""
+
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        return await _async_get_pull_request_checks(client, slug, sha, token=token)
 
 
 async def async_get_pull_request_deploy_info(

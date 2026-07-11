@@ -22,12 +22,14 @@ GITHUB_TOOLS = [
                         "list_issues",
                         "list_pull_requests",
                         "get_pull_request",
+                        "pull_request_checks",
                         "get_counts",
                     ],
                     "default": "list_issues",
                     "description": (
-                        "Which GitHub source data to read. get_pull_request includes mergeability and CI "
-                        "check runs; get_counts returns exact issue and PR counts for the requested state."
+                        "Which GitHub source data to read. get_pull_request includes mergeability, CI "
+                        "check runs, and combined status; pull_request_checks reads CI for a head SHA; "
+                        "get_counts returns exact issue and PR counts for the requested state."
                     ),
                 },
                 "repo": {
@@ -60,6 +62,15 @@ GITHUB_TOOLS = [
                     "type": "integer",
                     "minimum": 1,
                     "description": "Pull request number required by get_pull_request.",
+                },
+                "number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Alias for pull_number when using get_pull_request.",
+                },
+                "sha": {
+                    "type": "string",
+                    "description": "Head commit SHA required by pull_request_checks.",
                 },
                 "limit": {"type": "integer", "default": 30, "description": "Maximum items to return, 1-100."},
                 "token_secret_key": {
