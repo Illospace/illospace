@@ -2,8 +2,11 @@
 
 ## Next Agent Prompt
 
-**Status (2026-07-10):** Spec drafted, no slices implemented. Start at
-[slices/01-dossier-core.md](slices/01-dossier-core.md).
+**Status (2026-07-10):** Spec drafted, adversarially reviewed (14 findings,
+all integrated — see Drafting provenance), no slices implemented. Start at
+[slices/01-dossier-core.md](slices/01-dossier-core.md). A cross-family
+`codex exec` re-review is queued for when the Codex window resets; fold its
+findings in before starting slice 03.
 
 You are implementing the coordinator upgrade: at every routing moment
 (triage assignment, notify nudge, digest line) Illo attaches a **handoff
@@ -78,8 +81,11 @@ Coordination seams the packets plug into (lifecycle overhaul, all shipped):
 - Notify loop: `brain/systems/change_notifications.py` (pure decide) +
   `change_notifications_cycle.py` (wiring; injectable `post`; posts via
   `brain/systems/slack/client.py` `post_message`).
-- Slack thread replies from runs: `post_slack_reply`
-  (`brain/systems/runs/work_intake_slack.py`, thread_ts plumbing).
+- Slack posting: from BACKEND hooks use `brain/systems/slack/client.py`
+  `post_message(channel, thread_ts=…)` with the origin provenance stored on
+  the idea (the `post_slack_reply` TOOL resolves its target from in-run
+  trigger context — `tool_catalog/handlers/slack.py` — and is only usable
+  inside a live run, e.g. the on-demand "brief me" flow).
 - Deploy state: `brain/systems/deploy_state*.py`.
 - Evidence ledger: `brain/systems/runs/evidence.py` — "records what the
   backend actually saw" (compact, JSON-safe, hash-stamped).
@@ -110,7 +116,16 @@ everything.
 - **Launch snapshot has one owner: `LaunchHandoff`.** Packets do not add a
   parallel packet table; a packet = one human-brief rendering + one
   `LaunchHandoff` row. Re-issue via `idempotency_key` + revision metadata,
-  superseding, not duplicating.
+  superseding, not duplicating. Supersede reuses the EXISTING status
+  vocabulary — old row → `archived` + `metadata_["superseded_by"] = <new id>`
+  (the DB CHECK constraint allows only `open/launched/claimed/expired/
+  archived`, `brain/contracts/statuses.py` + migration 0017 — do NOT invent
+  a `superseded` status; no migration in this feature).
+- **Privacy boundary:** packets widen who can read gathered context —
+  `handoff.get` and the API are org-scoped, so anything gathered becomes
+  readable by every org member/agent token. V1 gathers only team-visible
+  Slack channels; private-channel/DM sources degrade to an explicit
+  omission marker, never excerpted content.
 - **Gathering has one owner: `brain/systems/briefing/`** (new). Triage,
   notify, digest, and on-demand "brief me" all call the same assembler.
   If any caller grows its own context-collection logic, that's drift.
@@ -158,5 +173,10 @@ everything.
 
 Single-pass draft by the main session (2026-07-10) after the user cancelled
 the three-drafter fan-out; grounded in live recon of the modules named above
-plus the lifecycle-spec history. Hardening pass: cross-family review of this
-spec via `codex exec` before implementation begins.
+plus the lifecycle-spec history. Hardening: an independent fresh-context
+Claude review (2026-07-10, Codex window was exhausted) verified every cited
+module against code and returned 14 findings (2 HIGH: the invented
+`superseded` status vs the DB CHECK constraint; dossier-only revision hash
+allowing brief/handoff divergence) — all folded into the slice texts.
+Pending: a cross-family `codex exec` re-review when the window resets;
+treat its findings as spec-blocking before slice 03+.

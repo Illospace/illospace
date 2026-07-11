@@ -13,7 +13,14 @@ class PacketRender:
     human_brief: str                 # Slack mrkdwn, ≤ ~1200 chars, ends with launch link placeholder "{launch_url}"
     handoff_input: LaunchHandoffCreateInput   # from brain/systems/launch_handoffs
     idempotency_key: str             # f"{job_ref}:{revision}" — supersede, don't duplicate
-    revision: str                    # content hash of the dossier (stable for unchanged truth)
+    revision: str                    # 16-hex content hash of the COMPOSE OUTPUT:
+                                     # dossier + ask + acceptance_criteria + owner + target_tool.
+                                     # NOT the dossier alone — create_launch_handoff silently
+                                     # returns the existing row on an idempotency hit
+                                     # (launch_handoffs.py:171-180), so any input that changes
+                                     # the packet MUST change the key, or the stored handoff
+                                     # diverges from the posted brief. Assert final key length
+                                     # ≤ 120 (model column cap); truncate job_ref, never the hash.
 
 def compose_packet(dossier: Dossier, *, owner_label: str | None,
                    ask: str, target_tool: str, repo_origin_url: str | None,
@@ -45,7 +52,9 @@ prints the human brief and the full handoff payload JSON side by side.
   `human_brief` snapshot + exact `context_parts` snapshot.
 - Property tests: brief length cap enforced by tightening excerpts (with
   markers), never by dropping the omissions note or the launch link;
-  idempotency_key stable for identical dossiers, changed for changed truth.
+  idempotency_key stable for identical compose inputs, changed when ANY of
+  dossier/ask/criteria/owner/target changes; key length ≤120 for
+  pathological job_refs.
 - No model involvement — composer is deterministic (briefs must be trusted;
   determinism is the trust floor; model-polished phrasing is a later,
   eval-gated idea).

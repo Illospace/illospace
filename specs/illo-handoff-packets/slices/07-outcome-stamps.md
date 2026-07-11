@@ -8,14 +8,25 @@ data instead of vibes.
 
 ## API seam
 - `LaunchHandoff` already records `launch_count` / `last_launched_at` — no
-  schema change for the launch side.
-- Mint side: slice-05 mint stamps the record (existing JSONB details, the
-  lifecycle pattern) with `packet: {handoff_id, revision, minted_at}`.
+  schema change for the launch side. **"Launched" is defined as
+  `launch_count > 0`, never by status** (supersede archives rows, and the
+  claude copy-button vs codex redirect semantics from slice 04 are what
+  make the count honest across targets).
+- Mint side (from slice 05): stamp lives in
+  `idea.agent_details["packet"]`; assignee lives in handoff
+  `metadata_["owner_user_id"]` (the model has no assignee column) — the
+  per-member split reads that.
 - New pure reporter `brain/systems/briefing/outcomes.py`:
-  `packet_outcomes(records, handoffs, *, since) -> OutcomeSummary`
+  `packet_outcomes(ideas, handoffs, *, since) -> OutcomeSummary`
   (minted, launched, ignored>48h, median mint→launch, per-member split).
+  A supersede chain (`supersedes`/`superseded_by` metadata) counts as ONE
+  job: launched if any revision launched, mint time = first revision.
 - Digest footer gains one line: `Packets: 6 minted · 4 launched · median
-  22m to launch` — through the digest contract, no new section.
+  22m to launch` — through the digest contract, no new section. **Data
+  path, explicit:** the digest is an agent-run prose contract that cannot
+  import Python — expose the reporter through an existing read surface
+  (extend `illo_read`/`domain.inspect`-style capability with
+  `packets.outcomes`), and the digest mission calls that tool.
 
 ## What the human can run/see
 `python -m brain.systems.briefing --outcomes --since 7d` against illo-dev

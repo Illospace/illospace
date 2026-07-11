@@ -31,6 +31,11 @@ async def gather_pieces(session: AsyncSession, *, org_id: str,
 - Failures degrade to an explicit `DossierSection` omission line
   ("github: unavailable — <reason>"), never a silent absence and never a
   crashed mint.
+- **Privacy boundary (README invariant):** gather only team-visible Slack
+  channels; a private-channel/DM source yields an omission marker
+  ("slack: private source omitted"), never excerpted content —
+  `handoff.get` and the handoff API are org-scoped, so gathered text is
+  readable by every org member and org-scoped agent token.
 
 ## What the human can run/see
 Read-only probe against illo-dev (952-pattern):

@@ -10,11 +10,21 @@ changes — continuity across sittings ("picking the thread back up").
   `launch_url` + `packet_revision`; line formatting appends `→ launch` when
   present. Pure tests only.
 - `change_notifications_cycle.py` (wiring): before posting, for events whose
-  record has a packet, look up the current handoff reference; if the
-  record's truth changed since `packet_revision` (freshness events from the
-  webhook path), call `mint.refresh_packet_for_record` — thin wrapper over
-  the slice-05 mint with the supersede path. Env-gated by the same
-  `ILLO_HANDOFF_PACKETS` value.
+  job carries a packet stamp (read from `idea.agent_details["packet"]` —
+  the Illo-owned home; never from projection-owned record `data`), look up
+  the current handoff; if truth changed since `packet_revision`, call
+  `mint.refresh_packet_for_job` — thin wrapper over the slice-05 mint with
+  the supersede path (archived + `superseded_by`, per-job serialization).
+  Env-gated by the same `ILLO_HANDOFF_PACKETS` + `_MODE` pair.
+
+**Activation preconditions (cross-spec, explicit):** this slice's refresh
+trigger only fires once the lifecycle spec's activation steps are live —
+Slice 4's notify cycle registered on the scheduler AND (for the
+"PR merged overnight" story) Slice 1's GitHub webhook ingest
+(`app.include_router(github_webhooks.router)` + env + source policy).
+Until webhooks are live, v1 refresh scope = events already flowing through
+`domain_events` today. List both in the activation checklist; do not let
+this slice's demo silently depend on another spec's dormant wiring.
 - Digest pipeline (doc-1155 contract, sweep→diff→post): digest lines for
   packeted items include the launch link. This is a prose+mission change
   riding the existing digest contract — keep the 8 Before-Posting gates
