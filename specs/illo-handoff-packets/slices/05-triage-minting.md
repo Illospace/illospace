@@ -1,10 +1,12 @@
-# Slice 05 — Triage-moment minting (env-gated)
+# Slice 05 — Triage-moment minting
 
 ## Contract unlocked
 The first routing moment goes warm: when an inbound item finishes triage
 with a resolved owner, Illo mints a packet, replies in the origin Slack
 thread with the human brief + launch link, and stamps the packet onto the
-idea. This is the feature's first end-to-end value.
+idea. This is the feature's first end-to-end value. **No runtime gate**
+(Reda, 2026-07-13): once this slice merges and deploys, every actionable
+triaged item gets a packet — verification happens pre-merge (below).
 
 ## API seam
 `brain/systems/briefing/mint.py` — the single orchestration owner:
@@ -71,14 +73,18 @@ its own tests.
 - Unclaimed-pool items get a packet too (owner label "unclaimed") — the
   brief is what makes claiming cheap.
 
-**Gating (two vars, repo pattern — gate/allowlist separate from mode):**
-- `ILLO_HANDOFF_PACKETS` unset → no behavior change; value = task-domain
-  allowlist (start: engineering/bug-shaped).
-- `ILLO_HANDOFF_PACKETS_MODE` = `dry` (default) | `live`. Dry mints
-  nothing and posts nothing: it logs the would-be brief + payload to the
-  run's evidence ledger.
+**No gating (superseded 2026-07-13 — see README invariant):** packets fire
+for every actionable triaged item, all task domains, as soon as this
+merges+deploys. There is no allowlist and no dry/live mode env. What
+replaces the old dry mode is a **pre-merge probe**: a read-only CLI
+(`python -m brain.systems.briefing --probe-triage --since …`, dev checkout
++ read env against illo-dev) that walks recent real triaged ideas through
+gather→assemble→compose WITHOUT creating handoffs or posting, and prints
+the briefs. Paste 3+ samples into `assets/pre-merge-probe-05.md`; Reda
+eyeballs them on the PR before merge. The only env var is
+`ILLO_MEMBER_AGENT_TARGETS` (config-with-default: unset → codex).
 
-## Doc-1155 delta (applied at activation, not before)
+## Doc-1155 delta (applied at merge+deploy)
 Add to the triage playbook: when a packet is minted, the reply IS the
 packet brief — do not also write a freeform summary; on-demand
 "brief me on X" requests route through the same mint path (tool call),
@@ -87,8 +93,9 @@ written; apply to live doc 1155 following the pointer-section discipline
 (never grow the core).
 
 ## What the human can run/see
-Dry-run on illo-dev (952-pattern) over a day of real triage → paste 3
-sample briefs into `assets/dry-run-05.md` for Reda's review.
+The pre-merge probe: recent real triaged items rendered as briefs with
+zero side effects → paste 3+ samples into `assets/pre-merge-probe-05.md`
+on the PR for Reda's review.
 **Non-blocking checkpoint:** give ~5 min for a reaction, then decide on the
 evidence and record the decision here.
 
@@ -104,11 +111,12 @@ evidence and record the decision here.
   line instead) — triage worked before packets existed and must keep
   working without them.
 - Record-less item test: idea-id job_ref path mints fine.
-- Live gates before `MODE=live`: sample briefs approved, supersede path
-  exercised once on illo-dev.
+- Pre-merge: probe samples approved on the PR; supersede path exercised
+  once against illo-dev read data.
 
 ## Stays green
-Triage suite unchanged with env unset; full fast suite.
+Full fast suite; triage tests updated to expect the mint hook (it is now
+unconditional — containment tests prove triage survives mint failure).
 
 ## Feedback that would change this slice
 Reda wants packets on every triaged item (no allowlist), wants the digest

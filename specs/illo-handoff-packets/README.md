@@ -94,9 +94,9 @@ explicitly rejected (see Direction below).
 - Work slices in order; each leaves a runnable artifact + green tests before
   the next depends on it.
 - Slices 01–04 are pure/additive and safe to build blind. Slices 05–07 wire
-  live moments and follow the repo's activation pattern: **additive, not
-  auto-registered, env-gated** (see the lifecycle spec's activation checklist
-  style in `specs/illo-lifecycle/README.md`).
+  live moments with **no runtime gates** (Reda, 2026-07-13): merge = live.
+  Verification is pre-merge — tests plus the read-only illo-dev probe whose
+  sample briefs land in `assets/` on the PR.
 - Before ending your pass: update this section (status, next pickup, TODO),
   and run a cross-family review (`codex exec` with an explicit review prompt —
   NOT `codex review`, it can recurse and self-kill) on your diff.
@@ -106,11 +106,13 @@ explicitly rejected (see Direction below).
 - [x] Slice 02 — packet composer (dual-audience render + idempotency)
 - [ ] Slice 03 — gather wiring (read-only source adapters)
 - [x] Slice 04 — claude launch target (launch page; codex redirect preserved)
-- [ ] Slice 05 — triage-moment minting (env-gated)
+- [ ] Slice 05 — triage-moment minting (ungated; pre-merge probe)
 - [ ] Slice 06 — notify/digest packet links + stale re-render
 - [ ] Slice 07 — outcome stamps (launched/ignored, time-to-launch)
-- [ ] Doc-1155 delta applied at activation (text lives in slice 05/06 files)
-- [ ] Live activation on illo-dev (gates listed per slice; read-only dry run first)
+- [ ] Doc-1155 delta applied at merge+deploy (text lives in slice 05/06 files)
+- [ ] Pre-merge verification: read-only illo-dev probe over real triaged
+      records; sample briefs into `assets/` (owns the old "dry run" role —
+      there are NO runtime gates; merge = live)
 
 ## Direction (do not re-litigate)
 
@@ -212,10 +214,14 @@ everything.
 - **Coordinator boundary:** packets contain instructions *for the assignee's
   agent*; no slice gives Illo write access to code, PRs, or execution
   runtimes. GitHub scope stays read-mostly (`issues:write` only).
-- **Additive activation:** new cycle/hook wiring ships dormant
-  (env-gated, not auto-registered), activated deliberately on illo-dev —
-  same pattern as lifecycle slices. Read-only dry run (952/1088 pattern)
-  before any live posting.
+- **No feature gates (Reda, 2026-07-13 — supersedes the earlier env-gated
+  design):** merging IS the activation; there is no `ILLO_HANDOFF_PACKETS`
+  flag, no dry/live mode switch, no dormant wiring. Verification happens ON
+  THE BRANCH before merge: unit/integration tests plus a read-only illo-dev
+  probe (952-pattern) whose sample briefs are pasted into `assets/` for
+  review. Rollback = revert + redeploy. Env vars are config-with-safe-
+  defaults only (`ILLO_MEMBER_AGENT_TARGETS`, unset → codex for everyone);
+  tunables are code constants.
 - **Short-lived seams:** none planned. If an implementation pass introduces
   one, name it here with its removal slice.
 
@@ -223,8 +229,8 @@ everything.
 
 - Pure cores (01, 02): unit tests + golden fixtures (`tests/`), JSON
   snapshot of a fixture dossier + both packet renders.
-- Wiring (03, 05, 06): integration tests with fakes; then read-only
-  illo-dev dry-run gates before activation (documented per slice).
+- Wiring (03, 05, 06): integration tests with fakes; then the read-only
+  illo-dev pre-merge probe (documented per slice) — no runtime gates.
 - 04: route tests + a manual click-through from Slack on both targets.
 - Visual surfaces: only slice 04's launch page and (optionally) the Cortex
   card. Any changed shot gets an unprimed screenshot-critique pass
