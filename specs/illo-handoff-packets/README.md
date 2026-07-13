@@ -255,14 +255,15 @@ explicitly rejected (see Direction below).
 - [x] Slice 06 — notify/digest packet links + stale re-render
 - [x] Slice 07 — outcome stamps (launched/ignored, time-to-launch)
 - [ ] Doc-1155 delta applied at merge+deploy (text lives in slice 05/06 files)
-- [ ] Pre-merge verification: read-only illo-dev probe over real triaged
-      records; sample briefs into `assets/` (owns the old "dry run" role —
-      there are NO runtime gates; merge = live). Must ALSO discharge the
-      06+07 review's findings 1+5: (a) confirm the notify cycle runner
-      COMMITS the tick's session (else refresh-created launch links 404 —
-      check how the deploy-verification writes persist today), (b) exercise
-      one real find→refresh round trip against Postgres (the JSONB astext
-      queries have no fake coverage), (c) click one posted launch link.
+- [x] Pre-merge verification: DONE 2026-07-13 — probe ran on illo-dev over
+      real triaged ideas; evidence + review-finding discharges in
+      [assets/pre-merge-probe-05.md](assets/pre-merge-probe-05.md). The
+      probe's first run caught 3 real-data gaps (bogus slack notes on
+      GitHub-origin events, private-repo reads needing authority context,
+      thin briefs) — folded with regression tests. Cycle runner commit
+      semantics verified (UnitOfWork commits on exit); JSONB queries
+      executed on real pg16. Launch-link click = first live packet after
+      merge (no rows exist pre-merge).
 
 ## Direction (do not re-litigate)
 
