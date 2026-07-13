@@ -203,15 +203,16 @@ class SlackWebClient:
         channel: str,
         thread_ts: str,
         limit: int = 50,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
-        return await self._get(
-            "conversations.replies",
-            {
-                "channel": channel,
-                "ts": thread_ts,
-                "limit": max(1, min(int(limit or 50), 200)),
-            },
-        )
+        params: dict[str, Any] = {
+            "channel": channel,
+            "ts": thread_ts,
+            "limit": max(1, min(int(limit or 50), 200)),
+        }
+        if cursor:
+            params["cursor"] = cursor
+        return await self._get("conversations.replies", params)
 
     async def conversation_history(
         self,

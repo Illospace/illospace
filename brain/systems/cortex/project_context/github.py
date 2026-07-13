@@ -510,7 +510,34 @@ async def async_get_pull_request(
         "repo": slug,
         "pull_request": _pull_request_detail_payload(pr if isinstance(pr, dict) else {}),
         "checks": _check_runs_payload(checks),
+        # True normalized body length BEFORE _compact_body's 1000-char cap, so
+        # downstream honesty accounting can report what compaction removed.
+        "body_total_chars": len(" ".join(str((pr or {}).get("body") or "").split()))
+        if isinstance(pr, dict)
+        else 0,
     }
+
+
+async def async_get_issue(
+    slug: str,
+    issue_number: int,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Read ONE issue by exact number — no listing window, no recency limit."""
+    owner, repo = slug.split("/", 1)
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        issue = await _async_request(
+            client,
+            "GET",
+            f"/repos/{owner}/{repo}/issues/{issue_number}",
+            token=token,
+        )
+    payload = _issue_payload(issue if isinstance(issue, dict) else {})
+    payload["body_total_chars"] = (
+        len(" ".join(str((issue or {}).get("body") or "").split())) if isinstance(issue, dict) else 0
+    )
+    return {"repo": slug, "issue": payload}
 
 
 async def async_get_pull_request_deploy_info(

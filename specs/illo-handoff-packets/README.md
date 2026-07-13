@@ -107,6 +107,41 @@ after the Codex worker wedged):**
 - `--live` CLI stub errors helpfully; the real pre-merge probe arrives
   with slice 05.
 
+**Post-review hardening (Codex cross-family pass on slice 03, 2026-07-13 —
+would-block, 9 findings / 6 HIGH, all folded; seam shapes now verified, not
+guessed):**
+- Slack provenance reads ONLY `event.envelope["payload"]` (`channel_id`,
+  `thread_ts`/`message_ts`, `channel_type`) — the shape ingress actually
+  writes; no top-level fallbacks. The inbound event must belong to the
+  requesting org. Privacy is an ALLOWLIST: only `channel_type == "channel"`
+  is excerpted; im/mpim/group/empty/unknown fail closed with a note.
+- Idea, DomainRecord, AND InboundEventRow loads are org-scoped; a
+  cross-org `domain_record:<id>` is "job not found", never a leak.
+- GitHub reads go through a new handler-owned
+  `github_read_ref_for_backend(repo_slug, number, org_id, …)` — explicit
+  backend context for `_github_token_candidates` (which gained optional
+  `org_id`/`user_id` params), ordered candidates preserved, PR wrapper
+  flattened, exact-issue fallback via new connector `async_get_issue`
+  (no recency-window hack), 404-per-candidate semantics. Sanctioned
+  exception to read-only: token resolution may write vault access-audit
+  rows (auth owner's behavior, documented in the helper).
+- Ref discovery covers the REAL live paths: inbound event `hints`
+  (github-origin), tracker `repo`+`pr_number` / `pr_url` via the
+  user_domains normalizers, and explicit `owner/repo#N` text — deduped,
+  capped WITH a visible note. Related tracker records are queried
+  org-scoped by the same identity; PR check-runs become evidence pieces.
+- Fetch honesty: connector body compaction is measured
+  (`body_total_chars` additive keys) and noted per ref; Slack reads walk
+  up to 3 cursor pages (client gained a `cursor` param) so thread tails
+  are reachable, with the only-N-of-M note covering the rest.
+- DB reads run under `no_autoflush` so gather can never flush a caller's
+  pending state (the review demonstrated a real-session INSERT without it).
+- Evidence pieces from idea attribution; `slack`/`github` reader absent →
+  explicit "no reader configured" notes. 24 gather tests mirror the real
+  seam shapes (org scoping, fail-closed surfaces, cap/compaction notes,
+  cursor pagination, backend-read flattening, revision rotation on
+  source_notes).
+
 You are implementing the coordinator upgrade: at every routing moment
 (triage assignment, notify nudge, digest line) Illo attaches a **handoff
 packet** — a short human brief plus an agent-ready launch handoff — so work
