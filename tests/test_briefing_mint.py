@@ -438,6 +438,23 @@ async def test_owner_label_lookup_failure_degrades_to_id_not_unclaimed(posts):
     assert _OWNER[:8] in header  # raw id (possibly shortened by the cap) shows
 
 
+class CleanGithub:
+    async def read_ref(self, *, repo_slug, number):
+        return {"kind": "github_pr", "title": "Restore backfill", "body": "b",
+                "state": "open", "body_total_chars": 1}
+
+
+class DownGithub:
+    async def read_ref(self, *, repo_slug, number):
+        raise RuntimeError("down")
+
+
+def _clean_readers():
+    """Readers whose gather yields ZERO source notes — refresh requires a
+    clean gather (degraded views must not supersede healthy rows)."""
+    return Readers(slack=FakeSlackReader(), github=CleanGithub())
+
+
 async def test_refresh_unchanged_truth_is_silent_reuse(posts):
     from brain.systems.briefing.mint import refresh_packet_for_job
 
@@ -445,12 +462,32 @@ async def test_refresh_unchanged_truth_is_silent_reuse(posts):
     session = FakeSession(ideas=[idea], events=[_event()],
                           users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
     first = await mint_packet_after_triage(
-        session, event=_event(), run_row=SimpleNamespace(id=1), readers=_readers())
+        session, event=_event(), run_row=SimpleNamespace(id=1), readers=_clean_readers())
     result = await refresh_packet_for_job(
-        session, org_id=_ORG, handoff_row=first.handoff, readers=_readers())
+        session, org_id=_ORG, handoff_row=first.handoff, readers=_clean_readers())
     assert result.ok and not result.created
     assert len(posts) == 1  # refresh NEVER posts
     assert len(session.handoffs) == 1
+
+
+async def test_refresh_skips_on_degraded_gather(posts):
+    from brain.systems.briefing.mint import refresh_packet_for_job
+
+    idea = _idea()
+    session = FakeSession(ideas=[idea], events=[_event()],
+                          users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
+    first = await mint_packet_after_triage(
+        session, event=_event(), run_row=SimpleNamespace(id=1), readers=_clean_readers())
+    # Now GitHub is down: the degraded view must NOT supersede the healthy row.
+    result = await refresh_packet_for_job(
+        session, org_id=_ORG, handoff_row=first.handoff,
+        readers=Readers(slack=FakeSlackReader(), github=DownGithub()),
+    )
+    assert result.ok is False
+    assert result.reason == "degraded gather; not refreshing"
+    assert len(session.handoffs) == 1  # healthy row untouched
+    live = session.handoffs[0]
+    assert live.status != "archived"
 
 
 async def test_refresh_changed_truth_supersedes_without_posting(posts):
@@ -460,10 +497,10 @@ async def test_refresh_changed_truth_supersedes_without_posting(posts):
     session = FakeSession(ideas=[idea], events=[_event()],
                           users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
     first = await mint_packet_after_triage(
-        session, event=_event(), run_row=SimpleNamespace(id=1), readers=_readers())
+        session, event=_event(), run_row=SimpleNamespace(id=1), readers=_clean_readers())
     idea.title = "Maison L. melted hands — rerun verified"
     result = await refresh_packet_for_job(
-        session, org_id=_ORG, handoff_row=first.handoff, readers=_readers())
+        session, org_id=_ORG, handoff_row=first.handoff, readers=_clean_readers())
     assert result.ok and result.created
     assert len(posts) == 1  # still only the original triage reply
     old = next(h for h in session.handoffs if str(h.id) == str(first.handoff.id))

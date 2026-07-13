@@ -241,10 +241,24 @@ class TestUnclaimedPool:
 
 class TestPacketLinkAttachment:
     """Slice 06 (illo-handoff-packets): notify lines carry launch links;
-    stale packets refresh first, capped and never silently."""
+    stale packets refresh first, capped (ok-only slot accounting) and never
+    silently."""
 
     def _events(self, n):
         return [{"title": f"t{i}", "action": "updated", "record_id": 1000 + i} for i in range(n)]
+
+    @staticmethod
+    def _rows_for(job_refs):
+        from types import SimpleNamespace
+
+        return {
+            jr: SimpleNamespace(
+                id=f"hf-{jr.rsplit(':', 1)[1]}", target_tool="codex",
+                source_surface="inbound_triage",
+                metadata_={"revision": f"rev-{jr.rsplit(':', 1)[1]}", "job_ref": jr},
+            )
+            for jr in job_refs
+        }
 
     async def test_attach_refresh_and_cap(self, monkeypatch, caplog):
         import logging
@@ -255,18 +269,14 @@ class TestPacketLinkAttachment:
 
         refreshed = []
 
-        async def fake_find(session, *, org_id, job_ref):
-            n = int(job_ref.rsplit(":", 1)[1])
-            return SimpleNamespace(
-                id=f"hf-{n}", target_tool="codex", source_surface="inbound_triage",
-                metadata_={"revision": f"rev-{n}", "job_ref": job_ref},
-            )
+        async def fake_find_batch(session, *, org_id, job_refs):
+            return self._rows_for(job_refs)
 
         async def fake_refresh(session, *, org_id, handoff_row, readers=None):
             refreshed.append(handoff_row.id)
             return SimpleNamespace(ok=True, created=False, handoff=handoff_row)
 
-        monkeypatch.setattr(mint_mod, "find_packet_handoff_for_job", fake_find)
+        monkeypatch.setattr(mint_mod, "find_packet_handoffs_for_jobs", fake_find_batch)
         monkeypatch.setattr(mint_mod, "refresh_packet_for_job", fake_refresh)
 
         events = self._events(8)
@@ -275,8 +285,34 @@ class TestPacketLinkAttachment:
 
         assert all(e.get("launch_url") for e in events)  # every line gets its link
         assert all(e.get("packet_revision") for e in events)
-        assert len(refreshed) == 5  # the per-tick cap
+        assert len(refreshed) == 5  # the per-tick cap (ok refreshes consume slots)
         assert any("deferred 3 packet refreshes" in r.message for r in caplog.records)
+
+    async def test_failed_refreshes_do_not_burn_slots(self, monkeypatch, caplog):
+        import logging
+        from types import SimpleNamespace
+
+        import brain.systems.change_notifications_cycle as cyc
+        import brain.systems.briefing.mint as mint_mod
+
+        attempts = []
+
+        async def fake_find_batch(session, *, org_id, job_refs):
+            return self._rows_for(job_refs)
+
+        async def failing_refresh(session, *, org_id, handoff_row, readers=None):
+            attempts.append(handoff_row.id)
+            return SimpleNamespace(ok=False, created=False, handoff=None)
+
+        monkeypatch.setattr(mint_mod, "find_packet_handoffs_for_jobs", fake_find_batch)
+        monkeypatch.setattr(mint_mod, "refresh_packet_for_job", failing_refresh)
+
+        events = self._events(8)
+        with caplog.at_level(logging.WARNING, logger="illo.notify"):
+            await cyc._attach_and_refresh_packets(object(), "org-1", events)
+        assert len(attempts) == 8  # fast failures never starve the healthy rows
+        assert not any("deferred" in r.message for r in caplog.records)
+        assert all(e.get("launch_url") for e in events)  # links still attach
 
     async def test_superseding_refresh_carries_the_new_link(self, monkeypatch):
         from types import SimpleNamespace
@@ -289,13 +325,13 @@ class TestPacketLinkAttachment:
         new = SimpleNamespace(id="hf-new", target_tool="codex", source_surface="inbound_triage",
                               metadata_={"revision": "rev-new", "job_ref": "domain_record:1"})
 
-        async def fake_find(session, *, org_id, job_ref):
-            return old
+        async def fake_find_batch(session, *, org_id, job_refs):
+            return {"domain_record:1": old}
 
         async def fake_refresh(session, *, org_id, handoff_row, readers=None):
             return SimpleNamespace(ok=True, created=True, handoff=new)
 
-        monkeypatch.setattr(mint_mod, "find_packet_handoff_for_job", fake_find)
+        monkeypatch.setattr(mint_mod, "find_packet_handoffs_for_jobs", fake_find_batch)
         monkeypatch.setattr(mint_mod, "refresh_packet_for_job", fake_refresh)
 
         events = [{"title": "t", "record_id": 1}]
@@ -307,10 +343,10 @@ class TestPacketLinkAttachment:
         import brain.systems.change_notifications_cycle as cyc
         import brain.systems.briefing.mint as mint_mod
 
-        async def exploding_find(session, *, org_id, job_ref):
+        async def exploding_find(session, *, org_id, job_refs):
             raise RuntimeError("db down")
 
-        monkeypatch.setattr(mint_mod, "find_packet_handoff_for_job", exploding_find)
+        monkeypatch.setattr(mint_mod, "find_packet_handoffs_for_jobs", exploding_find)
         events = [{"title": "t", "record_id": 1}]
         await cyc._attach_and_refresh_packets(object(), "org-1", events)  # must not raise
         assert "launch_url" not in events[0]

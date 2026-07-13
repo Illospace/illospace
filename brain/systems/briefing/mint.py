@@ -258,9 +258,16 @@ async def mint_packet_for_job(
     source_ref: dict[str, Any] | None = None,
     readers: Readers | None = None,
     budget: DossierBudget | None = None,
+    require_clean_gather: bool = False,
 ) -> MintResult:
     """Mint one packet. Raises nothing upward except via the caller's choice —
-    the triage-facing wrapper is :func:`mint_packet_after_triage`."""
+    the triage-facing wrapper is :func:`mint_packet_after_triage`.
+
+    ``require_clean_gather`` (the refresh path): a degraded gather (source
+    down, partial fetch) must not supersede a healthy stored packet — a
+    transient blip would rotate the revision, archive the good row, and
+    rotate back on recovery, burning refresh slots on churn.
+    """
     packet, dossier = await build_packet_for_job(
         session,
         org_id=org_id,
@@ -274,6 +281,12 @@ async def mint_packet_for_job(
         readers=readers,
         budget=budget,
     )
+    if require_clean_gather and dossier.source_notes:
+        return MintResult(
+            ok=False,
+            reason="degraded gather; not refreshing",
+            source_notes=list(dossier.source_notes),
+        )
 
     # WRITE PHASE — one savepoint around EVERYTHING (create + supersede +
     # repair + stamp), so a DB failure anywhere rolls back to the savepoint
@@ -336,25 +349,36 @@ async def mint_packet_for_job(
     )
 
 
-async def find_packet_handoff_for_job(session: Any, *, org_id: str, job_ref: str) -> LaunchHandoff | None:
-    """The current (non-archived) packet handoff for a job, newest first.
+async def find_packet_handoffs_for_jobs(
+    session: Any, *, org_id: str, job_refs: list[str]
+) -> dict[str, LaunchHandoff]:
+    """job_ref → its current (non-archived) packet handoff, newest wins.
 
     Packets carry their job identity in ``metadata_["job_ref"]`` — the one
-    queryable link between domain events and launch handoffs (slice 06)."""
+    queryable link between domain events and launch handoffs (slice 06).
+    ONE batched query per tick, not one per event (review finding: the
+    per-event JSONB scan would not age well as packets accumulate)."""
+    if not job_refs:
+        return {}
     from brain.platform.db.models.launch_handoff import LaunchHandoff as LaunchHandoffModel
 
-    return (
+    rows = (
         await session.execute(
             select(LaunchHandoffModel)
             .where(
                 LaunchHandoffModel.org_id == str(org_id),
-                LaunchHandoffModel.metadata_["job_ref"].astext == str(job_ref),
+                LaunchHandoffModel.metadata_["job_ref"].astext.in_([str(j) for j in job_refs]),
                 LaunchHandoffModel.status != "archived",
             )
-            .order_by(LaunchHandoffModel.created_at.desc())
-            .limit(1)
+            .order_by(LaunchHandoffModel.created_at.asc())
         )
-    ).scalars().first()
+    ).scalars().all()
+    newest: dict[str, LaunchHandoff] = {}
+    for row in rows:  # ascending order → later rows overwrite = newest wins
+        job_ref = str((dict(row.metadata_ or {})).get("job_ref") or "")
+        if job_ref:
+            newest[job_ref] = row
+    return newest
 
 
 async def _find_idea_by_stamp(session: Any, *, org_id: str, handoff_id: str) -> Any | None:
@@ -403,13 +427,17 @@ async def refresh_packet_for_job(session: Any, *, org_id: str, handoff_row: Any,
             source_surface=str(getattr(handoff_row, "source_surface", "") or "inbound_triage"),
             source_ref=dict(getattr(handoff_row, "source_ref", None) or {}),
             readers=readers,
+            require_clean_gather=True,
         )
         if result.ok and result.created and idea is None:
             # No idea stamp to find the prior through — the refreshed row IS
-            # the prior; supersede it directly.
-            await _supersede_prior(
-                session, org_id=org_id, prior_handoff_id=str(handoff_row.id), new_row=result.handoff
-            )
+            # the prior; supersede it directly, under its own savepoint so a
+            # failure here can't leave the tick's transaction poisoned
+            # (review finding: this branch skipped the write-phase savepoint).
+            async with session.begin_nested():
+                await _supersede_prior(
+                    session, org_id=org_id, prior_handoff_id=str(handoff_row.id), new_row=result.handoff
+                )
         return result
     except Exception as exc:  # noqa: BLE001 — total containment
         logger.warning("packet refresh failed for handoff %s: %s", getattr(handoff_row, "id", "?"), exc)

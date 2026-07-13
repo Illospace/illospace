@@ -127,31 +127,46 @@ async def _attach_and_refresh_packets(session, org_id, events) -> None:
     log = logging.getLogger("illo.notify")
     try:
         from brain.systems.briefing.mint import (
-            find_packet_handoff_for_job,
+            find_packet_handoffs_for_jobs,
             refresh_packet_for_job,
         )
         from brain.systems.launch_handoffs import launch_handoff_url_for_id
 
-        refreshes_left = _MAX_PACKET_REFRESHES_PER_TICK
-        deferred = 0
-        seen_job_refs: set[str] = set()
+        job_refs = []
+        seen: set[str] = set()
         for event in events:
             record_id = event.get("record_id")
-            if not record_id:
-                continue
-            job_ref = f"domain_record:{record_id}"
-            row = await find_packet_handoff_for_job(session, org_id=org_id, job_ref=job_ref)
+            if record_id:
+                job_ref = f"domain_record:{record_id}"
+                if job_ref not in seen:
+                    seen.add(job_ref)
+                    job_refs.append(job_ref)
+        packet_rows = await find_packet_handoffs_for_jobs(session, org_id=org_id, job_refs=job_refs)
+
+        # Refresh at most N unique jobs per tick — each refresh re-gathers
+        # (live Slack/GitHub reads). A slot is consumed only by a refresh
+        # that actually ran (ok) — permanently unrefreshable rows fail fast
+        # and must not starve the healthy ones.
+        refreshes_left = _MAX_PACKET_REFRESHES_PER_TICK
+        deferred = 0
+        for job_ref in job_refs:
+            row = packet_rows.get(job_ref)
             if row is None:
                 continue
-            if job_ref not in seen_job_refs:
-                seen_job_refs.add(job_ref)
-                if refreshes_left > 0:
+            if refreshes_left > 0:
+                result = await refresh_packet_for_job(session, org_id=org_id, handoff_row=row)
+                if result.ok:
                     refreshes_left -= 1
-                    result = await refresh_packet_for_job(session, org_id=org_id, handoff_row=row)
-                    if result.ok and result.created:
-                        row = result.handoff  # superseded → carry the new link
-                else:
-                    deferred += 1
+                    if result.created:
+                        packet_rows[job_ref] = result.handoff  # superseded → new link
+            else:
+                deferred += 1
+
+        for event in events:
+            record_id = event.get("record_id")
+            row = packet_rows.get(f"domain_record:{record_id}") if record_id else None
+            if row is None:
+                continue
             event["launch_url"] = launch_handoff_url_for_id(row.id, target_tool=row.target_tool)
             event["packet_revision"] = (dict(row.metadata_ or {})).get("revision")
         if deferred:

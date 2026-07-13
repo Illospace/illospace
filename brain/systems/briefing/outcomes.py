@@ -111,6 +111,10 @@ def packet_outcomes(
         member = per_member.setdefault(owner, {"minted": 0, "launched": 0})
         member["minted"] += 1
 
+        # NOTE: the model records only last_launched_at (no first-launch
+        # column), so a relaunch days later shifts a chain's reported launch
+        # time; min() across chain rows partially mitigates. Schema change
+        # if precision ever matters.
         launched_rows = [r for r in chain if int(getattr(r, "launch_count", 0) or 0) > 0]
         if launched_rows:
             launched_count += 1

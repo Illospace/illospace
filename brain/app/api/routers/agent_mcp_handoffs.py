@@ -110,8 +110,9 @@ async def read_packet_outcomes(
         packet_outcomes,
     )
 
+    raw_since = arguments.get("since_hours")
     try:
-        since_hours = float(arguments.get("since_hours") or 168)
+        since_hours = float(raw_since) if raw_since is not None else 168.0
     except (TypeError, ValueError):
         since_hours = 168.0
     since_hours = max(1.0, min(since_hours, 24 * 90))

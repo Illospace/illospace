@@ -257,7 +257,12 @@ explicitly rejected (see Direction below).
 - [ ] Doc-1155 delta applied at merge+deploy (text lives in slice 05/06 files)
 - [ ] Pre-merge verification: read-only illo-dev probe over real triaged
       records; sample briefs into `assets/` (owns the old "dry run" role —
-      there are NO runtime gates; merge = live)
+      there are NO runtime gates; merge = live). Must ALSO discharge the
+      06+07 review's findings 1+5: (a) confirm the notify cycle runner
+      COMMITS the tick's session (else refresh-created launch links 404 —
+      check how the deploy-verification writes persist today), (b) exercise
+      one real find→refresh round trip against Postgres (the JSONB astext
+      queries have no fake coverage), (c) click one posted launch link.
 
 ## Direction (do not re-litigate)
 
