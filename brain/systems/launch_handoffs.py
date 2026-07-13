@@ -17,6 +17,7 @@ from brain.systems.cortex.thread_links import public_app_base_url
 
 LAUNCH_HANDOFF_OBJECT_TYPE = "launch_handoff"
 TARGET_CODEX = "codex"
+TARGET_CLAUDE = "claude"
 LAUNCH_HANDOFF_ROUTE_PREFIX = "/api/launch-handoffs"
 
 _HANDOFF_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
@@ -91,6 +92,46 @@ def _uuid_or_none(value: Any) -> str | None:
         return None
 
 
+def parse_member_agent_targets(raw: str | None) -> dict[str, str]:
+    """Parse ``ILLO_MEMBER_AGENT_TARGETS`` into canonical UUID-keyed targets."""
+    targets: dict[str, str] = {}
+    for chunk in str(raw or "").split(","):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise LaunchHandoffError(
+                "ILLO_MEMBER_AGENT_TARGETS entries must use <user-uuid>=<target>"
+            )
+        user_id, target = (part.strip() for part in entry.split("=", 1))
+        try:
+            canonical_user_id = str(uuid.UUID(user_id))
+        except ValueError as exc:
+            raise LaunchHandoffError(
+                f"ILLO_MEMBER_AGENT_TARGETS user id must be a UUID: {user_id or '<empty>'}"
+            ) from exc
+        if not target:
+            raise LaunchHandoffError(
+                f"ILLO_MEMBER_AGENT_TARGETS target is empty for user {canonical_user_id}"
+            )
+        targets[canonical_user_id] = target.lower()
+    return targets
+
+
+def agent_target_for_member(
+    user_id: Any,
+    targets: dict[str, str],
+    *,
+    default: str = TARGET_CODEX,
+) -> str:
+    """Look up a member's configured target, falling back for unknown owners."""
+    canonical_user_id = _uuid_or_none(user_id)
+    fallback = (_clean_optional_string(default) or TARGET_CODEX).lower()
+    if not canonical_user_id:
+        return fallback
+    return (_clean_optional_string(targets.get(canonical_user_id)) or fallback).lower()
+
+
 def _strip_candidate(value: Any) -> str:
     cleaned = str(value or "").strip()
     while cleaned and cleaned[-1] in _TRAILING_PUNCTUATION:
@@ -146,6 +187,16 @@ def codex_prompt_for_handoff(row: LaunchHandoff) -> str:
     title = str(row.title or "Illo launch handoff").strip()
     return (
         f"Pick up Illo launch handoff {row.id}: {title}\n\n"
+        "Use the Illo MCP `illo_read` tool with capability `handoff.get` and "
+        f"arguments {{\"handoff_id\":\"{row.id}\"}} to fetch the full context, "
+        "source references, instructions, and acceptance criteria before changing code."
+    )
+
+
+def claude_prompt_for_handoff(row: LaunchHandoff) -> str:
+    title = str(row.title or "Illo launch handoff").strip()
+    return (
+        f"Pick up Illo launch handoff {row.id} in this Claude Code session: {title}\n\n"
         "Use the Illo MCP `illo_read` tool with capability `handoff.get` and "
         f"arguments {{\"handoff_id\":\"{row.id}\"}} to fetch the full context, "
         "source references, instructions, and acceptance criteria before changing code."

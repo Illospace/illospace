@@ -37,7 +37,9 @@
   );
   const threadId = $derived(String(reference?.thread_id || '').trim());
   const objectId = $derived(String(reference?.launch_handoff_id || reference?.object_id || threadId || '').trim());
-  const kicker = $derived(isLaunchHandoff ? 'Codex handoff' : 'Thread');
+  const targetTool = $derived(String(reference?.target_tool || 'codex').trim());
+  const targetLabel = $derived(targetTool ? `${targetTool[0].toUpperCase()}${targetTool.slice(1)}` : 'Codex');
+  const kicker = $derived(isLaunchHandoff ? `${targetLabel} handoff` : 'Thread');
   const cardClass = $derived(
     ['thread-link-preview-card', compact ? 'is-compact' : '', available ? 'is-available' : 'is-unavailable']
       .filter(Boolean)

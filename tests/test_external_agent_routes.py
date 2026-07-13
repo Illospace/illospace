@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from brain.app.api.auth import get_current_user
@@ -934,10 +935,7 @@ async def test_launch_handoff_redirects_to_codex_deep_link():
     ) as require_handoff, patch(
         "brain.app.api.routers.launch_handoffs.launch_handoffs.mark_launch_handoff_launched",
         new=AsyncMock(return_value=row),
-    ) as mark_launched, patch(
-        "brain.app.api.routers.launch_handoffs.launch_handoffs.codex_deep_link_for_handoff",
-        return_value="codex://threads/new?prompt=handoff",
-    ):
+    ) as mark_launched:
         response = await _request(
             "GET",
             f"/api/launch-handoffs/{row.id}/launch?target=codex",
@@ -945,7 +943,15 @@ async def test_launch_handoff_redirects_to_codex_deep_link():
         )
 
     assert response.status_code == 302
-    assert response.headers["location"] == "codex://threads/new?prompt=handoff"
+    assert response.headers["location"] == (
+        "codex://threads/new?prompt=Pick+up+Illo+launch+handoff+"
+        "88888888-8888-4888-8888-888888888888%3A+Launch+in+Codex%0A%0A"
+        "Use+the+Illo+MCP+%60illo_read%60+tool+with+capability+%60handoff.get%60+"
+        "and+arguments+%7B%22handoff_id%22%3A%2288888888-8888-4888-8888-"
+        "888888888888%22%7D+to+fetch+the+full+context%2C+source+references%2C+"
+        "instructions%2C+and+acceptance+criteria+before+changing+code.&originUrl="
+        "git%40github.com%3Auwear-ai%2Fillospace-project.git"
+    )
     require_handoff.assert_awaited_once()
     assert require_handoff.await_args.kwargs["org_id"] == "org-1"
     mark_launched.assert_awaited_once()
@@ -967,6 +973,98 @@ async def test_launch_handoff_redirect_requires_org_context():
     finally:
         app.dependency_overrides.clear()
         app.dependency_overrides.update(overrides)
+
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("target", ["claude", "unknown-agent"])
+async def test_launch_handoff_page_contains_only_starter_context_without_counting_view(target):
+    secret = "SECRET_SENTINEL_MUST_NOT_RENDER"
+    row = _handoff_row(
+        target_tool=target,
+        title="Prepared handoff",
+        instructions=secret,
+        context_parts=[{"text": secret}],
+        metadata_={"token": secret},
+        branch_hint="codex/hp-slice-04",
+    )
+
+    with patch(
+        "brain.app.api.routers.launch_handoffs.launch_handoffs.require_launch_handoff",
+        new=AsyncMock(return_value=row),
+    ) as require_handoff, patch(
+        "brain.app.api.routers.launch_handoffs.launch_handoffs.mark_launch_handoff_launched",
+        new=AsyncMock(return_value=row),
+    ) as mark_launched:
+        response = await _request(
+            "GET",
+            f"/api/launch-handoffs/{row.id}/launch?target={target}",
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Prepared handoff" in response.text
+    assert "handoff.get" in response.text
+    assert "git@github.com:uwear-ai/illospace-project.git" in response.text
+    assert "codex/hp-slice-04" in response.text
+    assert f"/api/launch-handoffs/{row.id}/launched" in response.text
+    assert f"/api/launch-handoffs/{row.id}/launch?target=codex" in response.text
+    assert secret not in response.text
+    assert row.launch_count == 0
+    require_handoff.assert_awaited_once()
+    assert require_handoff.await_args.kwargs["org_id"] == "org-1"
+    mark_launched.assert_not_awaited()
+
+
+async def test_launch_handoff_copy_post_increments_launch_count_for_org_member():
+    row = _handoff_row(target_tool="claude")
+
+    with patch(
+        "brain.app.api.routers.launch_handoffs.launch_handoffs.require_launch_handoff",
+        new=AsyncMock(return_value=row),
+    ) as require_handoff:
+        response = await _request(
+            "POST",
+            f"/api/launch-handoffs/{row.id}/launched",
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"launched": True, "launch_count": 1}
+    assert row.launch_count == 1
+    assert row.status == "launched"
+    assert row.last_launched_by_user_id is None
+    require_handoff.assert_awaited_once()
+    assert require_handoff.await_args.kwargs["org_id"] == "org-1"
+
+
+async def test_launch_handoff_copy_post_requires_authentication():
+    overrides = dict(app.dependency_overrides)
+    app.dependency_overrides[get_db] = lambda: _AsyncSession()
+
+    def unauthenticated():
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    app.dependency_overrides[get_current_user] = unauthenticated
+    app.dependency_overrides[rate_limit] = lambda: None
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/launch-handoffs/88888888-8888-4888-8888-888888888888/launched"
+            )
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(overrides)
+
+    assert response.status_code == 401
+
+
+async def test_launch_handoff_copy_post_requires_org_context():
+    response = await _request(
+        "POST",
+        "/api/launch-handoffs/88888888-8888-4888-8888-888888888888/launched",
+        user={"id": "user-1", "role": "member"},
+    )
 
     assert response.status_code == 403
 
