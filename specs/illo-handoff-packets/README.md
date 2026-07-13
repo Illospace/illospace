@@ -167,9 +167,38 @@ after the Codex worker wedged again — 0.15s CPU in 25min):**
   [--since-hours H]` — walks recent inbound-triaged ideas through the
   shared `build_packet_for_job` stage (gather→assemble→compose), prints
   briefs + notes, creates and posts nothing, rolls back. Fails helpfully
-  without the dev/read env. 11 mint tests cover the noise gate, supersede
+  without the dev/read env. 15 mint tests cover the noise gate, supersede
   vocabulary, containment, non-public no-post, unclaimed packets, target
   map, and probe-stage purity.
+
+**Post-review hardening (fresh-context Claude adversarial pass on slice 05,
+2026-07-13 — would-block, 10 findings / 3 HIGH, all folded):**
+- **Self-echo starved twice over.** (1) Gather filters Illo's OWN Slack
+  messages via the provenance `bot_user_id` (ingress always resolves it) —
+  the posted brief can never feed the next gather and rotate the revision.
+  (2) The reconcile hook fires only on the transition INTO a terminal
+  receipt state (`receipt_was_terminal` captured pre-mutation) — result
+  polls (`illo_get_result` re-runs reconcile on every read!) never
+  re-gather, never re-mint, never re-post.
+- **Spec-pinned serialization implemented for real**: the write phase
+  re-selects the idea `WITH FOR UPDATE` before reading the packet stamp —
+  concurrent minters queue instead of cross-superseding.
+- **Commit-time containment**: create + supersede + drift-repair + stamp
+  all run inside ONE savepoint; a DB failure anywhere rolls back to the
+  savepoint and the triage receipt commits untouched. The IntegrityError
+  loser re-stamps under a fresh savepoint. The reconcile-side import+call
+  is additionally try-wrapped (import-chain breaks can't kill the loop).
+- Owner-label lookup degrades to the RAW ID, never to "unclaimed".
+- Gather's provenance helpers promoted to public names
+  (`load_inbound_event`, `slack_provenance`, `PUBLIC_CHANNEL_TYPE`) — mint
+  consumes the single owner, no underscore imports.
+- Known deferred (recorded, review findings 4/5): the Slack reply still
+  precedes the outer commit (tiny 404-launch-link window if the
+  transaction later fails — revisit with slice 06's refresh cycle, which
+  is the natural post-commit home), and hook-level integration tests need
+  a real session (covered instead by mint-level regressions: echo
+  starvation, IntegrityError re-select, lock assertion, label fallback —
+  plus the illo-dev probe before merge).
 
 You are implementing the coordinator upgrade: at every routing moment
 (triage assignment, notify nudge, digest line) Illo attaches a **handoff

@@ -51,7 +51,8 @@ _SLACK_PAGE_CAP = 50
 _SLACK_MAX_PAGES = 3
 # The ONLY team-visible surface (ingress envelope vocabulary). Everything
 # else — im, mpim, group, empty, unknown — is fail-closed.
-_PUBLIC_CHANNEL_TYPE = "channel"
+PUBLIC_CHANNEL_TYPE = "channel"
+_PUBLIC_CHANNEL_TYPE = PUBLIC_CHANNEL_TYPE  # back-compat alias
 
 JOB_REF_IDEA_PREFIX = "idea:"
 JOB_REF_RECORD_PREFIX = "domain_record:"
@@ -196,8 +197,9 @@ async def _load_job(session: Any, *, org_id: str, job_ref: str) -> tuple[Any | N
     return idea, record
 
 
-async def _load_inbound_event(session: Any, *, org_id: str, idea: Any) -> Any | None:
-    """idea → its inbound event, org-verified."""
+async def load_inbound_event(session: Any, *, org_id: str, idea: Any) -> Any | None:
+    """idea → its inbound event, org-verified. Public: mint (slice 05) and
+    the notify refresh (slice 06) reuse this — one owner for provenance."""
     details = dict(getattr(idea, "agent_details", None) or {})
     event_id = str((details.get("inbound_triage") or {}).get("event_id") or "")
     if not event_id:
@@ -211,7 +213,7 @@ async def _load_inbound_event(session: Any, *, org_id: str, idea: Any) -> Any | 
     return event
 
 
-def _slack_provenance(event: Any) -> dict[str, Any] | None:
+def slack_provenance(event: Any) -> dict[str, Any] | None:
     """The AUTHORITATIVE origin-thread coordinates: ``envelope["payload"]``
     only (that is what ingress writes — ``channel_id``, ``thread_ts`` /
     ``message_ts``, ``channel_type``). No top-level fallbacks: a shape we
@@ -228,6 +230,11 @@ def _slack_provenance(event: Any) -> dict[str, Any] | None:
         "channel": channel,
         "thread_ts": thread_ts,
         "channel_type": _text(payload.get("channel_type")).lower(),
+        # Illo's own Slack identity: gather MUST filter it out of thread
+        # reads, or mint's posted brief feeds the next gather, rotates the
+        # revision, and the noise gate collapses into a self-echo repost
+        # loop (cross-family review finding, 2026-07-13).
+        "bot_user_id": _text(payload.get("bot_user_id")),
     }
 
 
@@ -437,7 +444,7 @@ async def gather_pieces(
     provenance_note_added = False
     if idea is not None:
         try:
-            event = await _load_inbound_event(session, org_id=org_id, idea=idea)
+            event = await load_inbound_event(session, org_id=org_id, idea=idea)
         except Exception as exc:  # noqa: BLE001
             notes.append(f"slack: provenance unavailable — {type(exc).__name__}")
             provenance_note_added = True
@@ -459,7 +466,7 @@ async def gather_pieces(
     if idea is not None:
         details = dict(getattr(idea, "agent_details", None) or {})
         event_expected = bool((details.get("inbound_triage") or {}).get("event_id"))
-        provenance = _slack_provenance(event) if event is not None else None
+        provenance = slack_provenance(event) if event is not None else None
         if event_expected and event is None:
             # Missing row OR org mismatch — either way, say so, don't guess.
             if not provenance_note_added:
@@ -479,7 +486,10 @@ async def gather_pieces(
                         thread_ts=provenance["thread_ts"],
                         limit=fetch_limit,
                     )
+                    bot_user_id = provenance.get("bot_user_id") or ""
                     for message in thread.messages:
+                        if bot_user_id and message.get("user") == bot_user_id:
+                            continue  # Illo's own replies are output, not context
                         result.pieces.append(
                             SourcePiece(
                                 source="slack_thread",

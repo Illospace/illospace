@@ -66,6 +66,7 @@ def _event(channel_type: str = "channel", *, org_id: str = _ORG):
                 "channel_type": channel_type,
                 "thread_ts": "1751964840.0",
                 "message_ts": "1751964840.0",
+                "bot_user_id": "B0ILLO",  # ingress always resolves this
             },
             "hints": {},
         },
@@ -131,6 +132,8 @@ class FakeSession:
         values = {str(v) for v in params.values() if not isinstance(v, (list, tuple, set))}
         entity = stmt.column_descriptions[0]["entity"]
         name = getattr(entity, "__name__", None) or str(stmt.column_descriptions[0].get("name"))
+        if name == "Idea" and getattr(stmt, "_for_update_arg", None) is not None:
+            self.locked_idea_selects = getattr(self, "locked_idea_selects", 0) + 1
         if name == "Idea":
             rows = [
                 i for i in self._ideas
@@ -162,6 +165,10 @@ class FakeSession:
 
     async def flush(self):
         self.flush_count += 1
+        if getattr(self, "fail_next_flush_with", None) is not None:
+            exc = self.fail_next_flush_with
+            self.fail_next_flush_with = None
+            raise exc
 
     async def rollback(self):
         pass
@@ -350,6 +357,81 @@ async def test_no_idea_for_event_is_a_quiet_skip(posts):
     assert result.ok is False
     assert result.reason == "no triage idea for event"
     assert posts == []
+
+
+async def test_own_brief_in_thread_does_not_rotate_revision(posts):
+    """The self-echo regression (review finding 1): Illo's posted brief must
+    not feed the next gather, or every reconcile re-mints and re-posts."""
+    idea = _idea()
+    session = FakeSession(ideas=[idea], events=[_event()],
+                          users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
+
+    class EchoingSlack:
+        """After the first mint, the thread contains Illo's own reply."""
+
+        def __init__(self):
+            self.extra: list[dict] = []
+
+        async def read_thread(self, *, channel, thread_ts, limit):
+            base = [{"ts": "1751964840.0", "user": "jb", "text": "half the batch melted"}]
+            return SlackThreadRead(
+                messages=tuple(base + self.extra), total=1 + len(self.extra), channel=channel
+            )
+
+    slack = EchoingSlack()
+    readers = Readers(slack=slack, github=NoGithub())
+    first = await mint_packet_after_triage(
+        session, event=_event(), run_row=SimpleNamespace(id=1), readers=readers)
+    assert first.created and len(posts) == 1
+    # Illo's brief lands in the thread under the BOT user id from provenance.
+    slack.extra.append({"ts": "1751964900.0", "user": "B0ILLO", "text": posts[0]["text"]})
+    second = await mint_packet_after_triage(
+        session, event=_event(), run_row=SimpleNamespace(id=2), readers=readers)
+    assert not second.created  # bot message filtered → same dossier → same key
+    assert len(posts) == 1  # no echo repost
+    assert len(session.handoffs) == 1
+
+
+async def test_integrity_race_reselects_as_reused_and_stamps(posts):
+    """Losing the (org, idempotency_key) race must re-select the winner's
+    row, stamp the idea, and post nothing."""
+    from sqlalchemy.exc import IntegrityError
+
+    idea = _idea()
+    winner_session = FakeSession(ideas=[idea], events=[_event()],
+                                 users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
+    first = await mint_packet_after_triage(
+        winner_session, event=_event(), run_row=SimpleNamespace(id=1), readers=_readers())
+    assert first.created and len(posts) == 1
+
+    # The loser: same content, but its insert flush raises IntegrityError.
+    idea.agent_details = {**idea.agent_details}
+    idea.agent_details.pop("packet", None)  # pretend loser hasn't stamped yet
+    winner_session.fail_next_flush_with = IntegrityError("dup", None, Exception("uq"))
+    second = await mint_packet_after_triage(
+        winner_session, event=_event(), run_row=SimpleNamespace(id=2), readers=_readers())
+    assert second.ok and not second.created
+    assert len(posts) == 1  # loser posts nothing
+    assert idea.agent_details["packet"]["handoff_id"] == str(first.handoff.id)
+
+
+async def test_stamp_reads_go_through_a_row_locked_idea(posts):
+    idea = _idea()
+    session = FakeSession(ideas=[idea], events=[_event()],
+                          users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
+    await mint_packet_after_triage(
+        session, event=_event(), run_row=SimpleNamespace(id=1), readers=_readers())
+    assert getattr(session, "locked_idea_selects", 0) >= 1  # spec-pinned serialization
+
+
+async def test_owner_label_lookup_failure_degrades_to_id_not_unclaimed(posts):
+    idea = _idea()
+    session = FakeSession(ideas=[idea], events=[_event()], users=[])  # no User row
+    result = await mint_packet_after_triage(
+        session, event=_event(), run_row=SimpleNamespace(id=1), readers=_readers())
+    header = result.human_brief.splitlines()[0]
+    assert "unclaimed" not in header  # assigned item never reads as unclaimed
+    assert _OWNER[:8] in header  # raw id (possibly shortened by the cap) shows
 
 
 async def test_probe_stage_creates_and_posts_nothing(posts):

@@ -34,8 +34,13 @@ def _piece(data: dict) -> SourcePiece:
 
 def _run_triage_probe(*, since_hours: float) -> int:
     """The slice-05 pre-merge probe: recent real triaged ideas rendered as
-    briefs, zero side effects. Sample output belongs in
-    specs/illo-handoff-packets/assets/pre-merge-probe-05.md on the PR."""
+    briefs. Creates no handoffs, posts nothing, rolls back its session; the
+    one sanctioned side effect is the GitHub token resolver's vault
+    access-audit rows (auth owner's behavior). Briefs print the literal
+    ``{launch_url}`` placeholder — honest for a no-row render. Sample output
+    belongs in specs/illo-handoff-packets/assets/pre-merge-probe-05.md on
+    the PR. Dev CLI: queries all orgs, ignores archival — fine at Uwear
+    scale."""
     import asyncio
     from datetime import datetime, timedelta, timezone
 

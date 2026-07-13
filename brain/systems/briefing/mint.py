@@ -42,14 +42,14 @@ from sqlalchemy.exc import IntegrityError
 from brain.systems.briefing.compose import PacketRender, compose_packet, fill_launch_url
 from brain.systems.briefing.core import Dossier, DossierBudget, assemble_dossier
 from brain.systems.briefing.gather import (
-    _PUBLIC_CHANNEL_TYPE,
-    _load_inbound_event,
-    _slack_provenance,
+    PUBLIC_CHANNEL_TYPE,
     DefaultGithubReader,
     DefaultSlackReader,
     GithubReader,
     SlackReader,
     gather_pieces,
+    load_inbound_event,
+    slack_provenance,
 )
 from brain.systems.launch_handoffs import (
     LaunchHandoff,
@@ -91,7 +91,11 @@ def _member_targets() -> dict[str, str]:
 
 
 async def _owner_label(session: Any, owner_user_id: str | None) -> str | None:
-    """Best-effort uuid → display name (the _fill_owner_labels pattern)."""
+    """Best-effort uuid → display name (the _fill_owner_labels pattern).
+
+    Degrades to the RAW ID — never to None — so a transient lookup failure
+    can't render an assigned item as "unclaimed" in the brief.
+    """
     if not owner_user_id or session is None:
         return None
     try:
@@ -101,10 +105,10 @@ async def _owner_label(session: Any, owner_user_id: str | None) -> str | None:
             await session.execute(select(User.id, User.name, User.email).where(User.id == str(owner_user_id)))
         ).first()
         if row is None:
-            return None
+            return str(owner_user_id)
         return row.name or row.email or str(row.id)
     except Exception:  # noqa: BLE001 — degrade to the raw id, never break a mint
-        return None
+        return str(owner_user_id)
 
 
 def _repo_origin_hint(dossier: Dossier) -> str | None:
@@ -166,6 +170,25 @@ async def build_packet_for_job(
         source_ref=dict(source_ref or {}),
     )
     return packet, dossier
+
+
+async def _lock_idea(session: Any, *, org_id: str, idea: Any) -> Any | None:
+    """Re-select the idea FOR UPDATE — the spec-pinned per-job serialization.
+
+    All stamp reads/writes go through the locked row so concurrent minters
+    queue instead of cross-superseding.
+    """
+    if idea is None:
+        return None
+    from brain.platform.db.models.idea import Idea
+
+    return (
+        await session.execute(
+            select(Idea)
+            .where(Idea.id == str(getattr(idea, "id", "")), Idea.org_id == str(org_id))
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
 
 
 def _stamp_idea(idea: Any, *, handoff: LaunchHandoff, revision: str, owner_user_id: str | None) -> None:
@@ -252,13 +275,38 @@ async def mint_packet_for_job(
         budget=budget,
     )
 
-    prior = dict((dict(getattr(idea, "agent_details", None) or {})).get("packet") or {}) if idea is not None else {}
+    # WRITE PHASE — one savepoint around EVERYTHING (create + supersede +
+    # repair + stamp), so a DB failure anywhere rolls back to the savepoint
+    # and the caller's transaction (the triage receipt!) stays healthy.
+    # Containment must hold at commit-time, not just raise-time
+    # (cross-family review finding, 2026-07-13).
+    #
+    # The idea is re-selected WITH a row lock before the stamp is read, so a
+    # triage-mint racing a notify-refresh (slice 06) cannot double-supersede
+    # or clobber a concurrent agent_details write (spec-pinned serialization).
     try:
         async with session.begin_nested():
+            locked_idea = await _lock_idea(session, org_id=org_id, idea=idea)
+            prior = (
+                dict((dict(getattr(locked_idea, "agent_details", None) or {})).get("packet") or {})
+                if locked_idea is not None
+                else {}
+            )
             row, created = await create_launch_handoff_with_status(session, packet.handoff_input)
+            if created:
+                if prior.get("handoff_id"):
+                    await _supersede_prior(
+                        session, org_id=org_id, prior_handoff_id=str(prior["handoff_id"]), new_row=row
+                    )
+            elif _reused_row_drifted(row, packet):
+                _repair_drifted_row(row, packet)
+            if locked_idea is not None:
+                _stamp_idea(locked_idea, handoff=row, revision=packet.revision, owner_user_id=owner_user_id)
+            await session.flush()
     except IntegrityError:
         # Lost a concurrent race on (org_id, idempotency_key): the winner's
-        # row IS this content. Re-select and treat as reused.
+        # row IS this content. The savepoint rolled back; re-select as
+        # reused and re-stamp under a fresh savepoint (no supersede, no post).
         from brain.platform.db.models.launch_handoff import LaunchHandoff as LaunchHandoffModel
 
         row = (
@@ -270,19 +318,11 @@ async def mint_packet_for_job(
             )
         ).scalar_one()
         created = False
-
-    if created:
-        if prior.get("handoff_id"):
-            await _supersede_prior(
-                session, org_id=org_id, prior_handoff_id=str(prior["handoff_id"]), new_row=row
-            )
-    elif _reused_row_drifted(row, packet):
-        _repair_drifted_row(row, packet)
-        await session.flush()
-
-    if idea is not None:
-        _stamp_idea(idea, handoff=row, revision=packet.revision, owner_user_id=owner_user_id)
-        await session.flush()
+        async with session.begin_nested():
+            locked_idea = await _lock_idea(session, org_id=org_id, idea=idea)
+            if locked_idea is not None:
+                _stamp_idea(locked_idea, handoff=row, revision=packet.revision, owner_user_id=owner_user_id)
+            await session.flush()
 
     launch_url = launch_handoff_url_for_id(row.id, target_tool=row.target_tool)
     return MintResult(
@@ -317,9 +357,9 @@ def _record_job_ref(attribution: dict[str, Any] | None, idea: Any) -> str:
 async def _post_brief_to_origin_thread(session: Any, *, org_id: str, idea: Any, brief: str) -> bool:
     """Backend Slack reply into the origin thread — same provenance and
     public-only allowlist as gather; silent skip (False) when not possible."""
-    event = await _load_inbound_event(session, org_id=org_id, idea=idea)
-    provenance = _slack_provenance(event) if event is not None else None
-    if not provenance or provenance["channel_type"] != _PUBLIC_CHANNEL_TYPE:
+    event = await load_inbound_event(session, org_id=org_id, idea=idea)
+    provenance = slack_provenance(event) if event is not None else None
+    if not provenance or provenance["channel_type"] != PUBLIC_CHANNEL_TYPE:
         return False
     from brain.systems.slack.client import slack_web_client_from_env
 

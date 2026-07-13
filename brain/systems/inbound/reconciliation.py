@@ -165,6 +165,12 @@ async def reconcile_inbound_triage_run(
     receipt = await _inbound_receipt_for_run(session, event_id=event_id, run_id=run_id)
     if receipt is None:
         return None
+    # Captured BEFORE mutation: the packet hook fires only on the transition
+    # INTO a terminal receipt state. Re-reconciles of an already-terminal
+    # receipt (e.g. illo_get_result polls call this on every read) must
+    # never re-gather or re-mint — that keeps the read path free of live
+    # Slack/GitHub I/O and starves the brief self-echo loop.
+    receipt_was_terminal = str(receipt.status or "") in {"processed", "failed"}
 
     now = datetime.now(timezone.utc)
     terminal_at = _run_datetime(row, status)
@@ -238,15 +244,28 @@ async def reconcile_inbound_triage_run(
     await session.flush()
 
     # Handoff packet (spec: illo-handoff-packets slice 05): a COMPLETED
-    # triage routes work — mint the packet that makes it arrive warm. Fully
-    # contained: mint_packet_after_triage never raises, so a packet failure
-    # can never break the receipt loop that worked before packets existed.
-    if status == RunStatus.COMPLETED and tool_use.get("type") == "illo_triage":
-        from brain.systems.briefing.mint import mint_packet_after_triage
+    # triage routes work — mint the packet that makes it arrive warm.
+    # Once per receipt lifecycle (see receipt_was_terminal above). Double
+    # containment: mint never raises by contract, and the import + call sit
+    # under their own guard so even an import-chain break cannot take down
+    # the receipt loop that worked before packets existed.
+    if (
+        status == RunStatus.COMPLETED
+        and tool_use.get("type") == "illo_triage"
+        and not receipt_was_terminal
+    ):
+        try:
+            from brain.systems.briefing.mint import mint_packet_after_triage
 
-        await mint_packet_after_triage(
-            session, event=event, run_row=row, attribution=attribution
-        )
+            await mint_packet_after_triage(
+                session, event=event, run_row=row, attribution=attribution
+            )
+        except Exception:  # noqa: BLE001 — belt to mint's own containment
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "packet mint hook failed for event %s", event_id, exc_info=True
+            )
 
     return receipt
 
