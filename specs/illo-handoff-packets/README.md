@@ -67,6 +67,22 @@ implements per the routing rules, Claude directs and reviews.
   body joins the ordering key); `excerpt_chars` has a 40-char floor
   (below it a cap can't hold content + an honest marker).
 
+**Implementation decisions that refine slice texts (04, Codex-implemented):**
+- Unknown targets get the launch PAGE (fallback), not the old 400 — the
+  page is target-agnostic enough (copy box + codex alternate button).
+- Launch marking: codex → on redirect (unchanged); claude/unknown → a new
+  authed `POST /api/launch-handoffs/{id}/launched` fired by the copy
+  button; page render never counts (slice-07 metric depends on this).
+- The page is self-contained dark-only HTML with a strict CSP
+  (`default-src 'none'`), all interpolations escaped; Constellation palette
+  values from DESIGN.md. Visual gate: rendered from a fixture row and
+  screenshot-reviewed 2026-07-13 (evidence:
+  [assets/launch-page-render-04.html](assets/launch-page-render-04.html));
+  accepted — flat, legible, primary action correct. Re-run the gate at
+  activation against the live route.
+- `parse_member_agent_targets` / `agent_target_for_member` live in
+  `launch_handoffs.py` (uuid-keyed, validated); slice 05 consumes them.
+
 You are implementing the coordinator upgrade: at every routing moment
 (triage assignment, notify nudge, digest line) Illo attaches a **handoff
 packet** — a short human brief plus an agent-ready launch handoff — so work
@@ -89,7 +105,7 @@ explicitly rejected (see Direction below).
 - [x] Slice 01 — dossier core (pure assembly + budgets + truncation honesty)
 - [x] Slice 02 — packet composer (dual-audience render + idempotency)
 - [ ] Slice 03 — gather wiring (read-only source adapters)
-- [ ] Slice 04 — claude launch target (launch page; codex redirect preserved)
+- [x] Slice 04 — claude launch target (launch page; codex redirect preserved)
 - [ ] Slice 05 — triage-moment minting (env-gated)
 - [ ] Slice 06 — notify/digest packet links + stale re-render
 - [ ] Slice 07 — outcome stamps (launched/ignored, time-to-launch)

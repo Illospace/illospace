@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Launch handoff · Illo</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --page: #050915;
+        --surface: #0b111d;
+        --surface-raised: #101826;
+        --border: #263143;
+        --text: #f0f0fa;
+        --muted: #9aa7ba;
+        --accent: #8db7ff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--page);
+        color: var(--text);
+        font: 15px/1.6 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      main { width: min(720px, calc(100% - 32px)); margin: 0 auto; padding: 64px 0; }
+      .eyebrow {
+        margin: 0 0 8px;
+        color: var(--accent);
+        font: 600 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+      }
+      h1 { margin: 0; font-size: clamp(26px, 5vw, 36px); line-height: 1.15; font-weight: 600; }
+      .lede { margin: 12px 0 28px; color: var(--muted); }
+      section { padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+      label { display: block; margin-bottom: 8px; font-weight: 600; }
+      textarea {
+        width: 100%;
+        min-height: 180px;
+        resize: vertical;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 14px;
+        background: var(--surface-raised);
+        color: var(--text);
+        font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      textarea:focus, a:focus-visible, button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+      button, .button {
+        min-height: 42px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 15px;
+        background: var(--surface-raised);
+        color: var(--text);
+        font: 600 12px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+        text-decoration: none;
+        cursor: pointer;
+      }
+      button { border-color: var(--text); background: var(--text); color: var(--page); }
+      button:disabled { opacity: .65; cursor: wait; }
+      #copy-status { min-height: 24px; margin: 10px 0 0; color: var(--muted); font-size: 13px; }
+      dl { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px 16px; margin: 22px 0 0; }
+      dt { color: var(--muted); }
+      dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+        font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      @media (max-width: 520px) {
+        main { padding: 36px 0; }
+        section { padding: 16px; }
+        dl { grid-template-columns: 1fr; gap: 2px; }
+        dd + dt { margin-top: 8px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">Illo launch handoff</p>
+      <h1>Maison L. batch 8841 melted hands</h1>
+      <p class="lede">
+        Copy the starter prompt into Claude Code. The session will fetch the full,
+        org-scoped context from Illo.
+      </p>
+      <section aria-labelledby="prompt-label">
+        <label id="prompt-label" for="starter-prompt">Starter prompt</label>
+        <textarea id="starter-prompt" readonly>Pick up Illo launch handoff hf-demo-01 in this Claude Code session: Maison L. batch 8841 melted hands
+
+Use the Illo MCP `illo_read` tool with capability `handoff.get` and arguments {&quot;handoff_id&quot;:&quot;hf-demo-01&quot;} to fetch the full context, source references, instructions, and acceptance criteria before changing code.</textarea>
+        <div class="actions">
+          <button id="copy-prompt" type="button" data-launched-url="/api/launch-handoffs/hf-demo-01/launched">Copy for Claude Code</button>
+          <a class="button" href="/api/launch-handoffs/hf-demo-01/launch?target=codex">Open in Codex</a>
+        </div>
+        <p id="copy-status" role="status" aria-live="polite"></p>
+        <dl>
+          <dt>Repository</dt><dd>https://github.com/uwear/uwear-backend.git</dd>
+          <dt>Branch hint</dt><dd>fix/default-model-backfill</dd>
+        </dl>
+      </section>
+    </main>
+    <script>
+      const button = document.getElementById('copy-prompt');
+      const prompt = document.getElementById('starter-prompt');
+      const status = document.getElementById('copy-status');
+
+      async function copyPrompt() {
+        let copied = false;
+        button.disabled = true;
+        try {
+          if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(prompt.value);
+          } else {
+            prompt.focus();
+            prompt.select();
+            if (!document.execCommand('copy')) throw new Error('Copy unavailable');
+          }
+          copied = true;
+          const response = await fetch(button.dataset.launchedUrl, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { Accept: 'application/json' },
+          });
+          if (!response.ok) throw new Error('Launch record failed');
+          status.textContent = 'Copied. Launch recorded by Illo.';
+        } catch (error) {
+          status.textContent = copied
+            ? 'Prompt copied, but Illo could not record the launch.'
+            : 'Copy failed. Select the prompt and copy it manually.';
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      button.addEventListener('click', copyPrompt);
+    </script>
+  </body>
+</html>
