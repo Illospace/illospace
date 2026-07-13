@@ -215,6 +215,19 @@ async def create_launch_handoff(
     session: AsyncSession,
     handoff_input: LaunchHandoffCreateInput,
 ) -> LaunchHandoff:
+    row, _created = await create_launch_handoff_with_status(session, handoff_input)
+    return row
+
+
+async def create_launch_handoff_with_status(
+    session: AsyncSession,
+    handoff_input: LaunchHandoffCreateInput,
+) -> tuple[LaunchHandoff, bool]:
+    """Create a handoff, or return the existing row on an idempotency hit.
+
+    The boolean is the caller's noise gate: a REUSED row (``False``) means
+    the packet already went out — mint must post nothing to Slack.
+    """
     clean_org_id = _required_string(handoff_input.org_id, "org_id")
     clean_title = _required_string(handoff_input.title, "title")
     clean_instructions = _required_string(handoff_input.instructions, "instructions")
@@ -228,7 +241,7 @@ async def create_launch_handoff(
             )
         )
         if existing is not None:
-            return existing
+            return existing, False
 
     row = LaunchHandoff(
         org_id=clean_org_id,
@@ -248,7 +261,7 @@ async def create_launch_handoff(
     )
     session.add(row)
     await session.flush()
-    return row
+    return row, True
 
 
 async def get_launch_handoff(

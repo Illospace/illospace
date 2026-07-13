@@ -142,6 +142,35 @@ guessed):**
   cursor pagination, backend-read flattening, revision rotation on
   source_notes).
 
+**Implementation decisions that refine slice texts (05, Claude-implemented
+after the Codex worker wedged again — 0.15s CPU in 25min):**
+- Orchestrator: `brain/systems/briefing/mint.py`. Hook = two contained
+  lines at the end of `reconcile_inbound_triage_run` (COMPLETED
+  `illo_triage` receipts only); the idea resolves via
+  `Idea.origin_ref == "inbound_event:<id>"`, org-scoped.
+- `create_launch_handoff_with_status(...) -> (row, created)` is the new
+  service primitive (create delegates to it); `created=False` is the noise
+  gate — reuse posts NOTHING.
+- Supersede: prior row found via the idea's packet stamp → `archived` +
+  `metadata_["superseded_by"]`, new row `metadata_["supersedes"]`.
+  Reuse-with-drift (same key, different content = revision-hash gap) is
+  repaired IN PLACE with a warning, never duplicated.
+- Race: nested transaction; IntegrityError on the unique key → re-select
+  as reused. Total containment: `mint_packet_after_triage` never raises.
+- Ask = deterministic template (`task_domain` + envelope summary);
+  `job_ref` from attribution `domain_record` refs, idea-id fallback;
+  owner label via a `_fill_owner_labels`-style best-effort User lookup;
+  Slack reply reuses gather's provenance + public-only allowlist via
+  `slack/client.post_message` (thread_ts).
+- `repo_origin_url` hint derived from the dossier's first GitHub ref.
+- Pre-merge probe: `python -m brain.systems.briefing --probe-triage
+  [--since-hours H]` — walks recent inbound-triaged ideas through the
+  shared `build_packet_for_job` stage (gather→assemble→compose), prints
+  briefs + notes, creates and posts nothing, rolls back. Fails helpfully
+  without the dev/read env. 11 mint tests cover the noise gate, supersede
+  vocabulary, containment, non-public no-post, unclaimed packets, target
+  map, and probe-stage purity.
+
 You are implementing the coordinator upgrade: at every routing moment
 (triage assignment, notify nudge, digest line) Illo attaches a **handoff
 packet** — a short human brief plus an agent-ready launch handoff — so work
@@ -165,7 +194,7 @@ explicitly rejected (see Direction below).
 - [x] Slice 02 — packet composer (dual-audience render + idempotency)
 - [x] Slice 03 — gather wiring (read-only source adapters)
 - [x] Slice 04 — claude launch target (launch page; codex redirect preserved)
-- [ ] Slice 05 — triage-moment minting (ungated; pre-merge probe)
+- [x] Slice 05 — triage-moment minting (ungated; pre-merge probe)
 - [ ] Slice 06 — notify/digest packet links + stale re-render
 - [ ] Slice 07 — outcome stamps (launched/ignored, time-to-launch)
 - [ ] Doc-1155 delta applied at merge+deploy (text lives in slice 05/06 files)

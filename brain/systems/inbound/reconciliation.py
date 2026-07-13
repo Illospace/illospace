@@ -236,6 +236,18 @@ async def reconcile_inbound_triage_run(
         event.error = final_answer or f"Illo triage run ended with status {status.value}"
 
     await session.flush()
+
+    # Handoff packet (spec: illo-handoff-packets slice 05): a COMPLETED
+    # triage routes work — mint the packet that makes it arrive warm. Fully
+    # contained: mint_packet_after_triage never raises, so a packet failure
+    # can never break the receipt loop that worked before packets existed.
+    if status == RunStatus.COMPLETED and tool_use.get("type") == "illo_triage":
+        from brain.systems.briefing.mint import mint_packet_after_triage
+
+        await mint_packet_after_triage(
+            session, event=event, run_row=row, attribution=attribution
+        )
+
     return receipt
 
 
