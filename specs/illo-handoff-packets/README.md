@@ -2,25 +2,71 @@
 
 ## Next Agent Prompt
 
-**Status (2026-07-13): ALL SEVEN SLICES IMPLEMENTED.** 01–05 adversarially
-reviewed and hardened (four review rounds folded: 14+9+9+10 findings);
-06+07 implemented and unit-green, their adversarial pass is the next
-pickup, then the illo-dev pre-merge probe (briefs into `assets/`) and the
-doc-1155 delta at merge+deploy. Earlier per-slice status follows for
-provenance. Slices 01+02 implemented, cross-family reviewed,
-hardened, and green —
-`brain/systems/briefing/{core,compose}.py` (pure), CLI probe
-(`python -m brain.systems.briefing --fixture
-tests/fixtures/briefing/uwear_bug.json [--compose --ask …]`), 31 unit
-tests + golden snapshot; architecture-boundary gate green; full fast suite
-green (only the 9 pre-existing `test_llm_worker` env failures).
-Claude-implemented; **Codex cross-family review completed 2026-07-11**
-(9 findings: 3 HIGH — revision hash omitted persisted repo/branch/
-provenance fields; double-cut markers under-reported omitted chars;
-fully-shed sections lost structured counts — all 9 folded, each with a
-regression test; 51 briefing tests green). **Next pickup:
-[slices/03-gather-wiring.md](slices/03-gather-wiring.md)** — Codex
-implements per the routing rules, Claude directs and reviews.
+**Status (2026-07-13): FEATURE COMPLETE — awaiting Reda's merge of PR #308.**
+All 7 slices built, all verification done, branch merged clean with
+origin/main (conflict-free, mergeable). If you are resuming this: the
+CODE is finished; what remains is a human merge + a short deploy/activation
+sequence. Do NOT re-implement anything — read the "Remaining work" list
+below and pick up there.
+
+- **Branch:** `claude/illospace-next-steps-4b4ed3` → PR #308, base `main`.
+  Up to date with `main` (last synced 2026-07-13, resolved a GitHub-reader
+  conflict vs PR #306/#307 — kept both their `combined_status` and our
+  `body_total_chars`/`async_get_issue`).
+- **What shipped:** the whole `brain/systems/briefing/` package
+  (`core` → `compose` → `gather` → `mint` → `outcomes`), the reconcile
+  hook in `brain/systems/inbound/reconciliation.py`, notify-link wiring in
+  `change_notifications*.py`, the claude launch target in
+  `launch_handoffs.py` + `routers/launch_handoffs.py`, and the
+  `packets.outcomes` capability in `agent_mcp_handoffs.py`.
+- **Verification done:** 5 adversarial review rounds folded (51 findings,
+  last round 0 HIGH); ~150 feature tests; full fast suite 3592 passed
+  (only the 9 pre-existing `test_llm_worker` env failures); illo-dev
+  pre-merge probe ran on REAL triaged data (evidence + review-finding
+  discharges in [assets/pre-merge-probe-05.md](assets/pre-merge-probe-05.md)).
+
+### Remaining work (post-merge, in order)
+1. **Reda merges PR #308.** Merge = live behavior (no runtime gates — see
+   the "No feature gates" invariant). Rollback = revert + redeploy.
+2. **Deploy to illo-dev:** `cd /home/uwear/illospace && git pull &&
+   deploy/scripts/upgrade.sh --build --no-pull` (GHCR login expired — build
+   from the server checkout). Gotchas (from `[[illospace-deploy-illo-dev]]`):
+   `upgrade.sh` does NOT recreate `slack-connector` (compose profile
+   "slack") — recreate it manually or the Slack lane runs old code; and
+   `--force-recreate web` AFTER api or the dashboard 502s.
+3. **Apply the doc-1155 delta** — the triage-playbook + digest-footer prose
+   in [slices/05-triage-minting.md](slices/05-triage-minting.md) and
+   [slices/06-notify-digest-links.md](slices/06-notify-digest-links.md);
+   follow the pointer-section discipline (`[[illo-doc-1155-split]]`), never
+   grow the core.
+4. **Optional config:** `ILLO_MEMBER_AGENT_TARGETS` (uuid-keyed,
+   `<uuid>=claude,<uuid>=codex`; unset → codex for everyone) — add to the
+   `x-illo-env` whitelist + `deploy/compose/.env` (the whitelist gotcha).
+5. **Watch the first live packets** (the one verification a pre-merge run
+   can't do): a real complaint → triage → a brief in the origin thread with
+   a launch link; CLICK that link end-to-end. Watch for the three failure
+   modes the reviews hardened against: Slack noise (re-mint must be silent),
+   wrong owner in the header, and dishonest completeness (a brief that lost
+   context MUST say `context trimmed: …`).
+6. **Re-ask the north-star question** with the packets pillar filled in
+   (`[[pinecone-north-star-question]]`) — propose the next step unprompted.
+
+### Deferred (fast-follow, non-blocking — from the 06+07 review)
+- Notify-tick Slack reply still precedes the outer commit (tiny
+  404-launch-link window if the tick later rolls back); the notify cycle's
+  refresh path is the natural post-commit home. Verify the runner commits
+  (it does — `UnitOfWork` commits on exit) and revisit if ever observed.
+- A functional index on `launch_handoffs.metadata_->>'job_ref'` once
+  packets accumulate (today the batched per-tick query is fine).
+
+When you finish activation and the feature is live+verified, run
+[close-spec](../../.claude/skills/close-spec) to archive this into
+`specs/done/` as a durable rationale record.
+
+---
+_Historical per-slice provenance follows (implementation decisions that
+refine the original slice sketches). Slices 01+02 were the first built;
+each block records what the code does that the sketch didn't say._
 
 **Implementation decisions that refine slice texts (01):**
 - `DossierItem.truncated` (+ `omitted_chars`), not the sketch's
