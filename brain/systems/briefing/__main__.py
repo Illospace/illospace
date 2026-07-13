@@ -79,10 +79,22 @@ def _run_triage_probe(*, since_hours: float) -> int:
             if not ideas:
                 print(f"no inbound-triaged ideas in the last {since_hours:g}h")
                 return 0
+            from brain.systems.briefing.gather import load_inbound_event
+
             for idea in ideas:
                 details = dict(idea.agent_details or {})
                 assignment = dict(details.get("assignment") or {})
                 owner_id = str(assignment.get("owner_id") or "") or None
+                # Same identity the live mint uses: GitHub token discovery
+                # needs the inbound connection's authority user.
+                source_event = await load_inbound_event(
+                    session, org_id=str(idea.org_id), idea=idea
+                )
+                authority = (
+                    str(getattr(source_event, "authority_user_id", "") or "") or None
+                    if source_event is not None
+                    else None
+                )
                 packet, dossier = await build_packet_for_job(
                     session,
                     org_id=str(idea.org_id),
@@ -91,6 +103,7 @@ def _run_triage_probe(*, since_hours: float) -> int:
                     owner_user_id=owner_id,
                     owner_label=await _owner_label(session, owner_id),
                     target_tool=agent_target_for_member(owner_id, targets),
+                    reader_user_id=authority,
                 )
                 print("=" * 72)
                 print(packet.human_brief)
