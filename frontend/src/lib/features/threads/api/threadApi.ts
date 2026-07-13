@@ -1,6 +1,6 @@
-import { api } from '$lib/api/client';
+import { api, type ThreadStreamPage, type ThreadStreamPageOptions } from '$lib/api/client';
 import { pickTypedApiMethods } from '$lib/api/featureApi';
-import type { Connection, Idea, StreamItem } from '$lib/types/cortex';
+import type { Connection, Idea } from '$lib/types/cortex';
 
 export type ThreadMessageInput = Parameters<typeof api.addThreadMessage>[1];
 export type ThreadMessage = Awaited<ReturnType<typeof api.addThreadMessage>>;
@@ -30,9 +30,9 @@ export type ThreadDiscussionCreateInput = Parameters<typeof api.postThreadDiscus
 export type ThreadDiscussionCreateResult = Awaited<ReturnType<typeof api.postThreadDiscussionComment>>;
 
 type ThreadApiMethods = {
-  unifiedStream: (ideaId: string, includeDebug?: boolean) => Promise<StreamItem[]>;
+  unifiedStream: (ideaId: string, options?: ThreadStreamPageOptions) => Promise<ThreadStreamPage>;
   addThreadMessage: (ideaId: string, data: ThreadMessageInput) => Promise<ThreadMessage>;
-  runHistory: (ideaId: string, includeDebug?: boolean) => Promise<ThreadRunHistoryItem[]>;
+  runHistory: (ideaId: string) => Promise<ThreadRunHistoryItem[]>;
   approveRun: typeof api.approveRun;
   denyRun: typeof api.denyRun;
   steerRun: typeof api.steerRun;

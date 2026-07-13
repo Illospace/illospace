@@ -181,18 +181,23 @@ async def test_cortex_stream_includes_persisted_visual_block(monkeypatch):
 
     monkeypatch.setattr(idea_ops, "_require_idea_for_user", fake_require_idea)
 
-    items = await idea_ops.idea_unified_stream("idea-1", user={"id": "user-1"})
+    page = await idea_ops.idea_unified_stream("idea-1", user={"id": "user-1"})
 
-    assert items == [
-        {
-            "type": "visual_block",
-            "timestamp": created.isoformat(),
-            "id": "vb-5",
-            "content_type": "markdown",
-            "title": "Summary",
-            "content": "**Done**",
-            "display_mode": "inline",
-            "run_id": "99",
-            "position_after": 12,
-        }
-    ]
+    assert page == {
+        "idea_id": "idea-1",
+        "items": [
+            {
+                "type": "visual_block",
+                "timestamp": created.isoformat(),
+                "id": "vb-5",
+                "content_type": "markdown",
+                "title": "Summary",
+                "content": "**Done**",
+                "display_mode": "inline",
+                "run_id": "99",
+                "position_after": 12,
+            }
+        ],
+        "has_more": False,
+        "next_before": None,
+    }

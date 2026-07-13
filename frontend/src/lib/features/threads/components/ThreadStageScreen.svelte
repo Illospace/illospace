@@ -53,7 +53,6 @@
     type ThreadStageRightDockTab,
     type ThreadStageRightDockTabKind,
   } from '$lib/features/threads/controllers/threadSidePanelController';
-  import { threadStreamController } from '$lib/features/threads/controllers/threadStreamController';
   import { threadUrl } from '$lib/features/threads/domain/threadLinks';
   import {
     findSlashCommandToken,
@@ -67,6 +66,7 @@
     scrollConversationToBottom,
     shouldShowConversationScrollCue,
   } from '$lib/components/chat/conversationScroll';
+  import { buildThreadStreamWindow, type ThreadStreamWindowCursor } from '$lib/utils/threadStreamOrdering';
   import { onDestroy, onMount, tick } from 'svelte';
 
   import type SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
@@ -87,11 +87,12 @@
     timeAgo,
     visibleThreadStreamItems,
   } from '$lib/features/threads/domain/threadStreamAdapter';
-  import type {
-    CortexThreadStageFileAttachment,
-    CortexThreadStageHeaderStatusState,
-    CortexThreadStageImageAttachment,
-    CortexThreadStageTranscriptItem,
+  import {
+    canShowEarlierThreadHistory,
+    type CortexThreadStageFileAttachment,
+    type CortexThreadStageHeaderStatusState,
+    type CortexThreadStageImageAttachment,
+    type CortexThreadStageTranscriptItem,
   } from '$lib/features/threads/domain/threadTranscriptAdapter';
 
   type ActiveRunMessageIntent = 'steer' | 'queue';
@@ -153,7 +154,9 @@
   let transcriptEl: HTMLDivElement | undefined = $state();
   let threadDragOver = $state(false);
   let userScrolledUp = $state(false);
-  let programmaticScroll = false;
+  let threadStreamWindowState = $state<{ ideaId: string; cursor: ThreadStreamWindowCursor } | null>(null);
+  let threadHistoryOperationToken = 0;
+  let programmaticScroll = $state(false);
   let showTranscriptScrollCue = $state(false);
   let transcriptScrollFrame: number | null = null;
   let projectContextError = $state('');
@@ -791,16 +794,35 @@
     if (state.valid) projectContextError = '';
   }
 
+  const selectedThreadId = $derived(idea?.id == null ? null : String(idea.id));
+  const threadStreamWindow = $derived.by(() =>
+    buildThreadStreamWindow(
+      visibleStreamItems,
+      selectedThreadId === threadStreamWindowState?.ideaId
+        ? threadStreamWindowState.cursor
+        : null,
+    ),
+  );
+  const remoteHistoryHasMore = $derived(Boolean(selectedThreadId && cortex.threadHistoryHasMore(selectedThreadId)));
+  const canShowEarlierHistory = $derived(
+    programmaticScroll && userScrolledUp
+    || canShowEarlierThreadHistory(threadStreamWindow.previousCursor, remoteHistoryHasMore),
+  );
+  const earlierHistoryState = $derived(
+    selectedThreadId && ((programmaticScroll && userScrolledUp) || cortex.threadHistoryLoadingOlder(selectedThreadId)) ? 'loading'
+      : selectedThreadId && !threadStreamWindow.previousCursor && cortex.threadHistoryError(selectedThreadId) ? 'error' : 'idle',
+  );
+
   const transcriptItems = $derived.by((): CortexThreadStageTranscriptItem[] =>
     buildThreadTranscriptItems({
       idea,
-      stream: cortex.stream,
+      stream: threadStreamWindow.items,
       themeMode: theme.mode === 'light' ? 'light' : 'dark',
       runInfo,
       latestRun,
       currentUser: auth.user,
-      onApproveRun: (runId) => void threadStreamController.approveRun(runId),
-      onDenyRun: (runId) => void threadStreamController.denyRun(runId),
+      onApproveRun: (runId) => void cortex.approveRun(runId),
+      onDenyRun: (runId) => void cortex.denyRun(runId),
     }),
   );
 
@@ -828,7 +850,7 @@
   }
 
   function keepTranscriptPinnedToBottom() {
-    if (!transcriptEl || userScrolledUp) {
+    if (!transcriptEl || userScrolledUp || programmaticScroll) {
       syncTranscriptScrollCue();
       return;
     }
@@ -852,6 +874,52 @@
     showTranscriptScrollCue = shouldShowConversationScrollCue(transcriptEl);
   }
 
+  async function showEarlierHistory() {
+    const cursor = threadStreamWindow.previousCursor;
+    const element = transcriptEl;
+    const threadId = selectedThreadId;
+    if (programmaticScroll || earlierHistoryState === 'loading' || !element || !threadId
+      || !canShowEarlierHistory) return;
+    const operationToken = ++threadHistoryOperationToken;
+    const scrollBottom = element.scrollHeight - element.scrollTop;
+    const anchor = element.querySelector<HTMLElement>('.thread-history-window-control + *');
+    const anchorTop = anchor?.getBoundingClientRect().top ?? 0;
+    programmaticScroll = true;
+    userScrolledUp = true;
+    if (transcriptScrollFrame !== null) {
+      cancelAnimationFrame(transcriptScrollFrame);
+      transcriptScrollFrame = null;
+    }
+
+    try {
+      threadStreamWindowState = { ideaId: threadId, cursor: cursor ?? threadStreamWindow.startCursor };
+      if (!cursor) await cortex.loadOlderThreadHistory(threadId);
+    } finally {
+      await tick();
+      requestAnimationFrame(() => {
+        if (operationToken !== threadHistoryOperationToken || selectedThreadId !== threadId) return;
+        if (transcriptEl === element) {
+          if (anchor?.isConnected) {
+            element.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+          } else {
+            element.scrollTop = element.scrollHeight - scrollBottom;
+          }
+        }
+        requestAnimationFrame(() => {
+          if (operationToken !== threadHistoryOperationToken || selectedThreadId !== threadId) return;
+          if (transcriptEl === element) {
+            if (anchor?.isConnected) {
+              element.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+            }
+            userScrolledUp = !conversationIsNearBottom(element, CONVERSATION_SCROLL_BOTTOM_THRESHOLD);
+            syncTranscriptScrollCue();
+          }
+          programmaticScroll = false;
+        });
+      });
+    }
+  }
+
   async function send() {
     const text = inputValue.trim();
     if ((!text && pendingAttachments.length === 0) || sending) return;
@@ -872,7 +940,7 @@
     const queueAfterTarget = fastSteerTarget && activeRunMessageIntent === 'queue';
     pendingAttachments = [];
     try {
-      await threadStreamController.sendReply(text || '(attachment)', attachments, {
+      await cortex.sendMessage(text || '(attachment)', attachments, {
         executionProfile: cortex.executionProfile,
         skipRun: Boolean(fastSteerTarget && !queueAfterTarget),
         metadata: fastSteerTarget
@@ -1280,6 +1348,11 @@
   $effect(() => {
     const currentIdeaId = idea?.id ?? null;
     if (currentIdeaId !== lastSelectedIdeaId) {
+      threadHistoryOperationToken += 1;
+      programmaticScroll = false;
+      if (currentIdeaId && String(currentIdeaId) !== threadStreamWindowState?.ideaId) {
+        threadStreamWindowState = null;
+      }
       pendingInitialScrollIdeaId = currentIdeaId;
       lastSelectedIdeaId = currentIdeaId;
       pendingAttachments = [];
@@ -1295,7 +1368,6 @@
       nextBrowserTabIndex = 1;
       dockPreviewAttachment = null;
       onBrowserOpenChange?.(false);
-      if (currentIdeaId) void loadIdeaProjectContext(currentIdeaId);
     }
   });
 
@@ -1366,6 +1438,7 @@
 
   onDestroy(() => {
     threadStageDestroyed = true;
+    threadHistoryOperationToken += 1;
     voiceDictation?.destroy();
     document.removeEventListener('click', handleDocClick);
     if (transcriptScrollFrame !== null) {
@@ -1464,7 +1537,7 @@
         secondaryIntentAriaLabel="Message intent"
         onSecondaryIntentChange={setActiveRunMessageIntent}
         onSubmit={() => (isVoiceRecording ? void voiceDictation?.send() : void send())}
-        onStop={() => void threadStreamController.cancelAll()}
+        onStop={() => void cortex.cancelAll()}
         onAttach={() => fileInputEl?.click()}
         onRemoveAttachment={removeAttachment}
         onDrop={handleDrop}
@@ -1699,6 +1772,8 @@
             replyDock={replyDock}
             onTranscriptScroll={handleScrollEvent}
             onScrollToBottom={() => scrollToBottom(true)}
+            onShowEarlierHistory={canShowEarlierHistory ? showEarlierHistory : undefined}
+            {earlierHistoryState}
             onPreviewAttachment={openPreviewTab}
             onTranscriptReady={(element) => {
               transcriptEl = element;

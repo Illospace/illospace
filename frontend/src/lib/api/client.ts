@@ -1,4 +1,5 @@
 import type { RuntimeSettings, RuntimeVoiceSession, RuntimeVoiceTranscript } from '$lib/types/runtimeSettings';
+import type { StreamItem } from '$lib/types/cortex';
 
 const BASE = '';
 const DEFAULT_API_TIMEOUT_MS = 20_000;
@@ -717,7 +718,7 @@ export interface CortexBootstrapPayload {
   workspace_apps: WorkspaceAppRead[] | null;
   workspace_pins: WorkspacePinRead[] | null;
   selected_idea?: any | null;
-  direct_thread?: { idea_id: string; stream: any[] } | null;
+  direct_thread?: ThreadStreamPage | null;
   auth_status: any | null;
   meta?: Record<string, any>;
 }
@@ -725,8 +726,18 @@ export interface CortexBootstrapPayload {
 export interface CortexBootstrapOptions {
   include?: string | string[];
   ideaId?: string | null;
-  includeDebug?: boolean;
   provider?: string | null;
+}
+
+export interface ThreadStreamPage {
+  idea_id: string;
+  items: StreamItem[];
+  has_more: boolean;
+  next_before: string | null;
+}
+
+export interface ThreadStreamPageOptions {
+  before?: string | null;
 }
 
 export type ProjectDraftChangeKey =
@@ -1057,7 +1068,6 @@ export const api = {
     return fetchJson<CortexBootstrapPayload>(withQuery('/api/cortex/bootstrap', {
       include,
       idea_id: options.ideaId,
-      include_debug: options.includeDebug,
       provider: options.provider,
     }));
   },
@@ -1264,12 +1274,10 @@ export const api = {
     fetchJson<any>(`/api/cortex/ideas/${id}`, { method: 'DELETE' }),
   restoreIdea: (id: string) =>
     fetchJson<any>(`/api/cortex/ideas/${id}/restore`, { method: 'POST' }),
-  unifiedStream: (ideaId: string, includeDebug = false) =>
-    fetchJson<any[]>(
-      includeDebug
-        ? `/api/cortex/ideas/${ideaId}/unified-stream?include_debug=true`
-        : `/api/cortex/ideas/${ideaId}/unified-stream`
-    ),
+  unifiedStream: (ideaId: string, options: ThreadStreamPageOptions = {}) =>
+    fetchJson<ThreadStreamPage>(withQuery(`/api/cortex/ideas/${ideaId}/unified-stream`, {
+      before: options.before,
+    })),
   addThreadMessage: (ideaId: string, data: { content: string; role?: string; attachments?: ChatAttachmentPayload[]; metadata?: Record<string, any> }) =>
     fetchJson<any>(`/api/cortex/ideas/${ideaId}/thread`, { method: 'POST', body: JSON.stringify(data) }),
   updatePosition: (ideaId: string, x: number, y: number) =>
@@ -1277,12 +1285,8 @@ export const api = {
   batchPositions: (positions: { id: string; x: number; y: number }[]) =>
     fetchJson<any>('/api/cortex/ideas/positions', { method: 'PUT', body: JSON.stringify({ positions }) }),
   runStatus: () => fetchJson<any>('/api/cortex/run/status'),
-  runHistory: (ideaId: string, includeDebug = false) =>
-    fetchJson<any[]>(
-      includeDebug
-        ? `/api/cortex/run/history/${ideaId}?include_debug=true`
-        : `/api/cortex/run/history/${ideaId}`
-    ),
+  runHistory: (ideaId: string) =>
+    fetchJson<any[]>(`/api/cortex/run/history/${ideaId}`),
   approveRun: (id: number) =>
     fetchJson<any>(`/api/cortex/run/${id}/approve`, { method: 'POST' }),
   denyRun: (id: number) =>

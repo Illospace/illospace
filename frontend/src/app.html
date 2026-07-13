@@ -48,18 +48,23 @@
 		</script>
 		<script>
 			(() => {
-				if (!location.pathname.startsWith('/cortex')) return;
 				const url = new URL(location.href);
-				const requestedIdeaId = url.searchParams.get('idea');
+				const directThreadMatch = url.pathname.match(/^\/threads\/([^/]+)/);
+				let directThreadIdeaId = null;
+				if (directThreadMatch) {
+					try {
+						directThreadIdeaId = decodeURIComponent(directThreadMatch[1]);
+					} catch {
+						directThreadIdeaId = directThreadMatch[1];
+					}
+				}
+				if (!url.pathname.startsWith('/cortex') && !directThreadIdeaId) return;
+				const requestedIdeaId = directThreadIdeaId || url.searchParams.get('idea');
 				const workspacePageModalIds = new Set(['cycles', 'skills', 'team', 'vault', 'system']);
 				const modalFirst = !requestedIdeaId && workspacePageModalIds.has(url.searchParams.get('modal'));
 				const bootstrapParams = new URLSearchParams();
 				bootstrapParams.set('include', 'core,workspace');
-				const paths = [
-					'/api/me',
-					'/api/notifications/summary',
-					'/api/notifications?status=unread&limit=50',
-				];
+				const paths = ['/api/me'];
 				if (!requestedIdeaId && !modalFirst) {
 					paths.splice(1, 0, `/api/cortex/bootstrap?${bootstrapParams.toString()}`);
 				} else if (requestedIdeaId) {

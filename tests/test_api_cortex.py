@@ -110,6 +110,21 @@ def _make_thread_msg(**overrides):
     return obj
 
 
+def _stream_page(idea_id="idea-1"):
+    return {
+        "idea_id": idea_id,
+        "items": [{
+            "type": "message",
+            "timestamp": "2026-05-01T12:00:00Z",
+            "id": "1",
+            "role": "user",
+            "content": "Hello",
+        }],
+        "has_more": False,
+        "next_before": None,
+    }
+
+
 def _assign_thread_defaults_on_add(session):
     next_thread_id = 1
 
@@ -1319,23 +1334,29 @@ async def test_cortex_bootstrap_can_skip_team_members_for_direct_threads(client)
 
 
 @pytest.mark.asyncio
+async def test_unified_stream_route_enforces_page_limits_and_cursor(client):
+    from brain.app.api.routers.cortex import _idea_ops as idea_ops
+
+    with patch.object(idea_ops, "unified_stream_payload", AsyncMock(return_value=_stream_page())) as payload:
+        response = await client.get("/api/cortex/ideas/idea-1/unified-stream")
+
+    assert response.status_code == 200
+    assert payload.call_args.kwargs["limit"] == 200
+    assert (await client.get("/api/cortex/ideas/idea-1/unified-stream?limit=0")).status_code == 422
+    assert (await client.get("/api/cortex/ideas/idea-1/unified-stream?limit=201")).status_code == 422
+    assert (await client.get("/api/cortex/ideas/idea-1/unified-stream?before=bad")).status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_cortex_bootstrap_direct_thread_reuses_stream_payload(client):
     from brain.app.api.routers.cortex import _bootstrap as bootstrap_mod
 
-    stream = [
-        {
-            "type": "message",
-            "timestamp": "2026-05-01T12:00:00Z",
-            "id": "1",
-            "role": "user",
-            "content": "Hello",
-        }
-    ]
+    stream_page = _stream_page()
 
     with (
         patch.object(bootstrap_mod, "list_ideas_payload", AsyncMock(return_value=[])),
         patch.object(bootstrap_mod, "list_connections_payload", AsyncMock(return_value=[])),
-        patch.object(bootstrap_mod, "unified_stream_payload", return_value=stream) as stream_payload,
+        patch.object(bootstrap_mod, "unified_stream_payload", return_value=stream_page) as stream_payload,
     ):
         resp = await client.get("/api/cortex/bootstrap?include=ideas,connections,direct_thread&idea_id=idea-1")
 
@@ -1343,10 +1364,10 @@ async def test_cortex_bootstrap_direct_thread_reuses_stream_payload(client):
     data = resp.json()
     assert data["ideas"] == []
     assert data["connections"] == []
-    assert data["direct_thread"] == {"idea_id": "idea-1", "stream": stream}
+    assert data["direct_thread"] == stream_page
     stream_payload.assert_called_once()
     assert stream_payload.call_args.kwargs["idea_id"] == "idea-1"
-    assert stream_payload.call_args.kwargs["include_debug"] is False
+    assert stream_payload.call_args.kwargs["user"]["id"] == "user-1"
 
 
 @pytest.mark.asyncio
@@ -1354,21 +1375,13 @@ async def test_cortex_bootstrap_direct_thread_can_return_selected_idea_without_g
     from brain.app.api.routers.cortex import _bootstrap as bootstrap_mod
 
     idea = _make_idea(id="idea-1", title="Selected Thread")
-    stream = [
-        {
-            "type": "message",
-            "timestamp": "2026-05-01T12:00:00Z",
-            "id": "1",
-            "role": "user",
-            "content": "Hello",
-        }
-    ]
+    stream_page = _stream_page()
 
     with (
         patch.object(bootstrap_mod, "_require_idea_for_user", AsyncMock(return_value=idea)) as require_idea,
         patch.object(bootstrap_mod, "list_ideas_payload") as list_ideas,
         patch.object(bootstrap_mod, "list_connections_payload") as list_connections,
-        patch.object(bootstrap_mod, "unified_stream_payload", return_value=stream),
+        patch.object(bootstrap_mod, "unified_stream_payload", return_value=stream_page),
     ):
         resp = await client.get("/api/cortex/bootstrap?include=selected_idea,direct_thread&idea_id=idea-1")
 
@@ -1378,7 +1391,7 @@ async def test_cortex_bootstrap_direct_thread_can_return_selected_idea_without_g
     assert data["connections"] is None
     assert data["selected_idea"]["id"] == "idea-1"
     assert data["selected_idea"]["title"] == "Selected Thread"
-    assert data["direct_thread"] == {"idea_id": "idea-1", "stream": stream}
+    assert data["direct_thread"] == stream_page
     require_idea.assert_awaited_once()
     list_ideas.assert_not_called()
     list_connections.assert_not_called()
