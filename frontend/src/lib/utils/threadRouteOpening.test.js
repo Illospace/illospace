@@ -1,10 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   buildSyncedThreadRouteHref,
   decideThreadRouteSelection,
 } from '../features/cortex/domain/threadRouteOpening.ts';
+
+test('a superseded same-thread load remains successful for URL synchronization', () => {
+  const source = readFileSync(new URL('../stores/cortex.svelte.ts', import.meta.url), 'utf8');
+  const loadDirectThread = source.match(/async loadDirectThread[\s\S]*?\n  async selectIdea/)?.[0] ?? '';
+  assert.match(loadDirectThread, /const applied = this\._applyThreadStreamPage/);
+  assert.match(loadDirectThread, /return applied \|\| this\.selectedIdeaId === id;/);
+});
 
 test('thread routes load through the direct thread path', () => {
   assert.deepEqual(

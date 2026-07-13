@@ -881,11 +881,9 @@ def _normalize_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-async def _latest_event_times_for_rows_async(session, rows: list[AgentRunRow]) -> tuple[dict[int, datetime], dict[int, datetime]]:
+async def _latest_event_times_for_rows_async(session, rows: list[AgentRunRow]) -> dict[int, datetime]:
     run_ids = {int(row.id) for row in rows}
-    root_ids = {int(row.root_run_id or row.id) for row in rows}
     latest_by_run: dict[int, datetime] = {}
-    latest_by_root: dict[int, datetime] = {}
     if run_ids:
         result = await session.execute(
             select(AgentRunEventRow.run_id, func.max(AgentRunEventRow.created_at))
@@ -896,17 +894,7 @@ async def _latest_event_times_for_rows_async(session, rows: list[AgentRunRow]) -
             parsed = _normalize_datetime(created_at)
             if parsed is not None:
                 latest_by_run[int(run_id)] = parsed
-    if root_ids:
-        result = await session.execute(
-            select(AgentRunEventRow.root_run_id, func.max(AgentRunEventRow.created_at))
-            .where(AgentRunEventRow.root_run_id.in_(root_ids))
-            .group_by(AgentRunEventRow.root_run_id)
-        )
-        for root_id, created_at in result:
-            parsed = _normalize_datetime(created_at)
-            if parsed is not None:
-                latest_by_root[int(root_id)] = parsed
-    return latest_by_run, latest_by_root
+    return latest_by_run
 
 
 async def _active_root_run_ids_for_children_async(session, rows: list[AgentRunRow]) -> set[int]:
@@ -930,7 +918,6 @@ def _run_liveness_at(
     row: AgentRunRow,
     *,
     latest_event_by_run: dict[int, datetime],
-    latest_event_by_root: dict[int, datetime],
 ) -> datetime | None:
     metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
     heartbeat = metadata.get("runner_heartbeat")
@@ -941,10 +928,83 @@ def _run_liveness_at(
         _normalize_datetime(row.created_at),
         _normalize_datetime(heartbeat.get("at")),
         latest_event_by_run.get(int(row.id)),
-        latest_event_by_root.get(int(row.root_run_id or row.id)),
     ]
     live = [candidate for candidate in candidates if candidate is not None]
     return max(live) if live else None
+
+
+async def _reap_stale_candidate(
+    session,
+    store: AsyncAgentRunStore,
+    row: AgentRunRow,
+    *,
+    root_run_id: int,
+    cutoff: datetime,
+    stale_after_seconds: float,
+) -> tuple[bool, dict[str, Any] | None]:
+    candidate_tx = await session.begin_nested()
+    try:
+        locked = await store.lock_run_liveness(int(row.id), root_run_id)
+        if locked is None:
+            await candidate_tx.rollback()
+            return False, None
+        row, locked_root = locked
+        if str(row.status or "") not in _PROCESS_ACTIVE_STATUS_VALUES:
+            await candidate_tx.rollback()
+            return False, None
+        if (
+            row.parent_run_id is not None
+            and locked_root is not None
+            and str(locked_root.status or "") in _PROCESS_ACTIVE_STATUS_VALUES
+        ):
+            await candidate_tx.rollback()
+            return False, None
+        locked_event_by_run = await _latest_event_times_for_rows_async(session, [row])
+        last_liveness_at = _run_liveness_at(
+            row,
+            latest_event_by_run=locked_event_by_run,
+        )
+        if last_liveness_at is not None and last_liveness_at > cutoff:
+            await candidate_tx.rollback()
+            return False, None
+        metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
+        heartbeat = metadata.get("runner_heartbeat")
+        heartbeat = dict(heartbeat) if isinstance(heartbeat, dict) else {}
+        payload = {
+            "error": "runner heartbeat stale",
+            "reason": "runner_heartbeat_stale",
+            "stale_after_seconds": int(stale_after_seconds),
+            "last_heartbeat_at": heartbeat.get("at"),
+            "last_heartbeat_reason": heartbeat.get("reason"),
+            "last_liveness_at": last_liveness_at.isoformat() if last_liveness_at else None,
+            "last_run_update_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+        _failed_run, changed = await store.set_status_with_result(
+            int(row.id),
+            RunStatus.FAILED,
+            reason="runner_heartbeat_stale",
+            expected_updated_at=row.updated_at,
+            expected_execution_token=row.execution_token,
+            expected_execution_attempt=int(row.execution_attempt or 0),
+            rollback_on_conflict=False,
+        )
+        if not changed:
+            await candidate_tx.rollback()
+            return False, None
+        event = run_event(int(row.id), "run.failed", payload, root_run_id=row.root_run_id)
+        event_row = await store.append_event(event)
+        await _project_live_event_async(
+            session,
+            event.event_type,
+            _event_stream_payload(event, event_row, row),
+        )
+        status_payload = await _settle_terminal_root_run_async(session, int(row.id))
+        await candidate_tx.commit()
+        return True, status_payload
+    except BaseException:
+        if candidate_tx.is_active:
+            await candidate_tx.rollback()
+        raise
 
 
 async def reap_stale_active_runs(
@@ -971,7 +1031,7 @@ async def reap_stale_active_runs(
         )
         rows = list(result.all())
         store = AsyncAgentRunStore(uow.session)
-        latest_event_by_run, latest_event_by_root = await _latest_event_times_for_rows_async(uow.session, rows)
+        latest_event_by_run = await _latest_event_times_for_rows_async(uow.session, rows)
         active_root_run_ids = await _active_root_run_ids_for_children_async(uow.session, rows)
         for row in rows:
             if str(row.status or "") not in _PROCESS_ACTIVE_STATUS_VALUES:
@@ -982,27 +1042,19 @@ async def reap_stale_active_runs(
             last_liveness_at = _run_liveness_at(
                 row,
                 latest_event_by_run=latest_event_by_run,
-                latest_event_by_root=latest_event_by_root,
             )
             if last_liveness_at is not None and last_liveness_at > cutoff:
                 continue
-            metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
-            heartbeat = metadata.get("runner_heartbeat")
-            heartbeat = dict(heartbeat) if isinstance(heartbeat, dict) else {}
-            payload = {
-                "error": "runner heartbeat stale",
-                "reason": "runner_heartbeat_stale",
-                "stale_after_seconds": int(stale_after_seconds),
-                "last_heartbeat_at": heartbeat.get("at"),
-                "last_heartbeat_reason": heartbeat.get("reason"),
-                "last_liveness_at": last_liveness_at.isoformat() if last_liveness_at else None,
-                "last_run_update_at": row.updated_at.isoformat() if row.updated_at else None,
-            }
-            event = run_event(int(row.id), "run.failed", payload, root_run_id=row.root_run_id)
-            event_row = await store.append_event(event)
-            await store.set_status(int(row.id), RunStatus.FAILED, reason="runner_heartbeat_stale")
-            await _project_live_event_async(uow.session, event.event_type, _event_stream_payload(event, event_row, row))
-            status_payload = await _settle_terminal_root_run_async(uow.session, int(row.id))
+            candidate_reaped, status_payload = await _reap_stale_candidate(
+                uow.session,
+                store,
+                row,
+                root_run_id=root_run_id,
+                cutoff=cutoff,
+                stale_after_seconds=stale_after_seconds,
+            )
+            if not candidate_reaped:
+                continue
             if status_payload:
                 status_payloads.append(status_payload)
             reaped += 1

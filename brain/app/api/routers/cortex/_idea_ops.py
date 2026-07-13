@@ -1,15 +1,17 @@
 """Cortex idea operations — threads, mentions, presence, unified stream."""
 from __future__ import annotations
 
+import base64
+import binascii
+import copy
 import json
 import logging
-import copy
 from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Any, NamedTuple
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select, union
 from sqlalchemy.orm import aliased
 
 from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
@@ -26,7 +28,6 @@ from brain.app.api.services.notifications import (
     async_build_notification_summary,
 )
 from brain.systems.runs.cortex.read_models import run_stream_payload
-from brain.systems.runs.visibility import fetch_visible_run_rows
 from brain.app.api.routers.cortex._helpers import (
     _infer_feedback_tags,
     _parse_message_type,
@@ -56,7 +57,7 @@ from brain.systems.cortex.project_context.snapshot import (
 )
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
 from brain.platform.db.models.run import AgentRun
-from brain.platform.db.models.idea import IdeaThread
+from brain.platform.db.models.idea import IdeaThread, VisualBlock
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
@@ -661,56 +662,270 @@ async def update_agent_status(idea_id: str, request: Request, user: dict[str, An
 
 # ── Unified stream ─────────────────────────────────────────────
 
+
+_STREAM_PAGE_LIMIT = 200
+# Head-only active roots are bounded independently of the physical page size.
+_STREAM_ACTIVE_ROOT_LIMIT = 20
+_STREAM_KIND_RANK = {"message": 0, "run": 1, "visual_block": 2}
+
+
+class _StreamKey(NamedTuple):
+    created_at: datetime
+    kind_rank: int
+    row_id: int
+
+
+class _StreamCandidate(NamedTuple):
+    key: _StreamKey
+    kind: str
+    row: Any
+
+
+def _utc_datetime(value: Any) -> datetime:
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if not isinstance(value, datetime):
+        raise ValueError("Stream timestamp must be a datetime")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _stream_candidate(kind: str, row: Any) -> _StreamCandidate:
+    physical_row = row[0] if kind == "message" else row
+    return _StreamCandidate(
+        key=_StreamKey(
+            _utc_datetime(physical_row.created_at),
+            _STREAM_KIND_RANK[kind],
+            int(physical_row.id),
+        ),
+        kind=kind,
+        row=row,
+    )
+
+
+def _encode_stream_cursor(key: _StreamKey) -> str:
+    payload = "|".join((
+        "v1",
+        key.created_at.isoformat(timespec="microseconds"),
+        str(key.kind_rank),
+        str(key.row_id),
+    )).encode("ascii")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_stream_cursor(value: str | None) -> _StreamKey | None:
+    if value is None:
+        return None
+    try:
+        padding = "=" * (-len(value) % 4)
+        raw = base64.b64decode((value + padding).encode("ascii"), altchars=b"-_", validate=True)
+        version, timestamp, raw_kind_rank, raw_row_id = raw.decode("ascii").split("|")
+        if version != "v1":
+            raise ValueError
+        kind_rank = int(raw_kind_rank)
+        row_id = int(raw_row_id)
+        if (
+            (raw_kind_rank, raw_row_id) != (str(kind_rank), str(row_id))
+            or kind_rank not in _STREAM_KIND_RANK.values() or row_id <= 0
+        ):
+            raise ValueError
+        parsed_timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if parsed_timestamp.tzinfo is None:
+            raise ValueError
+        return _StreamKey(_utc_datetime(parsed_timestamp), kind_rank, row_id)
+    except (ValueError, TypeError, UnicodeError, binascii.Error):
+        raise HTTPException(status_code=400, detail="Invalid unified stream cursor") from None
+
+
+def _stream_before_clause(model: Any, kind: str, cursor: _StreamKey | None):
+    if cursor is None:
+        return None
+    rank = _STREAM_KIND_RANK[kind]
+    if rank < cursor.kind_rank:
+        return model.created_at <= cursor.created_at
+    if rank > cursor.kind_rank:
+        return model.created_at < cursor.created_at
+    return or_(
+        model.created_at < cursor.created_at,
+        and_(model.created_at == cursor.created_at, model.id < cursor.row_id),
+    )
+
+
+def _stream_messages_stmt(
+    idea_id: str,
+    cursor: _StreamKey | None,
+    candidate_limit: int,
+):
+    stmt = (
+        select(IdeaThread, User.name.label("user_name"), User.color.label("user_color"))
+        .outerjoin(User, IdeaThread.user_id == User.id)
+        .where(IdeaThread.idea_id == idea_id)
+    )
+    before_clause = _stream_before_clause(IdeaThread, "message", cursor)
+    if before_clause is not None:
+        stmt = stmt.where(before_clause)
+    return stmt.order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc()).limit(candidate_limit)
+
+
+def _visible_run_clause():
+    return AgentRun.metadata_["headless"].as_boolean().is_not(True)
+
+
+def _stream_runs_stmt(
+    idea_id: str,
+    cursor: _StreamKey | None,
+    candidate_limit: int,
+):
+    recent = select(AgentRun.id).where(
+        AgentRun.thread_id == idea_id,
+        _visible_run_clause(),
+    )
+    before_clause = _stream_before_clause(AgentRun, "run", cursor)
+    if before_clause is not None:
+        recent = recent.where(before_clause)
+    recent = recent.order_by(AgentRun.created_at.desc(), AgentRun.id.desc()).limit(candidate_limit)
+    recent_ids = recent.cte("recent_stream_runs")
+    selected_ids = select(recent_ids.c.id)
+    if cursor is None:
+        active_roots = (
+            select(AgentRun.id)
+            .where(
+                AgentRun.thread_id == idea_id,
+                AgentRun.parent_run_id.is_(None),
+                AgentRun.status.in_(OPEN_RUN_STATUS_VALUES),
+                _visible_run_clause(),
+            )
+            .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+            .limit(_STREAM_ACTIVE_ROOT_LIMIT)
+            .cte("active_stream_roots")
+        )
+        selected_ids = union(selected_ids, select(active_roots.c.id))
+    return (
+        select(AgentRun)
+        .where(AgentRun.id.in_(selected_ids))
+        .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+    )
+
+
+def _stream_visuals_stmt(
+    idea_id: str,
+    cursor: _StreamKey | None,
+    candidate_limit: int,
+):
+    stmt = select(VisualBlock).where(VisualBlock.idea_id == idea_id)
+    before_clause = _stream_before_clause(VisualBlock, "visual_block", cursor)
+    if before_clause is not None:
+        stmt = stmt.where(before_clause)
+    return stmt.order_by(VisualBlock.created_at.desc(), VisualBlock.id.desc()).limit(candidate_limit)
+
+
+def _select_stream_page(
+    candidates: list[_StreamCandidate],
+    limit: int,
+) -> tuple[list[_StreamCandidate], bool, str | None]:
+    newest = sorted(candidates, key=lambda candidate: candidate.key, reverse=True)[: limit + 1]
+    has_more = len(newest) > limit
+    selected = sorted(newest[:limit], key=lambda candidate: candidate.key)
+    next_before = _encode_stream_cursor(selected[0].key) if has_more else None
+    return selected, has_more, next_before
+
+
+def _active_root_injections(
+    run_rows: list[Any],
+    selected: list[_StreamCandidate],
+) -> list[_StreamCandidate]:
+    if not selected:
+        return []
+    oldest_key = selected[0].key
+    selected_run_ids = {
+        candidate.key.row_id for candidate in selected if candidate.kind == "run"
+    }
+    injections: list[_StreamCandidate] = []
+    for run in run_rows:
+        if (
+            int(run.id) in selected_run_ids
+            or run.parent_run_id is not None
+            or run.status not in OPEN_RUN_STATUS_VALUES
+        ):
+            continue
+        candidate = _stream_candidate("run", run)
+        if candidate.key < oldest_key:
+            injections.append(candidate)
+    return sorted(injections, key=lambda candidate: candidate.key)
+
+
+def _serialize_stream_candidate(candidate: _StreamCandidate) -> dict[str, Any]:
+    if candidate.kind == "run":
+        return run_stream_payload(candidate.row)
+    if candidate.kind == "visual_block":
+        visual = candidate.row
+        return {
+            "type": "visual_block",
+            "timestamp": visual.created_at.isoformat() if visual.created_at else "",
+            "id": f"vb-{visual.id}",
+            "content_type": visual.content_type,
+            "title": visual.title,
+            "content": visual.content,
+            "display_mode": visual.display_mode or "inline",
+            "run_id": visual.run_id,
+            "position_after": visual.position_after,
+        }
+    row = candidate.row
+    message = row[0]
+    return {
+        "type": "message",
+        "timestamp": message.created_at.isoformat() if message.created_at else "",
+        "id": str(message.id),
+        "role": message.role,
+        "content": message.content,
+        "attachments": message.attachments or [],
+        "metadata": message.metadata_ or {},
+        "message_type": message.message_type,
+        "user_name": row.user_name,
+        "user_color": row.user_color,
+    }
+
+
 async def unified_stream_payload(
     idea_id: str,
-    include_debug: bool = False,
+    *,
+    limit: int = _STREAM_PAGE_LIMIT,
+    before: str | None = None,
     user: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     if user is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    items = []
+    cursor = _decode_stream_cursor(before)
+    candidate_limit = limit + 1
 
     async with UnitOfWork() as uow:
         await _require_idea_for_user(uow.session, idea_id, user)
-        stmt = (
-            select(IdeaThread, User.name.label("user_name"), User.color.label("user_color"))
-            .outerjoin(User, IdeaThread.user_id == User.id)
-            .where(IdeaThread.idea_id == idea_id)
-            .order_by(IdeaThread.created_at)
+        message_rows = list(
+            (await uow.session.execute(_stream_messages_stmt(idea_id, cursor, candidate_limit))).all()
         )
-        for row in (await uow.session.execute(stmt)).all():
-            t = row[0]
-            items.append({
-                "type": "message",
-                "timestamp": t.created_at.isoformat() if t.created_at else "",
-                "id": str(t.id),
-                "role": t.role,
-                "content": t.content,
-                "attachments": t.attachments or [],
-                "metadata": t.metadata_ or {},
-                "message_type": t.message_type,
-                "user_name": row.user_name,
-                "user_color": row.user_color,
-            })
+        all_run_rows = list((await uow.session.scalars(
+            _stream_runs_stmt(idea_id, cursor, candidate_limit)
+        )).all())
+        recent_run_rows = sorted(
+            all_run_rows,
+            key=lambda run: _stream_candidate("run", run).key,
+            reverse=True,
+        )[:candidate_limit]
+        visual_rows = list((await uow.session.scalars(
+            _stream_visuals_stmt(idea_id, cursor, candidate_limit)
+        )).all())
 
-        if include_debug:
-            from brain.systems.runs.cortex.read_models import serialize_run_history_async
-
-            for dp in await serialize_run_history_async(idea_id, include_debug=True, uow_factory=UnitOfWork):
-                ts = dp.get("started_at") or dp.get("created_at")
-                items.append({
-                    "type": "run",
-                    "timestamp": ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
-                    **dp,
-                })
-        else:
-            stmt = (
-                select(AgentRun)
-                .where(AgentRun.thread_id == idea_id)
-                .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
-            )
-            for run in await fetch_visible_run_rows(uow.session, stmt, limit=20):
-                items.append(run_stream_payload(run))
+        candidates = [
+            *(_stream_candidate("message", row) for row in message_rows),
+            *(_stream_candidate("run", row) for row in recent_run_rows),
+            *(_stream_candidate("visual_block", row) for row in visual_rows),
+        ]
+        selected, has_more, next_before = _select_stream_page(candidates, limit)
+        if cursor is None:
+            selected.extend(_active_root_injections(all_run_rows, selected))
+        selected.sort(key=lambda candidate: candidate.key)
+        items = [_serialize_stream_candidate(candidate) for candidate in selected]
 
         run_ids = [int(item["id"]) for item in items if item.get("type") == "run"]
         for item in items:
@@ -723,10 +938,10 @@ async def unified_stream_payload(
         if run_ids:
             children_stmt = (
                 select(AgentRun)
-                .where(AgentRun.parent_run_id.in_(run_ids))
+                .where(AgentRun.parent_run_id.in_(run_ids), _visible_run_clause())
                 .order_by(AgentRun.created_at.asc(), AgentRun.id.asc())
             )
-            for child in await fetch_visible_run_rows(uow.session, children_stmt):
+            for child in (await uow.session.scalars(children_stmt)).all():
                 if child.parent_run_id is None:
                     continue
                 child_runs.setdefault(int(child.parent_run_id), []).append(run_stream_payload(child))
@@ -766,38 +981,25 @@ async def unified_stream_payload(
 
         _append_final_answer_messages(items)
 
-        # Include visual blocks in the stream
-        from brain.platform.db.models.idea import VisualBlock
-        vb_stmt = (
-            select(VisualBlock)
-            .where(VisualBlock.idea_id == idea_id)
-            .order_by(VisualBlock.created_at)
-        )
-        for vb in (await uow.session.scalars(vb_stmt)).all():
-            items.append({
-                "type": "visual_block",
-                "timestamp": vb.created_at.isoformat() if vb.created_at else "",
-                "id": f"vb-{vb.id}",
-                "content_type": vb.content_type,
-                "title": vb.title,
-                "content": vb.content,
-                "display_mode": vb.display_mode or "inline",
-                "run_id": vb.run_id,
-                "position_after": vb.position_after,
-            })
-
-    items.sort(key=lambda x: x.get("timestamp", ""))
-    return items
+    items.sort(key=lambda item: _utc_datetime(item["timestamp"]))
+    return {
+        "idea_id": idea_id,
+        "items": items,
+        "has_more": has_more,
+        "next_before": next_before,
+    }
 
 
 @router.get("/ideas/{idea_id}/unified-stream")
 async def idea_unified_stream(
     idea_id: str,
-    include_debug: bool = False,
+    limit: Annotated[int, Query(ge=1, le=_STREAM_PAGE_LIMIT)] = _STREAM_PAGE_LIMIT,
+    before: str | None = None,
     user: dict[str, Any] = Depends(get_current_user),
 ):
     return await unified_stream_payload(
         idea_id=idea_id,
-        include_debug=include_debug,
+        limit=limit,
+        before=before,
         user=user,
     )

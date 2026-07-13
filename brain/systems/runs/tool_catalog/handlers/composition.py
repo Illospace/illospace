@@ -152,6 +152,18 @@ def _resolved_workspace_tool_runtime_args(
     return _resolved_workspace_tool_env, _resolved_workspace_tool_sensitive_values
 
 
+def _run_on_event_loop_adapter(handler):
+    """Mark a sync compatibility adapter whose returned awaitable does the work."""
+    handler._illo_run_on_event_loop = True
+    return handler
+
+
+def _private_async_adapter(name: str, default):
+    return _run_on_event_loop_adapter(
+        lambda **kwargs: _patched_private(name, default)(**kwargs)
+    )
+
+
 def _get_tool_handlers(
     workspace_root: str | None = None,
     allowed_workspaces: list[str | dict] | None = None,
@@ -200,6 +212,9 @@ def _get_tool_handlers(
             org_id=getattr(_agent_context, "org_id", None),
         )
 
+    _manage_deployment._illo_run_on_event_loop = True
+    _manage_runtime_services._illo_run_on_event_loop = True
+
     handlers = {
         # Brain tools (workspace-independent — always hit shared DB)
         "brain_recall": _wrap_brain_recall(async_tool_brain_recall),
@@ -210,23 +225,27 @@ def _get_tool_handlers(
         "skill_view": _wrap_tool_evidence("skill_view", async_tool_skill_view),
         "skill_asset": async_tool_skill_asset,
         "brain_encode": _wrap_brain_encode(async_tool_brain_encode),
-        "brain_vault": lambda key, reason=None: tool_brain_vault(
-            key,
-            reason=reason,
-            user_id=_current_agent_value("user_id"),
-            org_id=_current_agent_value("org_id"),
-            run_id=_current_run_id(),
-            idea_id=_current_idea_id(),
-            requested_by=_current_requested_by(),
-            **_current_project_token_context(),
+        "brain_vault": _run_on_event_loop_adapter(
+            lambda key, reason=None: tool_brain_vault(
+                key,
+                reason=reason,
+                user_id=_current_agent_value("user_id"),
+                org_id=_current_agent_value("org_id"),
+                run_id=_current_run_id(),
+                idea_id=_current_idea_id(),
+                requested_by=_current_requested_by(),
+                **_current_project_token_context(),
+            )
         ),
-        "vault_inventory": lambda category=None, access_level=None: tool_vault_inventory(
-            category=category,
-            access_level=access_level,
-            user_id=_current_agent_value("user_id"),
-            org_id=_current_agent_value("org_id"),
+        "vault_inventory": _run_on_event_loop_adapter(
+            lambda category=None, access_level=None: tool_vault_inventory(
+                category=category,
+                access_level=access_level,
+                user_id=_current_agent_value("user_id"),
+                org_id=_current_agent_value("org_id"),
+            )
         ),
-        "vault_secret_prompt": (
+        "vault_secret_prompt": _run_on_event_loop_adapter(
             lambda key_name, description=None, category="api", reason=None: tool_vault_secret_prompt(
                 key_name,
                 description=description,
@@ -239,19 +258,21 @@ def _get_tool_handlers(
                 requested_by=_current_requested_by(),
             )
         ),
-        "runtime_settings": lambda provider=None: tool_runtime_settings(
-            provider=provider,
-            user_id=getattr(_agent_context, "user_id", None),
-            org_id=getattr(_agent_context, "org_id", None),
+        "runtime_settings": _run_on_event_loop_adapter(
+            lambda provider=None: tool_runtime_settings(
+                provider=provider,
+                user_id=getattr(_agent_context, "user_id", None),
+                org_id=getattr(_agent_context, "org_id", None),
+            )
         ),
         "read_self_context": _handle_read_self_context,
         "read_capabilities": _handle_read_capabilities,
         "manage_deployment": _manage_deployment,
         "manage_runtime_services": _manage_runtime_services,
-        "transcribe_audio_attachment": lambda **kw: _patched_private(
+        "transcribe_audio_attachment": _private_async_adapter(
             "_handle_transcribe_audio_attachment",
             _handle_transcribe_audio_attachment,
-        )(**kw),
+        ),
         "manage_soul": lambda action, content=None, reason=None: manage_agent_soul(
             action,
             content=content,
@@ -266,73 +287,73 @@ def _get_tool_handlers(
         "read_workspace_records": _handle_read_workspace_records,
         "read_cycles": _handle_read_cycles,
         "read_workspace_apps": _handle_read_workspace_apps,
-        "read_github_source": lambda **kw: _patched_private(
+        "read_github_source": _private_async_adapter(
             "_handle_read_github_source",
             _handle_read_github_source,
-        )(**kw),
-        "create_github_issue": lambda **kw: _patched_private(
+        ),
+        "create_github_issue": _private_async_adapter(
             "_handle_create_github_issue",
             _handle_create_github_issue,
-        )(**kw),
-        "check_fix_deploy_state": lambda **kw: _patched_private(
+        ),
+        "check_fix_deploy_state": _private_async_adapter(
             "_handle_check_fix_deploy_state",
             _handle_check_fix_deploy_state,
-        )(**kw),
+        ),
         "read_thread_messages": _handle_read_thread_messages,
-        "post_chat_message": lambda **kw: _patched_private(
+        "post_chat_message": _private_async_adapter(
             "_handle_post_chat_message",
             _handle_post_chat_message,
-        )(**kw),
-        "post_slack_reply": lambda **kw: _patched_private(
+        ),
+        "post_slack_reply": _private_async_adapter(
             "_handle_post_slack_reply",
             _handle_post_slack_reply,
-        )(**kw),
-        "post_thread_discussion_reply": lambda **kw: _patched_private(
+        ),
+        "post_thread_discussion_reply": _private_async_adapter(
             "_handle_post_thread_discussion_reply",
             _handle_post_thread_discussion_reply,
-        )(**kw),
-        "publish_thread_asset": lambda **kw: _patched_private(
+        ),
+        "publish_thread_asset": _private_async_adapter(
             "_handle_publish_thread_asset",
             _handle_publish_thread_asset,
-        )(**kw),
-        "publish_thread_artifact": lambda **kw: _patched_private(
+        ),
+        "publish_thread_artifact": _private_async_adapter(
             "_handle_publish_thread_artifact",
             _handle_publish_thread_artifact,
-        )(**kw),
-        "post_ai_timeline_message": lambda **kw: _patched_private(
+        ),
+        "post_ai_timeline_message": _private_async_adapter(
             "_handle_post_ai_timeline_message",
             _handle_post_ai_timeline_message,
-        )(**kw),
-        "create_launch_handoff": lambda **kw: _patched_private(
+        ),
+        "create_launch_handoff": _private_async_adapter(
             "_handle_create_launch_handoff",
             _handle_create_launch_handoff,
-        )(**kw),
-        "read_thread_discussion": lambda **kw: _patched_private(
+        ),
+        "read_thread_discussion": _private_async_adapter(
             "_handle_read_thread_discussion",
             _handle_read_thread_discussion,
-        )(**kw),
-        "read_slack_conversation": lambda **kw: _patched_private(
+        ),
+        "read_slack_conversation": _private_async_adapter(
             "_handle_read_slack_conversation",
             _handle_read_slack_conversation,
-        )(**kw),
-        "manage_slack": lambda **kw: _patched_private(
+        ),
+        "manage_slack": _private_async_adapter(
             "_handle_manage_slack",
             _handle_manage_slack,
-        )(**kw),
-        "manage_cycle": lambda **kw: _patched_private("_handle_manage_cycle", _handle_manage_cycle)(**kw),
-        "manage_domain": lambda **kw: _patched_private("_handle_manage_domain", _handle_manage_domain)(**kw),
-        "manage_inbound": lambda **kw: _patched_private("_handle_manage_inbound", _handle_manage_inbound)(**kw),
-        "manage_idea": lambda **kw: _patched_private("_handle_manage_idea", _handle_manage_idea)(**kw),
-        "manage_project": lambda **kw: _patched_private("_handle_manage_project", _handle_manage_project)(**kw),
-        "manage_skill": lambda **kw: _patched_private("_handle_manage_skill", _handle_manage_skill)(**kw),
-        "manage_workspace_app": lambda **kw: _patched_private(
+        ),
+        "manage_cycle": _private_async_adapter("_handle_manage_cycle", _handle_manage_cycle),
+        "manage_domain": _private_async_adapter("_handle_manage_domain", _handle_manage_domain),
+        "manage_inbound": _private_async_adapter("_handle_manage_inbound", _handle_manage_inbound),
+        "manage_idea": _private_async_adapter("_handle_manage_idea", _handle_manage_idea),
+        "manage_project": _private_async_adapter("_handle_manage_project", _handle_manage_project),
+        "manage_skill": _private_async_adapter("_handle_manage_skill", _handle_manage_skill),
+        "manage_workspace_app": _private_async_adapter(
             "_handle_manage_workspace_app",
             _handle_manage_workspace_app,
-        )(**kw),
-        "manage_workspace_tools": lambda **kw: _patched_private(
+        ),
+        "manage_workspace_tools": _private_async_adapter(
             "_handle_manage_workspace_tools",
             _handle_manage_workspace_tools,
-        )(**kw),
+        ),
         # Session scratchpad tools
         "session_write": _handle_session_write,
         "session_read": _handle_session_read,
@@ -342,10 +363,12 @@ def _get_tool_handlers(
         "session_promote": _handle_session_promote,
         "session_close": _handle_session_close,
         "cortex_reply": _handle_cortex_reply,
-        "cortex_visual_reply": lambda **kwargs: _handle_cortex_visual_reply(**kwargs),
+        "cortex_visual_reply": _run_on_event_loop_adapter(
+            lambda **kwargs: _handle_cortex_visual_reply(**kwargs)
+        ),
         "my_activity": _handle_my_activity,
-        "spawn_worker": lambda **kw: _patched_private("_handle_spawn_worker", _handle_spawn_worker)(**kw),
-        "browser": lambda **kw: _patched_private("_handle_browser", _handle_browser)(**kw),
+        "spawn_worker": _private_async_adapter("_handle_spawn_worker", _handle_spawn_worker),
+        "browser": _private_async_adapter("_handle_browser", _handle_browser),
         "web_search": _handle_web_search,
         "web_fetch": _handle_web_fetch,
     }
@@ -599,6 +622,7 @@ def _get_tool_handlers(
                     org_id = execution_metadata.get("org_id")
             return user_id, org_id
 
+        @_run_on_event_loop_adapter
         def _summarize_file_for_task_with_context(
             path,
             question,
@@ -618,6 +642,7 @@ def _get_tool_handlers(
                 workspace_root=_workspace_hint(),
             )
 
+        @_run_on_event_loop_adapter
         def _summarize_files_for_task_with_context(
             paths,
             question,

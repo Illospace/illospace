@@ -861,6 +861,68 @@ class TestAgentLoop:
             "payload": {"query": "beta"},
         }
 
+    @pytest.mark.asyncio
+    async def test_parallel_safe_sync_tool_batch_runs_off_loop(self):
+        from brain.systems.runs.direct_agent import _GateState
+        from brain.systems.runs.direct_loop.gates import check_gate_violations
+        from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
+
+        blocks = []
+        for index, name in enumerate(("read_file", "search_files"), start=1):
+            block = MagicMock()
+            block.type = "tool_use"
+            block.name = name
+            block.input = {"value": name}
+            block.id = f"sync-tool-{index}"
+            blocks.append(block)
+
+        response = MagicMock()
+        response.content = blocks
+        stop_ticker = asyncio.Event()
+        ticker_count = 0
+        rendezvous = threading.Barrier(2)
+
+        async def ticker():
+            nonlocal ticker_count
+            while not stop_ticker.is_set():
+                ticker_count += 1
+                await asyncio.sleep(0.01)
+
+        def blocking_handler(**kwargs):
+            rendezvous.wait(timeout=1)
+            time.sleep(0.05)
+            return kwargs
+
+        ticker_task = asyncio.create_task(ticker())
+        started_at = time.perf_counter()
+        try:
+            results = await async_execute_tool_calls(
+                response,
+                {"read_file": blocking_handler, "search_files": blocking_handler},
+                [],
+                _GateState(),
+                None,
+                None,
+                None,
+                "runner",
+                agent_context=SimpleNamespace(),
+                brain_tool_names=frozenset(),
+                gated_tool_names=frozenset(),
+                research_tool_names=frozenset(),
+                research_budget=0,
+                parallel_safe_tool_names=frozenset({"read_file", "search_files"}),
+                max_parallel_tool_calls=2,
+                check_gate_violations=check_gate_violations,
+            )
+        finally:
+            elapsed = time.perf_counter() - started_at
+            stop_ticker.set()
+            await ticker_task
+
+        assert elapsed < 0.5
+        assert ticker_count >= 3
+        assert [result["tool_use_id"] for result in results] == ["sync-tool-1", "sync-tool-2"]
+
     async def test_parallel_safe_tool_batch_propagates_agent_context(self):
         from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState, _agent_context
 

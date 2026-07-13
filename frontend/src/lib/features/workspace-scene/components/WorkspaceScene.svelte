@@ -1761,8 +1761,10 @@
     const duration = 220;
     archivingIdeaId = nodeId;
     archivingIdeaProgress = 0;
+    void cortex.deleteIdea(nodeId);
 
     function tick(now: number) {
+      if (destroyed) return;
       const progress = Math.min((now - startedAt) / duration, 1);
       archivingIdeaProgress = d3.easeCubicOut(progress);
       syncPrimitiveDragVisuals();
@@ -1772,7 +1774,6 @@
       }
       archivingIdeaId = null;
       archivingIdeaProgress = 0;
-      cortex.deleteIdea(nodeId);
     }
 
     requestAnimationFrame(tick);
@@ -1870,7 +1871,7 @@
     state.node.y = point.y;
     dragging({ active: false, x: point.x, y: point.y, clientX: event.clientX, clientY: event.clientY }, state.node);
     syncPrimitiveDragVisuals();
-    if (simulation) simulation.alpha(0.18).restart();
+    heatOrbit(0.18);
     return true;
   }
 
@@ -1953,17 +1954,25 @@
     const startTime = performance.now();
     archivingPinId = pin.pinId;
     archivingPinProgress = 0;
+    const deletion = onpindelete
+      ? Promise.resolve().then(() => onpindelete({ pinId: pin.pinId })).then(
+          () => true,
+          () => false,
+        )
+      : null;
 
     function finish() {
+      if (destroyed) return;
       archivingPinId = null;
       archivingPinProgress = 0;
       resetArchiveDragInteraction();
       localPinPositions.delete(pin.pinId);
       syncPrimitiveOrbitVisuals();
-      if (simulation) simulation.alpha(0.16).restart();
+      heatOrbit(0.16);
     }
 
     function archiveTick(t: number) {
+      if (destroyed) return;
       const elapsed = t - startTime;
       const progress = Math.min(elapsed / duration, 1);
       const eased = 1 - (1 - progress) ** 3;
@@ -1979,17 +1988,19 @@
         return;
       }
 
-      if (!onpindelete) {
+      if (!deletion) {
         patchPrimitivePinPosition(pin.pinId, fallbackPosition.x, fallbackPosition.y);
         finish();
         return;
       }
 
-      Promise.resolve(onpindelete({ pinId: pin.pinId }))
-        .catch(() => {
+      void deletion.then((deleted) => {
+        if (destroyed) return;
+        if (!deleted) {
           patchPrimitivePinPosition(pin.pinId, fallbackPosition.x, fallbackPosition.y);
-        })
-        .finally(finish);
+        }
+        finish();
+      });
     }
 
     requestAnimationFrame(archiveTick);
@@ -2104,7 +2115,7 @@
     dragTargetAnchorId = null;
     archiveDropAppId = archiveTarget ? app.id : null;
     setArchiveDragState(true, Boolean(archiveTarget));
-    if (simulation) simulation.alpha(0.08).restart();
+    heatOrbit(0.08);
     return true;
   }
 
@@ -2120,8 +2131,13 @@
     const startTime = performance.now();
     archivingAppId = app.id;
     archivingAppProgress = 0;
+    const archive = Promise.resolve().then(() => onapparchive?.({ appId: app.id })).then(
+      () => true,
+      () => false,
+    );
 
     function archiveTick(t: number) {
+      if (destroyed) return;
       const elapsed = t - startTime;
       const progress = Math.min(elapsed / duration, 1);
       const eased = 1 - (1 - progress) ** 3;
@@ -2137,18 +2153,18 @@
         return;
       }
 
-      Promise.resolve(onapparchive?.({ appId: app.id }))
-        .catch(() => {
+      void archive.then((archived) => {
+        if (destroyed) return;
+        if (!archived) {
           patchPrimitiveAppPosition(app.id, fallbackPosition.x, fallbackPosition.y);
-        })
-        .finally(() => {
-          archivingAppId = null;
-          archivingAppProgress = 0;
-          resetArchiveDragInteraction();
-          localAppPositions.delete(app.id);
-          syncPrimitiveOrbitVisuals();
-          if (simulation) simulation.alpha(0.16).restart();
-        });
+        }
+        archivingAppId = null;
+        archivingAppProgress = 0;
+        resetArchiveDragInteraction();
+        localAppPositions.delete(app.id);
+        syncPrimitiveOrbitVisuals();
+        heatOrbit(0.16);
+      });
     }
 
     requestAnimationFrame(archiveTick);
@@ -2176,7 +2192,7 @@
           x: state.previousX,
           y: state.previousY,
         });
-        if (simulation) simulation.alpha(0.16).restart();
+        heatOrbit(0.16);
         return didMove;
       }
 
@@ -2189,7 +2205,7 @@
           localAppPositions.delete(app.id);
           syncPrimitiveOrbitVisuals();
         });
-      if (simulation) simulation.alpha(0.16).restart();
+      heatOrbit(0.16);
 
       return didMove;
     }
@@ -2259,6 +2275,9 @@
   let orbitAnchorLookup: AttractorLookup = { byId: new Map(), byName: new Map(), byAnchorKey: new Map() };
   let sunLayoutKey = '';
   let pinLayoutKey = '';
+  let appLayoutKey = '';
+  let connectionTopologyKey = '';
+  let presenceMotionKey: string | null = null;
   let sunPulseFrame: number | null = null;
   let breathingFrame: number | null = null;
   let particleFrame: number | null = null;
@@ -2268,20 +2287,16 @@
   let primitiveSyncLastAt = 0;
   let simulationPaintLastAt = 0;
   let renderOwnerWarningIssued = false;
-  let workspaceMotionSuspended = false;
+  let destroyed = false;
   let _isDragging = false;
-  let lastOrbitTickAt = 0;
   const PREVIEW_MEMBER_PREFIX = '__cortex-preview-user__';
   const PREVIEW_IDEA_PREFIX = '__cortex-preview-idea__';
   const PRIMITIVE_SYNC_INTERVAL_MS = 16;
   const SIMULATION_PAINT_INTERVAL_MS = 16;
-  const ORBIT_WAKE_CHECK_INTERVAL_MS = 4_000;
-  const ORBIT_STALE_AFTER_MS = 6_500;
 
   type SimulationPerformanceProfile = {
     alphaDecay: number;
     alphaMin: number;
-    idleAlphaTarget: number;
     collideIterations: number;
     velocityDecay: number;
   };
@@ -2296,10 +2311,6 @@
 
   function activeSimulationProfile() {
     return simulationPerformanceProfile(activeSimulationNodeCount());
-  }
-
-  function idleOrbitAlphaTarget() {
-    return activeSimulationProfile().idleAlphaTarget;
   }
 
   function primitiveSyncIntervalMs() {
@@ -2359,6 +2370,21 @@
     primitiveSyncNodes = null;
   }
 
+  function heatOrbit(alpha: number) {
+    if (!simulation || paused) return;
+
+    simulation
+      .alphaTarget(0)
+      .alpha(Math.max(simulation.alpha(), alpha));
+
+    if (document.visibilityState !== 'visible') return;
+
+    primitiveSyncLastAt = 0;
+    simulationPaintLastAt = 0;
+    schedulePrimitiveOrbitVisuals(simulation.nodes() as OrbitNode[]);
+    simulation.restart();
+  }
+
   function stopActiveSimulation() {
     if (!simulation) return;
     simulation.on('tick', null);
@@ -2383,42 +2409,13 @@
     cancelPrimitiveOrbitVisualSync();
   }
 
-  function suspendWorkspaceMotion() {
-    if (workspaceMotionSuspended) return;
-    workspaceMotionSuspended = true;
-    if (simulation) {
-      simulation.alphaTarget(0);
-      simulation.stop();
-      syncPrimitiveOrbitVisuals(simulation.nodes() as OrbitNode[]);
-    }
-    cancelRenderFrames();
-    g?.selectAll('*').interrupt();
-  }
-
-  function resumeWorkspaceMotion() {
-    if (!workspaceMotionSuspended) return;
-    workspaceMotionSuspended = false;
-    if (!simulation) {
-      renderCanvas({ preserveViewport: true });
-      return;
-    }
-    const nodes = simulation.nodes() as OrbitNode[];
-    clearAttractionCache(nodes);
-    simulation
-      .alphaTarget(idleOrbitAlphaTarget())
-      .alpha(Math.max(simulation.alpha(), 0.14))
-      .restart();
-    syncPrimitiveMotionVisuals(nodes);
-  }
-
   function resetRenderRuntime() {
     renderGeneration += 1;
-    workspaceMotionSuspended = false;
+    restoreThreadAnchorState(simulation?.nodes() as OrbitNode[] | undefined);
     stopActiveSimulation();
     cancelRenderFrames();
     primitiveSyncLastAt = 0;
     simulationPaintLastAt = 0;
-    lastOrbitTickAt = 0;
     coreGroup = undefined as any;
   }
 
@@ -2510,11 +2507,7 @@
     if (!simulation) return;
     const profile = activeSimulationProfile();
     simulation.force('collide', d3.forceCollide().radius((d: any) => bubbleCollisionRadius(d)).strength(0.84).iterations(profile.collideIterations));
-    if (workspaceMotionSuspended) {
-      syncPrimitiveOrbitVisuals(simulation.nodes() as OrbitNode[]);
-      return;
-    }
-    simulation.alpha(alpha).restart();
+    heatOrbit(alpha);
   }
 
   // ── SVG Defs (from cortex-physics.js createDefs) ───────────
@@ -2589,7 +2582,7 @@
     return d3.forceSimulation(nodes)
       .alphaDecay(profile.alphaDecay)
       .alphaMin(profile.alphaMin)
-      .alphaTarget(profile.idleAlphaTarget)
+      .alphaTarget(0)
       .velocityDecay(profile.velocityDecay)
       .force('center', orbitAnchors.length > 0 ? null : d3.forceCenter(w / 2, h / 2).strength(0.02))
       .force('collide', d3.forceCollide().radius((d: any) => bubbleCollisionRadius(d)).strength(0.84).iterations(profile.collideIterations))
@@ -2652,13 +2645,6 @@
         for (const n of nodes) {
           // Subtle upward float for high-salience nodes (reduced to avoid directional bias)
           n.vy -= ((n.salience_score || 5) / 10) * 0.03 * alpha;
-        }
-      })
-      .force('brownian', () => {
-        for (const n of nodes) {
-          // Gentle random perturbation keeps motion organic (not alpha-dependent)
-          n.vx += (Math.random() - 0.5) * 0.15;
-          n.vy += (Math.random() - 0.5) * 0.15;
         }
       });
   }
@@ -3073,8 +3059,7 @@
   }
 
   function restartOrbitSettle() {
-    if (!simulation) return;
-    simulation.alpha(Math.max(simulation.alpha(), 0.22)).restart();
+    heatOrbit(0.22);
   }
 
   function dragStart(e: any, d: any) {
@@ -3083,7 +3068,7 @@
     dragTargetAnchorId = null;
     archiveDropIdeaId = null;
     setArchiveDragState(canArchiveNode(d), false);
-    if (!e.active && simulation) simulation.alphaTarget(0.1).restart();
+    if (!e.active) heatOrbit(0.1);
     d.fx = d.x; d.fy = d.y;
     d._dragOrigX = d.x; d._dragOrigY = d.y;
   }
@@ -3132,8 +3117,10 @@
     const startTime = performance.now();
     archivingIdeaId = d.id;
     archivingIdeaProgress = 0;
+    void cortex.deleteIdea(d.id);
 
     function archiveTick(t: number) {
+      if (destroyed) return;
       const elapsed = t - startTime;
       const progress = Math.min(elapsed / duration, 1);
       const eased = 1 - (1 - progress) ** 3;
@@ -3154,9 +3141,8 @@
       archivingIdeaId = null;
       archivingIdeaProgress = 0;
       resetArchiveDragInteraction();
-      cortex.deleteIdea(d.id);
       el.remove();
-      if (simulation) simulation.alpha(0.3).restart();
+      heatOrbit(0.3);
     }
 
     requestAnimationFrame(archiveTick);
@@ -3169,8 +3155,7 @@
       _isDragging = false;
       dragTargetAnchorId = null;
       resetArchiveDragInteraction();
-      if (!e.active && simulation) simulation.alphaTarget(idleOrbitAlphaTarget());
-      if (simulation) simulation.alpha(0.1).restart();
+      heatOrbit(0.1);
       return;
     }
 
@@ -3178,7 +3163,6 @@
     _isDragging = false;
     dragTargetAnchorId = null;
     resetArchiveDragInteraction();
-    if (!e.active && simulation) simulation.alphaTarget(idleOrbitAlphaTarget());
     if (coreGroup) coreGroup.select('.core-circle').attr('filter', 'url(#core-glow)');
 
     const dragDx = d.x - (d._dragOrigX || d.x);
@@ -3194,7 +3178,7 @@
       el.select('.bubble-cloud').transition().duration(200).attr('transform', 'scale(1)');
       el.transition().duration(200).attr('opacity', (dd: any) => bubbleOpacity(dd.status));
       syncPrimitiveDragVisuals();
-      if (simulation) simulation.alpha(0.22).restart();
+      heatOrbit(0.22);
       return;
     }
 
@@ -3229,7 +3213,7 @@
       if (dragDist > 20) {
         cortex.updateIdeaPosition(d.id, d.x, d.y);
       }
-      if (simulation) simulation.alpha(0.15).restart();
+      heatOrbit(0.15);
     }
   }
 
@@ -3309,7 +3293,7 @@
     setTimeout(() => {
       cortex.deleteIdea(d.id);
       el.remove();
-      if (simulation) { simulation.alpha(0.3).restart(); }
+      heatOrbit(0.3);
     }, 250);
   }
 
@@ -3547,6 +3531,41 @@
     });
   }
 
+  function workspaceConnectionLinkData(visible: any[]) {
+    const visibleIds = new Set(visible.map((idea: any) => idea.id));
+    const visibleById = new Map(visible.map((idea: any) => [idea.id, idea] as const));
+    return cortex.connections
+      .filter((connection: any) => visibleIds.has(connection.source_id) && visibleIds.has(connection.target_id))
+      .map((connection: any) => {
+        const sourceIdea = visibleById.get(connection.source_id);
+        const targetIdea = visibleById.get(connection.target_id);
+
+        return {
+          ...connection,
+          source: connection.source_id,
+          target: connection.target_id,
+          sourceUserId: sourceIdea?.user_id,
+          targetUserId: targetIdea?.user_id,
+          sourceAccent: sourceIdea ? ownerColor(sourceIdea) : undefined,
+          targetAccent: targetIdea ? ownerColor(targetIdea) : undefined,
+        };
+      });
+  }
+
+  function workspaceConnectionTopologyKey(visible: any[]) {
+    const visibleIds = new Set(visible.map((idea: any) => idea.id));
+    const ownership = visible
+      .map((idea: any) => `${idea.id}:${idea.user_id ?? ''}`)
+      .sort()
+      .join('|');
+    const connections = cortex.connections
+      .filter((connection: any) => visibleIds.has(connection.source_id) && visibleIds.has(connection.target_id))
+      .map((connection: any) => `${connection.id}:${connection.source_id}:${connection.target_id}`)
+      .sort()
+      .join('|');
+    return `${ownership}::${connections}`;
+  }
+
   function renderCanvas({ preserveViewport = false }: { preserveViewport?: boolean } = {}) {
     if (!containerEl) return;
     const preservedTransform = preserveViewport ? untrack(() => currentZoomTransform) : null;
@@ -3618,26 +3637,11 @@
     const visible = syncSceneNodes(cortex.filteredIdeas);
     clearAttractionCache(visible);
 
-    const visibleIds = new Set(visible.map((i: any) => i.id));
-    const visibleById = new Map(visible.map((idea: any) => [idea.id, idea] as const));
-    const linkData = cortex.connections
-      .filter((c: any) => visibleIds.has(c.source_id) && visibleIds.has(c.target_id))
-      .map((c: any) => {
-        const sourceIdea = visibleById.get(c.source_id);
-        const targetIdea = visibleById.get(c.target_id);
-
-        return {
-          ...c,
-          source: c.source_id,
-          target: c.target_id,
-          sourceUserId: sourceIdea?.user_id,
-          targetUserId: targetIdea?.user_id,
-          sourceAccent: sourceIdea ? ownerColor(sourceIdea) : undefined,
-          targetAccent: targetIdea ? ownerColor(targetIdea) : undefined,
-        };
-      });
+    const linkData = workspaceConnectionLinkData(visible);
+    connectionTopologyKey = workspaceConnectionTopologyKey(visible);
 
     simulation = createSim(visible, linkData, canvasW, canvasH);
+    if (paused || document.visibilityState !== 'visible') simulation.stop();
 
     const linkSel = USE_D3_SHADOW_SCENE
       ? g.selectAll('.connection-path').data(linkData, (d: any) => d.id)
@@ -3696,7 +3700,6 @@
     simulation.on('tick', () => {
       if (renderToken !== renderGeneration) return;
       const now = performance.now();
-      lastOrbitTickAt = now;
       if (simulationPaintLastAt && now - simulationPaintLastAt < simulationPaintIntervalMs()) return;
       simulationPaintLastAt = now;
       if (linkSel) linkSel.attr('d', curvedLinkPath);
@@ -3736,7 +3739,7 @@
           pair.target.vy -= (dy / dist) * strength;
         }
       });
-      simulation.alpha(0.18).restart();
+      heatOrbit(0.18);
     };
 
     // Semantic clustering is progressive enhancement: keep the initial orbit
@@ -3759,33 +3762,40 @@
     // Save positions when simulation settles
     simulation.on('end', () => {
       if (renderToken !== renderGeneration) return;
-      const positions = collectSceneIdeaPositions(
-        simulation?.nodes() as OrbitNode[] ?? [],
-        isPreviewIdeaId,
-      );
+      const nodes = simulation?.nodes() as OrbitNode[] ?? [];
+      cancelPrimitiveOrbitVisualSync();
+      syncPrimitiveMotionVisuals(nodes);
+      const positions = collectSceneIdeaPositions(nodes, isPreviewIdeaId);
       persistSceneIdeaPositions(positions).catch(() => {});
     });
+    untrack(syncThreadAnchor);
   }
 
   // ── Lifecycle ──────────────────────────────────────────────
   let paused = false;
   let flowState = $state(false);
-  let flowCheckInterval: any = null;
-  let orbitWakeCheckInterval: ReturnType<typeof setInterval> | null = null;
 
-  function checkFlowState() {
+  function updateFlowState() {
+    if (destroyed) return;
     const panelOpen = cortex.panelOpen;
     const activeInput = document.activeElement?.tagName === 'TEXTAREA';
-    if (panelOpen && activeInput && !flowState) {
-      flowState = true;
+    const nextFlowState = panelOpen && activeInput;
+    if (nextFlowState === flowState) return;
+
+    flowState = nextFlowState;
+    if (nextFlowState) {
       g?.selectAll('.bubble-group')
         .filter((d: any) => d.id !== cortex.selectedIdeaId)
         .transition().duration(600).attr('opacity', 0.38);
-    } else if ((!panelOpen || !activeInput) && flowState) {
-      flowState = false;
+    } else {
       g?.selectAll('.bubble-group').transition().duration(600)
         .attr('opacity', (d: any) => bubbleOpacity(d.status));
     }
+  }
+
+  function handleFlowFocusChange() {
+    if (destroyed) return;
+    queueMicrotask(updateFlowState);
   }
 
   function handleFitView() {
@@ -3797,6 +3807,7 @@
   function handleTogglePause() {
     paused = !paused;
     if (paused) {
+      restoreThreadAnchorState(simulation?.nodes() as OrbitNode[] | undefined);
       renderGeneration += 1;
       cancelRenderFrames();
       stopActiveSimulation();
@@ -3805,28 +3816,15 @@
     }
   }
 
-  function ensureOrbitMotionActive() {
-    if (!simulation || paused || workspaceMotionSuspended) return;
-    const nodes = simulation.nodes() as OrbitNode[];
-    clearAttractionCache(nodes);
-    simulation
-      .alphaTarget(idleOrbitAlphaTarget())
-      .alpha(Math.max(simulation.alpha(), 0.14))
-      .restart();
-    schedulePrimitiveOrbitVisuals(nodes);
-  }
-
   function handleVisibilityChange() {
-    if (document.visibilityState !== 'visible') return;
-    ensureOrbitMotionActive();
-  }
-
-  function checkOrbitMotionHealth() {
-    if (!simulation || paused || workspaceMotionSuspended || document.visibilityState === 'hidden') return;
-    const now = performance.now();
-    if (!lastOrbitTickAt || now - lastOrbitTickAt > ORBIT_STALE_AFTER_MS) {
-      ensureOrbitMotionActive();
+    if (!simulation || paused) return;
+    if (document.visibilityState === 'hidden') {
+      simulation.stop();
+      cancelPrimitiveOrbitVisualSync();
+      return;
     }
+    if (simulation.alpha() < simulation.alphaMin()) return;
+    heatOrbit(0);
   }
 
   // Track rendered idea IDs to detect new ones
@@ -3857,14 +3855,9 @@
       nodes.push(sceneNode);
       simulation.nodes(nodes);
     }
-    if (!workspaceMotionSuspended) {
-      simulation.alpha(0.5).restart();
-    }
+    heatOrbit(0.5);
 
     if (!USE_D3_SHADOW_SCENE) {
-      if (workspaceMotionSuspended) {
-        collapseBirthAnimation(sceneNode);
-      }
       syncPrimitiveOrbitVisuals(Array.from(orbitSceneNodesById.values()));
       syncPrimitiveMotionVisuals(simulation.nodes() as OrbitNode[]);
       return;
@@ -3882,21 +3875,14 @@
     renderBubbleContent(bubble, qPosMap);
     syncPrimitiveOrbitVisuals(Array.from(orbitSceneNodesById.values()));
 
-    if (workspaceMotionSuspended) {
-      bubble.select('.bubble-cloud')
-        .attr('opacity', bubbleOpacity(sceneNode.status))
-        .attr('transform', 'scale(1)');
-      bubble.select('.bubble-label').attr('opacity', 1);
-    } else {
-      bubble.select('.bubble-cloud')
-        .attr('opacity', 0).attr('transform', 'scale(0)')
-        .transition('bubble-birth-cloud').duration(600).ease(d3.easeCubicOut)
-        .attr('opacity', bubbleOpacity(sceneNode.status))
-        .attr('transform', 'scale(1)');
-      bubble.select('.bubble-label')
-        .attr('opacity', 0)
-        .transition('bubble-birth-label').delay(300).duration(400).attr('opacity', 1);
-    }
+    bubble.select('.bubble-cloud')
+      .attr('opacity', 0).attr('transform', 'scale(0)')
+      .transition('bubble-birth-cloud').duration(600).ease(d3.easeCubicOut)
+      .attr('opacity', bubbleOpacity(sceneNode.status))
+      .attr('transform', 'scale(1)');
+    bubble.select('.bubble-label')
+      .attr('opacity', 0)
+      .transition('bubble-birth-label').delay(300).duration(400).attr('opacity', 1);
 
     bubble
       .on('click', (e: Event) => {
@@ -3936,8 +3922,9 @@
     window.addEventListener('cortex-fit-view', handleFitView);
     window.addEventListener('cortex-toggle-pause', handleTogglePause);
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    flowCheckInterval = setInterval(checkFlowState, 2000);
-    orbitWakeCheckInterval = setInterval(checkOrbitMotionHealth, ORBIT_WAKE_CHECK_INTERVAL_MS);
+    document.addEventListener('focusin', handleFlowFocusChange);
+    document.addEventListener('focusout', handleFlowFocusChange);
+    handleFlowFocusChange();
   });
 
   // Re-initialize attractors when teamMembers loads or user-owned cluster loads change.
@@ -4005,7 +3992,7 @@
     const nodes = simulation?.nodes() as OrbitNode[] | undefined;
     if (nodes) clearAttractionCache(nodes);
     refreshOrbitVisualState();
-    if (simulation) simulation.alpha(0.24).restart();
+    heatOrbit(0.24);
   });
 
   $effect(() => {
@@ -4016,23 +4003,27 @@
   });
 
   $effect(() => {
-    const appLayoutKey = apps
-      .map((app) => [
-        app.id,
-        app.updated_at,
-        app.anchor_user_id ?? '',
-        app.visual_spec?.orbit_anchor_type ?? '',
-        app.visual_spec?.orbit_anchor_id ?? '',
-        app.visual_spec?.position_x ?? '',
-        app.visual_spec?.position_y ?? '',
-      ].join(':'))
+    const nextAppLayoutKey = apps
+      .filter((app) => !app.archived_at)
+      .map((app) => {
+        const position = workspaceAppStoredPosition(app);
+        return [
+          app.id,
+          app.created_at,
+          workspaceAppAnchorId(app),
+          workspaceAppOrbitOrder(app) ?? '',
+          position?.x ?? '',
+          position?.y ?? '',
+        ].join(':');
+      })
+      .sort()
       .join('|');
+    const layoutChanged = nextAppLayoutKey !== appLayoutKey;
+    appLayoutKey = nextAppLayoutKey;
     activeAppId;
     if (svg) {
       syncPrimitiveOrbitVisuals();
-      if (simulation && !workspaceMotionSuspended) {
-        simulation.alpha(Math.max(simulation.alpha(), 0.12)).restart();
-      }
+      if (layoutChanged) heatOrbit(0.12);
     }
   });
 
@@ -4066,11 +4057,26 @@
     }
   });
 
-  $effect(() => {
+  function restoreThreadAnchorState(nodes: OrbitNode[] = []) {
+    const previous = threadAnchorState;
+    if (!previous) return false;
+
+    const previousNode = nodes.find((node) => node.id === previous.id)
+      ?? orbitSceneNodesById.get(previous.id);
+    if (previousNode) {
+      previousNode.fx = previous.fx;
+      previousNode.fy = previous.fy;
+      delete previousNode._threadAnchorPinned;
+    }
+    threadAnchorState = null;
+    return true;
+  }
+
+  function syncThreadAnchor() {
     const panelOpen = cortex.panelOpen;
     const selectedId = cortex.selectedIdeaId;
 
-    if (!simulation) return;
+    if (destroyed || !simulation) return;
     const nodes = simulation.nodes() as OrbitNode[];
 
     if (panelOpen && selectedId) {
@@ -4079,15 +4085,7 @@
       collapseBirthAnimation(anchorNode);
 
       if (!threadAnchorState || threadAnchorState.id !== selectedId) {
-        const prevAnchorState = threadAnchorState;
-        if (prevAnchorState) {
-          const prevNode = nodes.find((node) => node.id === prevAnchorState.id);
-          if (prevNode) {
-            prevNode.fx = prevAnchorState.fx;
-            prevNode.fy = prevAnchorState.fy;
-            delete prevNode._threadAnchorPinned;
-          }
-        }
+        restoreThreadAnchorState(nodes);
 
         threadAnchorState = {
           id: selectedId,
@@ -4103,27 +4101,15 @@
       return;
     }
 
-    if (threadAnchorState) {
-      const prevNode = nodes.find((node) => node.id === threadAnchorState?.id);
-      if (prevNode) {
-        prevNode.fx = threadAnchorState.fx;
-        prevNode.fy = threadAnchorState.fy;
-        delete prevNode._threadAnchorPinned;
-      }
-      threadAnchorState = null;
+    if (restoreThreadAnchorState(nodes)) {
       refreshCollisionForce(0.14);
       handleFocusMode(currentZoomTransform);
     }
 
     releaseThreadAnchors(nodes);
-  });
+  }
 
-  $effect(() => {
-    const panelOpen = cortex.panelOpen;
-    const selectedId = cortex.selectedIdeaId;
-    if (!svg || !simulation || !panelOpen || !selectedId) return;
-    ensureOrbitMotionActive();
-  });
+  $effect(syncThreadAnchor);
 
   // Track node properties for change detection
   let nodeSnapshotMap = new Map<string, WorkspaceSceneNodeSnapshot>();
@@ -4225,27 +4211,58 @@
           const nodes = (simulation.nodes() as OrbitNode[]).filter((n) => n.id !== id);
           simulation.nodes(nodes);
           clearAttractionCache(nodes);
-          simulation.alpha(0.2).restart();
+          heatOrbit(0.2);
         }
       }
     }
   });
 
   $effect(() => {
-    const typingEntries = Array.from(cortex.typingUsers.values()).map((entry) => `${entry.user_id}:${entry.idea_id}`).join('|');
-    typingEntries;
+    const visible = (cortex.filteredIdeas as WorkspaceSceneIdeaSnapshot[]).filter((idea) => !idea?.archived_at);
+    const nextTopologyKey = workspaceConnectionTopologyKey(visible);
+    if (!simulation || nextTopologyKey === connectionTopologyKey) return;
+
+    connectionTopologyKey = nextTopologyKey;
+    const linkForce = simulation.force('link') as d3.ForceLink<OrbitNode, any> | undefined;
+    linkForce?.links(workspaceConnectionLinkData(visible));
+    heatOrbit(0.18);
+  });
+
+  $effect(() => {
+    const typingEntries = Array.from(cortex.typingUsers.values())
+      .map((entry) => `${entry.user_id}:${entry.idea_id}`)
+      .sort()
+      .join('|');
+    const viewerEntries = Array.from(new Set(
+      presenceStore.viewers.map((entry) => entry.user_id),
+    ))
+      .sort()
+      .join('|');
+    const nextPresenceMotionKey = `${typingEntries}::${viewerEntries}`;
+    const initialPresence = presenceMotionKey === null;
+    const presenceChanged = nextPresenceMotionKey !== presenceMotionKey;
+    if (!presenceChanged) return;
+
+    presenceMotionKey = nextPresenceMotionKey;
     refreshOrbitVisualState();
+    if (!initialPresence) heatOrbit(0.08);
+  });
+
+  $effect(() => {
+    cortex.panelOpen;
+    handleFlowFocusChange();
   });
 
   onDestroy(() => {
+    destroyed = true;
     resetArchiveDragInteraction();
     resetRenderRuntime();
-    if (flowCheckInterval) clearInterval(flowCheckInterval);
-    if (orbitWakeCheckInterval) clearInterval(orbitWakeCheckInterval);
     cortex.setBirthContext(null);
     window.removeEventListener('cortex-fit-view', handleFitView);
     window.removeEventListener('cortex-toggle-pause', handleTogglePause);
     document.removeEventListener('visibilitychange', handleVisibilityChange);
+    document.removeEventListener('focusin', handleFlowFocusChange);
+    document.removeEventListener('focusout', handleFlowFocusChange);
   });
 </script>
 

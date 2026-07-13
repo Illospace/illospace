@@ -40,6 +40,10 @@ class AgentRunRow(Base, TimestampMixin):
             check_in_constraint("status", AGENT_RUN_DB_STATUS_VALUES),
             name="ck_agent_runs_status",
         ),
+        CheckConstraint(
+            "parent_run_id IS NULL OR parent_step_key_hash IS NOT NULL",
+            name="ck_agent_runs_child_parent_step_hash",
+        ),
         Index("ix_agent_runs_org_created", "org_id", "created_at"),
         Index("ix_agent_runs_thread_created", "thread_id", "created_at"),
         Index("ix_agent_runs_status_created", "status", "created_at"),
@@ -52,6 +56,11 @@ class AgentRunRow(Base, TimestampMixin):
             "source_idempotency_scope",
             "source_idempotency_key",
             name="uq_agent_runs_org_source_idempotency",
+        ),
+        UniqueConstraint(
+            "parent_run_id",
+            "parent_step_key_hash",
+            name="uq_agent_runs_parent_step_key_hash",
         ),
     )
 
@@ -81,6 +90,9 @@ class AgentRunRow(Base, TimestampMixin):
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False, server_default=sql_text("'{}'::jsonb"), default=dict)
     source_idempotency_scope: Mapped[str | None] = mapped_column(String(80), nullable=True)
     source_idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_step_key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    execution_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    execution_attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", default=0)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

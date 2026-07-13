@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 import fnmatch
@@ -10,6 +11,12 @@ import json
 import os
 from typing import Any
 
+from brain.platform.async_io import (
+    BlockingInvocationCancelled,
+    callable_uses_blocking_thread,
+    invoke_maybe_async,
+    mark_side_effect_started,
+)
 from brain.systems.runs.actions import (
     blocked_action_result,
     build_action_manifest,
@@ -197,11 +204,84 @@ class AsyncRunToolExecutor:
             )
             try:
                 with bind_agent_context(_handler_context_from_action_context(action_context)):
-                    result = handler(**handler_args)
-                    if inspect.isawaitable(result):
-                        result = await result
+                    mark_side_effect_started()
+                    result = await invoke_maybe_async(handler, **handler_args)
             finally:
                 workspace_tool_runtime.cleanup()
+        except BlockingInvocationCancelled as exc:
+            failure = str(exc.error) if exc.error else result_failure_summary(exc.result)
+            if manifest_id:
+                await _maybe_await(
+                    complete_action_manifest(
+                        manifest_id,
+                        outcome_status="failed" if failure else "succeeded",
+                        outcome_error=failure,
+                    )
+                )
+            if failure:
+                await self._append_event(
+                    run_event(
+                        run_id,
+                        "run.tool_failed",
+                        _event_payload(tool.name, safe_args, error=failure),
+                        root_run_id=root_run_id,
+                    )
+                )
+                record = ToolRecord(
+                    tool_name=tool.name,
+                    args=safe_args,
+                    status="failed",
+                    artifact_type=artifact_type,
+                    side_effect=side_effect,
+                    error=failure[:1000],
+                )
+                await self._append_artifact(
+                    run_id,
+                    root_run_id=root_run_id,
+                    artifact_type=artifact_type,
+                    title=f"{tool.name} failed",
+                    payload=record.to_payload(),
+                    text=failure[:4000],
+                )
+            else:
+                safe_result = redact_tool_result(tool.name, exc.result)
+                await self._append_event(
+                    run_event(
+                        run_id,
+                        "run.tool_completed",
+                        _event_payload(tool.name, safe_args, result=safe_result[:1000]),
+                        root_run_id=root_run_id,
+                    )
+                )
+                record = ToolRecord(
+                    tool_name=tool.name,
+                    args=safe_args,
+                    status="completed",
+                    artifact_type=artifact_type,
+                    side_effect=side_effect,
+                    result_preview=safe_result[:1000],
+                )
+                await self._append_artifact(
+                    run_id,
+                    root_run_id=root_run_id,
+                    artifact_type=artifact_type,
+                    title=tool.name,
+                    payload=record.to_payload(),
+                    text=safe_result[:4000],
+                )
+            if collector is not None:
+                collector.append(record)
+            raise
+        except asyncio.CancelledError:
+            if manifest_id:
+                await _maybe_await(
+                    complete_action_manifest(
+                        manifest_id,
+                        outcome_status="indeterminate",
+                        outcome_error="caller canceled before a definitive action outcome",
+                    )
+                )
+            raise
         except Exception as exc:
             error_text = str(exc)
             if manifest_id:
@@ -488,6 +568,8 @@ def wrap_tool_handlers(
             )
 
         _handler.__name__ = getattr(handler, "__name__", f"runtime_{tool_name}")
+        _handler._illo_marks_side_effect_start = True
+        _handler._illo_uses_blocking_thread = callable_uses_blocking_thread(handler)
         wrapped[tool_name] = _handler
     return wrapped
 

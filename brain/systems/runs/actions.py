@@ -23,6 +23,12 @@ from pydantic import (
     model_validator,
 )
 
+from brain.platform.async_io import (
+    BlockingInvocationCancelled,
+    callable_uses_blocking_thread,
+    invoke_maybe_async,
+    mark_side_effect_started,
+)
 from brain.systems.runs.tool_catalog.metadata import ActionPolicyResult
 from brain.systems.runs.tool_catalog.registry import action_policy_for_tool
 
@@ -680,9 +686,29 @@ def wrap_action_manifest_audit(
             logger.debug("Failed to build action manifest", exc_info=True)
 
         try:
-            result = handler(*args, **kwargs)
-            if inspect.isawaitable(result):
-                result = await result
+            mark_side_effect_started()
+            result = await invoke_maybe_async(handler, *args, **kwargs)
+        except BlockingInvocationCancelled as exc:
+            failure = str(exc.error) if exc.error else result_failure_summary(exc.result)
+            if manifest_id:
+                completion = complete_action_manifest(
+                    manifest_id,
+                    outcome_status="failed" if failure else "succeeded",
+                    outcome_error=failure,
+                )
+                if inspect.isawaitable(completion):
+                    await completion
+            raise
+        except asyncio.CancelledError:
+            if manifest_id:
+                completion = complete_action_manifest(
+                    manifest_id,
+                    outcome_status="indeterminate",
+                    outcome_error="caller canceled before a definitive action outcome",
+                )
+                if inspect.isawaitable(completion):
+                    await completion
+            raise
         except Exception as exc:
             if manifest_id:
                 completion = complete_action_manifest(
@@ -715,4 +741,8 @@ def wrap_action_manifest_audit(
         return awaitable
 
     wrapper._action_manifest_audited = True
+    wrapper._illo_marks_side_effect_start = True
+    wrapper._illo_run_on_event_loop = True
+    wrapper._illo_uses_blocking_thread = callable_uses_blocking_thread(handler)
+    wrapper.__wrapped__ = handler
     return wrapper

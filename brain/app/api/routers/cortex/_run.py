@@ -82,10 +82,12 @@ async def _cancel_run_with_event(store: AsyncAgentRunStore, run_id: int, *, reas
     row = await store.require_run(int(run_id))
     if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
         return
+    canceled = await store.set_status(int(run_id), RunStatus.CANCELED, reason=reason)
+    if canceled.status != RunStatus.CANCELED:
+        return
     await store.append_event(
         run_event(int(run_id), "run.canceled", {"reason": reason}, root_run_id=row.root_run_id)
     )
-    await store.set_status(int(run_id), RunStatus.CANCELED, reason=reason)
 
 
 async def _require_idea_for_run_history(session, idea_id: str, user: dict[str, Any]) -> None:

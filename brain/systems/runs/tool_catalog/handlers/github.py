@@ -12,6 +12,7 @@ from brain.systems.cortex.project_context.github import (
     async_create_repo_issue,
     async_get_pull_request_deploy_info,
     async_get_pull_request,
+    async_get_pull_request_checks,
     async_get_repo_counts,
     async_get_repo_by_slug,
     async_list_repo_issues,
@@ -238,6 +239,7 @@ async def _read_with_token(
     limit: int,
     token: str | None,
     pull_number: int | None,
+    sha: str | None,
 ) -> dict[str, Any]:
     if action in {"repo", "get_repo"}:
         repo = await async_get_repo_by_slug(repo_slug, token=token)
@@ -272,6 +274,12 @@ async def _read_with_token(
             int(pull_number or 0),
             token=token,
         )
+    if action in {"pull_request_checks", "pr_checks", "checks"}:
+        return await async_get_pull_request_checks(
+            repo_slug,
+            str(sha or ""),
+            token=token,
+        )
     if action in {"counts", "get_counts", "exact_counts"}:
         return await async_get_repo_counts(
             repo_slug,
@@ -280,7 +288,7 @@ async def _read_with_token(
         )
     raise ValueError(
         "read_github_source action must be get_repo, list_issues, list_pull_requests, "
-        "get_pull_request, or get_counts"
+        "get_pull_request, pull_request_checks, or get_counts"
     )
 
 
@@ -297,6 +305,8 @@ async def _handle_read_github_source(
     head: str | None = None,
     base: str | None = None,
     pull_number: int | None = None,
+    number: int | None = None,
+    sha: str | None = None,
     limit: int = 30,
     token_secret_key: str | None = None,
 ) -> str:
@@ -317,6 +327,9 @@ async def _handle_read_github_source(
         "pull_request",
         "get_pull_request",
         "pr",
+        "pull_request_checks",
+        "pr_checks",
+        "checks",
         "counts",
         "get_counts",
         "exact_counts",
@@ -325,18 +338,21 @@ async def _handle_read_github_source(
         return json.dumps({
             "error": (
                 "read_github_source action must be get_repo, list_issues, list_pull_requests, "
-                "get_pull_request, or get_counts"
+                "get_pull_request, pull_request_checks, or get_counts"
             )
         })
     if clean_action in {"pull_request", "get_pull_request", "pr"}:
         try:
-            clean_pull_number = int(pull_number or 0)
+            clean_pull_number = int(number or pull_number or 0)
         except (TypeError, ValueError):
             clean_pull_number = 0
         if clean_pull_number < 1:
             return json.dumps({"error": "get_pull_request requires a positive pull_number"})
     else:
         clean_pull_number = None
+    clean_sha = _clean(sha)
+    if clean_action in {"pull_request_checks", "pr_checks", "checks"} and not clean_sha:
+        return json.dumps({"error": "pull_request_checks requires sha"})
 
     candidates = await _github_token_candidates(
         repo_slug=repo_slug,
@@ -356,7 +372,11 @@ async def _handle_read_github_source(
         ]
         if cached_errors:
             cached_error = cached_errors[-1]
-            return json.dumps({"error": cached_error.message, "status_code": cached_error.status_code})
+            return json.dumps({
+                "error": cached_error.message,
+                "status_code": cached_error.status_code,
+                "attempted_token_sources": [candidate["source"] for candidate in candidates],
+            })
         return json.dumps({"error": "No GitHub token candidates were available"})
     last_error: GitHubConnectorError | None = None
     retry_statuses = {401, 403, 404}
@@ -365,7 +385,9 @@ async def _handle_read_github_source(
         # this candidate cannot search the private repository.
         retry_statuses.add(422)
     negative_cache_statuses = {401, 404}
+    attempted_token_sources: list[str] = []
     for index, candidate in enumerate(read_candidates):
+        attempted_token_sources.append(candidate["source"])
         try:
             payload = await _read_with_token(
                 action=clean_action,
@@ -382,6 +404,7 @@ async def _handle_read_github_source(
                 limit=limit,
                 token=candidate["token"],
                 pull_number=clean_pull_number,
+                sha=clean_sha,
             )
         except GitHubConnectorError as exc:
             last_error = exc
@@ -389,7 +412,11 @@ async def _handle_read_github_source(
                 read_state.rejected[(candidate.get("token"), repo_slug)] = exc
             if exc.status_code in retry_statuses and index < len(read_candidates) - 1:
                 continue
-            return json.dumps({"error": exc.message, "status_code": exc.status_code})
+            return json.dumps({
+                "error": exc.message,
+                "status_code": exc.status_code,
+                "attempted_token_sources": attempted_token_sources,
+            })
         read_state.preferred[repo_slug] = candidate.get("token")
         payload["token_secret_key_used"] = bool(candidate.get("key_name"))
         payload["token_source"] = candidate["source"]
@@ -398,7 +425,11 @@ async def _handle_read_github_source(
         return json.dumps(payload, default=str)
 
     if last_error is not None:
-        return json.dumps({"error": last_error.message, "status_code": last_error.status_code})
+        return json.dumps({
+            "error": last_error.message,
+            "status_code": last_error.status_code,
+            "attempted_token_sources": attempted_token_sources,
+        })
     return json.dumps({"error": "No GitHub token candidates were available"})
 
 

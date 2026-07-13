@@ -62,6 +62,13 @@ export function streamItemBelongsToIdea(
   return Boolean(ideaId && streamItemIdeaId(item) === ideaId);
 }
 
+function streamItemIdentity(
+  item: Partial<CortexRunStreamItem> | null | undefined,
+): string | null {
+  if (!item?.type || item.id === null || item.id === undefined || item.id === '') return null;
+  return `${item.type}:${item.id}`;
+}
+
 export function isLivePartialReply(item: Partial<CortexRunStreamItem> | null | undefined): boolean {
   return Boolean(item?.metadata?.live_agent_text);
 }
@@ -237,6 +244,49 @@ export function hasVisiblePersistedRunMessage(item: CortexRunStreamItem): boolea
   );
 }
 
+const STREAM_KIND_RANK: Record<string, number> = { message: 0, run: 1, visual_block: 2 };
+
+function compareStreamItems(left: CortexRunStreamItem, right: CortexRunStreamItem): number {
+  const byTime = (timestampMs(left.timestamp) ?? 0) - (timestampMs(right.timestamp) ?? 0);
+  if (byTime) return byTime;
+  const leftKind = STREAM_KIND_RANK[left.type] ?? 3;
+  const byKind = leftKind - (STREAM_KIND_RANK[right.type] ?? 3);
+  if (byKind) return byKind;
+  const leftId = String(left.id), rightId = String(right.id);
+  const persistedId = left.type === 'visual_block' ? /^vb-\d+$/ : /^\d+$/;
+  if (leftKind < 3 && persistedId.test(leftId) && persistedId.test(rightId)) {
+    const byRowId = Number(leftId.replace('vb-', '')) - Number(rightId.replace('vb-', ''));
+    if (byRowId) return byRowId;
+  }
+  return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+}
+
+export function mergeThreadStreamPageItems(
+  current: CortexRunStreamItem[],
+  pageItems: CortexRunStreamItem[],
+  mode: 'initial' | 'head' | 'older',
+): CortexRunStreamItem[] {
+  const byIdentity = new Map<string, CortexRunStreamItem>();
+  for (const item of mode === 'older' ? [...pageItems, ...current] : [...current, ...pageItems]) {
+    byIdentity.set(`${item.type}:${item.id}`, item);
+  }
+  const items = [...byIdentity.values()];
+  const persistedRunIds = new Set(
+    items
+      .filter((item) => hasVisiblePersistedRunMessage(item) && item.metadata?.synthetic_from_run_artifact !== true)
+      .map(streamItemRunId)
+      .filter((value): value is string => Boolean(value)),
+  );
+  const syntheticRunIds = new Set<string>();
+  return items.filter((item) => {
+    if (item.metadata?.synthetic_from_run_artifact !== true) return true;
+    const runId = streamItemRunId(item);
+    if (!runId || persistedRunIds.has(runId) || syntheticRunIds.has(runId)) return false;
+    syntheticRunIds.add(runId);
+    return true;
+  }).sort(compareStreamItems);
+}
+
 export function mergeLiveStreamState(
   items: CortexRunStreamItem[],
   liveStream: CortexRunStreamItem[],
@@ -271,10 +321,18 @@ export function mergeLiveStreamState(
       .map((item) => streamItemRunId(item))
       .filter((value): value is string => Boolean(value)),
   );
+  const withRunIdentities = new Set(
+    withRuns.map(streamItemIdentity).filter((value): value is string => Boolean(value)),
+  );
   const livePartials = liveStream.filter((item) => {
     if (!isLivePartialReply(item) || !streamItemBelongsToIdea(item, ideaId)) return false;
     const runId = streamItemRunId(item);
-    return Boolean(runId && !persistedRunIds.has(runId));
+    const identity = streamItemIdentity(item);
+    return Boolean(
+      runId &&
+      !persistedRunIds.has(runId) &&
+      (!identity || !withRunIdentities.has(identity)),
+    );
   });
   return livePartials.length ? [...withRuns, ...livePartials] : withRuns;
 }

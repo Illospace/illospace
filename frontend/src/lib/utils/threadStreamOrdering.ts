@@ -1,11 +1,19 @@
+import { isActiveRun } from './cortexRunPresentation.ts';
+import { streamItemRunId } from './cortexRunStream.ts';
+
 export type ThreadStreamOrderingItem = {
   type?: string;
   id?: string | number | null;
   role?: string | null;
   content?: string | null;
+  status?: string | null;
   run_id?: string | number | null;
+  requires_approval?: boolean | null;
   metadata?: Record<string, any> | null;
 };
+
+export const THREAD_STREAM_WINDOW_BATCH_SIZE = 200;
+export type ThreadStreamWindowCursor = { index: number; key: string };
 
 function keyFor(value: unknown): string | null {
   if (value === null || value === undefined || value === '') return null;
@@ -22,8 +30,61 @@ function queuedAfterRunId(item: ThreadStreamOrderingItem): string | null {
 }
 
 function itemRunId(item: ThreadStreamOrderingItem): string | null {
-  const metadata = metadataFor(item);
-  return keyFor(item.run_id ?? metadata.run_id ?? (item.type === 'run' ? item.id : null));
+  return streamItemRunId({ run_id: item.run_id, metadata: metadataFor(item) })
+    ?? (item.type === 'run' ? keyFor(item.id) : null);
+}
+
+function itemKey(item: ThreadStreamOrderingItem): string {
+  return `${String(item.type || '')}\u0000${keyFor(item.id) || ''}`;
+}
+
+function protectedIndices<T extends ThreadStreamOrderingItem>(items: readonly T[]): Set<number> {
+  const runIds = new Set<string>();
+  const promptIds = new Set<string>();
+  for (const item of items) {
+    if (item.type !== 'run' || (!isActiveRun(item) && !item.requires_approval)) continue;
+    const runId = itemRunId(item);
+    if (runId) runIds.add(runId);
+    const promptId = keyFor(metadataFor(item).thread_message_id);
+    if (promptId) promptIds.add(promptId);
+  }
+  const indices = new Set<number>();
+  items.forEach((item, index) => {
+    const metadata = metadataFor(item);
+    if (
+      runIds.has(itemRunId(item) || '')
+      || (item.type === 'message' && promptIds.has(keyFor(item.id) || ''))
+      || runIds.has(keyFor(metadata.target_run_id) || '')
+    ) indices.add(index);
+  });
+  return indices;
+}
+
+function cursorIndex<T extends ThreadStreamOrderingItem>(items: readonly T[], cursor: ThreadStreamWindowCursor): number {
+  const keyedIndex = items.findIndex((item) => itemKey(item) === cursor.key);
+  return keyedIndex >= 0 ? keyedIndex : Math.max(0, Math.min(items.length, cursor.index));
+}
+
+export function buildThreadStreamWindow<T extends ThreadStreamOrderingItem>(
+  items: readonly T[],
+  before: ThreadStreamWindowCursor | null = null,
+): { items: T[]; startCursor: ThreadStreamWindowCursor; previousCursor: ThreadStreamWindowCursor | null } {
+  const protectedItems = protectedIndices(items);
+  let start = before ? cursorIndex(items, before) : Math.max(0, items.length - THREAD_STREAM_WINDOW_BATCH_SIZE);
+  if (before) {
+    let hidden = 0;
+    while (start > 0 && hidden < THREAD_STREAM_WINDOW_BATCH_SIZE) {
+      start -= 1;
+      if (!protectedItems.has(start)) hidden += 1;
+    }
+  }
+  const hasEarlier = items.some((_, index) => index < start && !protectedItems.has(index));
+  const startCursor = { index: start, key: items.length ? itemKey(items[start]) : '' };
+  return {
+    items: items.filter((_, index) => index >= start || protectedItems.has(index)),
+    startCursor,
+    previousCursor: hasEarlier ? startCursor : null,
+  };
 }
 
 function isAgentRunReply(item: ThreadStreamOrderingItem): boolean {
