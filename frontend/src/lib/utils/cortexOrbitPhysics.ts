@@ -1,7 +1,6 @@
 export type CortexOrbitPerformanceProfile = {
   alphaDecay: number;
   alphaMin: number;
-  idleAlphaTarget: number;
   collideIterations: number;
   velocityDecay: number;
 };
@@ -23,7 +22,6 @@ export function cortexOrbitPerformanceProfile(nodeCount: number): CortexOrbitPer
     return {
       alphaDecay: 0.018,
       alphaMin: 0.003,
-      idleAlphaTarget: 0.004,
       collideIterations: 1,
       velocityDecay: 0.38,
     };
@@ -32,7 +30,6 @@ export function cortexOrbitPerformanceProfile(nodeCount: number): CortexOrbitPer
     return {
       alphaDecay: 0.012,
       alphaMin: 0.002,
-      idleAlphaTarget: 0.006,
       collideIterations: 2,
       velocityDecay: 0.36,
     };
@@ -41,7 +38,6 @@ export function cortexOrbitPerformanceProfile(nodeCount: number): CortexOrbitPer
     return {
       alphaDecay: 0.008,
       alphaMin: 0.0015,
-      idleAlphaTarget: 0.009,
       collideIterations: 2,
       velocityDecay: 0.35,
     };
@@ -49,7 +45,6 @@ export function cortexOrbitPerformanceProfile(nodeCount: number): CortexOrbitPer
   return {
     alphaDecay: 0.0045,
     alphaMin: 0.001,
-    idleAlphaTarget: 0.012,
     collideIterations: 3,
     velocityDecay: 0.34,
   };
