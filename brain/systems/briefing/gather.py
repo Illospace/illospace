@@ -278,7 +278,7 @@ def _idea_piece(idea: Any) -> SourcePiece:
         title=_text(getattr(idea, "title", "")) or "triaged item",
         body="; ".join(bit for bit in body_bits if bit),
         ts=getattr(idea, "updated_at", None),
-        weight=9,
+        weight=8,  # below the event-summary piece: the raw signal reads better
     )
 
 
@@ -462,7 +462,34 @@ async def gather_pieces(
         if evidence:
             result.pieces.append(evidence)
 
+    # An inbound event's own normalized summary is often the best statement
+    # of "what happened" for NON-Slack origins (GitHub webhooks etc.), where
+    # no thread exists to gather. Slack origins skip this — the thread
+    # itself carries the message (probe finding, 2026-07-13).
+    envelope = dict(getattr(event, "envelope", None) or {}) if event is not None else {}
+    is_slack_event = str(envelope.get("kind") or "").startswith("slack")
+    if event is not None and not is_slack_event:
+        summary = _text(envelope.get("summary"))
+        if summary:
+            hints = dict(envelope.get("hints") or {})
+            bits = [summary] + [
+                f"{key}: {hints[key]}" for key in ("url", "action", "state") if _text(hints.get(key))
+            ]
+            result.pieces.append(
+                SourcePiece(
+                    source="record",
+                    ref=f"inbound_event:{getattr(event, 'id', '')}",
+                    title=summary[:90],
+                    body="; ".join(bits),
+                    ts=getattr(event, "created_at", None),
+                    weight=9,
+                )
+            )
+
     # Origin Slack thread — the fail-closed privacy boundary lives HERE.
+    # Only SLACK-origin events are expected to carry thread provenance; a
+    # GitHub-origin event has no thread, so its absence is not a degradation
+    # (probe finding: bogus "malformed" notes on every GitHub item).
     if idea is not None:
         details = dict(getattr(idea, "agent_details", None) or {})
         event_expected = bool((details.get("inbound_triage") or {}).get("event_id"))
@@ -471,6 +498,8 @@ async def gather_pieces(
             # Missing row OR org mismatch — either way, say so, don't guess.
             if not provenance_note_added:
                 notes.append("slack: provenance unavailable")
+        elif event is not None and not is_slack_event:
+            pass  # non-Slack origin: nothing omitted, nothing to note
         elif event is not None and provenance is None:
             notes.append("slack: provenance malformed or missing")
         elif provenance is not None and slack is None:

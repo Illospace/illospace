@@ -134,13 +134,20 @@ async def build_packet_for_job(
     source_ref: dict[str, Any] | None = None,
     readers: Readers | None = None,
     budget: DossierBudget | None = None,
+    reader_user_id: str | None = None,
 ) -> tuple[PacketRender, Dossier]:
     """The shared read-only stage: gather → assemble → compose.
 
     Used by the live mint AND the pre-merge probe (which stops here).
+    ``reader_user_id`` is the identity the GitHub reader resolves tokens
+    under — token discovery (project bindings, vault inventory, the App
+    mint) requires BOTH org and user context, so backend callers pass the
+    inbound connection's ``authority_user_id`` (probe finding: without it,
+    private-repo reads 404 as if the refs did not exist).
     """
     active_readers = readers or Readers(
-        slack=DefaultSlackReader(), github=DefaultGithubReader(org_id=org_id)
+        slack=DefaultSlackReader(),
+        github=DefaultGithubReader(org_id=org_id, user_id=reader_user_id),
     )
     active_budget = budget or DossierBudget()
     gathered = await gather_pieces(
@@ -259,6 +266,7 @@ async def mint_packet_for_job(
     readers: Readers | None = None,
     budget: DossierBudget | None = None,
     require_clean_gather: bool = False,
+    reader_user_id: str | None = None,
 ) -> MintResult:
     """Mint one packet. Raises nothing upward except via the caller's choice —
     the triage-facing wrapper is :func:`mint_packet_after_triage`.
@@ -280,6 +288,7 @@ async def mint_packet_for_job(
         source_ref=source_ref,
         readers=readers,
         budget=budget,
+        reader_user_id=reader_user_id,
     )
     if require_clean_gather and dossier.source_notes:
         return MintResult(
@@ -415,6 +424,11 @@ async def refresh_packet_for_job(session: Any, *, org_id: str, handoff_row: Any,
             return MintResult(ok=False, reason="handoff has no job_ref")
         owner_user_id = str(meta.get("owner_user_id") or "") or None
         idea = await _find_idea_by_stamp(session, org_id=org_id, handoff_id=str(handoff_row.id))
+        reader_user_id = None
+        if idea is not None:
+            source_event = await load_inbound_event(session, org_id=org_id, idea=idea)
+            if source_event is not None:
+                reader_user_id = str(getattr(source_event, "authority_user_id", "") or "") or None
         result = await mint_packet_for_job(
             session,
             org_id=org_id,
@@ -428,6 +442,7 @@ async def refresh_packet_for_job(session: Any, *, org_id: str, handoff_row: Any,
             source_ref=dict(getattr(handoff_row, "source_ref", None) or {}),
             readers=readers,
             require_clean_gather=True,
+            reader_user_id=reader_user_id,
         )
         if result.ok and result.created and idea is None:
             # No idea stamp to find the prior through — the refreshed row IS
@@ -524,6 +539,7 @@ async def mint_packet_after_triage(
             source_surface="inbound_triage",
             source_ref={"inbound_event_id": str(event.id)},
             readers=readers,
+            reader_user_id=str(getattr(event, "authority_user_id", "") or "") or None,
         )
         if result.ok and result.created:
             try:

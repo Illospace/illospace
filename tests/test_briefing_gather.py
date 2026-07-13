@@ -516,3 +516,49 @@ async def test_backend_github_read_flattens_pr_and_falls_back_to_exact_issue(mon
     assert await handler.github_read_ref_for_backend(
         repo_slug="uwear/x", number=3, org_id=_ORG
     ) is None
+
+
+def _github_event(*, org_id=_ORG, summary="GitHub issue #81 opened: SEO landing pages"):
+    """Non-Slack origin: kind is github.*, payload has no channel provenance."""
+    return SimpleNamespace(
+        id=_EVENT_ID,
+        org_id=org_id,
+        created_at=_T0,
+        envelope={
+            "kind": "github.subject",
+            "summary": summary,
+            "payload": {"action": "opened"},
+            "hints": {"provider": "github", "repo": "uwear-ai/uwear-website",
+                      "number": 81, "url": "https://github.com/uwear-ai/uwear-website/issues/81"},
+        },
+        normalized_payload={},
+        raw_payload={},
+    )
+
+
+async def test_github_origin_events_get_no_bogus_slack_note():
+    """Probe finding (2026-07-13): a GitHub webhook has no Slack thread —
+    its absence is not a degradation."""
+    result = await gather_pieces(
+        _session(_idea(), _github_event()), org_id=_ORG, job_ref=f"idea:{_IDEA_ID}",
+        slack=FakeSlack(), github=None, budget=DossierBudget(),
+    )
+    assert not any(note.startswith("slack:") for note in result.source_notes)
+
+
+async def test_github_origin_event_summary_becomes_the_leading_piece():
+    """Probe finding: the envelope summary reads far better than the generic
+    triage idea description — it should lead the record section."""
+    idea = _idea(title="Inbound signal needs Illo triage: github:uwear-ai/uwear-website",
+                 description="generic")
+    result = await gather_pieces(
+        _session(idea, _github_event()), org_id=_ORG, job_ref=f"idea:{_IDEA_ID}",
+        slack=None, github=None, budget=DossierBudget(),
+    )
+    from brain.systems.briefing import assemble_dossier as _assemble
+
+    dossier = _assemble(result.pieces, job_ref=f"idea:{_IDEA_ID}", budget=DossierBudget(),
+                        source_notes=result.source_notes)
+    assert dossier.headline.startswith("GitHub issue #81 opened")
+    record_section = next(s for s in dossier.sections if s.source == "record")
+    assert "url: https://github.com/uwear-ai/uwear-website/issues/81" in record_section.items[0].excerpt
