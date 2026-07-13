@@ -138,7 +138,11 @@ class FakeSession:
             rows = [
                 i for i in self._ideas
                 if str(i.org_id) in values
-                and (str(i.id) in values or str(getattr(i, "origin_ref", "")) in values)
+                and (
+                    str(i.id) in values
+                    or str(getattr(i, "origin_ref", "")) in values
+                    or str(dict(getattr(i, "agent_details", None) or {}).get("packet", {}).get("handoff_id")) in values
+                )
             ]
         elif name == "LaunchHandoff":
             rows = [
@@ -432,6 +436,51 @@ async def test_owner_label_lookup_failure_degrades_to_id_not_unclaimed(posts):
     header = result.human_brief.splitlines()[0]
     assert "unclaimed" not in header  # assigned item never reads as unclaimed
     assert _OWNER[:8] in header  # raw id (possibly shortened by the cap) shows
+
+
+async def test_refresh_unchanged_truth_is_silent_reuse(posts):
+    from brain.systems.briefing.mint import refresh_packet_for_job
+
+    idea = _idea()
+    session = FakeSession(ideas=[idea], events=[_event()],
+                          users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
+    first = await mint_packet_after_triage(
+        session, event=_event(), run_row=SimpleNamespace(id=1), readers=_readers())
+    result = await refresh_packet_for_job(
+        session, org_id=_ORG, handoff_row=first.handoff, readers=_readers())
+    assert result.ok and not result.created
+    assert len(posts) == 1  # refresh NEVER posts
+    assert len(session.handoffs) == 1
+
+
+async def test_refresh_changed_truth_supersedes_without_posting(posts):
+    from brain.systems.briefing.mint import refresh_packet_for_job
+
+    idea = _idea()
+    session = FakeSession(ideas=[idea], events=[_event()],
+                          users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
+    first = await mint_packet_after_triage(
+        session, event=_event(), run_row=SimpleNamespace(id=1), readers=_readers())
+    idea.title = "Maison L. melted hands — rerun verified"
+    result = await refresh_packet_for_job(
+        session, org_id=_ORG, handoff_row=first.handoff, readers=_readers())
+    assert result.ok and result.created
+    assert len(posts) == 1  # still only the original triage reply
+    old = next(h for h in session.handoffs if str(h.id) == str(first.handoff.id))
+    assert old.status == "archived"
+    assert (old.metadata_ or {}).get("superseded_by") == str(result.handoff.id)
+    assert idea.agent_details["packet"]["handoff_id"] == str(result.handoff.id)
+
+
+async def test_refresh_rejects_non_packet_handoffs(posts):
+    from brain.systems.briefing.mint import refresh_packet_for_job
+
+    manual = SimpleNamespace(id="hf-manual", source_surface="illo", metadata_={},
+                             summary="s", target_tool="codex", source_ref={})
+    result = await refresh_packet_for_job(
+        FakeSession(), org_id=_ORG, handoff_row=manual, readers=_readers())
+    assert result.ok is False
+    assert result.reason == "not a packet-minted handoff"
 
 
 async def test_probe_stage_creates_and_posts_nothing(posts):

@@ -2,7 +2,12 @@
 
 ## Next Agent Prompt
 
-**Status (2026-07-11):** Slices 01+02 implemented, cross-family reviewed,
+**Status (2026-07-13): ALL SEVEN SLICES IMPLEMENTED.** 01–05 adversarially
+reviewed and hardened (four review rounds folded: 14+9+9+10 findings);
+06+07 implemented and unit-green, their adversarial pass is the next
+pickup, then the illo-dev pre-merge probe (briefs into `assets/`) and the
+doc-1155 delta at merge+deploy. Earlier per-slice status follows for
+provenance. Slices 01+02 implemented, cross-family reviewed,
 hardened, and green —
 `brain/systems/briefing/{core,compose}.py` (pure), CLI probe
 (`python -m brain.systems.briefing --fixture
@@ -200,6 +205,29 @@ after the Codex worker wedged again — 0.15s CPU in 25min):**
   starvation, IntegrityError re-select, lock assertion, label fallback —
   plus the illo-dev probe before merge).
 
+**Implementation decisions that refine slice texts (06+07, Claude-implemented):**
+- Slice 06: `format_line` appends `→ launch: <url>` (one field, Slack-
+  escaped, no new section). The cycle's `_attach_and_refresh_packets` maps
+  events to packets via `LaunchHandoff.metadata_["job_ref"]`
+  (`find_packet_handoff_for_job`) — the one queryable event→packet link —
+  attaches url+revision, and refreshes at most 5 unique jobs per tick
+  (code constant; deferrals logged, never silent). Fully contained: any
+  failure means lines without links, never a dead tick.
+- `refresh_packet_for_job` (mint.py) NEVER posts to Slack (only the triage
+  moment posts; nudges/digest lines carry the link). It refreshes ONLY
+  packet-minted rows (`source_surface == "inbound_triage"`) and reuses the
+  row's original ask/owner/target/provenance so the revision reflects
+  TRUTH changes only. Idea-less jobs supersede through the refreshed row
+  itself.
+- Slice 07: pure reporter `briefing/outcomes.py` — launched means
+  `launch_count > 0` (never status), supersede chains collapse to one job
+  (first-mint time, any-revision launch, newest-revision owner), `ignored`
+  needs the 48h horizon (younger unlaunched = `pending`). Surfaces:
+  `packets.outcomes` read capability (agent_mcp — the doc-1155 digest run
+  and team agents call it; returns summary + ready `digest_line`) and the
+  `--outcomes` CLI. The digest-footer prose lives in the doc-1155 delta at
+  merge+deploy.
+
 You are implementing the coordinator upgrade: at every routing moment
 (triage assignment, notify nudge, digest line) Illo attaches a **handoff
 packet** — a short human brief plus an agent-ready launch handoff — so work
@@ -224,8 +252,8 @@ explicitly rejected (see Direction below).
 - [x] Slice 03 — gather wiring (read-only source adapters)
 - [x] Slice 04 — claude launch target (launch page; codex redirect preserved)
 - [x] Slice 05 — triage-moment minting (ungated; pre-merge probe)
-- [ ] Slice 06 — notify/digest packet links + stale re-render
-- [ ] Slice 07 — outcome stamps (launched/ignored, time-to-launch)
+- [x] Slice 06 — notify/digest packet links + stale re-render
+- [x] Slice 07 — outcome stamps (launched/ignored, time-to-launch)
 - [ ] Doc-1155 delta applied at merge+deploy (text lives in slice 05/06 files)
 - [ ] Pre-merge verification: read-only illo-dev probe over real triaged
       records; sample briefs into `assets/` (owns the old "dry run" role —

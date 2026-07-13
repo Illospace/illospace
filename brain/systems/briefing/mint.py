@@ -336,6 +336,86 @@ async def mint_packet_for_job(
     )
 
 
+async def find_packet_handoff_for_job(session: Any, *, org_id: str, job_ref: str) -> LaunchHandoff | None:
+    """The current (non-archived) packet handoff for a job, newest first.
+
+    Packets carry their job identity in ``metadata_["job_ref"]`` — the one
+    queryable link between domain events and launch handoffs (slice 06)."""
+    from brain.platform.db.models.launch_handoff import LaunchHandoff as LaunchHandoffModel
+
+    return (
+        await session.execute(
+            select(LaunchHandoffModel)
+            .where(
+                LaunchHandoffModel.org_id == str(org_id),
+                LaunchHandoffModel.metadata_["job_ref"].astext == str(job_ref),
+                LaunchHandoffModel.status != "archived",
+            )
+            .order_by(LaunchHandoffModel.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+
+
+async def _find_idea_by_stamp(session: Any, *, org_id: str, handoff_id: str) -> Any | None:
+    from brain.platform.db.models.idea import Idea
+
+    return (
+        await session.execute(
+            select(Idea).where(
+                Idea.org_id == str(org_id),
+                Idea.agent_details["packet"]["handoff_id"].astext == str(handoff_id),
+            ).limit(1)
+        )
+    ).scalars().first()
+
+
+async def refresh_packet_for_job(session: Any, *, org_id: str, handoff_row: Any,
+                                 readers: Readers | None = None) -> MintResult:
+    """Slice 06: re-render a packet against current truth. NEVER posts to
+    Slack (nudges and digest lines carry the link); unchanged truth reuses
+    the row silently, changed truth supersedes. Contained like the triage
+    hook — a refresh failure degrades to a log line, never a dead tick.
+
+    Only packet-minted rows (``source_surface == "inbound_triage"``) are
+    refreshable: the ORIGINAL ask/owner/target/provenance are reused from
+    the row so the revision reflects TRUTH changes only — a refresh must
+    never rotate the key on its own inputs.
+    """
+    try:
+        if str(getattr(handoff_row, "source_surface", "") or "") != "inbound_triage":
+            return MintResult(ok=False, reason="not a packet-minted handoff")
+        meta = dict(getattr(handoff_row, "metadata_", None) or {})
+        job_ref = str(meta.get("job_ref") or "")
+        if not job_ref:
+            return MintResult(ok=False, reason="handoff has no job_ref")
+        owner_user_id = str(meta.get("owner_user_id") or "") or None
+        idea = await _find_idea_by_stamp(session, org_id=org_id, handoff_id=str(handoff_row.id))
+        result = await mint_packet_for_job(
+            session,
+            org_id=org_id,
+            idea=idea,
+            job_ref=job_ref,
+            ask=str(getattr(handoff_row, "summary", "") or "") or "take a pass",
+            owner_user_id=owner_user_id,
+            owner_label=await _owner_label(session, owner_user_id),
+            target_tool=str(getattr(handoff_row, "target_tool", "") or "codex"),
+            source_surface=str(getattr(handoff_row, "source_surface", "") or "inbound_triage"),
+            source_ref=dict(getattr(handoff_row, "source_ref", None) or {}),
+            readers=readers,
+        )
+        if result.ok and result.created and idea is None:
+            # No idea stamp to find the prior through — the refreshed row IS
+            # the prior; supersede it directly.
+            await _supersede_prior(
+                session, org_id=org_id, prior_handoff_id=str(handoff_row.id), new_row=result.handoff
+            )
+        return result
+    except Exception as exc:  # noqa: BLE001 — total containment
+        logger.warning("packet refresh failed for handoff %s: %s", getattr(handoff_row, "id", "?"), exc)
+        return MintResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
+
+
 def _ask_from_event(idea: Any, event: Any) -> str:
     """Deterministic v1 ask: task_domain + the normalized inbound summary.
     NO run-prose parsing, NO new structured-output channel (see slice 05)."""

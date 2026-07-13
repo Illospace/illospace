@@ -103,6 +103,46 @@ def _run_triage_probe(*, since_hours: float) -> int:
     return asyncio.run(_probe())
 
 
+def _run_outcomes(*, since_hours: float) -> int:
+    """Slice 07: `--outcomes --since-hours 168` prints the packet outcome
+    summary + the digest footer line, read-only."""
+    import asyncio
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+
+    async def _report() -> int:
+        try:
+            from brain.platform.db.repositories.unit_of_work import UnitOfWork
+            from brain.systems.briefing.outcomes import (
+                format_outcomes_line,
+                load_packet_handoffs,
+                packet_outcomes,
+            )
+
+            now = datetime.now(timezone.utc)
+            async with UnitOfWork() as uow:
+                session = uow.session
+                from sqlalchemy import select
+
+                from brain.platform.db.models.org import Org
+
+                org_ids = (await session.execute(select(Org.id))).scalars().all()
+                for org_id in org_ids:
+                    rows = await load_packet_handoffs(
+                        session, org_id=str(org_id), since=now - timedelta(hours=since_hours)
+                    )
+                    summary = packet_outcomes(rows, now=now)
+                    print(f"org {org_id}: {format_outcomes_line(summary) or 'no packets in window'}")
+                    print(_json.dumps(summary.to_dict(), indent=2))
+                await session.rollback()
+            return 0
+        except Exception as exc:  # noqa: BLE001 — dev CLI fails helpfully
+            print(f"outcomes unavailable (need dev checkout + illo-dev read env): {type(exc).__name__}: {exc}")
+            return 2
+
+    return asyncio.run(_report())
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m brain.systems.briefing")
     parser.add_argument("--fixture", help="path to a fixture JSON file")
@@ -115,13 +155,19 @@ def main(argv: list[str] | None = None) -> int:
         help="pre-merge probe: render briefs for recent REAL triaged items (read-only, "
              "creates nothing, posts nothing; needs dev checkout + illo-dev read env)",
     )
-    parser.add_argument("--since-hours", type=float, default=24.0, help="probe window")
+    parser.add_argument("--since-hours", type=float, default=24.0, help="probe/outcomes window")
+    parser.add_argument(
+        "--outcomes", action="store_true",
+        help="packet outcome summary over recent real handoffs (read-only; slice 07)",
+    )
     args = parser.parse_args(argv)
 
     if args.probe_triage:
         return _run_triage_probe(since_hours=args.since_hours)
+    if args.outcomes:
+        return _run_outcomes(since_hours=args.since_hours)
     if not args.fixture:
-        parser.error("--fixture is required unless --probe-triage is used")
+        parser.error("--fixture is required unless --probe-triage/--outcomes is used")
 
     data = json.loads(Path(args.fixture).read_text())
     dossier = assemble_dossier(

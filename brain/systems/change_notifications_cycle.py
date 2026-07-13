@@ -110,6 +110,57 @@ async def _count_unclaimed(session, org_id) -> int:
     return int((await session.execute(stmt)).scalar() or 0)
 
 
+# At most this many packet refreshes per tick — each one re-gathers (live
+# Slack/GitHub reads), and a gathering storm inside the notify tick is worse
+# than a slightly stale packet. Deferrals are logged, never silent.
+_MAX_PACKET_REFRESHES_PER_TICK = 5
+
+
+async def _attach_and_refresh_packets(session, org_id, events) -> None:
+    """Slice 06 (illo-handoff-packets): give digest/nudge lines their launch
+    links, refreshing stale packets first (capped). Fully contained — any
+    failure degrades to lines without links, never a dead tick."""
+    import logging
+
+    if session is None:
+        return
+    log = logging.getLogger("illo.notify")
+    try:
+        from brain.systems.briefing.mint import (
+            find_packet_handoff_for_job,
+            refresh_packet_for_job,
+        )
+        from brain.systems.launch_handoffs import launch_handoff_url_for_id
+
+        refreshes_left = _MAX_PACKET_REFRESHES_PER_TICK
+        deferred = 0
+        seen_job_refs: set[str] = set()
+        for event in events:
+            record_id = event.get("record_id")
+            if not record_id:
+                continue
+            job_ref = f"domain_record:{record_id}"
+            row = await find_packet_handoff_for_job(session, org_id=org_id, job_ref=job_ref)
+            if row is None:
+                continue
+            if job_ref not in seen_job_refs:
+                seen_job_refs.add(job_ref)
+                if refreshes_left > 0:
+                    refreshes_left -= 1
+                    result = await refresh_packet_for_job(session, org_id=org_id, handoff_row=row)
+                    if result.ok and result.created:
+                        row = result.handoff  # superseded → carry the new link
+                else:
+                    deferred += 1
+            event["launch_url"] = launch_handoff_url_for_id(row.id, target_tool=row.target_tool)
+            event["packet_revision"] = (dict(row.metadata_ or {})).get("revision")
+        if deferred:
+            # No silent caps (spec invariant): say what was skipped.
+            log.warning("notify tick deferred %s packet refreshes to the next tick", deferred)
+    except Exception:  # noqa: BLE001
+        log.exception("packet link attachment failed safely; lines go out without links")
+
+
 async def _default_post(channel_id, text) -> None:
     from brain.systems.slack.client import slack_web_client_from_env
 
@@ -157,6 +208,7 @@ async def run_notify_cycle(
     verification = await _maybe_run_deploy_verification(session, org_id)
     events = await _load_change_events(session, org_id, since)
     await _fill_owner_labels(session, events)
+    await _attach_and_refresh_packets(session, org_id, events)
     unclaimed = await _count_unclaimed(session, org_id)
     outbound = render_outbound(events, unclaimed_count=unclaimed, urgent_terms=urgent_terms)
 

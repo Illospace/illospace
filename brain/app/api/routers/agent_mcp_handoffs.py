@@ -15,6 +15,13 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
         "description": "Read a launch handoff prepared by Illo for Codex or another local agent.",
         "arguments": {"handoff_id": "string", "url": "string"},
     },
+    "packets.outcomes": {
+        "description": (
+            "Handoff-packet outcome summary (minted / launched / ignored, median time to "
+            "launch, per-member split) — the digest's packets footer reads this."
+        ),
+        "arguments": {"since_hours": "number (default 168)"},
+    },
 }
 
 
@@ -89,6 +96,37 @@ async def read_handoff(
     return {"handoff": launch_handoffs.serialize_launch_handoff(row)}
 
 
+async def read_packet_outcomes(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Slice 07: the outcomes reporter over the caller's org, JSON-safe."""
+    from datetime import datetime, timedelta, timezone
+
+    from brain.systems.briefing.outcomes import (
+        format_outcomes_line,
+        load_packet_handoffs,
+        packet_outcomes,
+    )
+
+    try:
+        since_hours = float(arguments.get("since_hours") or 168)
+    except (TypeError, ValueError):
+        since_hours = 168.0
+    since_hours = max(1.0, min(since_hours, 24 * 90))
+    now = datetime.now(timezone.utc)
+    rows = await load_packet_handoffs(
+        db, org_id=principal.org_id, since=now - timedelta(hours=since_hours)
+    )
+    summary = packet_outcomes(rows, now=now)
+    return {
+        "since_hours": since_hours,
+        "outcomes": summary.to_dict(),
+        "digest_line": format_outcomes_line(summary),
+    }
+
+
 async def create_handoff(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
@@ -127,4 +165,5 @@ __all__ = [
     "create_handoff",
     "handoff_argument_id",
     "read_handoff",
+    "read_packet_outcomes",
 ]
