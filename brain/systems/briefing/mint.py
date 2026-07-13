@@ -1,0 +1,555 @@
+"""Illo Brain — Packet minting (the routing-moment orchestrator).
+
+The single owner of gather → assemble → compose → create → stamp → post for
+handoff packets (spec: illo-handoff-packets slice 05). Triage completion
+calls :func:`mint_packet_after_triage`; the notify refresh (slice 06) and
+the pre-merge probe reuse the same stages.
+
+Load-bearing stances:
+
+- **Containment.** A packet failure may never break the thing that worked
+  before packets existed: :func:`mint_packet_after_triage` never raises —
+  every failure returns a ``MintResult(ok=False)`` and a log line.
+- **Noise gate.** ``create_launch_handoff_with_status`` reuse
+  (``created=False``) means this content already went out — mint posts
+  NOTHING to Slack on reuse. Re-triage of unchanged truth is silent.
+- **Supersede, existing vocabulary only.** When the job's truth changes,
+  the new revision is a NEW row (new idempotency key); the prior row —
+  found via the idea's packet stamp — becomes ``archived`` +
+  ``metadata_["superseded_by"]`` (the DB CHECK constraint has no
+  ``superseded`` status). Reuse-with-drift (same key, different content —
+  a hash-gap anomaly the slice-02 revision should make impossible) is
+  repaired in place and logged, never duplicated.
+- **Stamps live in Illo-owned state**: ``idea.agent_details["packet"]``,
+  never in projection-owned record ``data`` (re-projection would clobber
+  it and orphan slice 06's lookup).
+- **No gates** (Reda, 2026-07-13): once the reconcile hook ships, every
+  completed triage of an actionable item mints. The only env var is
+  ``ILLO_MEMBER_AGENT_TARGETS`` (config-with-default: unset → codex).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+
+from brain.systems.briefing.compose import PacketRender, compose_packet, fill_launch_url
+from brain.systems.briefing.core import Dossier, DossierBudget, assemble_dossier
+from brain.systems.briefing.gather import (
+    PUBLIC_CHANNEL_TYPE,
+    DefaultGithubReader,
+    DefaultSlackReader,
+    GithubReader,
+    SlackReader,
+    gather_pieces,
+    load_inbound_event,
+    slack_provenance,
+)
+from brain.systems.launch_handoffs import (
+    LaunchHandoff,
+    agent_target_for_member,
+    create_launch_handoff_with_status,
+    launch_handoff_url_for_id,
+    parse_member_agent_targets,
+)
+
+logger = logging.getLogger(__name__)
+
+_ACCEPTANCE_CRITERIA_V1: list[str] = []  # v1: none unless mechanically derivable
+
+
+@dataclass(frozen=True)
+class Readers:
+    slack: SlackReader | None = None
+    github: GithubReader | None = None
+
+
+@dataclass
+class MintResult:
+    ok: bool
+    created: bool = False
+    posted: bool = False
+    handoff: LaunchHandoff | None = None
+    human_brief: str = ""
+    launch_url: str = ""
+    reason: str = ""
+    source_notes: list[str] = field(default_factory=list)
+
+
+def _member_targets() -> dict[str, str]:
+    try:
+        return parse_member_agent_targets(os.environ.get("ILLO_MEMBER_AGENT_TARGETS"))
+    except Exception as exc:  # noqa: BLE001 — bad config degrades to default, loudly
+        logger.warning("ILLO_MEMBER_AGENT_TARGETS unparseable (%s); defaulting to codex", exc)
+        return {}
+
+
+async def _owner_label(session: Any, owner_user_id: str | None) -> str | None:
+    """Best-effort uuid → display name (the _fill_owner_labels pattern).
+
+    Degrades to the RAW ID — never to None — so a transient lookup failure
+    can't render an assigned item as "unclaimed" in the brief.
+    """
+    if not owner_user_id or session is None:
+        return None
+    try:
+        from brain.platform.db.models.org import User
+
+        row = (
+            await session.execute(select(User.id, User.name, User.email).where(User.id == str(owner_user_id)))
+        ).first()
+        if row is None:
+            return str(owner_user_id)
+        return row.name or row.email or str(row.id)
+    except Exception:  # noqa: BLE001 — degrade to the raw id, never break a mint
+        return str(owner_user_id)
+
+
+def _repo_origin_hint(dossier: Dossier) -> str | None:
+    for section in dossier.sections:
+        if section.source in ("github_pr", "github_issue"):
+            for item in section.items:
+                slug = item.ref.split("#", 1)[0]
+                if slug.count("/") == 1:
+                    return f"https://github.com/{slug}.git"
+    return None
+
+
+async def build_packet_for_job(
+    session: Any,
+    *,
+    org_id: str,
+    job_ref: str,
+    ask: str,
+    owner_user_id: str | None,
+    owner_label: str | None,
+    target_tool: str,
+    source_surface: str = "illo",
+    source_ref: dict[str, Any] | None = None,
+    readers: Readers | None = None,
+    budget: DossierBudget | None = None,
+    reader_user_id: str | None = None,
+) -> tuple[PacketRender, Dossier]:
+    """The shared read-only stage: gather → assemble → compose.
+
+    Used by the live mint AND the pre-merge probe (which stops here).
+    ``reader_user_id`` is the identity the GitHub reader resolves tokens
+    under — token discovery (project bindings, vault inventory, the App
+    mint) requires BOTH org and user context, so backend callers pass the
+    inbound connection's ``authority_user_id`` (probe finding: without it,
+    private-repo reads 404 as if the refs did not exist).
+    """
+    active_readers = readers or Readers(
+        slack=DefaultSlackReader(),
+        github=DefaultGithubReader(org_id=org_id, user_id=reader_user_id),
+    )
+    active_budget = budget or DossierBudget()
+    gathered = await gather_pieces(
+        session,
+        org_id=org_id,
+        job_ref=job_ref,
+        slack=active_readers.slack,
+        github=active_readers.github,
+        budget=active_budget,
+    )
+    dossier = assemble_dossier(
+        gathered.pieces,
+        job_ref=job_ref,
+        budget=active_budget,
+        source_notes=gathered.source_notes,
+    )
+    packet = compose_packet(
+        dossier,
+        org_id=org_id,
+        ask=ask,
+        acceptance_criteria=list(_ACCEPTANCE_CRITERIA_V1),
+        owner_user_id=owner_user_id,
+        owner_label=owner_label,
+        target_tool=target_tool,
+        repo_origin_url=_repo_origin_hint(dossier),
+        source_surface=source_surface,
+        source_ref=dict(source_ref or {}),
+    )
+    return packet, dossier
+
+
+async def _lock_idea(session: Any, *, org_id: str, idea: Any) -> Any | None:
+    """Re-select the idea FOR UPDATE — the spec-pinned per-job serialization.
+
+    All stamp reads/writes go through the locked row so concurrent minters
+    queue instead of cross-superseding.
+    """
+    if idea is None:
+        return None
+    from brain.platform.db.models.idea import Idea
+
+    return (
+        await session.execute(
+            select(Idea)
+            .where(Idea.id == str(getattr(idea, "id", "")), Idea.org_id == str(org_id))
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+
+
+def _stamp_idea(idea: Any, *, handoff: LaunchHandoff, revision: str, owner_user_id: str | None) -> None:
+    details = dict(getattr(idea, "agent_details", None) or {})
+    details["packet"] = {
+        "handoff_id": str(handoff.id),
+        "revision": revision,
+        "owner_user_id": owner_user_id,
+        "minted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    idea.agent_details = details
+
+
+async def _supersede_prior(
+    session: Any, *, org_id: str, prior_handoff_id: str, new_row: LaunchHandoff
+) -> None:
+    from brain.systems.launch_handoffs import get_launch_handoff
+
+    old = await get_launch_handoff(session, prior_handoff_id, org_id=org_id)
+    if old is None or str(old.id) == str(new_row.id) or old.status == "archived":
+        return
+    old.status = "archived"
+    old.metadata_ = {**(old.metadata_ or {}), "superseded_by": str(new_row.id)}
+    new_row.metadata_ = {**(new_row.metadata_ or {}), "supersedes": str(old.id)}
+    await session.flush()
+
+
+def _reused_row_drifted(row: LaunchHandoff, packet: PacketRender) -> bool:
+    fresh = packet.handoff_input
+    return (
+        str(row.instructions or "") != str(fresh.instructions or "")
+        or str(row.target_tool or "") != str(fresh.target_tool or "")
+        or (row.metadata_ or {}).get("owner_user_id") != (fresh.metadata or {}).get("owner_user_id")
+    )
+
+
+def _repair_drifted_row(row: LaunchHandoff, packet: PacketRender) -> None:
+    """Same idempotency key, different content — a revision-hash gap. Repair
+    the stored snapshot in place (one row per key) and log; never duplicate."""
+    fresh = packet.handoff_input
+    row.title = fresh.title
+    row.instructions = fresh.instructions
+    row.summary = fresh.summary
+    row.target_tool = fresh.target_tool
+    row.context_parts = list(fresh.context_parts)
+    row.acceptance_criteria = list(fresh.acceptance_criteria)
+    row.repo_origin_url = fresh.repo_origin_url
+    row.branch_hint = fresh.branch_hint
+    row.metadata_ = {**(row.metadata_ or {}), **(fresh.metadata or {})}
+    logger.warning(
+        "handoff %s reused with content drift — repaired in place; revision hashing "
+        "should have rotated the key (investigate)", row.id,
+    )
+
+
+async def mint_packet_for_job(
+    session: Any,
+    *,
+    org_id: str,
+    idea: Any,
+    job_ref: str,
+    ask: str,
+    owner_user_id: str | None,
+    owner_label: str | None,
+    target_tool: str,
+    source_surface: str = "illo",
+    source_ref: dict[str, Any] | None = None,
+    readers: Readers | None = None,
+    budget: DossierBudget | None = None,
+    require_clean_gather: bool = False,
+    reader_user_id: str | None = None,
+) -> MintResult:
+    """Mint one packet. Raises nothing upward except via the caller's choice —
+    the triage-facing wrapper is :func:`mint_packet_after_triage`.
+
+    ``require_clean_gather`` (the refresh path): a degraded gather (source
+    down, partial fetch) must not supersede a healthy stored packet — a
+    transient blip would rotate the revision, archive the good row, and
+    rotate back on recovery, burning refresh slots on churn.
+    """
+    packet, dossier = await build_packet_for_job(
+        session,
+        org_id=org_id,
+        job_ref=job_ref,
+        ask=ask,
+        owner_user_id=owner_user_id,
+        owner_label=owner_label,
+        target_tool=target_tool,
+        source_surface=source_surface,
+        source_ref=source_ref,
+        readers=readers,
+        budget=budget,
+        reader_user_id=reader_user_id,
+    )
+    if require_clean_gather and dossier.source_notes:
+        return MintResult(
+            ok=False,
+            reason="degraded gather; not refreshing",
+            source_notes=list(dossier.source_notes),
+        )
+
+    # WRITE PHASE — one savepoint around EVERYTHING (create + supersede +
+    # repair + stamp), so a DB failure anywhere rolls back to the savepoint
+    # and the caller's transaction (the triage receipt!) stays healthy.
+    # Containment must hold at commit-time, not just raise-time
+    # (cross-family review finding, 2026-07-13).
+    #
+    # The idea is re-selected WITH a row lock before the stamp is read, so a
+    # triage-mint racing a notify-refresh (slice 06) cannot double-supersede
+    # or clobber a concurrent agent_details write (spec-pinned serialization).
+    try:
+        async with session.begin_nested():
+            locked_idea = await _lock_idea(session, org_id=org_id, idea=idea)
+            prior = (
+                dict((dict(getattr(locked_idea, "agent_details", None) or {})).get("packet") or {})
+                if locked_idea is not None
+                else {}
+            )
+            row, created = await create_launch_handoff_with_status(session, packet.handoff_input)
+            if created:
+                if prior.get("handoff_id"):
+                    await _supersede_prior(
+                        session, org_id=org_id, prior_handoff_id=str(prior["handoff_id"]), new_row=row
+                    )
+            elif _reused_row_drifted(row, packet):
+                _repair_drifted_row(row, packet)
+            if locked_idea is not None:
+                _stamp_idea(locked_idea, handoff=row, revision=packet.revision, owner_user_id=owner_user_id)
+            await session.flush()
+    except IntegrityError:
+        # Lost a concurrent race on (org_id, idempotency_key): the winner's
+        # row IS this content. The savepoint rolled back; re-select as
+        # reused and re-stamp under a fresh savepoint (no supersede, no post).
+        from brain.platform.db.models.launch_handoff import LaunchHandoff as LaunchHandoffModel
+
+        row = (
+            await session.execute(
+                select(LaunchHandoffModel).where(
+                    LaunchHandoffModel.org_id == str(org_id),
+                    LaunchHandoffModel.idempotency_key == packet.idempotency_key,
+                )
+            )
+        ).scalar_one()
+        created = False
+        async with session.begin_nested():
+            locked_idea = await _lock_idea(session, org_id=org_id, idea=idea)
+            if locked_idea is not None:
+                _stamp_idea(locked_idea, handoff=row, revision=packet.revision, owner_user_id=owner_user_id)
+            await session.flush()
+
+    launch_url = launch_handoff_url_for_id(row.id, target_tool=row.target_tool)
+    return MintResult(
+        ok=True,
+        created=created,
+        handoff=row,
+        human_brief=fill_launch_url(packet.human_brief, launch_url),
+        launch_url=launch_url,
+        reason="minted" if created else "reused",
+        source_notes=list(dossier.source_notes),
+    )
+
+
+async def find_packet_handoffs_for_jobs(
+    session: Any, *, org_id: str, job_refs: list[str]
+) -> dict[str, LaunchHandoff]:
+    """job_ref → its current (non-archived) packet handoff, newest wins.
+
+    Packets carry their job identity in ``metadata_["job_ref"]`` — the one
+    queryable link between domain events and launch handoffs (slice 06).
+    ONE batched query per tick, not one per event (review finding: the
+    per-event JSONB scan would not age well as packets accumulate)."""
+    if not job_refs:
+        return {}
+    from brain.platform.db.models.launch_handoff import LaunchHandoff as LaunchHandoffModel
+
+    rows = (
+        await session.execute(
+            select(LaunchHandoffModel)
+            .where(
+                LaunchHandoffModel.org_id == str(org_id),
+                LaunchHandoffModel.metadata_["job_ref"].astext.in_([str(j) for j in job_refs]),
+                LaunchHandoffModel.status != "archived",
+            )
+            .order_by(LaunchHandoffModel.created_at.asc())
+        )
+    ).scalars().all()
+    newest: dict[str, LaunchHandoff] = {}
+    for row in rows:  # ascending order → later rows overwrite = newest wins
+        job_ref = str((dict(row.metadata_ or {})).get("job_ref") or "")
+        if job_ref:
+            newest[job_ref] = row
+    return newest
+
+
+async def _find_idea_by_stamp(session: Any, *, org_id: str, handoff_id: str) -> Any | None:
+    from brain.platform.db.models.idea import Idea
+
+    return (
+        await session.execute(
+            select(Idea).where(
+                Idea.org_id == str(org_id),
+                Idea.agent_details["packet"]["handoff_id"].astext == str(handoff_id),
+            ).limit(1)
+        )
+    ).scalars().first()
+
+
+async def refresh_packet_for_job(session: Any, *, org_id: str, handoff_row: Any,
+                                 readers: Readers | None = None) -> MintResult:
+    """Slice 06: re-render a packet against current truth. NEVER posts to
+    Slack (nudges and digest lines carry the link); unchanged truth reuses
+    the row silently, changed truth supersedes. Contained like the triage
+    hook — a refresh failure degrades to a log line, never a dead tick.
+
+    Only packet-minted rows (``source_surface == "inbound_triage"``) are
+    refreshable: the ORIGINAL ask/owner/target/provenance are reused from
+    the row so the revision reflects TRUTH changes only — a refresh must
+    never rotate the key on its own inputs.
+    """
+    try:
+        if str(getattr(handoff_row, "source_surface", "") or "") != "inbound_triage":
+            return MintResult(ok=False, reason="not a packet-minted handoff")
+        meta = dict(getattr(handoff_row, "metadata_", None) or {})
+        job_ref = str(meta.get("job_ref") or "")
+        if not job_ref:
+            return MintResult(ok=False, reason="handoff has no job_ref")
+        owner_user_id = str(meta.get("owner_user_id") or "") or None
+        idea = await _find_idea_by_stamp(session, org_id=org_id, handoff_id=str(handoff_row.id))
+        reader_user_id = None
+        if idea is not None:
+            source_event = await load_inbound_event(session, org_id=org_id, idea=idea)
+            if source_event is not None:
+                reader_user_id = str(getattr(source_event, "authority_user_id", "") or "") or None
+        result = await mint_packet_for_job(
+            session,
+            org_id=org_id,
+            idea=idea,
+            job_ref=job_ref,
+            ask=str(getattr(handoff_row, "summary", "") or "") or "take a pass",
+            owner_user_id=owner_user_id,
+            owner_label=await _owner_label(session, owner_user_id),
+            target_tool=str(getattr(handoff_row, "target_tool", "") or "codex"),
+            source_surface=str(getattr(handoff_row, "source_surface", "") or "inbound_triage"),
+            source_ref=dict(getattr(handoff_row, "source_ref", None) or {}),
+            readers=readers,
+            require_clean_gather=True,
+            reader_user_id=reader_user_id,
+        )
+        if result.ok and result.created and idea is None:
+            # No idea stamp to find the prior through — the refreshed row IS
+            # the prior; supersede it directly, under its own savepoint so a
+            # failure here can't leave the tick's transaction poisoned
+            # (review finding: this branch skipped the write-phase savepoint).
+            async with session.begin_nested():
+                await _supersede_prior(
+                    session, org_id=org_id, prior_handoff_id=str(handoff_row.id), new_row=result.handoff
+                )
+        return result
+    except Exception as exc:  # noqa: BLE001 — total containment
+        logger.warning("packet refresh failed for handoff %s: %s", getattr(handoff_row, "id", "?"), exc)
+        return MintResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
+
+
+def _ask_from_event(idea: Any, event: Any) -> str:
+    """Deterministic v1 ask: task_domain + the normalized inbound summary.
+    NO run-prose parsing, NO new structured-output channel (see slice 05)."""
+    details = dict(getattr(idea, "agent_details", None) or {})
+    domain = str(details.get("task_domain") or "other")
+    summary = str((dict(getattr(event, "envelope", None) or {})).get("summary") or "").strip()
+    if not summary:
+        summary = str(getattr(idea, "title", "") or "").strip() or "this item"
+    return f"Pick up this {domain} item: {summary}"
+
+
+def _record_job_ref(attribution: dict[str, Any] | None, idea: Any) -> str:
+    for ref in (attribution or {}).get("target_refs") or []:
+        if isinstance(ref, dict) and str(ref.get("kind") or "") == "domain_record" and ref.get("id"):
+            return f"domain_record:{ref['id']}"
+    return f"idea:{getattr(idea, 'id', '')}"
+
+
+async def _post_brief_to_origin_thread(session: Any, *, org_id: str, idea: Any, brief: str) -> bool:
+    """Backend Slack reply into the origin thread — same provenance and
+    public-only allowlist as gather; silent skip (False) when not possible."""
+    event = await load_inbound_event(session, org_id=org_id, idea=idea)
+    provenance = slack_provenance(event) if event is not None else None
+    if not provenance or provenance["channel_type"] != PUBLIC_CHANNEL_TYPE:
+        return False
+    from brain.systems.slack.client import slack_web_client_from_env
+
+    client = slack_web_client_from_env()
+    await client.post_message(
+        channel=provenance["channel"], text=brief, thread_ts=provenance["thread_ts"]
+    )
+    return True
+
+
+async def mint_packet_after_triage(
+    session: Any,
+    *,
+    event: Any,
+    run_row: Any,
+    attribution: dict[str, Any] | None = None,
+    readers: Readers | None = None,
+) -> MintResult:
+    """The triage-completion hook body. NEVER raises — triage worked before
+    packets existed and must keep working without them."""
+    try:
+        org_id = str(getattr(event, "org_id", "") or "")
+        if not org_id:
+            return MintResult(ok=False, reason="event has no org")
+
+        from brain.platform.db.models.idea import Idea
+
+        idea = (
+            await session.execute(
+                select(Idea).where(
+                    Idea.origin_ref == f"inbound_event:{event.id}",
+                    Idea.org_id == org_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if idea is None:
+            return MintResult(ok=False, reason="no triage idea for event")
+
+        details = dict(getattr(idea, "agent_details", None) or {})
+        assignment = dict(details.get("assignment") or {})
+        owner_user_id = str(assignment.get("owner_id") or "") or None
+        owner_label = await _owner_label(session, owner_user_id)
+        target_tool = agent_target_for_member(owner_user_id, _member_targets())
+
+        result = await mint_packet_for_job(
+            session,
+            org_id=org_id,
+            idea=idea,
+            job_ref=_record_job_ref(attribution, idea),
+            ask=_ask_from_event(idea, event),
+            owner_user_id=owner_user_id,
+            owner_label=owner_label,
+            target_tool=target_tool,
+            source_surface="inbound_triage",
+            source_ref={"inbound_event_id": str(event.id)},
+            readers=readers,
+            reader_user_id=str(getattr(event, "authority_user_id", "") or "") or None,
+        )
+        if result.ok and result.created:
+            try:
+                result.posted = await _post_brief_to_origin_thread(
+                    session, org_id=org_id, idea=idea, brief=result.human_brief
+                )
+            except Exception as exc:  # noqa: BLE001 — the packet exists; the reply degraded
+                logger.warning("packet %s minted but Slack reply failed: %s",
+                               getattr(result.handoff, "id", "?"), exc)
+        return result
+    except Exception as exc:  # noqa: BLE001 — total containment
+        logger.warning("packet mint failed for event %s: %s", getattr(event, "id", "?"), exc)
+        return MintResult(ok=False, reason=f"{type(exc).__name__}: {exc}")

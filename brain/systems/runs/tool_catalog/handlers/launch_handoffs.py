@@ -62,7 +62,7 @@ async def _handle_create_launch_handoff(
     idempotency_key: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> str:
-    """Create a durable handoff link that a teammate can open in Codex."""
+    """Create a durable handoff link that a teammate can open in a local agent."""
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
     from brain.systems import launch_handoffs
 

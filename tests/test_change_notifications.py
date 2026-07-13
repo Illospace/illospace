@@ -60,6 +60,20 @@ class TestFormat:
     def test_line_unclaimed(self):
         assert "unclaimed" in format_line({"title": "T", "action": "opened"})
 
+    def test_line_includes_launch_link_when_packet_exists(self):
+        from brain.systems.change_notifications import format_line
+
+        line = format_line({
+            "title": "Ticket", "action": "closed", "owner_id": "u1",
+            "launch_url": "https://illo.example/api/launch-handoffs/h1/launch?target=codex",
+        })
+        assert "→ launch: https://illo.example" in line
+
+    def test_line_without_packet_is_unchanged_shape(self):
+        from brain.systems.change_notifications import format_line
+
+        assert "launch" not in format_line({"title": "Ticket", "action": "closed"})
+
     def test_line_includes_url(self):
         assert "http://x" in format_line({"title": "T", "url": "http://x"})
 
@@ -223,3 +237,123 @@ class TestUnclaimedPool:
         monkeypatch.delenv("ILLO_UNCLAIMED_POOL_USER_ID", raising=False)
         # session is present but the pool is off -> 0 without touching the DB.
         assert await cyc._count_unclaimed(object(), "org-1") == 0
+
+
+class TestPacketLinkAttachment:
+    """Slice 06 (illo-handoff-packets): notify lines carry launch links;
+    stale packets refresh first, capped (ok-only slot accounting) and never
+    silently."""
+
+    def _events(self, n):
+        return [{"title": f"t{i}", "action": "updated", "record_id": 1000 + i} for i in range(n)]
+
+    @staticmethod
+    def _rows_for(job_refs):
+        from types import SimpleNamespace
+
+        return {
+            jr: SimpleNamespace(
+                id=f"hf-{jr.rsplit(':', 1)[1]}", target_tool="codex",
+                source_surface="inbound_triage",
+                metadata_={"revision": f"rev-{jr.rsplit(':', 1)[1]}", "job_ref": jr},
+            )
+            for jr in job_refs
+        }
+
+    async def test_attach_refresh_and_cap(self, monkeypatch, caplog):
+        import logging
+        from types import SimpleNamespace
+
+        import brain.systems.change_notifications_cycle as cyc
+        import brain.systems.briefing.mint as mint_mod
+
+        refreshed = []
+
+        async def fake_find_batch(session, *, org_id, job_refs):
+            return self._rows_for(job_refs)
+
+        async def fake_refresh(session, *, org_id, handoff_row, readers=None):
+            refreshed.append(handoff_row.id)
+            return SimpleNamespace(ok=True, created=False, handoff=handoff_row)
+
+        monkeypatch.setattr(mint_mod, "find_packet_handoffs_for_jobs", fake_find_batch)
+        monkeypatch.setattr(mint_mod, "refresh_packet_for_job", fake_refresh)
+
+        events = self._events(8)
+        with caplog.at_level(logging.WARNING, logger="illo.notify"):
+            await cyc._attach_and_refresh_packets(object(), "org-1", events)
+
+        assert all(e.get("launch_url") for e in events)  # every line gets its link
+        assert all(e.get("packet_revision") for e in events)
+        assert len(refreshed) == 5  # the per-tick cap (ok refreshes consume slots)
+        assert any("deferred 3 packet refreshes" in r.message for r in caplog.records)
+
+    async def test_failed_refreshes_do_not_burn_slots(self, monkeypatch, caplog):
+        import logging
+        from types import SimpleNamespace
+
+        import brain.systems.change_notifications_cycle as cyc
+        import brain.systems.briefing.mint as mint_mod
+
+        attempts = []
+
+        async def fake_find_batch(session, *, org_id, job_refs):
+            return self._rows_for(job_refs)
+
+        async def failing_refresh(session, *, org_id, handoff_row, readers=None):
+            attempts.append(handoff_row.id)
+            return SimpleNamespace(ok=False, created=False, handoff=None)
+
+        monkeypatch.setattr(mint_mod, "find_packet_handoffs_for_jobs", fake_find_batch)
+        monkeypatch.setattr(mint_mod, "refresh_packet_for_job", failing_refresh)
+
+        events = self._events(8)
+        with caplog.at_level(logging.WARNING, logger="illo.notify"):
+            await cyc._attach_and_refresh_packets(object(), "org-1", events)
+        assert len(attempts) == 8  # fast failures never starve the healthy rows
+        assert not any("deferred" in r.message for r in caplog.records)
+        assert all(e.get("launch_url") for e in events)  # links still attach
+
+    async def test_superseding_refresh_carries_the_new_link(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import brain.systems.change_notifications_cycle as cyc
+        import brain.systems.briefing.mint as mint_mod
+
+        old = SimpleNamespace(id="hf-old", target_tool="codex", source_surface="inbound_triage",
+                              metadata_={"revision": "rev-old", "job_ref": "domain_record:1"})
+        new = SimpleNamespace(id="hf-new", target_tool="codex", source_surface="inbound_triage",
+                              metadata_={"revision": "rev-new", "job_ref": "domain_record:1"})
+
+        async def fake_find_batch(session, *, org_id, job_refs):
+            return {"domain_record:1": old}
+
+        async def fake_refresh(session, *, org_id, handoff_row, readers=None):
+            return SimpleNamespace(ok=True, created=True, handoff=new)
+
+        monkeypatch.setattr(mint_mod, "find_packet_handoffs_for_jobs", fake_find_batch)
+        monkeypatch.setattr(mint_mod, "refresh_packet_for_job", fake_refresh)
+
+        events = [{"title": "t", "record_id": 1}]
+        await cyc._attach_and_refresh_packets(object(), "org-1", events)
+        assert "hf-new" in events[0]["launch_url"]
+        assert events[0]["packet_revision"] == "rev-new"
+
+    async def test_failure_degrades_to_lines_without_links(self, monkeypatch):
+        import brain.systems.change_notifications_cycle as cyc
+        import brain.systems.briefing.mint as mint_mod
+
+        async def exploding_find(session, *, org_id, job_refs):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(mint_mod, "find_packet_handoffs_for_jobs", exploding_find)
+        events = [{"title": "t", "record_id": 1}]
+        await cyc._attach_and_refresh_packets(object(), "org-1", events)  # must not raise
+        assert "launch_url" not in events[0]
+
+    async def test_no_session_is_a_noop(self):
+        import brain.systems.change_notifications_cycle as cyc
+
+        events = [{"title": "t", "record_id": 1}]
+        await cyc._attach_and_refresh_packets(None, "org-1", events)
+        assert "launch_url" not in events[0]

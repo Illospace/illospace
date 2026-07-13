@@ -23,6 +23,8 @@ this)::
         "labels": ["p0", "bug"],          # any labels/tags on the record
         "priority": "P1" | None,
         "noteworthy": True,               # optional explicit override
+        "launch_url": "https://…" | None,  # handoff packet link (slice 06)
+        "packet_revision": "abc123" | None,
     }
 """
 
@@ -106,6 +108,11 @@ def format_line(event: dict) -> str:
     url = event.get("url")
     if url:
         line += f" {_slack_escape(url)}"
+    launch_url = event.get("launch_url")
+    if launch_url:
+        # The handoff packet link (spec: illo-handoff-packets slice 06) — one
+        # extra field on the existing line, never a new section.
+        line += f" → launch: {_slack_escape(launch_url)}"
     return line
 
 

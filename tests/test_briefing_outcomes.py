@@ -1,0 +1,123 @@
+"""Slice 07 (illo-handoff-packets): packet outcome reporting (pure).
+
+Contract under test: launched means launch_count>0 (never status), a
+supersede chain counts as one job (mint time = first revision, launched if
+any revision launched), ignored needs the 48h horizon, and the digest line
+is one honest sentence or nothing.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+from brain.systems.briefing.outcomes import (
+    OutcomeSummary,
+    format_outcomes_line,
+    packet_outcomes,
+)
+
+_NOW = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+
+
+def _row(row_id, *, created_hours_ago, launch_count=0, launched_minutes_after=None,
+         owner="u-axel", supersedes=None, status="open"):
+    created = _NOW - timedelta(hours=created_hours_ago)
+    meta = {"owner_user_id": owner, "job_ref": f"idea:{row_id}"}
+    if supersedes:
+        meta["supersedes"] = supersedes
+    return SimpleNamespace(
+        id=row_id,
+        created_at=created,
+        launch_count=launch_count,
+        last_launched_at=(created + timedelta(minutes=launched_minutes_after))
+        if launched_minutes_after is not None
+        else None,
+        metadata_=meta,
+        status=status,
+    )
+
+
+def test_launched_means_launch_count_not_status():
+    rows = [
+        _row("a", created_hours_ago=10, launch_count=1, launched_minutes_after=22, status="archived"),
+        _row("b", created_hours_ago=10, launch_count=0, status="launched"),  # lying status
+    ]
+    summary = packet_outcomes(rows, now=_NOW)
+    assert summary.minted == 2
+    assert summary.launched == 1  # 'a' by count, never 'b' by status
+
+
+def test_supersede_chain_counts_once_with_first_mint_time():
+    rows = [
+        _row("old", created_hours_ago=30, launch_count=0),
+        _row("new", created_hours_ago=1, launch_count=1, launched_minutes_after=10,
+             supersedes="old"),
+    ]
+    summary = packet_outcomes(rows, now=_NOW)
+    assert summary.minted == 1  # one job, two revisions
+    assert summary.launched == 1
+    # mint time is the FIRST revision's; launch 29h later ≈ 1750 minutes
+    assert summary.median_minutes_to_launch > 24 * 60
+
+
+def test_ignored_needs_the_horizon_pending_before_it():
+    rows = [
+        _row("fresh", created_hours_ago=2),     # pending, not ignored
+        _row("stale", created_hours_ago=72),    # ignored
+    ]
+    summary = packet_outcomes(rows, now=_NOW)
+    assert summary.pending == 1
+    assert summary.ignored == 1
+
+
+def test_per_member_split_uses_newest_revision_owner():
+    rows = [
+        _row("old", created_hours_ago=30, owner="u-reda"),
+        _row("new", created_hours_ago=1, owner="u-axel", supersedes="old",
+             launch_count=2, launched_minutes_after=5),
+        _row("solo", created_hours_ago=3, owner=None),
+    ]
+    summary = packet_outcomes(rows, now=_NOW)
+    assert summary.per_member["u-axel"] == {"minted": 1, "launched": 1}
+    assert summary.per_member["unclaimed"] == {"minted": 1, "launched": 0}
+    assert "u-reda" not in summary.per_member  # reassigned chain follows the newest owner
+
+
+def test_median_is_median():
+    rows = [
+        _row("a", created_hours_ago=5, launch_count=1, launched_minutes_after=10),
+        _row("b", created_hours_ago=5, launch_count=1, launched_minutes_after=20),
+        _row("c", created_hours_ago=5, launch_count=1, launched_minutes_after=90),
+    ]
+    assert packet_outcomes(rows, now=_NOW).median_minutes_to_launch == 20.0
+
+
+def test_digest_line_shapes():
+    assert format_outcomes_line(packet_outcomes([], now=_NOW)) is None
+    line = format_outcomes_line(
+        packet_outcomes(
+            [
+                _row("a", created_hours_ago=5, launch_count=1, launched_minutes_after=22),
+                _row("b", created_hours_ago=72),
+            ],
+            now=_NOW,
+        )
+    )
+    assert line == "Packets: 2 minted · 1 launched · 1 ignored >48h · median 22m to launch"
+    hours = format_outcomes_line(
+        packet_outcomes(
+            [_row("a", created_hours_ago=10, launch_count=1, launched_minutes_after=180)],
+            now=_NOW,
+        )
+    )
+    assert "median 3.0h to launch" in hours
+
+
+def test_empty_summary_is_json_safe():
+    summary = packet_outcomes([], now=_NOW)
+    assert summary == OutcomeSummary(
+        minted=0, launched=0, ignored=0, pending=0,
+        median_minutes_to_launch=None, per_member={},
+    )
+    assert summary.to_dict()["per_member"] == {}

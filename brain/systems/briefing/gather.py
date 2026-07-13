@@ -1,0 +1,603 @@
+"""Illo Brain — Dossier gathering (read-only source adapters).
+
+The single owner of "collect the raw pieces for a job" (spec:
+illo-handoff-packets slice 03). Triage minting, notify refresh, and the
+on-demand "brief me" flow all gather through :func:`gather_pieces`; no
+caller grows its own context collection.
+
+Design stances, each load-bearing (and each cross-family-review hardened):
+
+- **Read-only.** No ``session.add`` / ``flush`` / ``commit`` anywhere, and
+  DB reads run under ``no_autoflush`` so a caller's pending ORM state can
+  never be flushed by the gather path. One sanctioned exception lives in
+  the auth owner: GitHub token-candidate resolution may write vault
+  access-audit rows (see ``github_read_ref_for_backend``).
+- **Delegation, not duplication.** Adapters are tiny Protocols whose
+  default impls delegate to the EXISTING owners of each read path — the
+  Slack web client, the handler-owned backend GitHub read (which keeps the
+  ordered token-candidate behavior), the domain-record tables. No new HTTP
+  clients, no new token paths.
+- **Honest degradation.** A source that is down, non-public, partially
+  fetched, capped, or upstream-compacted yields an explicit
+  ``source_notes`` entry (rendered in both packet audiences) — never a
+  silent absence and never a crashed gather. Adapters report TRUE totals.
+- **Privacy boundary, fail-closed.** Only Slack surfaces whose envelope
+  ``channel_type`` is exactly ``"channel"`` (public) are excerpted;
+  private channels, DMs, group DMs, AND empty/unknown types degrade to a
+  note BEFORE any Slack call. The referenced inbound event must belong to
+  the requesting org.
+- **Same-job references only.** GitHub refs come from the inbound event's
+  own hints, the tracker record's canonical ``repo``/``pr_number`` (or
+  ``pr_url``) identity, and explicit ``owner/repo#N`` text in the job's
+  title/description — no fuzzy search.
+"""
+
+from __future__ import annotations
+
+import re
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Protocol
+
+from sqlalchemy import select
+
+from brain.systems.briefing.core import DossierBudget, SourcePiece
+
+# Conservative same-job reference pattern: explicit owner/repo#N only.
+_GITHUB_REF_RE = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)\b")
+_MAX_GITHUB_REFS = 4
+_SLACK_PAGE_CAP = 50
+_SLACK_MAX_PAGES = 3
+# The ONLY team-visible surface (ingress envelope vocabulary). Everything
+# else — im, mpim, group, empty, unknown — is fail-closed.
+PUBLIC_CHANNEL_TYPE = "channel"
+_PUBLIC_CHANNEL_TYPE = PUBLIC_CHANNEL_TYPE  # back-compat alias
+
+JOB_REF_IDEA_PREFIX = "idea:"
+JOB_REF_RECORD_PREFIX = "domain_record:"
+
+
+@dataclass(frozen=True)
+class SlackThreadRead:
+    """One thread read: fetched messages + the TRUE total the API reported."""
+
+    messages: tuple[dict[str, Any], ...]  # each: {ts, user, text}
+    total: int
+    channel: str
+
+
+@dataclass(frozen=True)
+class GatherResult:
+    pieces: list[SourcePiece] = field(default_factory=list)
+    source_notes: list[str] = field(default_factory=list)
+
+
+class SlackReader(Protocol):
+    async def read_thread(self, *, channel: str, thread_ts: str, limit: int) -> SlackThreadRead: ...
+
+
+class GithubReader(Protocol):
+    async def read_ref(self, *, repo_slug: str, number: int) -> dict[str, Any] | None:
+        """Return the FLAT contract {kind, title, body, state,
+        body_total_chars, checks?} or None when the ref does not exist."""
+        ...
+
+
+def _ts_from_slack(ts: Any) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _no_autoflush(session: Any):
+    sync_session = getattr(session, "sync_session", session)
+    return getattr(sync_session, "no_autoflush", None) or nullcontext()
+
+
+class DefaultSlackReader:
+    """Delegates to the existing Slack web client (read path only).
+
+    Bounded pagination: walks up to ``_SLACK_MAX_PAGES`` cursor pages so the
+    tail of a long thread (where decisions live) is reachable; anything
+    beyond stays visible through the caller's only-N-of-M note.
+    """
+
+    def __init__(self, client: Any | None = None) -> None:
+        self._client = client
+
+    def _resolve_client(self) -> Any:
+        if self._client is None:
+            from brain.systems.slack.client import slack_web_client_from_env
+
+            self._client = slack_web_client_from_env()
+        return self._client
+
+    async def read_thread(self, *, channel: str, thread_ts: str, limit: int) -> SlackThreadRead:
+        client = self._resolve_client()
+        collected: list[dict[str, Any]] = []
+        total = 0
+        cursor: str | None = None
+        for _page in range(_SLACK_MAX_PAGES):
+            payload = await client.conversation_replies(
+                channel=channel, thread_ts=thread_ts, limit=limit, cursor=cursor
+            )
+            raw = payload.get("messages") or []
+            collected.extend(raw)
+            if not total and raw:
+                # Slack returns the parent first; reply_count excludes it.
+                try:
+                    total = int(raw[0].get("reply_count") or 0) + 1
+                except (TypeError, ValueError):
+                    total = 0
+            cursor = _text(((payload.get("response_metadata") or {}).get("next_cursor")))
+            if not cursor:
+                break
+        messages = tuple(
+            {"ts": _text(m.get("ts")), "user": _text(m.get("user")), "text": _text(m.get("text"))}
+            for m in collected
+            if _text(m.get("text"))
+        )
+        return SlackThreadRead(
+            messages=messages, total=max(total, len(collected)), channel=channel
+        )
+
+
+class DefaultGithubReader:
+    """Delegates to the handler-owned backend read (the existing owner of
+    GitHub auth candidates and retry order)."""
+
+    def __init__(self, *, org_id: str, user_id: str | None = None) -> None:
+        self._org_id = str(org_id)
+        self._user_id = user_id
+
+    async def read_ref(self, *, repo_slug: str, number: int) -> dict[str, Any] | None:
+        from brain.systems.runs.tool_catalog.handlers.github import github_read_ref_for_backend
+
+        return await github_read_ref_for_backend(
+            repo_slug=repo_slug, number=number, org_id=self._org_id, user_id=self._user_id
+        )
+
+
+async def _load_job(session: Any, *, org_id: str, job_ref: str) -> tuple[Any | None, Any | None]:
+    """Resolve a job_ref to (idea, record) — both queries org-scoped."""
+    from brain.platform.db.models.domain import DomainRecord
+    from brain.platform.db.models.idea import Idea
+
+    idea = None
+    record = None
+    with _no_autoflush(session):
+        if job_ref.startswith(JOB_REF_IDEA_PREFIX):
+            idea = (
+                await session.execute(
+                    select(Idea).where(
+                        Idea.id == job_ref[len(JOB_REF_IDEA_PREFIX):],
+                        Idea.org_id == str(org_id),
+                    )
+                )
+            ).scalar_one_or_none()
+        elif job_ref.startswith(JOB_REF_RECORD_PREFIX):
+            try:
+                record_id = int(job_ref[len(JOB_REF_RECORD_PREFIX):])
+            except ValueError:
+                return None, None
+            record = (
+                await session.execute(
+                    select(DomainRecord).where(
+                        DomainRecord.id == record_id,
+                        DomainRecord.org_id == str(org_id),
+                    )
+                )
+            ).scalar_one_or_none()
+    return idea, record
+
+
+async def load_inbound_event(session: Any, *, org_id: str, idea: Any) -> Any | None:
+    """idea → its inbound event, org-verified. Public: mint (slice 05) and
+    the notify refresh (slice 06) reuse this — one owner for provenance."""
+    details = dict(getattr(idea, "agent_details", None) or {})
+    event_id = str((details.get("inbound_triage") or {}).get("event_id") or "")
+    if not event_id:
+        return None
+    from brain.platform.db.models.inbound import InboundEventRow
+
+    with _no_autoflush(session):
+        event = await session.get(InboundEventRow, event_id)
+    if event is None or str(getattr(event, "org_id", "") or "") != str(org_id):
+        return None
+    return event
+
+
+def slack_provenance(event: Any) -> dict[str, Any] | None:
+    """The AUTHORITATIVE origin-thread coordinates: ``envelope["payload"]``
+    only (that is what ingress writes — ``channel_id``, ``thread_ts`` /
+    ``message_ts``, ``channel_type``). No top-level fallbacks: a shape we
+    don't recognize is a note, never a guess."""
+    envelope = dict(getattr(event, "envelope", None) or {})
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    channel = _text(payload.get("channel_id"))
+    thread_ts = _text(payload.get("thread_ts") or payload.get("message_ts"))
+    if not channel or not thread_ts:
+        return None
+    return {
+        "channel": channel,
+        "thread_ts": thread_ts,
+        "channel_type": _text(payload.get("channel_type")).lower(),
+        # Illo's own Slack identity: gather MUST filter it out of thread
+        # reads, or mint's posted brief feeds the next gather, rotates the
+        # revision, and the noise gate collapses into a self-echo repost
+        # loop (cross-family review finding, 2026-07-13).
+        "bot_user_id": _text(payload.get("bot_user_id")),
+    }
+
+
+def _record_piece(record: Any) -> SourcePiece | None:
+    data = dict(getattr(record, "data", None) or {})
+    if not data:
+        return None
+    title = (
+        _text(getattr(record, "title", ""))
+        or _text(data.get("title") or data.get("name"))
+        or f"record {getattr(record, 'id', '?')}"
+    )
+    skip = {"title", "name"}
+    body = "; ".join(
+        f"{key}: {value}" for key, value in sorted(data.items())
+        if key not in skip and isinstance(value, (str, int, float, bool)) and _text(value)
+    )
+    return SourcePiece(
+        source="record",
+        ref=f"{JOB_REF_RECORD_PREFIX}{getattr(record, 'id', '')}",
+        title=title,
+        body=body or title,
+        ts=getattr(record, "updated_at", None),
+        weight=10,
+    )
+
+
+def _idea_piece(idea: Any) -> SourcePiece:
+    details = dict(getattr(idea, "agent_details", None) or {})
+    assignment = details.get("assignment") or {}
+    body_bits = [_text(getattr(idea, "description", ""))]
+    if details.get("task_domain"):
+        body_bits.append(f"task_domain: {details['task_domain']}")
+    if assignment:
+        body_bits.append(
+            f"owner: {assignment.get('owner_id') or 'unclaimed'} (basis: {assignment.get('basis', '?')})"
+        )
+    return SourcePiece(
+        source="record",
+        ref=f"{JOB_REF_IDEA_PREFIX}{getattr(idea, 'id', '')}",
+        title=_text(getattr(idea, "title", "")) or "triaged item",
+        body="; ".join(bit for bit in body_bits if bit),
+        ts=getattr(idea, "updated_at", None),
+        weight=8,  # below the event-summary piece: the raw signal reads better
+    )
+
+
+def _evidence_piece(idea: Any) -> SourcePiece | None:
+    details = dict(getattr(idea, "agent_details", None) or {})
+    trail = details.get("attribution") or details.get("preservation")
+    if not trail:
+        return None
+    body = "; ".join(
+        f"{key}: {value}" for key, value in sorted(dict(trail).items())
+        if isinstance(value, (str, int, float, bool)) and _text(value)
+    ) or str(trail)
+    return SourcePiece(
+        source="evidence",
+        ref=f"{JOB_REF_IDEA_PREFIX}{getattr(idea, 'id', '')}:attribution",
+        title="Triage-run attribution",
+        body=body,
+        ts=getattr(idea, "updated_at", None),
+    )
+
+
+def _github_refs(idea: Any, record: Any, event: Any) -> tuple[list[tuple[str, int]], list[str]]:
+    """Explicit same-job refs, priority-ordered: event hints → tracker
+    identity → owner/repo#N text. Deduped; caps produce a visible note."""
+    notes: list[str] = []
+    refs: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+
+    def add(repo: Any, number: Any) -> None:
+        slug = _text(repo).rstrip("/")
+        try:
+            n = int(str(number).lstrip("#"))
+        except (TypeError, ValueError):
+            return
+        if slug.count("/") != 1 or n < 1:
+            return
+        ref = (slug, n)
+        if ref not in seen:
+            seen.add(ref)
+            refs.append(ref)
+
+    # (a) GitHub-origin inbound events carry exact identity in hints.
+    hints = dict((dict(getattr(event, "envelope", None) or {})).get("hints") or {}) if event else {}
+    if _text(hints.get("provider")).lower() == "github":
+        add(hints.get("repo"), hints.get("number"))
+
+    # (b) Canonical tracker identity via the existing normalizers.
+    data = dict(getattr(record, "data", None) or {}) if record is not None else {}
+    if data:
+        from brain.systems.user_domains.service import (
+            _github_pr_key_from_url,
+            _normalize_pr_number,
+            _normalize_repo_identity,
+        )
+
+        repo = _normalize_repo_identity(data.get("repo"))
+        pr_number = _normalize_pr_number(data.get("pr_number"))
+        if repo and pr_number:
+            add(repo, pr_number)
+        elif data.get("pr_url"):
+            key = _github_pr_key_from_url(data.get("pr_url"))
+            if key:
+                add(key[0], key[1])
+
+    # (c) Explicit owner/repo#N text in the job's own words.
+    texts = []
+    if idea is not None:
+        texts.extend([_text(getattr(idea, "title", "")), _text(getattr(idea, "description", ""))])
+    for key in ("fix_pr", "pr", "ticket", "issue", "url"):
+        texts.append(_text(data.get(key)))
+    for text in texts:
+        for match in _GITHUB_REF_RE.finditer(text):
+            add(match.group(1), match.group(2))
+
+    if len(refs) > _MAX_GITHUB_REFS:
+        notes.append(f"github: {len(refs) - _MAX_GITHUB_REFS} additional refs not gathered (cap)")
+        refs = refs[:_MAX_GITHUB_REFS]
+    return refs, notes
+
+
+def _checks_summary(checks: Any) -> str:
+    runs = (checks or {}).get("check_runs") if isinstance(checks, dict) else None
+    if not isinstance(runs, list) or not runs:
+        return ""
+    conclusions: dict[str, int] = {}
+    for run in runs:
+        conclusion = _text((run or {}).get("conclusion")) or _text((run or {}).get("status")) or "unknown"
+        conclusions[conclusion] = conclusions.get(conclusion, 0) + 1
+    summary = ", ".join(f"{count} {name}" for name, count in sorted(conclusions.items()))
+    return f"{len(runs)} check runs: {summary}"
+
+
+def _deploy_piece(record: Any) -> SourcePiece | None:
+    data = dict(getattr(record, "data", None) or {}) if record is not None else {}
+    state = _text(data.get("deploy_state"))
+    if not state:
+        return None
+    bits = [f"deploy_state: {state}"]
+    for key in ("fix_pr", "pr_number", "repo", "deployed_at", "verified_at"):
+        if _text(data.get(key)):
+            bits.append(f"{key}: {data[key]}")
+    return SourcePiece(
+        source="deploy_state",
+        ref=f"deploy:{data.get('fix_pr') or data.get('pr_number') or getattr(record, 'id', '')}",
+        title="Deploy ladder",
+        body="; ".join(bits),
+        ts=getattr(record, "updated_at", None),
+    )
+
+
+async def _related_tracker_records(
+    session: Any, *, org_id: str, refs: list[tuple[str, int]], exclude_id: Any
+) -> list[Any]:
+    """Org-scoped tracker records matching a discovered repo#number identity."""
+    if not refs:
+        return []
+    from brain.platform.db.models.domain import DomainRecord
+
+    numbers = {str(n) for _, n in refs}
+    with _no_autoflush(session):
+        rows = (
+            await session.execute(
+                select(DomainRecord).where(
+                    DomainRecord.org_id == str(org_id),
+                    DomainRecord.data["pr_number"].astext.in_(numbers),
+                ).limit(8)
+            )
+        ).scalars().all()
+    repo_names = {slug.split("/", 1)[1].lower() for slug, _ in refs}
+    related = []
+    for row in rows:
+        if exclude_id is not None and getattr(row, "id", None) == exclude_id:
+            continue
+        row_repo = _text(dict(getattr(row, "data", None) or {}).get("repo")).lower().rstrip("/")
+        if not row_repo or any(row_repo.endswith(name) for name in repo_names):
+            related.append(row)
+    return related
+
+
+async def gather_pieces(
+    session: Any,
+    *,
+    org_id: str,
+    job_ref: str,
+    slack: SlackReader | None,
+    github: GithubReader | None,
+    budget: DossierBudget,
+) -> GatherResult:
+    """Collect raw pieces + degradation notes for one job. Read-only."""
+    result = GatherResult()
+    notes = result.source_notes
+
+    try:
+        idea, record = await _load_job(session, org_id=org_id, job_ref=str(job_ref or ""))
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"record: unavailable — {type(exc).__name__}")
+        return result
+    if idea is None and record is None:
+        notes.append("record: job not found")
+        return result
+
+    event = None
+    provenance_note_added = False
+    if idea is not None:
+        try:
+            event = await load_inbound_event(session, org_id=org_id, idea=idea)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"slack: provenance unavailable — {type(exc).__name__}")
+            provenance_note_added = True
+
+    if record is not None:
+        piece = _record_piece(record)
+        if piece:
+            result.pieces.append(piece)
+        deploy = _deploy_piece(record)
+        if deploy:
+            result.pieces.append(deploy)
+    if idea is not None:
+        result.pieces.append(_idea_piece(idea))
+        evidence = _evidence_piece(idea)
+        if evidence:
+            result.pieces.append(evidence)
+
+    # An inbound event's own normalized summary is often the best statement
+    # of "what happened" for NON-Slack origins (GitHub webhooks etc.), where
+    # no thread exists to gather. Slack origins skip this — the thread
+    # itself carries the message (probe finding, 2026-07-13).
+    envelope = dict(getattr(event, "envelope", None) or {}) if event is not None else {}
+    is_slack_event = str(envelope.get("kind") or "").startswith("slack")
+    if event is not None and not is_slack_event:
+        summary = _text(envelope.get("summary"))
+        if summary:
+            hints = dict(envelope.get("hints") or {})
+            bits = [summary] + [
+                f"{key}: {hints[key]}" for key in ("url", "action", "state") if _text(hints.get(key))
+            ]
+            result.pieces.append(
+                SourcePiece(
+                    source="record",
+                    ref=f"inbound_event:{getattr(event, 'id', '')}",
+                    title=summary[:90],
+                    body="; ".join(bits),
+                    ts=getattr(event, "created_at", None),
+                    weight=9,
+                )
+            )
+
+    # Origin Slack thread — the fail-closed privacy boundary lives HERE.
+    # Only SLACK-origin events are expected to carry thread provenance; a
+    # GitHub-origin event has no thread, so its absence is not a degradation
+    # (probe finding: bogus "malformed" notes on every GitHub item).
+    if idea is not None:
+        details = dict(getattr(idea, "agent_details", None) or {})
+        event_expected = bool((details.get("inbound_triage") or {}).get("event_id"))
+        provenance = slack_provenance(event) if event is not None else None
+        if event_expected and event is None:
+            # Missing row OR org mismatch — either way, say so, don't guess.
+            if not provenance_note_added:
+                notes.append("slack: provenance unavailable")
+        elif event is not None and not is_slack_event:
+            pass  # non-Slack origin: nothing omitted, nothing to note
+        elif event is not None and provenance is None:
+            notes.append("slack: provenance malformed or missing")
+        elif provenance is not None and slack is None:
+            notes.append("slack: no reader configured")
+        elif provenance is not None:
+            if provenance["channel_type"] != _PUBLIC_CHANNEL_TYPE:
+                notes.append("slack: non-public or unknown-visibility source omitted")
+            else:
+                fetch_limit = min(max(budget.max_items_per_source * 2, 10), _SLACK_PAGE_CAP)
+                try:
+                    thread = await slack.read_thread(
+                        channel=provenance["channel"],
+                        thread_ts=provenance["thread_ts"],
+                        limit=fetch_limit,
+                    )
+                    bot_user_id = provenance.get("bot_user_id") or ""
+                    for message in thread.messages:
+                        if bot_user_id and message.get("user") == bot_user_id:
+                            continue  # Illo's own replies are output, not context
+                        result.pieces.append(
+                            SourcePiece(
+                                source="slack_thread",
+                                ref=f"slack:{thread.channel}/p{str(message['ts']).replace('.', '')}",
+                                title=f"{message['user'] or 'someone'} in {thread.channel}",
+                                body=message["text"],
+                                ts=_ts_from_slack(message["ts"]),
+                            )
+                        )
+                    if thread.total > len(thread.messages):
+                        notes.append(
+                            f"slack_thread: only {len(thread.messages)} of {thread.total} messages fetched"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    notes.append(f"slack: unavailable — {type(exc).__name__}")
+
+    # Linked GitHub refs — explicit same-job references only.
+    refs, ref_notes = _github_refs(idea, record, event)
+    notes.extend(ref_notes)
+    if refs and github is None:
+        notes.append("github: no reader configured")
+    elif github is not None:
+        for repo_slug, number in refs:
+            ref_label = f"{repo_slug}#{number}"
+            try:
+                payload = await github.read_ref(repo_slug=repo_slug, number=number)
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"github: {ref_label} unavailable — {type(exc).__name__}")
+                continue
+            if payload is None:
+                notes.append(f"github: {ref_label} not found")
+                continue
+            kind = _text(payload.get("kind"))
+            body = _text(payload.get("body")) or _text(payload.get("state"))
+            total_chars = int(payload.get("body_total_chars") or 0)
+            if total_chars > len(_text(payload.get("body"))):
+                notes.append(
+                    f"github: {ref_label} body pre-compacted upstream "
+                    f"(+{total_chars - len(_text(payload.get('body')))} chars)"
+                )
+            result.pieces.append(
+                SourcePiece(
+                    source=kind if kind in ("github_issue", "github_pr") else "github_issue",
+                    ref=ref_label,
+                    title=_text(payload.get("title")) or ref_label,
+                    body=body,
+                    ts=None,
+                    weight=3,
+                )
+            )
+            checks = _checks_summary(payload.get("checks"))
+            if checks:
+                result.pieces.append(
+                    SourcePiece(
+                        source="evidence",
+                        ref=f"{ref_label}:checks",
+                        title=f"CI checks for {ref_label}",
+                        body=checks,
+                        ts=None,
+                    )
+                )
+
+    # Related tracker records reached through the discovered identity.
+    if refs:
+        try:
+            related = await _related_tracker_records(
+                session, org_id=org_id, refs=refs,
+                exclude_id=getattr(record, "id", None) if record is not None else None,
+            )
+            for row in related:
+                piece = _record_piece(row)
+                if piece:
+                    result.pieces.append(
+                        SourcePiece(
+                            source="record", ref=piece.ref, title=piece.title,
+                            body=piece.body, ts=piece.ts, weight=8,
+                        )
+                    )
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"record: related lookup unavailable — {type(exc).__name__}")
+
+    return result

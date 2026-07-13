@@ -578,6 +578,16 @@ def test_manage_cycle_schema_matches_canonical_runtime_policy():
     assert "add_output_target" in properties["action"]["enum"]
 
 
+def test_launch_handoff_tool_schema_offers_codex_and_claude():
+    from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS
+
+    tool = next(tool for tool in COORDINATOR_TOOLS if tool["name"] == "create_launch_handoff")
+    target_tool = tool["input_schema"]["properties"]["target_tool"]
+
+    assert target_tool["enum"] == ["codex", "claude"]
+    assert target_tool["default"] == "codex"
+
+
 def test_tool_result_truncation_uses_registry_output_budget():
     from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, resolve_tool_call
     from brain.systems.runs.tool_catalog.registry import output_budget_chars_for_tool

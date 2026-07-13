@@ -524,7 +524,7 @@ LAUNCH_HANDOFF_TOOLS = [
         "name": "create_launch_handoff",
         "description": (
             "Prepare a durable launch handoff link for opening a task in a teammate's local coding agent. "
-            "Use this when a user asks to open, launch, send, or hand off coding work to Codex. "
+            "Use this when a user asks to open, launch, send, or hand off coding work to Codex or Claude Code. "
             "The returned HTTPS launch_url is surface-agnostic and can be posted in Slack, chat, or Thread Discussion."
         ),
         "input_schema": {
@@ -532,7 +532,7 @@ LAUNCH_HANDOFF_TOOLS = [
             "properties": {
                 "title": {
                     "type": "string",
-                    "description": "Short task title for the handoff card and Codex starter prompt.",
+                    "description": "Short task title for the handoff card and starter prompt.",
                 },
                 "instructions": {
                     "type": "string",
@@ -544,13 +544,13 @@ LAUNCH_HANDOFF_TOOLS = [
                 },
                 "target_tool": {
                     "type": "string",
-                    "enum": ["codex"],
-                    "description": "Local agent surface to launch. Currently codex.",
+                    "enum": ["codex", "claude"],
+                    "description": "Local agent surface to launch.",
                     "default": "codex",
                 },
                 "repo_origin_url": {
                     "type": "string",
-                    "description": "Git remote/origin URL so any teammate's Codex can match their local project.",
+                    "description": "Git remote/origin URL so a teammate's local agent can match their project.",
                 },
                 "branch_hint": {
                     "type": "string",
@@ -569,7 +569,7 @@ LAUNCH_HANDOFF_TOOLS = [
                 "context_parts": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "Ordered context parts Codex can fetch later through Illo MCP.",
+                    "description": "Ordered context parts the local agent can fetch later through Illo MCP.",
                     "default": [],
                 },
                 "acceptance_criteria": {
