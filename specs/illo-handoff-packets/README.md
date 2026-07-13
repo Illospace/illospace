@@ -83,6 +83,30 @@ implements per the routing rules, Claude directs and reviews.
 - `parse_member_agent_targets` / `agent_target_for_member` live in
   `launch_handoffs.py` (uuid-keyed, validated); slice 05 consumes them.
 
+**Implementation decisions that refine slice texts (03, Claude-implemented
+after the Codex worker wedged):**
+- Gather-level degradations are a FIRST-CLASS channel: `GatherResult
+  {pieces, source_notes}`; `assemble_dossier(..., source_notes=…)` carries
+  them onto `Dossier.source_notes` (structurally separate from budget
+  omissions), the brief note adds "N sources degraded", and the agent's
+  omissions context-part includes both lists.
+- Privacy boundary enforced BEFORE any Slack read: the inbound event's
+  envelope `channel_type` decides (`im`/`mpim`/`group` → note, no fetch);
+  API errors additionally degrade to notes.
+- Job resolution: `idea:<uuid>` (triage home) or `domain_record:<id>`;
+  org-scope mismatch = not found. Slack provenance = idea →
+  `agent_details.inbound_triage.event_id` → `InboundEventRow` payload.
+- Related refs: conservative `owner/repo#N` regex over the job's own
+  title/description + record tracker fields (`fix_pr`, `ticket`, …),
+  deduped, capped at 4. No fuzzy search (spec rule).
+- `DefaultGithubReader` reuses the tool handler's token-candidate
+  resolution (the existing auth owner) + the cortex GitHub connector; no
+  new token path. Issues resolve via the recent-issues window (no
+  single-issue getter exists) — an old issue degrades to a "not found in
+  readable window" note, honestly.
+- `--live` CLI stub errors helpfully; the real pre-merge probe arrives
+  with slice 05.
+
 You are implementing the coordinator upgrade: at every routing moment
 (triage assignment, notify nudge, digest line) Illo attaches a **handoff
 packet** — a short human brief plus an agent-ready launch handoff — so work
@@ -104,7 +128,7 @@ explicitly rejected (see Direction below).
 ### Global TODO
 - [x] Slice 01 — dossier core (pure assembly + budgets + truncation honesty)
 - [x] Slice 02 — packet composer (dual-audience render + idempotency)
-- [ ] Slice 03 — gather wiring (read-only source adapters)
+- [x] Slice 03 — gather wiring (read-only source adapters)
 - [x] Slice 04 — claude launch target (launch page; codex redirect preserved)
 - [ ] Slice 05 — triage-moment minting (ungated; pre-merge probe)
 - [ ] Slice 06 — notify/digest packet links + stale re-render

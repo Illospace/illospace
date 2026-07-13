@@ -14,13 +14,27 @@ from brain.systems.briefing.core import (
     SourcePiece,
     assemble_dossier,
 )
+from brain.systems.briefing.gather import (
+    DefaultGithubReader,
+    DefaultSlackReader,
+    GatherResult,
+    GithubReader,
+    SlackReader,
+    gather_pieces,
+)
 
 __all__ = [
     "SOURCE_PRIORITY",
+    "DefaultGithubReader",
+    "DefaultSlackReader",
     "Dossier",
     "DossierBudget",
     "DossierItem",
     "DossierSection",
+    "GatherResult",
+    "GithubReader",
+    "SlackReader",
     "SourcePiece",
     "assemble_dossier",
+    "gather_pieces",
 ]

@@ -135,6 +135,10 @@ class Dossier:
     total_chars: int  # len(render_text()) — the real artifact, markers included
     budget: DossierBudget
     omissions: tuple[str, ...]
+    # Gather-level degradations (source down, private channel, partial
+    # fetch), verbatim from the caller — structurally separate from budget
+    # omissions so downstream honesty notes can count each kind.
+    source_notes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -160,10 +164,14 @@ class Dossier:
             "total_chars": self.total_chars,
             "budget": self.budget.to_dict(),
             "omissions": list(self.omissions),
+            "source_notes": list(self.source_notes),
         }
 
     def render_text(self) -> str:
-        return _render(self.job_ref, self.headline, self.sections, self.omissions)
+        return _render(
+            self.job_ref, self.headline, self.sections,
+            tuple(self.omissions) + tuple(self.source_notes),
+        )
 
 
 def _normalize_text(value: Any) -> str:
@@ -312,6 +320,7 @@ def assemble_dossier(
     job_ref: str,
     budget: DossierBudget,
     headline: str | None = None,
+    source_notes: Sequence[str] = (),
 ) -> Dossier:
     """Assemble a deterministic, budgeted dossier from raw pieces.
 
@@ -403,7 +412,10 @@ def assemble_dossier(
         elif section.omitted_count:
             omissions.append(f"{section.source}: all {_plural(section.omitted_count, 'item')} omitted (budget)")
 
-    rendered = _render(clean_job_ref, clean_headline, final_sections, omissions)
+    clean_notes = tuple(note for note in (_normalize_text(n) for n in source_notes) if note)
+    rendered = _render(
+        clean_job_ref, clean_headline, final_sections, tuple(omissions) + clean_notes
+    )
     return Dossier(
         job_ref=clean_job_ref,
         headline=clean_headline,
@@ -411,4 +423,5 @@ def assemble_dossier(
         total_chars=len(rendered),
         budget=budget,
         omissions=tuple(omissions),
+        source_notes=clean_notes,
     )

@@ -185,6 +185,8 @@ def _omissions_note(dossier: Dossier) -> str:
         parts.append(f"{_plural(dropped, 'item')} omitted")
     if shortened:
         parts.append(f"{_plural(shortened, 'excerpt')} shortened")
+    if dossier.source_notes:
+        parts.append(f"{_plural(len(dossier.source_notes), 'source')} degraded")
     return f"context trimmed: {', '.join(parts)}" if parts else ""
 
 
@@ -231,8 +233,10 @@ def _context_parts(dossier: Dossier) -> list[dict[str, Any]]:
                     "omitted_chars": item.omitted_chars,
                 }
             )
-    if dossier.omissions:
-        parts.append({"source": "omissions", "notes": list(dossier.omissions)})
+    if dossier.omissions or dossier.source_notes:
+        parts.append(
+            {"source": "omissions", "notes": list(dossier.omissions) + list(dossier.source_notes)}
+        )
     return parts
 
 

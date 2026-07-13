@@ -39,7 +39,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compose", action="store_true", help="also render the packet (slice 02)")
     parser.add_argument("--ask", default="take a pass", help="the ask line for --compose")
     parser.add_argument("--owner", default=None, help="owner label for --compose")
+    parser.add_argument("--live", action="store_true", help="gather a real job (pre-merge probe)")
     args = parser.parse_args(argv)
+
+    if args.live:
+        parser.error(
+            "--live needs a dev checkout with illo-dev read env (DB + Slack + GitHub); "
+            "wire it via gather.DefaultSlackReader/DefaultGithubReader — arrives with slice 05's "
+            "pre-merge probe. Use --fixture for offline runs."
+        )
 
     data = json.loads(Path(args.fixture).read_text())
     dossier = assemble_dossier(
