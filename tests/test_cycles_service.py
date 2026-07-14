@@ -1254,11 +1254,23 @@ def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
         ),
         created_at=datetime(2026, 4, 28, 20, 25, tzinfo=timezone.utc),
     )
+    completed_side_effect = AgentRunEventRow(
+        id=4,
+        run_id=44,
+        root_run_id=44,
+        sequence_no=4,
+        event_type="run.tool_completed",
+        payload={
+            "tool_name": "update_cycle_tracker",
+            "result": {"status": "ok", "record_id": 26},
+        },
+    )
     fake_session = _AsyncFakeSession(
         agent_run=agent_run,
         run=cycle_run,
         cycle=cycle,
         artifacts=[final_answer],
+        events=[completed_side_effect],
     )
     monkeypatch.setattr(
         service,
@@ -1284,6 +1296,8 @@ def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
     verdict = evaluation.details["mission_result_contract_verdict"]
     assert verdict["settlement_status"] == "mission_success"
     assert verdict["candidate_artifact_id"] == 8
+    assert verdict["side_effects_succeeded"] is True
+    assert fake_session._artifacts[-1].text == final_answer.text
 
 
 def test_cycle_contract_rejects_raw_provider_error_as_visible_answer():
@@ -1423,6 +1437,113 @@ async def test_cycle_contract_gate_repairs_bad_visible_answer_once(monkeypatch):
     assert cycle_run.context_snapshot["mission_result_contract_verdict"] == verdict
 
 
+@pytest.mark.asyncio
+async def test_cycle_contract_gate_appends_one_missing_required_output_to_draft(monkeypatch):
+    from brain.systems.cycles import contract_gate
+
+    agent_run = AgentRun()
+    agent_run.id = 44
+    agent_run.root_run_id = 44
+    agent_run.user_id = "user-1"
+    agent_run.org_id = "org-1"
+    agent_run.input_message = "Review the scheduled Cycle smoke test."
+    agent_run.model_policy = {}
+    agent_run.metadata_ = {"source": "cycle", "cycle_run_id": 12}
+
+    cycle_run = CycleRun()
+    cycle_run.id = 12
+    cycle_run.cycle_id = 5
+    cycle_run.status = "running"
+    cycle_run.prompt_snapshot = agent_run.input_message
+    cycle_run.context_snapshot = {
+        "result_contract": {
+            "kind": "autonomous_cycle_run_result",
+            "required_outputs": [
+                "answer_the_cycle_mission",
+                "summarize_workspace_evidence_or_explicit_gaps",
+                "report_evidence_health",
+                "record_next_action_or_blocker",
+                "short_self_review_summary",
+            ],
+        }
+    }
+
+    cycle = Cycle()
+    cycle.id = 5
+    cycle.prompt = cycle_run.prompt_snapshot
+
+    substantive_draft = AgentRunArtifactRow(
+        id=8,
+        run_id=44,
+        root_run_id=44,
+        artifact_type="final_answer",
+        text=(
+            "The scheduled Cycle smoke test completed successfully and its tracker was updated. "
+            "Workspace evidence showed the expected output with no explicit gaps. "
+            "Evidence health: ok. Next action: monitor the next scheduled run."
+        ),
+        created_at=datetime(2026, 4, 28, 20, 25, tzinfo=timezone.utc),
+    )
+    completed_side_effect = AgentRunEventRow(
+        id=4,
+        run_id=44,
+        root_run_id=44,
+        sequence_no=4,
+        event_type="run.tool_completed",
+        payload={"tool_name": "update_cycle_tracker", "result": {"status": "ok"}},
+    )
+    session = _AsyncFakeSession(
+        agent_run=agent_run,
+        run=cycle_run,
+        cycle=cycle,
+        artifacts=[substantive_draft],
+        events=[completed_side_effect],
+    )
+    repair_calls = []
+
+    async def fake_repair(**kwargs):
+        repair_calls.append(kwargs)
+        return "Self-review summary: the mission result is supported by the recorded evidence."
+
+    monkeypatch.setattr(contract_gate, "_async_repair_cycle_contract_answer", fake_repair)
+
+    verdict = await contract_gate.async_prepare_cycle_run_visible_finalization(session, 44)
+
+    assert len(repair_calls) == 1
+    assert repair_calls[0]["candidate_answer"] == substantive_draft.text
+    assert repair_calls[0]["missing_outputs"] == ["short_self_review_summary"]
+    assert verdict["settlement_status"] == "mission_success_after_repair"
+    assert verdict["repair_succeeded"] is True
+    assert verdict["final_missing_outputs"] == []
+    repaired_answer = session._artifacts[-1].text
+    assert substantive_draft.text in repaired_answer
+    assert "Self-review summary:" in repaired_answer
+    assert repaired_answer.count("Workspace evidence showed") == 1
+
+
+def test_cycle_contract_repair_prompt_requests_only_missing_sections():
+    from brain.systems.cycles.contract_gate import _repair_prompt
+
+    candidate = (
+        "Mission complete. Workspace evidence showed success. Evidence health: ok. "
+        "Next action: monitor."
+    )
+
+    messages = _repair_prompt(
+        mission="Review the scheduled Cycle smoke test.",
+        result_contract={"required_outputs": ["short_self_review_summary"]},
+        evidence_packet={"side_effects_succeeded": True},
+        missing_outputs=["short_self_review_summary"],
+        candidate_answer=candidate,
+        append_only=True,
+    )
+
+    prompt = "\n".join(message["content"] for message in messages)
+    assert "append only the missing section" in prompt.lower()
+    assert "do not repeat or rewrite" in prompt.lower()
+    assert candidate in prompt
+
+
 def test_finalize_cycle_run_degrades_when_contract_repair_fails(monkeypatch):
     from brain.systems.cycles import contract_gate
 
@@ -1467,12 +1588,18 @@ def test_finalize_cycle_run_degrades_when_contract_repair_fails(monkeypatch):
     cycle.last_error = None
     cycle.last_run_at = None
 
-    bad_answer = AgentRunArtifactRow(
+    substantive_draft = AgentRunArtifactRow(
         id=8,
         run_id=44,
         root_run_id=44,
         artifact_type="final_answer",
-        text="Verified current runtime facts:\n- Runtime scope: workspace-bound.",
+        text=(
+            "24h readout: workspace evidence showed the scheduled review completed. "
+            "Failure map: no execution failures were observed. Codebase implications: none. "
+            "Proposals: continue monitoring. Tracking summary: the tracker update succeeded. "
+            "Impact loop: compare the next run. Next action: monitor the next scheduled run. "
+            "Evidence health: ok. Domain record 26 contains the tracking result."
+        ),
         created_at=datetime(2026, 4, 28, 20, 25, tzinfo=timezone.utc),
     )
     domain_event = AgentRunEventRow(
@@ -1490,7 +1617,7 @@ def test_finalize_cycle_run_degrades_when_contract_repair_fails(monkeypatch):
         agent_run=agent_run,
         run=cycle_run,
         cycle=cycle,
-        artifacts=[bad_answer],
+        artifacts=[substantive_draft],
         events=[domain_event],
     )
 
@@ -1498,7 +1625,7 @@ def test_finalize_cycle_run_degrades_when_contract_repair_fails(monkeypatch):
 
     async def fake_repair(**kwargs):
         repair_calls.append(kwargs)
-        return "Verified current runtime facts: Git metadata is unavailable right now."
+        return "The repair attempt did not include the requested section."
 
     monkeypatch.setattr(contract_gate, "_async_repair_cycle_contract_answer", fake_repair)
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([fake_session]))
@@ -1510,8 +1637,9 @@ def test_finalize_cycle_run_degrades_when_contract_repair_fails(monkeypatch):
     assert cycle.last_status == "degraded"
     assert cycle_run.error.startswith("mission_contract_failed: missing")
     latest_answer = fake_session._artifacts[-1].text
-    assert latest_answer.startswith("Cycle run degraded: mission_contract_failed")
-    assert "Verified current runtime facts" not in latest_answer
+    assert substantive_draft.text in latest_answer
+    assert "Cycle run degraded: mission_contract_failed" in latest_answer
+    assert latest_answer != "Cycle run degraded: mission_contract_failed"
     evaluation = next(
         item for item in fake_session.added if item.__class__.__name__ == "CycleRunEvaluation"
     )
@@ -1519,7 +1647,7 @@ def test_finalize_cycle_run_degrades_when_contract_repair_fails(monkeypatch):
     assert verdict["settlement_status"] == "mission_contract_failed"
     assert verdict["repair_attempted"] is True
     assert verdict["side_effects_succeeded"] is True
-    assert "24h readout" in verdict["missing_outputs"]
+    assert verdict["missing_outputs"] == ["short_self_review_summary"]
 
 
 @pytest.mark.asyncio
