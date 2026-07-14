@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from brain.kernel.common.pagination import next_offset_token, page_offset
 from brain.systems.runs.tool_catalog.handlers.common import *
 
 
@@ -43,6 +44,7 @@ async def _handle_manage_domain(
     source_record_id: int | None = None,
     target_record_id: int | None = None,
     properties: dict | None = None,
+    cursor: str | None = None,
 ) -> str:
     action = str(action or "").strip().lower()
     if action == "help":
@@ -141,6 +143,9 @@ async def _handle_manage_domain(
                 return json.dumps({"relation_type": await service.serialize_relation_type(added)}, default=str)
 
             if action == "query_records":
+                page_limit = max(1, min(int(limit or 50), 500))
+                page_kind = f"manage_domain:records:{domain.id}"
+                offset = page_offset(cursor, kind=page_kind)
                 record_format = str(format or "full").strip().lower()
                 if record_format not in {"full", "compact"}:
                     raise DomainError("format must be 'full' or 'compact'")
@@ -156,8 +161,9 @@ async def _handle_manage_domain(
                     object_key=object_key,
                     search=search,
                     include_archived=include_archived,
-                    limit=limit,
+                    limit=page_limit,
                     order=record_order,
+                    offset=offset,
                 )
                 if record_format == "compact":
                     records = [
@@ -173,6 +179,7 @@ async def _handle_manage_domain(
                     search=search,
                     include_archived=include_archived,
                 )
+                has_more = offset + len(records) < total
                 return json.dumps(
                     {
                         "records": records,
@@ -180,6 +187,20 @@ async def _handle_manage_domain(
                         "total_matching": total,
                         "order": record_order,
                         "format": record_format,
+                        "truncated": has_more,
+                        "next_page": (
+                            next_offset_token(
+                                kind=page_kind,
+                                offset=offset,
+                                returned=len(records),
+                            )
+                            if has_more
+                            else None
+                        ),
+                        "evidence_health": {
+                            "status": "ok",
+                            "completeness": "more_available" if has_more else "complete",
+                        },
                     },
                     default=str,
                 )
@@ -258,16 +279,47 @@ async def _handle_manage_domain(
                 return json.dumps({"relation": await service.serialize_relation(relation)}, default=str)
 
             if action == "events":
+                page_limit = max(1, min(int(limit or 50), 200))
+                page_kind = f"manage_domain:events:{domain.id}"
+                offset = page_offset(cursor, kind=page_kind)
                 events = [
                     service.serialize_event(event)
                     for event in await service.list_events(
                         org_id,
                         domain.id,
                         record_id=record_id,
-                        limit=limit,
+                        limit=page_limit,
+                        offset=offset,
                     )
                 ]
-                return json.dumps({"events": events}, default=str)
+                total = await service.count_events(
+                    org_id,
+                    domain.id,
+                    record_id=record_id,
+                )
+                has_more = offset + len(events) < total
+                return json.dumps(
+                    {
+                        "events": events,
+                        "returned": len(events),
+                        "total_matching": total,
+                        "truncated": has_more,
+                        "next_page": (
+                            next_offset_token(
+                                kind=page_kind,
+                                offset=offset,
+                                returned=len(events),
+                            )
+                            if has_more
+                            else None
+                        ),
+                        "evidence_health": {
+                            "status": "ok",
+                            "completeness": "more_available" if has_more else "complete",
+                        },
+                    },
+                    default=str,
+                )
 
             return json.dumps({"error": f"Unknown action: {action}"})
     except (DomainError, DomainNotFound) as exc:

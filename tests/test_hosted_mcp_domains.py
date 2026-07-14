@@ -103,8 +103,9 @@ async def test_hosted_mcp_inspect_domains_reads_schema_and_optional_records():
             include_archived=False,
             limit=100,
             order="updated_desc",
+            offset=0,
         ):
-            assert (org_id, domain_id, object_key, search, filters, include_archived, limit, order) == (
+            assert (org_id, domain_id, object_key, search, filters, include_archived, limit, order, offset) == (
                 "org-1",
                 3,
                 "company",
@@ -113,6 +114,7 @@ async def test_hosted_mcp_inspect_domains_reads_schema_and_optional_records():
                 False,
                 2,
                 "updated_asc",
+                0,
             )
             return [record]
 
@@ -167,9 +169,13 @@ async def test_hosted_mcp_inspect_domains_reads_schema_and_optional_records():
         async def serialize_relation(self, item):
             return {"id": item.id}
 
-        async def list_events(self, org_id, domain_id, *, record_id=None, limit=50):
-            assert (org_id, domain_id, record_id, limit) == ("org-1", 3, None, 2)
+        async def list_events(self, org_id, domain_id, *, record_id=None, limit=50, offset=0):
+            assert (org_id, domain_id, record_id, limit, offset) == ("org-1", 3, None, 2, 0)
             return [event]
+
+        async def count_events(self, org_id, domain_id, *, record_id=None):
+            assert (org_id, domain_id, record_id) == ("org-1", 3, None)
+            return 1
 
         def serialize_event(self, item):
             return {"id": item.id, "event_type": item.event_type}
@@ -211,6 +217,8 @@ async def test_hosted_mcp_inspect_domains_reads_schema_and_optional_records():
 
     assert response.status_code == 200
     payload = json.loads(response.json()["result"]["content"][0]["text"])
+    next_page = payload.pop("next_page")
+    assert next_page
     assert payload == {
         "domain": {"id": 3, "slug": "crm", "objects": [{"key": "company"}]},
         "records": [{"id": 9, "title": "Acme", "data": {"status": "active"}}],
@@ -220,6 +228,9 @@ async def test_hosted_mcp_inspect_domains_reads_schema_and_optional_records():
         "format": "compact",
         "relations": [{"id": 4}],
         "events": [{"id": 7, "event_type": "record.created"}],
+        "event_total_matching": 1,
+        "truncated": True,
+        "evidence_health": {"status": "ok", "completeness": "more_available"},
     }
     assert session.order == []
 

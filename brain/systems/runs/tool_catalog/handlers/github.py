@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 from typing import Any
 
+from brain.kernel.common.pagination import InvalidPageToken
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
     async_create_repo_issue,
@@ -240,6 +241,7 @@ async def _read_with_token(
     token: str | None,
     pull_number: int | None,
     sha: str | None,
+    cursor: str | None,
 ) -> dict[str, Any]:
     if action in {"repo", "get_repo"}:
         repo = await async_get_repo_by_slug(repo_slug, token=token)
@@ -258,6 +260,7 @@ async def _read_with_token(
             since=_clean(since),
             include_pull_requests=bool(include_pull_requests),
             limit=_limit(limit),
+            cursor=cursor,
         )
     if action in {"list_pull_requests", "pull_requests", "prs"}:
         return await async_list_repo_pull_requests(
@@ -267,6 +270,7 @@ async def _read_with_token(
             head=_clean(head),
             base=_clean(base),
             limit=_limit(limit),
+            cursor=cursor,
         )
     if action in {"pull_request", "get_pull_request", "pr"}:
         return await async_get_pull_request(
@@ -309,6 +313,7 @@ async def _handle_read_github_source(
     sha: str | None = None,
     limit: int = 30,
     token_secret_key: str | None = None,
+    cursor: str | None = None,
 ) -> str:
     """Read GitHub repo metadata, issues, pull requests, counts, or CI checks."""
 
@@ -405,7 +410,10 @@ async def _handle_read_github_source(
                 token=candidate["token"],
                 pull_number=clean_pull_number,
                 sha=clean_sha,
+                cursor=_clean(cursor),
             )
+        except InvalidPageToken as exc:
+            return json.dumps({"error": str(exc)})
         except GitHubConnectorError as exc:
             last_error = exc
             if exc.status_code in negative_cache_statuses:

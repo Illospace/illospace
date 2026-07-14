@@ -95,7 +95,7 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         "- Use Cycle memory, revisions, guidance, output targets, and the workspace state as source of truth.\n"
         "- You may create, update, delete, or run Cycles when that is the right workspace action; include rationale.\n"
         "- If an output target is unavailable, repair or replace it when possible instead of treating it as a blocker.\n"
-        "- Report evidence health explicitly. If readers fail, warn, or return unexpectedly sparse data, mark the run degraded in your self-review and name the repair.\n"
+        "- Report evidence health explicitly. Follow next_page tokens to completion; routine pagination is not degradation and fully paginated reads are evidence_health=ok. If readers fail, warn, return unexpectedly sparse data, or cannot page to completion, mark the run degraded in your self-review and name the gap.\n"
         "- End with a short self-review summary suitable for the Cycle ledger and visible outputs.\n\n"
         "## Result Contract\n"
         f"{_json_block(result_contract)}\n\n"

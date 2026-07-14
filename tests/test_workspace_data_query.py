@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import json
 from types import SimpleNamespace
 
 from sqlalchemy import select
@@ -357,3 +358,234 @@ def test_workspace_data_activity_items_sort_newest_signals_first():
     assert items[0]["summary"] == "Let's fix the current thread activity answer."
     assert items[0]["thread_url"] == "https://illo.example.com/threads/idea-2"
     assert items[0]["thread_reference"]["thread_id"] == "idea-2"
+
+
+class _RowsResult:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def all(self):
+        return self._rows
+
+
+def _select_page(rows, stmt):
+    offset_clause = getattr(stmt, "_offset_clause", None)
+    limit_clause = getattr(stmt, "_limit_clause", None)
+    offset = int(getattr(offset_clause, "value", 0) or 0)
+    limit = int(getattr(limit_clause, "value", len(rows)) or len(rows))
+    return list(rows)[offset : offset + limit]
+
+
+async def test_read_cycles_pages_to_complete_history_and_watermark_is_one_bounded_query(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import workspace_data
+
+    now = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+    cycle = SimpleNamespace(
+        id=7,
+        name="GitHub Reflex",
+        user_id="user-1",
+        org_id="org-1",
+        deleted_at=None,
+    )
+    user = SimpleNamespace(name="Reflex owner")
+    runs = []
+    for run_id in range(5, 0, -1):
+        completed_at = now - timedelta(minutes=5 - run_id)
+        run = SimpleNamespace(
+            id=run_id,
+            cycle_id=cycle.id,
+            revision_id=None,
+            created_at=completed_at,
+            scheduled_for=completed_at,
+            started_at=completed_at,
+            completed_at=completed_at,
+            status="completed",
+            error=None,
+            skip_reason=None,
+            idea_id=None,
+            run_id=100 + run_id,
+            prompt_snapshot="Check GitHub events",
+            guidance_snapshot=[],
+            output_targets_snapshot=[],
+            context_snapshot={},
+            self_review_summary="Healthy evidence",
+        )
+        runs.append((run, cycle, user, None))
+
+    class CycleHistorySession(_FakeSession):
+        def __init__(self):
+            super().__init__()
+            self.statements = []
+
+        def execute(self, stmt):
+            self.statements.append(stmt)
+            return _RowsResult(_select_page(runs, stmt))
+
+    history_session = CycleHistorySession()
+    _patch_uow(monkeypatch, history_session)
+    monkeypatch.setattr(
+        workspace_data,
+        "_SOURCE_ADAPTERS",
+        {
+            "cycle_runs": workspace_data.WorkspaceDataSource(
+                name="cycle_runs",
+                description="Cycle history",
+                groups=("cycles",),
+                handler=workspace_data._run_cycle_runs,
+            )
+        },
+    )
+
+    seen_ids = []
+    cursor = None
+    pages = []
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}):
+        while True:
+            page = json.loads(
+                await workspace_data._handle_read_cycles(
+                    cycle_id=cycle.id,
+                    limit=2,
+                    cursor=cursor,
+                )
+            )
+            pages.append(page)
+            seen_ids.extend(item["id"] for item in page["sources"]["cycle_runs"])
+            cursor = page["next_page"]
+            if cursor is None:
+                break
+
+    assert seen_ids == [5, 4, 3, 2, 1]
+    assert pages[0]["truncated"] is True
+    assert pages[0]["next_page"]
+    assert pages[-1]["truncated"] is False
+    assert pages[-1]["evidence_health"] == {"status": "ok", "completeness": "complete"}
+
+    class WatermarkSession(_FakeSession):
+        def __init__(self):
+            super().__init__()
+            self.statements = []
+
+        def execute(self, stmt):
+            self.statements.append(stmt)
+            return _RowsResult([(runs[0][0], cycle)])
+
+    watermark_session = WatermarkSession()
+    _patch_uow(monkeypatch, watermark_session)
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}):
+        watermark = json.loads(
+            await workspace_data._handle_read_cycles(
+                cycle_id=cycle.id,
+                last_completed_run=True,
+            )
+        )
+
+    assert len(watermark_session.statements) == 1
+    statement = watermark_session.statements[0]
+    assert int(statement._limit_clause.value) == 1
+    assert "cycle_runs.completed_at IS NOT NULL" in str(statement)
+    assert watermark["last_completed_run"]["completed_at"] == runs[0][0].completed_at.isoformat()
+    assert watermark["evidence_health"] == {"status": "ok", "completeness": "complete"}
+    assert "truncated" not in watermark
+
+
+async def test_domain_tracker_and_event_feed_page_to_evidence_health_ok(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import workspace_data
+
+    now = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+    domain = SimpleNamespace(id=1, name="Tracker", archived_at=None)
+    object_type = SimpleNamespace(key="ticket", name="Ticket")
+    record_rows = [
+        (
+            SimpleNamespace(
+                id=record_id,
+                domain_id=1,
+                created_at=now - timedelta(minutes=record_id),
+                updated_at=now - timedelta(minutes=record_id),
+                title=f"Ticket {record_id}",
+                data={"status": "open"},
+                version=1,
+            ),
+            domain,
+            object_type,
+        )
+        for record_id in range(5, 0, -1)
+    ]
+    event_domain = SimpleNamespace(id=38, name="Event feed")
+    event_rows = [
+        (
+            SimpleNamespace(
+                id=event_id,
+                created_at=now - timedelta(minutes=event_id),
+                event_type="github.issue.updated",
+                domain_id=38,
+                record_id=None,
+                relation_id=None,
+                actor_kind="agent",
+                actor_id="reflex",
+                run_id=200 + event_id,
+                idea_id=None,
+                reason="Observed GitHub update",
+            ),
+            event_domain,
+        )
+        for event_id in range(5, 0, -1)
+    ]
+
+    class DomainPagingSession(_FakeSession):
+        def __init__(self, rows):
+            super().__init__()
+            self.rows = rows
+
+        def execute(self, stmt):
+            return _RowsResult(_select_page(self.rows, stmt))
+
+    async def read_all(source, handler, rows, domain_id):
+        _patch_uow(monkeypatch, DomainPagingSession(rows))
+        monkeypatch.setattr(
+            workspace_data,
+            "_SOURCE_ADAPTERS",
+            {
+                source: workspace_data.WorkspaceDataSource(
+                    name=source,
+                    description=source,
+                    groups=("records",),
+                    handler=handler,
+                )
+            },
+        )
+        seen = []
+        cursor = None
+        final_page = None
+        with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}):
+            while True:
+                final_page = json.loads(
+                    await workspace_data._handle_read_workspace_records(
+                        domain_id=domain_id,
+                        limit=2,
+                        cursor=cursor,
+                    )
+                )
+                seen.extend(item["id"] for item in final_page["sources"][source])
+                cursor = final_page["next_page"]
+                if cursor is None:
+                    return seen, final_page
+
+    record_ids, record_final = await read_all(
+        "domain_records",
+        workspace_data._run_domain_records,
+        record_rows,
+        1,
+    )
+    event_ids, event_final = await read_all(
+        "domain_events",
+        workspace_data._run_domain_events,
+        event_rows,
+        38,
+    )
+
+    assert record_ids == [5, 4, 3, 2, 1]
+    assert event_ids == [5, 4, 3, 2, 1]
+    assert record_final["evidence_health"] == {"status": "ok", "completeness": "complete"}
+    assert event_final["evidence_health"] == {"status": "ok", "completeness": "complete"}

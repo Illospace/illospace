@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from brain.systems.cortex.project_context.github import GitHubConnectorError, _issue_payload
+from brain.systems.cortex.project_context.github import (
+    GitHubConnectorError,
+    _issue_payload,
+    async_list_repo_issues,
+    async_list_repo_pull_requests,
+)
 from brain.systems.runs.execution_context import bind_agent_context, snapshot_agent_context
 from brain.systems.runs.tool_catalog.handlers.github import (
     _github_token_candidates,
@@ -64,6 +69,51 @@ async def test_read_github_source_handler_lists_issues_with_canonical_repo_and_b
     assert list_issues.await_args.kwargs["labels"] == ["bug"]
     assert list_issues.await_args.kwargs["assignee"] == "redawear"
     assert list_issues.await_args.kwargs["limit"] == 100
+
+
+@pytest.mark.asyncio
+async def test_github_issue_and_pull_request_lists_return_working_next_page_tokens():
+    issues = [
+        {"id": number, "number": number, "title": f"Issue {number}", "state": "open"}
+        for number in range(1, 5)
+    ]
+    pulls = [
+        {"id": number, "number": number, "title": f"PR {number}", "state": "open"}
+        for number in range(1, 4)
+    ]
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(return_value=issues),
+    ):
+        first_issues = await async_list_repo_issues("acme/widgets", limit=2)
+        second_issues = await async_list_repo_issues(
+            "acme/widgets",
+            limit=2,
+            cursor=first_issues["next_page"],
+        )
+
+    assert [item["number"] for item in first_issues["issues"]] == [1, 2]
+    assert first_issues["truncated"] is True
+    assert [item["number"] for item in second_issues["issues"]] == [3, 4]
+    assert second_issues["truncated"] is False
+    assert second_issues["evidence_health"] == {"status": "ok", "completeness": "complete"}
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(return_value=pulls),
+    ):
+        first_pulls = await async_list_repo_pull_requests("acme/widgets", limit=2)
+        second_pulls = await async_list_repo_pull_requests(
+            "acme/widgets",
+            limit=2,
+            cursor=first_pulls["next_page"],
+        )
+
+    assert [item["number"] for item in first_pulls["pull_requests"]] == [1, 2]
+    assert first_pulls["next_page"]
+    assert [item["number"] for item in second_pulls["pull_requests"]] == [3]
+    assert second_pulls["next_page"] is None
 
 
 @pytest.mark.asyncio
