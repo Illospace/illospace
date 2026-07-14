@@ -15,7 +15,11 @@ from brain.systems.runs.cortex.runner import (
     start_runner,
     stop_runner,
 )
-from brain.systems.cycles import start_cycle_scheduler, stop_cycle_scheduler
+from brain.systems.cycles import (
+    seconds_since_last_cycle_tick,
+    start_cycle_scheduler,
+    stop_cycle_scheduler,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,6 +83,16 @@ def _queue_stall_grace_seconds() -> float:
         return 45.0
 
 
+def _cycle_scheduler_stall_grace_seconds() -> float:
+    try:
+        return max(
+            1.0,
+            float(os.getenv("ILLO_CYCLE_SCHEDULER_STALL_GRACE_SECONDS", "300")),
+        )
+    except Exception:
+        return 300.0
+
+
 def _require_embedding_backend_ready() -> None:
     """Block worker startup until the configured GPU embedding worker is ready."""
     import brain.kernel.config as cfg
@@ -120,6 +134,7 @@ def main() -> None:
         check_interval_seconds=_queue_health_check_interval_seconds(),
         stall_grace_seconds=_queue_stall_grace_seconds(),
     )
+    cycle_scheduler_stall_grace_seconds = _cycle_scheduler_stall_grace_seconds()
     try:
         while _running:
             now = time.monotonic()
@@ -149,6 +164,18 @@ def main() -> None:
                             },
                         )
                         raise SystemExit(1)
+
+            if cycle_scheduler_enabled:
+                seconds_since_last_tick = seconds_since_last_cycle_tick()
+                if (
+                    seconds_since_last_tick is not None
+                    and seconds_since_last_tick > cycle_scheduler_stall_grace_seconds
+                ):
+                    logger.error(
+                        "cycle scheduler wedged; exiting for restart",
+                        extra={"seconds_since_last_tick": seconds_since_last_tick},
+                    )
+                    raise SystemExit(1)
             time.sleep(_poll_interval())
     finally:
         stop_runner(drain_timeout_seconds=_shutdown_drain_timeout_seconds())

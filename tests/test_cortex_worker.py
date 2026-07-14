@@ -125,3 +125,36 @@ def test_cycle_scheduler_can_be_explicitly_enabled(monkeypatch):
     monkeypatch.setenv("ILLO_WORKER_ENABLE_CYCLE_SCHEDULER", "1")
 
     assert _cycle_scheduler_enabled() is True
+
+
+def test_cycle_scheduler_stall_grace_defaults_to_five_minutes(monkeypatch):
+    from brain.systems.cortex.worker import _cycle_scheduler_stall_grace_seconds
+
+    monkeypatch.delenv("ILLO_CYCLE_SCHEDULER_STALL_GRACE_SECONDS", raising=False)
+
+    assert _cycle_scheduler_stall_grace_seconds() == 300.0
+
+
+def test_worker_exits_when_cycle_scheduler_heartbeat_is_stale(monkeypatch, caplog):
+    from brain.systems.cortex import worker
+
+    class QueueStallMonitorStub:
+        def should_check(self, *, now):
+            return False
+
+    monkeypatch.setattr(worker, "_running", True)
+    monkeypatch.setattr(worker, "_require_embedding_backend_ready", lambda: None)
+    monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: True)
+    monkeypatch.setattr(worker, "start_cycle_scheduler", lambda: None)
+    monkeypatch.setattr(worker, "start_runner", lambda: None)
+    monkeypatch.setattr(worker, "runner_health_snapshot", lambda: {"runner_running": True})
+    monkeypatch.setattr(worker, "QueueStallMonitor", lambda **_kwargs: QueueStallMonitorStub())
+    monkeypatch.setattr(worker, "seconds_since_last_cycle_tick", lambda: 301.0)
+    monkeypatch.setattr(worker, "stop_runner", lambda **_kwargs: None)
+    monkeypatch.setattr(worker, "stop_cycle_scheduler", lambda: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        worker.main()
+
+    assert exc_info.value.code == 1
+    assert "cycle scheduler wedged; exiting for restart" in caplog.text
