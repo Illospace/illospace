@@ -452,7 +452,11 @@ async def _query_runs(
     stmt = _apply_date_bounds(stmt, AgentRun.created_at, start, end)
     if run_id is not None:
         stmt = stmt.where(AgentRun.id != run_id)
-    if idea_id:
+    if idea_id and run_id is not None:
+        stmt = stmt.where(
+            or_(AgentRun.thread_id == idea_id, AgentRun.parent_run_id == run_id)
+        )
+    elif idea_id:
         stmt = stmt.where(AgentRun.thread_id == idea_id)
     if person_ids:
         stmt = stmt.where(AgentRun.user_id.in_(person_ids))

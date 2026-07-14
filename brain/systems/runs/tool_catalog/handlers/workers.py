@@ -28,6 +28,17 @@ _HEADLESS_BLOCKED_TOOLS = frozenset({
     "post_thread_discussion_reply",
 })
 
+_MATERIALIZED_PROJECT_CONTEXT_KEYS = frozenset({
+    "project_context_materialization",
+    "project_context_permission_scope",
+    "project_context_snapshot",
+    "project_runtime_context",
+    "project_workspace_manifest",
+    "resolved_workspace_root",
+    "workspace_root",
+    "workspaces",
+})
+
 
 def _current_agent_value(name: str) -> Any:
     value = getattr(_agent_context, name, None)
@@ -87,6 +98,21 @@ def _current_mapping(name: str) -> dict[str, Any]:
         if isinstance(value, Mapping):
             return dict(value)
     return {}
+
+
+def _inherited_run_mapping(
+    parent_value: Any,
+    current_value: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge live tool context without discarding durable Project materialization."""
+
+    parent = dict(parent_value or {}) if isinstance(parent_value, Mapping) else {}
+    current = dict(current_value or {}) if isinstance(current_value, Mapping) else {}
+    merged = {**parent, **current}
+    for key in _MATERIALIZED_PROJECT_CONTEXT_KEYS:
+        if key in parent:
+            merged[key] = parent[key]
+    return merged
 
 
 def _string_list(value: Any) -> list[str]:
@@ -270,8 +296,14 @@ async def _handle_spawn_worker(
             step_key=step_key,
             thread_id=_headless_thread_id(parent.id, step_key) if headless else None,
             profile=parent.profile,
-            target_ref=_current_mapping("target_ref") or dict(parent.target_ref or {}),
-            workspace_ref=_current_mapping("workspace_ref") or dict(parent.workspace_ref or {}),
+            target_ref=_inherited_run_mapping(
+                parent.target_ref,
+                _current_mapping("target_ref"),
+            ),
+            workspace_ref=_inherited_run_mapping(
+                parent.workspace_ref,
+                _current_mapping("workspace_ref"),
+            ),
             model_policy=dict(parent.model_policy or {}),
             metadata=worker_metadata,
         )

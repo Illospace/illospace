@@ -2,6 +2,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 
 def test_project_context_materialization_result_is_ready_when_evidence_is_degraded():
     from brain.systems.cortex.project_context.materializer import ProjectContextMaterializationResult
@@ -558,6 +560,91 @@ async def test_materialize_github_project_context_reports_explicit_vault_failure
     resource = run.target_metadata["project_context_snapshot"]["resources"][1]
     assert resource["materialization"]["error"] == "Vault key GITHUB_EXAMPLE_TOKEN: Vault secret was not found or is empty."
     assert run.target_status == "invalid"
+
+
+async def test_spawned_reader_materializes_with_parent_project_bound_github_credential(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    run = SimpleNamespace(
+        id=311,
+        parent_run_id=42,
+        user_id="user-1",
+        org_id="org-1",
+        metadata_={
+            "origin": "spawn_worker",
+            "spawned_by_tool": True,
+            "worker_role": "repo_reader",
+        },
+        target_ref={
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {
+                        "kind": "repo",
+                        "repo": "uwear-ai/uwear-backend",
+                        "uri": "https://github.com/uwear-ai/uwear-backend",
+                    }
+                ],
+            }
+        },
+        workspace_ref={},
+        target_status="resolved",
+        target_validation_error=None,
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    clone_calls = []
+
+    def fake_clone(slug, destination, *, token, branch):
+        clone_calls.append({"slug": slug, "token": token})
+        destination.mkdir(parents=True)
+        (destination / "README.md").write_text("reader evidence", encoding="utf-8")
+        return {"path": str(destination), "branch": branch or "main", "commit": "reader123"}
+
+    resolve_project_bound = AsyncMock(
+        return_value={"GITHUB_TOKEN__COORDINATOR": "parent-working-token"}
+    )
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(materializer, "list_secrets", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        materializer,
+        "async_resolve_project_bound_env_tokens",
+        resolve_project_bound,
+        raising=False,
+    )
+    monkeypatch.setattr(materializer, "_clone_github_repo", fake_clone)
+
+    result = await materialize_project_context_workspaces(
+        run.id,
+        workspace_root=str(tmp_path / "headless-worker"),
+        user_id=run.user_id,
+        org_id=run.org_id,
+    )
+
+    assert result.ok
+    assert clone_calls == [{"slug": "uwear-ai/uwear-backend", "token": "parent-working-token"}]
+    resolve_project_bound.assert_awaited_once_with(
+        actor_user_id="user-1",
+        org_id="org-1",
+        project_slug="uwear-ai/uwear-backend",
+    )
+    assert (Path(result.workspaces[1]["path"]) / "README.md").read_text(encoding="utf-8") == "reader evidence"
+    assert "parent-working-token" not in str(run.target_ref)
+    assert "parent-working-token" not in str(run.workspace_ref)
+    assert "parent-working-token" not in str(run.metadata_)
 
 
 async def test_materialize_github_folder_uri_mounts_repo_subpath(tmp_path, monkeypatch):
@@ -1344,3 +1431,121 @@ def test_runner_fails_fast_when_project_context_has_no_workspace(monkeypatch):
     assert captured["run_id"] == 49
     assert "Project Context unavailable" in captured["error"]
     assert "did not provide a usable workspace" in captured["final_answer"]
+
+
+@pytest.mark.parametrize("materialization_ok", [False, True])
+async def test_spawned_reader_materialization_issue_degrades_parent_cycle_evidence_health(
+    monkeypatch,
+    materialization_ok,
+):
+    from brain.systems.runs.cortex import runner
+
+    child = SimpleNamespace(
+        id=49,
+        parent_run_id=42,
+        root_run_id=42,
+        user_id="user-1",
+        org_id="org-1",
+        thread_id="headless-worker:42:reader",
+        metadata_={
+            "origin": "spawn_worker",
+            "spawned_by_tool": True,
+            "worker_role": "repo_reader",
+        },
+        target_ref={
+            "project_context_snapshot": {
+                "resources": [
+                    {
+                        "kind": "repo",
+                        "repo": "example-org/missing-repo",
+                        "uri": "https://github.com/example-org/missing-repo",
+                    }
+                ]
+            }
+        },
+        workspace_ref={},
+    )
+    parent = SimpleNamespace(
+        id=42,
+        root_run_id=42,
+        metadata_={
+            "source": "cycle",
+            "cycle_run_id": 12,
+            "evidence_health": {"status": "pending"},
+        },
+    )
+    cycle_run = SimpleNamespace(
+        id=12,
+        context_snapshot={"evidence_health": {"status": "pending", "expected_checks": ["github"]}},
+    )
+
+    class FakeSession:
+        async def get(self, _model, object_id, **_kwargs):
+            return {49: child, 42: parent, 12: cycle_run}.get(object_id)
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    events = []
+
+    class FakeStore:
+        def __init__(self, _session, **_kwargs):
+            pass
+
+        async def append_event(self, event):
+            events.append(event)
+            return SimpleNamespace(id=len(events), sequence_no=len(events), root_run_id=42)
+
+    error = "Could not materialize GitHub repository example-org/missing-repo: credential denied."
+    resource_failure = {
+        "kind": "repo",
+        "repo": "example-org/missing-repo",
+        "error": error,
+    }
+    result = SimpleNamespace(
+        ok=materialization_ok,
+        workspaces=[{"path": "/tmp/project-root"}] if materialization_ok else [],
+        errors=[] if materialization_ok else [error],
+        warnings=[error] if materialization_ok else [],
+        failed_resources=[] if materialization_ok else [resource_failure],
+        degraded_resources=[resource_failure] if materialization_ok else [],
+    )
+    mark_failed = AsyncMock(return_value=None)
+    monkeypatch.setattr(runner, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(runner, "AsyncAgentRunStore", FakeStore)
+    monkeypatch.setattr(runner, "_async_record_project_activity", AsyncMock())
+    monkeypatch.setattr(runner, "materialize_project_context_workspaces", AsyncMock(return_value=result))
+    monkeypatch.setattr(runner, "_mark_run_failed_after_runner_error_async", mark_failed)
+
+    context_ready, status_payload = await runner._async_materialize_project_context(child.id)
+
+    assert context_ready is materialization_ok
+    assert status_payload is None
+    failure = parent.metadata_["evidence_health"]["failures"][0]
+    assert parent.metadata_["evidence_health"]["status"] == "degraded"
+    assert cycle_run.context_snapshot["evidence_health"]["status"] == "degraded"
+    assert cycle_run.context_snapshot["evidence_health"]["expected_checks"] == ["github"]
+    assert cycle_run.context_snapshot["evidence_health"]["failures"] == [failure]
+    assert failure == {
+        "kind": "worker_tool_failure",
+        "tool": "spawn_worker",
+        "child_run_id": 49,
+        "worker_run_id": 49,
+        "worker_role": "repo_reader",
+        "repo": "example-org/missing-repo",
+        "stage": "project_context_materialization",
+        "error": error,
+    }
+    assert [(event.run_id, event.event_type, event.payload) for event in events] == [
+        (42, "run.worker_failed", failure)
+    ]
+    if materialization_ok:
+        mark_failed.assert_not_awaited()
+    else:
+        mark_failed.assert_awaited_once()
