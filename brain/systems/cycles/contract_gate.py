@@ -46,6 +46,13 @@ _EVIDENCE_HEALTH_VALUES = (
     "unknown",
 )
 
+_NON_PRESERVABLE_OUTPUTS = frozenset(
+    {
+        "visible_final_answer",
+        "candidate_is_runtime_introspection",
+    }
+)
+
 _MISSION_OUTPUT_ALIASES: dict[str, tuple[str, ...]] = {
     "24h readout": (
         "24h readout",
@@ -96,6 +103,10 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(key)
         deduped.append(key)
     return deduped
+
+
+def _missing_outputs_allow_append(missing_outputs: list[str]) -> bool:
+    return not _NON_PRESERVABLE_OUTPUTS.intersection(missing_outputs)
 
 
 def _looks_like_introspection_boilerplate(text: str) -> bool:
@@ -440,14 +451,27 @@ def _repair_prompt(
     evidence_packet: dict[str, Any],
     missing_outputs: list[str],
     candidate_answer: str,
+    append_only: bool = False,
 ) -> list[dict[str, str]]:
+    repair_instruction = (
+        "The candidate is a substantive draft that must remain unchanged. Produce only one or "
+        "more appendable sections for the named missing outputs. Append only the missing sections; "
+        "do not repeat or rewrite the candidate. Return the new section text only."
+        if append_only
+        else "Produce the corrected visible final answer only."
+    )
+    candidate_label = (
+        "Candidate visible answer to preserve unchanged"
+        if append_only
+        else "Candidate visible answer"
+    )
     return [
         {
             "role": "system",
             "content": (
                 "You are repairing one scheduled Cycle final answer before it becomes visible. "
                 "Use only the supplied mission, result contract, evidence packet, and candidate. "
-                "Do not claim fresh tool access. Produce the corrected visible final answer only. "
+                f"Do not claim fresh tool access. {repair_instruction} "
                 "If evidence is insufficient, say evidence_health=degraded and name the gap."
             ),
         },
@@ -462,7 +486,7 @@ def _repair_prompt(
                 f"{json.dumps(evidence_packet, ensure_ascii=True, sort_keys=True, default=str)[:5000]}\n\n"
                 "Missing required outputs:\n"
                 f"{json.dumps(missing_outputs, ensure_ascii=True)}\n\n"
-                "Candidate visible answer:\n"
+                f"{candidate_label}:\n"
                 f"{candidate_answer[:4000]}"
             ),
         },
@@ -525,6 +549,7 @@ async def _async_repair_cycle_contract_answer(
                 evidence_packet=evidence_packet,
                 missing_outputs=missing_outputs,
                 candidate_answer=candidate_answer,
+                append_only=_missing_outputs_allow_append(missing_outputs),
             ),
             max_tokens=1200,
             system=None,
@@ -557,11 +582,36 @@ def _completed_side_effect_names(evidence_packet: dict[str, Any]) -> list[str]:
     return _dedupe(names)
 
 
+def _candidate_can_be_preserved(
+    candidate_answer: str,
+    review: dict[str, Any],
+) -> bool:
+    missing_outputs = set(_json_list(review.get("missing_outputs")))
+    return (
+        bool(str(candidate_answer or "").strip())
+        and not review.get("provider_error")
+        and _missing_outputs_allow_append(list(missing_outputs))
+    )
+
+
+def _append_targeted_repair(candidate_answer: str, repair_answer: str) -> str:
+    candidate = str(candidate_answer or "").strip()
+    repair = str(repair_answer or "").strip()
+    if not candidate:
+        return repair
+    if not repair or repair in candidate:
+        return candidate
+    if candidate in repair:
+        return repair
+    return f"{candidate}\n\n{repair}"
+
+
 def _degraded_visible_answer(
     missing_outputs: list[str],
     *,
     provider_error: str | None = None,
     evidence_packet: dict[str, Any] | None = None,
+    candidate_answer: str | None = None,
 ) -> str:
     if provider_error:
         side_effect_names = _completed_side_effect_names(_json_dict(evidence_packet))
@@ -577,10 +627,14 @@ def _degraded_visible_answer(
             f"was produced. {side_effect_sentence}"
         )
     missing = ", ".join(missing_outputs[:8]) if missing_outputs else "required Cycle outputs"
-    return (
+    explanation = (
         "Cycle run degraded: mission_contract_failed. The run completed side effects, "
         f"but its visible final answer did not satisfy the Cycle result contract. Missing: {missing}."
     )
+    candidate = str(candidate_answer or "").strip()
+    if not candidate:
+        return explanation
+    return f"{candidate}\n\n---\n{explanation}"
 
 
 def _base_verdict(
@@ -691,7 +745,11 @@ async def async_prepare_cycle_run_visible_finalization(
         _persist_cycle_contract_verdict(cycle_run, verdict)
         return verdict
 
+    append_only = _candidate_can_be_preserved(candidate_answer, initial_review)
+    preserved_answer = candidate_answer if append_only else None
+    preserved_answer_source = "candidate" if append_only else None
     verdict["repair_attempted"] = True
+    verdict["repair_mode"] = "append_missing_outputs" if append_only else "replace_invalid_answer"
     try:
         repair_answer = await _async_repair_cycle_contract_answer(
             agent_run=agent_run,
@@ -705,8 +763,13 @@ async def async_prepare_cycle_run_visible_finalization(
         logger.exception("cycle_contract_repair_call_failed", extra={"run_id": int(agent_run.id)})
         repair_answer = None
     if repair_answer:
+        combined_answer = (
+            _append_targeted_repair(candidate_answer, repair_answer)
+            if append_only and not provider_error_kind(repair_answer)
+            else repair_answer
+        )
         repair_review = evaluate_cycle_result_contract(
-            candidate_answer=repair_answer,
+            candidate_answer=combined_answer,
             result_contract=result_contract,
             mission=mission,
             evidence_packet=evidence_packet,
@@ -721,18 +784,21 @@ async def async_prepare_cycle_run_visible_finalization(
             repaired_artifact = await _append_final_answer_artifact_once(
                 session,
                 agent_run,
-                repair_answer,
+                combined_answer,
                 payload={
                     "source": "cycle_result_contract_gate",
                     "repair_for_artifact_id": getattr(artifact, "id", None),
                     "initial_missing_outputs": list(initial_review["missing_outputs"]),
+                    "repair_mode": verdict["repair_mode"],
                 },
             )
             verdict.update(
                 {
                     "repair_succeeded": True,
                     "settlement_status": "mission_success_after_repair",
-                    "visible_answer_source": "repair",
+                    "visible_answer_source": (
+                        "candidate_with_repair" if append_only else "repair"
+                    ),
                     "repaired_artifact_id": getattr(repaired_artifact, "id", None),
                     "repaired_summary": repair_review["candidate_summary"],
                     "final_missing_outputs": [],
@@ -742,12 +808,16 @@ async def async_prepare_cycle_run_visible_finalization(
             return verdict
         verdict["repair_missing_outputs"] = list(repair_review["missing_outputs"])
         verdict["final_missing_outputs"] = list(repair_review["missing_outputs"])
+        if not append_only and _candidate_can_be_preserved(combined_answer, repair_review):
+            preserved_answer = combined_answer
+            preserved_answer_source = "repair"
 
     missing_outputs = list(verdict.get("final_missing_outputs") or verdict["missing_outputs"])
     degraded_answer = _degraded_visible_answer(
         missing_outputs,
         provider_error=verdict.get("provider_error"),
         evidence_packet=evidence_packet,
+        candidate_answer=preserved_answer,
     )
     degraded_artifact = await _append_final_answer_artifact_once(
         session,
@@ -757,12 +827,26 @@ async def async_prepare_cycle_run_visible_finalization(
             "source": "cycle_result_contract_gate",
             "settlement_status": "mission_contract_failed",
             "missing_outputs": missing_outputs,
+            "preserved_candidate_artifact_id": (
+                getattr(artifact, "id", None)
+                if preserved_answer_source == "candidate"
+                else None
+            ),
+            "preserved_answer_source": preserved_answer_source,
         },
     )
     verdict.update(
         {
             "settlement_status": "mission_contract_failed",
-            "visible_answer_source": "degraded_explanation",
+            "visible_answer_source": (
+                "candidate_with_degraded_explanation"
+                if preserved_answer_source == "candidate"
+                else (
+                    "repair_with_degraded_explanation"
+                    if preserved_answer_source == "repair"
+                    else "degraded_explanation"
+                )
+            ),
             "degraded_artifact_id": getattr(degraded_artifact, "id", None),
             "degraded_summary": _candidate_summary(degraded_answer),
             "final_missing_outputs": missing_outputs,
