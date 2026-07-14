@@ -789,3 +789,43 @@ async def test_count_records_matches_list_scope_without_limit_or_order(session):
     ) == len(all_alpha_tickets) == 2
     assert len(await service.list_records(ORG_ID, domain.id, limit=1)) == 1
     assert await service.count_records(ORG_ID, domain.id) == 3
+
+
+async def test_record_and_event_list_offsets_fetch_following_pages(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="Paginated Tracker",
+        objects=[
+            {
+                "key": "ticket",
+                "title_field": "title",
+                "fields": [{"key": "title", "field_type": "text", "required": True}],
+            }
+        ],
+    )
+    created = [
+        await service.create_record(
+            ORG_ID,
+            domain.id,
+            "ticket",
+            data={"title": f"Ticket {index}"},
+        )
+        for index in range(5)
+    ]
+
+    first_records = await service.list_records(ORG_ID, domain.id, limit=2)
+    second_records = await service.list_records(ORG_ID, domain.id, limit=2, offset=2)
+    third_records = await service.list_records(ORG_ID, domain.id, limit=2, offset=4)
+    assert [record.id for record in first_records + second_records + third_records] == [
+        record.id for record in reversed(created)
+    ]
+
+    all_events = await service.list_events(ORG_ID, domain.id, limit=20)
+    paged_events = []
+    for offset in range(0, len(all_events), 2):
+        paged_events.extend(
+            await service.list_events(ORG_ID, domain.id, limit=2, offset=offset)
+        )
+    assert [event.id for event in paged_events] == [event.id for event in all_events]
+    assert await service.count_events(ORG_ID, domain.id) == len(all_events)

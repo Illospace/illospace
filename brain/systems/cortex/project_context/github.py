@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from brain.kernel.common.pagination import InvalidPageToken, decode_page_token, encode_page_token
 from brain.platform.async_io import async_http_client, sync_http_client
 
 
@@ -403,12 +404,23 @@ async def async_list_repo_issues(
     since: str | None = None,
     include_pull_requests: bool = False,
     limit: int = 30,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     owner, repo = slug.split("/", 1)
     max_items = max(1, min(int(limit or 30), GITHUB_ITEM_LIMIT))
+    page_kind = f"github_issues:{slug}"
+    position = decode_page_token(cursor, kind=page_kind)
+    try:
+        page = int(position.get("page", 1))
+        page_index = int(position.get("index", 0))
+    except (TypeError, ValueError) as exc:
+        raise InvalidPageToken("Invalid pagination cursor") from exc
+    if page < 1 or page_index < 0:
+        raise InvalidPageToken("Invalid pagination cursor")
     params: dict[str, Any] = {
         "state": state or "open",
         "per_page": GITHUB_ITEM_LIMIT,
+        "page": page,
         "sort": "updated",
         "direction": "desc",
     }
@@ -430,14 +442,27 @@ async def async_list_repo_issues(
             token=token,
             params=params,
         )
-    items = data if isinstance(data, list) else []
+    raw_items = data if isinstance(data, list) else []
+    items = raw_items
     if not include_pull_requests:
         items = [item for item in items if not (isinstance(item, dict) and item.get("pull_request"))]
+    selected = items[page_index : page_index + max_items]
+    next_position = None
+    if page_index + max_items < len(items):
+        next_position = {"page": page, "index": page_index + max_items}
+    elif len(raw_items) == GITHUB_ITEM_LIMIT:
+        next_position = {"page": page + 1, "index": 0}
     return {
         "repo": slug,
         "state": params["state"],
-        "issues": [_issue_payload(item) for item in items[:max_items] if isinstance(item, dict)],
+        "issues": [_issue_payload(item) for item in selected if isinstance(item, dict)],
         "included_pull_requests": include_pull_requests,
+        "truncated": next_position is not None,
+        "next_page": encode_page_token(page_kind, next_position) if next_position else None,
+        "evidence_health": {
+            "status": "ok",
+            "completeness": "more_available" if next_position else "complete",
+        },
     }
 
 
@@ -449,12 +474,23 @@ async def async_list_repo_pull_requests(
     head: str | None = None,
     base: str | None = None,
     limit: int = 30,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     owner, repo = slug.split("/", 1)
     max_items = max(1, min(int(limit or 30), GITHUB_ITEM_LIMIT))
+    page_kind = f"github_pull_requests:{slug}"
+    position = decode_page_token(cursor, kind=page_kind)
+    try:
+        page = int(position.get("page", 1))
+        page_index = int(position.get("index", 0))
+    except (TypeError, ValueError) as exc:
+        raise InvalidPageToken("Invalid pagination cursor") from exc
+    if page < 1 or page_index < 0:
+        raise InvalidPageToken("Invalid pagination cursor")
     params: dict[str, Any] = {
         "state": state or "open",
-        "per_page": max_items,
+        "per_page": GITHUB_ITEM_LIMIT,
+        "page": page,
         "sort": "updated",
         "direction": "desc",
     }
@@ -471,10 +507,22 @@ async def async_list_repo_pull_requests(
             params=params,
         )
     items = data if isinstance(data, list) else []
+    selected = items[page_index : page_index + max_items]
+    next_position = None
+    if page_index + max_items < len(items):
+        next_position = {"page": page, "index": page_index + max_items}
+    elif len(items) == GITHUB_ITEM_LIMIT:
+        next_position = {"page": page + 1, "index": 0}
     return {
         "repo": slug,
         "state": params["state"],
-        "pull_requests": [_pull_request_payload(item) for item in items[:max_items] if isinstance(item, dict)],
+        "pull_requests": [_pull_request_payload(item) for item in selected if isinstance(item, dict)],
+        "truncated": next_position is not None,
+        "next_page": encode_page_token(page_kind, next_position) if next_position else None,
+        "evidence_health": {
+            "status": "ok",
+            "completeness": "more_available" if next_position else "complete",
+        },
     }
 
 

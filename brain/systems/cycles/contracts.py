@@ -50,6 +50,10 @@ def cycle_result_contract() -> dict[str, Any]:
             "the_run_cannot_access_required_context_or_output_targets",
             "the_final_response_does_not_state_evidence_health",
         ],
+        "pagination_health": (
+            "truncated_with_next_page_means_more_available_not_degraded; "
+            "follow_next_page_to_completion_and_report_ok_when_no_reader_warnings_or_failures_remain"
+        ),
     }
 
 
@@ -66,9 +70,11 @@ def pending_evidence_health_receipt(scheduled_for: datetime | None) -> dict[str,
             "output_target_available",
         ],
         "repair_instruction": (
-            "If evidence readers are empty, warning, or failing in a way that conflicts with "
-            "the mission, report evidence_health=degraded and name the repair before drawing "
-            "strong conclusions."
+            "Follow next_page tokens until pagination is complete. Routine truncation with a cursor "
+            "is more_available, not degraded; report evidence_health=ok after all pages complete. "
+            "If evidence readers are empty, warning, failing, or cannot be paged to completion in a "
+            "way that conflicts with the mission, report evidence_health=degraded and name the gap "
+            "before drawing strong conclusions."
         ),
     }
 

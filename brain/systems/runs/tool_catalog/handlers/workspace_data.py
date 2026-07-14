@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 from sqlalchemy import String, and_, cast, func, or_, select
 
+from brain.kernel.common.pagination import next_offset_token, page_offset
 from brain.systems.cortex.thread_links import thread_id_from_reference, thread_link_payload
 from brain.systems.runs.tool_definitions import WORKSPACE_OVERVIEW_SPARSE_GUIDANCE
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, logger
@@ -29,11 +30,13 @@ class WorkspaceDataQueryContext:
     idea_id: str | None
     run_id: int | None
     domain_id: int | None
+    cycle_id: int | None
     object_key: str | None
     query: str | None
     search: str | None
     include_archived: bool
     limit: int
+    offset: int
 
 
 @dataclass(frozen=True)
@@ -202,6 +205,22 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _workspace_page_kind(source_names: list[str]) -> str:
+    return f"workspace_data:{','.join(source_names)}"
+
+
+def _page_rows(
+    payload: dict[str, Any],
+    source: str,
+    rows: list[Any],
+    *,
+    limit: int,
+) -> list[Any]:
+    if len(rows) > limit:
+        payload.setdefault("_more_sources", []).append(source)
+    return rows[:limit]
 
 
 def _thread_id_from_first_reference(*values: Any) -> str | None:
@@ -842,6 +861,7 @@ async def _query_domains(
     search: str | None,
     include_archived: bool,
     limit: int,
+    offset: int = 0,
 ) -> None:
     if not org_id:
         payload["warnings"].append({"source": "domains", "error": "org_id required"})
@@ -849,7 +869,13 @@ async def _query_domains(
         return
     from brain.platform.db.models.domain import Domain
 
-    stmt = select(Domain).where(Domain.org_id == org_id).order_by(Domain.updated_at.desc()).limit(limit)
+    stmt = (
+        select(Domain)
+        .where(Domain.org_id == org_id)
+        .order_by(Domain.updated_at.desc(), Domain.id.desc())
+        .offset(offset)
+        .limit(limit + 1)
+    )
     stmt = _apply_date_bounds(stmt, Domain.updated_at, start, end)
     if domain_id is not None:
         stmt = stmt.where(Domain.id == domain_id)
@@ -861,7 +887,12 @@ async def _query_domains(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = await _session_scalars_all(session, stmt)
+    rows = _page_rows(
+        payload,
+        "domains",
+        await _session_scalars_all(session, stmt),
+        limit=limit,
+    )
     payload["sources"]["domains"] = [
         {
             "id": int(domain.id),
@@ -893,6 +924,7 @@ async def _query_domain_records(
     search: str | None,
     include_archived: bool,
     limit: int,
+    offset: int = 0,
 ) -> None:
     if not org_id:
         payload["warnings"].append({"source": "domain_records", "error": "org_id required"})
@@ -906,7 +938,8 @@ async def _query_domain_records(
         .join(DomainObjectType, DomainObjectType.id == DomainRecord.object_type_id)
         .where(DomainRecord.org_id == org_id)
         .order_by(DomainRecord.updated_at.desc(), DomainRecord.id.desc())
-        .limit(limit)
+        .offset(offset)
+        .limit(limit + 1)
     )
     stmt = _apply_date_bounds(stmt, DomainRecord.updated_at, start, end)
     if domain_id is not None:
@@ -921,7 +954,12 @@ async def _query_domain_records(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = await _session_execute_all(session, stmt)
+    rows = _page_rows(
+        payload,
+        "domain_records",
+        await _session_execute_all(session, stmt),
+        limit=limit,
+    )
     payload["sources"]["domain_records"] = [
         {
             "id": int(record.id),
@@ -952,6 +990,7 @@ async def _query_domain_events(
     domain_id: int | None,
     search: str | None,
     limit: int,
+    offset: int = 0,
 ) -> None:
     if not org_id:
         payload["warnings"].append({"source": "domain_events", "error": "org_id required"})
@@ -964,7 +1003,8 @@ async def _query_domain_events(
         .join(Domain, Domain.id == DomainEvent.domain_id)
         .where(DomainEvent.org_id == org_id)
         .order_by(DomainEvent.created_at.desc(), DomainEvent.id.desc())
-        .limit(limit)
+        .offset(offset)
+        .limit(limit + 1)
     )
     stmt = _apply_date_bounds(stmt, DomainEvent.created_at, start, end)
     if domain_id is not None:
@@ -975,7 +1015,12 @@ async def _query_domain_events(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = await _session_execute_all(session, stmt)
+    rows = _page_rows(
+        payload,
+        "domain_events",
+        await _session_execute_all(session, stmt),
+        limit=limit,
+    )
     payload["sources"]["domain_events"] = [
         {
             "id": int(event.id),
@@ -1121,9 +1166,11 @@ async def _query_cycles(
     org_id: str | None,
     user_id: str | None,
     person_ids: list[str],
+    cycle_id: int | None,
     search: str | None,
     include_archived: bool,
     limit: int,
+    offset: int = 0,
 ) -> None:
     from brain.platform.db.models.cycle import Cycle
     from brain.platform.db.models.idea import Idea
@@ -1133,13 +1180,16 @@ async def _query_cycles(
         select(Cycle, User, Idea)
         .outerjoin(User, User.id == Cycle.user_id)
         .outerjoin(Idea, Idea.id == Cycle.target_idea_id)
-        .order_by(Cycle.updated_at.desc().nullslast(), Cycle.created_at.desc())
-        .limit(limit)
+        .order_by(Cycle.updated_at.desc().nullslast(), Cycle.created_at.desc(), Cycle.id.desc())
+        .offset(offset)
+        .limit(limit + 1)
     )
     stmt = _scope_cycle(stmt, Cycle, User, org_id=org_id, user_id=user_id)
     stmt = _apply_date_bounds(stmt, Cycle.updated_at, start, end)
     if person_ids:
         stmt = stmt.where(Cycle.user_id.in_(person_ids))
+    if cycle_id is not None:
+        stmt = stmt.where(Cycle.id == cycle_id)
     if not include_archived:
         stmt = stmt.where(Cycle.deleted_at.is_(None))
     text_match = _text_filter(
@@ -1155,7 +1205,12 @@ async def _query_cycles(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = await _session_execute_all(session, stmt)
+    rows = _page_rows(
+        payload,
+        "cycles",
+        await _session_execute_all(session, stmt),
+        limit=limit,
+    )
     payload["sources"]["cycles"] = [
         {
             "id": int(cycle.id),
@@ -1200,9 +1255,11 @@ async def _query_cycle_runs(
     user_id: str | None,
     person_ids: list[str],
     idea_id: str | None,
+    cycle_id: int | None,
     search: str | None,
     include_archived: bool,
     limit: int,
+    offset: int = 0,
 ) -> None:
     from brain.platform.db.models.cycle import Cycle, CycleRun
     from brain.platform.db.models.idea import Idea
@@ -1214,12 +1271,15 @@ async def _query_cycle_runs(
         .outerjoin(User, User.id == Cycle.user_id)
         .outerjoin(Idea, Idea.id == CycleRun.idea_id)
         .order_by(CycleRun.created_at.desc(), CycleRun.id.desc())
-        .limit(limit)
+        .offset(offset)
+        .limit(limit + 1)
     )
     stmt = _scope_cycle(stmt, Cycle, User, org_id=org_id, user_id=user_id)
     stmt = _apply_date_bounds(stmt, CycleRun.created_at, start, end)
     if idea_id:
         stmt = stmt.where(CycleRun.idea_id == idea_id)
+    if cycle_id is not None:
+        stmt = stmt.where(CycleRun.cycle_id == cycle_id)
     if person_ids:
         stmt = stmt.where(Cycle.user_id.in_(person_ids))
     if not include_archived:
@@ -1237,7 +1297,12 @@ async def _query_cycle_runs(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = await _session_execute_all(session, stmt)
+    rows = _page_rows(
+        payload,
+        "cycle_runs",
+        await _session_execute_all(session, stmt),
+        limit=limit,
+    )
     payload["sources"]["cycle_runs"] = [
         {
             "id": int(run.id),
@@ -1267,6 +1332,63 @@ async def _query_cycle_runs(
         }
         for run, cycle, user, idea in rows
     ]
+
+
+async def _query_last_completed_cycle_run(
+    *,
+    cycle_id: int,
+    org_id: str | None,
+    user_id: str | None,
+    include_deleted: bool,
+) -> dict[str, Any]:
+    """Read one cycle watermark without scanning the broad run-history surface."""
+    from brain.platform.db.models.cycle import Cycle, CycleRun
+    from brain.platform.db.models.org import User
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+    if not org_id and not user_id:
+        return {
+            "view": "cycle_last_completed_run",
+            "cycle_id": cycle_id,
+            "last_completed_run": None,
+            "error": "read_cycles could not access this workspace or user context",
+            "evidence_health": {"status": "degraded", "completeness": "unavailable"},
+        }
+
+    async with UnitOfWork() as uow:
+        stmt = (
+            select(CycleRun, Cycle)
+            .join(Cycle, Cycle.id == CycleRun.cycle_id)
+            .where(
+                CycleRun.cycle_id == cycle_id,
+                CycleRun.completed_at.is_not(None),
+            )
+            .order_by(CycleRun.completed_at.desc(), CycleRun.id.desc())
+            .limit(1)
+        )
+        stmt = _scope_cycle(stmt, Cycle, User, org_id=org_id, user_id=user_id)
+        if not include_deleted:
+            stmt = stmt.where(Cycle.deleted_at.is_(None))
+        rows = await _session_execute_all(uow.session, stmt)
+
+    if not rows:
+        watermark = None
+    else:
+        run, cycle = rows[0]
+        watermark = {
+            "cycle_id": int(cycle.id),
+            "cycle_name": cycle.name,
+            "cycle_run_id": int(run.id),
+            "completed_at": _serialize_dt(run.completed_at),
+            "status": run.status,
+            "run_id": int(run.run_id) if run.run_id is not None else None,
+        }
+    return {
+        "view": "cycle_last_completed_run",
+        "cycle_id": cycle_id,
+        "last_completed_run": watermark,
+        "evidence_health": {"status": "ok", "completeness": "complete"},
+    }
 
 
 def _activity_timestamp(record: Mapping[str, Any]) -> str | None:
@@ -1516,6 +1638,7 @@ async def _run_domains(session: Any, payload: dict[str, Any], ctx: WorkspaceData
         search=ctx.search,
         include_archived=ctx.include_archived,
         limit=ctx.limit,
+        offset=ctx.offset,
     )
 
 
@@ -1532,6 +1655,7 @@ async def _run_domain_records(session: Any, payload: dict[str, Any], ctx: Worksp
         search=ctx.search,
         include_archived=ctx.include_archived,
         limit=ctx.limit,
+        offset=ctx.offset,
     )
 
 
@@ -1546,6 +1670,7 @@ async def _run_domain_events(session: Any, payload: dict[str, Any], ctx: Workspa
         domain_id=ctx.domain_id,
         search=ctx.search,
         limit=ctx.limit,
+        offset=ctx.offset,
     )
 
 
@@ -1585,9 +1710,11 @@ async def _run_cycles(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQ
         org_id=ctx.org_id,
         user_id=ctx.user_id,
         person_ids=ctx.person_ids,
+        cycle_id=ctx.cycle_id,
         search=ctx.search,
         include_archived=ctx.include_archived,
         limit=ctx.limit,
+        offset=ctx.offset,
     )
 
 
@@ -1601,9 +1728,11 @@ async def _run_cycle_runs(session: Any, payload: dict[str, Any], ctx: WorkspaceD
         user_id=ctx.user_id,
         person_ids=ctx.person_ids,
         idea_id=ctx.idea_id,
+        cycle_id=ctx.cycle_id,
         search=ctx.search,
         include_archived=ctx.include_archived,
         limit=ctx.limit,
+        offset=ctx.offset,
     )
 
 
@@ -1724,8 +1853,10 @@ async def query_workspace_data(
     limit: int = 20,
     idea_id: str | None = None,
     domain_id: int | None = None,
+    cycle_id: int | None = None,
     object_key: str | None = None,
     include_archived: bool = False,
+    cursor: str | None = None,
     user_id: str | None = None,
     org_id: str | None = None,
     run_id: int | None = None,
@@ -1740,6 +1871,8 @@ async def query_workspace_data(
     source_names = _normalize_sources(sources)
     start, end, resolved_window = _time_bounds(time_window, start_at=start_at, end_at=end_at)
     per_source_limit = min(max(int(limit or 20), 1), 100)
+    page_kind = _workspace_page_kind(source_names)
+    offset = page_offset(cursor, kind=page_kind)
     payload: dict[str, Any] = {
         "query": query,
         "search": search,
@@ -1764,6 +1897,7 @@ async def query_workspace_data(
             "person": person,
             "idea_id": idea_id,
             "domain_id": domain_id,
+            "cycle_id": cycle_id,
             "object_key": object_key,
         },
         "people": [],
@@ -1827,11 +1961,13 @@ async def query_workspace_data(
             idea_id=idea_id,
             run_id=run_id,
             domain_id=domain_id,
+            cycle_id=cycle_id,
             object_key=object_key,
             query=query,
             search=search,
             include_archived=include_archived,
             limit=per_source_limit,
+            offset=offset,
         )
 
         for source in source_names:
@@ -1843,12 +1979,30 @@ async def query_workspace_data(
                 payload["sources"][source] = []
                 _add_error(payload, source, exc)
 
+    more_sources = list(dict.fromkeys(payload.pop("_more_sources", [])))
+    has_more = bool(more_sources)
     payload["counts"] = {
         source: len(rows) if isinstance(rows, list) else 0
         for source, rows in payload["sources"].items()
     }
     payload["total_count"] = sum(payload["counts"].values())
     payload["activity_items"] = _build_activity_items(payload, limit=per_source_limit)
+    payload["pagination"] = {
+        "offset": offset,
+        "limit": per_source_limit,
+        "has_more": has_more,
+        "more_sources": more_sources,
+    }
+    payload["truncated"] = has_more
+    payload["next_page"] = (
+        next_offset_token(kind=page_kind, offset=offset, returned=per_source_limit)
+        if has_more
+        else None
+    )
+    payload["evidence_health"] = {
+        "status": "degraded" if payload["warnings"] else "ok",
+        "completeness": "more_available" if has_more else "complete",
+    }
     return payload
 
 
@@ -1857,6 +2011,7 @@ def _workspace_query_scope(
     idea_id: str | None = None,
     thread_url: str | None = None,
     domain_id: int | None = None,
+    cycle_id: int | None = None,
     object_key: str | None = None,
     include_archived: bool = False,
     default_current_idea: bool = False,
@@ -1873,6 +2028,7 @@ def _workspace_query_scope(
     return {
         "idea_id": scoped_idea_id,
         "domain_id": domain_id,
+        "cycle_id": cycle_id,
         "object_key": _optional_text(object_key),
         "include_archived": include_archived,
         "user_id": _optional_text(getattr(_agent_context, "user_id", None) or execution_metadata.get("user_id")),
@@ -1886,6 +2042,7 @@ async def _query_workspace_data_for_agent(**kwargs: Any) -> dict[str, Any]:
         idea_id=kwargs.pop("idea_id", None),
         thread_url=kwargs.pop("thread_url", None),
         domain_id=kwargs.pop("domain_id", None),
+        cycle_id=kwargs.pop("cycle_id", None),
         object_key=kwargs.pop("object_key", None),
         include_archived=bool(kwargs.pop("include_archived", False)),
         default_current_idea=bool(kwargs.pop("_default_current_idea", False)),
@@ -1969,8 +2126,10 @@ async def _handle_query_workspace_data(
     idea_id: str | None = None,
     thread_url: str | None = None,
     domain_id: int | None = None,
+    cycle_id: int | None = None,
     object_key: str | None = None,
     include_archived: bool = False,
+    cursor: str | None = None,
 ) -> str:
     payload = await _query_workspace_data_for_agent(
         sources=sources,
@@ -1984,8 +2143,10 @@ async def _handle_query_workspace_data(
         idea_id=idea_id,
         thread_url=thread_url,
         domain_id=domain_id,
+        cycle_id=cycle_id,
         object_key=object_key,
         include_archived=include_archived,
+        cursor=cursor,
         _default_current_idea=True,
     )
     return json.dumps(payload, default=str)
@@ -2035,6 +2196,7 @@ async def _handle_read_team_activity(
     limit: int = 20,
     idea_id: str | None = None,
     thread_url: str | None = None,
+    cursor: str | None = None,
 ) -> str:
     payload = await _query_workspace_data_for_agent(
         sources=["activity"],
@@ -2047,10 +2209,12 @@ async def _handle_read_team_activity(
         limit=limit,
         idea_id=idea_id,
         thread_url=thread_url,
+        cursor=cursor,
     )
     payload = _workspace_view_payload("team_activity", payload)
     payload["answering_guidance"] = [
         "Base recaps on activity_items first, then use per-source rows for detail.",
+        "When next_page is present, follow it before treating the activity window as complete.",
         "When pointing someone to existing work in a Cortex Thread, include the returned thread_url with the Thread title.",
         "When results are empty, say what was checked instead of guessing from memory.",
     ]
@@ -2123,6 +2287,7 @@ async def _handle_read_workspace_records(
     end_at: str | None = None,
     limit: int = 20,
     include_archived: bool = False,
+    cursor: str | None = None,
 ) -> str:
     payload = await _query_workspace_data_for_agent(
         sources=["records"],
@@ -2135,10 +2300,12 @@ async def _handle_read_workspace_records(
         end_at=end_at,
         limit=limit,
         include_archived=include_archived,
+        cursor=cursor,
     )
     payload = _workspace_view_payload("workspace_records", payload)
     payload["answering_guidance"] = [
         "Domains are user-created structured databases, not the system's raw database tables.",
+        "When next_page is present, follow it before treating records or Domain events as complete.",
         "Use Domain schemas to explain what each record type is for before summarizing records.",
     ]
     return json.dumps(payload, default=str)
@@ -2153,7 +2320,24 @@ async def _handle_read_cycles(
     end_at: str | None = None,
     limit: int = 20,
     include_deleted: bool = False,
+    cycle_id: int | None = None,
+    last_completed_run: bool = False,
+    cursor: str | None = None,
 ) -> str:
+    if last_completed_run:
+        if cycle_id is None or cycle_id < 1:
+            return json.dumps({"error": "last_completed_run requires a positive cycle_id"})
+        scope = _workspace_query_scope(
+            cycle_id=cycle_id,
+            include_archived=include_deleted,
+        )
+        payload = await _query_last_completed_cycle_run(
+            cycle_id=cycle_id,
+            org_id=scope["org_id"],
+            user_id=scope["user_id"],
+            include_deleted=include_deleted,
+        )
+        return json.dumps(payload, default=str)
     payload = await _query_workspace_data_for_agent(
         sources=["cycles"],
         query=query or "workspace cycles",
@@ -2164,10 +2348,13 @@ async def _handle_read_cycles(
         end_at=end_at,
         limit=limit,
         include_archived=include_deleted,
+        cycle_id=cycle_id,
+        cursor=cursor,
     )
     payload = _workspace_view_payload("cycles", payload)
     payload["answering_guidance"] = [
         "Use cycles for recurring configuration and cycle_runs for actual execution history.",
+        "When next_page is present, follow it before treating Cycle run history as complete.",
         "Distinguish enabled/disabled/deleted Cycles when summarizing scheduled work.",
     ]
     return json.dumps(payload, default=str)

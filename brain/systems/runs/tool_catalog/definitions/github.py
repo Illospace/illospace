@@ -73,6 +73,10 @@ GITHUB_TOOLS = [
                     "description": "Head commit SHA required by pull_request_checks.",
                 },
                 "limit": {"type": "integer", "default": 30, "description": "Maximum items to return, 1-100."},
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque next_page token returned by an issue or pull-request listing.",
+                },
                 "token_secret_key": {
                     "type": "string",
                     "description": "Optional Vault secret key containing a GitHub token for private repos.",

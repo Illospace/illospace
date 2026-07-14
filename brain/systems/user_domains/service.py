@@ -459,6 +459,7 @@ class AsyncDomainService:
         include_archived: bool = False,
         limit: int = 100,
         order: str = "updated_desc",
+        offset: int = 0,
     ) -> Sequence[DomainRecord]:
         if order not in {"updated_desc", "updated_asc"}:
             raise DomainError("order must be 'updated_desc' or 'updated_asc'")
@@ -471,14 +472,19 @@ class AsyncDomainService:
         )
         stmt = select(DomainRecord).where(*where_clauses)
         max_results = max(1, min(int(limit), 500))
+        page_offset = max(0, int(offset or 0))
         if order == "updated_asc":
             stmt = stmt.order_by(DomainRecord.updated_at.asc(), DomainRecord.id.asc())
         else:
             stmt = stmt.order_by(DomainRecord.updated_at.desc(), DomainRecord.id.desc())
-        stmt = stmt.limit(500 if filters else max_results)
+        if filters:
+            stmt = stmt.limit(500)
+        else:
+            stmt = stmt.offset(page_offset).limit(max_results)
         records = (await self.session.scalars(stmt)).all()
         if filters:
-            return [record for record in records if _record_matches_filters(record, filters)][:max_results]
+            matches = [record for record in records if _record_matches_filters(record, filters)]
+            return matches[page_offset : page_offset + max_results]
         return records
 
     async def count_records(
@@ -943,6 +949,7 @@ class AsyncDomainService:
         *,
         record_id: int | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> Sequence[DomainEvent]:
         await self.get_domain(org_id, domain_id)
         stmt = select(DomainEvent).where(
@@ -951,8 +958,28 @@ class AsyncDomainService:
         )
         if record_id is not None:
             stmt = stmt.where(DomainEvent.record_id == record_id)
-        stmt = stmt.order_by(DomainEvent.created_at.desc(), DomainEvent.id.desc()).limit(max(1, min(limit, 200)))
+        stmt = (
+            stmt.order_by(DomainEvent.created_at.desc(), DomainEvent.id.desc())
+            .offset(max(0, int(offset or 0)))
+            .limit(max(1, min(limit, 200)))
+        )
         return (await self.session.scalars(stmt)).all()
+
+    async def count_events(
+        self,
+        org_id: str,
+        domain_id: int,
+        *,
+        record_id: int | None = None,
+    ) -> int:
+        await self.get_domain(org_id, domain_id)
+        stmt = select(func.count()).select_from(DomainEvent).where(
+            DomainEvent.org_id == org_id,
+            DomainEvent.domain_id == domain_id,
+        )
+        if record_id is not None:
+            stmt = stmt.where(DomainEvent.record_id == record_id)
+        return int(await self.session.scalar(stmt) or 0)
 
     async def get_object_type(
         self,

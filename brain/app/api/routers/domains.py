@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.auth import get_current_user
@@ -29,6 +29,7 @@ from brain.app.api.schemas.domains import (
     DomainSchemaRead,
     DomainSummaryRead,
 )
+from brain.kernel.common.pagination import InvalidPageToken, next_offset_token, page_offset
 from brain.systems.user_domains.service import AsyncDomainService, DomainError, DomainNotFound
 
 router = APIRouter(
@@ -45,7 +46,7 @@ def _service(db: AsyncSession) -> AsyncDomainService:
 def _domain_error(exc: Exception) -> HTTPException:
     if isinstance(exc, DomainNotFound):
         return HTTPException(status_code=404, detail=str(exc))
-    if isinstance(exc, DomainError):
+    if isinstance(exc, (DomainError, InvalidPageToken)):
         return HTTPException(status_code=400, detail=str(exc))
     return HTTPException(status_code=500, detail=str(exc))
 
@@ -202,17 +203,22 @@ async def add_domain_relation_type(
 @router.get("/{domain_id}/records", response_model=list[DomainRecordRead])
 async def list_domain_records(
     domain_id: int,
+    response: Response,
     object_key: str | None = None,
     search: str | None = None,
     include_archived: bool = False,
     limit: int = 100,
+    cursor: str | None = None,
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
     service = _service(db)
     try:
-        return [
+        page_limit = max(1, min(int(limit or 100), 500))
+        page_kind = f"domain_api:records:{domain_id}"
+        offset = page_offset(cursor, kind=page_kind)
+        records = [
             await service.serialize_record(record)
             for record in await service.list_records(
                 org_id,
@@ -220,10 +226,28 @@ async def list_domain_records(
                 object_key=object_key,
                 search=search,
                 include_archived=include_archived,
-                limit=limit,
+                limit=page_limit,
+                offset=offset,
             )
         ]
-    except (DomainError, DomainNotFound) as exc:
+        total = await service.count_records(
+            org_id,
+            domain_id,
+            object_key=object_key,
+            search=search,
+            include_archived=include_archived,
+        )
+        has_more = offset + len(records) < total
+        response.headers["X-Truncated"] = str(has_more).lower()
+        response.headers["X-Evidence-Health"] = "ok"
+        if has_more:
+            response.headers["X-Next-Page"] = next_offset_token(
+                kind=page_kind,
+                offset=offset,
+                returned=len(records),
+            )
+        return records
+    except (DomainError, DomainNotFound, InvalidPageToken) as exc:
         raise _domain_error(exc) from exc
 
 
@@ -404,17 +428,39 @@ async def remove_domain_relation(
 @router.get("/{domain_id}/events", response_model=list[DomainEventRead])
 async def list_domain_events(
     domain_id: int,
+    response: Response,
     record_id: int | None = None,
     limit: int = 50,
+    cursor: str | None = None,
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
     service = _service(db)
     try:
-        return [
+        page_limit = max(1, min(int(limit or 50), 200))
+        page_kind = f"domain_api:events:{domain_id}"
+        offset = page_offset(cursor, kind=page_kind)
+        events = [
             service.serialize_event(event)
-            for event in await service.list_events(org_id, domain_id, record_id=record_id, limit=limit)
+            for event in await service.list_events(
+                org_id,
+                domain_id,
+                record_id=record_id,
+                limit=page_limit,
+                offset=offset,
+            )
         ]
-    except (DomainError, DomainNotFound) as exc:
+        total = await service.count_events(org_id, domain_id, record_id=record_id)
+        has_more = offset + len(events) < total
+        response.headers["X-Truncated"] = str(has_more).lower()
+        response.headers["X-Evidence-Health"] = "ok"
+        if has_more:
+            response.headers["X-Next-Page"] = next_offset_token(
+                kind=page_kind,
+                offset=offset,
+                returned=len(events),
+            )
+        return events
+    except (DomainError, DomainNotFound, InvalidPageToken) as exc:
         raise _domain_error(exc) from exc

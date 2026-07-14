@@ -110,6 +110,10 @@ DOMAIN_TOOLS = [
                     ),
                 },
                 "limit": {"type": "integer", "default": 50, "description": "Maximum records/events to return."},
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque next_page token returned by query_records or events.",
+                },
                 "include_archived": {"type": "boolean", "default": False},
                 "record_id": {"type": "integer", "description": "Record id for get/update/remove/events."},
                 "data": {"type": "object", "description": "Record data for create_record."},

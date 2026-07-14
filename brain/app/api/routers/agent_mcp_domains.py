@@ -6,6 +6,7 @@ from typing import Any, Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.kernel.common.pagination import next_offset_token, page_offset
 from brain.systems.external_agents import service as external_agents
 from brain.systems.user_domains.service import AsyncDomainService, DomainNotFound
 
@@ -113,6 +114,10 @@ DOMAIN_MCP_TOOLS: dict[str, dict[str, Any]] = {
                     "type": "integer",
                     "description": "Maximum records, relations, or events to return, 1-100.",
                     "default": 25,
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque next_page token returned by a previous inspection.",
                 },
             },
         ),
@@ -251,6 +256,9 @@ async def _tool_inspect_domains(
             ]
         }
 
+    page_kind = f"hosted_domain:{domain.id}"
+    offset = page_offset(_clean_optional_string(arguments.get("cursor")), kind=page_kind)
+    has_more = False
     payload: dict[str, Any] = {"domain": await service.serialize_domain_schema(domain)}
     record_id = _clean_optional_int(arguments.get("record_id"))
     if record_id is not None:
@@ -269,6 +277,7 @@ async def _tool_inspect_domains(
             include_archived=include_archived,
             limit=limit,
             order=record_order,
+            offset=offset,
         )
         if record_format == "compact":
             records = [
@@ -294,6 +303,7 @@ async def _tool_inspect_domains(
                 "format": record_format,
             }
         )
+        has_more = has_more or offset + len(records) < total
     if bool(arguments.get("include_relations", False)):
         payload["relations"] = [
             await service.serialize_relation(relation)
@@ -315,8 +325,27 @@ async def _tool_inspect_domains(
                 domain.id,
                 record_id=record_id,
                 limit=limit,
+                offset=offset,
             )
         ]
+        event_total = await service.count_events(
+            principal.org_id,
+            domain.id,
+            record_id=record_id,
+        )
+        payload["event_total_matching"] = event_total
+        has_more = has_more or offset + len(payload["events"]) < event_total
+    if bool(arguments.get("include_records", False)) or bool(arguments.get("include_events", False)):
+        payload["truncated"] = has_more
+        payload["next_page"] = (
+            next_offset_token(kind=page_kind, offset=offset, returned=limit)
+            if has_more
+            else None
+        )
+        payload["evidence_health"] = {
+            "status": "ok",
+            "completeness": "more_available" if has_more else "complete",
+        }
     return payload
 
 

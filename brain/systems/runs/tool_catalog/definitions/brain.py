@@ -601,8 +601,13 @@ BRAIN_TOOLS = [
                 "idea_id": {"type": "string", "description": "Optional Cortex idea/thread id filter."},
                 "thread_url": {"type": "string", "description": "Optional canonical Illo Thread URL or /threads/{id} route filter."},
                 "domain_id": {"type": "integer", "description": "Optional Domain id filter."},
+                "cycle_id": {"type": "integer", "description": "Optional Cycle id filter."},
                 "object_key": {"type": "string", "description": "Optional Domain object key filter."},
                 "include_archived": {"type": "boolean", "default": False},
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque next_page token returned by a previous call.",
+                },
             },
         },
     },
@@ -651,6 +656,10 @@ BRAIN_TOOLS = [
                 "limit": {"type": "integer", "description": "Max records per source (default 20)", "default": 20},
                 "idea_id": {"type": "string", "description": "Optional Cortex idea/thread id filter."},
                 "thread_url": {"type": "string", "description": "Optional canonical Illo Thread URL or /threads/{id} route filter."},
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque next_page token returned by a previous call.",
+                },
             },
         },
     },
@@ -718,6 +727,10 @@ BRAIN_TOOLS = [
                 "end_at": {"type": "string", "description": "ISO timestamp for custom upper bound."},
                 "limit": {"type": "integer", "description": "Max records per source (default 20)", "default": 20},
                 "include_archived": {"type": "boolean", "default": False},
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque next_page token returned by a previous call.",
+                },
             },
         },
     },
@@ -739,6 +752,21 @@ BRAIN_TOOLS = [
                 "end_at": {"type": "string", "description": "ISO timestamp for custom upper bound."},
                 "limit": {"type": "integer", "description": "Max records per source (default 20)", "default": 20},
                 "include_deleted": {"type": "boolean", "default": False},
+                "cycle_id": {
+                    "type": "integer",
+                    "description": "Optional Cycle id filter; required for last_completed_run.",
+                },
+                "last_completed_run": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Return only this Cycle's latest completed-run timestamp using one bounded query."
+                    ),
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque next_page token returned by a previous call.",
+                },
             },
         },
     },
