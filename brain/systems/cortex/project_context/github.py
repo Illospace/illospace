@@ -591,17 +591,15 @@ async def _async_get_pull_request_checks(
             page_runs = page_data.get("check_runs") if isinstance(page_data, dict) else None
             if isinstance(page_runs, list):
                 check_runs.extend(page_runs)
-    combined = await _async_request(
-        client,
-        "GET",
-        f"/repos/{owner}/{repo}/commits/{sha}/status",
-        token=token,
-    )
+    checks_payload = _check_runs_payload(checks)
+    # Modern CI (GitHub Actions, gitleaks, etc.) surfaces through check runs. The
+    # legacy statuses API needs statuses:read, which illo-bot deliberately omits
+    # to avoid a GitHub App re-approval.
     return {
         "repo": slug,
         "sha": sha,
-        "checks": _check_runs_payload(checks),
-        "combined_status": combined.get("state") if isinstance(combined, dict) else None,
+        "checks": checks_payload,
+        "combined_status": checks_payload["status"],
     }
 
 

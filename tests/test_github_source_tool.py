@@ -476,7 +476,6 @@ async def test_pull_request_reader_fetches_details_and_checks_with_same_token():
                         {"name": "lint", "status": "completed", "conclusion": "failure"},
                     ],
                 },
-                {"state": "failure", "statuses": []},
             ]
         ),
     ) as request:
@@ -498,10 +497,8 @@ async def test_pull_request_reader_fetches_details_and_checks_with_same_token():
     assert [call.args[2] for call in request.await_args_list] == [
         "/repos/uwear-ai/uwear-backend/pulls/42",
         "/repos/uwear-ai/uwear-backend/commits/abc123/check-runs",
-        "/repos/uwear-ai/uwear-backend/commits/abc123/status",
     ]
     assert [call.kwargs["token"] for call in request.await_args_list] == [
-        "primary-token",
         "primary-token",
         "primary-token",
     ]
@@ -533,7 +530,6 @@ async def test_get_pull_request_uses_project_bound_token_for_mergeability_and_ci
                         {"name": "lint", "status": "completed", "conclusion": "success"},
                     ],
                 },
-                {"state": "success", "statuses": []},
             ]
         ),
     ) as request:
@@ -577,7 +573,6 @@ async def test_get_pull_request_uses_project_bound_token_for_mergeability_and_ci
     assert [call.args[2] for call in request.await_args_list] == [
         "/repos/uwear-ai/uwear-backend/pulls/859",
         "/repos/uwear-ai/uwear-backend/commits/head859/check-runs",
-        "/repos/uwear-ai/uwear-backend/commits/head859/status",
     ]
     assert all(call.kwargs["token"] == "app-token" for call in request.await_args_list)
 
@@ -585,16 +580,16 @@ async def test_get_pull_request_uses_project_bound_token_for_mergeability_and_ci
 @pytest.mark.asyncio
 async def test_pull_request_checks_action_reads_checks_and_combined_status():
     with patch(
-        "brain.systems.runs.tool_catalog.handlers.github.async_get_pull_request_checks",
+        "brain.systems.cortex.project_context.github._async_request",
         new=AsyncMock(
             return_value={
-                "repo": "uwear-ai/uwear-backend",
-                "sha": "abc123",
-                "checks": {"total": 1, "success": 0, "failure": 0, "pending": 1},
-                "combined_status": "pending",
+                "total_count": 1,
+                "check_runs": [
+                    {"name": "unit", "status": "in_progress", "conclusion": None},
+                ],
             }
         ),
-    ) as get_checks:
+    ) as request:
         result = json.loads(
             await _handle_read_github_source(
                 action="pull_request_checks",
@@ -603,13 +598,13 @@ async def test_pull_request_checks_action_reads_checks_and_combined_status():
             )
         )
 
-    assert result["checks"] == {"total": 1, "success": 0, "failure": 0, "pending": 1}
+    assert result["checks"]["status"] == "pending"
     assert result["combined_status"] == "pending"
-    get_checks.assert_awaited_once_with(
-        "uwear-ai/uwear-backend",
-        "abc123",
-        token=None,
-    )
+    requested_urls = [call.args[2] for call in request.await_args_list]
+    assert requested_urls == [
+        "/repos/uwear-ai/uwear-backend/commits/abc123/check-runs",
+    ]
+    assert "/repos/uwear-ai/uwear-backend/commits/abc123/status" not in requested_urls
 
 
 @pytest.mark.asyncio
