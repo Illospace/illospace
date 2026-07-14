@@ -310,6 +310,72 @@ async def test_workspace_data_runs_include_latest_final_answer_artifact():
     assert payload["sources"]["runs"][0]["thread_reference"]["title"] == "Current planning"
 
 
+async def test_workspace_data_runs_include_headless_child_summary_for_current_parent():
+    from brain.systems.runs.tool_catalog.handlers import workspace_data
+
+    now = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+    child = SimpleNamespace(
+        id=49,
+        parent_run_id=42,
+        created_at=now,
+        started_at=now,
+        completed_at=now,
+        status="completed",
+        thread_id="headless-worker:42:repo-reader",
+        user_id="user-1",
+        metadata_={"origin": "spawn_worker", "worker_role": "repo_reader"},
+        model_policy={},
+        input_message="Read uwear-backend",
+        context_summary="Read GitHub counts and Project Context.",
+    )
+    user = SimpleNamespace(name="Coordinator")
+    captured = {}
+
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _Session:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, stmt):
+            self.calls += 1
+            if self.calls == 1:
+                captured["sql"] = str(stmt.compile(dialect=postgresql.dialect()))
+                return _Result([(child, None, user)])
+            return _Result([(49, '{"repo":"uwear-backend","issues":17,"prs":4,"project_context":"ready"}')])
+
+    payload = {"sources": {}}
+    await workspace_data._query_runs(
+        _Session(),
+        payload,
+        start=None,
+        end=None,
+        org_id="org-1",
+        user_id=None,
+        person_ids=[],
+        idea_id="idea-1",
+        run_id=42,
+        search=None,
+        limit=20,
+    )
+
+    assert "agent_runs.thread_id =" in captured["sql"]
+    assert "agent_runs.parent_run_id =" in captured["sql"]
+    assert " OR " in captured["sql"]
+    assert len(payload["sources"]["runs"]) == 1
+    record = payload["sources"]["runs"][0]
+    assert record["id"] == 49
+    assert record["status"] == "completed"
+    assert record["output"] == (
+        '{"repo":"uwear-backend","issues":17,"prs":4,"project_context":"ready"}'
+    )
+
+
 def test_workspace_data_activity_items_sort_newest_signals_first():
     from brain.systems.runs.tool_catalog.handlers import workspace_data
 

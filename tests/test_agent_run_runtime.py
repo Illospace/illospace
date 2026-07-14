@@ -1336,14 +1336,28 @@ async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monke
     from brain.systems.runs.execution_context import bind_agent_context
     import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
 
+    project_context_snapshot = {
+        "status": "validated",
+        "resources": [{"kind": "repo", "repo": "uwear-ai/uwear-backend"}],
+    }
     parent = SimpleNamespace(
         id=42,
         org_id="org-1",
         user_id="user-1",
         root_run_id=42,
         profile=RunProfile.FAST,
-        target_ref={"kind": "cortex_idea"},
-        workspace_ref={"workspace_root": "/tmp/work"},
+        target_ref={
+            "kind": "cortex_idea",
+            "project_context_snapshot": project_context_snapshot,
+        },
+        workspace_ref={
+            "workspace_root": "/tmp/work",
+            "project_context_snapshot": project_context_snapshot,
+            "project_runtime_context": {
+                "schema_version": 1,
+                "project_context_snapshot": project_context_snapshot,
+            },
+        },
         model_policy={"model": "openai/gpt-5.5"},
     )
     child = SimpleNamespace(id=99, root_run_id=42, recipe=RunRecipe.WORKER)
@@ -1383,7 +1397,11 @@ async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monke
     monkeypatch.setattr(worker_handlers, "UnitOfWork", _Uow)
     monkeypatch.setattr(worker_handlers, "AsyncAgentRunStore", _Store)
 
-    with bind_agent_context(run=SimpleNamespace(id=parent.id)):
+    with bind_agent_context(
+        run=SimpleNamespace(id=parent.id),
+        target_ref={"kind": "cortex_idea", "idea_id": "idea-1"},
+        workspace_ref={"allowed_workspaces": ["/tmp/work"]},
+    ):
         payload = json.loads(
             await worker_handlers._handle_spawn_worker(
                 objective="File the reproducible blocker.",
@@ -1404,6 +1422,15 @@ async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monke
     assert "Do not call spawn_worker again" in payload["next_action"]["instruction"]
     assert "headless" in payload["next_action"]["instruction"]
     assert create_kwargs["thread_id"].startswith("headless-worker:42:")
+    assert create_kwargs["target_ref"] == {
+        "kind": "cortex_idea",
+        "idea_id": "idea-1",
+        "project_context_snapshot": project_context_snapshot,
+    }
+    assert create_kwargs["workspace_ref"]["workspace_root"] == "/tmp/work"
+    assert create_kwargs["workspace_ref"]["allowed_workspaces"] == ["/tmp/work"]
+    assert create_kwargs["workspace_ref"]["project_context_snapshot"] == project_context_snapshot
+    assert create_kwargs["workspace_ref"]["project_runtime_context"]["schema_version"] == 1
     assert create_kwargs["metadata"]["headless"] is True
     assert set(create_kwargs["metadata"]["tool_policy"]["disabled_tools"]) >= {
         "manage_cycle",

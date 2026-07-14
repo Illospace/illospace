@@ -35,7 +35,7 @@ from brain.systems.cortex.project_context.workspace_manifest import (
     ThreadDraftIdentity,
     normalize_project_workspace_manifest,
 )
-from brain.systems.vault import async_get_secret, list_secrets
+from brain.systems.vault import async_get_secret, async_resolve_project_bound_env_tokens, list_secrets
 
 
 _REPO_RESOURCE_KINDS = {
@@ -57,6 +57,7 @@ class ProjectContextMaterializationResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     degraded_resources: list[dict[str, str]] = field(default_factory=list)
+    failed_resources: list[dict[str, str]] = field(default_factory=list)
     resources_checked: int = 0
     empty_project: bool = False
 
@@ -85,11 +86,22 @@ class ProjectContextMaterializationResult:
                 "degraded_resources": self.degraded_resources[:10],
             }
         if self.status == "failed":
-            return {"status": "unavailable", "errors": self.errors[:10]}
+            return {
+                "status": "unavailable",
+                "errors": self.errors[:10],
+                "failed_resources": self.failed_resources[:10],
+            }
         return {"status": "ok"}
 
-    def fail(self, message: str) -> "ProjectContextMaterializationResult":
+    def fail(
+        self,
+        message: str,
+        *,
+        resource: dict[str, str] | None = None,
+    ) -> "ProjectContextMaterializationResult":
         self.errors.append(message)
+        if resource:
+            self.failed_resources.append(resource)
         return self
 
     def degrade(
@@ -106,6 +118,7 @@ class ProjectContextMaterializationResult:
         if usable_workspace_count or not self.warnings:
             return
         self.errors.extend(self.warnings)
+        self.failed_resources.extend(self.degraded_resources)
         self.warnings.clear()
         self.degraded_resources.clear()
 
@@ -281,41 +294,81 @@ async def _token_candidates(
     resource: dict[str, Any],
     user_id: str | None,
     org_id: str | None,
-) -> list[tuple[str | None, str | None, str | None]]:
+) -> list[tuple[str | None, str | None, str | None, str]]:
     explicit_key = _vault_key_from_resource(resource)
-    candidates: list[tuple[str | None, str | None, str | None]] = []
+    candidates: list[tuple[str | None, str | None, str | None, str]] = []
     if not user_id:
         if explicit_key:
-            return [(explicit_key, None, "Vault credential requires a run user_id context.")]
-        return [(None, None, None)]
+            return [(explicit_key, None, "Vault credential requires a run user_id context.", "vault")]
+        return [(None, None, None, "public")]
 
-    key_names = []
+    key_names: list[str] = []
     if explicit_key:
         key_names.append(explicit_key)
-    else:
-        key_names.extend(await _github_secret_names(user_id, org_id))
 
-    seen: set[str] = set()
-    for key_name in key_names:
-        if key_name in seen:
-            continue
-        seen.add(key_name)
+    seen_keys: set[str] = set()
+    seen_tokens: set[str] = set()
+
+    async def add_vault_keys() -> None:
+        for key_name in key_names:
+            if key_name in seen_keys:
+                continue
+            seen_keys.add(key_name)
+            try:
+                token = await async_get_secret(
+                    key_name,
+                    actor_user_id=user_id,
+                    org_id=org_id,
+                    accessed_by="github_runtime_tool",
+                )
+            except Exception as exc:
+                candidates.append((key_name, None, _vault_read_error_message(exc), "vault"))
+                continue
+            if token:
+                value = token.strip()
+                if value and value not in seen_tokens:
+                    seen_tokens.add(value)
+                    candidates.append((key_name, value, None, "vault"))
+            else:
+                candidates.append((key_name, None, "Vault secret was not found or is empty.", "vault"))
+
+    await add_vault_keys()
+
+    slug = _github_slug_from_resource(resource)
+    if slug and org_id:
         try:
-            token = await async_get_secret(
-                key_name,
+            bound_env = await async_resolve_project_bound_env_tokens(
                 actor_user_id=user_id,
                 org_id=org_id,
-                accessed_by="github_runtime_tool",
+                project_slug=slug,
             )
-        except Exception as exc:
-            candidates.append((key_name, None, _vault_read_error_message(exc)))
-            continue
-        if token:
-            candidates.append((key_name, token.strip(), None))
-        else:
-            candidates.append((key_name, None, "Vault secret was not found or is empty."))
+        except Exception:
+            bound_env = {}
+        if not isinstance(bound_env, dict):
+            bound_env = {}
+        preferred_names = ("GITHUB_TOKEN", "GH_TOKEN")
+        ordered_names = [
+            *[name for name in preferred_names if name in bound_env],
+            *sorted(
+                name
+                for name in bound_env
+                if name not in preferred_names
+                and not ("__" in name.upper() and name.upper().endswith("_LEGACY"))
+            ),
+        ]
+        for env_name in ordered_names:
+            token = _clean_text(bound_env.get(env_name))
+            if not token or token in seen_tokens:
+                continue
+            seen_tokens.add(token)
+            candidates.append((None, token, None, "project_binding"))
+
     if not explicit_key:
-        candidates.append((None, None, None))
+        key_names.extend(await _github_secret_names(user_id, org_id))
+        await add_vault_keys()
+
+    if not explicit_key:
+        candidates.append((None, None, None, "public"))
     return candidates
 
 
@@ -788,6 +841,7 @@ async def _materialize_resource(
     for candidate in await _token_candidates(resource, user_id, org_id):
         key_name, token = candidate[:2]
         token_error = candidate[2] if len(candidate) > 2 else None
+        credential = candidate[3] if len(candidate) > 3 else ("vault" if key_name else "public")
         if token_error:
             prefix = f"Vault key {key_name}: " if key_name else "GitHub credential: "
             errors.append(prefix + token_error)
@@ -816,7 +870,7 @@ async def _materialize_resource(
             workspace_path=workspace_path,
             branch=clone.get("branch") or branch,
             commit=clone.get("commit") or None,
-            credential="vault" if key_name else "public",
+            credential=credential,
             subpath=subpath,
         ), None
 
@@ -984,7 +1038,7 @@ async def materialize_project_context_workspaces(
             if _resource_failure_is_soft(resource):
                 result.degrade(error, resource=_degraded_resource_payload(resource, error))
             else:
-                result.fail(error)
+                result.fail(error, resource=_degraded_resource_payload(resource, error))
 
     result.fail_if_no_usable_workspace(usable_workspace_count)
 
@@ -1013,6 +1067,7 @@ async def materialize_project_context_workspaces(
         "errors": result.errors[:10],
         "warnings": result.warnings[:10],
         "degraded_resources": result.degraded_resources[:10],
+        "failed_resources": result.failed_resources[:10],
         "evidence_health": result.evidence_health,
         "empty_project": result.empty_project,
         "seed_resource_count": len(resources),
