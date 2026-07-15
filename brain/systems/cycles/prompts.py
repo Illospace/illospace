@@ -25,6 +25,11 @@ _MISSION_SEED_MAX_CHARS = 12_000
 
 
 def cycle_launch_envelope(cycle: Cycle, run: CycleRun) -> dict:
+    context_snapshot = json_dict(getattr(run, "context_snapshot", None))
+    degradation_tracking = json_dict(context_snapshot.get("degradation_tracking"))
+    result_contract = context_snapshot.get("result_contract")
+    if not isinstance(result_contract, dict):
+        result_contract = cycle_result_contract(degradation_tracking)
     launch_context = cycle_run_launch_context(run)
     origin = str(launch_context.get("origin") or SCHEDULED_CYCLE_ORIGIN)
     timezone_name = str(getattr(cycle, "timezone", None) or "UTC")
@@ -64,13 +69,16 @@ def cycle_launch_envelope(cycle: Cycle, run: CycleRun) -> dict:
         "thread_visibility": "output_target",
         "cycle_memory_role": "source_of_truth",
         "scheduled_review_window": cycle_scheduled_review_window(run.scheduled_for),
-        "result_contract": cycle_result_contract(),
-        "evidence_health": pending_evidence_health_receipt(run.scheduled_for),
+        "result_contract": result_contract,
+        "evidence_health": context_snapshot.get("evidence_health")
+        or pending_evidence_health_receipt(run.scheduled_for),
+        "degradation_tracking": degradation_tracking,
     }
 
 
 def cycle_run_metadata(cycle: Cycle, run: CycleRun) -> dict:
     envelope = cycle_launch_envelope(cycle, run)
+    result_contract = envelope["result_contract"]
     return {
         "source": "cycle",
         "origin": "cycle",
@@ -84,15 +92,16 @@ def cycle_run_metadata(cycle: Cycle, run: CycleRun) -> dict:
             "kind": "autonomous_cycle_run",
             "active_instruction_source": "cycle.prompt",
             "lifecycle_owner": "cycle_run",
-            "result": cycle_result_contract(),
+            "result": result_contract,
         },
-        "evidence_health": pending_evidence_health_receipt(run.scheduled_for),
+        "evidence_health": envelope["evidence_health"],
         "launch_receipt": cycle_launch_receipt(
             cycle_id=cycle.id,
             cycle_run_id=run.id,
             scheduled_for=run.scheduled_for,
             timezone_name=envelope["timezone"],
             launch_context=envelope["launch_context"],
+            result_contract=result_contract,
         ),
         "context_policy": {
             "current_instruction_role": (
@@ -124,6 +133,7 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
     trigger_rationale_line = (
         f"- Trigger rationale: {trigger_rationale}\n" if trigger_rationale else ""
     )
+    degradation_instruction = _degradation_instruction(envelope["degradation_tracking"])
     return (
         f"[Idea: \"{idea.title}\" | {idea.id}]\n\n"
         f"## {launch_title}\n"
@@ -144,6 +154,7 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         "- You may create, update, delete, or run Cycles when that is the right workspace action; include rationale.\n"
         "- If an output target is unavailable, repair or replace it when possible instead of treating it as a blocker.\n"
         "- Report evidence health explicitly. Follow next_page tokens to completion; routine pagination is not degradation and fully paginated reads are evidence_health=ok. If readers fail, warn, return unexpectedly sparse data, or cannot page to completion, mark the run degraded in your self-review and name the gap.\n"
+        f"{degradation_instruction}"
         "- End with a short self-review summary suitable for the Cycle ledger and visible outputs.\n\n"
         "## Result Contract\n"
         f"{_json_block(result_contract)}\n\n"
@@ -162,6 +173,36 @@ def _mission_block(prompt: str) -> str:
         f"{prompt[:_MISSION_SEED_MAX_CHARS]}\n\n"
         f"[Cycle mission truncated for launch: {omitted} chars omitted. The full mission remains "
         "authoritative - read it with manage_cycle before deviating from it.]"
+    )
+
+
+def _degradation_instruction(tracking: dict) -> str:
+    pending = [
+        item
+        for item in tracking.get("pending_escalations", [])
+        if isinstance(item, dict) and item.get("summary")
+    ]
+    if not pending:
+        return ""
+    causes = "; ".join(
+        f"{item.get('key')}: {item.get('summary')}"
+        for item in (
+            tracking.get("mandatory_causes", [])
+            if tracking.get("mandatory_in_current_digest")
+            else pending
+        )
+        if isinstance(item, dict)
+    )
+    if tracking.get("mandatory_in_current_digest"):
+        return (
+            "- MANDATORY DEGRADATION ESCALATION: this run is the next required digest. "
+            f"The visible digest MUST name these causes exactly: {causes}. Do not silently skip "
+            "the digest.\n"
+        )
+    return (
+        "- Pending cross-run degradation escalation: preserve these causes for the next required "
+        f"08:00/13:00/18:00 America/Toronto digest: {causes}. Off-cadence silence must not "
+        "consume them.\n"
     )
 
 
