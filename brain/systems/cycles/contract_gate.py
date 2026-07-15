@@ -45,6 +45,12 @@ _EVIDENCE_HEALTH_VALUES = (
     "unavailable",
     "unknown",
 )
+_EVIDENCE_HEALTH_REPORT_RE = re.compile(
+    r"(?:evidence_health|evidence health)\s*(?::|=|is)\s*"
+    r"(?P<value>ok|healthy|degraded|partial|sparse|failed|unavailable|unknown)"
+    r"(?P<detail>[^\n.]{0,240})",
+    re.IGNORECASE,
+)
 
 _NON_PRESERVABLE_OUTPUTS = frozenset(
     {
@@ -118,6 +124,20 @@ def _contains_any(normalized_text: str, terms: tuple[str, ...]) -> bool:
     return any(term in normalized_text for term in terms)
 
 
+def _reported_evidence_health(candidate_answer: str | None) -> dict[str, Any] | None:
+    matches = list(_EVIDENCE_HEALTH_REPORT_RE.finditer(str(candidate_answer or "")))
+    if not matches:
+        return None
+    match = matches[-1]
+    value = str(match.group("value") or "").lower()
+    status = "ok" if value in {"ok", "healthy"} else "degraded"
+    report: dict[str, Any] = {"status": status, "reported_value": value}
+    if status == "degraded":
+        detail = re.sub(r"^[\s:;=—-]+", "", str(match.group("detail") or "")).strip()
+        report["cause"] = detail or "Evidence health reported degraded without a named cause."
+    return report
+
+
 def _mission_required_output_labels(mission: str) -> list[str]:
     normalized = _normalize_text(mission)
     labels = [
@@ -175,6 +195,26 @@ def _satisfies_required_output(
     return requirement.replace("_", " ") in normalized_candidate
 
 
+def _missing_mandatory_degradation_escalations(
+    result_contract: dict[str, Any],
+    *,
+    normalized_candidate: str,
+) -> list[str]:
+    missing: list[str] = []
+    for raw_escalation in _json_list(
+        result_contract.get("mandatory_degradation_escalations")
+    ):
+        escalation = _json_dict(raw_escalation)
+        key = str(escalation.get("key") or "").strip()
+        summary = _normalize_text(escalation.get("summary"))
+        if not key or not summary:
+            continue
+        if summary in normalized_candidate:
+            continue
+        missing.append(f"mandatory_degradation_escalation:{key}")
+    return missing
+
+
 def evaluate_cycle_result_contract(
     *,
     candidate_answer: str | None,
@@ -208,6 +248,13 @@ def evaluate_cycle_result_contract(
         ):
             missing.append(requirement_name)
 
+    missing.extend(
+        _missing_mandatory_degradation_escalations(
+            result_contract,
+            normalized_candidate=normalized_candidate,
+        )
+    )
+
     for label in _mission_required_output_labels(mission):
         if not _contains_any(normalized_candidate, _MISSION_OUTPUT_ALIASES[label]):
             missing.append(label)
@@ -230,6 +277,7 @@ def evaluate_cycle_result_contract(
             else _candidate_summary(candidate_answer)
         ),
         "provider_error": detected_provider_error,
+        "reported_evidence_health": _reported_evidence_health(candidate_answer),
     }
 
 
@@ -660,6 +708,7 @@ def _base_verdict(
         "side_effects_succeeded": bool(evidence_packet.get("side_effects_succeeded")),
         "domain_side_effects_succeeded": bool(evidence_packet.get("domain_side_effects_succeeded")),
         "provider_error": initial_review.get("provider_error"),
+        "reported_evidence_health": initial_review.get("reported_evidence_health"),
     }
 
 
@@ -802,6 +851,9 @@ async def async_prepare_cycle_run_visible_finalization(
                     "repaired_artifact_id": getattr(repaired_artifact, "id", None),
                     "repaired_summary": repair_review["candidate_summary"],
                     "final_missing_outputs": [],
+                    "reported_evidence_health": repair_review.get(
+                        "reported_evidence_health"
+                    ),
                 }
             )
             _persist_cycle_contract_verdict(cycle_run, verdict)

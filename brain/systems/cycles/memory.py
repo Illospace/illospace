@@ -28,6 +28,11 @@ from brain.systems.cycles.contracts import (
     cycle_scheduled_review_window,
     pending_evidence_health_receipt,
 )
+from brain.systems.cycles.degradation import (
+    advance_degradation_state,
+    degradation_causes,
+    degradation_tracking_for_run,
+)
 from brain.systems.cycles.serializers import (
     serialize_cycle_guidance,
     serialize_cycle_output_target,
@@ -156,12 +161,17 @@ async def async_prepare_cycle_run_memory_snapshot(session, cycle: Cycle, run: Cy
     revision = await _async_latest_cycle_revision(session, cycle.id)
     guidance_rows = await _async_active_cycle_guidance(session, cycle.id)
     target_rows = await _async_active_cycle_output_targets(session, cycle.id)
+    degradation_tracking = degradation_tracking_for_run(
+        getattr(cycle, "degradation_state", None),
+        scheduled_for=getattr(run, "scheduled_for", None),
+    )
     snapshot = _build_cycle_run_memory_snapshot(
         cycle,
         run=run,
         revision=revision,
         guidance_rows=guidance_rows,
         target_rows=target_rows,
+        degradation_tracking=degradation_tracking,
     )
 
     if snapshot["revision_id"] is not None:
@@ -179,11 +189,17 @@ def _build_cycle_run_memory_snapshot(
     revision: CycleRevision | None,
     guidance_rows: list[CycleGuidance],
     target_rows: list[CycleOutputTarget],
+    degradation_tracking: dict | None = None,
 ) -> dict:
     output_targets = [serialize_cycle_output_target(target) for target in target_rows]
     _ensure_default_output_targets(cycle, output_targets)
     scheduled_for = getattr(run, "scheduled_for", None)
     cycle_run_id = getattr(run, "id", None)
+    degradation_tracking = degradation_tracking or degradation_tracking_for_run(
+        getattr(cycle, "degradation_state", None),
+        scheduled_for=scheduled_for,
+    )
+    result_contract = cycle_result_contract(degradation_tracking)
 
     return {
         "revision_id": revision.id if revision is not None else None,
@@ -197,13 +213,15 @@ def _build_cycle_run_memory_snapshot(
                 "workspace_id": string_or_none(cycle.org_id),
                 "owner_user_id": string_or_none(cycle.user_id),
                 "scheduled_review_window": cycle_scheduled_review_window(scheduled_for),
-                "result_contract": cycle_result_contract(),
+                "result_contract": result_contract,
                 "evidence_health": pending_evidence_health_receipt(scheduled_for),
+                "degradation_tracking": degradation_tracking,
                 "launch_receipts": [
                     cycle_launch_receipt(
                         cycle_id=cycle.id,
                         cycle_run_id=cycle_run_id,
                         scheduled_for=scheduled_for,
+                        result_contract=result_contract,
                     )
                 ],
                 **creator_payload(cycle),
@@ -329,8 +347,33 @@ async def record_cycle_run_evaluation(
         skip_reason=skip_reason,
     )
     score = 1 if status == "completed" else 0 if status in {"failed", "degraded", "auth_blocked"} else None
-    run.self_review_summary = summary
     context_snapshot = json_dict(getattr(run, "context_snapshot", None))
+    launch_tracking = json_dict(context_snapshot.get("degradation_tracking"))
+    verdict = json_dict(context_snapshot.get(MISSION_RESULT_CONTRACT_VERDICT_KEY))
+    observed_causes = degradation_causes(
+        status=status,
+        error=error,
+        evidence_health=json_dict(context_snapshot.get("evidence_health")),
+        reported_evidence_health=json_dict(verdict.get("reported_evidence_health")),
+    )
+    degradation_state = advance_degradation_state(
+        launch_tracking,
+        causes=observed_causes,
+        scheduled_for=run.scheduled_for,
+        mandatory_digest_satisfied=(
+            status == "completed"
+            and verdict.get("settlement_status")
+            in {"mission_success", "mission_success_after_repair"}
+        ),
+    )
+    cycle.degradation_state = jsonable(degradation_state)
+    context_snapshot["degradation_tracking"] = {
+        **launch_tracking,
+        "observed_causes": observed_causes,
+        "result_state": degradation_state,
+    }
+    run.context_snapshot = jsonable(context_snapshot)
+    run.self_review_summary = summary
     session.add(
         CycleRunEvaluation(
             cycle_id=cycle.id,
@@ -348,6 +391,7 @@ async def record_cycle_run_evaluation(
                 "scheduled_review_window": context_snapshot.get("scheduled_review_window"),
                 "result_contract": context_snapshot.get("result_contract"),
                 "evidence_health": context_snapshot.get("evidence_health"),
+                "degradation_tracking": context_snapshot.get("degradation_tracking"),
                 "launch_receipts": context_snapshot.get("launch_receipts", []),
                 MISSION_RESULT_CONTRACT_VERDICT_KEY: context_snapshot.get(
                     MISSION_RESULT_CONTRACT_VERDICT_KEY

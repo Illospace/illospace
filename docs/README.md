@@ -9,6 +9,8 @@ Start here when you want to understand, run, or extend Illo Brain.
 - [Server Setup](server-setup.md) - canonical single-server team deployment runbook.
 - [Deployment](deployment.md) - deployment overview and advanced native notes.
 - [Cycles](cycles.md) - scheduler-owned recurring jobs.
+- [Illo-QA Close Criteria](qa-close-criteria.md) - required post-deploy run
+  evidence before an `[Illo-QA]` issue is completed.
 - [Project Workspaces](project-workspaces.md) - Project root, thread draft, base, conflict, and publish semantics.
 - [Workspace Tool Installer](workspace-tools.md) - opt-in persisted tool bundles for team-specific skill dependencies.
 - [Security Model](security-model.md) - secrets, tool execution, browser sessions, and data boundaries.
