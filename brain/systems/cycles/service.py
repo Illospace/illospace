@@ -16,9 +16,12 @@ from brain.systems.cycles.auth_preflight import (
     async_preflight_cycle_external_auth,
 )
 from brain.systems.cycles.common import (
+    MANUAL_CYCLE_ORIGIN,
     REUSABLE_THREAD_EXECUTION_MODE,
+    SCHEDULED_CYCLE_ORIGIN,
     THREAD_OUTPUT_TARGET_TYPE,
     canonical_execution_mode,
+    json_dict,
     short_identifier,
     validate_nonempty_trimmed,
     validate_thinking_override,
@@ -210,8 +213,17 @@ async def _async_append_cycle_auth_blocked_thread_message(
     return result.message_payload, result.status_change
 
 
-async def async_run_cycle_now(cycle_id: int) -> dict:
+async def async_run_cycle_now(
+    cycle_id: int,
+    *,
+    launch_context: dict | None = None,
+) -> dict:
     scheduled_for = datetime.now(timezone.utc)
+    launch = {
+        "origin": MANUAL_CYCLE_ORIGIN,
+        "source": "cycle.run_now",
+        **json_dict(launch_context),
+    }
     async with UnitOfWork() as uow:
         cycle = await uow.session.get(Cycle, cycle_id)
         if not cycle or cycle.deleted_at is not None:
@@ -221,6 +233,7 @@ async def async_run_cycle_now(cycle_id: int) -> dict:
             scheduled_for=scheduled_for,
             prompt_snapshot=cycle.prompt,
             status="queued",
+            context_snapshot={"launch_context": launch},
         )
         uow.session.add(run)
         await uow.session.flush()
@@ -341,6 +354,12 @@ async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
                 scheduled_for=scheduled_for,
                 prompt_snapshot=cycle.prompt,
                 status="queued",
+                context_snapshot={
+                    "launch_context": {
+                        "origin": SCHEDULED_CYCLE_ORIGIN,
+                        "source": "cycle_scheduler",
+                    }
+                },
             )
             uow.session.add(run)
             await uow.session.flush()

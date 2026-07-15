@@ -29,6 +29,7 @@ from brain.platform.db.models.idea import Idea
 from brain.systems.cortex.thread_links import thread_id_from_reference
 from brain.systems.cortex.project_context.search import search_project_contexts
 from brain.systems.cycles.access import CycleActor, cycle_scope_conditions, target_idea_scope_conditions
+from brain.systems.cycles.common import EXTERNAL_AGENT_TRIGGERED_CYCLE_ORIGIN
 from brain.systems.cycles.commands import (
     UNSET_CYCLE_FIELD,
     async_add_guidance_to_cycle as command_add_cycle_guidance,
@@ -1136,7 +1137,17 @@ async def _act_manage_cycle(
         return _cycle_mutation_payload("delete", cycle, {"ok": True, "id": cycle.id})
 
     if action == "run":
-        result = await async_run_cycle_now(cycle.id)
+        result = await async_run_cycle_now(
+            cycle.id,
+            launch_context={
+                "origin": EXTERNAL_AGENT_TRIGGERED_CYCLE_ORIGIN,
+                "source": "illo_act.cycle.manage",
+                "actor_type": "external_agent",
+                "actor_id": principal.connection_id,
+                "agent_kind": principal.agent_kind,
+                "rationale": rationale,
+            },
+        )
         payload = {"cycle": serialize_cycle(cycle), "run": result}
         payload["_mutates_cycle"] = True
         payload["_cycle_change"] = {"action": "run", "event": cycle_change_event(cycle)}

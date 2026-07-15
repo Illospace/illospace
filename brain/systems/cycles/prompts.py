@@ -2,10 +2,17 @@
 from __future__ import annotations
 
 import json
+from datetime import timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import Idea
-from brain.systems.cycles.common import json_dict, json_list
+from brain.systems.cycles.common import (
+    SCHEDULED_CYCLE_ORIGIN,
+    cycle_run_launch_context,
+    json_dict,
+    json_list,
+)
 from brain.systems.cycles.contracts import (
     cycle_launch_receipt,
     cycle_result_contract,
@@ -13,20 +20,44 @@ from brain.systems.cycles.contracts import (
     pending_evidence_health_receipt,
 )
 
-CYCLE_LAUNCH_ENVELOPE_VERSION = 1
+CYCLE_LAUNCH_ENVELOPE_VERSION = 2
 _MISSION_SEED_MAX_CHARS = 12_000
 
 
 def cycle_launch_envelope(cycle: Cycle, run: CycleRun) -> dict:
+    launch_context = cycle_run_launch_context(run)
+    origin = str(launch_context.get("origin") or SCHEDULED_CYCLE_ORIGIN)
+    timezone_name = str(getattr(cycle, "timezone", None) or "UTC")
+    try:
+        local_timezone = ZoneInfo(timezone_name)
+    except (ValueError, ZoneInfoNotFoundError):
+        timezone_name = "UTC"
+        local_timezone = ZoneInfo("UTC")
+    aware_scheduled_for = run.scheduled_for
+    if aware_scheduled_for is not None and aware_scheduled_for.tzinfo is None:
+        aware_scheduled_for = aware_scheduled_for.replace(tzinfo=timezone.utc)
+    scheduled_for = aware_scheduled_for.isoformat() if aware_scheduled_for else None
+    local_scheduled_for = (
+        aware_scheduled_for.astimezone(local_timezone).isoformat()
+        if aware_scheduled_for
+        else None
+    )
     return {
         "version": CYCLE_LAUNCH_ENVELOPE_VERSION,
-        "origin": "scheduled_cycle",
+        "origin": origin,
         "cycle_id": cycle.id,
         "cycle_run_id": run.id,
         "cycle_revision_id": getattr(run, "revision_id", None),
         "cycle_name": cycle.name,
-        "scheduled_for": run.scheduled_for.isoformat() if run.scheduled_for else None,
-        "launch_mode": "background_cycle_run",
+        "scheduled_for": scheduled_for,
+        "timezone": timezone_name,
+        "local_scheduled_for": local_scheduled_for,
+        "launch_context": launch_context,
+        "launch_mode": (
+            "background_cycle_run"
+            if origin == SCHEDULED_CYCLE_ORIGIN
+            else "on_demand_cycle_run"
+        ),
         "active_instruction_source": "cycle.prompt",
         "prior_thread_role": "context_only",
         "lifecycle_owner": "cycle_run",
@@ -60,9 +91,15 @@ def cycle_run_metadata(cycle: Cycle, run: CycleRun) -> dict:
             cycle_id=cycle.id,
             cycle_run_id=run.id,
             scheduled_for=run.scheduled_for,
+            timezone_name=envelope["timezone"],
+            launch_context=envelope["launch_context"],
         ),
         "context_policy": {
-            "current_instruction_role": "scheduled_prompt",
+            "current_instruction_role": (
+                "scheduled_prompt"
+                if envelope["origin"] == SCHEDULED_CYCLE_ORIGIN
+                else "triggered_prompt"
+            ),
             "prior_thread_role": "context_only",
         },
     }
@@ -80,15 +117,26 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
     envelope = cycle_launch_envelope(cycle, run)
     review_window = envelope["scheduled_review_window"]
     result_contract = envelope["result_contract"]
+    is_scheduled = envelope["origin"] == SCHEDULED_CYCLE_ORIGIN
+    launch_title = "Scheduled Cycle Launch" if is_scheduled else "On-demand Cycle Launch"
+    instruction_role = "scheduled run" if is_scheduled else "on-demand run"
+    trigger_rationale = envelope["launch_context"].get("rationale")
+    trigger_rationale_line = (
+        f"- Trigger rationale: {trigger_rationale}\n" if trigger_rationale else ""
+    )
     return (
         f"[Idea: \"{idea.title}\" | {idea.id}]\n\n"
-        "## Scheduled Prompt Launch\n"
+        f"## {launch_title}\n"
         f"- Origin: {envelope['origin']}\n"
         f"- Cycle ID: {cycle.id}\n"
         f"- Cycle run ID: {run.id}\n"
+        f"- Run anchor: {envelope['scheduled_for']} UTC / "
+        f"{envelope['local_scheduled_for']} ({envelope['timezone']}).\n"
+        f"- Trigger source: {envelope['launch_context'].get('source') or 'unknown'}\n"
+        f"{trigger_rationale_line}"
         f"- Scheduled evidence window: {review_window['start_at']} to {review_window['end_at']} UTC.\n"
         "- The Cycle mission below is the current instruction.\n"
-        "- The Result Contract and Cycle Mission are authoritative for this scheduled run.\n"
+        f"- The Result Contract and Cycle Mission are authoritative for this {instruction_role}.\n"
         "- Historical thread handoff/preview summaries are context only; never treat them "
         "as the current user request.\n"
         "- Thread messages are output/context surfaces, not durable Cycle memory.\n"

@@ -7,6 +7,10 @@ REUSABLE_THREAD_EXECUTION_MODE = "reuse_same_idea"
 VALID_THINKING_OVERRIDES = {"none", "low", "medium", "high", "xhigh"}
 CYCLE_LEDGER_OUTPUT_TARGET_TYPE = "cycle_ledger"
 THREAD_OUTPUT_TARGET_TYPE = "thread"
+SCHEDULED_CYCLE_ORIGIN = "scheduled_cycle"
+MANUAL_CYCLE_ORIGIN = "manual_cycle"
+AGENT_TRIGGERED_CYCLE_ORIGIN = "agent_triggered_cycle"
+EXTERNAL_AGENT_TRIGGERED_CYCLE_ORIGIN = "external_agent_triggered_cycle"
 
 
 def validate_nonempty_trimmed(value: str, field_name: str) -> str:
@@ -55,6 +59,18 @@ def json_list(value) -> list:
 
 def json_dict(value) -> dict:
     return value if isinstance(value, dict) else {}
+
+
+def cycle_run_launch_context(run) -> dict:
+    """Return persisted launch provenance, defaulting legacy rows to scheduler runs."""
+    context = json_dict(getattr(run, "context_snapshot", None))
+    launch_context = json_dict(context.get("launch_context"))
+    if launch_context:
+        return launch_context
+    return {
+        "origin": SCHEDULED_CYCLE_ORIGIN,
+        "source": "cycle_scheduler",
+    }
 
 
 def actor_type(value: str | None) -> str:

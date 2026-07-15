@@ -773,6 +773,64 @@ async def test_hosted_mcp_cycle_manage_create_commits_and_publishes_change():
     create_cycle.assert_awaited_once()
 
 
+async def test_hosted_mcp_cycle_manage_run_propagates_external_trigger_provenance():
+    order: list[str] = []
+    session = _AsyncSession(order)
+    cycle = _cycle_row()
+    captured = {}
+
+    async def run_cycle_now(cycle_id, *, launch_context=None):
+        captured["cycle_id"] = cycle_id
+        captured["launch_context"] = launch_context
+        return {"id": 77, "cycle_id": cycle_id, "status": "queued"}
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp._get_cycle_for_principal",
+        new=AsyncMock(return_value=cycle),
+    ), patch(
+        "brain.app.api.routers.agent_mcp.async_run_cycle_now",
+        side_effect=run_cycle_now,
+    ):
+        response = await _request(
+            "POST",
+            "/api/mcp",
+            session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_act",
+                    "arguments": {
+                        "capability": "cycle.manage",
+                        "arguments": {
+                            "action": "run",
+                            "cycle_id": cycle.id,
+                            "rationale": "EVENT_TRIGGER: backend PR merged",
+                        },
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert payload["run"]["id"] == 77
+    assert captured["cycle_id"] == cycle.id
+    assert captured["launch_context"] == {
+        "origin": "external_agent_triggered_cycle",
+        "source": "illo_act.cycle.manage",
+        "actor_type": "external_agent",
+        "actor_id": "conn-1",
+        "agent_kind": "hermes",
+        "rationale": "EVENT_TRIGGER: backend PR merged",
+    }
+
+
 async def test_hosted_mcp_identity_resolve_lists_provider_links():
     user = SimpleNamespace(
         id="user-1",
