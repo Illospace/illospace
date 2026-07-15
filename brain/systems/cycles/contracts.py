@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from brain.systems.cycles.degradation import mandatory_escalations
+
 SCHEDULED_REVIEW_WINDOW_HOURS = 24
 
 
@@ -34,9 +36,11 @@ def cycle_scheduled_review_window(scheduled_for: datetime | None) -> dict[str, A
     }
 
 
-def cycle_result_contract() -> dict[str, Any]:
+def cycle_result_contract(
+    degradation_tracking: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """The minimum output contract for autonomous cycle runs."""
-    return {
+    contract = {
         "kind": "autonomous_cycle_run_result",
         "required_outputs": [
             "answer_the_cycle_mission",
@@ -55,6 +59,15 @@ def cycle_result_contract() -> dict[str, Any]:
             "follow_next_page_to_completion_and_report_ok_when_no_reader_warnings_or_failures_remain"
         ),
     }
+    escalations = mandatory_escalations(degradation_tracking)
+    if escalations:
+        contract["mandatory_degradation_escalations"] = escalations
+        contract["degradation_escalation_instruction"] = (
+            "This is the required digest at or after each escalation's "
+            "next_required_digest_at. The visible digest MUST name every cause exactly; "
+            "off-cadence silence is not allowed to consume the escalation."
+        )
+    return contract
 
 
 def pending_evidence_health_receipt(scheduled_for: datetime | None) -> dict[str, Any]:
@@ -79,13 +92,19 @@ def pending_evidence_health_receipt(scheduled_for: datetime | None) -> dict[str,
     }
 
 
-def cycle_launch_receipt(*, cycle_id: int | None, cycle_run_id: int | None, scheduled_for: datetime | None) -> dict[str, Any]:
+def cycle_launch_receipt(
+    *,
+    cycle_id: int | None,
+    cycle_run_id: int | None,
+    scheduled_for: datetime | None,
+    result_contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "kind": "cycle_launch_receipt",
         "cycle_id": cycle_id,
         "cycle_run_id": cycle_run_id,
         "scheduled_for": _iso(_aware_utc(scheduled_for)),
         "scheduled_review_window": cycle_scheduled_review_window(scheduled_for),
-        "result_contract": cycle_result_contract(),
+        "result_contract": result_contract or cycle_result_contract(),
         "evidence_health": pending_evidence_health_receipt(scheduled_for),
     }
