@@ -16,6 +16,7 @@ from brain.systems.cycles.common import (
     CYCLE_LEDGER_OUTPUT_TARGET_TYPE,
     actor_id,
     actor_type,
+    cycle_run_launch_context,
     creator_payload,
     json_dict,
     string_or_none,
@@ -195,6 +196,7 @@ def _build_cycle_run_memory_snapshot(
     _ensure_default_output_targets(cycle, output_targets)
     scheduled_for = getattr(run, "scheduled_for", None)
     cycle_run_id = getattr(run, "id", None)
+    launch_context = cycle_run_launch_context(run)
     degradation_tracking = degradation_tracking or degradation_tracking_for_run(
         getattr(cycle, "degradation_state", None),
         scheduled_for=scheduled_for,
@@ -215,12 +217,15 @@ def _build_cycle_run_memory_snapshot(
                 "scheduled_review_window": cycle_scheduled_review_window(scheduled_for),
                 "result_contract": result_contract,
                 "evidence_health": pending_evidence_health_receipt(scheduled_for),
+                "launch_context": launch_context,
                 "degradation_tracking": degradation_tracking,
                 "launch_receipts": [
                     cycle_launch_receipt(
                         cycle_id=cycle.id,
                         cycle_run_id=cycle_run_id,
                         scheduled_for=scheduled_for,
+                        timezone_name=cycle.timezone,
+                        launch_context=launch_context,
                         result_contract=result_contract,
                     )
                 ],

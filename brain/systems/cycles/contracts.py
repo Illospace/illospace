@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from brain.systems.cycles.common import SCHEDULED_CYCLE_ORIGIN, json_dict
 
 from brain.systems.cycles.degradation import mandatory_escalations
 
@@ -97,13 +100,32 @@ def cycle_launch_receipt(
     cycle_id: int | None,
     cycle_run_id: int | None,
     scheduled_for: datetime | None,
+    timezone_name: str | None = None,
+    launch_context: dict | None = None,
     result_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    launch = json_dict(launch_context)
+    origin = str(launch.get("origin") or SCHEDULED_CYCLE_ORIGIN)
+    local_scheduled_for = None
+    timezone_name = timezone_name or "UTC"
+    try:
+        local_timezone = ZoneInfo(timezone_name)
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        timezone_name = "UTC"
+        local_timezone = ZoneInfo("UTC")
+    if scheduled_for is not None:
+        local_scheduled_for = _aware_utc(scheduled_for).astimezone(
+            local_timezone
+        ).isoformat()
     return {
         "kind": "cycle_launch_receipt",
         "cycle_id": cycle_id,
         "cycle_run_id": cycle_run_id,
+        "origin": origin,
+        "launch_context": launch,
         "scheduled_for": _iso(_aware_utc(scheduled_for)),
+        "timezone": timezone_name,
+        "local_scheduled_for": local_scheduled_for,
         "scheduled_review_window": cycle_scheduled_review_window(scheduled_for),
         "result_contract": result_contract or cycle_result_contract(),
         "evidence_health": pending_evidence_health_receipt(scheduled_for),

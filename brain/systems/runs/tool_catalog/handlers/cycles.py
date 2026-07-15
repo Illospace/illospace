@@ -15,6 +15,7 @@ from brain.systems.cycles.access import (
     cycle_scope_conditions,
     target_idea_scope_conditions,
 )
+from brain.systems.cycles.common import AGENT_TRIGGERED_CYCLE_ORIGIN
 from brain.systems.cycles.commands import (
     UNSET_CYCLE_FIELD,
     async_add_guidance_to_cycle,
@@ -247,7 +248,17 @@ async def _action_run(ctx: ManageCycleContext) -> dict[str, Any]:
     async with UnitOfWork() as uow:
         cycle = await _load_cycle(uow.session, ctx.actor, ctx.args.id)
         event = cycle_change_event(cycle)
-    payload = await async_run_cycle_now(ctx.args.id)
+    payload = await async_run_cycle_now(
+        ctx.args.id,
+        launch_context={
+            "origin": AGENT_TRIGGERED_CYCLE_ORIGIN,
+            "source": "manage_cycle",
+            "actor_type": ctx.actor.principal_type,
+            "actor_id": ctx.actor.source_id,
+            "thread_id": getattr(_agent_context, "idea_id", None),
+            "rationale": _optional_text(ctx.args.rationale),
+        },
+    )
     publish_cycle_change(action="run", **event)
     return {"run": payload}
 

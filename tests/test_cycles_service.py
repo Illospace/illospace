@@ -11,7 +11,9 @@ from sqlalchemy import select
 from brain.app.api.schemas.cycles import CycleRead, CycleRunRead
 from brain.systems.cycles import access as cycle_access
 from brain.systems.cycles import execution as cycle_execution
+from brain.systems.cycles import prompts as cycle_prompts
 from brain.systems.cycles import service
+from brain.systems.cycles.common import AGENT_TRIGGERED_CYCLE_ORIGIN, MANUAL_CYCLE_ORIGIN
 from brain.app.api.routers import cycles as cycles_router
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
@@ -632,6 +634,47 @@ def test_serialize_cycle_run_normalizes_uuid_columns_for_api_schema():
     CycleRunRead.model_validate(serialized)
 
 
+def test_on_demand_cycle_launch_exposes_provenance_and_local_anchor():
+    cycle = Cycle()
+    cycle.id = 2
+    cycle.name = "Uwear Ticket Coordinator Check-ins"
+    cycle.prompt = "Coordinate Uwear engineering."
+    cycle.timezone = "America/New_York"
+    cycle.model_override = None
+    cycle.thinking_override = None
+
+    run = CycleRun()
+    run.id = 1346
+    run.cycle_id = cycle.id
+    run.revision_id = 41
+    run.scheduled_for = datetime(2026, 7, 15, 13, 2, 31, tzinfo=timezone.utc)
+    run.context_snapshot = {
+        "launch_context": {
+            "origin": AGENT_TRIGGERED_CYCLE_ORIGIN,
+            "source": "manage_cycle",
+            "actor_id": "1438",
+            "rationale": "EVENT_TRIGGER: merged PR now requires deploy",
+        }
+    }
+
+    idea = Idea()
+    idea.id = "0772d00e-41ad-4a0a-b26d-1886de587ed8"
+    idea.title = "Uwear Ticket Coordinator Runs"
+
+    envelope = cycle_prompts.cycle_launch_envelope(cycle, run)
+    message = cycle_prompts.cycle_run_message(idea, cycle, run)
+
+    assert envelope["origin"] == AGENT_TRIGGERED_CYCLE_ORIGIN
+    assert envelope["launch_mode"] == "on_demand_cycle_run"
+    assert envelope["scheduled_for"] == "2026-07-15T13:02:31+00:00"
+    assert envelope["local_scheduled_for"] == "2026-07-15T09:02:31-04:00"
+    assert envelope["timezone"] == "America/New_York"
+    assert "## On-demand Cycle Launch" in message
+    assert "2026-07-15T09:02:31-04:00 (America/New_York)" in message
+    assert "EVENT_TRIGGER: merged PR now requires deploy" in message
+    assert "## Scheduled Cycle Launch" not in message
+
+
 @pytest.mark.asyncio
 async def test_async_run_cycle_now_uses_native_uow_without_sync_bridges(monkeypatch):
     cycle = Cycle()
@@ -662,6 +705,10 @@ async def test_async_run_cycle_now_uses_native_uow_without_sync_bridges(monkeypa
     assert payload["cycle_id"] == cycle.id
     assert payload["prompt_snapshot"] == cycle.prompt
     assert payload["status"] == "completed"
+    assert payload["context_snapshot"]["launch_context"] == {
+        "origin": MANUAL_CYCLE_ORIGIN,
+        "source": "cycle.run_now",
+    }
     assert all(uow.entered for uow in factory.uows)
 
 
@@ -791,7 +838,7 @@ async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeyp
     assert run.context_snapshot["result_contract"]["kind"] == "autonomous_cycle_run_result"
     assert run.context_snapshot["evidence_health"]["status"] == "pending"
     assert run.context_snapshot["scheduled_review_window"]["end_at"] == "2026-04-28T20:20:00+00:00"
-    assert "Scheduled Prompt Launch" in admissions[0]["message"]
+    assert "Scheduled Cycle Launch" in admissions[0]["message"]
     assert "Scheduled evidence window: 2026-04-27T20:20:00+00:00 to 2026-04-28T20:20:00+00:00 UTC." in admissions[0]["message"]
     assert "Result Contract" in admissions[0]["message"]
     assert "Report evidence health explicitly" in admissions[0]["message"]
@@ -1093,6 +1140,57 @@ async def test_manage_cycle_list_uses_native_uow_without_sync_bridges(monkeypatc
     assert factory.uows[0].entered is True
     assert payload["cycles"][0]["id"] == cycle.id
     assert payload["cycles"][0]["name"] == cycle.name
+
+
+@pytest.mark.asyncio
+async def test_manage_cycle_run_propagates_agent_trigger_provenance(monkeypatch):
+    from brain.systems.runs.tool_catalog.handlers import cycles as cycle_handlers
+    from brain.systems.runs.execution_context import bind_agent_context
+
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 8,13,18 * * *",
+        timezone_name="America/New_York",
+    )
+    factory = _AsyncUnitOfWorkFactory([_AsyncCycleListSession([cycle])])
+    captured = {}
+
+    async def fake_run_cycle_now(cycle_id, *, launch_context=None):
+        captured["cycle_id"] = cycle_id
+        captured["launch_context"] = launch_context
+        return {"id": 99, "cycle_id": cycle_id, "status": "queued"}
+
+    monkeypatch.setattr(cycle_handlers, "UnitOfWork", factory)
+    monkeypatch.setattr(cycle_handlers, "async_run_cycle_now", fake_run_cycle_now)
+    monkeypatch.setattr(cycle_handlers, "publish_cycle_change", lambda **_kwargs: None)
+
+    with bind_agent_context(
+        {
+            "user_id": "user-1",
+            "org_id": None,
+            "run_id": 1438,
+            "idea_id": "reflex-thread",
+        }
+    ):
+        payload = json.loads(
+            await cycle_handlers._handle_manage_cycle_async(
+                action="run",
+                id=cycle.id,
+                rationale="EVENT_TRIGGER: PR #990 merged and needs deploy",
+            )
+        )
+
+    assert payload["run"]["id"] == 99
+    assert captured == {
+        "cycle_id": cycle.id,
+        "launch_context": {
+            "origin": AGENT_TRIGGERED_CYCLE_ORIGIN,
+            "source": "manage_cycle",
+            "actor_type": "agent",
+            "actor_id": "1438",
+            "thread_id": "reflex-thread",
+            "rationale": "EVENT_TRIGGER: PR #990 merged and needs deploy",
+        },
+    }
 
 
 @pytest.mark.asyncio
