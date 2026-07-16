@@ -229,18 +229,38 @@ async def run_notify_cycle(
     unclaimed = await _count_unclaimed(session, org_id)
     outbound = render_outbound(events, unclaimed_count=unclaimed, urgent_terms=urgent_terms)
 
+    import logging
+
     sender = post or _default_post
+    log = logging.getLogger("illo.notify")
+    post_failures = 0
+    digest_posted = False
+    # A failed send (token unavailable, Slack rejection) must not kill the
+    # tick or the messages behind it — count it, log it, keep going
+    # (cross-family review finding, 2026-07-16: this path went live with the
+    # runtime-token resolver and previously had no containment).
     for message in outbound["immediate"]:
-        await sender(channel_id, message)
+        try:
+            await sender(channel_id, message)
+        except Exception:  # noqa: BLE001
+            post_failures += 1
+            log.warning("notify post failed; continuing with remaining messages", exc_info=True)
     if outbound["digest"]:
-        await sender(channel_id, outbound["digest"])
+        try:
+            await sender(channel_id, outbound["digest"])
+            digest_posted = True
+        except Exception:  # noqa: BLE001
+            post_failures += 1
+            log.warning("notify digest post failed", exc_info=True)
 
     summary = {
         "events": len(events),
         "immediate": len(outbound["immediate"]),
-        "digest_posted": bool(outbound["digest"]),
+        "digest_posted": digest_posted,
         "unclaimed": unclaimed,
     }
+    if post_failures:
+        summary["post_failures"] = post_failures
     if verification is not None:
         summary["verification"] = verification
     return summary
