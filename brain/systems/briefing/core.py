@@ -32,6 +32,7 @@ from typing import Any
 # these, alphabetically, and shed first under total-budget pressure.
 SOURCE_PRIORITY: tuple[str, ...] = (
     "record",
+    "chantier",
     "slack_thread",
     "github_issue",
     "github_pr",
