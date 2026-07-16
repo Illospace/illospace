@@ -111,15 +111,18 @@ class DefaultSlackReader:
     def __init__(self, client: Any | None = None) -> None:
         self._client = client
 
-    def _resolve_client(self) -> Any:
+    async def _resolve_client(self) -> Any:
         if self._client is None:
-            from brain.systems.slack.client import slack_web_client_from_env
+            from brain.systems.slack.client import slack_web_client_from_runtime
 
-            self._client = slack_web_client_from_env()
+            self._client = await slack_web_client_from_runtime(
+                requested_by="packet_gather",
+                reason="Read the origin Slack thread for a handoff dossier.",
+            )
         return self._client
 
     async def read_thread(self, *, channel: str, thread_ts: str, limit: int) -> SlackThreadRead:
-        client = self._resolve_client()
+        client = await self._resolve_client()
         collected: list[dict[str, Any]] = []
         total = 0
         cursor: str | None = None

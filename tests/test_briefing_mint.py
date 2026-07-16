@@ -206,7 +206,7 @@ def _readers():
 
 @pytest.fixture(autouse=True)
 def _no_real_slack_post(monkeypatch):
-    """mint's Slack reply goes through slack_web_client_from_env — stub it."""
+    """mint's Slack reply goes through slack_web_client_from_runtime — stub it."""
     posts: list[dict] = []
 
     class FakeClient:
@@ -216,7 +216,10 @@ def _no_real_slack_post(monkeypatch):
 
     import brain.systems.slack.client as slack_client
 
-    monkeypatch.setattr(slack_client, "slack_web_client_from_env", lambda: FakeClient())
+    async def fake_from_runtime(**_kwargs):
+        return FakeClient()
+
+    monkeypatch.setattr(slack_client, "slack_web_client_from_runtime", fake_from_runtime)
     return posts
 
 
