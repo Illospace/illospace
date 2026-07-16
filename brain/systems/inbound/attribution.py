@@ -16,6 +16,13 @@ from brain.systems.runs.tool_catalog.registry import action_policy_for_tool, get
 
 _TOOL_COMPLETED_EVENT = "run.tool_completed"
 _MAX_TARGET_REFS = 20
+# Entity identities are short (uuids, integer ids, owner/repo#N). Anything
+# longer is result CONTENT that leaked into a ref-shaped position — drop it
+# (never truncate: a clipped id is a wrong ref), which also bounds the
+# persisted result_refs payload (cross-family review finding, 2026-07-16).
+_MAX_REF_ID_CHARS = 200
+_MAX_REF_KIND_CHARS = 64
+_MAX_REF_SOURCE_CHARS = 80
 _SUMMARY_OPERATION_TAGS = {
     "created",
     "updated",
@@ -170,13 +177,16 @@ def _add_ref(refs: list[dict[str, str]], seen: set[tuple[str, str]], *, kind: st
     if len(refs) >= _MAX_TARGET_REFS:
         return
     text = str(value or "").strip()
-    if not text:
+    kind_text = str(kind or "").strip()
+    if not text or not kind_text:
         return
-    key = (kind, text)
+    if len(text) > _MAX_REF_ID_CHARS or len(kind_text) > _MAX_REF_KIND_CHARS:
+        return
+    key = (kind_text, text)
     if key in seen:
         return
     seen.add(key)
-    refs.append({"kind": kind, "id": text, "source": source})
+    refs.append({"kind": kind_text, "id": text, "source": str(source or "")[:_MAX_REF_SOURCE_CHARS]})
 
 
 def _add_ref_values(

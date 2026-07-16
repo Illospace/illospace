@@ -189,3 +189,16 @@ def test_event_payload_carries_full_result_refs_beside_preview():
 
     small = _event_payload("post_slack_reply", {}, result=json.dumps({"ok": True, "channel_id": "C1"}))
     assert "result_refs" not in small  # no refs → no key
+
+
+def test_oversized_ref_ids_are_dropped_never_truncated():
+    """A clipped id is a wrong ref, and unbounded ids would balloon the
+    persisted result_refs payload — drop anything id-shaped that is really
+    content (cross-family review finding, 2026-07-16)."""
+    from brain.systems.inbound.attribution import collect_result_refs
+
+    refs = collect_result_refs(
+        json.dumps({"record_id": "z" * 1_000_000, "idea_id": "idea-ok"}),
+        source="s" * 500,
+    )
+    assert refs == [{"kind": "idea", "id": "idea-ok", "source": "s" * 80}]

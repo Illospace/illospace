@@ -60,6 +60,9 @@ async def _maybe_await(value):
 
 def _event_stream_payload(event, row) -> dict[str, Any]:
     payload = dict(event.payload or {})
+    # Backend-only attribution channel; live stream consumers never see it
+    # (ref ids are raw result content with no redaction pass).
+    payload.pop("result_refs", None)
     event_id = int(getattr(row, "id", 0) or 0)
     payload.update({
         "run_id": int(event.run_id),
