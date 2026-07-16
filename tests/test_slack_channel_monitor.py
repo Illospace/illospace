@@ -319,6 +319,24 @@ def test_build_payload_for_channel_message_is_headless_and_not_forced_reply():
     assert "👀" in run_message
 
 
+def test_channel_monitor_framing_routes_feature_requests_to_tickets():
+    # Regression: a Retool-relayed customer feature request ("*New:* Idea") was
+    # classified "low-signal" and dropped because the framing only made
+    # user-reported *problems* ticket-worthy (run 1550, 2026-07-16).
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
+    payload = build_slack_work_intake_payload(
+        org_id="org1",
+        authority_user_id="user1",
+        payload=_channel_monitor_payload(),
+    )
+
+    run_message = payload["payload"]["run_message"]
+    assert "feature request or product idea" in run_message
+    assert "NOT chatter and NOT low-signal" in run_message
+    assert "email/profile id" in run_message
+
+
 def test_build_payload_for_mention_still_forces_reply():
     from brain.systems.slack.triggers import build_slack_work_intake_payload
 

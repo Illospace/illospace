@@ -262,6 +262,15 @@ def slack_channel_monitor_message(
         "section (a Domain 37 doc_page record; skill_asset references/creating-work-items.md as "
         "fallback), then optionally "
         "post a brief Slack note with post_slack_reply citing the issue number and URL.",
+        "- A user-submitted feature request or product idea (feedback relayed by a bot such as "
+        "Retool — e.g. '*New:* Idea' or '*New:* Feedback' with a user email and profile id — is "
+        "a real customer ask, NOT chatter and NOT low-signal): if the ask is concrete and "
+        "actionable, it IS ticket-worthy — follow the same flow as above to open a REAL GitHub "
+        "issue in the correct uwear-ai repo, quoting the user's ask and including their "
+        "email/profile id in the issue body, then post a brief thread note with post_slack_reply "
+        "citing the issue number and URL so the team knows it was captured. Only if the ask is "
+        "too vague to act on, or it duplicates an existing open issue, comment on the existing "
+        "issue or stay silent instead.",
         "- An alert that matches an EXISTING ticket or issue (same Rollbar id/error signature): "
         "do NOT refile and do NOT blindly skip — follow the triage skill's Deploy-State Ladder: "
         "note occurrences while unfixed; a fix merged to staging but not promoted is expected "
