@@ -637,6 +637,212 @@ async def async_get_issue(
     return {"repo": slug, "issue": payload}
 
 
+def _issue_reference(slug: str, issue_number: int) -> dict[str, Any]:
+    return {
+        "repo": slug,
+        "number": issue_number,
+        "html_url": f"https://github.com/{slug}/issues/{issue_number}",
+    }
+
+
+def _numeric_issue_id(issue: Any, *, slug: str, issue_number: int) -> int:
+    issue_id = issue.get("id") if isinstance(issue, dict) else None
+    if not isinstance(issue_id, int) or isinstance(issue_id, bool) or issue_id < 1:
+        raise GitHubConnectorError(
+            status_code=502,
+            message=f"GitHub issue response for {slug}#{issue_number} omitted its numeric id.",
+        )
+    return issue_id
+
+
+async def async_list_repo_sub_issues(
+    slug: str,
+    issue_number: int,
+    *,
+    token: str | None = None,
+    limit: int = 30,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """List one bounded page of a parent issue's native GitHub sub-issues."""
+
+    owner, repo = slug.split("/", 1)
+    max_items = max(1, min(int(limit or 30), GITHUB_ITEM_LIMIT))
+    page_kind = f"github_sub_issues:{slug}#{issue_number}"
+    position = decode_page_token(cursor, kind=page_kind)
+    try:
+        page = int(position.get("page", 1))
+        page_index = int(position.get("index", 0))
+    except (TypeError, ValueError) as exc:
+        raise InvalidPageToken("Invalid pagination cursor") from exc
+    if page < 1 or page_index < 0:
+        raise InvalidPageToken("Invalid pagination cursor")
+
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        data = await _async_request(
+            client,
+            "GET",
+            f"/repos/{owner}/{repo}/issues/{issue_number}/sub_issues",
+            token=token,
+            params={"per_page": GITHUB_ITEM_LIMIT, "page": page},
+        )
+    items = data if isinstance(data, list) else []
+    selected = items[page_index : page_index + max_items]
+    next_position = None
+    if page_index + max_items < len(items):
+        next_position = {"page": page, "index": page_index + max_items}
+    elif len(items) == GITHUB_ITEM_LIMIT:
+        next_position = {"page": page + 1, "index": 0}
+    return {
+        "repo": slug,
+        "parent": _issue_reference(slug, issue_number),
+        "sub_issues": [_issue_payload(item) for item in selected if isinstance(item, dict)],
+        "truncated": next_position is not None,
+        "next_page": encode_page_token(page_kind, next_position) if next_position else None,
+        "evidence_health": {
+            "status": "ok",
+            "completeness": "more_available" if next_position else "complete",
+        },
+    }
+
+
+async def async_get_repo_issue_parent(
+    slug: str,
+    issue_number: int,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Return the native parent of one issue, or ``None`` when it has none."""
+
+    owner, repo = slug.split("/", 1)
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        issue = await _async_request(
+            client,
+            "GET",
+            f"/repos/{owner}/{repo}/issues/{issue_number}",
+            token=token,
+        )
+        try:
+            parent = await _async_request(
+                client,
+                "GET",
+                f"/repos/{owner}/{repo}/issues/{issue_number}/parent",
+                token=token,
+            )
+        except GitHubConnectorError as exc:
+            if exc.status_code != 404:
+                raise
+            parent = None
+    return {
+        "repo": slug,
+        "issue": _issue_payload(issue if isinstance(issue, dict) else {}),
+        "parent": _issue_payload(parent) if isinstance(parent, dict) else None,
+    }
+
+
+async def async_add_repo_sub_issue(
+    parent_slug: str,
+    parent_issue_number: int,
+    child_slug: str,
+    child_issue_number: int,
+    *,
+    token: str,
+) -> dict[str, Any]:
+    """Idempotently link a child issue after resolving number to numeric id."""
+
+    parent_owner, parent_repo = parent_slug.split("/", 1)
+    child_owner, child_repo = child_slug.split("/", 1)
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        child = await _async_request(
+            client,
+            "GET",
+            f"/repos/{child_owner}/{child_repo}/issues/{child_issue_number}",
+            token=token,
+        )
+        child_id = _numeric_issue_id(child, slug=child_slug, issue_number=child_issue_number)
+        current = await _async_request(
+            client,
+            "GET",
+            f"/repos/{parent_owner}/{parent_repo}/issues/{parent_issue_number}/sub_issues",
+            token=token,
+            params={"per_page": GITHUB_ITEM_LIMIT, "page": 1},
+        )
+        current_items = current if isinstance(current, list) else []
+        if any(isinstance(item, dict) and item.get("id") == child_id for item in current_items):
+            return {
+                "action": "already_linked",
+                "changed": False,
+                "already_linked": True,
+                "parent": _issue_reference(parent_slug, parent_issue_number),
+                "child": {"repo": child_slug, **_issue_payload(child)},
+            }
+        linked = await _async_request(
+            client,
+            "POST",
+            f"/repos/{parent_owner}/{parent_repo}/issues/{parent_issue_number}/sub_issues",
+            token=token,
+            json={"sub_issue_id": child_id},
+        )
+    return {
+        "action": "linked",
+        "changed": True,
+        "already_linked": False,
+        "parent": _issue_reference(parent_slug, parent_issue_number),
+        "child": {"repo": child_slug, **_issue_payload(linked if isinstance(linked, dict) else child)},
+    }
+
+
+async def async_remove_repo_sub_issue(
+    parent_slug: str,
+    parent_issue_number: int,
+    child_slug: str,
+    child_issue_number: int,
+    *,
+    token: str,
+) -> dict[str, Any]:
+    """Idempotently remove a child after resolving its number to numeric id."""
+
+    parent_owner, parent_repo = parent_slug.split("/", 1)
+    child_owner, child_repo = child_slug.split("/", 1)
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        child = await _async_request(
+            client,
+            "GET",
+            f"/repos/{child_owner}/{child_repo}/issues/{child_issue_number}",
+            token=token,
+        )
+        child_id = _numeric_issue_id(child, slug=child_slug, issue_number=child_issue_number)
+        current = await _async_request(
+            client,
+            "GET",
+            f"/repos/{parent_owner}/{parent_repo}/issues/{parent_issue_number}/sub_issues",
+            token=token,
+            params={"per_page": GITHUB_ITEM_LIMIT, "page": 1},
+        )
+        current_items = current if isinstance(current, list) else []
+        if not any(isinstance(item, dict) and item.get("id") == child_id for item in current_items):
+            return {
+                "action": "already_unlinked",
+                "changed": False,
+                "already_unlinked": True,
+                "parent": _issue_reference(parent_slug, parent_issue_number),
+                "child": {"repo": child_slug, **_issue_payload(child)},
+            }
+        removed = await _async_request(
+            client,
+            "DELETE",
+            f"/repos/{parent_owner}/{parent_repo}/issues/{parent_issue_number}/sub_issue",
+            token=token,
+            json={"sub_issue_id": child_id},
+        )
+    return {
+        "action": "unlinked",
+        "changed": True,
+        "already_unlinked": False,
+        "parent": _issue_reference(parent_slug, parent_issue_number),
+        "child": {"repo": child_slug, **_issue_payload(removed if isinstance(removed, dict) else child)},
+    }
+
+
 async def async_get_pull_request_deploy_info(
     slug: str,
     pull_number: int,

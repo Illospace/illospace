@@ -94,7 +94,10 @@ GITHUB_TOOLS = [
             "write-capable token can reach the repo. If no write-capable token can reach a "
             "(private) repo, this returns an error carrying no_write_token so the triage flow can "
             "ask for clarification or fall back to an internal tracker record + handoff. Accepts "
-            "owner/name, GitHub URL, or git remote repo values."
+            "owner/name, GitHub URL, or git remote repo values. For a chantier parent mirror, use "
+            "the title '[Chantier] <title>' and a body that states the goal as 'Done means …', the "
+            "chantier slug, and key references. Do not add a hand-maintained child checklist: "
+            "native GitHub sub-issues are the progress surface."
         ),
         "input_schema": {
             "type": "object",
@@ -111,7 +114,9 @@ GITHUB_TOOLS = [
                     "type": "string",
                     "description": (
                         "Optional Markdown issue body. Prefix AI-authored triage issues with a "
-                        "clear AI-generated disclaimer."
+                        "clear AI-generated disclaimer. A chantier parent body carries its "
+                        "'Done means …' goal, chantier slug, and key refs, without duplicating "
+                        "native sub-issues as a Markdown checklist."
                     ),
                 },
                 "labels": {
@@ -130,6 +135,135 @@ GITHUB_TOOLS = [
                 },
             },
             "required": ["repo", "title"],
+        },
+    },
+    {
+        "name": "add_github_sub_issue",
+        "description": (
+            "Link a REAL GitHub issue as a native sub-issue of a chantier parent issue. This is an "
+            "external GitHub write. Parent and child may be in different repositories owned by the "
+            "same organization. The tool resolves the child's issue number to GitHub's numeric issue "
+            "id, requests a GitHub App token scoped to both repositories, and is idempotent when the "
+            "child is already linked. Use the parent's native sub-issue rollup as the progress surface; "
+            "do not maintain a duplicate checklist in the parent body."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "parent_repo": {
+                    "type": "string",
+                    "description": "Parent repository as owner/name, GitHub URL, or git remote URL.",
+                },
+                "parent_issue_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Chantier parent issue number.",
+                },
+                "child_repo": {
+                    "type": "string",
+                    "description": "Child repository as owner/name, GitHub URL, or git remote URL.",
+                },
+                "child_issue_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Member ticket issue number; the tool resolves its numeric GitHub id.",
+                },
+                "token_secret_key": {
+                    "type": "string",
+                    "description": "Optional Vault secret key holding a write-capable GitHub token.",
+                },
+            },
+            "required": [
+                "parent_repo",
+                "parent_issue_number",
+                "child_repo",
+                "child_issue_number",
+            ],
+        },
+    },
+    {
+        "name": "remove_github_sub_issue",
+        "description": (
+            "Remove a REAL GitHub issue from a chantier parent's native sub-issues. This is an "
+            "external GitHub write, supports same-organization cross-repository children, resolves "
+            "the child's issue number to its numeric GitHub id, and is idempotent when the child is "
+            "already unlinked. It does not close or otherwise edit either issue."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "parent_repo": {
+                    "type": "string",
+                    "description": "Parent repository as owner/name, GitHub URL, or git remote URL.",
+                },
+                "parent_issue_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Chantier parent issue number.",
+                },
+                "child_repo": {
+                    "type": "string",
+                    "description": "Child repository as owner/name, GitHub URL, or git remote URL.",
+                },
+                "child_issue_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Member ticket issue number; the tool resolves its numeric GitHub id.",
+                },
+                "token_secret_key": {
+                    "type": "string",
+                    "description": "Optional Vault secret key holding a write-capable GitHub token.",
+                },
+            },
+            "required": [
+                "parent_repo",
+                "parent_issue_number",
+                "child_repo",
+                "child_issue_number",
+            ],
+        },
+    },
+    {
+        "name": "list_github_sub_issues",
+        "description": (
+            "Read native GitHub sub-issue relationships. Use action='list' with a parent issue to "
+            "inspect its bounded sub-issue rollup, or action='get_parent' with a member ticket to "
+            "answer which parent issue tracks it. This tool is read-only and accepts owner/name, "
+            "GitHub URL, or git remote repo values."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "get_parent"],
+                    "default": "list",
+                    "description": "List a parent's children or look up one child issue's parent.",
+                },
+                "repo": {
+                    "type": "string",
+                    "description": "Parent repo for list; child repo for get_parent.",
+                },
+                "issue_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Parent issue number for list; child issue number for get_parent.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 30,
+                    "description": "Maximum sub-issues to return for list, 1-100.",
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque next_page token returned by a sub-issue listing.",
+                },
+                "token_secret_key": {
+                    "type": "string",
+                    "description": "Optional Vault secret key containing a GitHub token for private repos.",
+                },
+            },
+            "required": ["repo", "issue_number"],
         },
     },
     {

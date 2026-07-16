@@ -10,7 +10,9 @@ from typing import Any
 from brain.kernel.common.pagination import InvalidPageToken
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
+    async_add_repo_sub_issue,
     async_create_repo_issue,
+    async_get_repo_issue_parent,
     async_get_pull_request_deploy_info,
     async_get_pull_request,
     async_get_pull_request_checks,
@@ -18,6 +20,8 @@ from brain.systems.cortex.project_context.github import (
     async_get_repo_by_slug,
     async_list_repo_issues,
     async_list_repo_pull_requests,
+    async_list_repo_sub_issues,
+    async_remove_repo_sub_issue,
     parse_github_repo_slug,
 )
 from brain.systems.deploy_state import (
@@ -60,6 +64,16 @@ def _limit(value: Any) -> int:
         return max(1, min(int(value or 30), 100))
     except (TypeError, ValueError):
         return 30
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(value, bool) or number < 1:
+        return None
+    return number
 
 
 def _is_known_legacy_token_key(value: Any) -> bool:
@@ -116,6 +130,7 @@ async def _github_token_candidates(
     *,
     repo_slug: str,
     token_secret_key: str | None,
+    repo_slugs: list[str] | None = None,
     for_write: bool = False,
     org_id: str | None = None,
     user_id: str | None = None,
@@ -128,6 +143,9 @@ async def _github_token_candidates(
     ``for_write`` restricts automatic identity selection to GitHub App project
     bindings. Writes may also use an explicit ``token_secret_key``. Reads keep
     the broader project-binding and vault-inventory fallback behavior.
+
+    ``repo_slugs`` lets a cross-repository write mint one installation token
+    down-scoped to every participating repository binding.
 
     ``org_id``/``user_id`` override the run context for BACKEND callers (e.g.
     dossier gathering) where no ``_agent_context`` exists; tool handlers omit
@@ -169,6 +187,7 @@ async def _github_token_candidates(
                 actor_user_id=user_id,
                 org_id=org_id,
                 project_slug=repo_slug,
+                project_slugs=repo_slugs,
                 github_app_only=for_write,
             )
         except Exception:
@@ -528,6 +547,269 @@ async def _handle_create_github_issue(
     return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
 
 
+def _sub_issue_write_error(
+    exc: GitHubConnectorError,
+    *,
+    operation: str,
+    parent_repo: str,
+    child_repo: str,
+    token_key_name: str | None = None,
+) -> dict[str, Any]:
+    auth_statuses = {401, 403, 404}
+    if exc.status_code == 403:
+        error = (
+            f"GitHub refused to {operation} the sub-issue with HTTP 403. Ensure the GitHub App is "
+            f"installed on both {parent_repo} and {child_repo} with Issues: Read and write, then "
+            "reapprove or reconnect the installation before retrying."
+        )
+    else:
+        error = exc.message
+    return {
+        "error": error,
+        "status_code": exc.status_code,
+        "no_write_token": exc.status_code in auth_statuses,
+        "missing_scope": exc.status_code == 403,
+        "parent_repo": parent_repo,
+        "child_repo": child_repo,
+        "token_key_name": token_key_name,
+    }
+
+
+async def _handle_github_sub_issue_write(
+    operation: str,
+    *,
+    parent_repo: str | None,
+    parent_issue_number: int | None,
+    child_repo: str | None,
+    child_issue_number: int | None,
+    token_secret_key: str | None,
+) -> str:
+    parent_slug = parse_github_repo_slug(parent_repo or "")
+    if not parent_slug:
+        return json.dumps({
+            "error": f"{operation}_github_sub_issue requires parent_repo as owner/name or a GitHub URL"
+        })
+    child_slug = parse_github_repo_slug(child_repo or "")
+    if not child_slug:
+        return json.dumps({
+            "error": f"{operation}_github_sub_issue requires child_repo as owner/name or a GitHub URL"
+        })
+    clean_parent_number = _positive_int(parent_issue_number)
+    if clean_parent_number is None:
+        return json.dumps({
+            "error": f"{operation}_github_sub_issue requires a positive parent_issue_number"
+        })
+    clean_child_number = _positive_int(child_issue_number)
+    if clean_child_number is None:
+        return json.dumps({
+            "error": f"{operation}_github_sub_issue requires a positive child_issue_number"
+        })
+    if parent_slug.split("/", 1)[0].lower() != child_slug.split("/", 1)[0].lower():
+        return json.dumps({
+            "error": "GitHub sub-issues must have the same repository owner as their parent issue",
+            "status_code": 422,
+            "parent_repo": parent_slug,
+            "child_repo": child_slug,
+        })
+
+    repo_slugs = list(dict.fromkeys([parent_slug, child_slug]))
+    candidates = await _github_token_candidates(
+        repo_slug=parent_slug,
+        repo_slugs=repo_slugs,
+        token_secret_key=token_secret_key,
+        for_write=True,
+    )
+    write_candidates = [candidate for candidate in candidates if candidate.get("token")]
+    if not write_candidates:
+        return json.dumps({
+            "error": (
+                "No GitHub App identity is connected for every repository in this sub-issue "
+                f"relationship ({', '.join(repo_slugs)}). Connect the GitHub App to both repos "
+                "(or pass token_secret_key) so Illo can update the native relationship."
+            ),
+            "status_code": 401,
+            "no_write_token": True,
+            "parent_repo": parent_slug,
+            "child_repo": child_slug,
+        })
+
+    last_error: GitHubConnectorError | None = None
+    auth_statuses = {401, 403, 404}
+    for index, candidate in enumerate(write_candidates):
+        try:
+            if operation == "add":
+                payload = await async_add_repo_sub_issue(
+                    parent_slug,
+                    clean_parent_number,
+                    child_slug,
+                    clean_child_number,
+                    token=str(candidate["token"]),
+                )
+            else:
+                payload = await async_remove_repo_sub_issue(
+                    parent_slug,
+                    clean_parent_number,
+                    child_slug,
+                    clean_child_number,
+                    token=str(candidate["token"]),
+                )
+        except GitHubConnectorError as exc:
+            last_error = exc
+            if exc.status_code in auth_statuses and index < len(write_candidates) - 1:
+                continue
+            return json.dumps(_sub_issue_write_error(
+                exc,
+                operation=operation,
+                parent_repo=parent_slug,
+                child_repo=child_slug,
+                token_key_name=candidate.get("key_name"),
+            ))
+        payload["token_secret_key_used"] = bool(candidate.get("key_name"))
+        payload["token_source"] = candidate["source"]
+        payload["token_key_name"] = candidate.get("key_name")
+        if last_error is not None:
+            payload["fallback_from_status_code"] = last_error.status_code
+        return json.dumps(payload, default=str)
+
+    if last_error is not None:
+        return json.dumps(_sub_issue_write_error(
+            last_error,
+            operation=operation,
+            parent_repo=parent_slug,
+            child_repo=child_slug,
+        ))
+    return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
+
+
+async def _handle_add_github_sub_issue(
+    parent_repo: str | None = None,
+    parent_issue_number: int | None = None,
+    child_repo: str | None = None,
+    child_issue_number: int | None = None,
+    token_secret_key: str | None = None,
+) -> str:
+    """Idempotently add a native GitHub sub-issue using the App write lane."""
+
+    return await _handle_github_sub_issue_write(
+        "add",
+        parent_repo=parent_repo,
+        parent_issue_number=parent_issue_number,
+        child_repo=child_repo,
+        child_issue_number=child_issue_number,
+        token_secret_key=token_secret_key,
+    )
+
+
+async def _handle_remove_github_sub_issue(
+    parent_repo: str | None = None,
+    parent_issue_number: int | None = None,
+    child_repo: str | None = None,
+    child_issue_number: int | None = None,
+    token_secret_key: str | None = None,
+) -> str:
+    """Idempotently remove a native GitHub sub-issue using the App write lane."""
+
+    return await _handle_github_sub_issue_write(
+        "remove",
+        parent_repo=parent_repo,
+        parent_issue_number=parent_issue_number,
+        child_repo=child_repo,
+        child_issue_number=child_issue_number,
+        token_secret_key=token_secret_key,
+    )
+
+
+async def _handle_list_github_sub_issues(
+    action: str = "list",
+    repo: str | None = None,
+    issue_number: int | None = None,
+    limit: int = 30,
+    cursor: str | None = None,
+    token_secret_key: str | None = None,
+) -> str:
+    """List a parent's native children or look up one issue's parent."""
+
+    repo_slug = parse_github_repo_slug(repo or "")
+    if not repo_slug:
+        return json.dumps({"error": "list_github_sub_issues requires repo as owner/name or a GitHub URL"})
+    clean_issue_number = _positive_int(issue_number)
+    if clean_issue_number is None:
+        return json.dumps({"error": "list_github_sub_issues requires a positive issue_number"})
+    clean_action = str(action or "list").strip().lower()
+    if clean_action not in {"list", "get_parent"}:
+        return json.dumps({"error": "list_github_sub_issues action must be list or get_parent"})
+    if clean_action == "get_parent" and _clean(cursor):
+        return json.dumps({"error": "list_github_sub_issues cursor is only valid for action=list"})
+
+    candidates = await _github_token_candidates(
+        repo_slug=repo_slug,
+        token_secret_key=token_secret_key,
+    )
+    read_state = _github_read_state()
+    read_candidates = _ordered_read_candidates(candidates, repo_slug=repo_slug, state=read_state)
+    if not read_candidates:
+        cached_errors = [
+            error
+            for (token, rejected_repo), error in read_state.rejected.items()
+            if rejected_repo == repo_slug
+            and any(candidate.get("token") == token for candidate in candidates)
+        ]
+        if cached_errors:
+            cached_error = cached_errors[-1]
+            return json.dumps({
+                "error": cached_error.message,
+                "status_code": cached_error.status_code,
+                "attempted_token_sources": [candidate["source"] for candidate in candidates],
+            })
+        return json.dumps({"error": "No GitHub token candidates were available"})
+    attempted_token_sources: list[str] = []
+    last_error: GitHubConnectorError | None = None
+    for index, candidate in enumerate(read_candidates):
+        attempted_token_sources.append(str(candidate["source"]))
+        try:
+            if clean_action == "list":
+                payload = await async_list_repo_sub_issues(
+                    repo_slug,
+                    clean_issue_number,
+                    token=candidate.get("token"),
+                    limit=_limit(limit),
+                    cursor=_clean(cursor),
+                )
+            else:
+                payload = await async_get_repo_issue_parent(
+                    repo_slug,
+                    clean_issue_number,
+                    token=candidate.get("token"),
+                )
+        except InvalidPageToken as exc:
+            return json.dumps({"error": str(exc)})
+        except GitHubConnectorError as exc:
+            last_error = exc
+            if exc.status_code in {401, 404}:
+                read_state.rejected[(candidate.get("token"), repo_slug)] = exc
+            if exc.status_code in {401, 403, 404} and index < len(read_candidates) - 1:
+                continue
+            return json.dumps({
+                "error": exc.message,
+                "status_code": exc.status_code,
+                "attempted_token_sources": attempted_token_sources,
+            })
+        read_state.preferred[repo_slug] = candidate.get("token")
+        payload["token_secret_key_used"] = bool(candidate.get("key_name"))
+        payload["token_source"] = candidate["source"]
+        if last_error is not None:
+            payload["fallback_from_status_code"] = last_error.status_code
+        return json.dumps(payload, default=str)
+
+    if last_error is not None:
+        return json.dumps({
+            "error": last_error.message,
+            "status_code": last_error.status_code,
+            "attempted_token_sources": attempted_token_sources,
+        })
+    return json.dumps({"error": "No GitHub token candidates were available"})
+
+
 async def _maybe_ensure_deploy_fields(repo_slug: str) -> None:
     """Lazily provision runtime fields when this env-gated feature is armed."""
     from brain.systems.deploy_state_sweep import ensure_deploy_state_fields
@@ -785,8 +1067,11 @@ async def github_read_ref_for_backend(
 
 
 __all__ = [
+    "_handle_add_github_sub_issue",
     "_handle_check_fix_deploy_state",
     "_handle_create_github_issue",
+    "_handle_list_github_sub_issues",
     "_handle_read_github_source",
+    "_handle_remove_github_sub_issue",
     "github_read_ref_for_backend",
 ]
