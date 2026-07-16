@@ -42,6 +42,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0020_reconstructive_memory.py",
     # Upgrade intentionally removes replaced model-routing tables after migrating the default model.
     "0021_remove_intelligence_tiers.py",
+    # Downgrade removes only the packet brief delivery outbox table introduced by this migration.
+    "0026_packet_brief_deliveries.py",
 }
 
 

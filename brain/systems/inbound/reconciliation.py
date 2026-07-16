@@ -164,13 +164,13 @@ def _log_mint_result(*, event_id: str, run_id: int, lane: str, result: Any) -> N
         level = logging.DEBUG
     logger.log(
         level,
-        "packet mint: event=%s run=%s lane=%s ok=%s created=%s posted=%s reason=%s",
+        "packet mint: event=%s run=%s lane=%s ok=%s created=%s delivery=%s reason=%s",
         event_id,
         run_id,
         lane,
         getattr(result, "ok", None),
         getattr(result, "created", None),
-        getattr(result, "posted", None),
+        getattr(result, "delivery", None),
         reason,
     )
 

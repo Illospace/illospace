@@ -7,8 +7,11 @@ shipped. The mint hook was gated on the dormant lane, so zero packets were
 ever minted. The regression contract:
 
 - a ``slack_teammate_run``-filed GitHub issue produces a ``launch_handoffs``
-  row with ``source_surface='inbound_triage'`` and a Slack thread post when
-  the provenance is a public channel;
+  row with ``source_surface='inbound_triage'`` and a PENDING brief-delivery
+  outbox row when the provenance is a public channel — the Slack post itself
+  happens strictly post-commit (``brain.systems.briefing.deliver``), so a
+  failed terminal-status commit can never leave a live Slack message
+  pointing at rolled-back state;
 - runs that only replied in Slack never mint;
 - the slack lane's already-terminal receipt and event are never rewritten;
 - every mint decision leaves a log line (a dormant gate can't be silent);
@@ -34,6 +37,8 @@ from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundEventRow
 from brain.platform.db.models.launch_handoff import LaunchHandoff
 from brain.platform.db.models.org import User
+from brain.platform.db.models.packet_delivery import PacketBriefDelivery
+from brain.systems.briefing.deliver import deliver_pending_briefs
 from brain.systems.briefing.gather import SlackThreadRead
 from brain.systems.inbound.reconciliation import reconcile_inbound_triage_run
 
@@ -62,8 +67,35 @@ async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
         InboundDecisionReceiptRow.__table__,
         Idea.__table__,
         LaunchHandoff.__table__,
+        PacketBriefDelivery.__table__,
         User.__table__,
     ])
+
+
+class _SessionLease:
+    """A factory shim handing the deliverer the test's live sqlite session
+    (in-memory sqlite is per-connection, so a real second session would see
+    an empty database). Close is a no-op; commits are real."""
+
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+def _lease_factory(session):
+    return lambda: _SessionLease(session)
+
+
+async def _deliveries(session) -> list[PacketBriefDelivery]:
+    rows = list((await session.scalars(select(PacketBriefDelivery))).all())
+    for row in rows:
+        await session.refresh(row)  # the deliverer's CAS bypasses the ORM
+    return rows
 
 
 @pytest.fixture(autouse=True)
@@ -194,7 +226,7 @@ async def _ideas(session) -> list[Idea]:
     return list((await session.scalars(select(Idea))).all())
 
 
-async def test_slack_filed_issue_mints_packet_and_posts(session, posts, caplog):
+async def test_slack_filed_issue_mints_packet_and_records_delivery(session, posts, caplog):
     event_id, run_id = await _seed_slack_lane(
         session, tool_results=[("create_github_issue", _ISSUE_RESULT),
                                ("post_slack_reply", _REPLY_RESULT)],
@@ -220,14 +252,22 @@ async def test_slack_filed_issue_mints_packet_and_posts(session, posts, caplog):
     assert "uwear-ai/uwear-backend#616" in (idea.description or "")
     assert (row.metadata_ or {}).get("job_ref") == f"idea:{idea.id}"
 
-    assert len(posts) == 1
-    assert posts[0]["channel"] == "C0ALERTS"
-    assert posts[0]["thread_ts"] == "1752600000.0"
+    # In-transaction: NO Slack post — the outbox row carries the obligation.
+    assert posts == []
+    deliveries = await _deliveries(session)
+    assert len(deliveries) == 1
+    delivery = deliveries[0]
+    assert delivery.state == "pending"
+    assert delivery.handoff_id == str(row.id)
+    assert delivery.idempotency_key == f"packet-brief:{row.id}"
+    assert delivery.channel == "C0ALERTS" and delivery.thread_ts == "1752600000.0"
+    assert str(row.id) in delivery.brief  # launch URL = the crash-dedup marker
 
     mint_lines = [r for r in caplog.records if "packet mint:" in r.getMessage()]
     assert len(mint_lines) == 1
     assert "lane=slack_teammate_run" in mint_lines[0].getMessage()
     assert "ok=True" in mint_lines[0].getMessage()
+    assert "delivery=recorded" in mint_lines[0].getMessage()
 
     # The admission receipt and event stay exactly as the slack lane wrote them.
     stored = (await session.scalars(select(InboundDecisionReceiptRow))).one()
@@ -236,6 +276,27 @@ async def test_slack_filed_issue_mints_packet_and_posts(session, posts, caplog):
     event = await session.get(InboundEventRow, event_id)
     assert event.status == "processed"
     assert "triage" not in dict(event.action_result or {})
+
+    # Post-commit: the deliverer sends exactly the recorded brief to the
+    # recorded target and marks the row posted.
+    summary = await deliver_pending_briefs(
+        org_id=_ORG, session_factory=_lease_factory(session)
+    )
+    assert summary["posted"] == 1
+    assert len(posts) == 1
+    assert posts[0]["channel"] == "C0ALERTS"
+    assert posts[0]["thread_ts"] == "1752600000.0"
+    assert posts[0]["text"] == delivery.brief
+    deliveries = await _deliveries(session)
+    assert deliveries[0].state == "posted"
+    assert deliveries[0].posted_at is not None
+
+    # A second pass finds nothing to do — crash-retry safe at the sweep level.
+    summary = await deliver_pending_briefs(
+        org_id=_ORG, session_factory=_lease_factory(session)
+    )
+    assert summary["selected"] == 0
+    assert len(posts) == 1
 
 
 async def test_slack_reply_only_run_skips_with_log_line(session, posts, caplog):
@@ -247,6 +308,7 @@ async def test_slack_reply_only_run_skips_with_log_line(session, posts, caplog):
 
     assert await _handoffs(session) == []
     assert await _ideas(session) == []
+    assert await _deliveries(session) == []
     assert posts == []
     mint_lines = [r for r in caplog.records if "packet mint:" in r.getMessage()]
     assert len(mint_lines) == 1
@@ -259,10 +321,10 @@ async def test_slack_lane_mint_is_one_shot(session, posts, caplog):
     )
     await reconcile_inbound_triage_run(session, run_id)
     with caplog.at_level(logging.INFO, logger="brain.systems.inbound.reconciliation"):
-        await reconcile_inbound_triage_run(session, run_id)  # duplicate delivery
+        await reconcile_inbound_triage_run(session, run_id)  # duplicate reconcile
 
     assert len(await _handoffs(session)) == 1
-    assert len(posts) == 1
+    assert len(await _deliveries(session)) == 1  # one obligation, ever
     second = [r for r in caplog.records if "packet mint:" in r.getMessage()]
     assert len(second) == 1
     assert "reason=packet already minted for event" in second[0].getMessage()
@@ -322,7 +384,8 @@ async def test_submit_lane_mints_on_durable_work_without_post(session, posts):
     rows = await _handoffs(session)
     assert len(rows) == 1
     assert rows[0].source_surface == "inbound_triage"
-    assert posts == []  # no slack provenance → persistence without a post
+    assert posts == []
+    assert await _deliveries(session) == []  # no slack provenance → nothing owed
 
     # Re-reconcile (illo_get_result polls do this): terminal receipt, no re-mint.
     await reconcile_inbound_triage_run(session, run.id)
@@ -378,7 +441,9 @@ async def test_triage_lane_still_mints_unconditionally(session, posts):
     rows = await _handoffs(session)
     assert len(rows) == 1
     assert rows[0].source_surface == "inbound_triage"
-    assert len(posts) == 1
+    assert posts == []
+    deliveries = await _deliveries(session)
+    assert len(deliveries) == 1 and deliveries[0].state == "pending"
 
 
 async def test_submit_mint_failure_is_retried_by_next_poll(session, posts, monkeypatch):
@@ -434,3 +499,47 @@ async def test_submit_mint_failure_is_retried_by_next_poll(session, posts, monke
     ideas = await _ideas(session)
     assert len(ideas) == 1  # the failed attempt's job home was reused
     assert ideas[0].agent_details["packet"]["handoff_id"] == str(rows[0].id)
+
+
+async def test_mint_arms_fast_path_that_fires_only_after_commit(session, posts, monkeypatch):
+    """The post-commit fast path: the mint arms a one-shot after-commit
+    dispatch; nothing runs before the enclosing transaction commits (the
+    whole point — no Slack side effect can precede the terminal-status
+    write), and the commit triggers a delivery targeted at the minted
+    handoff."""
+    import asyncio
+
+    import brain.systems.briefing.deliver as deliver_module
+
+    dispatched: list[dict] = []
+
+    async def fake_deliver(**kwargs):
+        dispatched.append(kwargs)
+        return {"selected": 1, "posted": 1}
+
+    monkeypatch.setattr(deliver_module, "deliver_pending_briefs", fake_deliver)
+
+    _, run_id = await _seed_slack_lane(
+        session, tool_results=[("create_github_issue", _ISSUE_RESULT)],
+    )
+    await reconcile_inbound_triage_run(session, run_id)
+    rows = await _handoffs(session)
+    assert len(rows) == 1
+
+    await asyncio.sleep(0)
+    assert dispatched == []  # armed, not fired: the transaction is still open
+
+    await session.commit()
+    for _ in range(5):  # after_commit → call_soon → task; give the loop a few turns
+        await asyncio.sleep(0)
+        if dispatched:
+            break
+    assert len(dispatched) == 1
+    assert dispatched[0]["org_id"] == _ORG
+    assert dispatched[0]["handoff_ids"] == [str(rows[0].id)]
+
+    # once=True: a later commit must not re-dispatch
+    await session.commit()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(dispatched) == 1

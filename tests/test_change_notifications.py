@@ -153,7 +153,8 @@ class TestNotifyCycleOrchestration:
         monkeypatch.setattr(cyc, "_count_unclaimed", lambda *a, **k: _async_value(0))
 
         result = await cyc.run_notify_cycle(
-            object(), org_id="o", channel_id="C123", post=lambda *a: _async_value(None)
+            object(), org_id="o", channel_id="C123", post=lambda *a: _async_value(None),
+            deliver_briefs=lambda org: _async_value(None),
         )
         assert result == {
             "events": 0,
@@ -175,9 +176,56 @@ class TestNotifyCycleOrchestration:
         )
 
         result = await cyc.run_notify_cycle(
-            object(), org_id="o", channel_id="C123", post=lambda *a: _async_value(None)
+            object(), org_id="o", channel_id="C123", post=lambda *a: _async_value(None),
+            deliver_briefs=lambda org: _async_value(None),
         )
         assert result["verification"] == {"verified": 2}
+
+    async def test_brief_delivery_sweep_runs_and_reports(self, monkeypatch):
+        """Slice-06 sweep half of the packet-brief outbox: the tick invokes
+        the deliverer org-scoped, reports only when something was selected,
+        and a sweep failure never kills the tick."""
+        import brain.systems.change_notifications_cycle as cyc
+
+        monkeypatch.setattr(cyc, "_load_change_events", lambda *a, **k: _async_value([]))
+        monkeypatch.setattr(cyc, "_count_unclaimed", lambda *a, **k: _async_value(0))
+
+        swept: list[str] = []
+
+        async def fake_deliver(org_id):
+            swept.append(org_id)
+            return {"selected": 2, "posted": 2}
+
+        result = await cyc.run_notify_cycle(
+            object(), org_id="o", channel_id="C123",
+            post=lambda *a: _async_value(None), deliver_briefs=fake_deliver,
+        )
+        assert swept == ["o"]
+        assert result["brief_deliveries"] == {"selected": 2, "posted": 2}
+
+        # A quiet sweep stays out of the summary.
+        result = await cyc.run_notify_cycle(
+            object(), org_id="o", channel_id="C123",
+            post=lambda *a: _async_value(None),
+            deliver_briefs=lambda org: _async_value({"selected": 0}),
+        )
+        assert "brief_deliveries" not in result
+
+        # No session (unit contexts) → no sweep at all.
+        result = await cyc.run_notify_cycle(
+            None, org_id="o", channel_id="C123",
+            post=lambda *a: _async_value(None), deliver_briefs=fake_deliver,
+        )
+        assert swept == ["o"]
+
+        async def exploding_deliver(org_id):
+            raise RuntimeError("delivery infrastructure down")
+
+        result = await cyc.run_notify_cycle(
+            object(), org_id="o", channel_id="C123",
+            post=lambda *a: _async_value(None), deliver_briefs=exploding_deliver,
+        )
+        assert result["events"] == 0  # the tick survived
 
 
 async def _async_value(value):
