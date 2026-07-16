@@ -578,6 +578,25 @@ async def mint_packet_after_triage(
         return MintResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
 
 
+async def _acquire_event_mint_lock(session: Any, *, org_id: str, event_id: str) -> None:
+    """Postgres advisory xact lock keyed on (org, event) — released at the
+    caller's commit/rollback. Non-postgres sessions (unit tests on sqlite,
+    fakes) skip it: the races it closes are cross-connection, which those
+    environments don't exercise."""
+    try:
+        dialect = getattr(getattr(session, "bind", None), "dialect", None)
+        if getattr(dialect, "name", "") != "postgresql":
+            return
+    except Exception:  # noqa: BLE001 — no bind info → assume no lock support
+        return
+    from sqlalchemy import text as sql_text
+
+    await session.execute(
+        sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"packet-mint:{org_id}:{event_id}"},
+    )
+
+
 def _github_repo_from_refs(work_refs: list[dict[str, str]]) -> str | None:
     for ref in work_refs:
         if str(ref.get("kind") or "") in ("github_issue", "github_pull_request"):
@@ -724,6 +743,15 @@ async def mint_packet_after_actionable_run(
         work_refs = durable_work_refs(attribution)
         if not work_refs:
             return MintResult(ok=False, reason="no durable work created by run")
+
+        # Serialize per event BEFORE the idea lookup: ideas have no unique
+        # constraint on origin_ref, so an unlocked check-then-insert lets two
+        # concurrent reconciles (illo_get_result polls racing on a still-open
+        # submit receipt) create two job homes → two packets (cross-family
+        # review finding, 2026-07-16). The xact-scoped advisory lock makes
+        # lookup → stamp check → create → mint one critical section per
+        # event; the loser blocks, then sees the winner's committed stamp.
+        await _acquire_event_mint_lock(session, org_id=org_id, event_id=str(event.id))
 
         from brain.platform.db.models.idea import Idea
 

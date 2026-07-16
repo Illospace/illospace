@@ -144,11 +144,26 @@ async def _inbound_receipt_for_run(
     return None
 
 
+# Benign repeat outcomes on the poll-driven submit lane: the FIRST decision
+# already logged at INFO; every later illo_get_result poll re-derives the
+# same skip, which is churn, not signal.
+_REPEAT_SKIP_REASONS = frozenset(
+    {"packet already minted for event", "no durable work created by run"}
+)
+
+
 def _log_mint_result(*, event_id: str, run_id: int, lane: str, result: Any) -> None:
     """One line per mint decision (worker logs at INFO). This is what makes a
     dormant lane visible: silence around packets is itself the bug this line
-    guards against — skips say WHY, mints say what happened."""
-    logger.info(
+    guards against — skips say WHY, mints say what happened. The submit lane
+    re-dispatches on every result poll, so its benign repeat skips drop to
+    DEBUG; single-shot lanes always speak at INFO."""
+    reason = getattr(result, "reason", "") or "minted"
+    level = logging.INFO
+    if lane == "illo_submit" and reason in _REPEAT_SKIP_REASONS:
+        level = logging.DEBUG
+    logger.log(
+        level,
         "packet mint: event=%s run=%s lane=%s ok=%s created=%s posted=%s reason=%s",
         event_id,
         run_id,
@@ -156,7 +171,7 @@ def _log_mint_result(*, event_id: str, run_id: int, lane: str, result: Any) -> N
         getattr(result, "ok", None),
         getattr(result, "created", None),
         getattr(result, "posted", None),
-        getattr(result, "reason", "") or "minted",
+        reason,
     )
 
 
@@ -324,32 +339,39 @@ async def reconcile_inbound_triage_run(
     await session.flush()
 
     # Handoff packet (spec: illo-handoff-packets slice 05): a COMPLETED run
-    # that routes work mints the packet that makes it arrive warm. Once per
-    # receipt lifecycle (see receipt_was_terminal above). Lanes differ:
-    # triage completion IS the routing moment, so illo_triage mints
-    # unconditionally; illo_submit runs often just answer, so they mint only
-    # when attribution shows durable work (the actionable-run path, which
-    # also carries a stamp guard against evidence-missing receipts that
-    # never reach a terminal state and re-enter here on every poll). Double
-    # containment: mint never raises by contract, and the import + call sit
-    # under their own guard so even an import-chain break cannot take down
-    # the receipt loop that worked before packets existed.
+    # that routes work mints the packet that makes it arrive warm. Lanes
+    # differ. illo_triage: triage completion IS the routing moment — mint
+    # unconditionally, once per receipt lifecycle (receipt_was_terminal
+    # above). illo_submit: runs often just answer, so the actionable path
+    # mints only on durable-work evidence — and it dispatches on EVERY
+    # reconcile of a completed run, not just the receipt transition, so a
+    # contained mint failure is retried by the next illo_get_result poll
+    # instead of becoming permanent (cross-family review finding,
+    # 2026-07-16); its stamp guard makes minted events a cheap DB-only
+    # skip. Double containment: mint never raises by contract, and the
+    # import + call sit under their own guard so even an import-chain break
+    # cannot take down the receipt loop that worked before packets existed.
     receipt_type = str(tool_use.get("type") or "")
-    if status == RunStatus.COMPLETED and not receipt_was_terminal:
+    if status == RunStatus.COMPLETED:
         try:
+            result = None
             if receipt_type == "illo_triage":
-                from brain.systems.briefing.mint import mint_packet_after_triage
+                if not receipt_was_terminal:
+                    from brain.systems.briefing.mint import mint_packet_after_triage
 
-                result = await mint_packet_after_triage(
-                    session, event=event, run_row=row, attribution=attribution
-                )
+                    result = await mint_packet_after_triage(
+                        session, event=event, run_row=row, attribution=attribution
+                    )
             else:  # illo_submit — the only other admitted triage-lane type
                 from brain.systems.briefing.mint import mint_packet_after_actionable_run
 
                 result = await mint_packet_after_actionable_run(
                     session, event=event, run_row=row, attribution=attribution
                 )
-            _log_mint_result(event_id=event_id, run_id=run_id, lane=receipt_type, result=result)
+            if result is not None:
+                _log_mint_result(
+                    event_id=event_id, run_id=run_id, lane=receipt_type, result=result
+                )
         except Exception:  # noqa: BLE001 — belt to mint's own containment
             logger.warning(
                 "packet mint hook failed for event %s", event_id, exc_info=True

@@ -379,3 +379,58 @@ async def test_triage_lane_still_mints_unconditionally(session, posts):
     assert len(rows) == 1
     assert rows[0].source_surface == "inbound_triage"
     assert len(posts) == 1
+
+
+async def test_submit_mint_failure_is_retried_by_next_poll(session, posts, monkeypatch):
+    """Cross-family review finding (2026-07-16): the receipt transitions to
+    processed even when the contained mint fails — a later illo_get_result
+    poll must retry the mint instead of the packet being lost forever."""
+    import brain.systems.briefing.mint as mint_module
+
+    event = InboundEventRow(
+        org_id=_ORG, connection_id=_CONN, origin="mcp.submission",
+        envelope={"kind": "submission", "summary": "file the melting bug"},
+        status="review_required",
+    )
+    session.add(event)
+    await session.flush()
+    run = AgentRunRow(
+        org_id=_ORG, user_id=_RUN_USER, thread_id=f"inbound:{_CONN}:{event.id}",
+        profile="fast", recipe="illo", status="completed", input_message="s",
+        metadata_={"inbound_event": {"event_id": str(event.id)}}, completed_at=_NOW,
+    )
+    session.add(run)
+    await session.flush()
+    session.add(InboundDecisionReceiptRow(
+        event_id=str(event.id), org_id=_ORG, connection_id=_CONN,
+        status="review_required",
+        tool_use={"type": "illo_submit", "status": "queued", "run_id": run.id},
+        target={"kind": "inbound_submission"}, outcome={},
+    ))
+    session.add(AgentRunEventRow(
+        run_id=run.id, sequence_no=1, event_type="run.tool_completed",
+        payload={"tool_name": "create_github_issue", "args": {}, "result": _ISSUE_RESULT},
+    ))
+    await session.flush()
+
+    real_build = mint_module.build_packet_for_job
+    calls = {"n": 0}
+
+    async def flaky_build(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("gather source down")
+        return await real_build(*args, **kwargs)
+
+    monkeypatch.setattr(mint_module, "build_packet_for_job", flaky_build)
+
+    receipt = await reconcile_inbound_triage_run(session, run.id)
+    assert receipt is not None and receipt.status == "processed"  # loop closed anyway
+    assert await _handoffs(session) == []  # mint failed, contained
+
+    await reconcile_inbound_triage_run(session, run.id)  # the retrying poll
+    rows = await _handoffs(session)
+    assert len(rows) == 1
+    ideas = await _ideas(session)
+    assert len(ideas) == 1  # the failed attempt's job home was reused
+    assert ideas[0].agent_details["packet"]["handoff_id"] == str(rows[0].id)

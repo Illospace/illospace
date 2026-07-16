@@ -720,3 +720,29 @@ async def test_actionable_run_unowned_parks_on_unclaimed_pool(monkeypatch, posts
     idea = session._ideas[0]
     assert idea.agent_details["assignment"]["owner_id"] == pool
     assert idea.agent_details["assignment"]["unclaimed"] is True
+
+
+async def test_event_mint_lock_taken_on_postgres_only():
+    """The per-event advisory lock serializes concurrent actionable mints on
+    Postgres (ideas have no origin_ref uniqueness); other dialects skip it."""
+    from brain.systems.briefing.mint import _acquire_event_mint_lock
+
+    executed: list[str] = []
+
+    class LockSession:
+        def __init__(self, dialect_name):
+            self.bind = SimpleNamespace(dialect=SimpleNamespace(name=dialect_name))
+
+        async def execute(self, stmt, params=None):
+            executed.append((str(stmt), dict(params or {})))
+            return _Result([])
+
+    await _acquire_event_mint_lock(LockSession("postgresql"), org_id=_ORG, event_id=_EVENT_ID)
+    assert len(executed) == 1
+    assert "pg_advisory_xact_lock" in executed[0][0]
+    assert executed[0][1]["key"] == f"packet-mint:{_ORG}:{_EVENT_ID}"
+
+    executed.clear()
+    await _acquire_event_mint_lock(LockSession("sqlite"), org_id=_ORG, event_id=_EVENT_ID)
+    assert executed == []
+    await _acquire_event_mint_lock(FakeSession(), org_id=_ORG, event_id=_EVENT_ID)  # no bind at all
