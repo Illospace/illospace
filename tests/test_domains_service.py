@@ -425,6 +425,94 @@ async def test_pr_tracker_distinct_pr_numbers_create_distinct_records(session):
     assert {record.id for record in records} == {first.id, second.id}
 
 
+async def test_domain_one_pr_contract_handles_open_draft_and_merged_first_attempt(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[
+            {
+                "key": "pull_request",
+                "name": "Pull Request",
+                "title_field": "external_id",
+                "fields": [
+                    {"key": "external_id", "field_type": "text", "required": True},
+                    {"key": "repo", "field_type": "text", "required": True},
+                    {"key": "number", "field_type": "number", "required": True},
+                    {"key": "url", "field_type": "url"},
+                    {
+                        "key": "state",
+                        "field_type": "enum",
+                        "options": ["open", "closed", "merged", "draft"],
+                    },
+                    {"key": "author", "field_type": "text"},
+                    {
+                        "key": "review_status",
+                        "field_type": "enum",
+                        "options": [
+                            "pending",
+                            "changes_requested",
+                            "approved",
+                            "merged",
+                        ],
+                    },
+                    {"key": "linked_ticket", "field_type": "record_ref"},
+                    {"key": "updated_at", "field_type": "datetime"},
+                    {"key": "assignee", "field_type": "text"},
+                    {"key": "progress_note", "field_type": "long_text"},
+                ],
+            }
+        ],
+    )
+
+    created = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "pull_request",
+        data={
+            "external_id": "Illospace/illospace#323",
+            "repo": "Illospace/illospace",
+            "number": 323,
+            "state": "open",
+            "review_status": "pending",
+            "assignee": "Reda",
+            "progress_note": "Finish tests, then request review.",
+        },
+    )
+
+    stored = await service.get_record(ORG_ID, domain.id, created.id)
+    assert stored.data["state"] == "open"
+    assert stored.data["review_status"] == "pending"
+    assert stored.data["assignee"] == "Reda"
+    assert stored.data["progress_note"] == "Finish tests, then request review."
+
+    draft = await service.update_record(
+        ORG_ID,
+        domain.id,
+        created.id,
+        data_patch={"state": "draft", "review_status": "pending"},
+    )
+    assert draft.data["state"] == "draft"
+    assert draft.data["review_status"] == "pending"
+
+    merged = await service.update_record(
+        ORG_ID,
+        domain.id,
+        created.id,
+        data_patch={
+            "state": "merged",
+            "review_status": "merged",
+            "assignee": "Axel",
+            "progress_note": "Verify staging and close the linked ticket.",
+        },
+    )
+    assert merged.data["state"] == "merged"
+    assert merged.data["review_status"] == "merged"
+    assert merged.data["assignee"] == "Axel"
+    assert merged.data["progress_note"] == "Verify staging and close the linked ticket."
+
+
 async def test_domain_events_drop_non_uuid_idea_ids(session):
     service = AsyncDomainService(session)
     domain = await service.create_domain(
