@@ -176,6 +176,24 @@ async def _attach_and_refresh_packets(session, org_id, events) -> None:
         log.exception("packet link attachment failed safely; lines go out without links")
 
 
+async def _deliver_pending_briefs_safely(org_id) -> dict | None:
+    """Post-slice-05 hardening: the sweep half of the packet-brief outbox.
+    The mint records deliveries inside its transaction and an after-commit
+    fast path usually posts them within a second; this sweep is the
+    guaranteed retry for anything a crash or Slack outage left behind
+    (pending or stale-posting rows). Own sessions, fully contained — a
+    delivery failure degrades to a log line, never a dead tick."""
+    import logging
+
+    try:
+        from brain.systems.briefing.deliver import deliver_pending_briefs
+
+        return await deliver_pending_briefs(org_id=org_id)
+    except Exception:  # noqa: BLE001
+        logging.getLogger("illo.notify").exception("packet brief delivery sweep failed safely")
+        return None
+
+
 async def _default_post(channel_id, text) -> None:
     from brain.systems.slack.client import slack_web_client_from_runtime
 
@@ -220,12 +238,23 @@ async def run_notify_cycle(
     since=None,
     urgent_terms=DEFAULT_URGENT_TERMS,
     post=None,
+    deliver_briefs=None,
 ) -> dict:
     """One notify-cycle tick. Returns a small summary of what was sent."""
     verification = await _maybe_run_deploy_verification(session, org_id)
     events = await _load_change_events(session, org_id, since)
     await _fill_owner_labels(session, events)
     await _attach_and_refresh_packets(session, org_id, events)
+    # After the refresh: a supersede may have just moved a pending brief to
+    # its new revision, and this sweep should send THAT one.
+    deliveries = None
+    if session is not None:
+        try:
+            deliveries = await (deliver_briefs or _deliver_pending_briefs_safely)(org_id)
+        except Exception:  # noqa: BLE001 — a delivery failure never kills the tick
+            import logging
+
+            logging.getLogger("illo.notify").exception("brief delivery sweep failed safely")
     unclaimed = await _count_unclaimed(session, org_id)
     outbound = render_outbound(events, unclaimed_count=unclaimed, urgent_terms=urgent_terms)
 
@@ -263,4 +292,6 @@ async def run_notify_cycle(
         summary["post_failures"] = post_failures
     if verification is not None:
         summary["verification"] = verification
+    if deliveries and deliveries.get("selected"):
+        summary["brief_deliveries"] = deliveries
     return summary

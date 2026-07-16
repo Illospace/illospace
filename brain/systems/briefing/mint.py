@@ -14,8 +14,15 @@ Load-bearing stances:
   before packets existed: :func:`mint_packet_after_triage` never raises —
   every failure returns a ``MintResult(ok=False)`` and a log line.
 - **Noise gate.** ``create_launch_handoff_with_status`` reuse
-  (``created=False``) means this content already went out — mint posts
-  NOTHING to Slack on reuse. Re-triage of unchanged truth is silent.
+  (``created=False``) means this content already went out — mint records
+  NO Slack delivery on reuse. Re-triage of unchanged truth is silent.
+- **Post-commit delivery.** Mint never posts to Slack itself: the write
+  phase records a pending ``PacketBriefDelivery`` (one per handoff id)
+  inside its savepoint, and ``brain.systems.briefing.deliver`` posts it
+  strictly after the enclosing transaction commits — a rolled-back mint
+  leaves no Slack message, a crash-retry cannot double-post (the
+  deterministic ``packet-brief:<handoff_id>`` identity plus the
+  thread-read disambiguation own that).
 - **Supersede, existing vocabulary only.** When the job's truth changes,
   the new revision is a NEW row (new idempotency key); the prior row —
   found via the idea's packet stamp — becomes ``archived`` +
@@ -44,6 +51,13 @@ from sqlalchemy.exc import IntegrityError
 
 from brain.systems.briefing.compose import PacketRender, compose_packet, fill_launch_url
 from brain.systems.briefing.core import Dossier, DossierBudget, assemble_dossier
+from brain.systems.briefing.deliver import (
+    DeliveryTarget,
+    record_brief_delivery,
+    refresh_pending_delivery_brief,
+    schedule_post_commit_delivery,
+    transfer_pending_delivery,
+)
 from brain.systems.briefing.gather import (
     PUBLIC_CHANNEL_TYPE,
     DefaultGithubReader,
@@ -78,7 +92,11 @@ class Readers:
 class MintResult:
     ok: bool
     created: bool = False
-    posted: bool = False
+    # Delivery of the human brief is post-commit (outbox): "recorded" means a
+    # pending PacketBriefDelivery was written in the mint's savepoint;
+    # "skipped:<why>" means a created mint owes no Slack reply; "none" means
+    # nothing new to deliver (reuse, failure, refresh).
+    delivery: str = "none"
     handoff: LaunchHandoff | None = None
     human_brief: str = ""
     launch_url: str = ""
@@ -214,7 +232,8 @@ def _stamp_idea(idea: Any, *, handoff: LaunchHandoff, revision: str, owner_user_
 
 
 async def _supersede_prior(
-    session: Any, *, org_id: str, prior_handoff_id: str, new_row: LaunchHandoff
+    session: Any, *, org_id: str, prior_handoff_id: str, new_row: LaunchHandoff,
+    new_brief: str | None = None,
 ) -> None:
     from brain.systems.launch_handoffs import get_launch_handoff
 
@@ -224,6 +243,17 @@ async def _supersede_prior(
     old.status = "archived"
     old.metadata_ = {**(old.metadata_ or {}), "superseded_by": str(new_row.id)}
     new_row.metadata_ = {**(new_row.metadata_ or {}), "supersedes": str(old.id)}
+    # A brief that never went out follows the superseding row (the refresh
+    # lane records no delivery of its own, so an unfulfilled triage-moment
+    # reply would otherwise die with the archived row — or worse, post its
+    # dead launch link).
+    await transfer_pending_delivery(
+        session,
+        org_id=org_id,
+        prior_handoff_id=str(old.id),
+        new_handoff_id=str(new_row.id),
+        new_brief=new_brief,
+    )
     await session.flush()
 
 
@@ -271,6 +301,7 @@ async def mint_packet_for_job(
     budget: DossierBudget | None = None,
     require_clean_gather: bool = False,
     reader_user_id: str | None = None,
+    deliver_to: DeliveryTarget | None = None,
 ) -> MintResult:
     """Mint one packet. Raises nothing upward except via the caller's choice —
     the triage-facing wrapper is :func:`mint_packet_after_triage`.
@@ -279,6 +310,13 @@ async def mint_packet_for_job(
     down, partial fetch) must not supersede a healthy stored packet — a
     transient blip would rotate the revision, archive the good row, and
     rotate back on recovery, burning refresh slots on churn.
+
+    ``deliver_to`` (the triage/actionable lanes): a created mint records ONE
+    pending brief delivery for that target inside the write-phase savepoint —
+    the Slack post itself happens strictly post-commit (see
+    ``brain.systems.briefing.deliver``); a mint must never leave a live Slack
+    message pointing at state its transaction later rolled back. Reuse
+    records nothing (the noise gate). The refresh lane passes None.
     """
     packet, dossier = await build_packet_for_job(
         session,
@@ -310,6 +348,7 @@ async def mint_packet_for_job(
     # The idea is re-selected WITH a row lock before the stamp is read, so a
     # triage-mint racing a notify-refresh (slice 06) cannot double-supersede
     # or clobber a concurrent agent_details write (spec-pinned serialization).
+    delivery = "none"
     try:
         async with session.begin_nested():
             locked_idea = await _lock_idea(session, org_id=org_id, idea=idea)
@@ -319,13 +358,33 @@ async def mint_packet_for_job(
                 else {}
             )
             row, created = await create_launch_handoff_with_status(session, packet.handoff_input)
+            filled_brief = fill_launch_url(
+                packet.human_brief, launch_handoff_url_for_id(row.id, target_tool=row.target_tool)
+            )
             if created:
+                if deliver_to is not None:
+                    # Recorded BEFORE the supersede so the transfer sees the
+                    # new row already owes its own delivery.
+                    await record_brief_delivery(
+                        session, org_id=org_id, handoff_id=str(row.id),
+                        target=deliver_to, brief=filled_brief,
+                    )
+                    delivery = "recorded"
                 if prior.get("handoff_id"):
                     await _supersede_prior(
-                        session, org_id=org_id, prior_handoff_id=str(prior["handoff_id"]), new_row=row
+                        session, org_id=org_id, prior_handoff_id=str(prior["handoff_id"]),
+                        new_row=row, new_brief=filled_brief,
                     )
             elif _reused_row_drifted(row, packet):
                 _repair_drifted_row(row, packet)
+                # Refilled AFTER the repair: it may have rotated target_tool,
+                # which changes the launch URL an undelivered brief carries.
+                await refresh_pending_delivery_brief(
+                    session, handoff_id=str(row.id), brief=fill_launch_url(
+                        packet.human_brief,
+                        launch_handoff_url_for_id(row.id, target_tool=row.target_tool),
+                    ),
+                )
             if locked_idea is not None:
                 _stamp_idea(locked_idea, handoff=row, revision=packet.revision, owner_user_id=owner_user_id)
             await session.flush()
@@ -354,6 +413,7 @@ async def mint_packet_for_job(
     return MintResult(
         ok=True,
         created=created,
+        delivery=delivery,
         handoff=row,
         human_brief=fill_launch_url(packet.human_brief, launch_url),
         launch_url=launch_url,
@@ -409,10 +469,14 @@ async def _find_idea_by_stamp(session: Any, *, org_id: str, handoff_id: str) -> 
 
 async def refresh_packet_for_job(session: Any, *, org_id: str, handoff_row: Any,
                                  readers: Readers | None = None) -> MintResult:
-    """Slice 06: re-render a packet against current truth. NEVER posts to
-    Slack (nudges and digest lines carry the link); unchanged truth reuses
-    the row silently, changed truth supersedes. Contained like the triage
-    hook — a refresh failure degrades to a log line, never a dead tick.
+    """Slice 06: re-render a packet against current truth. Never creates a
+    NEW Slack post (nudges and digest lines carry the link); unchanged truth
+    reuses the row silently, changed truth supersedes. The one delivery
+    nuance: superseding a row whose triage-moment brief is still PENDING
+    transfers that unfulfilled obligation to the new row (fresh brief, fresh
+    launch URL) — the thread still gets its single reply, never a dead link.
+    Contained like the triage hook — a refresh failure degrades to a log
+    line, never a dead tick.
 
     Only packet-minted rows (``source_surface == "inbound_triage"``) are
     refreshable: the ORIGINAL ask/owner/target/provenance are reused from
@@ -455,7 +519,8 @@ async def refresh_packet_for_job(session: Any, *, org_id: str, handoff_row: Any,
             # (review finding: this branch skipped the write-phase savepoint).
             async with session.begin_nested():
                 await _supersede_prior(
-                    session, org_id=org_id, prior_handoff_id=str(handoff_row.id), new_row=result.handoff
+                    session, org_id=org_id, prior_handoff_id=str(handoff_row.id),
+                    new_row=result.handoff, new_brief=result.human_brief,
                 )
         return result
     except Exception as exc:  # noqa: BLE001 — total containment
@@ -481,23 +546,23 @@ def _record_job_ref(attribution: dict[str, Any] | None, idea: Any) -> str:
     return f"idea:{getattr(idea, 'id', '')}"
 
 
-async def _post_brief_to_origin_thread(*, event: Any, brief: str) -> bool:
-    """Backend Slack reply into the origin thread — same provenance and
-    public-only allowlist as gather; silent skip (False) when not possible.
-    Both mint hooks already hold the event, so provenance reads it directly
-    (no idea → event reload)."""
+def _delivery_target_for_event(event: Any) -> tuple[DeliveryTarget | None, str]:
+    """Origin-thread delivery target — same provenance and public-only
+    allowlist the deleted in-transaction post used, but resolved at MINT
+    time so the outbox row snapshots channel/thread_ts and delivery never
+    needs the event again. Returns (target, "") or (None, why)."""
     provenance = slack_provenance(event) if event is not None else None
-    if not provenance or provenance["channel_type"] != PUBLIC_CHANNEL_TYPE:
-        return False
-    from brain.systems.slack.client import slack_web_client_from_runtime
-
-    client = await slack_web_client_from_runtime(
-        requested_by="packet_mint", reason="Post the handoff-packet brief to the origin thread."
-    )
-    await client.post_message(
-        channel=provenance["channel"], text=brief, thread_ts=provenance["thread_ts"]
-    )
-    return True
+    if not provenance:
+        return None, "no_slack_provenance"
+    if provenance["channel_type"] != PUBLIC_CHANNEL_TYPE:
+        return None, "non_public"
+    return DeliveryTarget(
+        channel=provenance["channel"],
+        thread_ts=provenance["thread_ts"],
+        # Crash disambiguation trusts only Illo-authored thread messages —
+        # the same identity gather's echo filter already keys on.
+        bot_user_id=str(provenance.get("bot_user_id") or "") or None,
+    ), ""
 
 
 async def _mint_for_idea_and_event(
@@ -511,13 +576,16 @@ async def _mint_for_idea_and_event(
     job_ref: str | None = None,
 ) -> MintResult:
     """Shared stage for every inbound-completion lane once the job-home idea
-    is resolved: owner → target → mint → post-once. Raises upward; the
-    lane-facing wrappers own containment."""
+    is resolved: owner → target → mint → record-delivery-once. Raises upward;
+    the lane-facing wrappers own containment. The Slack reply itself is
+    post-commit: the savepoint records the obligation, the after-commit fast
+    path (or the notify-cycle sweep) sends it."""
     details = dict(getattr(idea, "agent_details", None) or {})
     assignment = dict(details.get("assignment") or {})
     owner_user_id = str(assignment.get("owner_id") or "") or None
     owner_label = await _owner_label(session, owner_user_id)
     target_tool = agent_target_for_member(owner_user_id, _member_targets())
+    deliver_to, delivery_skip = _delivery_target_for_event(event)
 
     result = await mint_packet_for_job(
         session,
@@ -532,15 +600,19 @@ async def _mint_for_idea_and_event(
         source_ref={"inbound_event_id": str(event.id)},
         readers=readers,
         reader_user_id=str(getattr(event, "authority_user_id", "") or "") or None,
+        deliver_to=deliver_to,
     )
     if result.ok and result.created:
-        try:
-            result.posted = await _post_brief_to_origin_thread(
-                event=event, brief=result.human_brief
-            )
-        except Exception as exc:  # noqa: BLE001 — the packet exists; the reply degraded
-            logger.warning("packet %s minted but Slack reply failed: %s",
-                           getattr(result.handoff, "id", "?"), exc)
+        if deliver_to is None:
+            result.delivery = f"skipped:{delivery_skip}"
+        elif result.delivery == "recorded":
+            try:
+                schedule_post_commit_delivery(
+                    session, org_id=org_id, handoff_ids=[str(result.handoff.id)]
+                )
+            except Exception as exc:  # noqa: BLE001 — the sweep remains the guaranteed path
+                logger.warning("packet %s minted but fast-path dispatch failed to arm: %s",
+                               getattr(result.handoff, "id", "?"), exc)
     return result
 
 

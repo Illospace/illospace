@@ -6,8 +6,10 @@
 reviewed and hardened (four review rounds folded: 14+9+9+10 findings);
 06+07 implemented and unit-green, their adversarial pass is the next
 pickup, then the illo-dev pre-merge probe (briefs into `assets/`) and the
-doc-1155 delta at merge+deploy. Earlier per-slice status follows for
-provenance. Slices 01+02 implemented, cross-family reviewed,
+doc-1155 delta at merge+deploy. 2026-07-16: mint connected to the live
+completion lanes, and the deferred Slack-reply-before-commit window closed
+by the brief-delivery outbox (post-commit delivery; sections below).
+Earlier per-slice status follows for provenance. Slices 01+02 implemented, cross-family reviewed,
 hardened, and green —
 `brain/systems/briefing/{core,compose}.py` (pure), CLI probe
 (`python -m brain.systems.briefing --fixture
@@ -197,13 +199,13 @@ after the Codex worker wedged again — 0.15s CPU in 25min):**
 - Gather's provenance helpers promoted to public names
   (`load_inbound_event`, `slack_provenance`, `PUBLIC_CHANNEL_TYPE`) — mint
   consumes the single owner, no underscore imports.
-- Known deferred (recorded, review findings 4/5): the Slack reply still
-  precedes the outer commit (tiny 404-launch-link window if the
-  transaction later fails — revisit with slice 06's refresh cycle, which
-  is the natural post-commit home), and hook-level integration tests need
-  a real session (covered instead by mint-level regressions: echo
-  starvation, IntegrityError re-select, lock assertion, label fallback —
-  plus the illo-dev probe before merge).
+- Known deferred (recorded, review findings 4/5): ~~the Slack reply still
+  precedes the outer commit~~ — **FIXED 2026-07-16** by the brief-delivery
+  outbox (see the dedicated section below; re-confirmed as finding 1 of the
+  2026-07-16 Codex review of 6e477a5 before landing). Hook-level
+  integration tests still lean on mint-level regressions (echo starvation,
+  IntegrityError re-select, lock assertion, label fallback) plus the
+  sqlite lane end-to-ends in `tests/test_inbound_reconciliation.py`.
 
 **Post-deploy fix (2026-07-16, Claude-implemented): mint connected to the
 live completion lanes.** Production showed ZERO packets since the 07-13
@@ -251,6 +253,80 @@ still-contained layers:
   fields bounded, oversized ids dropped). Deferred follow-up (recorded,
   Codex finding on #332): the Slack brief still posts before the outer
   commit — the post-commit outbox belongs with slice 06's refresh home.
+
+**Post-slice-05 hardening (2026-07-16, Claude-implemented): brief delivery
+moved post-commit (transactional outbox).** Closes deferred finding 4/5 and
+finding 1 of the 2026-07-16 Codex review: the mint runs inside the run's
+terminal-status transaction (`runs/store.py` → `reconcile_inbound_triage_run`),
+so the old in-transaction Slack reply could survive a failed commit — a live
+message pointing at a rolled-back handoff row, then a second brief from the
+crash-retry's re-mint. Now:
+- **Record, don't post.** `mint_packet_for_job(deliver_to=…)` persists ONE
+  pending `PacketBriefDelivery` row per handoff id (`packet_brief_deliveries`,
+  migration 0026; unique on handoff_id) inside the existing write-phase
+  savepoint — atomically with the handoff row, idea stamp, and run status.
+  Provenance (channel/thread_ts, public-only allowlist) resolves at mint
+  time; non-public/no-provenance mints record nothing
+  (`MintResult.delivery = "skipped:<why>"` replaces `posted`).
+- **Deliver strictly post-commit** (`briefing/deliver.py`): claim (CAS
+  `pending→posting`, committed BEFORE the send) → fence-verified re-read →
+  post → mark `posted`, each step its own short transaction on its own
+  session. Deterministic identity `packet-brief:<handoff_id>`; the brief's
+  launch URL embeds the handoff id, and a stale `posting` claim (crashed
+  worker) is re-sent only after a disambiguation read of the origin thread —
+  counting ONLY Illo-authored messages (`bot_user_id` snapshot; a human
+  pasting the launch URL never satisfies it) and treating a failed or
+  truncated read as "cannot decide", never "absent" — so worker crashes
+  cannot duplicate the message. Definite Slack rejects requeue
+  (attempt-capped; the cap takes one last disambiguation look before
+  recording `failed` + ERROR) or fail fast on permanent errors; ambiguous
+  transport errors stay claimed for the next disambiguating pass.
+- **Concurrency posture (two Codex adversarial passes on the outbox,
+  2026-07-16 — 10 findings + a 4-finding verification, all folded):** every
+  sweep-side CAS that can touch a row the notify tick's own transaction may
+  hold (claims AND the attempts-cap transitions) goes through a
+  `FOR UPDATE SKIP LOCKED` subselect — the sweep runs awaited inside that
+  tick, so blocking there would self-deadlock it. The supersede transfer's
+  read is a locking read WITH `populate_existing` (a lock over stale
+  identity-map attributes would re-open the double-post it exists to
+  close); `claimed_at` doubles as a fencing token on every post-claim
+  transition, re-verified immediately before every send (again after the
+  disambiguation read, whose network latency is unbounded); the post-claim
+  re-read also picks up a drift-repaired brief. A capped row whose final
+  thread look is unreadable stays `posting` (retried loudly) — never
+  recorded `failed` on guesswork. Documented residual: a send whose
+  interval from the final fence check until the message is visible in
+  Slack outlives the 10-minute lease (suspension, glacial request) can
+  race a reclaimer's read into a duplicate — irreducible without
+  provider-side idempotency Slack does not offer. SQLite compiles the
+  locking clauses away: like the mint's advisory lock, the races they
+  close are cross-connection, which unit-test environments don't exercise
+  (production is PostgreSQL).
+- **Two triggers, one engine.** Fast path: mint queues the handoff id in
+  `session.info`; one pair of session-level listeners (armed once per
+  session — `after_commit` also fires on savepoint releases on the installed
+  SQLAlchemy, verified empirically, so the spawned task polls for the rows
+  to become committed-VISIBLE rather than trusting event timing; only a
+  ROOT rollback clears the queue — savepoint-rollback survivors still
+  commit, and dead entries self-clean via the visibility check) —
+  same-second UX as the old inline post. Guaranteed path: the slice-06
+  notify tick sweeps claimable rows org-scoped (`run_notify_cycle` →
+  `deliver_pending_briefs`, capped 10/tick AFTER filtering out fresh
+  in-flight claims so stuck rows can't starve deliverable ones; injectable,
+  contained).
+- **Supersede carry-over.** Archiving a row whose brief is still `pending`
+  transfers the obligation to the new revision (fresh brief, fresh URL, old
+  row's delivery → `superseded`); a `posted` prior transfers nothing (noise
+  gate holds). Refresh still never CREATES a post — it only carries an
+  unfulfilled one forward, so the origin thread gets its single
+  triage-moment reply with a live link, never a dead one. Drift-repair also
+  rewrites a still-pending brief in place.
+- Regression suites: `tests/test_briefing_deliver.py` (state machine: both
+  crash windows, permanent/transient/ambiguous errors, attempt cap, org
+  scoping, per-row containment), updated `tests/test_briefing_mint.py`
+  (record-not-post, skip reasons, transfer on supersede/refresh) and
+  `tests/test_inbound_reconciliation.py` (lane end-to-end through delivery
+  + the after-commit fast path on a real session).
 
 **Implementation decisions that refine slice texts (06+07, Claude-implemented):**
 - Slice 06: `format_line` appends `→ launch: <url>` (one field, Slack-
@@ -395,7 +471,11 @@ everything.
   vocabulary — old row → `archived` + `metadata_["superseded_by"] = <new id>`
   (the DB CHECK constraint allows only `open/launched/claimed/expired/
   archived`, `brain/contracts/statuses.py` + migration 0017 — do NOT invent
-  a `superseded` status; no migration in this feature).
+  a `superseded` status; no handoff-status migration in this feature).
+  The one sanctioned addition (2026-07-16, migration 0026):
+  `packet_brief_deliveries` is DELIVERY bookkeeping — the transactional
+  outbox for the Slack brief — never a second packet/job store; it holds
+  transport state (target, rendered brief, send state) keyed one-per-handoff.
 - **Privacy boundary:** packets widen who can read gathered context —
   `handoff.get` and the API are org-scoped, so anything gathered becomes
   readable by every org member/agent token. V1 gathers only team-visible
