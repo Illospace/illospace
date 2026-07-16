@@ -158,6 +158,14 @@ class FakeSession:
     def add(self, row):
         # Store the LIVE object (SQLAlchemy identity-map semantics): later
         # mutations through the returned row must be visible in the store.
+        if type(row).__name__ == "Idea":
+            # The actionable-lane hook creates the job-home idea itself; the
+            # ORM id default fires at INSERT, which this fake must emulate.
+            if not getattr(row, "id", None):
+                row.id = f"idea-{self._next_id}"
+                self._next_id += 1
+            self._ideas.append(row)
+            return
         if not getattr(row, "id", None):
             row.id = f"hf-{self._next_id}"
             self._next_id += 1
@@ -531,3 +539,184 @@ async def test_probe_stage_creates_and_posts_nothing(posts):
     assert "Launch: {launch_url}" in packet.human_brief  # placeholder intact
     assert session.handoffs == []  # no row
     assert posts == []  # no reply
+
+
+# --- Actionable-run minting (slack_teammate_run / illo_submit lanes) ---
+#
+# These lanes have NO pre-run triage idea and their receipts are terminal at
+# admission, so the hook must (a) only mint on durable-work evidence, (b)
+# create the job-home idea itself, and (c) one-shot via the packet stamp.
+
+_RUN_USER = "8b6f3f7e-0000-0000-0000-000000000002"
+_AUTHORITY = "8b6f3f7e-0000-0000-0000-000000000003"
+_ISSUE_REF = {
+    "kind": "github_issue",
+    "id": "uwear-ai/uwear-backend#616",
+    "source": "create_github_issue",
+}
+
+
+def _actionable_event(channel_type: str = "channel"):
+    event = _event(channel_type)
+    event.origin = "slack.channel_message"
+    event.connection_id = "conn-1"
+    event.authority_user_id = _AUTHORITY
+    return event
+
+
+def _run_row():
+    return SimpleNamespace(id=1602, user_id=_RUN_USER)
+
+
+def _attribution(refs=(_ISSUE_REF,)):
+    return {
+        "summary": "Illo created github_issue using create_github_issue.",
+        "tags": ["created"],
+        "tool_names": ["create_github_issue"],
+        "target_refs": list(refs),
+        "mutated_target_refs": list(refs),
+        "run_event_ids": [1],
+    }
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_assignment_env(monkeypatch):
+    for key in ("ILLO_BUSINESS_OWNER_USER_ID", "ILLO_PRODUCT_OWNER_USER_ID",
+                "ILLO_REPO_OWNERS", "ILLO_UNCLAIMED_POOL_USER_ID"):
+        monkeypatch.delenv(key, raising=False)
+
+
+async def test_actionable_run_mints_job_home_and_posts(posts):
+    from brain.systems.briefing.mint import mint_packet_after_actionable_run
+
+    session = FakeSession(events=[_actionable_event()])
+    result = await mint_packet_after_actionable_run(
+        session, event=_actionable_event(), run_row=_run_row(),
+        attribution=_attribution(), readers=_readers(),
+    )
+
+    assert result.ok and result.created and result.posted
+    assert len(session.handoffs) == 1
+    row = session.handoffs[0]
+    assert row.source_surface == "inbound_triage"
+    assert (row.metadata_ or {}).get("job_ref", "").startswith("idea:")
+
+    assert len(session._ideas) == 1
+    idea = session._ideas[0]
+    assert idea.origin_ref == f"inbound_event:{_EVENT_ID}"
+    assert idea.origin == "inbound_signal"
+    details = idea.agent_details
+    assert details["inbound_triage"]["event_id"] == _EVENT_ID
+    assert details["inbound_triage"]["reason"] == "actionable_run_completion"
+    assert details["assignment"]["owner_id"] == _RUN_USER  # connection basis
+    assert details["task_domain"]
+    assert "uwear-ai/uwear-backend#616" in (idea.description or "")
+    assert details["packet"]["handoff_id"] == str(row.id)  # stamped
+
+    assert len(posts) == 1
+    assert posts[0]["channel"] == "C0PROD"
+    assert posts[0]["thread_ts"] == "1751964840.0"
+
+
+async def test_actionable_run_without_durable_work_skips(posts):
+    from brain.systems.briefing.mint import mint_packet_after_actionable_run
+
+    chat_only = {
+        "mutated_target_refs": [
+            {"kind": "message", "id": "m1", "source": "post_slack_reply"},
+        ],
+    }
+    session = FakeSession(events=[_actionable_event()])
+    result = await mint_packet_after_actionable_run(
+        session, event=_actionable_event(), run_row=_run_row(),
+        attribution=chat_only, readers=_readers(),
+    )
+    assert result.ok is False
+    assert result.reason == "no durable work created by run"
+    assert session.handoffs == []
+    assert session._ideas == []
+    assert posts == []
+
+
+async def test_actionable_run_mint_is_one_shot_per_event(posts):
+    from brain.systems.briefing.mint import mint_packet_after_actionable_run
+
+    session = FakeSession(events=[_actionable_event()])
+    first = await mint_packet_after_actionable_run(
+        session, event=_actionable_event(), run_row=_run_row(),
+        attribution=_attribution(), readers=_readers(),
+    )
+    assert first.ok and first.created
+    second = await mint_packet_after_actionable_run(
+        session, event=_actionable_event(), run_row=_run_row(),
+        attribution=_attribution(), readers=_readers(),
+    )
+    assert second.ok is False
+    assert second.reason == "packet already minted for event"
+    assert len(session.handoffs) == 1
+    assert len(session._ideas) == 1
+    assert len(posts) == 1
+
+
+async def test_actionable_run_non_public_provenance_never_posts(posts):
+    from brain.systems.briefing.mint import mint_packet_after_actionable_run
+
+    session = FakeSession(events=[_actionable_event("im")])
+    result = await mint_packet_after_actionable_run(
+        session, event=_actionable_event("im"), run_row=_run_row(),
+        attribution=_attribution(), readers=_readers(),
+    )
+    assert result.ok and result.created
+    assert result.posted is False
+    assert len(session.handoffs) == 1  # persistence is never suppressed
+    assert posts == []
+
+
+async def test_actionable_run_repo_rule_owns_the_packet(monkeypatch, posts):
+    from brain.systems.briefing.mint import mint_packet_after_actionable_run
+
+    ruled_owner = "8b6f3f7e-0000-0000-0000-00000000000e"
+    monkeypatch.setenv("ILLO_REPO_OWNERS", f"uwear-backend={ruled_owner}")
+    session = FakeSession(events=[_actionable_event()])
+    result = await mint_packet_after_actionable_run(
+        session, event=_actionable_event(), run_row=_run_row(),
+        attribution=_attribution(), readers=_readers(),
+    )
+    assert result.ok and result.created
+    idea = session._ideas[0]
+    assert idea.agent_details["assignment"]["owner_id"] == ruled_owner
+    assert idea.agent_details["assignment"]["basis"] == "rule"
+
+
+async def test_actionable_run_unowned_without_pool_skips(posts):
+    from brain.systems.briefing.mint import mint_packet_after_actionable_run
+
+    event = _actionable_event()
+    event.authority_user_id = None
+    session = FakeSession(events=[event])
+    result = await mint_packet_after_actionable_run(
+        session, event=event, run_row=SimpleNamespace(id=1, user_id=None),
+        attribution=_attribution(), readers=_readers(),
+    )
+    assert result.ok is False
+    assert result.reason == "no owner and no unclaimed pool for job home"
+    assert session.handoffs == []
+    assert session._ideas == []
+
+
+async def test_actionable_run_unowned_parks_on_unclaimed_pool(monkeypatch, posts):
+    from brain.systems.briefing.mint import mint_packet_after_actionable_run
+
+    pool = "8b6f3f7e-0000-0000-0000-00000000000f"
+    monkeypatch.setenv("ILLO_UNCLAIMED_POOL_USER_ID", pool)
+    event = _actionable_event()
+    event.authority_user_id = None
+    session = FakeSession(events=[event])
+    result = await mint_packet_after_actionable_run(
+        session, event=event, run_row=SimpleNamespace(id=1, user_id=None),
+        attribution=_attribution(), readers=_readers(),
+    )
+    assert result.ok and result.created
+    idea = session._ideas[0]
+    assert idea.agent_details["assignment"]["owner_id"] == pool
+    assert idea.agent_details["assignment"]["unclaimed"] is True

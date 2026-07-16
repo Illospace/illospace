@@ -2,8 +2,11 @@
 
 The single owner of gather → assemble → compose → create → stamp → post for
 handoff packets (spec: illo-handoff-packets slice 05). Triage completion
-calls :func:`mint_packet_after_triage`; the notify refresh (slice 06) and
-the pre-merge probe reuse the same stages.
+calls :func:`mint_packet_after_triage`; the live actionable lanes
+(slack_teammate_run, illo_submit) call
+:func:`mint_packet_after_actionable_run` when attribution shows the run
+created durable work; the notify refresh (slice 06) and the pre-merge probe
+reuse the same stages.
 
 Load-bearing stances:
 
@@ -51,6 +54,7 @@ from brain.systems.briefing.gather import (
     load_inbound_event,
     slack_provenance,
 )
+from brain.systems.inbound.attribution import durable_work_refs
 from brain.systems.launch_handoffs import (
     LaunchHandoff,
     agent_target_for_member,
@@ -477,10 +481,11 @@ def _record_job_ref(attribution: dict[str, Any] | None, idea: Any) -> str:
     return f"idea:{getattr(idea, 'id', '')}"
 
 
-async def _post_brief_to_origin_thread(session: Any, *, org_id: str, idea: Any, brief: str) -> bool:
+async def _post_brief_to_origin_thread(*, event: Any, brief: str) -> bool:
     """Backend Slack reply into the origin thread — same provenance and
-    public-only allowlist as gather; silent skip (False) when not possible."""
-    event = await load_inbound_event(session, org_id=org_id, idea=idea)
+    public-only allowlist as gather; silent skip (False) when not possible.
+    Both mint hooks already hold the event, so provenance reads it directly
+    (no idea → event reload)."""
     provenance = slack_provenance(event) if event is not None else None
     if not provenance or provenance["channel_type"] != PUBLIC_CHANNEL_TYPE:
         return False
@@ -491,6 +496,49 @@ async def _post_brief_to_origin_thread(session: Any, *, org_id: str, idea: Any, 
         channel=provenance["channel"], text=brief, thread_ts=provenance["thread_ts"]
     )
     return True
+
+
+async def _mint_for_idea_and_event(
+    session: Any,
+    *,
+    org_id: str,
+    idea: Any,
+    event: Any,
+    attribution: dict[str, Any] | None,
+    readers: Readers | None,
+) -> MintResult:
+    """Shared stage for every inbound-completion lane once the job-home idea
+    is resolved: owner → target → mint → post-once. Raises upward; the
+    lane-facing wrappers own containment."""
+    details = dict(getattr(idea, "agent_details", None) or {})
+    assignment = dict(details.get("assignment") or {})
+    owner_user_id = str(assignment.get("owner_id") or "") or None
+    owner_label = await _owner_label(session, owner_user_id)
+    target_tool = agent_target_for_member(owner_user_id, _member_targets())
+
+    result = await mint_packet_for_job(
+        session,
+        org_id=org_id,
+        idea=idea,
+        job_ref=_record_job_ref(attribution, idea),
+        ask=_ask_from_event(idea, event),
+        owner_user_id=owner_user_id,
+        owner_label=owner_label,
+        target_tool=target_tool,
+        source_surface="inbound_triage",
+        source_ref={"inbound_event_id": str(event.id)},
+        readers=readers,
+        reader_user_id=str(getattr(event, "authority_user_id", "") or "") or None,
+    )
+    if result.ok and result.created:
+        try:
+            result.posted = await _post_brief_to_origin_thread(
+                event=event, brief=result.human_brief
+            )
+        except Exception as exc:  # noqa: BLE001 — the packet exists; the reply degraded
+            logger.warning("packet %s minted but Slack reply failed: %s",
+                           getattr(result.handoff, "id", "?"), exc)
+    return result
 
 
 async def mint_packet_after_triage(
@@ -521,35 +569,197 @@ async def mint_packet_after_triage(
         if idea is None:
             return MintResult(ok=False, reason="no triage idea for event")
 
-        details = dict(getattr(idea, "agent_details", None) or {})
-        assignment = dict(details.get("assignment") or {})
-        owner_user_id = str(assignment.get("owner_id") or "") or None
-        owner_label = await _owner_label(session, owner_user_id)
-        target_tool = agent_target_for_member(owner_user_id, _member_targets())
-
-        result = await mint_packet_for_job(
-            session,
-            org_id=org_id,
-            idea=idea,
-            job_ref=_record_job_ref(attribution, idea),
-            ask=_ask_from_event(idea, event),
-            owner_user_id=owner_user_id,
-            owner_label=owner_label,
-            target_tool=target_tool,
-            source_surface="inbound_triage",
-            source_ref={"inbound_event_id": str(event.id)},
-            readers=readers,
-            reader_user_id=str(getattr(event, "authority_user_id", "") or "") or None,
+        return await _mint_for_idea_and_event(
+            session, org_id=org_id, idea=idea, event=event,
+            attribution=attribution, readers=readers,
         )
-        if result.ok and result.created:
-            try:
-                result.posted = await _post_brief_to_origin_thread(
-                    session, org_id=org_id, idea=idea, brief=result.human_brief
+    except Exception as exc:  # noqa: BLE001 — total containment
+        logger.warning("packet mint failed for event %s: %s", getattr(event, "id", "?"), exc)
+        return MintResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
+
+
+def _github_repo_from_refs(work_refs: list[dict[str, str]]) -> str | None:
+    for ref in work_refs:
+        if str(ref.get("kind") or "") in ("github_issue", "github_pull_request"):
+            slug = str(ref.get("id") or "").split("#", 1)[0]
+            if slug.count("/") == 1:
+                return slug
+    return None
+
+
+async def _create_job_home_idea(
+    session: Any,
+    *,
+    org_id: str,
+    event: Any,
+    run_row: Any,
+    attribution: dict[str, Any] | None,
+    work_refs: list[dict[str, str]],
+) -> Any | None:
+    """Create the job-home idea the actionable lanes lack.
+
+    Slack-teammate and submission runs are admitted without a triage idea
+    (only ``_queue_illo_triage`` creates one), so when such a run completes
+    with durable work there is no stamp target, no gather anchor, and no
+    provenance bridge. This mirrors the triage idea's exact shape —
+    ``agent_details.inbound_triage.event_id`` is what ``load_inbound_event``
+    and gather's provenance walk — but deliberately admits NO new run: the
+    work already happened; the idea documents where it was routed.
+
+    The description embeds each work ref (``owner/repo#N`` included) so
+    gather's same-job reference discovery reaches the created artifacts.
+    Returns None (mint skips, logged by the hook) when no owner resolves
+    and no unclaimed pool is configured — the same parking rule as triage.
+    """
+    from brain.platform.db.models.idea import Idea
+    from brain.systems.inbound.assignment import default_rules, resolve_owner
+    from brain.systems.inbound.service import _unclaimed_pool_user_id
+    from brain.systems.task_domain import classify_task_domain
+
+    envelope = dict(getattr(event, "envelope", None) or {})
+    summary = str(envelope.get("summary") or "").strip()
+    origin = str(getattr(event, "origin", "") or "")
+    ref_ids = [str(ref.get("id") or "") for ref in work_refs if ref.get("id")]
+    repo = _github_repo_from_refs(work_refs)
+    task_domain = classify_task_domain(summary)
+    run_user_id = str(getattr(run_row, "user_id", "") or "") or None
+    authority_user_id = str(getattr(event, "authority_user_id", "") or "") or None
+    # Same rule order as _queue_illo_triage: domain rules only when a repo
+    # anchors the signal (here: the repo the run actually filed into), so a
+    # stray keyword in a Slack message can't yank ownership on its own.
+    decision = resolve_owner(
+        task_domain=task_domain if repo else None,
+        repo=repo,
+        connection_owner_id=run_user_id or authority_user_id,
+        rules=default_rules(),
+    )
+    owner_user_id = decision.user_id
+    unclaimed = False
+    if not owner_user_id:
+        pool_user_id = _unclaimed_pool_user_id()
+        if not pool_user_id:
+            return None
+        owner_user_id = pool_user_id
+        unclaimed = True
+
+    title = summary[:180] or f"Inbound {origin} signal routed by Illo"[:180]
+    description_lines = [
+        f"Illo run {getattr(run_row, 'id', '?')} handled this {origin or 'inbound'} "
+        "signal and created durable work.",
+        f"Work refs: {', '.join(ref_ids) or 'unknown'}",
+    ]
+    idea = Idea(
+        title=title,
+        description="\n".join(description_lines)[:500],
+        status="emerged",
+        origin="inbound_signal",
+        origin_ref=f"inbound_event:{event.id}",
+        user_id=owner_user_id,
+        org_id=org_id,
+        agent_details={
+            "inbound_triage": {
+                "event_id": str(event.id),
+                "origin": origin,
+                "reason": "actionable_run_completion",
+                "connection_id": str(getattr(event, "connection_id", "") or "") or None,
+                "policy_id": None,
+            },
+            "task_domain": task_domain.value,
+            "assignment": {
+                "owner_id": owner_user_id,
+                "basis": decision.basis.value,
+                "authority_user_id": authority_user_id,
+                "unclaimed": unclaimed,
+            },
+            # Gather's evidence piece renders scalar values from this trail.
+            "attribution": {
+                "summary": str((attribution or {}).get("summary") or ""),
+                "tools": ", ".join(
+                    str(tool) for tool in (attribution or {}).get("tool_names") or []
+                ),
+                "run_id": str(getattr(run_row, "id", "") or ""),
+            },
+        },
+    )
+    # Own savepoint: an INSERT failure must roll back cleanly instead of
+    # poisoning the caller's transaction (which holds the run's terminal
+    # status write) — the same commit-time containment mint_packet_for_job
+    # keeps for its write phase.
+    async with session.begin_nested():
+        session.add(idea)
+        await session.flush()
+    return idea
+
+
+async def mint_packet_after_actionable_run(
+    session: Any,
+    *,
+    event: Any,
+    run_row: Any,
+    attribution: dict[str, Any] | None,
+    readers: Readers | None = None,
+) -> MintResult:
+    """Completion hook for the live actionable lanes (``slack_teammate_run``,
+    ``illo_submit``): mint iff attribution proves the run created or routed
+    durable work. NEVER raises — these runs worked before packets existed.
+
+    Differences from the triage hook, both deliberate:
+
+    - **Durable-work predicate.** Triage completion IS the routing moment,
+      so it mints unconditionally. These runs answer questions and stay
+      silent far more often than they route work — only
+      :func:`durable_work_refs` evidence mints, so a Slack reply can never
+      spawn a packet.
+    - **One-shot stamp guard.** The slack lane's receipt is terminal at
+      admission time, so the reconcile transition can't serve as the
+      once-per-lifecycle gate the triage lane uses. The idea's packet stamp
+      is the gate instead: stamped → skip (refresh, slice 06, owns truth
+      drift after that). A failed mint leaves no stamp, so a crash-retry
+      of the same terminal transition retries the mint.
+    """
+    try:
+        org_id = str(getattr(event, "org_id", "") or "")
+        if not org_id:
+            return MintResult(ok=False, reason="event has no org")
+        work_refs = durable_work_refs(attribution)
+        if not work_refs:
+            return MintResult(ok=False, reason="no durable work created by run")
+
+        from brain.platform.db.models.idea import Idea
+
+        idea = (
+            (
+                await session.execute(
+                    select(Idea)
+                    .where(
+                        Idea.origin_ref == f"inbound_event:{event.id}",
+                        Idea.org_id == org_id,
+                    )
+                    .order_by(Idea.created_at.asc())
+                    .limit(1)
                 )
-            except Exception as exc:  # noqa: BLE001 — the packet exists; the reply degraded
-                logger.warning("packet %s minted but Slack reply failed: %s",
-                               getattr(result.handoff, "id", "?"), exc)
-        return result
+            )
+            .scalars()
+            .first()
+        )
+        if idea is not None and dict(dict(getattr(idea, "agent_details", None) or {}).get("packet") or {}):
+            return MintResult(ok=False, reason="packet already minted for event")
+        if idea is None:
+            idea = await _create_job_home_idea(
+                session,
+                org_id=org_id,
+                event=event,
+                run_row=run_row,
+                attribution=attribution,
+                work_refs=work_refs,
+            )
+        if idea is None:
+            return MintResult(ok=False, reason="no owner and no unclaimed pool for job home")
+
+        return await _mint_for_idea_and_event(
+            session, org_id=org_id, idea=idea, event=event,
+            attribution=attribution, readers=readers,
+        )
     except Exception as exc:  # noqa: BLE001 — total containment
         logger.warning("packet mint failed for event %s: %s", getattr(event, "id", "?"), exc)
         return MintResult(ok=False, reason=f"{type(exc).__name__}: {exc}")

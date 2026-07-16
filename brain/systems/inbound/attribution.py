@@ -83,6 +83,31 @@ _OBJECT_REF_KINDS = {
     "run": "agent_run",
 }
 
+# GitHub artifacts come back as {"repo": "owner/name", "issue": {"type",
+# "number", ...}} (the connector's payload contract), not as *_id keys, so
+# the maps above cannot see them. Without this extraction a run whose whole
+# outcome is a filed issue reports no durable refs at all.
+_GITHUB_ARTIFACT_KINDS = {
+    "issue": "github_issue",
+    "pull_request": "github_pull_request",
+}
+
+# Ref kinds that represent routed/created WORK (something a teammate or
+# their agent picks up), as opposed to conversation, memory, or plumbing
+# state. This is the packet-mint predicate's vocabulary (mirrors how
+# preservation.py filters mutated refs by kind).
+WORK_ITEM_REF_KINDS = frozenset(
+    {
+        "github_issue",
+        "github_pull_request",
+        "idea",
+        "domain_record",
+        "agent_run",
+        "launch_handoff",
+        "thread",
+    }
+)
+
 
 def _json_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
@@ -207,10 +232,34 @@ def _add_explicit_ref_values(
     _add_explicit_ref(refs, seen, value=value, source=source)
 
 
+def _add_github_artifact_ref(
+    refs: list[dict[str, str]],
+    seen: set[tuple[str, str]],
+    *,
+    value: Mapping[str, Any],
+    source: str,
+) -> None:
+    repo = str(value.get("repo") or "").strip()
+    issue = value.get("issue")
+    if repo.count("/") != 1 or not isinstance(issue, Mapping):
+        return
+    try:
+        number = int(str(issue.get("number") or "").strip())
+    except (TypeError, ValueError):
+        return
+    if number < 1:
+        return
+    kind = _GITHUB_ARTIFACT_KINDS.get(str(issue.get("type") or "issue").strip() or "issue")
+    if kind is None:
+        return
+    _add_ref(refs, seen, kind=kind, value=f"{repo}#{number}", source=source)
+
+
 def _collect_refs(value: Any, refs: list[dict[str, str]], seen: set[tuple[str, str]], *, source: str) -> None:
     if len(refs) >= _MAX_TARGET_REFS:
         return
     if isinstance(value, Mapping):
+        _add_github_artifact_ref(refs, seen, value=value, source=source)
         for key, child in value.items():
             key_text = str(key)
             if key_text in _EXPLICIT_REF_KEYS:
@@ -383,4 +432,30 @@ async def summarize_inbound_run_attribution(
     }
 
 
-__all__ = ["summarize_inbound_run_attribution"]
+def durable_work_refs(attribution: Mapping[str, Any] | None) -> list[dict[str, str]]:
+    """Mutated refs proving the run created or routed durable WORK.
+
+    The packet-mint predicate for actionable-run lanes: only refs of
+    work-item kinds count, and refs produced by conversational tools
+    (``side_effect_class == "chat_message"``) never do — a Slack reply is
+    an answer, not routed work, and must not mint a packet.
+    """
+    out: list[dict[str, str]] = []
+    for ref in (attribution or {}).get("mutated_target_refs") or []:
+        if not isinstance(ref, Mapping):
+            continue
+        if str(ref.get("kind") or "") not in WORK_ITEM_REF_KINDS:
+            continue
+        source = str(ref.get("source") or "")
+        registration = get_tool_registration(source) if source else None
+        if _enum_value(getattr(registration, "side_effect_class", "")) == "chat_message":
+            continue
+        out.append({str(key): str(value) for key, value in ref.items()})
+    return out
+
+
+__all__ = [
+    "WORK_ITEM_REF_KINDS",
+    "durable_work_refs",
+    "summarize_inbound_run_attribution",
+]

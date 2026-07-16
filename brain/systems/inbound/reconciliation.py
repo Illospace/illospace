@@ -1,7 +1,8 @@
-"""Reconcile inbound decision receipts after Illo triage runs finish."""
+"""Reconcile inbound decision receipts after inbound-admitted runs finish."""
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,6 +20,15 @@ from brain.systems.inbound.preservation import (
 from brain.systems.inbound.status import STATUS_REVIEW_REQUIRED
 from brain.systems.runs.domain import AgentRun, ArtifactType
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
+
+logger = logging.getLogger(__name__)
+
+# Receipt lanes. Triage/submit receipts are written NON-terminal at admission
+# and this module transitions them when the run finishes; the slack-teammate
+# lane writes its receipt already-terminal ("run admitted" IS its decision),
+# so it gets a mint check here but never a receipt/event rewrite.
+_TRIAGE_RECEIPT_TYPES = frozenset({"illo_triage", "illo_submit"})
+_ACTIONABLE_RECEIPT_TYPES = frozenset({"slack_teammate_run"})
 
 
 def _json_dict(value: Any) -> dict[str, Any]:
@@ -115,6 +125,7 @@ async def _inbound_receipt_for_run(
     *,
     event_id: str,
     run_id: int,
+    receipt_types: frozenset[str],
 ) -> InboundDecisionReceiptRow | None:
     rows = (
         await session.scalars(
@@ -126,22 +137,81 @@ async def _inbound_receipt_for_run(
     for row in rows:
         tool_use = _json_dict(row.tool_use)
         target = _json_dict(row.target)
-        if tool_use.get("type") not in {"illo_triage", "illo_submit"}:
+        if tool_use.get("type") not in receipt_types:
             continue
         if str(tool_use.get("run_id") or target.get("run_id") or "") == str(run_id):
             return row
     return None
 
 
+def _log_mint_result(*, event_id: str, run_id: int, lane: str, result: Any) -> None:
+    """One line per mint decision (worker logs at INFO). This is what makes a
+    dormant lane visible: silence around packets is itself the bug this line
+    guards against — skips say WHY, mints say what happened."""
+    logger.info(
+        "packet mint: event=%s run=%s lane=%s ok=%s created=%s posted=%s reason=%s",
+        event_id,
+        run_id,
+        lane,
+        getattr(result, "ok", None),
+        getattr(result, "created", None),
+        getattr(result, "posted", None),
+        getattr(result, "reason", "") or "minted",
+    )
+
+
+async def _mint_for_actionable_run(
+    session: AsyncSession,
+    *,
+    event: InboundEventRow,
+    run_row: AgentRunRow | AgentRun,
+    status: RunStatus,
+    event_id: str,
+    run_id: int,
+) -> None:
+    """Mint check for runs admitted by the slack-teammate lane.
+
+    Their receipts are terminal at admission, so the triage path's
+    transition guard can never fire — the mint's own stamp guard (see
+    :func:`mint_packet_after_actionable_run`) provides once-per-event.
+    Fully contained: this hook may never break run-status persistence."""
+    try:
+        receipt = await _inbound_receipt_for_run(
+            session, event_id=event_id, run_id=run_id, receipt_types=_ACTIONABLE_RECEIPT_TYPES
+        )
+        if receipt is None:
+            return
+        lane = str(_json_dict(receipt.tool_use).get("type") or "actionable")
+        if status != RunStatus.COMPLETED:
+            logger.info(
+                "packet mint skipped: event=%s run=%s lane=%s run_status=%s",
+                event_id, run_id, lane, status.value,
+            )
+            return
+        attribution = await summarize_inbound_run_attribution(session, run_id=run_id, status=status)
+        from brain.systems.briefing.mint import mint_packet_after_actionable_run
+
+        result = await mint_packet_after_actionable_run(
+            session, event=event, run_row=run_row, attribution=attribution
+        )
+        _log_mint_result(event_id=event_id, run_id=run_id, lane=lane, result=result)
+    except Exception:  # noqa: BLE001 — belt to mint's own containment
+        logger.warning("packet mint hook failed for event %s", event_id, exc_info=True)
+
+
 async def reconcile_inbound_triage_run(
     session: AsyncSession,
     run: AgentRunRow | AgentRun | int,
 ) -> InboundDecisionReceiptRow | None:
-    """Close the decision receipt loop for an inbound triage run.
+    """Close the decision receipt loop for an inbound-admitted run.
 
     Triage admission starts with an inbound event in ``review_required``. Once the
     admitted Illo run reaches a terminal state, the event and receipt should show
     the final run outcome instead of only the queued handoff.
+
+    Slack-teammate admissions close their receipt at admission time instead;
+    for those this function leaves receipt and event untouched and only runs
+    the packet-mint check (durable work → handoff packet).
     """
 
     row = await session.get(AgentRunRow, int(run)) if isinstance(run, int) else run
@@ -162,8 +232,18 @@ async def reconcile_inbound_triage_run(
         return None
 
     run_id = int(getattr(row, "id"))
-    receipt = await _inbound_receipt_for_run(session, event_id=event_id, run_id=run_id)
+    receipt = await _inbound_receipt_for_run(
+        session, event_id=event_id, run_id=run_id, receipt_types=_TRIAGE_RECEIPT_TYPES
+    )
     if receipt is None:
+        # Not the triage/submit lane. The slack-teammate lane lands here —
+        # its receipt closed at admission, but a COMPLETED run that created
+        # durable work still owes a handoff packet (the gate that silently
+        # never fired in prod: this lane is where actionable runs actually
+        # complete).
+        await _mint_for_actionable_run(
+            session, event=event, run_row=row, status=status, event_id=event_id, run_id=run_id
+        )
         return None
     # Captured BEFORE mutation: the packet hook fires only on the transition
     # INTO a terminal receipt state. Re-reconciles of an already-terminal
@@ -243,27 +323,35 @@ async def reconcile_inbound_triage_run(
 
     await session.flush()
 
-    # Handoff packet (spec: illo-handoff-packets slice 05): a COMPLETED
-    # triage routes work — mint the packet that makes it arrive warm.
-    # Once per receipt lifecycle (see receipt_was_terminal above). Double
+    # Handoff packet (spec: illo-handoff-packets slice 05): a COMPLETED run
+    # that routes work mints the packet that makes it arrive warm. Once per
+    # receipt lifecycle (see receipt_was_terminal above). Lanes differ:
+    # triage completion IS the routing moment, so illo_triage mints
+    # unconditionally; illo_submit runs often just answer, so they mint only
+    # when attribution shows durable work (the actionable-run path, which
+    # also carries a stamp guard against evidence-missing receipts that
+    # never reach a terminal state and re-enter here on every poll). Double
     # containment: mint never raises by contract, and the import + call sit
     # under their own guard so even an import-chain break cannot take down
     # the receipt loop that worked before packets existed.
-    if (
-        status == RunStatus.COMPLETED
-        and tool_use.get("type") == "illo_triage"
-        and not receipt_was_terminal
-    ):
+    receipt_type = str(tool_use.get("type") or "")
+    if status == RunStatus.COMPLETED and not receipt_was_terminal:
         try:
-            from brain.systems.briefing.mint import mint_packet_after_triage
+            if receipt_type == "illo_triage":
+                from brain.systems.briefing.mint import mint_packet_after_triage
 
-            await mint_packet_after_triage(
-                session, event=event, run_row=row, attribution=attribution
-            )
+                result = await mint_packet_after_triage(
+                    session, event=event, run_row=row, attribution=attribution
+                )
+            else:  # illo_submit — the only other admitted triage-lane type
+                from brain.systems.briefing.mint import mint_packet_after_actionable_run
+
+                result = await mint_packet_after_actionable_run(
+                    session, event=event, run_row=row, attribution=attribution
+                )
+            _log_mint_result(event_id=event_id, run_id=run_id, lane=receipt_type, result=result)
         except Exception:  # noqa: BLE001 — belt to mint's own containment
-            import logging
-
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "packet mint hook failed for event %s", event_id, exc_info=True
             )
 
