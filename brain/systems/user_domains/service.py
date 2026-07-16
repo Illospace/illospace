@@ -74,7 +74,9 @@ def _validate_record_data(
                 raise DomainError(f"Field '{key}' is required")
             normalized[key] = None
             continue
-        normalized[key] = _coerce_field_value(field, value)
+        normalized_value = _coerce_field_value(field, value)
+        _validate_field_constraints(field, normalized_value)
+        normalized[key] = normalized_value
     return normalized
 
 
@@ -377,6 +379,9 @@ class AsyncDomainService:
             raise DomainError(f"Field '{key}' requires non-empty options")
         if not isinstance(options, list):
             raise DomainError(f"Field '{key}' options must be a list")
+        validation = payload.get("validation") or {}
+        if not isinstance(validation, Mapping):
+            raise DomainError(f"Field '{key}' validation must be an object")
         field = DomainFieldDefinition(
             domain_id=object_type.domain_id,
             object_type_id=object_type.id,
@@ -386,7 +391,7 @@ class AsyncDomainService:
             required=bool(payload.get("required", False)),
             options=[str(option) for option in options],
             default_value=payload.get("default_value"),
-            validation=payload.get("validation") or {},
+            validation=dict(validation),
             searchable=bool(payload.get("searchable", True)),
             sortable=bool(payload.get("sortable", True)),
         )
@@ -723,6 +728,7 @@ class AsyncDomainService:
         obj = await self.get_object_type_by_id(record.object_type_id)
         fields = await self.list_fields(obj.id)
         before = await self.serialize_record(record)
+        _validate_immutable_field_updates(fields, record.data or {}, data_patch or {})
         merged = dict(record.data or {})
         merged.update(data_patch or {})
         normalized = self.validate_record_data(fields, merged)
@@ -1458,6 +1464,148 @@ def _coerce_field_value(field: DomainFieldDefinition, value: Any) -> Any:
     if kind == "json":
         return value
     raise DomainError(f"Unsupported field type: {kind}")
+
+
+def _validate_field_constraints(field: DomainFieldDefinition, value: Any) -> None:
+    validation = field.validation or {}
+    if not isinstance(validation, Mapping):
+        raise DomainError(f"Field '{field.key}' has an invalid validation contract")
+    _validate_constraint_value(field.key, value, validation, path=field.key)
+
+
+def _validate_constraint_value(
+    field_key: str,
+    value: Any,
+    constraints: Mapping[str, Any],
+    *,
+    path: str,
+) -> None:
+    expected_type = constraints.get("type")
+    if expected_type is not None and not _matches_validation_type(value, expected_type):
+        raise DomainError(
+            f"Field '{field_key}' value at '{path}' must be {_validation_type_label(expected_type)}"
+        )
+
+    allowed_values = constraints.get("enum")
+    if isinstance(allowed_values, list) and value not in allowed_values:
+        raise DomainError(
+            f"Field '{field_key}' value at '{path}' must be one of: "
+            f"{', '.join(str(item) for item in allowed_values)}"
+        )
+
+    if isinstance(value, str | list | dict):
+        min_length = constraints.get("min_length", constraints.get("minLength"))
+        max_length = constraints.get("max_length", constraints.get("maxLength"))
+        if min_length is not None and len(value) < int(min_length):
+            raise DomainError(
+                f"Field '{field_key}' value at '{path}' must contain at least {int(min_length)} item(s)"
+            )
+        if max_length is not None and len(value) > int(max_length):
+            raise DomainError(
+                f"Field '{field_key}' value at '{path}' must contain at most {int(max_length)} item(s)"
+            )
+
+    pattern = constraints.get("pattern")
+    if pattern is not None and isinstance(value, str):
+        try:
+            matches = re.search(str(pattern), value) is not None
+        except re.error as exc:
+            raise DomainError(f"Field '{field_key}' has an invalid validation pattern") from exc
+        if not matches:
+            raise DomainError(f"Field '{field_key}' value at '{path}' has an invalid format")
+
+    if isinstance(value, list):
+        item_constraints = constraints.get("items")
+        if isinstance(item_constraints, Mapping):
+            for index, item in enumerate(value):
+                _validate_constraint_value(
+                    field_key,
+                    item,
+                    item_constraints,
+                    path=f"{path}[{index}]",
+                )
+
+    if not isinstance(value, Mapping):
+        return
+
+    required_keys = constraints.get("required")
+    if isinstance(required_keys, list):
+        missing = [key for key in required_keys if _is_empty(value.get(str(key)))]
+        if missing:
+            raise DomainError(
+                f"Field '{field_key}' value at '{path}' requires: "
+                f"{', '.join(str(key) for key in missing)}"
+            )
+
+    properties = constraints.get("properties")
+    if isinstance(properties, Mapping):
+        if constraints.get("additional_properties") is False:
+            unknown = sorted(set(value) - set(properties))
+            if unknown:
+                raise DomainError(
+                    f"Field '{field_key}' value at '{path}' has unknown key(s): "
+                    f"{', '.join(str(key) for key in unknown)}"
+                )
+        for key, property_constraints in properties.items():
+            if key not in value or not isinstance(property_constraints, Mapping):
+                continue
+            _validate_constraint_value(
+                field_key,
+                value[key],
+                property_constraints,
+                path=f"{path}.{key}",
+            )
+
+    source_ref_patterns = constraints.get("source_ref_patterns")
+    if isinstance(source_ref_patterns, Mapping):
+        source = value.get("source")
+        ref_pattern = source_ref_patterns.get(source)
+        ref = value.get("ref")
+        if ref_pattern is not None and (
+            not isinstance(ref, str) or re.fullmatch(str(ref_pattern), ref) is None
+        ):
+            raise DomainError(
+                f"Field '{field_key}' value at '{path}.ref' has an invalid format for source '{source}'"
+            )
+
+
+def _matches_validation_type(value: Any, expected_type: Any) -> bool:
+    return {
+        "array": isinstance(value, list),
+        "object": isinstance(value, Mapping),
+        "string": isinstance(value, str),
+        "number": isinstance(value, int | float) and not isinstance(value, bool),
+        "boolean": isinstance(value, bool),
+    }.get(str(expected_type), False)
+
+
+def _validation_type_label(expected_type: Any) -> str:
+    return {
+        "array": "an array",
+        "object": "an object",
+        "string": "a string",
+        "number": "a number",
+        "boolean": "a boolean",
+    }.get(str(expected_type), f"a value of type '{expected_type}'")
+
+
+def _validate_immutable_field_updates(
+    fields: Iterable[DomainFieldDefinition],
+    current_data: Mapping[str, Any],
+    data_patch: Mapping[str, Any],
+) -> None:
+    for field in fields:
+        validation = field.validation or {}
+        if (
+            not isinstance(validation, Mapping)
+            or not validation.get("immutable")
+            or field.key not in data_patch
+        ):
+            continue
+        requested = _coerce_field_value(field, data_patch[field.key])
+        _validate_field_constraints(field, requested)
+        if requested != current_data.get(field.key):
+            raise DomainError(f"Field '{field.key}' is immutable once set")
 
 
 def _record_title(

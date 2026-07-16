@@ -51,7 +51,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.3.0"
+    assert bundle.manifest.version == "1.4.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -62,6 +62,20 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
         "dependency check",
     ):
         assert expected in procedure
+
+
+def test_uwear_triage_bundle_packages_chantier_record_contract():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    contract = _uwear_triage_asset(bundle, "references/chantier-record-contract.md")
+
+    assert "# Domain 1 Chantier Record Contract" in contract
+    assert "`feature`, `incident`, `quality`, or `gtm`" in contract
+    assert "`exploring`, `building`, `shipping`, `verifying`, `done`, or `paused`" in contract
+    assert contract.count("```json") == 1
+    assert '"parent_issue": "github:Illospace/illospace:issue:326"' in contract
 
 
 def test_uwear_triage_skill_distinguishes_internal_tracker_from_real_github_issue():

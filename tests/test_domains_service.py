@@ -194,6 +194,123 @@ async def _create_pr_tracker(service: AsyncDomainService) -> Domain:
     )
 
 
+def _chantier_object_definition() -> dict:
+    github_issue_pattern = (
+        r"github:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+:issue:[1-9][0-9]*"
+    )
+    return {
+        "key": "chantier",
+        "name": "Chantier",
+        "title_field": "title",
+        "fields": [
+            {
+                "key": "slug",
+                "field_type": "text",
+                "required": True,
+                "validation": {
+                    "immutable": True,
+                    "max_length": 80,
+                    "pattern": r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                },
+            },
+            {"key": "title", "field_type": "text", "required": True},
+            {
+                "key": "goal",
+                "field_type": "long_text",
+                "required": True,
+                "validation": {"pattern": r"(?is)^done means\s+\S.*$"},
+            },
+            {
+                "key": "kind",
+                "field_type": "enum",
+                "required": True,
+                "options": ["feature", "incident", "quality", "gtm"],
+            },
+            {
+                "key": "state",
+                "field_type": "enum",
+                "required": True,
+                "options": [
+                    "exploring",
+                    "building",
+                    "shipping",
+                    "verifying",
+                    "done",
+                    "paused",
+                ],
+            },
+            {
+                "key": "owner",
+                "field_type": "text",
+                "validation": {"max_length": 120},
+            },
+            {
+                "key": "refs",
+                "field_type": "json",
+                "required": True,
+                "validation": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["source", "ref"],
+                        "additional_properties": False,
+                        "properties": {
+                            "source": {
+                                "type": "string",
+                                "enum": ["github", "doc", "slack", "posthog", "url"],
+                            },
+                            "ref": {"type": "string", "min_length": 1},
+                            "title": {"type": "string", "min_length": 1},
+                        },
+                        "source_ref_patterns": {"github": github_issue_pattern},
+                    },
+                },
+            },
+            {
+                "key": "parent_issue",
+                "field_type": "text",
+                "validation": {"pattern": f"^{github_issue_pattern}$"},
+            },
+            {
+                "key": "next_step",
+                "field_type": "text",
+                "required": True,
+                "validation": {"pattern": r"^[^\r\n]+$"},
+            },
+            {"key": "progress_note", "field_type": "long_text"},
+            {"key": "created_at", "field_type": "datetime"},
+            {"key": "updated_at", "field_type": "datetime"},
+        ],
+    }
+
+
+def _chantier_record_data() -> dict:
+    return {
+        "slug": "agent-runtime-keystone",
+        "title": "Agent runtime chantier layer",
+        "goal": "Done means chantier members can be coordinated across repositories.",
+        "kind": "feature",
+        "state": "building",
+        "owner": "Reda",
+        "refs": [
+            {
+                "source": "github",
+                "ref": "github:Illospace/illospace:issue:326",
+                "title": "Chantier layer umbrella",
+            },
+            {
+                "source": "doc",
+                "ref": "brain/references/chantier-record-contract.md",
+            },
+        ],
+        "parent_issue": "github:Illospace/illospace:issue:326",
+        "next_step": "Land the record contract and unblock member-ticket work.",
+        "progress_note": "Schema implementation is in review.",
+        "created_at": "2026-07-16T14:00:00Z",
+        "updated_at": "2026-07-16T15:00:00Z",
+    }
+
+
 async def _insert_legacy_pr_record(
     session,
     service: AsyncDomainService,
@@ -511,6 +628,213 @@ async def test_domain_one_pr_contract_handles_open_draft_and_merged_first_attemp
     assert merged.data["review_status"] == "merged"
     assert merged.data["assignee"] == "Axel"
     assert merged.data["progress_note"] == "Verify staging and close the linked ticket."
+
+
+async def test_chantier_contract_creates_updates_and_queries_full_records(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+    data = _chantier_record_data()
+
+    created = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "chantier",
+        data=data,
+    )
+    updated = await service.update_record(
+        ORG_ID,
+        domain.id,
+        created.id,
+        data_patch={
+            "state": "verifying",
+            "next_step": "Verify the migration against the complete Domain test suite.",
+            "updated_at": "2026-07-16T16:00:00Z",
+        },
+        expected_version=1,
+    )
+    queried = await service.list_records(
+        ORG_ID,
+        domain.id,
+        object_key="chantier",
+        search="agent runtime",
+    )
+
+    assert created.title == data["title"]
+    assert updated.version == 2
+    assert updated.data == {
+        **data,
+        "state": "verifying",
+        "next_step": "Verify the migration against the complete Domain test suite.",
+        "updated_at": "2026-07-16T16:00:00Z",
+    }
+    assert [record.id for record in queried] == [created.id]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda data: data.pop("title"), "title.*required"),
+        (lambda data: data.update(kind="project"), "kind.*one of"),
+        (lambda data: data.update(state="todo"), "state.*one of"),
+        (lambda data: data.update(slug="Not Kebab"), "slug.*invalid format"),
+        (lambda data: data.update(goal="Coordinate all member tickets."), "goal.*invalid format"),
+        (lambda data: data.update(refs={"source": "doc", "ref": "x"}), "refs.*array"),
+        (lambda data: data.update(refs=["doc:x"]), "refs.*object"),
+        (
+            lambda data: data.update(refs=[{"source": "jira", "ref": "PROJ-1"}]),
+            "refs.*one of",
+        ),
+        (lambda data: data.update(refs=[{"source": "doc"}]), "refs.*requires.*ref"),
+        (
+            lambda data: data.update(refs=[{"source": "doc", "ref": "x", "extra": True}]),
+            "refs.*unknown key.*extra",
+        ),
+        (
+            lambda data: data.update(refs=[{"source": "doc", "ref": "x", "title": ""}]),
+            "refs.*at least 1",
+        ),
+        (
+            lambda data: data.update(refs=[{"source": "github", "ref": "#326"}]),
+            "refs.*invalid format.*github",
+        ),
+        (
+            lambda data: data.update(parent_issue="https://github.com/Illospace/illospace/issues/326"),
+            "parent_issue.*invalid format",
+        ),
+        (lambda data: data.update(next_step="First sentence.\nSecond sentence."), "next_step.*invalid format"),
+        (lambda data: data.update(owner="x" * 121), "owner.*at most 120"),
+        (lambda data: data.update(created_at="yesterday"), "created_at.*ISO datetime"),
+    ],
+)
+async def test_chantier_contract_rejects_invalid_records(session, mutate, match):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+    data = _chantier_record_data()
+    mutate(data)
+
+    with pytest.raises(DomainError, match=match):
+        await service.create_record(ORG_ID, domain.id, "chantier", data=data)
+
+
+async def test_chantier_slug_is_stable_after_creation(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+    created = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "chantier",
+        data=_chantier_record_data(),
+    )
+
+    with pytest.raises(DomainError, match="slug.*immutable"):
+        await service.update_record(
+            ORG_ID,
+            domain.id,
+            created.id,
+            data_patch={"slug": "renamed-keystone"},
+        )
+
+
+async def test_domain_field_validation_contract_must_be_an_object(session):
+    service = AsyncDomainService(session)
+
+    with pytest.raises(DomainError, match="validation must be an object"):
+        await service.create_domain(
+            ORG_ID,
+            name="Invalid field contract",
+            objects=[
+                {
+                    "key": "item",
+                    "fields": [
+                        {
+                            "key": "title",
+                            "field_type": "text",
+                            "validation": ["not", "an", "object"],
+                        }
+                    ],
+                }
+            ],
+        )
+
+
+async def test_manage_domain_round_trips_a_chantier_record(session, monkeypatch):
+    from brain.platform.db.repositories import unit_of_work
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
+
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+
+    class SessionUnitOfWork:
+        def __init__(self, *args, **kwargs):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            if exc_type is None:
+                await session.flush()
+            return False
+
+    monkeypatch.setattr(unit_of_work, "UnitOfWork", SessionUnitOfWork)
+    data = _chantier_record_data()
+    with bind_agent_context({"org_id": ORG_ID, "user_id": USER_ID}):
+        created = json.loads(
+            await _handle_manage_domain(
+                action="create_record",
+                domain_id=domain.id,
+                object_key="chantier",
+                data=data,
+            )
+        )["record"]
+        updated = json.loads(
+            await _handle_manage_domain(
+                action="update_record",
+                domain_id=domain.id,
+                record_id=created["id"],
+                data_patch={
+                    "state": "shipping",
+                    "next_step": "Merge the schema migration after checks pass.",
+                },
+                expected_version=1,
+            )
+        )["record"]
+        queried = json.loads(
+            await _handle_manage_domain(
+                action="query_records",
+                domain_id=domain.id,
+                object_key="chantier",
+                search="keystone",
+            )
+        )
+
+    assert created["object_key"] == "chantier"
+    assert created["data"] == data
+    assert updated["version"] == 2
+    assert updated["data"]["state"] == "shipping"
+    assert queried["returned"] == queried["total_matching"] == 1
+    assert queried["records"][0]["id"] == created["id"]
 
 
 async def test_domain_events_drop_non_uuid_idea_ids(session):
