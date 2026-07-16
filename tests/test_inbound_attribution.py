@@ -1,0 +1,145 @@
+"""Attribution: durable-ref extraction + the packet-mint work predicate.
+
+The gap under test (2026-07-16 fix): a run whose entire outcome is a filed
+GitHub issue reported NO mutated refs — the connector payload carries
+``{"repo", "issue": {"number"}}``, not ``*_id`` keys — which left the
+packet-mint predicate blind to the most common actionable outcome.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
+from brain.systems.inbound.attribution import (
+    WORK_ITEM_REF_KINDS,
+    durable_work_refs,
+    summarize_inbound_run_attribution,
+)
+from brain.systems.runs.status import RunStatus
+
+
+@pytest.fixture
+async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
+    return await async_sqlite_session_factory([
+        AgentRunRow.__table__,
+        AgentRunEventRow.__table__,
+    ])
+
+
+def _tool_event(run_id: int, seq: int, tool: str, result: dict) -> AgentRunEventRow:
+    return AgentRunEventRow(
+        run_id=run_id,
+        sequence_no=seq,
+        event_type="run.tool_completed",
+        payload={"tool_name": tool, "args": {}, "result": json.dumps(result)},
+    )
+
+
+async def _seed_run(session) -> int:
+    run = AgentRunRow(
+        org_id=None,
+        thread_id="t-1",
+        profile="fast",
+        recipe="illo",
+        status="completed",
+        input_message="x",
+    )
+    session.add(run)
+    await session.flush()
+    return int(run.id)
+
+
+async def test_created_github_issue_becomes_a_mutated_ref(session):
+    run_id = await _seed_run(session)
+    session.add(_tool_event(run_id, 1, "create_github_issue", {
+        "repo": "uwear-ai/uwear-backend",
+        "issue": {"type": "issue", "number": 616, "title": "Rollbar: boom",
+                  "html_url": "https://github.com/uwear-ai/uwear-backend/issues/616"},
+        "token_source": "github_app",
+    }))
+    await session.flush()
+
+    attribution = await summarize_inbound_run_attribution(
+        session, run_id=run_id, status=RunStatus.COMPLETED
+    )
+    refs = attribution["mutated_target_refs"]
+    assert {"kind": "github_issue", "id": "uwear-ai/uwear-backend#616",
+            "source": "create_github_issue"} in refs
+    assert durable_work_refs(attribution) == [
+        {"kind": "github_issue", "id": "uwear-ai/uwear-backend#616",
+         "source": "create_github_issue"}
+    ]
+
+
+async def test_created_pull_request_ref_kind(session):
+    run_id = await _seed_run(session)
+    session.add(_tool_event(run_id, 1, "create_github_issue", {
+        "repo": "uwear-ai/uwear-website",
+        "issue": {"type": "pull_request", "number": 88},
+    }))
+    await session.flush()
+
+    attribution = await summarize_inbound_run_attribution(
+        session, run_id=run_id, status=RunStatus.COMPLETED
+    )
+    kinds = {ref["kind"] for ref in attribution["mutated_target_refs"]}
+    assert "github_pull_request" in kinds
+
+
+async def test_error_payload_with_repo_yields_no_artifact_ref(session):
+    """The handler's failure shape carries ``repo`` but no ``issue`` — it must
+    never read as created work."""
+    run_id = await _seed_run(session)
+    session.add(_tool_event(run_id, 1, "create_github_issue", {
+        "error": "No GitHub App identity is connected",
+        "no_write_token": True,
+        "repo": "uwear-ai/uwear-backend",
+    }))
+    await session.flush()
+
+    attribution = await summarize_inbound_run_attribution(
+        session, run_id=run_id, status=RunStatus.COMPLETED
+    )
+    assert durable_work_refs(attribution) == []
+
+
+async def test_slack_reply_never_counts_as_durable_work(session):
+    run_id = await _seed_run(session)
+    session.add(_tool_event(run_id, 1, "post_slack_reply", {
+        "operation": "posted",
+        "channel_id": "C123",
+        "message_ts": "1752600000.0",
+    }))
+    await session.flush()
+
+    attribution = await summarize_inbound_run_attribution(
+        session, run_id=run_id, status=RunStatus.COMPLETED
+    )
+    assert durable_work_refs(attribution) == []
+
+
+def test_predicate_filters_kinds_and_chat_sources():
+    attribution = {
+        "mutated_target_refs": [
+            {"kind": "github_issue", "id": "a/b#1", "source": "create_github_issue"},
+            {"kind": "idea", "id": "i-1", "source": "manage_idea"},
+            {"kind": "message", "id": "m-1", "source": "post_chat_message"},
+            # work-item kind, but produced by a conversational tool:
+            {"kind": "thread", "id": "t-1", "source": "post_slack_reply"},
+            {"kind": "memory_source", "id": "s-1", "source": "brain_encode"},
+        ]
+    }
+    refs = durable_work_refs(attribution)
+    assert [ref["kind"] for ref in refs] == ["github_issue", "idea"]
+    assert durable_work_refs(None) == []
+    assert durable_work_refs({}) == []
+
+
+def test_work_item_vocabulary_is_the_expected_set():
+    assert WORK_ITEM_REF_KINDS == {
+        "github_issue", "github_pull_request", "idea", "domain_record",
+        "agent_run", "launch_handoff", "thread",
+    }

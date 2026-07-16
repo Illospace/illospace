@@ -205,6 +205,38 @@ after the Codex worker wedged again — 0.15s CPU in 25min):**
   starvation, IntegrityError re-select, lock assertion, label fallback —
   plus the illo-dev probe before merge).
 
+**Post-deploy fix (2026-07-16, Claude-implemented): mint connected to the
+live completion lanes.** Production showed ZERO packets since the 07-13
+deploy: slice 05's hook fired only on `illo_triage` receipt transitions, but
+that lane went dormant on 07-09 — actionable runs actually complete as
+`slack_teammate_run` (receipt terminal at admission, so the transition
+guard can never fire) and `illo_submit`; neither lane creates the triage
+idea mint required, and every skip was silent. The fix, in three
+still-contained layers:
+- **Attribution sees filed GitHub artifacts**: `{"repo", "issue": {...}}`
+  connector payloads now yield `github_issue`/`github_pull_request`
+  mutated refs (`owner/repo#N`), and `durable_work_refs()` (attribution.py)
+  is the shared work predicate — work-item ref kinds only, refs from
+  `chat_message`-class tools never count (a Slack reply is not routed work).
+- **Lane-aware reconcile hook**: `illo_triage` keeps the unconditional
+  transition-gated mint; `illo_submit` mints on its receipt transition via
+  the new `mint_packet_after_actionable_run` (durable-work predicate);
+  `slack_teammate_run` receipts (never rewritten — they closed at
+  admission) get the same actionable mint with the idea's packet stamp as
+  the once-per-event gate. EVERY mint decision logs one INFO
+  `packet mint: event=… lane=… ok=… reason=…` line — a dormant gate can
+  never be silent again.
+- **Job-home idea for idea-less lanes**: `_create_job_home_idea` (mint.py)
+  mirrors `_queue_illo_triage`'s exact shape (same `inbound_triage`/
+  `assignment` keys, owner via `resolve_owner` with the FILED repo driving
+  repo rules, unclaimed-pool parking) so gather/provenance/refresh work
+  unchanged; the description embeds `owner/repo#N` work refs so gather
+  reaches the created artifacts; admits NO new run. Backfill of pre-fix
+  events is explicitly out of scope (the hook is transition-driven).
+  Regression suites: `tests/test_inbound_reconciliation.py` (lane
+  end-to-end on sqlite), `tests/test_inbound_attribution.py`, actionable
+  cases in `tests/test_briefing_mint.py`.
+
 **Implementation decisions that refine slice texts (06+07, Claude-implemented):**
 - Slice 06: `format_line` appends `→ launch: <url>` (one field, Slack-
   escaped, no new section). The cycle's `_attach_and_refresh_packets` maps

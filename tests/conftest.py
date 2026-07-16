@@ -160,6 +160,34 @@ def allow_asgi_test_host_for_dev_auth_fallback(monkeypatch):
     )
 
 
+@pytest.fixture
+def sqlite_postgres_ddl_patch():
+    """Make postgres-typed tables (JSONB, BIGINT, ::jsonb defaults) render on
+    SQLite so repository tests can create them. Same guarded, idempotent
+    patch as test_agent_run_state_machine._patch_sqlite_for_agent_run_tables
+    (shared here for tests outside that module)."""
+    import re
+
+    from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
+
+    if not hasattr(SQLiteTypeCompiler, "visit_JSONB"):
+        SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_BIGINT = lambda self, type_, **kw: "INTEGER"
+    original = SQLiteDDLCompiler.get_column_default_string
+    if getattr(original, "_agent_run_patch", False):
+        return
+
+    def patched(self, column, **kw):
+        result = original(self, column, **kw)
+        if result:
+            result = re.sub(r"::jsonb", "", result)
+            result = result.replace("NOW()", "CURRENT_TIMESTAMP")
+        return result
+
+    patched._agent_run_patch = True
+    SQLiteDDLCompiler.get_column_default_string = patched
+
+
 # --- Docker test DB fixtures ---
 
 TEST_DB_URL = os.environ.get("TEST_DB_URL")
