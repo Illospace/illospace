@@ -276,6 +276,21 @@ def _collect_refs(value: Any, refs: list[dict[str, str]], seen: set[tuple[str, s
             _collect_refs(child, refs, seen, source=source)
 
 
+def collect_result_refs(result: Any, *, source: str) -> list[dict[str, str]]:
+    """Extract entity refs from a FULL tool result (pre-truncation).
+
+    Run events persist only a 1000-char result preview; a bigger mutating
+    result truncates into invalid JSON and the ref walk goes blind (found
+    live on illo-dev, 2026-07-16: a created tracker record was invisible to
+    the packet-mint predicate). The tool executor calls this on the full
+    text and stores the refs beside the preview as ``result_refs``.
+    """
+    refs: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    _collect_refs(_parse_result(result), refs, seen, source=source)
+    return refs
+
+
 def _target_refs(tool_events: list[AgentRunEventRow]) -> list[dict[str, str]]:
     refs: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -283,6 +298,9 @@ def _target_refs(tool_events: list[AgentRunEventRow]) -> list[dict[str, str]]:
         payload = _json_dict(row.payload)
         source = _tool_name(payload) or "tool_result"
         _collect_refs(_tool_result(payload), refs, seen, source=source)
+        # Full-fidelity channel: refs the executor extracted from the
+        # complete result before the stored preview truncated it.
+        _add_explicit_ref_values(refs, seen, value=payload.get("result_refs"), source=source)
     return refs
 
 
@@ -456,6 +474,7 @@ def durable_work_refs(attribution: Mapping[str, Any] | None) -> list[dict[str, s
 
 __all__ = [
     "WORK_ITEM_REF_KINDS",
+    "collect_result_refs",
     "durable_work_refs",
     "summarize_inbound_run_attribution",
 ]

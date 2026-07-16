@@ -143,3 +143,49 @@ def test_work_item_vocabulary_is_the_expected_set():
         "github_issue", "github_pull_request", "idea", "domain_record",
         "agent_run", "launch_handoff", "thread",
     }
+
+
+async def test_truncated_result_preview_recovers_refs_from_result_refs(session):
+    """Run events store a 1000-char result PREVIEW; the executor extracts
+    refs from the FULL result into payload.result_refs first. A truncated
+    (unparseable) preview must not blind attribution to what the tool
+    created (live illo-dev finding, 2026-07-16: tracker record invisible
+    to the packet-mint predicate)."""
+    run_id = await _seed_run(session)
+    big_result = json.dumps({"record": {"id": 1823, "domain_id": 30, "pad": "x" * 5000}})
+    session.add(AgentRunEventRow(
+        run_id=run_id,
+        sequence_no=1,
+        event_type="run.tool_completed",
+        payload={
+            "tool_name": "manage_domain",
+            "args": {"action": "create_record"},
+            "result": big_result[:1000],  # what tools.py persists
+            "result_refs": [
+                {"kind": "domain_record", "id": "1823", "source": "manage_domain"},
+                {"kind": "domain", "id": "30", "source": "manage_domain"},
+            ],
+        },
+    ))
+    await session.flush()
+
+    attribution = await summarize_inbound_run_attribution(
+        session, run_id=run_id, status=RunStatus.COMPLETED
+    )
+    assert {"kind": "domain_record", "id": "1823", "source": "manage_domain"} in (
+        attribution["mutated_target_refs"]
+    )
+    durable = durable_work_refs(attribution)
+    assert any(ref["kind"] == "domain_record" and ref["id"] == "1823" for ref in durable)
+
+
+def test_event_payload_carries_full_result_refs_beside_preview():
+    from brain.systems.runs.tools import _event_payload
+
+    big_result = json.dumps({"record": {"id": 99, "pad": "y" * 3000}})
+    payload = _event_payload("manage_domain", {"action": "create_record"}, result=big_result)
+    assert len(payload["result"]) == 1000  # bounded preview
+    assert {"kind": "domain_record", "id": "99", "source": "manage_domain"} in payload["result_refs"]
+
+    small = _event_payload("post_slack_reply", {}, result=json.dumps({"ok": True, "channel_id": "C1"}))
+    assert "result_refs" not in small  # no refs → no key
