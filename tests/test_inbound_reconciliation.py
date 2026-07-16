@@ -115,7 +115,10 @@ def posts(monkeypatch):
 
     import brain.systems.slack.client as slack_client
 
-    monkeypatch.setattr(slack_client, "slack_web_client_from_env", lambda: FakeClient())
+    async def fake_from_runtime(**_kwargs):
+        return FakeClient()
+
+    monkeypatch.setattr(slack_client, "slack_web_client_from_runtime", fake_from_runtime)
     return recorded
 
 

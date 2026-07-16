@@ -177,9 +177,11 @@ async def _attach_and_refresh_packets(session, org_id, events) -> None:
 
 
 async def _default_post(channel_id, text) -> None:
-    from brain.systems.slack.client import slack_web_client_from_env
+    from brain.systems.slack.client import slack_web_client_from_runtime
 
-    client = slack_web_client_from_env()
+    client = await slack_web_client_from_runtime(
+        requested_by="change_notifications", reason="Post a change-notification digest line."
+    )
     await client.post_message(channel=channel_id, text=text)
 
 

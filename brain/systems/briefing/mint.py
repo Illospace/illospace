@@ -489,9 +489,11 @@ async def _post_brief_to_origin_thread(*, event: Any, brief: str) -> bool:
     provenance = slack_provenance(event) if event is not None else None
     if not provenance or provenance["channel_type"] != PUBLIC_CHANNEL_TYPE:
         return False
-    from brain.systems.slack.client import slack_web_client_from_env
+    from brain.systems.slack.client import slack_web_client_from_runtime
 
-    client = slack_web_client_from_env()
+    client = await slack_web_client_from_runtime(
+        requested_by="packet_mint", reason="Post the handoff-packet brief to the origin thread."
+    )
     await client.post_message(
         channel=provenance["channel"], text=brief, thread_ts=provenance["thread_ts"]
     )
