@@ -64,6 +64,11 @@ def cycle_result_contract(
     }
     escalations = mandatory_escalations(degradation_tracking)
     if escalations:
+        contract["required_outputs"].extend(
+            f"mandatory_degradation_escalation:{escalation['key']}"
+            for escalation in escalations
+            if str(escalation.get("key") or "").strip()
+        )
         contract["mandatory_degradation_escalations"] = escalations
         contract["degradation_escalation_instruction"] = (
             "This is the required digest at or after each escalation's "

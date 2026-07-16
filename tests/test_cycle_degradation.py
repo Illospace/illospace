@@ -145,6 +145,9 @@ def test_required_digest_contract_and_prompt_name_escalated_cause():
     assert missing["missing_outputs"] == [
         f"mandatory_degradation_escalation:{cause['key']}"
     ]
+    assert set(missing["enforced_required_outputs"]) <= set(
+        contract["required_outputs"]
+    )
 
     named = evaluate_cycle_result_contract(
         candidate_answer=(

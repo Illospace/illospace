@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 MISSION_RESULT_CONTRACT_VERDICT_KEY = "mission_result_contract_verdict"
 _CONTRACT_KIND = "autonomous_cycle_run_result"
 _FINAL_ANSWER_TYPE = "final_answer"
+_MANDATORY_DEGRADATION_ESCALATION_PREFIX = "mandatory_degradation_escalation:"
 
 _INTROSPECTION_MARKERS = (
     "verified current runtime facts",
@@ -58,26 +59,6 @@ _NON_PRESERVABLE_OUTPUTS = frozenset(
         "candidate_is_runtime_introspection",
     }
 )
-
-_MISSION_OUTPUT_ALIASES: dict[str, tuple[str, ...]] = {
-    "24h readout": (
-        "24h readout",
-        "24-hour readout",
-        "24 hour readout",
-        "last 24h",
-        "last 24 hours",
-    ),
-    "failure map": ("failure map", "failure-map", "failure modes", "failures"),
-    "codebase implications": (
-        "codebase implications",
-        "code implications",
-        "implementation implications",
-    ),
-    "proposals": ("proposals", "proposal"),
-    "tracking summary": ("tracking summary", "tracking", "domain tracking"),
-    "impact loop": ("impact loop", "impact-loop"),
-    "next action": ("next action", "next step", "blocker"),
-}
 
 
 def _normalize_text(value: Any) -> str:
@@ -138,28 +119,25 @@ def _reported_evidence_health(candidate_answer: str | None) -> dict[str, Any] | 
     return report
 
 
-def _mission_required_output_labels(mission: str) -> list[str]:
-    normalized = _normalize_text(mission)
-    labels = [
-        label
-        for label, aliases in _MISSION_OUTPUT_ALIASES.items()
-        if _contains_any(normalized, aliases)
-    ]
-    return _dedupe(labels)
-
-
-def _domain_tracking_required(mission: str, evidence_packet: dict[str, Any]) -> bool:
-    if bool(evidence_packet.get("domain_side_effects_succeeded")):
-        return True
-    normalized = _normalize_text(mission)
-    return "domain" in normalized and ("record" in normalized or "tracking" in normalized)
-
-
 def _satisfies_required_output(
     requirement: str,
     *,
     normalized_candidate: str,
+    result_contract: dict[str, Any],
 ) -> bool:
+    if requirement.startswith(_MANDATORY_DEGRADATION_ESCALATION_PREFIX):
+        required_key = requirement.removeprefix(
+            _MANDATORY_DEGRADATION_ESCALATION_PREFIX
+        )
+        for raw_escalation in _json_list(
+            result_contract.get("mandatory_degradation_escalations")
+        ):
+            escalation = _json_dict(raw_escalation)
+            if str(escalation.get("key") or "").strip() != required_key:
+                continue
+            summary = _normalize_text(escalation.get("summary"))
+            return bool(summary and summary in normalized_candidate)
+        return False
     if requirement == "answer_the_cycle_mission":
         return (
             len(normalized_candidate) >= 80
@@ -192,27 +170,12 @@ def _satisfies_required_output(
             normalized_candidate,
             ("self-review", "self review", "review summary", "self review summary"),
         )
+    if requirement in {"domain_tracking", "domain_tracking_summary"}:
+        return _contains_any(
+            normalized_candidate,
+            ("domain tracking", "tracking summary", "domain record", "domain ledger"),
+        )
     return requirement.replace("_", " ") in normalized_candidate
-
-
-def _missing_mandatory_degradation_escalations(
-    result_contract: dict[str, Any],
-    *,
-    normalized_candidate: str,
-) -> list[str]:
-    missing: list[str] = []
-    for raw_escalation in _json_list(
-        result_contract.get("mandatory_degradation_escalations")
-    ):
-        escalation = _json_dict(raw_escalation)
-        key = str(escalation.get("key") or "").strip()
-        summary = _normalize_text(escalation.get("summary"))
-        if not key or not summary:
-            continue
-        if summary in normalized_candidate:
-            continue
-        missing.append(f"mandatory_degradation_escalation:{key}")
-    return missing
 
 
 def evaluate_cycle_result_contract(
@@ -223,9 +186,8 @@ def evaluate_cycle_result_contract(
     evidence_packet: dict[str, Any] | None = None,
     provider_exception: BaseException | str | None = None,
 ) -> dict[str, Any]:
-    """Return a deterministic verdict for a candidate scheduled-Cycle visible answer."""
+    """Validate a visible answer against only its advertised required outputs."""
 
-    evidence_packet = _json_dict(evidence_packet)
     normalized_candidate = _normalize_text(candidate_answer)
     detected_provider_error = provider_error_kind(
         candidate_answer,
@@ -238,39 +200,25 @@ def evaluate_cycle_result_contract(
     if _looks_like_introspection_boilerplate(candidate_answer):
         missing.append("candidate_is_runtime_introspection")
 
-    for requirement in _json_list(result_contract.get("required_outputs")):
-        requirement_name = str(requirement or "").strip()
-        if not requirement_name:
-            continue
+    enforced_required_outputs = _dedupe(
+        [
+            str(requirement or "").strip()
+            for requirement in _json_list(result_contract.get("required_outputs"))
+        ]
+    )
+    for requirement_name in enforced_required_outputs:
         if not _satisfies_required_output(
             requirement_name,
             normalized_candidate=normalized_candidate,
+            result_contract=result_contract,
         ):
             missing.append(requirement_name)
-
-    missing.extend(
-        _missing_mandatory_degradation_escalations(
-            result_contract,
-            normalized_candidate=normalized_candidate,
-        )
-    )
-
-    for label in _mission_required_output_labels(mission):
-        if not _contains_any(normalized_candidate, _MISSION_OUTPUT_ALIASES[label]):
-            missing.append(label)
-
-    if _domain_tracking_required(mission, evidence_packet):
-        has_domain_tracking = "domain" in normalized_candidate and _contains_any(
-            normalized_candidate,
-            ("record", "records", "tracking", "ledger"),
-        )
-        if not has_domain_tracking:
-            missing.append("domain_tracking_summary")
 
     missing = _dedupe(missing)
     return {
         "approved": not missing,
         "missing_outputs": missing,
+        "enforced_required_outputs": enforced_required_outputs,
         "candidate_summary": (
             safe_provider_error_sentinel(detected_provider_error)
             if detected_provider_error
@@ -283,11 +231,11 @@ def evaluate_cycle_result_contract(
 
 def _metadata_result_contract(agent_run: AgentRunRow | None) -> dict[str, Any]:
     metadata = _json_dict(getattr(agent_run, "metadata_", None))
-    contract = _json_dict(metadata.get("contract")).get("result")
-    if isinstance(contract, dict):
-        return dict(contract)
     launch_envelope = _json_dict(metadata.get("launch_envelope"))
     contract = launch_envelope.get("result_contract")
+    if isinstance(contract, dict):
+        return dict(contract)
+    contract = _json_dict(metadata.get("contract")).get("result")
     if isinstance(contract, dict):
         return dict(contract)
     launch_receipt = _json_dict(metadata.get("launch_receipt"))
@@ -301,11 +249,14 @@ def cycle_result_contract_for_run(
     agent_run: AgentRunRow | None,
     cycle_run: CycleRun | None,
 ) -> dict[str, Any]:
+    contract = _metadata_result_contract(agent_run)
+    if contract:
+        return contract
     context_snapshot = _json_dict(getattr(cycle_run, "context_snapshot", None))
     contract = context_snapshot.get("result_contract")
     if isinstance(contract, dict):
         return dict(contract)
-    return _metadata_result_contract(agent_run)
+    return {}
 
 
 def _is_result_contract(contract: dict[str, Any]) -> bool:
@@ -699,6 +650,9 @@ def _base_verdict(
         "candidate_summary": initial_review.get("candidate_summary") or _candidate_summary(candidate_answer),
         "missing_outputs": list(initial_review.get("missing_outputs") or []),
         "final_missing_outputs": list(initial_review.get("missing_outputs") or []),
+        "enforced_required_outputs": list(
+            initial_review.get("enforced_required_outputs") or []
+        ),
         "repair_attempted": False,
         "repair_succeeded": False,
         "settlement_status": (

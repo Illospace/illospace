@@ -27,6 +27,101 @@ RAW_PROVIDER_ERROR = (
     "ID `a7dd7556-test` in your message. | server_error | server_error"
 )
 
+RESULT_CONTRACT_REQUIRED_OUTPUTS = [
+    "answer_the_cycle_mission",
+    "summarize_workspace_evidence_or_explicit_gaps",
+    "report_evidence_health",
+    "record_next_action_or_blocker",
+    "short_self_review_summary",
+]
+REFLEX_MISSION = (
+    "Review GitHub events. If reader failures occur, report them under Evidence health. "
+    "End with exactly six lines: Reflex result / Evidence reviewed / Evidence health / "
+    "Domain tracking / Next action / Self-review."
+)
+REFLEX_ANSWER = (
+    "Reflex result: the scheduled GitHub review completed with no unresolved work.\n"
+    "Evidence reviewed: workspace GitHub events and current cycle state were inspected.\n"
+    "Evidence health: ok; the available readers returned complete results.\n"
+    "Domain tracking: no durable record update was needed for this run.\n"
+    "Next action: inspect new GitHub events at the next scheduled run.\n"
+    "Self-review: the mission and advertised result contract are satisfied."
+)
+
+
+def _result_contract(required_outputs=None):
+    return {
+        "kind": "autonomous_cycle_run_result",
+        "required_outputs": list(
+            RESULT_CONTRACT_REQUIRED_OUTPUTS
+            if required_outputs is None
+            else required_outputs
+        ),
+    }
+
+
+def _contract_finalization_scenario(
+    *,
+    cycle_id,
+    mission,
+    answer,
+    events=None,
+    launch_contract=None,
+    snapshot_contract=None,
+):
+    launch_contract = launch_contract or _result_contract()
+    snapshot_contract = snapshot_contract or launch_contract
+
+    agent_run = AgentRun()
+    agent_run.id = 44
+    agent_run.root_run_id = 44
+    agent_run.user_id = "user-1"
+    agent_run.org_id = "org-1"
+    agent_run.input_message = mission
+    agent_run.model_policy = {}
+    agent_run.metadata_ = {
+        "source": "cycle",
+        "cycle_run_id": 12,
+        "launch_envelope": {"result_contract": launch_contract},
+    }
+
+    cycle_run = CycleRun()
+    cycle_run.id = 12
+    cycle_run.cycle_id = cycle_id
+    cycle_run.status = "running"
+    cycle_run.completed_at = None
+    cycle_run.error = None
+    cycle_run.skip_reason = None
+    cycle_run.prompt_snapshot = mission
+    cycle_run.context_snapshot = {
+        "result_contract": snapshot_contract,
+        "evidence_health": {"status": "pending"},
+    }
+
+    cycle = Cycle()
+    cycle.id = cycle_id
+    cycle.prompt = mission
+    cycle.last_status = None
+    cycle.last_error = None
+    cycle.last_run_at = None
+
+    final_answer = AgentRunArtifactRow(
+        id=8,
+        run_id=44,
+        root_run_id=44,
+        artifact_type="final_answer",
+        text=answer,
+        created_at=datetime(2026, 4, 28, 20, 25, tzinfo=timezone.utc),
+    )
+    session = _AsyncFakeSession(
+        agent_run=agent_run,
+        run=cycle_run,
+        cycle=cycle,
+        artifacts=[final_answer],
+        events=events,
+    )
+    return session, cycle_run, cycle, final_answer
+
 
 class _FakeSession:
     def __init__(self, agent_run=None, run=None, cycle=None, artifacts=None, events=None):
@@ -1430,6 +1525,167 @@ def test_cycle_contract_rejects_empty_answer_with_captured_provider_exception():
     assert review["provider_error"] == "overloaded_error"
 
 
+@pytest.mark.parametrize("completed_event_count", [0, 2], ids=["no-op", "acted-on-events"])
+def test_reflex_cycle_satisfied_launch_contract_completes(
+    monkeypatch,
+    completed_event_count,
+):
+    from brain.systems.cycles import contract_gate
+
+    events = [
+        AgentRunEventRow(
+            id=index + 1,
+            run_id=44,
+            root_run_id=44,
+            sequence_no=index + 1,
+            event_type="run.tool_completed",
+            payload={
+                "tool_name": "update_github_event",
+                "result": {"status": "ok", "event_id": index + 100},
+            },
+        )
+        for index in range(completed_event_count)
+    ]
+    session, cycle_run, cycle, final_answer = _contract_finalization_scenario(
+        cycle_id=8,
+        mission=REFLEX_MISSION,
+        answer=REFLEX_ANSWER,
+        events=events,
+    )
+    repair_calls = []
+
+    async def fake_repair(**kwargs):
+        repair_calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(contract_gate, "_async_repair_cycle_contract_answer", fake_repair)
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+
+    service.finalize_cycle_run_from_run(44, status="completed")
+
+    assert repair_calls == []
+    assert cycle_run.status == "completed"
+    assert cycle_run.error is None
+    assert cycle.last_status == "completed"
+    assert cycle.last_error is None
+    verdict = cycle_run.context_snapshot["mission_result_contract_verdict"]
+    assert verdict["settlement_status"] == "mission_success"
+    assert verdict["missing_outputs"] == []
+    assert verdict["side_effects_succeeded"] is bool(completed_event_count)
+    assert session._artifacts[-1] is final_answer
+
+
+def test_coordinator_tracking_summary_does_not_add_undeclared_requirement(monkeypatch):
+    from brain.systems.cycles import contract_gate
+
+    mission = (
+        "Publish the coordinator digest and include its domain-tracking summary line, "
+        "evidence health, next action, and self-review."
+    )
+    answer = (
+        "Coordinator result: the workspace digest completed and all scheduled work is current.\n"
+        "Evidence reviewed: current assignments and workspace activity were inspected.\n"
+        "Evidence health: ok; the available sources were complete.\n"
+        "Tracking summary: the coordination ledger is current.\n"
+        "Next action: review new assignments at the next scheduled run.\n"
+        "Self-review: the advertised result contract is satisfied."
+    )
+    session, cycle_run, cycle, _ = _contract_finalization_scenario(
+        cycle_id=2,
+        mission=mission,
+        answer=answer,
+    )
+    repair_calls = []
+
+    async def fake_repair(**kwargs):
+        repair_calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(contract_gate, "_async_repair_cycle_contract_answer", fake_repair)
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+
+    service.finalize_cycle_run_from_run(44, status="completed")
+
+    assert repair_calls == []
+    assert cycle_run.status == "completed"
+    assert cycle_run.error is None
+    assert cycle.last_status == "completed"
+    assert cycle.last_error is None
+
+
+@pytest.mark.parametrize(
+    ("mission", "evidence_packet"),
+    [
+        (REFLEX_MISSION, {}),
+        (
+            "Publish a coordinator digest with domain tracking.",
+            {"domain_side_effects_succeeded": True},
+        ),
+    ],
+    ids=["reflex", "coordinator"],
+)
+def test_cycle_contract_enforces_only_advertised_required_outputs(mission, evidence_packet):
+    from brain.systems.cycles.contract_gate import evaluate_cycle_result_contract
+
+    result_contract = _result_contract(["report_evidence_health"])
+    review = evaluate_cycle_result_contract(
+        candidate_answer="Evidence health: ok.",
+        result_contract=result_contract,
+        mission=mission,
+        evidence_packet=evidence_packet,
+    )
+
+    assert set(review["missing_outputs"]) <= set(result_contract["required_outputs"])
+    assert set(review["enforced_required_outputs"]) <= set(
+        result_contract["required_outputs"]
+    )
+    assert review["approved"] is True
+
+
+def test_cycle_contract_for_run_prefers_advertised_launch_envelope():
+    from brain.systems.cycles.contract_gate import cycle_result_contract_for_run
+
+    launch_contract = _result_contract(["report_evidence_health"])
+    stale_snapshot_contract = _result_contract(["failure_map"])
+    session, cycle_run, _, _ = _contract_finalization_scenario(
+        cycle_id=8,
+        mission=REFLEX_MISSION,
+        answer="Evidence health: ok.",
+        launch_contract=launch_contract,
+        snapshot_contract=stale_snapshot_contract,
+    )
+
+    assert cycle_result_contract_for_run(session._agent_run, cycle_run) == launch_contract
+
+
+def test_reflex_cycle_missing_declared_evidence_health_still_degrades(monkeypatch):
+    from brain.systems.cycles import contract_gate
+
+    answer_without_evidence_health = "\n".join(
+        line for line in REFLEX_ANSWER.splitlines() if not line.startswith("Evidence health:")
+    )
+    session, cycle_run, cycle, _ = _contract_finalization_scenario(
+        cycle_id=8,
+        mission=REFLEX_MISSION,
+        answer=answer_without_evidence_health,
+    )
+
+    async def fake_repair(**kwargs):
+        return None
+
+    monkeypatch.setattr(contract_gate, "_async_repair_cycle_contract_answer", fake_repair)
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+
+    service.finalize_cycle_run_from_run(44, status="completed")
+
+    assert cycle_run.status == "degraded"
+    assert cycle_run.error == "mission_contract_failed: missing report_evidence_health"
+    assert cycle.last_status == "degraded"
+    assert cycle.last_error == cycle_run.error
+    verdict = cycle_run.context_snapshot["mission_result_contract_verdict"]
+    assert verdict["final_missing_outputs"] == ["report_evidence_health"]
+
+
 @pytest.mark.asyncio
 async def test_cycle_contract_gate_repairs_bad_visible_answer_once(monkeypatch):
     from brain.systems.cycles import contract_gate
@@ -1522,7 +1778,8 @@ async def test_cycle_contract_gate_repairs_bad_visible_answer_once(monkeypatch):
 
     assert len(repair_calls) == 1
     assert repair_calls[0]["candidate_answer"] == bad_answer.text
-    assert "24h readout" in repair_calls[0]["missing_outputs"]
+    assert "answer_the_cycle_mission" in repair_calls[0]["missing_outputs"]
+    assert "failure map" not in repair_calls[0]["missing_outputs"]
     assert verdict["repair_attempted"] is True
     assert verdict["repair_succeeded"] is True
     assert verdict["settlement_status"] == "mission_success_after_repair"
