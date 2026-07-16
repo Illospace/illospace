@@ -749,3 +749,37 @@ async def test_event_mint_lock_taken_on_postgres_only():
     await _acquire_event_mint_lock(LockSession("sqlite"), org_id=_ORG, event_id=_EVENT_ID)
     assert executed == []
     await _acquire_event_mint_lock(FakeSession(), org_id=_ORG, event_id=_EVENT_ID)  # no bind at all
+
+
+async def test_actionable_job_ref_anchors_on_created_work_not_reads(posts):
+    """The first live packet (handoff e827d633) anchored its dossier on the
+    playbook doc the run READ because _record_job_ref walks target_refs at
+    large. The actionable lane must anchor on the run's own durable refs:
+    created record wins; issue-only runs anchor on the job-home idea."""
+    from brain.systems.briefing.mint import mint_packet_after_actionable_run
+
+    created_record = {"kind": "domain_record", "id": "1826", "source": "manage_domain"}
+    read_doc = {"kind": "domain_record", "id": "1272", "source": "manage_domain"}
+    attribution = {
+        "target_refs": [read_doc, created_record],  # read-first, like run 1627
+        "mutated_target_refs": [created_record],
+    }
+    session = FakeSession(events=[_actionable_event()])
+    result = await mint_packet_after_actionable_run(
+        session, event=_actionable_event(), run_row=_run_row(),
+        attribution=attribution, readers=_readers(),
+    )
+    assert result.ok and result.created
+    assert (session.handoffs[0].metadata_ or {}).get("job_ref") == "domain_record:1826"
+
+    # Issue-only durable work → the idea is the anchor (its description
+    # carries owner/repo#N for gather), never a read doc from target_refs.
+    session2 = FakeSession(events=[_actionable_event()])
+    result2 = await mint_packet_after_actionable_run(
+        session2, event=_actionable_event(), run_row=_run_row(),
+        attribution={"target_refs": [read_doc, _ISSUE_REF], "mutated_target_refs": [_ISSUE_REF]},
+        readers=_readers(),
+    )
+    assert result2.ok and result2.created
+    idea2 = session2._ideas[0]
+    assert (session2.handoffs[0].metadata_ or {}).get("job_ref") == f"idea:{idea2.id}"
