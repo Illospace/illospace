@@ -405,3 +405,46 @@ class TestPacketLinkAttachment:
         events = [{"title": "t", "record_id": 1}]
         await cyc._attach_and_refresh_packets(None, "org-1", events)
         assert "launch_url" not in events[0]
+
+
+async def test_failed_sends_are_contained_and_counted(db_less_session=None):
+    """A raising sender (token unavailable, Slack rejection) must not kill the
+    tick; remaining messages still go out and the summary says how many
+    failed (cross-family review finding, 2026-07-16)."""
+    from unittest.mock import AsyncMock, patch
+
+    from brain.systems.change_notifications_cycle import run_notify_cycle
+
+    sent: list[str] = []
+
+    async def flaky_sender(channel_id, text):
+        if not sent:  # first send fails, later sends succeed
+            sent.append("FAILED")
+            raise RuntimeError("slack rejected the message")
+        sent.append(text)
+
+    events = [
+        {"kind": "assigned", "title": f"item {i}", "urgent": True, "owner_id": None}
+        for i in range(2)
+    ]
+    with (
+        patch("brain.systems.change_notifications_cycle._maybe_run_deploy_verification",
+              new=AsyncMock(return_value=None)),
+        patch("brain.systems.change_notifications_cycle._load_change_events",
+              new=AsyncMock(return_value=events)),
+        patch("brain.systems.change_notifications_cycle._fill_owner_labels",
+              new=AsyncMock(return_value=None)),
+        patch("brain.systems.change_notifications_cycle._attach_and_refresh_packets",
+              new=AsyncMock(return_value=None)),
+        patch("brain.systems.change_notifications_cycle._count_unclaimed",
+              new=AsyncMock(return_value=0)),
+        patch("brain.systems.change_notifications_cycle.render_outbound",
+              return_value={"immediate": ["m1", "m2"], "digest": "d1"}),
+    ):
+        summary = await run_notify_cycle(
+            None, org_id="o", channel_id="C1", post=flaky_sender,
+        )
+
+    assert summary["post_failures"] == 1
+    assert summary["digest_posted"] is True  # later sends still attempted
+    assert sent == ["FAILED", "m2", "d1"]

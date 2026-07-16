@@ -267,3 +267,51 @@ def slack_app_token_from_env() -> str:
 
 def slack_web_client_from_env() -> SlackWebClient:
     return SlackWebClient(slack_bot_token_from_env())
+
+
+async def slack_web_client_from_runtime(
+    *,
+    requested_by: str,
+    reason: str,
+) -> SlackWebClient:
+    """Backend Slack client with Vault-first bot-token resolution.
+
+    Deployments store SLACK_BOT_TOKEN in DB-backed runtime secrets, not in
+    every service's env (the compose anchor passes it to the connector
+    only), so env-only resolution silently strands backend posting/reading
+    in the worker and API — the packet-mint E2E on illo-dev caught exactly
+    that (2026-07-16). Resolution order mirrors the connector's
+    ``SlackConnectorConfig.from_runtime``: env when set, else the runtime
+    secret under the connector authority. One owner for the secret.
+    """
+    token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
+    if not token:
+        from brain.systems.slack.connector import resolve_slack_connector_authority
+        from brain.systems.vault.runtime_secrets import (
+            RuntimeSecretContext,
+            read_runtime_secret,
+        )
+
+        org_id = os.environ.get("ILLO_SLACK_ORG_ID") or os.environ.get("ILLO_ORG_ID")
+        owner_user_id = (
+            os.environ.get("ILLO_SLACK_OWNER_USER_ID")
+            or os.environ.get("ILLO_OWNER_USER_ID")
+        )
+        if not org_id or not owner_user_id:
+            org_id, owner_user_id = await resolve_slack_connector_authority(
+                org_id=org_id, owner_user_id=owner_user_id
+            )
+        token = str(
+            await read_runtime_secret(
+                "SLACK_BOT_TOKEN",
+                context=RuntimeSecretContext(actor_user_id=owner_user_id, org_id=org_id),
+                reason=reason,
+                requested_by=requested_by,
+                access="service",
+                allow_env_fallback=True,
+            )
+            or ""
+        ).strip()
+    if not token:
+        raise SlackConfigurationError("SLACK_BOT_TOKEN is required (env or runtime secret)")
+    return SlackWebClient(token)

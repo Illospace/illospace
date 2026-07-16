@@ -74,7 +74,11 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
     public = {
         key: value
         for key, value in raw.items()
-        if key not in {"args", "result", "result_preview"} and not _is_sensitive_key(str(key).lower())
+        # result_refs is the backend attribution channel (full-fidelity refs
+        # extracted pre-truncation); it never goes to the browser — ref ids
+        # are raw result content and receive no _redact_text pass.
+        if key not in {"args", "result", "result_preview", "result_refs"}
+        and not _is_sensitive_key(str(key).lower())
     }
     public["tool_name"] = tool_name
     public["tool"] = tool_name

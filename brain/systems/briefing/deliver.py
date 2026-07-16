@@ -229,9 +229,15 @@ def _default_session_factory() -> Callable[[], Any] | None:
 
 
 async def _default_poster(*, channel: str, text: str, thread_ts: str) -> dict[str, Any]:
-    from brain.systems.slack.client import slack_web_client_from_env
+    from brain.systems.slack.client import slack_web_client_from_runtime
 
-    client = slack_web_client_from_env()
+    # Vault-first token resolution (PR #333): deployments keep SLACK_BOT_TOKEN
+    # in DB-backed runtime secrets, not every service's env — env-only
+    # resolution silently strands backend posting in the worker.
+    client = await slack_web_client_from_runtime(
+        requested_by="packet_brief_delivery",
+        reason="Post the handoff-packet brief to the origin thread.",
+    )
     return await client.post_message(channel=channel, text=text, thread_ts=thread_ts)
 
 
@@ -240,9 +246,12 @@ async def _default_thread_reader(*, channel: str, thread_ts: str) -> dict[str, A
     excerpting reader): walk the WHOLE thread or say so. ``complete=False``
     means an unread tail may hide the brief — the caller must then treat
     "not found" as "cannot decide", never as "absent"."""
-    from brain.systems.slack.client import slack_web_client_from_env
+    from brain.systems.slack.client import slack_web_client_from_runtime
 
-    client = slack_web_client_from_env()
+    client = await slack_web_client_from_runtime(
+        requested_by="packet_brief_delivery",
+        reason="Read the origin thread to confirm a handoff brief was not already posted.",
+    )
     messages: list[dict[str, Any]] = []
     cursor: str | None = None
     complete = False

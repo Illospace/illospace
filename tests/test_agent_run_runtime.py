@@ -4604,3 +4604,50 @@ def test_truncate_tool_result_text_tiny_budget_skips_note(monkeypatch):
     assert len(result) <= 250
     assert "[System:" not in result
     assert "chars truncated by tool output budget" in result
+
+
+async def test_runtime_tool_executor_persists_full_result_refs_beside_preview():
+    """Big mutating results: the durable event keeps a 1000-char preview but
+    result_refs is extracted from the FULL result (illo-dev finding,
+    2026-07-16 — a created tracker record was invisible to attribution);
+    the live stream never carries the backend-only refs channel."""
+    import json as _json
+
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+
+    runtime = _runtime("worker")
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
+
+    big_result = _json.dumps({"record": {"id": 1823, "domain_id": 30, "pad": "x" * 5000}})
+    await executor.execute(
+        42,
+        ToolExecution(
+            name="manage_domain",
+            args={"action": "create_record"},
+            handler=lambda **kwargs: big_result,
+        ),
+        root_run_id=42,
+    )
+
+    completed = next(e for e in runtime.store.events if e.event_type == "run.tool_completed")
+    assert len(completed.payload["result"]) == 1000  # preview stays bounded
+    assert {"kind": "domain_record", "id": "1823", "source": "manage_domain"} in (
+        completed.payload["result_refs"]
+    )
+    streamed = [p for t, p in runtime.stream.messages if t == "run.tool_completed"]
+    assert streamed and all("result_refs" not in p for p in streamed)
+
+
+async def test_public_projection_never_carries_result_refs():
+    from brain.systems.runs.presentation import public_tool_event_payload
+
+    public = public_tool_event_payload(
+        {
+            "tool_name": "manage_domain",
+            "args": {"action": "create_record"},
+            "result": "{\"truncated",
+            "result_refs": [{"kind": "domain_record", "id": "sk-live-oops", "source": "x"}],
+        },
+        "run.tool_completed",
+    )
+    assert "result_refs" not in public

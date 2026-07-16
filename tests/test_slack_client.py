@@ -177,3 +177,46 @@ async def test_slack_client_uploads_file_with_external_upload_flow(monkeypatch):
             },
         ),
     ]
+
+
+async def test_runtime_client_prefers_env_token(monkeypatch):
+    from brain.systems.slack.client import slack_web_client_from_runtime
+
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-env-token")
+    client = await slack_web_client_from_runtime(requested_by="t", reason="t")
+    assert client.bot_token == "xoxb-env-token"
+
+
+async def test_runtime_client_falls_back_to_runtime_secret(monkeypatch):
+    """Deployments keep SLACK_BOT_TOKEN in DB-backed runtime secrets, not in
+    every service env (illo-dev packet-mint E2E finding, 2026-07-16)."""
+    import brain.systems.slack.client as slack_client
+    import brain.systems.slack.connector as connector
+    import brain.systems.vault.runtime_secrets as runtime_secrets
+
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("ILLO_SLACK_ORG_ID", raising=False)
+    monkeypatch.delenv("ILLO_SLACK_OWNER_USER_ID", raising=False)
+    monkeypatch.delenv("ILLO_ORG_ID", raising=False)
+    monkeypatch.delenv("ILLO_OWNER_USER_ID", raising=False)
+
+    async def fake_authority(*, org_id, owner_user_id):
+        assert org_id is None and owner_user_id is None
+        return "org-1", "user-1"
+
+    calls = {}
+
+    async def fake_read_runtime_secret(key_name, *, context, reason, requested_by, access, allow_env_fallback=False, env_names=None):
+        calls["key"] = key_name
+        calls["context"] = (context.actor_user_id, context.org_id)
+        calls["access"] = access
+        return "xoxb-vault-token"
+
+    monkeypatch.setattr(connector, "resolve_slack_connector_authority", fake_authority)
+    monkeypatch.setattr(runtime_secrets, "read_runtime_secret", fake_read_runtime_secret)
+
+    client = await slack_client.slack_web_client_from_runtime(requested_by="t", reason="t")
+    assert client.bot_token == "xoxb-vault-token"
+    assert calls["key"] == "SLACK_BOT_TOKEN"
+    assert calls["context"] == ("user-1", "org-1")
+    assert calls["access"] == "service"

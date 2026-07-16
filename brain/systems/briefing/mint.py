@@ -573,6 +573,7 @@ async def _mint_for_idea_and_event(
     event: Any,
     attribution: dict[str, Any] | None,
     readers: Readers | None,
+    job_ref: str | None = None,
 ) -> MintResult:
     """Shared stage for every inbound-completion lane once the job-home idea
     is resolved: owner → target → mint → record-delivery-once. Raises upward;
@@ -590,7 +591,7 @@ async def _mint_for_idea_and_event(
         session,
         org_id=org_id,
         idea=idea,
-        job_ref=_record_job_ref(attribution, idea),
+        job_ref=job_ref or _record_job_ref(attribution, idea),
         ask=_ask_from_event(idea, event),
         owner_user_id=owner_user_id,
         owner_label=owner_label,
@@ -858,9 +859,22 @@ async def mint_packet_after_actionable_run(
         if idea is None:
             return MintResult(ok=False, reason="no owner and no unclaimed pool for job home")
 
+        # Anchor the job on the run's OWN durable work, never on attribution
+        # target_refs at large — those include read-only tool results, and
+        # the first live packet anchored its dossier on the triage playbook
+        # doc the run had READ instead of the tracker item it CREATED
+        # (illo-dev E2E, handoff e827d633).
+        job_ref = next(
+            (
+                f"domain_record:{ref['id']}"
+                for ref in work_refs
+                if str(ref.get("kind") or "") == "domain_record" and ref.get("id")
+            ),
+            f"idea:{getattr(idea, 'id', '')}",
+        )
         return await _mint_for_idea_and_event(
             session, org_id=org_id, idea=idea, event=event,
-            attribution=attribution, readers=readers,
+            attribution=attribution, readers=readers, job_ref=job_ref,
         )
     except Exception as exc:  # noqa: BLE001 — total containment
         logger.warning("packet mint failed for event %s: %s", getattr(event, "id", "?"), exc)
