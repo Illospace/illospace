@@ -236,6 +236,21 @@ still-contained layers:
   Regression suites: `tests/test_inbound_reconciliation.py` (lane
   end-to-end on sqlite), `tests/test_inbound_attribution.py`, actionable
   cases in `tests/test_briefing_mint.py`.
+  The illo-dev E2E then exposed two more dormant assumptions, fixed the
+  same day: (#333) backend Slack posting/reading used env-only
+  `slack_web_client_from_env`, but deployments keep `SLACK_BOT_TOKEN` in
+  DB-backed runtime secrets — `slack_web_client_from_runtime` (Vault-first,
+  connector-authority, env fallback) now serves mint's post, gather's
+  reader, and the notify default post, with notify sends individually
+  contained; (#334) `run.tool_completed` events persist a 1000-char result
+  PREVIEW, so big mutating results truncated into unparseable JSON and
+  attribution reported "no durable work" for runs that created it (live
+  repro: record 1823 invisible) — the executor now extracts
+  `result_refs` from the FULL result beside the preview (backend-only
+  channel: stripped from public projections and the live stream; ref
+  fields bounded, oversized ids dropped). Deferred follow-up (recorded,
+  Codex finding on #332): the Slack brief still posts before the outer
+  commit — the post-commit outbox belongs with slice 06's refresh home.
 
 **Implementation decisions that refine slice texts (06+07, Claude-implemented):**
 - Slice 06: `format_line` appends `→ launch: <url>` (one field, Slack-

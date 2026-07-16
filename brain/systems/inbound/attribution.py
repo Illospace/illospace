@@ -16,6 +16,13 @@ from brain.systems.runs.tool_catalog.registry import action_policy_for_tool, get
 
 _TOOL_COMPLETED_EVENT = "run.tool_completed"
 _MAX_TARGET_REFS = 20
+# Entity identities are short (uuids, integer ids, owner/repo#N). Anything
+# longer is result CONTENT that leaked into a ref-shaped position — drop it
+# (never truncate: a clipped id is a wrong ref), which also bounds the
+# persisted result_refs payload (cross-family review finding, 2026-07-16).
+_MAX_REF_ID_CHARS = 200
+_MAX_REF_KIND_CHARS = 64
+_MAX_REF_SOURCE_CHARS = 80
 _SUMMARY_OPERATION_TAGS = {
     "created",
     "updated",
@@ -170,13 +177,16 @@ def _add_ref(refs: list[dict[str, str]], seen: set[tuple[str, str]], *, kind: st
     if len(refs) >= _MAX_TARGET_REFS:
         return
     text = str(value or "").strip()
-    if not text:
+    kind_text = str(kind or "").strip()
+    if not text or not kind_text:
         return
-    key = (kind, text)
+    if len(text) > _MAX_REF_ID_CHARS or len(kind_text) > _MAX_REF_KIND_CHARS:
+        return
+    key = (kind_text, text)
     if key in seen:
         return
     seen.add(key)
-    refs.append({"kind": kind, "id": text, "source": source})
+    refs.append({"kind": kind_text, "id": text, "source": str(source or "")[:_MAX_REF_SOURCE_CHARS]})
 
 
 def _add_ref_values(
@@ -276,6 +286,21 @@ def _collect_refs(value: Any, refs: list[dict[str, str]], seen: set[tuple[str, s
             _collect_refs(child, refs, seen, source=source)
 
 
+def collect_result_refs(result: Any, *, source: str) -> list[dict[str, str]]:
+    """Extract entity refs from a FULL tool result (pre-truncation).
+
+    Run events persist only a 1000-char result preview; a bigger mutating
+    result truncates into invalid JSON and the ref walk goes blind (found
+    live on illo-dev, 2026-07-16: a created tracker record was invisible to
+    the packet-mint predicate). The tool executor calls this on the full
+    text and stores the refs beside the preview as ``result_refs``.
+    """
+    refs: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    _collect_refs(_parse_result(result), refs, seen, source=source)
+    return refs
+
+
 def _target_refs(tool_events: list[AgentRunEventRow]) -> list[dict[str, str]]:
     refs: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -283,6 +308,9 @@ def _target_refs(tool_events: list[AgentRunEventRow]) -> list[dict[str, str]]:
         payload = _json_dict(row.payload)
         source = _tool_name(payload) or "tool_result"
         _collect_refs(_tool_result(payload), refs, seen, source=source)
+        # Full-fidelity channel: refs the executor extracted from the
+        # complete result before the stored preview truncated it.
+        _add_explicit_ref_values(refs, seen, value=payload.get("result_refs"), source=source)
     return refs
 
 
@@ -456,6 +484,7 @@ def durable_work_refs(attribution: Mapping[str, Any] | None) -> list[dict[str, s
 
 __all__ = [
     "WORK_ITEM_REF_KINDS",
+    "collect_result_refs",
     "durable_work_refs",
     "summarize_inbound_run_attribution",
 ]

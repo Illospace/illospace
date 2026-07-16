@@ -60,6 +60,9 @@ async def _maybe_await(value):
 
 def _event_stream_payload(event, row) -> dict[str, Any]:
     payload = dict(event.payload or {})
+    # Backend-only attribution channel; live stream consumers never see it
+    # (ref ids are raw result content with no redaction pass).
+    payload.pop("result_refs", None)
     event_id = int(getattr(row, "id", 0) or 0)
     payload.update({
         "run_id": int(event.run_id),
@@ -249,7 +252,7 @@ class AsyncRunToolExecutor:
                     run_event(
                         run_id,
                         "run.tool_completed",
-                        _event_payload(tool.name, safe_args, result=safe_result[:1000]),
+                        _event_payload(tool.name, safe_args, result=safe_result),
                         root_run_id=root_run_id,
                     )
                 )
@@ -345,7 +348,7 @@ class AsyncRunToolExecutor:
             run_event(
                 run_id,
                 "run.tool_completed",
-                _event_payload(tool.name, safe_args, result=safe_result[:1000]),
+                _event_payload(tool.name, safe_args, result=safe_result),
                 root_run_id=root_run_id,
             )
         )
@@ -634,7 +637,20 @@ def _event_payload(
         "side_effect": classify_side_effect(tool_name),
     }
     if result is not None:
-        payload["result"] = result
+        # The stored result is a bounded PREVIEW; entity refs are extracted
+        # from the FULL result first, or a big JSON result truncates into an
+        # unparseable string and downstream attribution (inbound packet
+        # minting, preservation evidence) goes blind to what the tool
+        # actually created (illo-dev E2E finding, 2026-07-16).
+        payload["result"] = result[:1000]
+        try:
+            from brain.systems.inbound.attribution import collect_result_refs
+
+            refs = collect_result_refs(result, source=tool_name)
+            if refs:
+                payload["result_refs"] = refs
+        except Exception:  # noqa: BLE001 — ref extraction may never break tool recording
+            pass
     if error is not None:
         payload["error"] = error[:1000]
     return payload
