@@ -81,3 +81,26 @@ async def test_tick_age_is_none_before_start_and_after_stop(monkeypatch):
     scheduler.stop_cycle_scheduler()
 
     assert scheduler.seconds_since_last_cycle_tick() is None
+
+
+async def test_stop_cycle_scheduler_joins_thread_promptly(monkeypatch):
+    async def schedule_due_cycles_once():
+        return []
+
+    monkeypatch.setattr(scheduler, "async_schedule_due_cycles_once", schedule_due_cycles_once)
+    monkeypatch.setattr(scheduler, "_poll_interval_sec", 30)
+
+    await asyncio.to_thread(scheduler.start_cycle_scheduler)
+    scheduler_thread = scheduler._scheduler_thread
+    assert scheduler_thread is not None
+    for _ in range(20):
+        if scheduler_thread.is_alive():
+            break
+        await asyncio.sleep(0.01)
+
+    started = asyncio.get_running_loop().time()
+    scheduler.stop_cycle_scheduler()
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 2
+    assert not scheduler_thread.is_alive()

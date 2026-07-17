@@ -1574,7 +1574,7 @@ async def test_runner_delegates_cycle_settlement_for_terminal_run(monkeypatch):
 def test_runner_prepares_cycle_contract_before_visible_terminal_settlement():
     from brain.systems.runs.cortex import runner
 
-    source = inspect.getsource(runner._run_queued_once_async)
+    source = inspect.getsource(runner._process_claimed_run_async)
 
     assert "async_prepare_cycle_run_visible_finalization" in source
     assert source.index("async_prepare_cycle_run_visible_finalization") < source.index(

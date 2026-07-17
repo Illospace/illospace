@@ -11,6 +11,7 @@ import time
 
 from brain.systems.runs.cortex.queue_health import QueueStallMonitor, queued_backlog_health_snapshot_async
 from brain.systems.runs.cortex.runner import (
+    request_runner_stop,
     runner_health_snapshot,
     start_runner,
     stop_runner,
@@ -29,12 +30,14 @@ logging.basicConfig(
 logger = logging.getLogger("cortex.worker")
 
 _running = True
+_terminate_process = os._exit
 
 
 def _signal_handler(signum, _frame):
     global _running
     logger.info("received %s, draining agent-run worker", signal.Signals(signum).name)
     _running = False
+    request_runner_stop()
 
 
 signal.signal(signal.SIGTERM, _signal_handler)
@@ -120,22 +123,24 @@ def _cycle_scheduler_enabled() -> bool:
 
 
 def main() -> None:
-    logger.info("starting agent-run worker")
-    _require_embedding_backend_ready()
-    cycle_scheduler_enabled = _cycle_scheduler_enabled()
-    if cycle_scheduler_enabled:
-        start_cycle_scheduler()
-    else:
-        logger.info("cycle scheduler disabled for this worker")
-    start_runner()
-    last_healthy = time.monotonic()
-    health_grace_seconds = _runner_health_grace_seconds()
-    queue_stall_monitor = QueueStallMonitor(
-        check_interval_seconds=_queue_health_check_interval_seconds(),
-        stall_grace_seconds=_queue_stall_grace_seconds(),
-    )
-    cycle_scheduler_stall_grace_seconds = _cycle_scheduler_stall_grace_seconds()
+    exit_code = 0
+    cycle_scheduler_enabled = False
     try:
+        logger.info("starting agent-run worker")
+        _require_embedding_backend_ready()
+        cycle_scheduler_enabled = _cycle_scheduler_enabled()
+        if cycle_scheduler_enabled:
+            start_cycle_scheduler()
+        else:
+            logger.info("cycle scheduler disabled for this worker")
+        start_runner()
+        last_healthy = time.monotonic()
+        health_grace_seconds = _runner_health_grace_seconds()
+        queue_stall_monitor = QueueStallMonitor(
+            check_interval_seconds=_queue_health_check_interval_seconds(),
+            stall_grace_seconds=_queue_stall_grace_seconds(),
+        )
+        cycle_scheduler_stall_grace_seconds = _cycle_scheduler_stall_grace_seconds()
         while _running:
             now = time.monotonic()
             health = runner_health_snapshot()
@@ -177,11 +182,21 @@ def main() -> None:
                     )
                     raise SystemExit(1)
             time.sleep(_poll_interval())
+    except SystemExit as exc:
+        exit_code = exc.code if isinstance(exc.code, int) else 1
+        raise
+    except BaseException:
+        # _terminate_process preempts the interpreter's top-level traceback print.
+        logger.exception("agent-run worker crashed; exiting")
+        exit_code = 1
+        raise
     finally:
         stop_runner(drain_timeout_seconds=_shutdown_drain_timeout_seconds())
         if cycle_scheduler_enabled:
             stop_cycle_scheduler()
         logger.info("agent-run worker stopped")
+        logging.shutdown()
+        _terminate_process(exit_code)
 
 
 if __name__ == "__main__":

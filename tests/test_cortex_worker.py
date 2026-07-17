@@ -1,3 +1,5 @@
+import signal
+
 import pytest
 from unittest.mock import patch
 
@@ -138,6 +140,8 @@ def test_cycle_scheduler_stall_grace_defaults_to_five_minutes(monkeypatch):
 def test_worker_exits_when_cycle_scheduler_heartbeat_is_stale(monkeypatch, caplog):
     from brain.systems.cortex import worker
 
+    terminate_calls = []
+
     class QueueStallMonitorStub:
         def should_check(self, *, now):
             return False
@@ -152,9 +156,54 @@ def test_worker_exits_when_cycle_scheduler_heartbeat_is_stale(monkeypatch, caplo
     monkeypatch.setattr(worker, "seconds_since_last_cycle_tick", lambda: 301.0)
     monkeypatch.setattr(worker, "stop_runner", lambda **_kwargs: None)
     monkeypatch.setattr(worker, "stop_cycle_scheduler", lambda: None)
+    monkeypatch.setattr(worker.logging, "shutdown", lambda: None)
+    monkeypatch.setattr(worker, "_terminate_process", terminate_calls.append)
 
     with pytest.raises(SystemExit) as exc_info:
         worker.main()
 
     assert exc_info.value.code == 1
+    assert terminate_calls == [1]
     assert "cycle scheduler wedged; exiting for restart" in caplog.text
+
+
+def test_worker_term_path_calls_terminate_process_with_zero(monkeypatch):
+    from brain.systems.cortex import worker
+
+    calls = []
+
+    monkeypatch.setattr(worker, "_running", False)
+    monkeypatch.setattr(worker, "_require_embedding_backend_ready", lambda: None)
+    monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: True)
+    monkeypatch.setattr(worker, "start_cycle_scheduler", lambda: None)
+    monkeypatch.setattr(worker, "start_runner", lambda: None)
+    monkeypatch.setattr(worker, "stop_runner", lambda **_kwargs: calls.append("stop_runner"))
+    monkeypatch.setattr(worker, "stop_cycle_scheduler", lambda: calls.append("stop_cycle_scheduler"))
+    monkeypatch.setattr(worker.logging, "shutdown", lambda: calls.append("logging.shutdown"))
+    monkeypatch.setattr(worker, "_terminate_process", lambda code: calls.append(("terminate", code)))
+
+    worker.main()
+
+    assert calls == [
+        "stop_runner",
+        "stop_cycle_scheduler",
+        "logging.shutdown",
+        ("terminate", 0),
+    ]
+
+
+def test_signal_handler_requests_runner_stop(monkeypatch):
+    from brain.systems.cortex import worker
+
+    request_stop_calls = []
+    previous_running = worker._running
+    monkeypatch.setattr(worker, "request_runner_stop", lambda: request_stop_calls.append(True))
+    try:
+        worker._running = True
+
+        worker._signal_handler(signal.SIGTERM, None)
+
+        assert worker._running is False
+        assert request_stop_calls == [True]
+    finally:
+        worker._running = previous_running
