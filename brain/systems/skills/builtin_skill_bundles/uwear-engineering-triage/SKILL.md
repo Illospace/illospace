@@ -13,61 +13,60 @@ staging, review, merge, deploy, and close/reopen workflow across
 
 ## Source Of Truth
 
-When available, read Enterprise Documentation Domain id `37`, object
-`doc_page`, record id `1155`, slug `uwear-engineering-triage` (use
-`manage_domain` `action=get_record` `domain_id=37` `record_id=1155`). Treat
-that document as the live operating model. If it conflicts with this bundled
-skill, surface the conflict and prefer the live document after verification.
-On-demand mode playbooks (see **On-demand Run Modes**) are separate Domain
-`37` records fetched the same way; the live records override the bundled
+Read Enterprise Documentation Domain `37` `doc_page` record `1155`, slug
+`uwear-engineering-triage`, with `manage_domain` `action=get_record`
+`domain_id=37` `record_id=1155`. It is the live operating model; surface any
+conflict and prefer the verified live document. On-demand playbooks are
+separate Domain `37` records; their live versions override bundled
 `references/` assets.
 
 ## On-demand Run Modes
 
-Some run modes are deliberately NOT in this core document: their full
-playbooks live as separate Enterprise Documentation Domain `37` `doc_page`
-records so the per-run core read stays small and untruncated. When a run
-enters one of these modes, fetch the playbook FIRST (`manage_domain`
-`action=get_record` `domain_id=37` with the `record_id` below) and follow
-it — never run the mode from this summary alone. If the record read fails,
-fall back to the bundled skill asset (`skill_asset`
-`name="uwear-engineering-triage"` with the `path` below); if both fail,
-degrade loudly: say the playbook was unreachable and defer the mode's
-writes.
+Full playbooks stay in separate Domain `37` `doc_page` records so this core
+read remains untruncated. On entering a listed mode, fetch its record FIRST
+with `manage_domain` `action=get_record` `domain_id=37`, then follow it. If
+that fails, use `skill_asset` `name="uwear-engineering-triage"` with the path
+below. If both fail, say so and defer the mode's writes.
 
 - **Direct customer support** — record `1271`, asset
-  `references/customer-support.md`. When a customer-support report arrives
-  (e.g. a Retool "New: Issue" with a `User` / `Profile ID` / `Message` about
-  a wrong generation): investigate the generation read-only and form a
-  hypothesis BEFORE filing or assigning anything. Always-on core rule:
-  customer-generation issues have NO owner until an investigation hypothesis
-  exists (see **Ownership**).
+  `references/customer-support.md`. Fetch on a customer-support report;
+  investigate the generation read-only and form a hypothesis before filing or
+  assigning. Always-on: customer-generation issues have NO owner until that
+  hypothesis exists (see **Ownership**).
 - **Creating work items** — record `1272`, asset
-  `references/creating-work-items.md`. The decision tree for real GitHub
-  issues vs internal tracker records, honest failure handling, and tracker
-  external-id formats. Fetch BEFORE calling `create_github_issue` or
-  creating a Domain `1` tracker record. Always-on core rules: one problem =
-  one issue — search open AND closed GitHub issues and Domain `1` records
-  for the same error signature or Rollbar id (prefer the structured
-  `rollbar_item` field; an exact match has no recency cutoff) before filing,
-  and a match — even closed or `Done` — routes through the **Deploy-State
-  Ladder**, never a refile; never describe an internal tracker record as a
-  GitHub issue.
+  `references/creating-work-items.md`. Fetch before `create_github_issue` or a
+  Domain `1` tracker write. Always-on: one problem = one issue; search open and
+  closed GitHub issues plus Domain `1` for the error signature or Rollbar id
+  (prefer `rollbar_item`; exact matches never expire). Any match, even closed
+  or `Done`, uses the **Deploy-State Ladder**, never a refile; never describe
+  an internal tracker record as a GitHub issue.
 - **Backlog maintenance** — record `1273`, asset
-  `references/backlog-maintenance.md`. One-time backlog seeding plus the
-  three backlog-hygiene modes (`process-design`, `no-write-audit`,
-  `live-hygiene-run`). Fetch when a human asks for a seed or hygiene pass —
-  never as part of a scheduled digest run. Always-on core rule: close
-  candidates are approval batches; never close GitHub issues or PRs without
+  `references/backlog-maintenance.md`. Covers seeding and `process-design`,
+  `no-write-audit`, `live-hygiene-run`; fetch only on a human request, never in
+  a scheduled digest. Always-on: never close GitHub issues or PRs without
   delegated authority.
 - **Chantier operations** — record `1274`, asset
   `references/chantier-operations.md`. Fetch before every scheduled digest and
-  before filing or recording a new work item. It defines chantier-primary
-  digests, attach-at-triage, induction, freshness, and close-out. Always-on core
-  rules: check active chantiers before filing; attach an exact match, but only
-  PROPOSE (never auto-create) a chantier for an ungrouped family; never let an
-  active chantier disappear silently or hide one that is stale, blocked, or
-  missing `next_step`.
+  before filing or recording a new work item. Always-on: check active
+  chantiers; attach an exact match, only PROPOSE (never auto-create) an
+  ungrouped family, and surface every stale, blocked, or incomplete chantier.
+
+## Memory
+
+At run START, before deciding, call `memory_reconstruct` with the concrete
+subjects at hand (repo, issue/PR, person, or incident). Recall is context, not
+proof: verify every load-bearing claim against live sources.
+
+At run END, if the run produced a durable outcome, make exactly one
+`memory_ingest_source` call for the most reusable decision, ownership change,
+standing guidance, or incident conclusion. Start content with the one-line
+framing `What future runs need: ...`. Never ingest ephemeral state such as open
+counts, run summaries, or “posted to Slack” receipts. Use `confidence=0.9` for
+human-stated facts or approvals; cap inferences at `0.7` and use the lower value
+when mixed.
+
+For selection, dedup wording, and examples, fetch Domain `37` record `1275`,
+asset `references/memory.md`, using the live-first fallback above.
 
 ## Coordination Pipeline
 
