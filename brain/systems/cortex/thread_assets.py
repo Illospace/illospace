@@ -25,6 +25,7 @@ VIEWER_EXTENSIONS = {
     "csv",
     "json",
     "log",
+    "markdown",
     "md",
     "pdf",
     "text",
@@ -43,6 +44,7 @@ CONTENT_TYPE_BY_EXTENSION = {
     "jpg": "image/jpeg",
     "json": "application/json",
     "log": "text/plain",
+    "markdown": "text/markdown",
     "md": "text/markdown",
     "pdf": "application/pdf",
     "png": "image/png",
@@ -146,16 +148,9 @@ def _asset_markdown(*, label: str, url: str, kind: str) -> str:
     return f"[{clean_label}]({url})"
 
 
-def _viewer_url(*, url: str, public_url: str, kind: str, label: str) -> str:
-    """Absolute link teammates can open in a browser (no session required).
+def _viewer_url(*, url: str, label: str) -> str:
+    """Absolute /doc link teammates can open without a session."""
 
-    Images render natively, so they keep the direct upload URL. Documents go
-    through the public /doc viewer page, which renders markdown readably
-    instead of serving the raw file as plain text.
-    """
-
-    if kind == "image":
-        return public_url
     query = urlencode({"src": url, "title": label}, quote_via=quote, safe="/")
     return f"{public_app_base_url()}/doc?{query}"
 
@@ -196,8 +191,6 @@ def publish_thread_asset(
                 "public_url": attachment["download_url"],
                 "viewer_url": _viewer_url(
                     url=url,
-                    public_url=attachment["download_url"],
-                    kind=attachment["kind"],
                     label=attachment["label"],
                 ),
                 "markdown": _asset_markdown(label=attachment["label"], url=url, kind=attachment["kind"]),
@@ -254,8 +247,6 @@ def publish_thread_asset(
         "public_url": attachment["download_url"],
         "viewer_url": _viewer_url(
             url=url,
-            public_url=attachment["download_url"],
-            kind=kind,
             label=label,
         ),
         "markdown": _asset_markdown(label=label, url=url, kind=kind),

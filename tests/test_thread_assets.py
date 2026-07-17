@@ -113,7 +113,7 @@ def test_publish_thread_asset_viewer_url_falls_back_to_local_base(
     assert result["viewer_url"].startswith("http://localhost:8080/doc?src=/static/uploads/")
 
 
-def test_publish_thread_asset_keeps_direct_viewer_url_for_images(
+def test_publish_thread_asset_builds_doc_viewer_url_for_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example")
@@ -128,8 +128,26 @@ def test_publish_thread_asset_keeps_direct_viewer_url_for_images(
         source_roots=[source_root],
     )
 
-    assert result["viewer_url"] == result["public_url"]
-    assert result["viewer_url"].startswith("https://illo.example/static/uploads/")
+    assert result["viewer_url"] == (
+        f"https://illo.example/doc?src={result['url']}&title=diagram.svg"
+    )
+    assert result["public_url"].startswith("https://illo.example/static/uploads/")
+
+
+def test_publish_thread_asset_accepts_markdown_extension(tmp_path: Path):
+    source_root = tmp_path / "artifacts"
+    source_root.mkdir()
+    markdown_path = source_root / "notes.markdown"
+    markdown_path.write_text("# Notes")
+
+    result = publish_thread_asset(
+        str(markdown_path),
+        upload_dir=tmp_path / "uploads",
+        source_roots=[source_root],
+    )
+
+    assert result["url"].endswith(".markdown")
+    assert result["attachment"]["content_type"] == "text/markdown"
 
 
 def test_already_published_markdown_gets_doc_viewer_url(

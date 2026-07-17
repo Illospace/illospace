@@ -30,10 +30,29 @@ test('accepts only /static/uploads sources', () => {
   assert.equal(normalizeDocViewerSrc('/static/uploads\\a.md'), null);
 });
 
+test('rejects percent-encoded traversal while preserving valid encoded paths', () => {
+  assert.equal(
+    normalizeDocViewerSrc('/static/uploads/%252e%252e/%252e%252e/api/runtime/settings'),
+    null,
+  );
+  assert.equal(normalizeDocViewerSrc('/static/uploads/%2e%2e/x'), null);
+  assert.equal(
+    normalizeDocViewerSrc('/static/uploads/foo/My%20Doc.md'),
+    '/static/uploads/foo/My%20Doc.md',
+  );
+  assert.equal(
+    normalizeDocViewerSrc('/static/uploads/thread-assets/shared/prd-abc.md'),
+    '/static/uploads/thread-assets/shared/prd-abc.md',
+  );
+});
+
 test('picks a render mode from the file extension', () => {
   assert.equal(docViewerRenderMode('/static/uploads/t/prd.md'), 'markdown');
   assert.equal(docViewerRenderMode('/static/uploads/t/prd.MARKDOWN'), 'markdown');
   assert.equal(docViewerRenderMode('/static/uploads/t/spec.pdf'), 'pdf');
+  for (const extension of ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg']) {
+    assert.equal(docViewerRenderMode(`/static/uploads/t/image.${extension}`), 'image');
+  }
   assert.equal(docViewerRenderMode('/static/uploads/t/data.csv'), 'text');
   assert.equal(docViewerRenderMode('/static/uploads/t/noext'), 'text');
 });

@@ -32,8 +32,14 @@
       || firstMarkdownHeading(documentText) !== pageTitle,
   );
 
+  function handleImageError() {
+    status = 'error';
+    errorMessage = 'Image not found. It may have been removed, or the link is incomplete.';
+  }
+
   $effect(() => {
     const target = src;
+    const mode = target ? docViewerRenderMode(target) : 'text';
     let cancelled = false;
     let objectUrl: string | null = null;
     status = 'loading';
@@ -46,6 +52,8 @@
       errorMessage =
         'This viewer can only open documents published to /static/uploads on this workspace. '
         + 'Check that the link includes a complete src parameter.';
+    } else if (mode === 'image') {
+      status = 'ready';
     } else {
       (async () => {
         try {
@@ -61,7 +69,7 @@
               : 'Document not found. It may have been removed, or the link is incomplete.';
             return;
           }
-          if (docViewerRenderMode(target) === 'pdf') {
+          if (mode === 'pdf') {
             const blob = await response.blob();
             if (cancelled) return;
             objectUrl = URL.createObjectURL(
@@ -101,7 +109,7 @@
     <div class="doc-error" role="alert">
       <h1>Can't open this document</h1>
       <p>{errorMessage}</p>
-      {#if src}
+      {#if src && renderMode !== 'image'}
         <p class="doc-error-hint">
           <a href={src} target="_blank" rel="noopener">Try the raw file instead</a>
         </p>
@@ -115,12 +123,18 @@
       {#if filename}
         <p class="doc-meta">
           <span>{filename}</span>
-          <span aria-hidden="true">·</span>
-          <a href={src} target="_blank" rel="noopener">Open raw file</a>
+          {#if renderMode !== 'image'}
+            <span aria-hidden="true">·</span>
+            <a href={src} target="_blank" rel="noopener">Open raw file</a>
+          {/if}
         </p>
       {/if}
     </header>
-    {#if renderMode === 'markdown'}
+    {#if renderMode === 'image'}
+      <div class="doc-image">
+        <img src={src} alt={pageTitle} onerror={handleImageError} />
+      </div>
+    {:else if renderMode === 'markdown'}
       <!-- renderReadableMarkdown escapes all source HTML; only its own safe markup is injected. -->
       <article class="constellation-prose doc-prose">{@html markdownHtml}</article>
     {:else if renderMode === 'pdf'}
@@ -208,6 +222,18 @@
 
   .doc-prose {
     --constellation-prose-font-size: var(--text-lg);
+  }
+
+  .doc-image {
+    display: grid;
+    place-items: center;
+    width: 100%;
+  }
+
+  .doc-image img {
+    display: block;
+    max-width: 100%;
+    height: auto;
   }
 
   .doc-pdf iframe {

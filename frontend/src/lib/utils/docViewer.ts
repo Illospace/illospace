@@ -1,6 +1,8 @@
 const STATIC_UPLOAD_PREFIX = '/static/uploads/';
+const PERCENT_ESCAPE = /%[0-9a-f]{2}/i;
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg']);
 
-export type DocViewerRenderMode = 'markdown' | 'pdf' | 'text';
+export type DocViewerRenderMode = 'image' | 'markdown' | 'pdf' | 'text';
 
 /**
  * Validate the public doc viewer's `src` query param.
@@ -13,8 +15,20 @@ export function normalizeDocViewerSrc(raw: string | null | undefined): string | 
   const value = (raw || '').trim();
   if (!value.startsWith(STATIC_UPLOAD_PREFIX)) return null;
   if (value.includes('\\') || /[?#\s]/.test(value)) return null;
-  const segments = value.slice(1).split('/');
+
+  let decoded = value;
+  for (let iteration = 0; iteration < 5 && PERCENT_ESCAPE.test(decoded); iteration += 1) {
+    try {
+      decoded = decodeURIComponent(decoded);
+    } catch {
+      return null;
+    }
+  }
+  if (PERCENT_ESCAPE.test(decoded)) return null;
+  if (!decoded.startsWith(STATIC_UPLOAD_PREFIX) || decoded.includes('\\')) return null;
+  const segments = decoded.slice(1).split('/');
   if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return null;
+
   return value;
 }
 
@@ -23,6 +37,7 @@ export function docViewerRenderMode(src: string): DocViewerRenderMode {
   const extension = filename.includes('.') ? (filename.split('.').pop() || '').toLowerCase() : '';
   if (extension === 'md' || extension === 'markdown') return 'markdown';
   if (extension === 'pdf') return 'pdf';
+  if (IMAGE_EXTENSIONS.has(extension)) return 'image';
   return 'text';
 }
 
