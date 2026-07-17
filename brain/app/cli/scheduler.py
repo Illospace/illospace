@@ -14,7 +14,11 @@ from brain.app.scheduler.catalog import (
     async_sync_scheduler_catalog,
     normalize_owner_mode,
 )
-from brain.app.scheduler.daemon import async_scheduler_daemon_tick, async_scheduler_health_snapshot
+from brain.app.scheduler.daemon import (
+    async_scheduler_daemon_startup,
+    async_scheduler_daemon_tick,
+    async_scheduler_health_snapshot,
+)
 from brain.app.scheduler.executor import (
     async_drain_scheduler,
     async_retry_scheduler_run,
@@ -199,6 +203,13 @@ async def cmd_retry_run(args: argparse.Namespace) -> int:
 async def cmd_daemon(args: argparse.Namespace) -> int:
     tick = 0
     try:
+        async with UnitOfWork() as uow:
+            startup = await async_scheduler_daemon_startup(
+                uow.session,
+                owner_mode=args.owner_mode,
+                now=_now_from_args(args),
+            )
+        _emit({"event": "scheduler_startup", **startup})
         while True:
             async with UnitOfWork() as uow:
                 result = await async_scheduler_daemon_tick(
