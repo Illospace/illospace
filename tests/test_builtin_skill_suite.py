@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 
@@ -51,7 +53,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.4.0"
+    assert bundle.manifest.version == "1.5.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -76,6 +78,86 @@ def test_uwear_triage_bundle_packages_chantier_record_contract():
     assert "`exploring`, `building`, `shipping`, `verifying`, `done`, or `paused`" in contract
     assert contract.count("```json") == 1
     assert '"parent_issue": "github:Illospace/illospace:issue:326"' in contract
+
+
+def test_uwear_triage_bundle_packages_chantier_operations_v2():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    procedure = bundle.skill_markdown
+    playbook = _uwear_triage_asset(bundle, "references/chantier-operations.md")
+
+    assert "record `1274`" in procedure
+    assert "before every scheduled digest" in procedure
+    assert "before filing or recording a new work item" in procedure
+    for expected in (
+        "## Chantier-primary Digest Contract v2",
+        "## Attach at Triage",
+        "## Induction",
+        "## Propose a Chantier",
+        "## Freshness and Close-out",
+        "## Declare Flow",
+        "Part of chantier: <slug>",
+        "at least three related items",
+        "stated goal or PRD",
+        "incident family",
+        "Never auto-create a chantier",
+        "Reserved for ticket #331",
+    ):
+        assert expected in playbook
+
+
+def test_uwear_triage_chantier_primary_digest_keeps_person_coverage():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    procedure = bundle.skill_markdown
+    digest = procedure.split("## Team Digest Contract", 1)[1].split("## Workflow", 1)[0]
+
+    for expected in (
+        "chantier count",
+        "one goal-progress line",
+        "Quiet chantiers",
+        "`Loose items`",
+        "Per-person recap",
+        "Reda, Axel, and JB",
+        "tracker records with that person as exact `assignee`",
+        "GitHub issues assigned to their handle",
+        "PRs they authored",
+        "builder-first engineering candidates",
+        "rebalancing recommendation",
+        "changed state, gained or lost",
+        "members, or hit/cleared a blocker",
+    ):
+        assert expected in digest
+    assert "active chantiers with slug, state, member refs, blockers, and next step" in procedure
+    assert "no-silent-departure" in procedure
+    assert "untouched for 3+ days or missing" in procedure
+    assert "outcome summary in the goal's language" in procedure
+
+
+def test_uwear_triage_live_delta_fingerprints_exact_bundle_mirrors():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    note = (Path(__file__).parents[1] / "docs" / "329-live-delta.md").read_text()
+    mirrors = (
+        (bundle.skill_markdown, "v8"),
+        (
+            _uwear_triage_asset(bundle, "references/chantier-operations.md"),
+            "content",
+        ),
+    )
+
+    for content, label in mirrors:
+        encoded = content.encode("utf-8")
+        fingerprint = hashlib.sha256(encoded).hexdigest()
+        assert f"characters: `{len(content)}`" in note, label
+        assert f"bytes: `{len(encoded)}`" in note, label
+        assert f"SHA-256: `{fingerprint}`" in note, label
 
 
 def test_uwear_triage_skill_distinguishes_internal_tracker_from_real_github_issue():
@@ -166,6 +248,11 @@ def test_uwear_triage_on_demand_run_mode_split():
         "## Creating Work Items",
         "## Backlog Seed",
         "## Backlog Hygiene",
+        "## Attach at Triage",
+        "## Induction",
+        "## Propose a Chantier",
+        "## Freshness and Close-out",
+        "## Declare Flow",
     ):
         assert moved_heading not in procedure
 
@@ -173,6 +260,7 @@ def test_uwear_triage_on_demand_run_mode_split():
         "references/customer-support.md",
         "references/creating-work-items.md",
         "references/backlog-maintenance.md",
+        "references/chantier-operations.md",
     ):
         # The core names each playbook asset path, and every playbook carries
         # the provenance preamble pointing back at the core doc.

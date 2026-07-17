@@ -61,6 +61,8 @@ def _run_cancel_token(run_id: int):
 
 _stop_event = threading.Event()
 _runner_lock = threading.Lock()
+_runner_in_flight_lock = threading.Lock()
+_in_flight_runs = 0
 _runner_supervisor_thread: threading.Thread | None = None
 _runner_slots: list[tuple[asyncio.Task[None], asyncio.Event]] = []
 _runner_thread_index = 0
@@ -119,6 +121,23 @@ def _active_runner_count() -> int:
         return sum(1 for task, stop_event in _runner_slots if not task.done() and not stop_event.is_set())
 
 
+def _increment_in_flight_runs() -> None:
+    global _in_flight_runs
+    with _runner_in_flight_lock:
+        _in_flight_runs += 1
+
+
+def _decrement_in_flight_runs() -> None:
+    global _in_flight_runs
+    with _runner_in_flight_lock:
+        _in_flight_runs -= 1
+
+
+def runner_in_flight_count() -> int:
+    with _runner_in_flight_lock:
+        return _in_flight_runs
+
+
 def runner_health_snapshot() -> dict[str, int | bool]:
     supervisor_alive = bool(_runner_supervisor_thread and _runner_supervisor_thread.is_alive())
     active_runner_count = _active_runner_count()
@@ -127,6 +146,7 @@ def runner_health_snapshot() -> dict[str, int | bool]:
         "supervisor_alive": supervisor_alive,
         "active_runner_count": active_runner_count,
         "configured_concurrency": _runner_concurrency(),
+        "in_flight_runs": runner_in_flight_count(),
     }
 
 
@@ -1394,52 +1414,74 @@ def _mark_run_failed_after_runner_error(
     )
 
 
-async def _run_queued_once_async(*, limit: int = 1) -> int:
-    async with _unit_of_work_factory()() as uow:
-        ids = await AsyncAgentRunStore(uow.session).claim_next_run_ids(limit=limit)
-    processed = 0
-    for run_id in ids:
-        try:
-            async with _run_heartbeat_async(int(run_id)):
-                context_ready, status_payload = await _async_materialize_project_context(int(run_id))
-                if not context_ready:
-                    await _finalize_cycle_run_if_needed_async(
-                        int(run_id),
-                        status="failed",
-                        error="Project Context unavailable",
-                    )
-                    if status_payload:
-                        publish_safe("status_change", status_payload)
-                    processed += 1
-                    continue
-                status_payload = None
-                async with _unit_of_work_factory()() as uow:
-                    completed_run = await _engine_for_session(uow.session).run_existing(int(run_id))
-                    completed_status = str(getattr(completed_run.status, "value", completed_run.status) or "")
-                    if completed_status in {"completed", "failed"}:
-                        from brain.systems.cycles.contract_gate import (
-                            async_prepare_cycle_run_visible_finalization,
-                        )
-
-                        await async_prepare_cycle_run_visible_finalization(
-                            uow.session,
-                            int(run_id),
-                            provider_errors_only=completed_status == "failed",
-                        )
-                    status_payload = await _settle_terminal_root_run_async(uow.session, int(run_id))
-                await _finalize_cycle_run_if_needed_async(int(run_id), status=completed_status)
-            if status_payload:
-                publish_safe("status_change", status_payload)
-            processed += 1
-        except Exception:
-            logger.exception("agent_run_failed", extra={"run_id": run_id})
-            try:
-                status_payload = await _mark_run_failed_after_runner_error_async(int(run_id), "runner_failed")
-                await _finalize_cycle_run_if_needed_async(int(run_id), status="failed", error="runner_failed")
+async def _process_claimed_run_async(run_id: int) -> bool:
+    try:
+        async with _run_heartbeat_async(int(run_id)):
+            context_ready, status_payload = await _async_materialize_project_context(int(run_id))
+            if not context_ready:
+                await _finalize_cycle_run_if_needed_async(
+                    int(run_id),
+                    status="failed",
+                    error="Project Context unavailable",
+                )
                 if status_payload:
                     publish_safe("status_change", status_payload)
-            except Exception:
-                logger.exception("agent_run_failed_settlement_failed", extra={"run_id": run_id})
+                return True
+            status_payload = None
+            async with _unit_of_work_factory()() as uow:
+                completed_run = await _engine_for_session(uow.session).run_existing(int(run_id))
+                completed_status = str(getattr(completed_run.status, "value", completed_run.status) or "")
+                if completed_status in {"completed", "failed"}:
+                    from brain.systems.cycles.contract_gate import (
+                        async_prepare_cycle_run_visible_finalization,
+                    )
+
+                    await async_prepare_cycle_run_visible_finalization(
+                        uow.session,
+                        int(run_id),
+                        provider_errors_only=completed_status == "failed",
+                    )
+                status_payload = await _settle_terminal_root_run_async(uow.session, int(run_id))
+            await _finalize_cycle_run_if_needed_async(int(run_id), status=completed_status)
+        if status_payload:
+            publish_safe("status_change", status_payload)
+        return True
+    except Exception:
+        logger.exception("agent_run_failed", extra={"run_id": run_id})
+        try:
+            status_payload = await _mark_run_failed_after_runner_error_async(int(run_id), "runner_failed")
+            await _finalize_cycle_run_if_needed_async(int(run_id), status="failed", error="runner_failed")
+            if status_payload:
+                publish_safe("status_change", status_payload)
+        except Exception:
+            logger.exception("agent_run_failed_settlement_failed", extra={"run_id": run_id})
+        return False
+
+
+async def _run_queued_once_async(*, limit: int = 1) -> int:
+    if _stop_event.is_set():
+        return 0
+
+    ids = []
+    processed = 0
+    remaining_in_flight = 0
+    try:
+        async with _unit_of_work_factory()() as uow:
+            ids = await AsyncAgentRunStore(uow.session).claim_next_run_ids(limit=limit)
+            for _run_id in ids:
+                _increment_in_flight_runs()
+                remaining_in_flight += 1
+
+        for run_id in ids:
+            try:
+                if await _process_claimed_run_async(int(run_id)):
+                    processed += 1
+            finally:
+                _decrement_in_flight_runs()
+                remaining_in_flight -= 1
+    finally:
+        for _ in range(remaining_in_flight):
+            _decrement_in_flight_runs()
     return processed
 
 
@@ -1593,18 +1635,52 @@ def start_runner() -> None:
     logger.info("agent_run_runner_started", extra={"concurrency": concurrency})
 
 
+def request_runner_stop() -> None:
+    _stop_event.set()
+
+
+def _runner_teardown_timeout_seconds() -> float:
+    return _coerce_float(
+        os.getenv("ILLO_AGENT_RUNNER_TEARDOWN_TIMEOUT_SECONDS"),
+        default=10.0,
+        minimum=0.1,
+    )
+
+
 def stop_runner(*, drain_timeout_seconds: float | None = 2.0) -> None:
     global _runner_supervisor_thread
-    _stop_event.set()
+    request_runner_stop()
 
     deadline = None
     if drain_timeout_seconds is not None:
         deadline = time.monotonic() + max(0.0, float(drain_timeout_seconds))
 
-    if _runner_supervisor_thread and _runner_supervisor_thread.is_alive():
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-        _runner_supervisor_thread.join(timeout=remaining)
-    if not (_runner_supervisor_thread and _runner_supervisor_thread.is_alive()):
+    while runner_in_flight_count() > 0:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                in_flight_runs = runner_in_flight_count()
+                if in_flight_runs > 0:
+                    logger.warning(
+                        "runner drain timed out with %s in-flight run(s); proceeding to teardown",
+                        in_flight_runs,
+                    )
+                break
+            time.sleep(min(0.2, remaining))
+        else:
+            time.sleep(0.2)
+
+    supervisor_thread = _runner_supervisor_thread
+    teardown_timeout_seconds = _runner_teardown_timeout_seconds()
+    if supervisor_thread and supervisor_thread.is_alive():
+        supervisor_thread.join(timeout=teardown_timeout_seconds)
+    if supervisor_thread and supervisor_thread.is_alive():
+        logger.warning(
+            "runner supervisor did not exit within %ss; proceeding with shutdown — "
+            "a wedged sync tool thread is the usual cause",
+            teardown_timeout_seconds,
+        )
+    elif _runner_supervisor_thread is supervisor_thread:
         _runner_supervisor_thread = None
 
 
@@ -1635,7 +1711,9 @@ __all__ = [
     "queue_status",
     "queue_status_async",
     "reap_stale_active_runs",
+    "request_runner_stop",
     "runner_health_snapshot",
+    "runner_in_flight_count",
     "run_queued_once",
     "start_runner",
     "stop_runner",

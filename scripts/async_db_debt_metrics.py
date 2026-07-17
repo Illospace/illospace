@@ -84,6 +84,10 @@ LEGACY_SYNC_TEST_HARNESSES = {
         "sqlalchemy_create_engine",
         "sync_session_method_call",
     },
+    "tests/test_chantier_digest_migration.py": {
+        "sqlalchemy_create_engine",
+        "sync_session_method_call",
+    },
     "tests/test_pr_tracker_schema_migration.py": {
         "sqlalchemy_create_engine",
         "sync_session_method_call",

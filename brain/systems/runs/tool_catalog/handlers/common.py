@@ -727,11 +727,16 @@ def _wrap_brain_recall(original_fn):
             kwargs["user_id"] = getattr(_agent_context, "user_id", None)
         if kwargs.get("org_id") is None:
             kwargs["org_id"] = getattr(_agent_context, "org_id", None)
+        run = getattr(_agent_context, "run", None)
+        if kwargs.get("run_id") is None and run is not None:
+            kwargs["run_id"] = getattr(run, "run_id", None)
         if isinstance(execution_metadata, dict):
             if kwargs.get("user_id") is None:
                 kwargs["user_id"] = execution_metadata.get("user_id")
             if kwargs.get("org_id") is None:
                 kwargs["org_id"] = execution_metadata.get("org_id")
+            if kwargs.get("run_id") is None:
+                kwargs["run_id"] = execution_metadata.get("run_id")
         result = original_fn(**kwargs)
         if inspect.isawaitable(result):
             result = await result

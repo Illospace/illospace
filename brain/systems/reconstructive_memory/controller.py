@@ -1,8 +1,8 @@
-"""Deterministic reconstructive-memory controller.
+"""Source-backed reconstructive-memory controller.
 
-This is the first working replacement primitive for legacy top-k memory recall.
-It records a reconstruction run, searches source-backed content nodes, attaches
-assertions/source spans as evidence, and returns an evidence pack.
+It records a reconstruction run, ranks source-backed content nodes with blended
+semantic and lexical relevance, attaches assertions/source spans as evidence,
+and returns an evidence pack.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from brain.platform.db.repositories.reconstructive_memory import (
     ReconstructionRepository,
 )
 from brain.systems.reconstructive_memory.contracts import EvidenceItem, EvidencePack, ReconstructionTraceStep
+from brain.systems.reconstructive_memory.embeddings import embed_recall_query
 
 
 async def reconstruct_memory(
@@ -43,14 +44,17 @@ async def reconstruct_memory(
         run_id=run_id,
         thread_id=thread_id,
         budget_steps=3,
-        policy_version="deterministic-v1",
+        policy_version="blended-relevance-v1",
     )
 
+    query_embedding = await embed_recall_query(session, query)
     candidates = await node_repo.search_content_nodes(
         query=query,
         org_id=org_id,
         user_id=user_id,
         limit=limit,
+        query_embedding=query_embedding.vector if query_embedding else None,
+        embedding_model=query_embedding.model if query_embedding else None,
     )
     await reconstruction_repo.add_step(
         reconstruction_run_id=run.id,
@@ -59,7 +63,7 @@ async def reconstruct_memory(
         action_input={"query": query},
         action_output={"candidate_count": len(candidates)},
         selected_node_ids=[node.id for node in candidates],
-        reason="lexical cue seed over source-backed content nodes",
+        reason="blended semantic and lexical ranking over source-backed content nodes",
     )
 
     assertions = await assertion_repo.list_for_nodes([node.id for node in candidates])
@@ -88,7 +92,10 @@ async def reconstruct_memory(
             role="supports_answer",
             text=(assertion.claim_text if assertion else node.text or node.canonical_label),
             source_text=source_text,
-            confidence=float(assertion.confidence if assertion else node.confidence),
+            confidence=float(getattr(node, "retrieval_score", 0.0)),
+            semantic_score=getattr(node, "semantic_score", None),
+            lexical_score=float(getattr(node, "lexical_score", 0.0)),
+            storage_confidence=float(assertion.confidence if assertion else node.confidence),
         )
         supporting.append(item)
         await reconstruction_repo.add_evidence(
@@ -116,7 +123,7 @@ async def reconstruct_memory(
     trajectory = (
         ReconstructionTraceStep(
             action_kind="seed_cues",
-            reason="lexical cue seed over source-backed content nodes",
+            reason="blended semantic and lexical ranking over source-backed content nodes",
             selected_node_ids=tuple(node.id for node in candidates),
             output={"candidate_count": len(candidates)},
         ),
