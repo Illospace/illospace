@@ -1808,3 +1808,189 @@ async def test_slack_identity_mapping_service_links_user(session):
     assert mappings == [{"slack_user_id": "U123", "user_id": MAPPED_USER_ID, "user_name": "Alex"}]
     refreshed = await session.get(ExternalAgentConnectionRow, connection.id)
     assert refreshed.metadata_["slack"]["identity_map"] == {"U123": MAPPED_USER_ID}
+
+
+@pytest.mark.asyncio
+async def test_post_slack_reply_accepts_slack_rewrites_without_false_truncation(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
+    from brain.systems.slack.client import SlackWebClient
+
+    headline = "*Uwear 08:00 ET daily engineering brief*\n"
+    pull_url = "https://github.com/uwear-ai/illospace/pull/357"
+    footer = "\nReda recap | Axel recap | JB recap"
+    body = (
+        headline
+        + f"@here: <@U123> owns <priority> delivery & review for {pull_url}.\n"
+        + ("delivery evidence and next action\n" * 150)
+        + footer
+    )
+    submitted_chunks: list[dict[str, Any]] = []
+    stored_texts: list[str] = []
+
+    def slack_like_rewrite(value: str) -> str:
+        return (
+            value.replace("&", "&amp;")
+            .replace("<priority>", "&lt;priority&gt;")
+            .replace("@here", "<!here>")
+            .replace(pull_url, f"<{pull_url}>")
+        )
+
+    class _SlackLikeRewriteClient(SlackWebClient):
+        async def _post(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+            assert method == "chat.postMessage"
+            submitted_chunks.append(dict(payload))
+            stored_text = slack_like_rewrite(str(payload["text"]))
+            stored_texts.append(stored_text)
+            ts = f"1716900200.{len(submitted_chunks):06d}"
+            return {
+                "ok": True,
+                "channel": payload["channel"],
+                "ts": ts,
+                "message": {"text": stored_text, "ts": ts},
+            }
+
+    async def slack_client():
+        return _SlackLikeRewriteClient("xoxb-test")
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    with bind_agent_context(
+        {
+            "org_id": ORG_ID,
+            "run_id": 9,
+            "slack_trigger": {
+                "response_target": {
+                    "channel_id": "C456",
+                    "thread_ts": None,
+                    "visibility": "public",
+                }
+            },
+        }
+    ):
+        result = json.loads(await _handle_post_slack_reply(body=body))
+
+    assert len(body) > 4000
+    assert result["ok"] is True
+    assert result["submitted_chars"] == len(body)
+    assert result["posted_chars"] == sum(len(text) for text in stored_texts)
+    assert result["truncated"] is False
+    assert result["chunk_count"] == len(submitted_chunks) == 2
+    assert "thread_ts" not in submitted_chunks[0]
+    assert submitted_chunks[1]["thread_ts"] == "1716900200.000001"
+    assert stored_texts[0].startswith(headline)
+    assert f"<{pull_url}>" in stored_texts[0]
+    assert "<!here>" in stored_texts[0]
+    assert "&amp;" in stored_texts[0]
+    assert "&lt;priority&gt;" in stored_texts[0]
+    assert "<@U123>" in stored_texts[0]
+    assert stored_texts[-1].endswith(footer)
+    assert "".join(str(chunk["text"]) for chunk in submitted_chunks) == body
+    assert "".join(stored_texts) != body
+
+
+@pytest.mark.asyncio
+async def test_post_slack_reply_surfaces_receiver_side_tail_truncation(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
+    from brain.systems.slack.client import SlackWebClient
+
+    body = "digest headline\n" + ("evidence\n" * 520) + "Reda | Axel | JB"
+
+    class _TailTruncatingSlackClient(SlackWebClient):
+        async def _post(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+            assert method == "chat.postMessage"
+            stored_text = str(payload["text"])[-1000:]
+            return {
+                "ok": True,
+                "channel": payload["channel"],
+                "ts": "1716900200.000001",
+                "message": {"text": stored_text, "ts": "1716900200.000001"},
+            }
+
+    async def slack_client():
+        return _TailTruncatingSlackClient("xoxb-test")
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    with bind_agent_context(
+        {
+            "org_id": ORG_ID,
+            "run_id": 9,
+            "slack_trigger": {
+                "response_target": {
+                    "channel_id": "C456",
+                    "thread_ts": None,
+                    "visibility": "public",
+                }
+            },
+        }
+    ):
+        result = json.loads(await _handle_post_slack_reply(body=body))
+
+    assert len(body) > 4000
+    assert result["ok"] is False
+    assert result["error"] == "slack_message_delivery_mismatch"
+    assert result["submitted_chars"] == len(body)
+    assert result["posted_chars"] == 1000
+    assert result["submitted_bytes"] == len(body.encode("utf-8"))
+    assert result["posted_bytes"] == 1000
+    assert result["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_post_slack_reply_surfaces_receiver_side_head_truncation(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
+    from brain.systems.slack.client import SlackWebClient
+
+    body = "digest headline\n" + ("evidence\n" * 520) + "Reda | Axel | JB"
+
+    class _HeadTruncatingSlackClient(SlackWebClient):
+        async def _post(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+            assert method == "chat.postMessage"
+            stored_text = str(payload["text"])[:1000]
+            return {
+                "ok": True,
+                "channel": payload["channel"],
+                "ts": "1716900200.000001",
+                "message": {"text": stored_text, "ts": "1716900200.000001"},
+            }
+
+    async def slack_client():
+        return _HeadTruncatingSlackClient("xoxb-test")
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    with bind_agent_context(
+        {
+            "org_id": ORG_ID,
+            "run_id": 9,
+            "slack_trigger": {
+                "response_target": {
+                    "channel_id": "C456",
+                    "thread_ts": None,
+                    "visibility": "public",
+                }
+            },
+        }
+    ):
+        result = json.loads(await _handle_post_slack_reply(body=body))
+
+    assert len(body) > 4000
+    assert result["ok"] is False
+    assert result["error"] == "slack_message_delivery_mismatch"
+    assert result["submitted_chars"] == len(body)
+    assert result["posted_chars"] == 1000
+    assert result["submitted_bytes"] == len(body.encode("utf-8"))
+    assert result["posted_bytes"] == 1000
+    assert result["truncated"] is True
