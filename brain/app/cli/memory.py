@@ -16,6 +16,10 @@ from types import SimpleNamespace
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.quality.gate import check_quality
 from brain.systems.reconstructive_memory.controller import reconstruct_memory
+from brain.systems.reconstructive_memory.embeddings import (
+    EMBEDDABLE_NODE_KINDS,
+    backfill_memory_node_embeddings,
+)
 
 
 # ============================================================
@@ -274,6 +278,22 @@ async def cmd_index(args):
     }, indent=2, default=str))
 
 
+async def cmd_backfill_embeddings(args):
+    async with UnitOfWork() as uow:
+        result = await backfill_memory_node_embeddings(
+            uow.session,
+            batch_size=args.batch_size,
+            after_id=args.after_id,
+            limit=args.limit,
+            commit_batches=True,
+        )
+    print(json.dumps({
+        **result.to_dict(),
+        "embedded_node_kinds": list(EMBEDDABLE_NODE_KINDS),
+        "excluded_node_kinds": ["cue", "tag"],
+    }, indent=2))
+
+
 def _write_context_from_args(args, *, source: str) -> SimpleNamespace | None:
     user_id = getattr(args, "user_id", None)
     if not user_id:
@@ -414,13 +434,31 @@ async def main():
 
     p = sub.add_parser("index"); p.add_argument("--limit", "-l", type=int, default=50)
 
+    p = sub.add_parser(
+        "backfill-embeddings",
+        description=(
+            "Backfill semantic vectors for content, summary, procedure, and policy nodes. "
+            "Cue/tag nodes are intentionally excluded: they route the graph but do not carry "
+            "the source-backed answer text ranked by recall."
+        ),
+        epilog=(
+            "Rows that already have the current model+content embedding are skipped. "
+            "Each batch commits independently. A plain rerun safely resumes by skipping completed rows; "
+            "for deliberately chunked runs, combine --limit with --after-id and the prior last_node_id."
+        ),
+    )
+    p.add_argument("--batch-size", type=int, default=25, help="Nodes per committed batch (default: 25)")
+    p.add_argument("--after-id", type=int, default=0, help="Resume strictly after this memory_nodes.id")
+    p.add_argument("--limit", type=int, help="Maximum nodes to scan in this invocation")
+
     p = sub.add_parser("import-md"); p.add_argument("file")
 
     args = parser.parse_args()
     cmd_map = {
         "add": cmd_add, "query": cmd_query, "get": cmd_get, "context": cmd_context,
         "connect": cmd_connect, "list": cmd_list, "stats": cmd_stats, "decay": cmd_decay,
-        "index": cmd_index, "import-md": cmd_import_md,
+        "index": cmd_index, "backfill-embeddings": cmd_backfill_embeddings,
+        "import-md": cmd_import_md,
     }
     await cmd_map[args.command](args)
 

@@ -15,6 +15,9 @@ class EvidenceItem:
     text: str
     source_text: str | None
     confidence: float
+    semantic_score: float | None = None
+    lexical_score: float = 0.0
+    storage_confidence: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -25,6 +28,9 @@ class EvidenceItem:
             "text": self.text,
             "source_text": self.source_text,
             "confidence": self.confidence,
+            "semantic_score": self.semantic_score,
+            "lexical_score": self.lexical_score,
+            "storage_confidence": self.storage_confidence,
         }
 
 
