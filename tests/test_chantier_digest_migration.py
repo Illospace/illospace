@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
 import sqlalchemy as sa
 
 
@@ -54,6 +55,14 @@ def _schema() -> tuple[sa.MetaData, dict[str, sa.Table]]:
             ),
             sa.UniqueConstraint("cycle_id", "revision_number"),
         ),
+        "domain_records": sa.Table(
+            "domain_records",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True),
+            sa.Column("domain_id", sa.Integer, nullable=False),
+            sa.Column("version", sa.Integer, nullable=False),
+            sa.Column("data", sa.JSON, nullable=False),
+        ),
     }
     return metadata, tables
 
@@ -100,6 +109,18 @@ def _seed(connection: sa.Connection, tables: dict[str, sa.Table]) -> None:
             }
             for cycle_id, name, schedule, timezone in cycles
         ],
+    )
+    connection.execute(
+        tables["domain_records"].insert(),
+        {
+            "id": 1155,
+            "domain_id": 37,
+            "version": 8,
+            "data": {
+                "slug": "uwear-engineering-triage",
+                "content": "The verified chantier operating model.",
+            },
+        },
     )
 
 
@@ -169,3 +190,72 @@ def test_v2_contract_stays_visible_at_front_of_near_cap_mission():
 
     assert prompt.startswith("Chantier-primary digest contract v2:")
     assert prompt.endswith("z" * 12_000)
+
+
+def test_migration_fails_before_mutating_cycle_when_doc_1155_is_still_v7():
+    migration = importlib.import_module(MIGRATION_MODULE)
+    engine = sa.create_engine("sqlite://")
+    metadata, tables = _schema()
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        _seed(connection, tables)
+        connection.execute(
+            tables["domain_records"]
+            .update()
+            .where(tables["domain_records"].c.id == 1155)
+            .values(version=7, data={"slug": "uwear-engineering-triage", "content": "v7"})
+        )
+
+        with pytest.raises(RuntimeError, match="record 1155.*v8"):
+            migration._upgrade(connection)
+
+        prompt = connection.execute(
+            sa.select(tables["cycles"].c.prompt).where(tables["cycles"].c.id == 2)
+        ).scalar_one()
+        revision_count = connection.execute(
+            sa.select(sa.func.count()).select_from(tables["cycle_revisions"])
+        ).scalar_one()
+        assert prompt == "Run the existing owner-primary coordinator mission."
+        assert revision_count == 3
+
+
+def test_migration_fails_when_doc_1155_v8_does_not_contain_chantier_contract():
+    migration = importlib.import_module(MIGRATION_MODULE)
+    engine = sa.create_engine("sqlite://")
+    metadata, tables = _schema()
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        _seed(connection, tables)
+        connection.execute(
+            tables["domain_records"]
+            .update()
+            .where(tables["domain_records"].c.id == 1155)
+            .values(data={"slug": "uwear-engineering-triage", "content": "unrelated v8"})
+        )
+
+        with pytest.raises(RuntimeError, match="chantier operating model"):
+            migration._upgrade(connection)
+
+
+def test_mission_contract_resolves_chantier_playbook_by_slug():
+    migration = importlib.import_module(MIGRATION_MODULE)
+
+    assert "uwear-engineering-triage-chantier-operations" in migration._MISSION_CONTRACT
+    assert "record 1274" not in migration._MISSION_CONTRACT
+
+
+def test_mission_prompt_replaces_an_older_v2_block_without_losing_legacy_mission():
+    migration = importlib.import_module(MIGRATION_MODULE)
+    legacy = "Keep the owner-primary details that are not superseded."
+    old_prompt = (
+        "Chantier-primary digest contract v2: Load playbook record 1274."
+        f"\n\n{legacy}"
+    )
+
+    prompt = migration._mission_prompt(old_prompt)
+
+    assert prompt.startswith(migration._MISSION_CONTRACT)
+    assert prompt.endswith(legacy)
+    assert "record 1274" not in prompt
