@@ -239,8 +239,9 @@ def slack_channel_monitor_message(
     """Frame a monitored-channel message as a passive triage decision.
 
     The message has already been acknowledged with a 👀 reaction at ingest, so
-    the run's job is only to decide whether the content is ticket-worthy — and to
-    stay silent otherwise.
+    the run's job is to decide whether the content is ticket-worthy, needs one
+    clarifying question, or warrants silence. Silence is correct for chatter and
+    alert commentary — never for a human request or a direct @-mention.
     """
 
     text = _clean(payload.get("text"))[:2000]
@@ -253,7 +254,10 @@ def slack_channel_monitor_message(
         "and has already been acknowledged with a 👀 reaction — do not acknowledge it again.",
         "",
         "Classify this message and act accordingly:",
-        "- Casual chatter, or discussion about an existing alert: take NO visible action. Do not reply.",
+        "- Casual chatter, or discussion about an existing alert that does not itself ask for "
+        "work: take NO visible action. Do not reply. A message is NOT alert commentary merely "
+        "because it arrived near an alert — if a human is asking for something, it belongs in "
+        "the underspecified-request branch below, not here.",
         "- A genuine automated alert (Sentry, Rollbar, CI) or a user-reported problem that is "
         "ticket-worthy AND the target repo and incident are both clear: open a REAL GitHub issue "
         "with create_github_issue in the correct uwear-ai repo. Load the 'uwear-engineering-triage' "
@@ -262,6 +266,19 @@ def slack_channel_monitor_message(
         "section (a Domain 37 doc_page record; skill_asset references/creating-work-items.md as "
         "fallback), then optionally "
         "post a brief Slack note with post_slack_reply citing the issue number and URL.",
+        "- If your investigation reaches a root-cause hypothesis naming the target repo, that IS "
+        "'repo and incident clear': file the issue in that repo in the same run. Include the "
+        "investigation findings in the issue body — not just a link to Slack — so the analysis is "
+        "captured in the work item instead of being left only in Slack.",
+        "- A human request/report or apparent request for work that is actionable but "
+        "underspecified because the target repo or incident is unclear: do NOT stay silent and do "
+        "NOT return 'No visible action taken.' Ask exactly ONE focused clarifying question "
+        "in-thread with post_slack_reply, then act on the answer. Proximity to an existing alert "
+        "alone does not turn an apparent human request into alert commentary. This branch does "
+        "not apply to casual chatter or genuine commentary that does not ask for work.",
+        "- A message that @-mentions Illo must NEVER end in silence or 'No visible action taken.' "
+        "Either file the issue or post a visible reply; if the details are insufficient to file, "
+        "ask exactly ONE focused clarifying question in-thread.",
         "- A user-submitted feature request or product idea (feedback relayed by a bot such as "
         "Retool — e.g. '*New:* Idea' or '*New:* Feedback' with a user email and profile id — is "
         "a real customer ask, NOT chatter and NOT low-signal): if the ask is concrete and "
@@ -278,14 +295,15 @@ def slack_channel_monitor_message(
         "to prod that still fires PAST the settle window (~30 min after deploy) means the fix "
         "did not work — reopen the ticket and escalate to the fix author (re-fires inside the "
         "settle window are expected drain noise).",
-        "- Ticket-worthy but the repo/incident is unclear, or create_github_issue reports "
-        "no write-capable token can reach the repo (no_write_token / 403 / 404): do NOT claim a "
-        "GitHub issue was filed. Ask for clarification with post_slack_reply, or record an internal "
-        "tracker record + handoff so it is not lost.",
-        "- Ambiguous or low-signal: prefer no visible action; the 👀 already confirms you saw it.",
+        "- If create_github_issue reports no write-capable token can reach the repo "
+        "(no_write_token / 403 / 404): do NOT claim a GitHub issue was filed. Surface the failure "
+        "with post_slack_reply, or record an internal tracker record + handoff so it is not lost.",
+        "- Ambiguous or low-signal content that is neither a human request/report nor a direct "
+        "@-mention: prefer no visible action; the 👀 already confirms you saw it.",
         "",
-        "Silence is the correct default. Only use post_slack_reply when you have opened/flagged a "
-        "ticket or must surface something important. Use read_slack_conversation "
+        "Silence is the correct default for casual chatter and genuine alert commentary. Use "
+        "post_slack_reply when you have opened/flagged a ticket, must ask the one clarifying "
+        "question required above, or must surface something important. Use read_slack_conversation "
         "(scope=recent_channel or thread) for more context before deciding. An internal Domain/"
         "tracker record is NOT a GitHub issue — only a successful create_github_issue opens a real "
         "issue; never describe a tracker record as a filed GitHub issue.",
