@@ -90,6 +90,48 @@ test('does not render remote markdown images inline', () => {
   assert.equal(html, '<p>Remote diagram</p>');
 });
 
+test('renders markdown tables inside a horizontal scroll wrapper', () => {
+  const html = renderReadableMarkdown([
+    'Slice plan:',
+    '',
+    '| Slice | Owner |',
+    '| --- | :---: |',
+    '| S1 | **JB** |',
+    '| S2 | `worker` |',
+    '',
+    'Next steps.',
+  ].join('\n'));
+
+  assert.equal(
+    html,
+    '<p>Slice plan:</p>'
+      + '<div class="md-table-wrap"><table><thead><tr><th>Slice</th><th>Owner</th></tr></thead>'
+      + '<tbody><tr><td>S1</td><td><strong>JB</strong></td></tr>'
+      + '<tr><td>S2</td><td><code class="md-inline-code">worker</code></td></tr></tbody></table></div>'
+      + '<p>Next steps.</p>',
+  );
+});
+
+test('escapes unsafe html inside table cells', () => {
+  const html = renderReadableMarkdown([
+    '| Col |',
+    '| --- |',
+    '| <script>alert(1)</script> |',
+  ].join('\n'));
+
+  assert.equal(
+    html,
+    '<div class="md-table-wrap"><table><thead><tr><th>Col</th></tr></thead>'
+      + '<tbody><tr><td>&lt;script&gt;alert(1)&lt;/script&gt;</td></tr></tbody></table></div>',
+  );
+});
+
+test('keeps pipe-delimited lines without a separator row as plain paragraphs', () => {
+  const html = renderReadableMarkdown('| just | text |\n| more | text |');
+
+  assert.equal(html, '<p>| just | text |<br/>| more | text |</p>');
+});
+
 test('preserves query parameters in bare url hrefs', () => {
   const html = renderReadableMarkdown('Open https://example.com/search?q=illo&sort=new');
 

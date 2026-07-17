@@ -7,7 +7,9 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import quote, urlencode
 
+from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.cortex.upload_preview import (
     normalize_static_upload_url,
     public_static_upload_url,
@@ -23,6 +25,7 @@ VIEWER_EXTENSIONS = {
     "csv",
     "json",
     "log",
+    "markdown",
     "md",
     "pdf",
     "text",
@@ -41,6 +44,7 @@ CONTENT_TYPE_BY_EXTENSION = {
     "jpg": "image/jpeg",
     "json": "application/json",
     "log": "text/plain",
+    "markdown": "text/markdown",
     "md": "text/markdown",
     "pdf": "application/pdf",
     "png": "image/png",
@@ -144,6 +148,21 @@ def _asset_markdown(*, label: str, url: str, kind: str) -> str:
     return f"[{clean_label}]({url})"
 
 
+def _viewer_url(*, url: str, label: str) -> str:
+    """Absolute /doc link teammates can open without a session."""
+
+    query = urlencode({"src": url, "title": label}, quote_via=quote, safe="/")
+    return f"{public_app_base_url()}/doc?{query}"
+
+
+_PUBLISH_INSTRUCTION = (
+    "To show this in a Thread, write the returned markdown or /static/uploads route "
+    "in post_thread_discussion_reply or post_ai_timeline_message. Valid upload routes "
+    "are promoted to visible attachments automatically. When sharing outside the app "
+    "(e.g. a Slack message), link viewer_url — it opens as a readable page with no sign-in."
+)
+
+
 def publish_thread_asset(
     file_path: str,
     *,
@@ -170,14 +189,14 @@ def publish_thread_asset(
                 "published_path": str(published_path),
                 "url": url,
                 "public_url": attachment["download_url"],
+                "viewer_url": _viewer_url(
+                    url=url,
+                    label=attachment["label"],
+                ),
                 "markdown": _asset_markdown(label=attachment["label"], url=url, kind=attachment["kind"]),
                 "attachment": attachment,
                 "already_published": True,
-                "instruction": (
-                    "To show this in a Thread, write the returned markdown or /static/uploads route "
-                    "in post_thread_discussion_reply or post_ai_timeline_message. Valid upload routes "
-                    "are promoted to visible attachments automatically."
-                ),
+                "instruction": _PUBLISH_INSTRUCTION,
             }
         except ValueError:
             pass
@@ -226,13 +245,13 @@ def publish_thread_asset(
         "published_path": str(destination),
         "url": url,
         "public_url": attachment["download_url"],
+        "viewer_url": _viewer_url(
+            url=url,
+            label=label,
+        ),
         "markdown": _asset_markdown(label=label, url=url, kind=kind),
         "attachment": attachment,
-        "instruction": (
-            "To show this in a Thread, write the returned markdown or /static/uploads route "
-            "in post_thread_discussion_reply or post_ai_timeline_message. Valid upload routes "
-            "are promoted to visible attachments automatically."
-        ),
+        "instruction": _PUBLISH_INSTRUCTION,
     }
 
 
