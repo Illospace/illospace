@@ -69,6 +69,7 @@ class ToolSideEffectClass(StrEnum):
     DOMAIN_MANAGEMENT = "domain_management"
     INBOUND_CONFIGURATION = "inbound_configuration"
     IDEA_MANAGEMENT = "idea_management"
+    MEMORY_CURATION = "memory_curation"
     DEPLOYMENT_MANAGEMENT = "deployment_management"
     WORKSPACE_TOOL_MANAGEMENT = "workspace_tool_management"
     SOUL_MANAGEMENT = "soul_management"

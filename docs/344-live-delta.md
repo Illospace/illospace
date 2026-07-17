@@ -6,9 +6,9 @@ recall-ranking slice from #342 has already merged; that sequencing is a soft
 dependency so the first coordinator recalls are relevant, not an activation
 blocker.
 
-## 1. Create the on-demand memory record
+## 1. Create or update the on-demand memory record
 
-Create a `doc_page` with:
+On a fresh install, create a `doc_page` with:
 
 - intended record id: `1275` (the core pointer is pinned to this id; assert the
   returned id before continuing);
@@ -19,13 +19,15 @@ Create a `doc_page` with:
 
 Expected content fingerprint:
 
-- characters: `4330`;
-- bytes: `4356`; and
-- SHA-256: `d1ad372fb34b3b7b3f24c26bf47c784ddd0ae594a3c5f7ccbedc4712908afe4b`.
+- characters: `4886`;
+- bytes: `4912`; and
+- SHA-256: `5fff971e13dea82cca19fce1f36a8d340904842a0398dd66ded4c371cd0de165`.
 
 Read record `1275` back and require byte identity with the bundled reference.
-If id `1275` is occupied, the slug differs, or the content differs, stop: do
-not update core record `1155` to point at a missing or different playbook.
+If record `1275` already has slug `uwear-engineering-triage-memory`, update its
+content with the current `expected_version`; if the id is occupied by another
+slug, stop. Do not update core record `1155` to point at a missing or different
+playbook.
 
 ## 2. Replace core record 1155 with doc v9
 

@@ -182,7 +182,10 @@ def _get_tool_handlers(
     """
     from brain.app.mcp.server import (
         async_tool_brain_recall,
+        async_tool_memory_archive,
+        async_tool_memory_link,
         async_tool_memory_reconstruct,
+        async_tool_memory_supersede,
         async_tool_memory_ingest_source,
         async_tool_brain_guardrails,
         async_tool_brain_skills,
@@ -222,6 +225,9 @@ def _get_tool_handlers(
         # Brain tools (workspace-independent — always hit shared DB)
         "brain_recall": _wrap_brain_recall(async_tool_brain_recall),
         "memory_reconstruct": _wrap_memory_reconstruct(async_tool_memory_reconstruct),
+        "memory_link": _wrap_memory_curation(async_tool_memory_link),
+        "memory_supersede": _wrap_memory_curation(async_tool_memory_supersede),
+        "memory_archive": _wrap_memory_curation(async_tool_memory_archive),
         "memory_ingest_source": _wrap_memory_ingest_source(async_tool_memory_ingest_source),
         "brain_guardrails": async_tool_brain_guardrails,
         "brain_skills": _wrap_tool_evidence("brain_skills", async_tool_brain_skills),

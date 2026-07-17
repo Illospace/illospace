@@ -53,7 +53,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.6.0"
+    assert bundle.manifest.version == "1.7.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -167,6 +167,10 @@ def test_uwear_triage_scheduled_memory_contract():
         "### What Makes a Good Memory",
         "## Stable Phrasing and Dedup",
         "`normalized_key`",
+        "memory_supersede",
+        "memory_archive",
+        "memory_link",
+        "concrete reason grounded in the current authoritative source",
         "Bad — ephemeral count",
         "Bad — delivery receipt",
     ):

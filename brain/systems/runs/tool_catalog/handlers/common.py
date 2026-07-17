@@ -687,26 +687,30 @@ def _wrap_memory_ingest_source(original_fn):
     return wrapper
 
 
+def _inject_memory_runtime_context(kwargs: dict, *, include_thread: bool = False) -> None:
+    execution_metadata = getattr(_agent_context, "execution_metadata", None)
+    if kwargs.get("user_id") is None:
+        kwargs["user_id"] = getattr(_agent_context, "user_id", None)
+    if kwargs.get("org_id") is None:
+        kwargs["org_id"] = getattr(_agent_context, "org_id", None)
+    if include_thread and kwargs.get("thread_id") is None:
+        kwargs["thread_id"] = getattr(_agent_context, "idea_id", None)
+    run = getattr(_agent_context, "run", None)
+    if kwargs.get("run_id") is None and run is not None:
+        kwargs["run_id"] = getattr(run, "run_id", None)
+    if isinstance(execution_metadata, dict):
+        if kwargs.get("user_id") is None:
+            kwargs["user_id"] = execution_metadata.get("user_id")
+        if kwargs.get("org_id") is None:
+            kwargs["org_id"] = execution_metadata.get("org_id")
+        if kwargs.get("run_id") is None:
+            kwargs["run_id"] = execution_metadata.get("run_id")
+
+
 def _wrap_memory_reconstruct(original_fn):
     """Inject viewer context into reconstructive memory calls."""
     async def wrapper(**kwargs):
-        execution_metadata = getattr(_agent_context, "execution_metadata", None)
-        if kwargs.get("user_id") is None:
-            kwargs["user_id"] = getattr(_agent_context, "user_id", None)
-        if kwargs.get("org_id") is None:
-            kwargs["org_id"] = getattr(_agent_context, "org_id", None)
-        if kwargs.get("thread_id") is None:
-            kwargs["thread_id"] = getattr(_agent_context, "idea_id", None)
-        run = getattr(_agent_context, "run", None)
-        if kwargs.get("run_id") is None and run is not None:
-            kwargs["run_id"] = getattr(run, "run_id", None)
-        if isinstance(execution_metadata, dict):
-            if kwargs.get("user_id") is None:
-                kwargs["user_id"] = execution_metadata.get("user_id")
-            if kwargs.get("org_id") is None:
-                kwargs["org_id"] = execution_metadata.get("org_id")
-            if kwargs.get("run_id") is None:
-                kwargs["run_id"] = execution_metadata.get("run_id")
+        _inject_memory_runtime_context(kwargs, include_thread=True)
         result = original_fn(**kwargs)
         if inspect.isawaitable(result):
             result = await result
@@ -715,6 +719,17 @@ def _wrap_memory_reconstruct(original_fn):
             kwargs,
             result,
         )
+        return result
+    return wrapper
+
+
+def _wrap_memory_curation(original_fn):
+    """Inject authenticated viewer and run provenance into curation calls."""
+    async def wrapper(**kwargs):
+        _inject_memory_runtime_context(kwargs)
+        result = original_fn(**kwargs)
+        if inspect.isawaitable(result):
+            return await result
         return result
     return wrapper
 

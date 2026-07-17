@@ -117,7 +117,7 @@ COORDINATOR_TOOLS = (
 # Brain gate: these tool names satisfy the "brain context accessed" requirement
 _BRAIN_TOOL_NAMES = frozenset({
     "brain_recall", "brain_guardrails", "brain_skills", "skill_view", "skill_asset",
-    "memory_reconstruct", "memory_ingest_source",
+    "memory_reconstruct", "memory_ingest_source", "memory_link", "memory_supersede", "memory_archive",
     "brain_encode", "runtime_settings", "read_self_context", "read_capabilities", "query_workspace_data", "read_workspace_overview",
     "read_team_activity", "read_project_contexts", "read_team_members", "read_workspace_records",
     "read_cycles", "read_workspace_apps",

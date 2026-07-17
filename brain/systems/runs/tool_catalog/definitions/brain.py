@@ -72,6 +72,56 @@ BRAIN_TOOLS = [
         },
     },
     {
+        "name": "memory_link",
+        "description": "Create a deliberate, reason-backed relationship between two visible memory nodes.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_node": {"type": "integer", "minimum": 1},
+                "target_node": {"type": "integer", "minimum": 1},
+                "relationship": {"type": "string", "minLength": 1, "maxLength": 60},
+                "reason": {"type": "string", "minLength": 3},
+            },
+            "required": ["source_node", "target_node", "relationship", "reason"],
+        },
+    },
+    {
+        "name": "memory_supersede",
+        "description": "Replace a stale visible memory with new content or an existing visible node.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "old_node": {"type": "integer", "minimum": 1},
+                "new_content": {"type": "string", "minLength": 20},
+                "new_node": {"type": "integer", "minimum": 1},
+                "reason": {"type": "string", "minLength": 3},
+            },
+            "required": ["old_node", "reason"],
+            "oneOf": [
+                {"required": ["new_content"], "not": {"required": ["new_node"]}},
+                {"required": ["new_node"], "not": {"required": ["new_content"]}},
+            ],
+        },
+    },
+    {
+        "name": "memory_archive",
+        "description": "Archive obsolete or redundant visible memory nodes with a durable reason.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "node_ids": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 1},
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "uniqueItems": True,
+                },
+                "reason": {"type": "string", "minLength": 3},
+            },
+            "required": ["node_ids", "reason"],
+        },
+    },
+    {
         "name": "brain_guardrails",
         "description": "Get guardrails: recent skill failures, high-salience warnings, and pitfalls for a specific skill.",
         "input_schema": {

@@ -42,6 +42,30 @@ class ConsolidationRunRepository(BaseRepository[ConsolidationRun]):
 class RetrievalLogRepository(BaseRepository[RetrievalLog]):
     model = RetrievalLog
 
+    async def create_reconstruction_log(
+        self,
+        *,
+        query_text: str,
+        results_returned: int,
+        top_result_id: int | None,
+        top_score: float,
+        was_relevant: bool,
+        feedback: str,
+        org_id: str | None,
+    ) -> RetrievalLog:
+        row = RetrievalLog(
+            query_text=query_text,
+            results_returned=results_returned,
+            top_result_id=top_result_id,
+            top_score=top_score,
+            was_relevant=was_relevant,
+            feedback=feedback,
+            org_id=org_id,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
     async def a_list_recent(self, *, limit: int = 100) -> Sequence[RetrievalLog]:
         stmt = (
             select(RetrievalLog)

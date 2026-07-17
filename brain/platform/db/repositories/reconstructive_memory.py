@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
-from sqlalchemy import and_, func, or_, select, true, update
+from sqlalchemy import and_, exists, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.reconstructive_memory import (
@@ -22,6 +22,7 @@ from brain.platform.db.models.reconstructive_memory import (
     MemorySource,
     MemorySpan,
     ReconstructionEvidence,
+    ReconstructionFeedback,
     ReconstructionRun,
     ReconstructionStep,
 )
@@ -283,6 +284,15 @@ class MemoryNodeRepository(BaseRepository[MemoryNode]):
         base_stmt = (
             select(MemoryNode)
             .where(MemoryNode.archived_at.is_(None))
+            .where(MemoryNode.truth_status != "superseded")
+            .where(
+                ~exists(
+                    select(MemoryEdgeNode.id).where(
+                        MemoryEdgeNode.source_node_id == MemoryNode.id,
+                        MemoryEdgeNode.edge_kind == "superseded_by",
+                    )
+                )
+            )
             .where(MemoryNode.node_kind.in_(_CONTENT_NODE_KINDS))
             .where(visibility_predicate)
         )
@@ -329,6 +339,41 @@ class MemoryNodeRepository(BaseRepository[MemoryNode]):
             rows = [(node, semantic_by_node.get(node.id)) for node in nodes]
 
         return _rank_memory_nodes(query=query, rows=rows, limit=limit)
+
+    async def get_visible_nodes(
+        self,
+        node_ids: Sequence[int],
+        *,
+        org_id: str | None,
+        user_id: str | None,
+    ) -> list[MemoryNode]:
+        """Load active nodes visible to one authenticated memory curator."""
+
+        unique_ids = list(dict.fromkeys(int(node_id) for node_id in node_ids))
+        if not unique_ids or (not org_id and not user_id):
+            return []
+        visibility_predicate = or_(
+            and_(MemoryNode.visibility == "org", MemoryNode.org_id == org_id),
+            and_(MemoryNode.visibility == "team", MemoryNode.org_id == org_id),
+            and_(MemoryNode.visibility == "private", MemoryNode.user_id == user_id),
+        )
+        stmt = (
+            select(MemoryNode)
+            .where(MemoryNode.id.in_(unique_ids))
+            .where(MemoryNode.archived_at.is_(None))
+            .where(visibility_predicate)
+        )
+        rows = list((await self._session.scalars(stmt)).all())
+        by_id = {row.id: row for row in rows}
+        return [by_id[node_id] for node_id in unique_ids if node_id in by_id]
+
+    async def mark_superseded(self, node_id: int) -> MemoryNode:
+        node = await self.a_get_or_raise(node_id)
+        node.truth_status = "superseded"
+        node.freshness_status = "stale"
+        await self._session.flush()
+        await self._session.refresh(node)
+        return node
 
     async def _python_semantic_scores(
         self,
@@ -480,6 +525,10 @@ class MemoryEdgeRepository(BaseRepository[MemoryEdgeNode]):
             existing.weight = max(float(existing.weight or 0), draft.weight)
             existing.confidence = max(float(existing.confidence or 0), draft.confidence)
             existing.evidence_span_ids = sorted(set(existing.evidence_span_ids or []) | set(draft.evidence_span_ids))
+            if draft.created_by == "agent_curation":
+                # The row now represents a deliberate relationship. Immutable
+                # source spans retain the earlier evidence trail.
+                existing.created_by = draft.created_by
             return existing
 
         edge = MemoryEdgeNode(
@@ -523,6 +572,13 @@ class MemoryAssertionRepository(BaseRepository[MemoryAssertionNode]):
             return []
         stmt = select(MemoryAssertionNode).where(MemoryAssertionNode.node_id.in_(list(node_ids)))
         return list((await self._session.scalars(stmt)).all())
+
+    async def mark_superseded_for_node(self, node_id: int) -> None:
+        await self._session.execute(
+            update(MemoryAssertionNode)
+            .where(MemoryAssertionNode.node_id == node_id)
+            .values(truth_status="superseded")
+        )
 
 
 class ReconstructionRepository(BaseRepository[ReconstructionRun]):
@@ -619,6 +675,28 @@ class ReconstructionRepository(BaseRepository[ReconstructionRun]):
         row.completed_at = datetime.now(timezone.utc)
         await self._session.flush()
 
+    async def add_feedback(
+        self,
+        *,
+        reconstruction_run_id: int,
+        signal_kind: str,
+        target_step_id: int | None = None,
+        target_node_id: int | None = None,
+        target_edge_id: int | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> ReconstructionFeedback:
+        row = ReconstructionFeedback(
+            reconstruction_run_id=reconstruction_run_id,
+            signal_kind=signal_kind,
+            target_step_id=target_step_id,
+            target_node_id=target_node_id,
+            target_edge_id=target_edge_id,
+            details=dict(details or {}),
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
 
 def _context_user_id(context: Any) -> str | None:
     return str(getattr(context, "user_id", "") or "") or None
@@ -676,6 +754,30 @@ def _node_type(node: MemoryNode) -> str:
     return node.content_kind or node.node_kind
 
 
+async def _hydrate_node_curation_state(session: AsyncSession, nodes: Sequence[MemoryNode]) -> None:
+    node_ids = [node.id for node in nodes]
+    if not node_ids:
+        return
+    stmt = select(MemoryEdgeNode).where(
+        or_(
+            MemoryEdgeNode.source_node_id.in_(node_ids),
+            MemoryEdgeNode.target_node_id.in_(node_ids),
+        ),
+        MemoryEdgeNode.edge_kind.in_(("superseded_by", "contradicts")),
+    )
+    edges = list((await session.scalars(stmt)).all())
+    superseded_by: dict[int, int] = {}
+    contradiction_ids: set[int] = set()
+    for edge in edges:
+        if edge.edge_kind == "superseded_by" and edge.source_node_id in node_ids:
+            superseded_by[edge.source_node_id] = edge.target_node_id
+        elif edge.edge_kind == "contradicts":
+            contradiction_ids.update((edge.source_node_id, edge.target_node_id))
+    for node in nodes:
+        node.superseded_by = superseded_by.get(node.id)
+        node.contradiction_status = "open" if node.id in contradiction_ids else "none"
+
+
 def _node_memory_payload(node: MemoryNode) -> dict[str, Any]:
     confidence = float(node.confidence or 0.0)
     now = datetime.now(timezone.utc)
@@ -687,7 +789,7 @@ def _node_memory_payload(node: MemoryNode) -> dict[str, Any]:
         "memory_tier": _node_type(node),
         "consolidated": node.node_kind == "summary",
         "archived": archived,
-        "superseded_by": None,
+        "superseded_by": getattr(node, "superseded_by", None),
         "salience": round(confidence * 10, 2),
         "source": "reconstructive_memory",
         "source_type": "reconstructive_memory_node",
@@ -704,10 +806,10 @@ def _node_memory_payload(node: MemoryNode) -> dict[str, Any]:
         "reviewed_by": None,
         "demoted_at": node.archived_at if archived else None,
         "demotion_reason": "archived" if archived else None,
-        "open_contradiction_count": 0,
+        "open_contradiction_count": 1 if getattr(node, "contradiction_status", "none") == "open" else 0,
         "resolved_contradiction_count": 0,
-        "contradiction_status": "none",
-        "has_open_contradiction": False,
+        "contradiction_status": getattr(node, "contradiction_status", "none"),
+        "has_open_contradiction": getattr(node, "contradiction_status", "none") == "open",
         "is_reviewed_active": node.truth_status == "active",
         "is_policy_effective": node.content_kind == "policy" and node.truth_status in {"active", "reviewed"},
         "tags": [node.node_kind, *([node.content_kind] if node.content_kind else [])],
@@ -732,6 +834,8 @@ def _edge_payload(edge: MemoryEdgeNode) -> dict[str, Any]:
         "target_id": edge.target_node_id,
         "relationship": edge.edge_kind,
         "weight": float(edge.weight or 0.0),
+        "created_by": edge.created_by,
+        "evidence_span_ids": list(edge.evidence_span_ids or []),
     }
 
 
@@ -820,12 +924,14 @@ class ReconstructiveMemoryCompatibilityRepository(BaseRepository[MemoryNode]):
         node = await self._session.get(MemoryNode, memory_id)
         if node is None or node.archived_at is not None:
             return None
+        await _hydrate_node_curation_state(self._session, [node])
         return _node_memory_payload(node)
 
     async def get_or_raise_visible(self, memory_id: int, context: Any) -> SimpleNamespace:
         node = await self._get_visible_node(memory_id, context)
         if node is None:
             raise LookupError(f"Memory {memory_id} not found")
+        await _hydrate_node_curation_state(self._session, [node])
         return _node_memory_object(node)
 
     async def search_visible(self, query: str, context: Any) -> list[dict[str, Any]]:
@@ -876,6 +982,7 @@ class ReconstructiveMemoryCompatibilityRepository(BaseRepository[MemoryNode]):
             .limit(limit)
         )
         nodes = list((await self._session.scalars(stmt)).all())
+        await _hydrate_node_curation_state(self._session, nodes)
         node_ids = [node.id for node in nodes]
         edges: list[MemoryEdgeNode] = []
         if node_ids:
@@ -906,6 +1013,7 @@ class ReconstructiveMemoryCompatibilityRepository(BaseRepository[MemoryNode]):
         node = await self._get_visible_node(memory_id, context)
         if node is None:
             raise LookupError(f"Memory {memory_id} not found")
+        await _hydrate_node_curation_state(self._session, [node])
         memory = _node_memory_payload(node)
         return {
             "memory": memory,
@@ -941,6 +1049,7 @@ class ReconstructiveMemoryCompatibilityRepository(BaseRepository[MemoryNode]):
         node = await self._session.get(MemoryNode, memory_id)
         if node is None or node.archived_at is not None:
             return None
+        await _hydrate_node_curation_state(self._session, [node])
         return {"memory": _node_memory_object(node), "edges": await self.get_neighborhood(memory_id)}
 
     async def get_graph_context(self, memory_id: int, depth: int = 2) -> dict[str, Any]:
@@ -954,6 +1063,7 @@ class ReconstructiveMemoryCompatibilityRepository(BaseRepository[MemoryNode]):
             node_ids.add(edge["source_id"])
             node_ids.add(edge["target_id"])
         rows = list((await self._session.scalars(select(MemoryNode).where(MemoryNode.id.in_(node_ids)))).all())
+        await _hydrate_node_curation_state(self._session, rows)
         return {
             "center": _node_memory_payload(node),
             "nodes": [_node_memory_payload(row) for row in rows],

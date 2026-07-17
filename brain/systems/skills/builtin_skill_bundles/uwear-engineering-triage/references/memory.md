@@ -69,6 +69,15 @@ same key:
 5. When the same outcome is reaffirmed, reuse its first sentence verbatim.
    When it is superseded, name the old outcome and the replacement explicitly.
 
+Curate memory whenever live verification exposes a contradiction, standing
+guidance has gone stale, or recall reveals duplicate saves: use
+`memory_supersede` when a corrected memory replaces an older one,
+`memory_archive` when an obsolete or redundant memory has no continuing value,
+and `memory_link` to preserve meaningful relationships (including duplicate
+provenance) between memories that remain useful. Give every curation action a
+concrete reason grounded in the current authoritative source; do not mutate
+memory merely for stylistic differences.
+
 ## Examples
 
 Good — human-approved ownership change (`confidence=0.9`):
