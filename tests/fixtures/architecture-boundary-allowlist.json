@@ -213,36 +213,6 @@
       "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
     },
     {
-      "source": "brain/systems/memory/encoder.py",
-      "import": "brain.app.cli.memory",
-      "source_layer": "brain.systems",
-      "target_layer": "brain.app",
-      "allowed_occurrences": 1,
-      "owner": "architecture-boundaries",
-      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
-      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
-    },
-    {
-      "source": "brain/systems/memory/lessons.py",
-      "import": "brain.app.cli.agent_cli",
-      "source_layer": "brain.systems",
-      "target_layer": "brain.app",
-      "allowed_occurrences": 1,
-      "owner": "architecture-boundaries",
-      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
-      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
-    },
-    {
-      "source": "brain/systems/memory/retrieval.py",
-      "import": "brain.jobs.pipelines.agent_cli",
-      "source_layer": "brain.systems",
-      "target_layer": "brain.jobs",
-      "allowed_occurrences": 1,
-      "owner": "architecture-boundaries",
-      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
-      "reason": "System code calls an offline job module; move shared behavior into systems or platform."
-    },
-    {
       "source": "brain/systems/quality/review.py",
       "import": "brain.app.hooks.brain_context",
       "source_layer": "brain.systems",

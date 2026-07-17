@@ -16,7 +16,7 @@ from brain.platform.db.models.narrative import NarrativeSession, ProjectNarrativ
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 if TYPE_CHECKING:
-    from brain.systems.memory.harvest import HarvestItem
+    from brain.systems.sessions.harvest_extraction import HarvestItem
 
 logger = logging.getLogger(__name__)
 

@@ -33,8 +33,9 @@ tests/               Backend, frontend utility, and regression tests
   assets in production mode, and optional inline local run execution.
 - The Cortex worker consumes queued AgentRuns for production/self-hosted
   deployments.
-- PostgreSQL stores users, orgs, memories, ideas, runs, skills, vault metadata,
-  workspace apps, notifications, cycles, and learning state.
+- PostgreSQL stores users, orgs, the source-backed reconstructive memory graph,
+  ideas, runs, skills, vault metadata, workspace apps, notifications, cycles,
+  and learning state.
 - pgvector powers semantic retrieval when embeddings are configured.
 - Provider keys can come from environment variables or encrypted database-backed
   credentials, depending on deployment mode.

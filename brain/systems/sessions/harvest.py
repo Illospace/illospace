@@ -28,8 +28,8 @@ async def _harvest_session(
     Harvest failure never breaks the session close path.
     """
     try:
-        from brain.systems.memory.harvest import extract_harvest_items
-        from brain.systems.memory.narratives import extract_topic_tags, link_session_to_narratives
+        from brain.systems.sessions.harvest_extraction import extract_harvest_items
+        from brain.systems.sessions.narratives import extract_topic_tags, link_session_to_narratives
         from brain.app.cli.memory import add_memory
         from brain.platform.db.repositories.memory_write_context import MemoryWriteContext
         from brain.platform.providers.model_policy import get_default_model

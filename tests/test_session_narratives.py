@@ -1,10 +1,10 @@
-"""Tests for brain.systems.memory.narratives — narrative lifecycle."""
+"""Tests for post-session narrative lifecycle."""
 from dataclasses import dataclass, field
 from unittest.mock import patch
 
 import pytest
 
-from brain.systems.memory.narratives import (
+from brain.systems.sessions.narratives import (
     _synthesize_arc,
     extract_topic_tags,
     should_create_narrative,

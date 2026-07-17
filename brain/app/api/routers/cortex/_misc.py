@@ -884,7 +884,6 @@ async def audit_apply(
         if not content or len(content) < 20:
             raise HTTPException(status_code=400, detail="Lesson content must be >= 20 chars")
         from brain.platform.db.repositories.memory_write_context import MemoryWriteContext
-        from brain.systems.memory.scope import classify_scope
         from brain.systems.quality.gate import check_quality
 
         salience = float(payload.get("salience", 7.0))
@@ -908,7 +907,6 @@ async def audit_apply(
                 memory_type=payload.get("memory_type", "lesson"),
                 salience=salience,
                 tags=payload.get("tags"),
-                scope=classify_scope(content, payload.get("memory_type", "lesson")),
                 context=write_context,
             )
         return {"ok": True, "action": "encode_lesson", "memory_id": result.get("id")}

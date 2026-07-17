@@ -267,16 +267,16 @@ class TestOrchestrateSkillProcedure:
 class TestHarvestStorageContract:
     """Focused checks for scoped writes from extracted memory items."""
 
-    @patch("brain.systems.memory.narratives.link_session_to_narratives", new_callable=AsyncMock)
+    @patch("brain.systems.sessions.narratives.link_session_to_narratives", new_callable=AsyncMock)
     @patch("brain.app.cli.memory.add_memory", new_callable=AsyncMock)
-    @patch("brain.systems.memory.harvest.extract_harvest_items")
+    @patch("brain.systems.sessions.harvest_extraction.extract_harvest_items")
     async def test_sensitivity_narrows_visibility_on_session_harvest(
         self,
         mock_extract,
         mock_add_memory,
         mock_link,
     ):
-        from brain.systems.memory.harvest import HarvestItem
+        from brain.systems.sessions.harvest_extraction import HarvestItem
         from brain.systems.sessions.harvest import _harvest_session
 
         mock_extract.return_value = [
@@ -309,16 +309,16 @@ class TestHarvestStorageContract:
         assert kwargs["write_context"].evidence["sensitivity"] == "high"
         mock_link.assert_not_awaited()
 
-    @patch("brain.systems.memory.narratives.link_session_to_narratives", new_callable=AsyncMock)
+    @patch("brain.systems.sessions.narratives.link_session_to_narratives", new_callable=AsyncMock)
     @patch("brain.app.cli.memory.add_memory", new_callable=AsyncMock)
-    @patch("brain.systems.memory.harvest.extract_harvest_items")
+    @patch("brain.systems.sessions.harvest_extraction.extract_harvest_items")
     async def test_failed_extraction_raw_episode_uses_existing_write_context(
         self,
         mock_extract,
         mock_add_memory,
         mock_link,
     ):
-        from brain.systems.memory.harvest import HarvestItem, RAW_EPISODE_CONFIDENCE
+        from brain.systems.sessions.harvest_extraction import HarvestItem, RAW_EPISODE_CONFIDENCE
         from brain.systems.sessions.harvest import _harvest_session
 
         mock_extract.return_value = [
