@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import inspect
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import func, select
 
+from brain.platform.db.models.reconstructive_memory import MemoryNode
 from brain.platform.db.repositories import unit_of_work as uow_module
 from brain.platform.db.repositories.unit_of_work import (
     AsyncRepositoryProxy,
@@ -217,7 +220,6 @@ def test_run_runtime_async_entrypoints_do_not_use_sync_bridges():
         inspect.getsource(event_log_module.async_record_run_degraded_event),
         inspect.getsource(telemetry_module.async_record_api_call),
         inspect.getsource(session_effects_module.async_memory_org_for_user),
-        inspect.getsource(session_effects_module.async_auto_encode_if_needed),
         inspect.getsource(session_effects_module.async_apply_agent_session_side_effects),
         inspect.getsource(project_execution_env_module._async_current_run_target_context),
         inspect.getsource(project_execution_env_module.async_current_project_bound_env),
@@ -337,9 +339,6 @@ async def test_async_session_effects_awaits_async_callbacks():
         calls.append(("memory_org", user_id))
         return "org-from-memory"
 
-    async def auto_encode(tool_calls_made, output, session_id, **kwargs):
-        calls.append(("auto", tool_calls_made, output, session_id, kwargs))
-
     async def harvest(session_id, harvested_messages, **kwargs):
         calls.append(("harvest", session_id, harvested_messages, kwargs))
 
@@ -349,7 +348,7 @@ async def test_async_session_effects_awaits_async_callbacks():
     effective_org_id = await session_effects_module.async_apply_agent_session_side_effects(
         session_id="session-1",
         messages=messages,
-        output="A long enough output to be eligible for auto encode if the tools acted.",
+        output="A routine file-change result long enough to exercise session side effects.",
         system_prompt="system",
         tokens=tokens,
         tool_calls_made=["write_file"],
@@ -359,13 +358,56 @@ async def test_async_session_effects_awaits_async_callbacks():
         idea_id="idea-1",
         run_id=42,
         memory_org_for_user=memory_org,
-        auto_encode_if_needed=auto_encode,
         harvest_session=harvest,
         save_session=save,
     )
 
     assert effective_org_id == "org-from-memory"
-    assert [call[0] for call in calls] == ["memory_org", "auto", "harvest", "save"]
-    assert calls[1][4]["org_id"] == "org-from-memory"
-    assert calls[2][3]["org_id"] == "org-from-memory"
-    assert calls[3][4] == (10, 5, 2, 1)
+    assert [call[0] for call in calls] == ["memory_org", "harvest", "save"]
+    assert calls[1][3]["org_id"] == "org-from-memory"
+    assert calls[2][4] == (10, 5, 2, 1)
+
+
+@pytest.mark.asyncio
+async def test_file_touching_routine_answer_creates_no_memory_nodes(
+    async_sqlite_session_factory,
+    monkeypatch,
+):
+    session = await async_sqlite_session_factory([MemoryNode.__table__])
+
+    async def add_memory(*, content, memory_type, **kwargs):
+        del kwargs
+        session.add(
+            MemoryNode(
+                node_kind="content",
+                content_kind=memory_type,
+                canonical_label="unexpected automatic memory",
+                text=content,
+                normalized_key="unexpected automatic memory",
+                scope_key="default",
+                visibility="private",
+            )
+        )
+        await session.flush()
+
+    monkeypatch.setattr("brain.app.cli.memory.add_memory", add_memory)
+    harvest = AsyncMock()
+
+    await session_effects_module.async_apply_agent_session_side_effects(
+        session_id="session-routine-file-change",
+        messages=[{"role": "user", "content": "Update the file."}],
+        output=(
+            "Updated the requested configuration file and verified the routine change "
+            "without discovering any durable lesson."
+        ),
+        system_prompt="system",
+        tokens=SimpleNamespace(input=10, output=5, cache_read=0, cache_creation=0),
+        tool_calls_made=["write_file"],
+        user_id="user-1",
+        metadata={"org_id": "org-1"},
+        persist_session=False,
+        harvest_session=harvest,
+    )
+
+    harvest.assert_awaited_once()
+    assert await session.scalar(select(func.count()).select_from(MemoryNode)) == 0

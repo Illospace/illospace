@@ -367,15 +367,12 @@ class TestRuntimeExtractionContracts:
         # Non-repeating calls: no reminder.
         assert _inject_nudges(["read_file:{}", "write_file:{}", "list_files:{}"]) is None
 
-    def test_session_effects_apply_auto_harvest_and_save(self):
+    def test_session_effects_apply_harvest_and_save(self):
         from brain.systems.runs.direct_loop.session_effects import apply_agent_session_side_effects
 
         calls = []
         tokens = SimpleNamespace(input=10, output=5, cache_read=2, cache_creation=1)
         messages = [{"role": "user", "content": "hello"}]
-
-        def auto_encode(tool_calls_made, output, session_id, **kwargs):
-            calls.append(("auto", tool_calls_made, output, session_id, kwargs))
 
         def harvest(session_id, harvested_messages, **kwargs):
             calls.append(("harvest", session_id, harvested_messages, kwargs))
@@ -390,7 +387,7 @@ class TestRuntimeExtractionContracts:
         effective_org_id = apply_agent_session_side_effects(
             session_id="session-1",
             messages=messages,
-            output="A long enough output to be eligible for auto encode if the tools acted.",
+            output="A routine file-change result long enough to exercise session side effects.",
             system_prompt="system",
             tokens=tokens,
             tool_calls_made=["write_file"],
@@ -400,13 +397,11 @@ class TestRuntimeExtractionContracts:
             idea_id="idea-1",
             run_id=42,
             memory_org_for_user=memory_org,
-            auto_encode_if_needed=auto_encode,
             harvest_session=harvest,
             save_session=save,
         )
 
         assert effective_org_id == "org-from-agent-run"
-        assert [call[0] for call in calls] == ["auto", "harvest", "save"]
-        assert calls[0][4]["org_id"] == "org-from-agent-run"
-        assert calls[1][3]["org_id"] == "org-from-agent-run"
-        assert calls[2][4] == (10, 5, 2, 1)
+        assert [call[0] for call in calls] == ["harvest", "save"]
+        assert calls[0][3]["org_id"] == "org-from-agent-run"
+        assert calls[1][4] == (10, 5, 2, 1)
