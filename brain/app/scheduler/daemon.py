@@ -1,6 +1,7 @@
 """Scheduler daemon and operational health helpers."""
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
@@ -15,8 +16,10 @@ from brain.platform.db.models.scheduler import (
     SchedulerRun,
 )
 from brain.app.scheduler.catalog import (
+    DEFAULT_SCHEDULER_TIMEZONE,
     async_list_scheduler_jobs,
     async_list_scheduler_runs,
+    async_sync_scheduler_catalog,
     normalize_owner_mode,
 )
 from brain.app.scheduler.executor import async_drain_scheduler
@@ -25,6 +28,8 @@ from brain.app.scheduler.runtime import (
     async_reclaim_expired_leases,
     normalize_run_status,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -227,6 +232,47 @@ async def async_scheduler_health_snapshot(
         active_leases=active_leases,
         expired_leases=expired_leases,
     )
+
+
+async def async_scheduler_daemon_startup(
+    session: AsyncSession,
+    *,
+    owner_mode: str = OWNER_MODE_SCHEDULER,
+    timezone_name: str = DEFAULT_SCHEDULER_TIMEZONE,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Synchronize the built-in catalog before the daemon starts draining work."""
+    now = now or _utc_now()
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+
+    owner_mode = normalize_owner_mode(owner_mode)
+    catalog = await async_sync_scheduler_catalog(
+        session,
+        owner_mode=owner_mode,
+        timezone_name=timezone_name,
+        now=now,
+    )
+    snapshot = await async_scheduler_health_snapshot(
+        session,
+        owner_mode=owner_mode,
+        now=now,
+    )
+    logger.info(
+        "Scheduler catalog synchronized at daemon startup: upserted=%s retired=%s "
+        "jobs_total=%s jobs_enabled=%s",
+        catalog["upserted"],
+        catalog["retired"],
+        snapshot["summary"]["jobs_total"],
+        snapshot["summary"]["jobs_enabled"],
+    )
+    await session.flush()
+    return {
+        "ok": True,
+        "owner_mode": owner_mode,
+        "catalog": catalog,
+        "snapshot": snapshot,
+    }
 
 
 async def async_scheduler_daemon_tick(

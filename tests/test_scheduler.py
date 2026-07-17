@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
 
-from brain.platform.db.models.scheduler import SchedulerJob, SchedulerLease, SchedulerRun, SchedulerRunStep
+import brain.app.scheduler.catalog as scheduler_catalog
 from brain.app.scheduler.catalog import async_list_scheduler_jobs, async_sync_scheduler_catalog
 from brain.app.scheduler.contracts import (
     extract_declared_actions,
@@ -19,7 +19,11 @@ from brain.app.scheduler.contracts import (
     validate_declared_actions,
     validate_recurring_task_contract,
 )
-from brain.app.scheduler.daemon import async_scheduler_daemon_tick, async_scheduler_health_snapshot
+from brain.app.scheduler.daemon import (
+    async_scheduler_daemon_startup,
+    async_scheduler_daemon_tick,
+    async_scheduler_health_snapshot,
+)
 from brain.app.scheduler.executor import (
     async_execute_scheduler_run,
     async_run_scheduler_run,
@@ -38,6 +42,7 @@ from brain.app.scheduler.runtime import (
     async_reclaim_expired_leases,
     async_update_run_step,
 )
+from brain.platform.db.models.scheduler import SchedulerJob, SchedulerLease, SchedulerRun, SchedulerRunStep
 
 pytestmark = pytest.mark.asyncio
 
@@ -120,7 +125,7 @@ async def test_sync_scheduler_catalog_seeds_scheduler_jobs_without_cron_table(se
     result = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=now)
     await session.flush()
 
-    assert result == {"upserted": 2}
+    assert result == {"upserted": 2, "retired": 0}
     jobs = {job["job_key"]: job for job in await async_list_scheduler_jobs(session)}
     assert set(jobs) == {"curiosity_cron", "nightly_sleep"}
     assert jobs["nightly_sleep"]["owner_mode"] == "scheduler"
@@ -132,6 +137,70 @@ async def test_sync_scheduler_catalog_seeds_scheduler_jobs_without_cron_table(se
         assert not job["handler_ref"].endswith(".sh")
         assert "script_path" not in job["default_payload"]
         assert "legacy_cron_retired" not in job["default_payload"]
+
+
+async def test_sync_scheduler_catalog_is_idempotent_and_reseeds_forward_on_restart(session):
+    first_boot = datetime(2026, 4, 20, 0, 0, tzinfo=timezone.utc)
+    await async_sync_scheduler_catalog(session, timezone_name="UTC", now=first_boot)
+    first_jobs = {job.job_key: job for job in (await session.scalars(select(SchedulerJob))).all()}
+    first_ids = {key: job.id for key, job in first_jobs.items()}
+
+    restart = datetime(2026, 4, 21, 23, 0, tzinfo=timezone.utc)
+    result = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=restart)
+    jobs = {job.job_key: job for job in (await session.scalars(select(SchedulerJob))).all()}
+
+    assert result == {"upserted": 2, "retired": 0}
+    assert await session.scalar(select(func.count()).select_from(SchedulerJob)) == 2
+    assert {key: job.id for key, job in jobs.items()} == first_ids
+    assert all(job.next_run_at > restart for job in jobs.values())
+    assert await async_materialize_due_runs(session, now=restart) == []
+
+
+async def test_sync_scheduler_catalog_first_registration_never_backfills_missed_runs(session):
+    now = datetime(2026, 4, 21, 3, 5, tzinfo=timezone.utc)
+
+    await async_sync_scheduler_catalog(session, timezone_name="UTC", now=now)
+    jobs = {job.job_key: job for job in (await session.scalars(select(SchedulerJob))).all()}
+
+    assert jobs["nightly_sleep"].next_run_at.isoformat().startswith("2026-04-22T03:00:00")
+    assert jobs["curiosity_cron"].next_run_at.isoformat().startswith("2026-04-21T22:00:00")
+
+
+async def test_sync_scheduler_catalog_retires_jobs_dropped_from_full_catalog(session, monkeypatch):
+    now = datetime(2026, 4, 21, 0, 0, tzinfo=timezone.utc)
+    await async_sync_scheduler_catalog(session, timezone_name="UTC", now=now)
+    monkeypatch.setattr(
+        scheduler_catalog,
+        "SCHEDULER_CATALOG",
+        tuple(
+            definition
+            for definition in scheduler_catalog.SCHEDULER_CATALOG
+            if definition["job_key"] == "nightly_sleep"
+        ),
+    )
+
+    result = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=now)
+    jobs = {job.job_key: job for job in (await session.scalars(select(SchedulerJob))).all()}
+
+    assert result == {"upserted": 1, "retired": 1}
+    assert jobs["nightly_sleep"].enabled is True
+    assert jobs["curiosity_cron"].enabled is False
+    assert jobs["curiosity_cron"].pause_reason == "removed from scheduler catalog"
+
+    repeated = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=now)
+    assert repeated == {"upserted": 1, "retired": 0}
+
+
+async def test_scheduler_daemon_startup_syncs_catalog_before_snapshot(session):
+    now = datetime(2026, 4, 21, 0, 0, tzinfo=timezone.utc)
+
+    result = await async_scheduler_daemon_startup(session, now=now, timezone_name="UTC")
+
+    assert result["ok"] is True
+    assert result["catalog"] == {"upserted": 2, "retired": 0}
+    assert result["snapshot"]["summary"]["jobs_total"] == 2
+    assert result["snapshot"]["summary"]["jobs_enabled"] == 2
+    assert all(job["next_run_at"] > now.isoformat() for job in result["snapshot"]["jobs"])
 
 
 async def test_due_run_materialization_records_scheduler_jobs(session):
@@ -772,6 +841,57 @@ async def test_async_run_scheduler_run_persists_step_failures_and_resumes(sessio
     ).all()
     assert all(step.status == RUN_STATUS_SETTLED_SUCCESS for step in steps)
     assert all("brain.jobs.pipelines.consolidate" not in call for call in calls)
+
+
+async def test_scheduler_step_crash_is_persisted_in_snapshot_and_logs(session, caplog):
+    job = _make_scheduler_job(
+        default_payload={
+            "name": "Nightly Sleep",
+            "step_plan": [
+                {
+                    "step_key": "memory_consolidation",
+                    "sequence_no": 1,
+                    "command": "python3 -m brain.jobs.pipelines.consolidate --phase all",
+                }
+            ],
+        },
+    )
+    session.add(job)
+    await session.flush()
+    run = (
+        await async_materialize_due_runs(
+            session,
+            now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
+        )
+    )[0]
+
+    def crashing_runner(command, *, cwd=None):
+        raise RuntimeError("consolidation process crashed")
+
+    failed = await async_run_scheduler_run(
+        session,
+        run.id,
+        owner_id="tester",
+        runner=crashing_runner,
+        now=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
+    )
+    snapshot = await async_scheduler_health_snapshot(
+        session,
+        now=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
+    )
+    step = await session.scalar(
+        select(SchedulerRunStep).where(SchedulerRunStep.run_id == run.id)
+    )
+
+    assert failed.status == "retryable"
+    assert failed.error_text == "RuntimeError: consolidation process crashed"
+    assert step is not None
+    assert step.status == "retryable"
+    assert step.result_summary["results"][0]["exception_type"] == "RuntimeError"
+    assert snapshot["health"]["status"] == "degraded"
+    assert snapshot["runs"][0]["status"] == "retryable"
+    assert snapshot["runs"][0]["error_text"] == failed.error_text
+    assert "Scheduler step crashed" in caplog.text
 
 
 async def test_retry_policy_backoff_controls_automatic_reclaim(session):

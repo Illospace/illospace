@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import shlex
 import socket
@@ -58,6 +59,7 @@ from brain.app.scheduler.runtime import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 Runner = Callable[..., Any]
+logger = logging.getLogger(__name__)
 
 _FINAL_RUN_STATUSES = {
     RUN_STATUS_SETTLED_SUCCESS,
@@ -467,11 +469,56 @@ async def _async_run_step(
     env = _shell_env(job, run, step.step_key)
     results: list[dict[str, Any]] = []
     for command in commands:
-        proc = await _call_runner(runner, command, env=env, timeout_seconds=job.timeout_seconds)
+        try:
+            proc = await _call_runner(
+                runner,
+                command,
+                env=env,
+                timeout_seconds=job.timeout_seconds,
+            )
+        except Exception as exc:
+            error_text = f"{type(exc).__name__}: {exc}"
+            results.append(
+                {
+                    "command": list(command),
+                    "exception_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            logger.exception(
+                "Scheduler step crashed: run_id=%s job_key=%s step_key=%s command=%s",
+                run.id,
+                job.job_key,
+                step.step_key,
+                list(command),
+            )
+            await async_update_run_step(
+                session,
+                step,
+                status=RUN_STATUS_RETRYABLE,
+                finished_at=now,
+                result_summary={"results": results},
+                error_text=error_text,
+            )
+            return {
+                "ok": False,
+                "step_key": step.step_key,
+                "results": results,
+                "error": error_text,
+            }
         summary = {"command": list(command), **_command_summary(proc)}
         results.append(summary)
         if int(getattr(proc, "returncode", 1)) != 0:
             error_text = summary["stderr_tail"] or summary["stdout_tail"] or "step failed"
+            logger.error(
+                "Scheduler step failed: run_id=%s job_key=%s step_key=%s "
+                "returncode=%s error=%s",
+                run.id,
+                job.job_key,
+                step.step_key,
+                summary["returncode"],
+                error_text,
+            )
             await async_update_run_step(
                 session,
                 step,
