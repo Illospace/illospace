@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _current_runtime_secret_context
+from brain.systems.slack.client import SlackDeliveryError
 from brain.systems.slack.uploads import slack_image_upload_from_data_url
 
 
@@ -243,7 +244,7 @@ async def _handle_post_slack_reply(
 ) -> str:
     """Post an Illo-authored reply to the originating Slack surface."""
 
-    text = str(body or "").strip()
+    text = str(body or "")
     try:
         image_upload = slack_image_upload_from_data_url(
             image_data,
@@ -253,7 +254,7 @@ async def _handle_post_slack_reply(
         )
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
-    if not text and image_upload is None:
+    if not text.strip() and image_upload is None:
         return json.dumps({"error": "post_slack_reply requires body or image_data"})
 
     trigger = _current_slack_trigger()
@@ -288,7 +289,7 @@ async def _handle_post_slack_reply(
                 file_bytes=image_upload.file_bytes,
                 filename=image_upload.filename,
                 title=image_upload.title,
-                initial_comment=text or None,
+                initial_comment=text if text.strip() else None,
                 thread_ts=target_thread_ts,
                 alt_txt=image_upload.alt_txt,
                 content_type=image_upload.content_type,
@@ -310,9 +311,24 @@ async def _handle_post_slack_reply(
                 thread_ts=target_thread_ts,
             )
         await _clear_processing_status(client, trigger)
+    except SlackDeliveryError as exc:
+        return json.dumps(exc.to_result())
     except Exception as exc:
-        return json.dumps({"error": str(exc)})
+        return json.dumps(
+            {
+                "ok": False,
+                "error": str(exc),
+                "submitted_chars": len(text),
+                "posted_chars": None,
+                "submitted_bytes": len(text.encode("utf-8")),
+                "posted_bytes": None,
+                "chunk_count": 0,
+                "truncated": None,
+            }
+        )
 
+    submitted_chars = int(response.get("submitted_chars", len(text)))
+    posted_chars = int(response.get("posted_chars", submitted_chars))
     return json.dumps(
         {
             "ok": True,
@@ -320,6 +336,12 @@ async def _handle_post_slack_reply(
             "thread_ts": target_thread_ts,
             "visibility": target_visibility,
             "uploaded_image": image_upload is not None,
+            "submitted_chars": submitted_chars,
+            "posted_chars": posted_chars,
+            "submitted_bytes": int(response.get("submitted_bytes", len(text.encode("utf-8")))),
+            "posted_bytes": int(response.get("posted_bytes", len(text.encode("utf-8")))),
+            "chunk_count": int(response.get("chunk_count", 1)),
+            "truncated": bool(response.get("truncated", posted_chars != submitted_chars)),
             "slack": response,
         },
         default=str,

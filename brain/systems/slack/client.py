@@ -8,6 +8,11 @@ from typing import Any
 from brain.platform.async_io import async_http_client
 
 
+# Slack recommends at most 4,000 characters for a top-level ``text`` field.
+# Split before the API boundary so a receiver-side limit cannot discard the lede.
+SLACK_MESSAGE_TEXT_CHARS = 4000
+
+
 class SlackConfigurationError(RuntimeError):
     """Raised when the self-hosted Slack connector is not configured."""
 
@@ -25,6 +30,69 @@ class SlackApiError(RuntimeError):
             else ""
         )
         super().__init__(f"{error}: {details}" if details else error)
+
+
+class SlackDeliveryError(SlackApiError):
+    """Raised when Slack cannot prove that submitted text was stored intact."""
+
+    def __init__(
+        self,
+        error: str,
+        *,
+        submitted_text: str,
+        posted_text: str | None,
+        chunk_count: int,
+        detail: str,
+    ) -> None:
+        self.submitted_chars = len(submitted_text)
+        self.posted_chars = len(posted_text) if posted_text is not None else None
+        self.submitted_bytes = len(submitted_text.encode("utf-8"))
+        self.posted_bytes = len(posted_text.encode("utf-8")) if posted_text is not None else None
+        self.chunk_count = chunk_count
+        self.truncated = None if posted_text is None else posted_text != submitted_text
+        self.detail = detail
+        super().__init__(error)
+
+    def to_result(self) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": self.error,
+            "detail": self.detail,
+            "submitted_chars": self.submitted_chars,
+            "posted_chars": self.posted_chars,
+            "submitted_bytes": self.submitted_bytes,
+            "posted_bytes": self.posted_bytes,
+            "chunk_count": self.chunk_count,
+            "truncated": self.truncated,
+        }
+
+
+def _message_text_chunks(text: str) -> list[str]:
+    if not text:
+        return [text]
+    return [
+        text[start : start + SLACK_MESSAGE_TEXT_CHARS]
+        for start in range(0, len(text), SLACK_MESSAGE_TEXT_CHARS)
+    ]
+
+
+def _stored_message_text(response: dict[str, Any]) -> str | None:
+    message = response.get("message")
+    if not isinstance(message, dict) or not isinstance(message.get("text"), str):
+        return None
+    return message["text"]
+
+
+def _posted_message_ts(response: dict[str, Any]) -> str | None:
+    message = response.get("message") if isinstance(response.get("message"), dict) else {}
+    return str(response.get("ts") or message.get("ts") or "").strip() or None
+
+
+def _response_warns_of_truncation(response: dict[str, Any]) -> bool:
+    metadata = response.get("response_metadata")
+    warnings = metadata.get("warnings") if isinstance(metadata, dict) else []
+    values = [response.get("warning"), *(warnings if isinstance(warnings, list) else [])]
+    return any(str(value or "").strip() == "message_truncated" for value in values)
 
 
 class SlackWebClient:
@@ -92,13 +160,85 @@ class SlackWebClient:
         text: str,
         thread_ts: str | None = None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "channel": channel,
-            "text": text,
-        }
-        if thread_ts:
-            payload["thread_ts"] = thread_ts
-        return await self._post("chat.postMessage", payload)
+        submitted_text = str(text)
+        chunks = _message_text_chunks(submitted_text)
+        responses: list[dict[str, Any]] = []
+        stored_chunks: list[str] = []
+        continuation_thread_ts = thread_ts
+
+        for index, chunk in enumerate(chunks):
+            payload: dict[str, Any] = {"channel": channel, "text": chunk}
+            if continuation_thread_ts:
+                payload["thread_ts"] = continuation_thread_ts
+            try:
+                response = await self._post("chat.postMessage", payload)
+            except Exception as exc:
+                if not responses:
+                    raise
+                raise SlackDeliveryError(
+                    "slack_message_delivery_incomplete",
+                    submitted_text=submitted_text,
+                    posted_text="".join(stored_chunks),
+                    chunk_count=len(responses),
+                    detail=f"Slack failed while posting continuation {index + 1} of {len(chunks)}: {exc}",
+                ) from exc
+
+            responses.append(response)
+            stored_text = _stored_message_text(response)
+            if stored_text is None:
+                raise SlackDeliveryError(
+                    "slack_message_delivery_unverified",
+                    submitted_text=submitted_text,
+                    posted_text=None,
+                    chunk_count=len(responses),
+                    detail="Slack returned ok without message.text, so delivery integrity cannot be verified.",
+                )
+            stored_chunks.append(stored_text)
+            if stored_text != chunk or _response_warns_of_truncation(response):
+                raise SlackDeliveryError(
+                    "slack_message_delivery_mismatch",
+                    submitted_text=submitted_text,
+                    posted_text="".join(stored_chunks),
+                    chunk_count=len(responses),
+                    detail=(
+                        f"Slack stored {len(stored_text)} of {len(chunk)} characters "
+                        f"for chunk {index + 1} of {len(chunks)}."
+                    ),
+                )
+
+            if index == 0 and len(chunks) > 1 and not continuation_thread_ts:
+                continuation_thread_ts = _posted_message_ts(response)
+                if not continuation_thread_ts:
+                    raise SlackDeliveryError(
+                        "slack_message_delivery_unverified",
+                        submitted_text=submitted_text,
+                        posted_text="".join(stored_chunks),
+                        chunk_count=len(responses),
+                        detail="Slack returned ok without a message timestamp for threaded continuations.",
+                    )
+
+        posted_text = "".join(stored_chunks)
+        result = dict(responses[0])
+        result.update(
+            {
+                "submitted_chars": len(submitted_text),
+                "posted_chars": len(posted_text),
+                "submitted_bytes": len(submitted_text.encode("utf-8")),
+                "posted_bytes": len(posted_text.encode("utf-8")),
+                "chunk_count": len(responses),
+                "truncated": posted_text != submitted_text,
+            }
+        )
+        if len(responses) > 1:
+            result["continuations"] = [
+                {
+                    "channel": response.get("channel"),
+                    "ts": _posted_message_ts(response),
+                    "posted_chars": len(stored_chunk),
+                }
+                for response, stored_chunk in zip(responses[1:], stored_chunks[1:])
+            ]
+        return result
 
     async def post_ephemeral(
         self,
@@ -108,14 +248,43 @@ class SlackWebClient:
         text: str,
         thread_ts: str | None = None,
     ) -> dict[str, Any]:
+        submitted_text = str(text)
+        if len(submitted_text) > SLACK_MESSAGE_TEXT_CHARS:
+            raise SlackDeliveryError(
+                "slack_ephemeral_message_too_long",
+                submitted_text=submitted_text,
+                posted_text="",
+                chunk_count=0,
+                detail=(
+                    "Ephemeral Slack messages cannot be verified or continued safely; "
+                    f"the {len(submitted_text)}-character message was not posted."
+                ),
+            )
         payload: dict[str, Any] = {
             "channel": channel,
             "user": user,
-            "text": text,
+            "text": submitted_text,
         }
         if thread_ts:
             payload["thread_ts"] = thread_ts
-        return await self._post("chat.postEphemeral", payload)
+        result = await self._post("chat.postEphemeral", payload)
+        if _response_warns_of_truncation(result):
+            raise SlackDeliveryError(
+                "slack_message_delivery_mismatch",
+                submitted_text=submitted_text,
+                posted_text=None,
+                chunk_count=1,
+                detail="Slack warned that the ephemeral message was truncated.",
+            )
+        return {
+            **result,
+            "submitted_chars": len(submitted_text),
+            "posted_chars": len(submitted_text),
+            "submitted_bytes": len(submitted_text.encode("utf-8")),
+            "posted_bytes": len(submitted_text.encode("utf-8")),
+            "chunk_count": 1,
+            "truncated": False,
+        }
 
     async def upload_file(
         self,
@@ -130,6 +299,18 @@ class SlackWebClient:
         content_type: str = "application/octet-stream",
     ) -> dict[str, Any]:
         """Upload bytes through Slack's external upload flow and share the file."""
+
+        if initial_comment and len(initial_comment) > SLACK_MESSAGE_TEXT_CHARS:
+            raise SlackDeliveryError(
+                "slack_file_comment_too_long",
+                submitted_text=initial_comment,
+                posted_text="",
+                chunk_count=0,
+                detail=(
+                    "Slack file initial comments cannot be continued safely; "
+                    f"the {len(initial_comment)}-character comment and file were not posted."
+                ),
+            )
 
         upload_request: dict[str, Any] = {
             "filename": filename,
