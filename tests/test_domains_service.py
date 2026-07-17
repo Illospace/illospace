@@ -311,6 +311,230 @@ def _chantier_record_data() -> dict:
     }
 
 
+def test_slack_chantier_declaration_parses_mechanical_contract():
+    from brain.systems.slack.chantier_declare import parse_chantier_declaration
+
+    declaration = parse_chantier_declaration(
+        "<@BILLO> chantier: clothing-intake hardening — "
+        "done means zero pool alerts for a week kind: quality owner: Axel "
+        "next_step: verify prod for seven days "
+        "https://github.com/Illospace/illospace/issues/331 https://example.com/spec"
+    )
+
+    assert declaration is not None
+    assert declaration.slug == "clothing-intake-hardening"
+    assert declaration.title == "clothing-intake hardening"
+    assert declaration.goal == "Done means zero pool alerts for a week"
+    assert declaration.kind == "quality"
+    assert declaration.kind_is_explicit is True
+    assert declaration.owner == "Axel"
+    assert declaration.next_step == "verify prod for seven days"
+    assert declaration.mirror_repo_suggestion == "Illospace/illospace"
+    assert declaration.refs == (
+        {
+            "source": "github",
+            "ref": "github:Illospace/illospace:issue:331",
+            "title": "GitHub issue Illospace/illospace#331",
+        },
+        {"source": "url", "ref": "https://example.com/spec"},
+    )
+    assert parse_chantier_declaration("<@BILLO> what chantier are active?") is None
+
+
+async def test_slack_chantier_duplicate_declare_updates_one_record(session):
+    from brain.systems.slack.chantier_declare import maybe_declare_chantier_from_slack
+
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+
+    created = await maybe_declare_chantier_from_slack(
+        session,
+        org_id=ORG_ID,
+        actor_user_id=USER_ID,
+        origin="slack.app_mention",
+        text=(
+            "<@BILLO> chantier: clothing-intake hardening — "
+            "done means zero pool alerts for a week "
+            "https://github.com/Illospace/illospace/issues/331"
+        ),
+    )
+    updated = await maybe_declare_chantier_from_slack(
+        session,
+        org_id=ORG_ID,
+        actor_user_id=USER_ID,
+        origin="slack.app_mention",
+        text=(
+            "<@BILLO> chantier: Clothing intake hardening — "
+            "done means no pool alerts for fourteen days kind: incident owner: Axel "
+            "next_step: watch the production pool through Friday "
+            "https://example.com/runbook"
+        ),
+    )
+
+    records = await service.list_records(
+        ORG_ID,
+        domain.id,
+        object_key="chantier",
+    )
+    assert created is not None and created.operation == "created"
+    assert created.needs_next_step is True
+    assert updated is not None and updated.operation == "updated"
+    assert updated.record_id == created.record_id
+    assert updated.version == 2
+    assert updated.needs_next_step is False
+    assert len(records) == 1
+    assert records[0].data["slug"] == "clothing-intake-hardening"
+    assert records[0].data["goal"] == "Done means no pool alerts for fourteen days"
+    assert records[0].data["kind"] == "incident"
+    assert records[0].data["owner"] == "Axel"
+    assert records[0].data["next_step"] == "watch the production pool through Friday"
+    assert records[0].data["refs"] == [
+        {
+            "source": "github",
+            "ref": "github:Illospace/illospace:issue:331",
+            "title": "GitHub issue Illospace/illospace#331",
+        },
+        {"source": "url", "ref": "https://example.com/runbook"},
+    ]
+
+
+async def test_slack_chantier_declare_matches_obvious_title_and_reuses_parent_mirror(session):
+    from brain.systems.slack.chantier_declare import maybe_declare_chantier_from_slack
+
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+    existing = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "chantier",
+        data=_chantier_record_data(),
+    )
+
+    result = await maybe_declare_chantier_from_slack(
+        session,
+        org_id=ORG_ID,
+        actor_user_id=USER_ID,
+        origin="slack.app_mention",
+        text=(
+            "<@BILLO> chantier: Agent runtime chantier layer — "
+            "done means every member arrives with the same outcome context"
+        ),
+    )
+
+    records = await service.list_records(ORG_ID, domain.id, object_key="chantier")
+    assert result is not None and result.operation == "updated"
+    assert result.record_id == existing.id
+    assert result.data["slug"] == "agent-runtime-keystone"
+    assert result.mirror_status == "linked"
+    assert result.data["parent_issue"] == "github:Illospace/illospace:issue:326"
+    assert [record.id for record in records] == [existing.id]
+
+
+async def test_slack_chantier_router_does_not_create_without_keyword(session):
+    from brain.systems.slack.chantier_declare import maybe_declare_chantier_from_slack
+
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+
+    ordinary_mention = await maybe_declare_chantier_from_slack(
+        session,
+        org_id=ORG_ID,
+        actor_user_id=USER_ID,
+        origin="slack.app_mention",
+        text="<@BILLO> please harden clothing intake until pool alerts stay at zero",
+    )
+    dm_with_keyword = await maybe_declare_chantier_from_slack(
+        session,
+        org_id=ORG_ID,
+        actor_user_id=USER_ID,
+        origin="slack.direct_message",
+        text="chantier: clothing intake hardening — done means no pool alerts",
+    )
+
+    records = await service.list_records(
+        ORG_ID,
+        domain.id,
+        object_key="chantier",
+    )
+    assert ordinary_mention is None
+    assert dm_with_keyword is None
+    assert records == []
+
+
+async def test_slack_chantier_declare_run_contract_requires_threaded_echo_and_mirror(session):
+    from brain.systems.slack.chantier_declare import (
+        apply_chantier_declare_run_contract,
+        maybe_declare_chantier_from_slack,
+    )
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    service = AsyncDomainService(session)
+    await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+    result = await maybe_declare_chantier_from_slack(
+        session,
+        org_id=ORG_ID,
+        actor_user_id=USER_ID,
+        origin="slack.app_mention",
+        text=(
+            "<@BILLO> chantier: clothing-intake hardening — "
+            "done means zero pool alerts for a week"
+        ),
+    )
+    assert result is not None
+    trigger = build_slack_work_intake_payload(
+        org_id=ORG_ID,
+        authority_user_id=USER_ID,
+        payload={
+            "origin": "slack.app_mention",
+            "team_id": "T789",
+            "channel_id": "C456",
+            "channel_type": "channel",
+            "message_ts": "1716900000.000100",
+            "thread_ts": "1716900000.000100",
+            "slack_user_id": "U123",
+            "text": "<@BILLO> chantier: clothing-intake hardening",
+        },
+    )
+
+    apply_chantier_declare_run_contract(trigger, result=result)
+    request = await build_agent_run_request(
+        object(),
+        WorkIntakeEvent.from_trigger_payload(trigger),
+    )
+
+    metadata = trigger["payload"]["metadata"]
+    run_message = trigger["payload"]["run_message"]
+    assert metadata["slack_trigger"]["response_target"]["thread_ts"] == "1716900000.000100"
+    assert request.target_ref["slack_trigger"]["response_target"]["thread_ts"] == "1716900000.000100"
+    assert metadata["chantier_declare"]["record_id"] == result.record_id
+    assert "Reply with post_slack_reply in the declaration thread" in run_message
+    assert "create_github_issue" in run_message
+    assert "add_github_sub_issue" in run_message
+    assert "mirror pending: <specific reason>" in run_message
+    assert "Ask the teammate for `next_step`" in run_message
+
+
 async def _insert_legacy_pr_record(
     session,
     service: AsyncDomainService,

@@ -53,7 +53,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.6.0"
+    assert bundle.manifest.version == "1.7.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -103,7 +103,11 @@ def test_uwear_triage_bundle_packages_chantier_operations_v2():
         "stated goal or PRD",
         "incident family",
         "Never auto-create a chantier",
-        "Reserved for ticket #331",
+        "ordinary mention without the `chantier` keyword",
+        "second record",
+        "builder-first owner suggestion",
+        "`mirror pending tooling`",
+        "add_github_sub_issue",
     ):
         assert expected in playbook
 
@@ -193,6 +197,21 @@ def test_uwear_triage_memory_delta_fingerprints_exact_bundle_mirrors():
         assert f"characters: `{len(content)}`" in note, label
         assert f"bytes: `{len(encoded)}`" in note, label
         assert f"SHA-256: `{fingerprint}`" in note, label
+
+
+def test_uwear_triage_declare_delta_fingerprints_exact_bundle_mirrors():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    note = (Path(__file__).parents[1] / "docs" / "331-live-delta.md").read_text()
+    content = _uwear_triage_asset(bundle, "references/chantier-operations.md")
+    encoded = content.encode("utf-8")
+    fingerprint = hashlib.sha256(encoded).hexdigest()
+
+    assert f"characters: `{len(content)}`" in note
+    assert f"bytes: `{len(encoded)}`" in note
+    assert f"SHA-256: `{fingerprint}`" in note
 
 
 def test_uwear_triage_skill_distinguishes_internal_tracker_from_real_github_issue():
