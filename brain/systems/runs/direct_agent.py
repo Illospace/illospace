@@ -1898,7 +1898,7 @@ async def run_agent_async(
                 logger.warning("Unknown stop_reason: %s", response.stop_reason)
                 break
 
-        # Post-loop: harvest, auto-encode, save, return
+        # Post-loop: harvest, save, return
         output = _extract_text(state.messages)
         staged_reply_contents = [
             str(content or "").strip()

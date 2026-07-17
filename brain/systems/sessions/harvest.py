@@ -25,8 +25,7 @@ async def _harvest_session(
     Runs the active LLM-based harvest extraction, stores each item as an
     episodic memory, and links extracted topics to project narratives.
 
-    This is an additive step alongside auto-encode — harvest failure never
-    breaks the session close path.
+    Harvest failure never breaks the session close path.
     """
     try:
         from brain.systems.memory.harvest import extract_harvest_items
