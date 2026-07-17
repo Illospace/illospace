@@ -53,7 +53,15 @@ async def _scheduler_loop() -> None:
             with _scheduler_state_lock:
                 if _scheduler_running:
                     _last_tick_ok = time.monotonic()
-        await asyncio.sleep(_poll_interval_sec)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, _poll_interval_sec)
+        if _poll_interval_sec <= 0 and is_cycle_scheduler_running():
+            await asyncio.sleep(0)
+        while is_cycle_scheduler_running():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.5, remaining))
 
 
 def _scheduler_thread_main() -> None:
@@ -80,12 +88,21 @@ def start_cycle_scheduler() -> None:
             _scheduler_task = loop.create_task(_scheduler_loop(), name="cycle-scheduler")
 
 
-def stop_cycle_scheduler() -> None:
-    global _last_tick_ok, _scheduler_running, _scheduler_task
+def stop_cycle_scheduler(join_timeout_seconds: float = 5.0) -> None:
+    global _last_tick_ok, _scheduler_running, _scheduler_task, _scheduler_thread
     with _scheduler_state_lock:
         _scheduler_running = False
         _last_tick_ok = None
         scheduler_task = _scheduler_task
         _scheduler_task = None
+        scheduler_thread = _scheduler_thread
+        _scheduler_thread = None
     if scheduler_task is not None and not scheduler_task.done():
         scheduler_task.cancel()
+    if scheduler_thread is not None and scheduler_thread.is_alive():
+        scheduler_thread.join(join_timeout_seconds)
+        if scheduler_thread.is_alive():
+            logger.warning(
+                "Cycle scheduler thread did not exit within %ss; proceeding with shutdown",
+                join_timeout_seconds,
+            )

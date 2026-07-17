@@ -99,6 +99,117 @@ def test_stop_runner_can_drain_active_slots(monkeypatch):
         runner.stop_runner()
 
 
+def test_stop_runner_returns_when_supervisor_thread_wedged(monkeypatch, caplog):
+    from brain.systems.runs.cortex import runner
+
+    release = threading.Event()
+    supervisor_thread = threading.Thread(target=release.wait, daemon=True)
+    runner.stop_runner()
+    supervisor_thread.start()
+    monkeypatch.setattr(runner, "_runner_supervisor_thread", supervisor_thread)
+    monkeypatch.setenv("ILLO_AGENT_RUNNER_TEARDOWN_TIMEOUT_SECONDS", "0.2")
+    caplog.set_level(logging.WARNING, logger=runner.__name__)
+    try:
+        started = time.monotonic()
+        runner.stop_runner(drain_timeout_seconds=None)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 2
+        assert supervisor_thread.is_alive()
+        assert "runner supervisor did not exit within 0.2s" in caplog.text
+    finally:
+        release.set()
+        supervisor_thread.join(timeout=1)
+        runner.stop_runner()
+        runner._stop_event.clear()
+
+
+def test_stop_runner_waits_for_in_flight_runs():
+    from brain.systems.runs.cortex import runner
+
+    runner.stop_runner()
+    assert runner.runner_in_flight_count() == 0
+    runner._increment_in_flight_runs()
+
+    def finish_run():
+        time.sleep(0.2)
+        runner._decrement_in_flight_runs()
+
+    finisher = threading.Thread(target=finish_run)
+    finisher.start()
+    try:
+        started = time.monotonic()
+        runner.stop_runner(drain_timeout_seconds=5)
+        elapsed = time.monotonic() - started
+
+        assert runner.runner_in_flight_count() == 0
+        assert 0.15 <= elapsed < 2
+    finally:
+        finisher.join(timeout=1)
+        runner._stop_event.clear()
+
+
+async def test_run_queued_once_skips_claim_when_stopping(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    def fail_uow_factory():
+        raise AssertionError("stopping runner must not claim another run")
+
+    runner._stop_event.set()
+    monkeypatch.setattr(runner, "_unit_of_work_factory", fail_uow_factory)
+    try:
+        assert await runner._run_queued_once_async() == 0
+    finally:
+        runner._stop_event.clear()
+
+
+async def test_run_queued_once_tracks_claims_before_uow_exit(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    uow_exit_started = asyncio.Event()
+    release_uow_exit = asyncio.Event()
+
+    class FakeUnitOfWork:
+        session = object()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc_info):
+            uow_exit_started.set()
+            await release_uow_exit.wait()
+
+    class FakeStore:
+        def __init__(self, _session):
+            pass
+
+        async def claim_next_run_ids(self, *, limit):
+            assert limit == 1
+            return [42]
+
+    async def process_claimed_run(_run_id):
+        return True
+
+    runner._stop_event.clear()
+    monkeypatch.setattr(runner, "_unit_of_work_factory", lambda: FakeUnitOfWork)
+    monkeypatch.setattr(runner, "AsyncAgentRunStore", FakeStore)
+    monkeypatch.setattr(runner, "_process_claimed_run_async", process_claimed_run)
+    task = asyncio.create_task(runner._run_queued_once_async())
+    try:
+        await asyncio.wait_for(uow_exit_started.wait(), timeout=1)
+        assert runner.runner_in_flight_count() == 1
+
+        release_uow_exit.set()
+        assert await asyncio.wait_for(task, timeout=1) == 1
+        assert runner.runner_in_flight_count() == 0
+    finally:
+        release_uow_exit.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        runner._stop_event.clear()
+
+
 def test_runner_pool_uses_one_event_loop(monkeypatch):
     from brain.systems.runs.cortex import runner
 
