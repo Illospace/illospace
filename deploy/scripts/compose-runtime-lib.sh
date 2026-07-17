@@ -110,7 +110,12 @@ record_worker_drain_timeout() {
 wait_for_worker_exit() {
   local id="$1"
   local wait_seconds="${COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS:-86400}"
-  local deadline=$((SECONDS + wait_seconds))
+  local started_at="$SECONDS"
+  local deadline=$((started_at + wait_seconds))
+  local wait_iterations=0
+  local consecutive_zero_checks=0
+  local hint_printed=0
+  local active_runs elapsed
   while container_running "$id"; do
     if [ "$SECONDS" -ge "$deadline" ]; then
       echo "Worker did not drain within ${wait_seconds}s; leaving it running to avoid interrupting active AgentRuns." >&2
@@ -118,6 +123,22 @@ wait_for_worker_exit() {
       return 1
     fi
     sleep 5
+    wait_iterations=$((wait_iterations + 1))
+    if [ $((wait_iterations % 6)) -eq 0 ] && container_running "$id"; then
+      active_runs="$(active_agent_run_count)"
+      if [ "$active_runs" = "0" ]; then
+        consecutive_zero_checks=$((consecutive_zero_checks + 1))
+        if [ "$consecutive_zero_checks" -ge 2 ] && [ "$hint_printed" = "0" ]; then
+          elapsed=$((SECONDS - started_at))
+          echo "Hint: worker has 0 active AgentRuns but its process has not exited after ${elapsed}s." >&2
+          echo "Pre-hardening worker images can wedge on SIGTERM (stray non-daemon threads). To force replacement now: docker stop -t 30 $id && compose up -d --no-deps worker, or" >&2
+          echo "deploy/scripts/runtime-services.sh restart worker." >&2
+          hint_printed=1
+        fi
+      else
+        consecutive_zero_checks=0
+      fi
+    fi
   done
 }
 
