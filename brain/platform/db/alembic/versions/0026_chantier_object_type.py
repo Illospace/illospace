@@ -1,7 +1,7 @@
 """Provision the Domain-1 chantier record contract.
 
 Revision ID: 0026_chantier_object_type
-Revises: 0025_pr_tracker_owner_fields
+Revises: 0026_packet_brief_deliveries
 Create Date: 2026-07-16
 """
 
@@ -15,7 +15,7 @@ import sqlalchemy as sa
 
 
 revision = "0026_chantier_object_type"
-down_revision = "0025_pr_tracker_owner_fields"
+down_revision = "0026_packet_brief_deliveries"
 branch_labels = None
 depends_on = None
 
