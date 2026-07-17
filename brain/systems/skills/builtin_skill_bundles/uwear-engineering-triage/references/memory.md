@@ -1,6 +1,6 @@
 # Uwear Engineering Triage — Memory Playbook
-> On-demand mode playbook for Enterprise Documentation Domain `37` record
-> `1275`, slug `uwear-engineering-triage-memory`.
+> On-demand mode playbook for Enterprise Documentation Domain `37`, slug
+> `uwear-engineering-triage-memory`.
 > Core doc: Domain `37` record `1155` (bundled skill
 > `uwear-engineering-triage`); fetch per its **Memory** section.
 

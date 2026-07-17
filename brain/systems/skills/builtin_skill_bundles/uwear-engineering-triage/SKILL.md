@@ -23,29 +23,36 @@ separate Domain `37` records; their live versions override bundled
 ## On-demand Run Modes
 
 Full playbooks stay in separate Domain `37` `doc_page` records so this core
-read remains untruncated. On entering a listed mode, fetch its record FIRST
-with `manage_domain` `action=get_record` `domain_id=37`, then follow it. If
-that fails, use `skill_asset` `name="uwear-engineering-triage"` with the path
-below. If both fail, say so and defer the mode's writes.
+read remains untruncated. Resolve each live record by slug: call `manage_domain`
+`action=query_records` `domain_id=37` `object_key=doc_page` with the slug as
+`search`, inspect all pages, and require exactly one active match whose
+`data.slug` exactly matches. Then call `action=get_record` with its id. Missing,
+duplicate, wrong-type, or cross-domain results fail the live read. Fall back to
+`skill_asset` `name="uwear-engineering-triage"` with the path below; if both
+reads fail, say so and defer writes.
 
-- **Direct customer support** — record `1271`, asset
+- **Direct customer support** — slug `uwear-engineering-triage-customer-support`,
+  asset
   `references/customer-support.md`. Fetch on a customer-support report;
   investigate the generation read-only and form a hypothesis before filing or
   assigning. Always-on: customer-generation issues have NO owner until that
   hypothesis exists (see **Ownership**).
-- **Creating work items** — record `1272`, asset
+- **Creating work items** — slug `uwear-engineering-triage-creating-work-items`,
+  asset
   `references/creating-work-items.md`. Fetch before `create_github_issue` or a
   Domain `1` tracker write. Always-on: one problem = one issue; search open and
   closed GitHub issues plus Domain `1` for the error signature or Rollbar id
   (prefer `rollbar_item`; exact matches never expire). Any match, even closed
   or `Done`, uses the **Deploy-State Ladder**, never a refile; never describe
   an internal tracker record as a GitHub issue.
-- **Backlog maintenance** — record `1273`, asset
+- **Backlog maintenance** — slug `uwear-engineering-triage-backlog-maintenance`,
+  asset
   `references/backlog-maintenance.md`. Covers seeding and `process-design`,
   `no-write-audit`, `live-hygiene-run`; fetch only on a human request, never in
   a scheduled digest. Always-on: never close GitHub issues or PRs without
   delegated authority.
-- **Chantier operations** — record `1274`, asset
+- **Chantier operations** — slug `uwear-engineering-triage-chantier-operations`,
+  asset
   `references/chantier-operations.md`. Fetch before every scheduled digest and
   before filing or recording a new work item. Always-on: check active
   chantiers; attach an exact match, only PROPOSE (never auto-create) an
@@ -65,8 +72,8 @@ counts, run summaries, or “posted to Slack” receipts. Use `confidence=0.9` f
 human-stated facts or approvals; cap inferences at `0.7` and use the lower value
 when mixed.
 
-For selection, dedup wording, and examples, fetch Domain `37` record `1275`,
-asset `references/memory.md`, using the live-first fallback above.
+For selection and dedup examples, resolve slug `uwear-engineering-triage-memory`
+in Domain `37`, asset `references/memory.md`, using the live-first fallback.
 
 ## Coordination Pipeline
 

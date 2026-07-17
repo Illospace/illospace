@@ -53,7 +53,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.7.0"
+    assert bundle.manifest.version == "1.8.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -88,7 +88,7 @@ def test_uwear_triage_bundle_packages_chantier_operations_v2():
     procedure = bundle.skill_markdown
     playbook = _uwear_triage_asset(bundle, "references/chantier-operations.md")
 
-    assert "record `1274`" in procedure
+    assert "slug `uwear-engineering-triage-chantier-operations`" in procedure
     assert "before every scheduled digest" in procedure
     assert "before filing or recording a new work item" in procedure
     for expected in (
@@ -160,7 +160,7 @@ def test_uwear_triage_scheduled_memory_contract():
         "What future runs need:",
         "confidence=0.9",
         "cap inferences at `0.7`",
-        "record `1275`",
+        "slug `uwear-engineering-triage-memory`",
         "`references/memory.md`",
     ):
         assert expected in procedure
@@ -186,7 +186,7 @@ def test_uwear_triage_memory_delta_fingerprints_exact_bundle_mirrors():
     from brain.systems.skills.bundles import load_skill_bundle
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
-    note = (Path(__file__).parents[1] / "docs" / "344-live-delta.md").read_text()
+    note = (Path(__file__).parents[1] / "docs" / "329-live-delta.md").read_text()
     mirrors = (
         (bundle.skill_markdown, "v9"),
         (
@@ -342,6 +342,30 @@ def test_builtin_skills_have_structured_routing_metadata():
         assert _has_text_items(skill["triggers"], "pattern")
         assert _has_text_items(skill["guardrails"], "text")
         assert all(item.get("severity") for item in skill["guardrails"])
+
+
+def test_uwear_triage_resolves_every_on_demand_playbook_by_exact_slug():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    procedure = bundle.skill_markdown
+
+    for slug in (
+        "uwear-engineering-triage-customer-support",
+        "uwear-engineering-triage-creating-work-items",
+        "uwear-engineering-triage-backlog-maintenance",
+        "uwear-engineering-triage-chantier-operations",
+        "uwear-engineering-triage-memory",
+    ):
+        assert f"slug `{slug}`" in procedure
+
+    normalized = " ".join(procedure.split())
+    assert "whose `data.slug` exactly matches" in normalized
+    assert "require exactly one active match" in normalized
+    assert "action=get_record" in normalized
+    for record_id in range(1271, 1276):
+        assert f"record `{record_id}`" not in procedure
 
 
 def test_builtin_skills_have_explicit_role_boundaries():
