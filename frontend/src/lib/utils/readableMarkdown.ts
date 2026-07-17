@@ -96,6 +96,38 @@ function renderParagraph(lines: string[]): string {
   return `<p>${applyInlineMarkdown(lines.join('<br/>'))}</p>`;
 }
 
+function isTableRow(line: string): boolean {
+  return /^\|.*\|$/.test(line) && line.length > 1;
+}
+
+function splitTableRow(line: string): string[] {
+  return line
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim());
+}
+
+function isTableSeparatorRow(line: string): boolean {
+  if (!isTableRow(line)) return false;
+  const cells = splitTableRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
+}
+
+function renderTable(headerCells: string[], bodyRows: string[][]): string {
+  const head = headerCells.map((cell) => `<th>${applyInlineMarkdown(cell)}</th>`).join('');
+  const body = bodyRows
+    .map((cells) => {
+      const columns = headerCells
+        .map((_cell, index) => `<td>${applyInlineMarkdown(cells[index] ?? '')}</td>`)
+        .join('');
+      return `<tr>${columns}</tr>`;
+    })
+    .join('');
+  const bodyHtml = body ? `<tbody>${body}</tbody>` : '';
+  return `<div class="md-table-wrap"><table><thead><tr>${head}</tr></thead>${bodyHtml}</table></div>`;
+}
+
 function restorePlaceholders(html: string, codeBlocks: string[], inlineCodes: string[]): string {
   return html
     .replace(new RegExp(`${CODE_BLOCK_TOKEN}(\\d+)\\u0000`, 'g'), (_match, idx) => codeBlocks[Number(idx)] || '')
@@ -156,11 +188,29 @@ export function renderReadableMarkdown(markdown: string): string {
     orderedContinuationStart = null;
   };
 
-  for (const line of processed.split('\n')) {
+  const lines = processed.split('\n');
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     const trimmed = line.trim();
     if (!trimmed) {
       flushParagraph();
       flushList();
+      continue;
+    }
+
+    if (isTableRow(trimmed) && isTableSeparatorRow((lines[index + 1] ?? '').trim())) {
+      flushParagraph();
+      flushList();
+      resetOrderedContinuation();
+      const headerCells = splitTableRow(trimmed);
+      const bodyRows: string[][] = [];
+      let cursor = index + 2;
+      while (cursor < lines.length && isTableRow(lines[cursor].trim())) {
+        bodyRows.push(splitTableRow(lines[cursor].trim()));
+        cursor += 1;
+      }
+      blocks.push(renderTable(headerCells, bodyRows));
+      index = cursor - 1;
       continue;
     }
 

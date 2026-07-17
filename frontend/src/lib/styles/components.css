@@ -289,6 +289,33 @@
   background: var(--content-code-background);
 }
 
+.constellation-prose .md-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.constellation-prose .md-table-wrap table {
+  width: max-content;
+  min-width: min(100%, 320px);
+  border-collapse: collapse;
+  font-size: 0.94em;
+  line-height: var(--leading-normal);
+}
+
+.constellation-prose .md-table-wrap th,
+.constellation-prose .md-table-wrap td {
+  border: 1px solid var(--border-2);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.constellation-prose .md-table-wrap th {
+  color: var(--constellation-prose-heading);
+  background: var(--content-code-background);
+  font-weight: var(--weight-semibold);
+}
+
 .constellation-prose .md-code-block code {
   border: 0;
   padding: 0;

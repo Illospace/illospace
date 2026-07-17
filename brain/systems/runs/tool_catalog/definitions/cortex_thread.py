@@ -236,7 +236,9 @@ CHAT_TOOLS = [
             "attachment object. To show the asset in a Thread, write the returned markdown "
             "or /static/uploads/... route in post_thread_discussion_reply or "
             "post_ai_timeline_message; those tools persist visible attachments from valid "
-            "upload routes automatically."
+            "upload routes automatically. The result also includes viewer_url, an absolute "
+            "no-login link that renders documents as readable pages; share viewer_url when "
+            "linking the asset outside the app (for example in Slack)."
         ),
         "input_schema": {
             "type": "object",

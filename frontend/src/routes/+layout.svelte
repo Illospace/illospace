@@ -40,7 +40,10 @@
   let isCyclesPreviewPage = $derived(
     dev && currentPath === '/cycles' && $page.url.searchParams.get('preview') === '1',
   );
-  let isPreviewPage = $derived(isVaultPreviewPage || isCyclesPreviewPage);
+  // /doc is the public share viewer for published /static/uploads documents:
+  // it renders without a session, nav rail, or login redirect (also in prod).
+  let isDocViewerPage = $derived(currentPath === '/doc');
+  let isPreviewPage = $derived(isVaultPreviewPage || isCyclesPreviewPage || isDocViewerPage);
   let showNavRail = $derived(!auth.loading && !isLoginPage && !isPreviewPage && !isOnboardingPage);
   let showSearch = $state(false);
   let navRailArrivalActive = $state(false);
