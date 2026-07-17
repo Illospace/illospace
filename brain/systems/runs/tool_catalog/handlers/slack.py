@@ -341,7 +341,7 @@ async def _handle_post_slack_reply(
             "submitted_bytes": int(response.get("submitted_bytes", len(text.encode("utf-8")))),
             "posted_bytes": int(response.get("posted_bytes", len(text.encode("utf-8")))),
             "chunk_count": int(response.get("chunk_count", 1)),
-            "truncated": bool(response.get("truncated", posted_chars != submitted_chars)),
+            "truncated": bool(response.get("truncated", False)),
             "slack": response,
         },
         default=str,

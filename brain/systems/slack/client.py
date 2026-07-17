@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from brain.platform.async_io import async_http_client
@@ -33,7 +34,7 @@ class SlackApiError(RuntimeError):
 
 
 class SlackDeliveryError(SlackApiError):
-    """Raised when Slack cannot prove that submitted text was stored intact."""
+    """Raised when Slack cannot prove that submitted text avoided truncation."""
 
     def __init__(
         self,
@@ -42,6 +43,7 @@ class SlackDeliveryError(SlackApiError):
         submitted_text: str,
         posted_text: str | None,
         chunk_count: int,
+        truncated: bool | None,
         detail: str,
     ) -> None:
         self.submitted_chars = len(submitted_text)
@@ -49,7 +51,7 @@ class SlackDeliveryError(SlackApiError):
         self.submitted_bytes = len(submitted_text.encode("utf-8"))
         self.posted_bytes = len(posted_text.encode("utf-8")) if posted_text is not None else None
         self.chunk_count = chunk_count
-        self.truncated = None if posted_text is None else posted_text != submitted_text
+        self.truncated = truncated
         self.detail = detail
         super().__init__(error)
 
@@ -93,6 +95,34 @@ def _response_warns_of_truncation(response: dict[str, Any]) -> bool:
     warnings = metadata.get("warnings") if isinstance(metadata, dict) else []
     values = [response.get("warning"), *(warnings if isinstance(warnings, list) else [])]
     return any(str(value or "").strip() == "message_truncated" for value in values)
+
+
+def _semantic_text_tokens(value: str) -> list[str]:
+    return re.findall(r"[^\W_]+", value.casefold())
+
+
+def _message_lede_survived(submitted_text: str, stored_text: str) -> bool:
+    submitted_lede = _semantic_text_tokens(submitted_text[:256])[:12]
+    if not submitted_lede:
+        return True
+    stored_lede = iter(_semantic_text_tokens(stored_text[:2048]))
+    return all(any(candidate == token for candidate in stored_lede) for token in submitted_lede)
+
+
+def _stored_text_indicates_truncation(submitted_text: str, stored_text: str) -> tuple[bool, str]:
+    # Slack may add link/mention markup and entity escapes, so equality is not
+    # an integrity signal. Be conservative both ways: flag only a material
+    # shortfall (> max(8 chars, 1%)) or loss of the semantic lede. Token order
+    # tolerates markup inserted by Slack without trying to reproduce its rules.
+    allowed_shortfall = max(8, (len(submitted_text) + 99) // 100)
+    materially_shorter = len(stored_text) < len(submitted_text) - allowed_shortfall
+    lede_survived = _message_lede_survived(submitted_text, stored_text)
+    reasons = []
+    if materially_shorter:
+        reasons.append(f"shortfall exceeded {allowed_shortfall} characters")
+    if not lede_survived:
+        reasons.append("semantic lede was not present at the start of Slack's stored text")
+    return bool(reasons), "; ".join(reasons)
 
 
 class SlackWebClient:
@@ -180,6 +210,7 @@ class SlackWebClient:
                     submitted_text=submitted_text,
                     posted_text="".join(stored_chunks),
                     chunk_count=len(responses),
+                    truncated=None,
                     detail=f"Slack failed while posting continuation {index + 1} of {len(chunks)}: {exc}",
                 ) from exc
 
@@ -191,18 +222,24 @@ class SlackWebClient:
                     submitted_text=submitted_text,
                     posted_text=None,
                     chunk_count=len(responses),
+                    truncated=None,
                     detail="Slack returned ok without message.text, so delivery integrity cannot be verified.",
                 )
             stored_chunks.append(stored_text)
-            if stored_text != chunk or _response_warns_of_truncation(response):
+            response_warned = _response_warns_of_truncation(response)
+            looks_truncated, mismatch_reason = _stored_text_indicates_truncation(chunk, stored_text)
+            if response_warned or looks_truncated:
+                reason = "Slack returned message_truncated" if response_warned else mismatch_reason
                 raise SlackDeliveryError(
                     "slack_message_delivery_mismatch",
                     submitted_text=submitted_text,
                     posted_text="".join(stored_chunks),
                     chunk_count=len(responses),
+                    truncated=True,
                     detail=(
-                        f"Slack stored {len(stored_text)} of {len(chunk)} characters "
-                        f"for chunk {index + 1} of {len(chunks)}."
+                        f"Slack stored {len(stored_text)} chars/{len(stored_text.encode('utf-8'))} bytes "
+                        f"for submitted chunk {index + 1} of {len(chunks)} "
+                        f"({len(chunk)} chars/{len(chunk.encode('utf-8'))} bytes): {reason}."
                     ),
                 )
 
@@ -214,6 +251,7 @@ class SlackWebClient:
                         submitted_text=submitted_text,
                         posted_text="".join(stored_chunks),
                         chunk_count=len(responses),
+                        truncated=None,
                         detail="Slack returned ok without a message timestamp for threaded continuations.",
                     )
 
@@ -226,7 +264,7 @@ class SlackWebClient:
                 "submitted_bytes": len(submitted_text.encode("utf-8")),
                 "posted_bytes": len(posted_text.encode("utf-8")),
                 "chunk_count": len(responses),
-                "truncated": posted_text != submitted_text,
+                "truncated": False,
             }
         )
         if len(responses) > 1:
@@ -255,6 +293,7 @@ class SlackWebClient:
                 submitted_text=submitted_text,
                 posted_text="",
                 chunk_count=0,
+                truncated=False,
                 detail=(
                     "Ephemeral Slack messages cannot be verified or continued safely; "
                     f"the {len(submitted_text)}-character message was not posted."
@@ -274,6 +313,7 @@ class SlackWebClient:
                 submitted_text=submitted_text,
                 posted_text=None,
                 chunk_count=1,
+                truncated=True,
                 detail="Slack warned that the ephemeral message was truncated.",
             )
         return {
@@ -306,6 +346,7 @@ class SlackWebClient:
                 submitted_text=initial_comment,
                 posted_text="",
                 chunk_count=0,
+                truncated=False,
                 detail=(
                     "Slack file initial comments cannot be continued safely; "
                     f"the {len(initial_comment)}-character comment and file were not posted."
@@ -334,7 +375,17 @@ class SlackWebClient:
             complete_request["initial_comment"] = initial_comment
         if thread_ts:
             complete_request["thread_ts"] = thread_ts
-        return await self._post("files.completeUploadExternal", complete_request)
+        result = await self._post("files.completeUploadExternal", complete_request)
+        if initial_comment and _response_warns_of_truncation(result):
+            raise SlackDeliveryError(
+                "slack_message_delivery_mismatch",
+                submitted_text=initial_comment,
+                posted_text=None,
+                chunk_count=1,
+                truncated=True,
+                detail="Slack warned that the file's initial comment was truncated.",
+            )
+        return result
 
     async def set_assistant_status(
         self,
