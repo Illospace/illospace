@@ -213,13 +213,20 @@ class TestIntegration:
 
         with patch("brain.app.mcp.server.async_tool_brain_recall", side_effect=fake_recall):
             handlers = _get_tool_handlers()
-            with bind_agent_context(AgentExecutionContext(user_id="user-1", org_id="org-1")):
+            with bind_agent_context(
+                AgentExecutionContext(
+                    user_id="user-1",
+                    org_id="org-1",
+                    run=SimpleNamespace(run_id=42),
+                )
+            ):
                 result = await handlers["brain_recall"](query="deployment notes")
 
         assert result == {"memories": []}
         assert captured["query"] == "deployment notes"
         assert captured["user_id"] == "user-1"
         assert captured["org_id"] == "org-1"
+        assert captured["run_id"] == 42
 
     def test_extended_tools_default_to_current_workspace_root(self, tmp_path):
         from brain.systems.runs.tool_handlers import _get_tool_handlers, _agent_context

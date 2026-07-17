@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 from sqlalchemy import and_, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +18,7 @@ from brain.platform.db.models.reconstructive_memory import (
     MemoryAssertionNode,
     MemoryEdgeNode,
     MemoryNode,
+    MemoryNodeEmbedding,
     MemorySource,
     MemorySpan,
     ReconstructionEvidence,
@@ -24,6 +26,35 @@ from brain.platform.db.models.reconstructive_memory import (
     ReconstructionStep,
 )
 from brain.platform.db.repositories.base import BaseRepository
+
+_CONTENT_NODE_KINDS = ("content", "summary", "procedure", "policy")
+_QUERY_TERM_RE = re.compile(r"[a-zA-Z0-9_/-]{3,}")
+_QUERY_STOP_WORDS = {
+    "about",
+    "and",
+    "are",
+    "did",
+    "does",
+    "for",
+    "from",
+    "has",
+    "have",
+    "how",
+    "into",
+    "that",
+    "the",
+    "this",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "with",
+}
+_MIN_SEMANTIC_CANDIDATE_SCORE = 0.35
 
 
 def stable_digest(value: str) -> str:
@@ -137,6 +168,49 @@ class MemorySourceRepository(BaseRepository[MemorySource]):
         return source, rows
 
 
+class MemoryNodeEmbeddingRepository(BaseRepository[MemoryNodeEmbedding]):
+    model = MemoryNodeEmbedding
+    content_digest = staticmethod(stable_digest)
+
+    async def exists(
+        self,
+        *,
+        node_id: int,
+        embedding_kind: str,
+        model: str,
+        content_digest: str,
+    ) -> bool:
+        stmt = select(MemoryNodeEmbedding.id).where(
+            MemoryNodeEmbedding.node_id == node_id,
+            MemoryNodeEmbedding.embedding_kind == embedding_kind,
+            MemoryNodeEmbedding.model == model,
+            MemoryNodeEmbedding.content_digest == content_digest,
+        )
+        return (await self._session.scalars(stmt)).first() is not None
+
+    async def create(
+        self,
+        *,
+        node_id: int,
+        embedding_kind: str,
+        model: str,
+        dimension: int,
+        embedding: list[float],
+        content_digest: str,
+    ) -> MemoryNodeEmbedding:
+        row = MemoryNodeEmbedding(
+            node_id=node_id,
+            embedding_kind=embedding_kind,
+            model=model,
+            dimension=dimension,
+            embedding=embedding,
+            content_digest=content_digest,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
+
 class MemoryNodeRepository(BaseRepository[MemoryNode]):
     model = MemoryNode
 
@@ -189,18 +263,12 @@ class MemoryNodeRepository(BaseRepository[MemoryNode]):
         user_id: str | None = None,
         limit: int = 5,
         allow_global: bool = False,
+        query_embedding: Sequence[float] | np.ndarray | None = None,
+        embedding_model: str | None = None,
     ) -> list[MemoryNode]:
-        terms = [term for term in re.findall(r"[a-zA-Z0-9_/-]{3,}", query.lower()) if term]
-        if not terms:
+        query = query.strip()
+        if not query:
             return []
-        predicates = [
-            or_(
-                func.lower(MemoryNode.canonical_label).contains(term),
-                func.lower(MemoryNode.text).contains(term),
-                func.lower(MemoryNode.normalized_key).contains(term),
-            )
-            for term in terms[:8]
-        ]
         if allow_global:
             visibility_predicate = true()
         elif not user_id and not org_id:
@@ -211,18 +279,185 @@ class MemoryNodeRepository(BaseRepository[MemoryNode]):
                 and_(MemoryNode.visibility == "team", MemoryNode.org_id == org_id),
                 and_(MemoryNode.visibility == "private", MemoryNode.user_id == user_id),
             )
-        stmt = (
+
+        base_stmt = (
             select(MemoryNode)
             .where(MemoryNode.archived_at.is_(None))
-            .where(MemoryNode.node_kind.in_(["content", "summary", "procedure", "policy"]))
+            .where(MemoryNode.node_kind.in_(_CONTENT_NODE_KINDS))
             .where(visibility_predicate)
-            .where(or_(*predicates))
-            .order_by(MemoryNode.confidence.desc(), MemoryNode.updated_at.desc())
-            .limit(limit)
         )
         if org_id is not None:
-            stmt = stmt.where(or_(MemoryNode.org_id == org_id, MemoryNode.org_id.is_(None)))
-        return list((await self._session.scalars(stmt)).all())
+            base_stmt = base_stmt.where(or_(MemoryNode.org_id == org_id, MemoryNode.org_id.is_(None)))
+
+        query_vector = (
+            np.asarray(query_embedding, dtype=np.float32).reshape(-1)
+            if query_embedding is not None
+            else None
+        )
+
+        rows: list[tuple[MemoryNode, float | None]]
+        if query_vector is None or not embedding_model:
+            rows = [(node, None) for node in (await self._session.scalars(base_stmt)).all()]
+        elif self._session.get_bind().dialect.name == "postgresql":
+            similarity = 1.0 - MemoryNodeEmbedding.embedding.cosine_distance(query_vector.tolist())
+            semantic_scores = (
+                select(
+                    MemoryNodeEmbedding.node_id.label("node_id"),
+                    func.max(similarity).label("semantic_score"),
+                )
+                .where(MemoryNodeEmbedding.embedding.isnot(None))
+                .where(MemoryNodeEmbedding.model == embedding_model)
+                .where(MemoryNodeEmbedding.dimension == int(query_vector.shape[0]))
+                .group_by(MemoryNodeEmbedding.node_id)
+                .subquery()
+            )
+            ranked_stmt = (
+                base_stmt.add_columns(semantic_scores.c.semantic_score)
+                .outerjoin(semantic_scores, semantic_scores.c.node_id == MemoryNode.id)
+            )
+            rows = [
+                (node, float(semantic_score) if semantic_score is not None else None)
+                for node, semantic_score in (await self._session.execute(ranked_stmt)).all()
+            ]
+        else:
+            nodes = list((await self._session.scalars(base_stmt)).all())
+            semantic_by_node = await self._python_semantic_scores(
+                nodes=nodes,
+                query_vector=query_vector,
+                model=embedding_model,
+            )
+            rows = [(node, semantic_by_node.get(node.id)) for node in nodes]
+
+        return _rank_memory_nodes(query=query, rows=rows, limit=limit)
+
+    async def _python_semantic_scores(
+        self,
+        *,
+        nodes: Sequence[MemoryNode],
+        query_vector: np.ndarray,
+        model: str,
+    ) -> dict[int, float]:
+        """Portable cosine fallback used by SQLite unit tests."""
+
+        if not nodes:
+            return {}
+        stmt = select(MemoryNodeEmbedding).where(
+            MemoryNodeEmbedding.node_id.in_([node.id for node in nodes]),
+            MemoryNodeEmbedding.embedding.isnot(None),
+            MemoryNodeEmbedding.model == model,
+            MemoryNodeEmbedding.dimension == int(query_vector.shape[0]),
+        )
+        scores: dict[int, float] = {}
+        for row in (await self._session.scalars(stmt)).all():
+            vector = _coerce_embedding_vector(row.embedding)
+            similarity = _cosine_similarity(query_vector, vector)
+            if similarity is not None:
+                scores[row.node_id] = max(scores.get(row.node_id, -1.0), similarity)
+        return scores
+
+
+def _query_terms(query: str) -> tuple[str, ...]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for match in _QUERY_TERM_RE.finditer(query.casefold()):
+        term = match.group(0)
+        if term in _QUERY_STOP_WORDS or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+        if len(terms) >= 8:
+            break
+    return tuple(terms)
+
+
+def _lexical_relevance(node: MemoryNode, *, query: str, terms: Sequence[str]) -> float:
+    fields = (
+        (node.canonical_label or "").casefold(),
+        (node.text or "").casefold(),
+        (node.normalized_key or "").casefold(),
+    )
+    normalized_query = " ".join(query.casefold().split())
+    exact = any(field == normalized_query for field in fields if field)
+    if not terms:
+        return 1.0 if exact else 0.0
+    hits = sum(1 for term in terms if any(term in field for field in fields))
+    return max(1.0 if exact else 0.0, hits / len(terms))
+
+
+def _blended_relevance_score(
+    *,
+    semantic_score: float | None,
+    lexical_score: float,
+    storage_confidence: float,
+) -> float:
+    storage_confidence = min(1.0, max(0.0, storage_confidence))
+    lexical_score = min(1.0, max(0.0, lexical_score))
+    if semantic_score is None:
+        # Missing vectors remain fully retrievable by text while backfill runs.
+        return 0.95 * lexical_score + 0.05 * storage_confidence
+    semantic_score = min(1.0, max(0.0, semantic_score))
+    # Similarity and query-term coverage own 97% of ranking. Storage confidence
+    # is only a stable tie-break signal and cannot swamp relevance.
+    return 0.72 * semantic_score + 0.25 * lexical_score + 0.03 * storage_confidence
+
+
+def _rank_memory_nodes(
+    *,
+    query: str,
+    rows: Sequence[tuple[MemoryNode, float | None]],
+    limit: int,
+) -> list[MemoryNode]:
+    terms = _query_terms(query)
+    ranked: list[MemoryNode] = []
+    for node, raw_semantic_score in rows:
+        semantic_score = (
+            min(1.0, max(0.0, float(raw_semantic_score)))
+            if raw_semantic_score is not None
+            else None
+        )
+        lexical_score = _lexical_relevance(node, query=query, terms=terms)
+        if lexical_score <= 0.0 and (
+            semantic_score is None or semantic_score < _MIN_SEMANTIC_CANDIDATE_SCORE
+        ):
+            continue
+        match_score = _blended_relevance_score(
+            semantic_score=semantic_score,
+            lexical_score=lexical_score,
+            storage_confidence=float(node.confidence or 0.0),
+        )
+        # These are query-local, non-persisted annotations consumed by the
+        # reconstruction controller and compatibility adapters.
+        node.retrieval_score = round(match_score, 4)
+        node.semantic_score = round(semantic_score, 4) if semantic_score is not None else None
+        node.lexical_score = round(lexical_score, 4)
+        ranked.append(node)
+
+    ranked.sort(
+        key=lambda node: (
+            -float(node.retrieval_score),
+            -float(node.semantic_score if node.semantic_score is not None else -1.0),
+            -float(node.lexical_score),
+            -(node.updated_at.timestamp() if node.updated_at is not None else 0.0),
+            node.id,
+        )
+    )
+    return ranked[: max(0, limit)]
+
+
+def _coerce_embedding_vector(value: Any) -> np.ndarray:
+    if isinstance(value, str):
+        cleaned = value.strip().removeprefix("[").removesuffix("]")
+        return np.fromstring(cleaned, sep=",", dtype=np.float32)
+    return np.asarray(value, dtype=np.float32).reshape(-1)
+
+
+def _cosine_similarity(left: np.ndarray, right: np.ndarray) -> float | None:
+    if left.shape != right.shape or not left.size:
+        return None
+    denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
+    if denominator <= 0.0:
+        return None
+    return float(np.dot(left, right) / denominator)
 
 
 class MemoryEdgeRepository(BaseRepository[MemoryEdgeNode]):
@@ -689,8 +924,9 @@ class ReconstructiveMemoryCompatibilityRepository(BaseRepository[MemoryNode]):
             {
                 **_node_memory_payload(node),
                 "memory_type": _node_type(node),
-                "combined_score": float(node.confidence or 0.0),
-                "semantic_score": float(node.confidence or 0.0),
+                "combined_score": float(getattr(node, "retrieval_score", 0.0)),
+                "semantic_score": getattr(node, "semantic_score", None),
+                "lexical_score": float(getattr(node, "lexical_score", 0.0)),
                 "recency_score": 0.5,
             }
             for node in nodes

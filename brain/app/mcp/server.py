@@ -216,6 +216,7 @@ async def async_tool_brain_recall(
     attention_debug: bool = False,
     expand_lazy_load: bool | None = None,
     service_retrieval: bool = False,
+    run_id: int | str | None = None,
 ) -> dict:
     """Compatibility recall over source-backed reconstructive memory.
 
@@ -223,11 +224,13 @@ async def async_tool_brain_recall(
     Without viewer context, recall intentionally returns no memories.
     """
     reconstruct_user_id = user_id or ("system" if service_retrieval else None)
+    parsed_run_id = _coerce_int(run_id)
     evidence_pack = await async_tool_memory_reconstruct(
         query=query,
         limit=limit,
         user_id=reconstruct_user_id,
         org_id=org_id,
+        run_id=parsed_run_id,
     )
     memories = _recall_memories_from_evidence_pack(evidence_pack, limit=limit)
 
@@ -240,6 +243,7 @@ async def async_tool_brain_recall(
         attention_debug=attention_debug,
         expand_lazy_load=expand_lazy_load,
         service_retrieval=service_retrieval,
+        run_id=parsed_run_id,
     )
     response["memory_system"] = "reconstructive"
     response["compatibility_alias"] = "brain_recall"
@@ -356,6 +360,7 @@ async def _finalize_recall_response(
     attention_debug: bool,
     expand_lazy_load: bool | None,
     service_retrieval: bool = False,
+    run_id: int | None = None,
 ) -> dict:
 
     await _async_log_retrieval(query, memories)
@@ -386,6 +391,7 @@ async def _finalize_recall_response(
         user_id=user_id,
         org_id=org_id,
         service_retrieval=service_retrieval,
+        run_id=run_id,
         preload_budget_tokens=limit * 120,
         lazy_budget_tokens=max(0, limit * 40),
     )

@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from sqlalchemy import inspect, text
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import numpy as np
+import pytest
+from sqlalchemy import inspect, select, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler
 
@@ -24,13 +30,21 @@ from brain.platform.db.repositories.reconstructive_memory import (
     EdgeDraft,
     MemoryAssertionRepository,
     MemoryEdgeRepository,
+    MemoryNodeEmbeddingRepository,
     MemoryNodeRepository,
     MemorySourceRepository,
     NodeDraft,
     SourceSpanDraft,
 )
 from brain.systems.reconstructive_memory.controller import reconstruct_memory
+from brain.systems.reconstructive_memory.embeddings import (
+    backfill_memory_node_embeddings,
+    embed_recall_query,
+    embedding_model_identity,
+)
 from brain.systems.reconstructive_memory.ingestion import ingest_memory_source
+from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
+from brain.kernel.config import MEMORY_SEMANTIC_EMBEDDING_DIM
 
 
 SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "JSON"
@@ -51,6 +65,7 @@ async def _session(async_sqlite_session_factory):
             MemorySource.__table__,
             MemorySpan.__table__,
             MemoryNode.__table__,
+            MemoryNodeEmbedding.__table__,
             MemoryAssertionNode.__table__,
             MemoryEdgeNode.__table__,
             ReconstructionRun.__table__,
@@ -85,6 +100,77 @@ async def _session(async_sqlite_session_factory):
     )
     await session.commit()
     return session
+
+
+def _runtime_config() -> EmbeddingRuntimeConfig:
+    return EmbeddingRuntimeConfig(
+        backend="api",
+        provider="gemini",
+        api_model="test-reconstructive-embedding",
+        cpu_model="unused",
+        dimensions=MEMORY_SEMANTIC_EMBEDDING_DIM,
+        api_key="test-key",
+    )
+
+
+def _unit_vector(axis: int) -> np.ndarray:
+    vector = np.zeros(MEMORY_SEMANTIC_EMBEDDING_DIM, dtype=np.float32)
+    vector[axis] = 1.0
+    return vector
+
+
+def _mock_embedding_runtime(monkeypatch, *, query_axis: int = 0, document_axis: int = 0) -> EmbeddingRuntimeConfig:
+    from brain.systems.memory import embeddings as embedding_client
+    from brain.systems.runtime_settings import memory as runtime_settings
+
+    runtime = _runtime_config()
+
+    async def fake_runtime_config(session, *, include_secret=True):
+        del session, include_secret
+        return runtime
+
+    monkeypatch.setattr(runtime_settings, "async_get_embedding_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(
+        embedding_client,
+        "embed_query",
+        lambda text, runtime_config=None: _unit_vector(query_axis),
+    )
+    monkeypatch.setattr(
+        embedding_client,
+        "embed_document",
+        lambda text, runtime_config=None: _unit_vector(document_axis),
+    )
+    return runtime
+
+
+async def _search_content_nodes(session, node_repo, *, query: str):
+    query_embedding = await embed_recall_query(session, query)
+    assert query_embedding is not None
+    return await node_repo.search_content_nodes(
+        query=query,
+        org_id=_TEST_ORG_ID,
+        user_id=_TEST_USER_ID,
+        query_embedding=query_embedding.vector,
+        embedding_model=query_embedding.model,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _prevent_live_embeddings(monkeypatch):
+    from brain.systems.memory import embeddings as embedding_client
+    from brain.systems.runtime_settings import memory as runtime_settings
+
+    async def fake_runtime_config(session, *, include_secret=True):
+        del session, include_secret
+        return _runtime_config()
+
+    def unavailable(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("embedding backend intentionally unavailable in unit test")
+
+    monkeypatch.setattr(runtime_settings, "async_get_embedding_runtime_config", fake_runtime_config)
+    monkeypatch.setattr(embedding_client, "embed_query", unavailable)
+    monkeypatch.setattr(embedding_client, "embed_document", unavailable)
 
 
 def test_reconstructive_memory_models_expose_clean_slate_tables():
@@ -192,7 +278,8 @@ async def test_source_backed_graph_can_be_written_and_reconstructed(async_sqlite
     )
 
     assert source.id is not None
-    assert pack.confidence == 0.9
+    assert pack.confidence == pack.supporting_evidence[0].confidence
+    assert pack.confidence != assertion.confidence
     assert pack.supporting_evidence[0].node_id == content.id
     assert pack.supporting_evidence[0].assertion_id == assertion.id
     assert pack.supporting_evidence[0].source_span_id == spans[0].id
@@ -200,7 +287,7 @@ async def test_source_backed_graph_can_be_written_and_reconstructed(async_sqlite
     assert [step.action_kind for step in pack.trajectory] == ["seed_cues", "summarize_evidence"]
 
     runs = (await session.execute(text("SELECT status, final_confidence FROM reconstruction_runs"))).all()
-    assert runs == [("completed", 0.9)]
+    assert runs == [("completed", pack.confidence)]
     evidence_rows = (await session.execute(text("SELECT node_id, assertion_id, source_span_id FROM reconstruction_evidence"))).all()
     assert evidence_rows == [(content.id, assertion.id, spans[0].id)]
 
@@ -232,6 +319,133 @@ async def test_private_nodes_do_not_cross_user_visibility(async_sqlite_session_f
     assert pack.supporting_evidence == ()
     assert pack.confidence == 0.0
     assert pack.unresolved_questions == ("No source-backed evidence found for: Private migration fact",)
+
+
+async def test_semantic_match_outranks_newer_high_confidence_off_topic_node(
+    async_sqlite_session_factory,
+    monkeypatch,
+):
+    session = await _session(async_sqlite_session_factory)
+    runtime = _mock_embedding_runtime(monkeypatch, query_axis=0)
+    node_repo = MemoryNodeRepository(session)
+    embedding_repo = MemoryNodeEmbeddingRepository(session)
+
+    relevant = await node_repo.upsert_node(
+        draft=NodeDraft(
+            node_kind="content",
+            content_kind="project_fact",
+            canonical_label="Luxury retail client pilot",
+            text="The client pilot covered a sensor-assisted fitting experience.",
+            confidence=0.2,
+        ),
+        org_id=_TEST_ORG_ID,
+        user_id=_TEST_USER_ID,
+        visibility="org",
+    )
+    off_topic = await node_repo.upsert_node(
+        draft=NodeDraft(
+            node_kind="content",
+            content_kind="receipt",
+            canonical_label="Uwear staging deploy receipt",
+            text="The staging deployment completed successfully.",
+            confidence=0.99,
+        ),
+        org_id=_TEST_ORG_ID,
+        user_id=_TEST_USER_ID,
+        visibility="org",
+    )
+    off_topic.updated_at = datetime.now(timezone.utc)
+    relevant.updated_at = off_topic.updated_at - timedelta(days=30)
+    for node, vector in ((relevant, _unit_vector(0)), (off_topic, _unit_vector(1))):
+        await embedding_repo.create(
+            node_id=node.id,
+            embedding_kind="content",
+            model=embedding_model_identity(runtime),
+            dimension=MEMORY_SEMANTIC_EMBEDDING_DIM,
+            embedding=vector.tolist(),
+            content_digest=embedding_repo.content_digest(node.text or node.canonical_label),
+        )
+
+    results = await _search_content_nodes(
+        session,
+        node_repo,
+        query="What happened with the Aritzia account?",
+    )
+
+    assert [node.id for node in results] == [relevant.id]
+    assert results[0].retrieval_score > 0.7
+    assert results[0].semantic_score == 1.0
+
+
+async def test_exact_term_node_without_embedding_remains_findable(
+    async_sqlite_session_factory,
+    monkeypatch,
+):
+    session = await _session(async_sqlite_session_factory)
+    _mock_embedding_runtime(monkeypatch, query_axis=2)
+    node_repo = MemoryNodeRepository(session)
+    exact = await node_repo.upsert_node(
+        draft=NodeDraft(
+            node_kind="content",
+            content_kind="fact",
+            canonical_label="axel-havard",
+            text="Axel's GitHub handle is axel-havard.",
+            confidence=0.4,
+        ),
+        org_id=_TEST_ORG_ID,
+        user_id=_TEST_USER_ID,
+        visibility="org",
+    )
+
+    results = await _search_content_nodes(
+        session,
+        node_repo,
+        query="axel-havard",
+    )
+
+    assert [node.id for node in results] == [exact.id]
+    assert results[0].semantic_score is None
+    assert results[0].lexical_score == 1.0
+    assert results[0].retrieval_score == 0.97
+
+
+async def test_nonsense_query_does_not_fall_back_to_newest_confident_nodes(
+    async_sqlite_session_factory,
+    monkeypatch,
+):
+    session = await _session(async_sqlite_session_factory)
+    runtime = _mock_embedding_runtime(monkeypatch, query_axis=2)
+    node_repo = MemoryNodeRepository(session)
+    embedding_repo = MemoryNodeEmbeddingRepository(session)
+    for index, label in enumerate(("Newest staging receipt", "Old project decision")):
+        node = await node_repo.upsert_node(
+            draft=NodeDraft(
+                node_kind="content",
+                content_kind="fact",
+                canonical_label=label,
+                text=label,
+                confidence=0.99 - index * 0.1,
+            ),
+            org_id=_TEST_ORG_ID,
+            user_id=_TEST_USER_ID,
+            visibility="org",
+        )
+        await embedding_repo.create(
+            node_id=node.id,
+            embedding_kind="content",
+            model=embedding_model_identity(runtime),
+            dimension=MEMORY_SEMANTIC_EMBEDDING_DIM,
+            embedding=_unit_vector(index).tolist(),
+            content_digest=embedding_repo.content_digest(node.text or node.canonical_label),
+        )
+
+    results = await _search_content_nodes(
+        session,
+        node_repo,
+        query="zqxjkv blorptastic",
+    )
+
+    assert results == []
 
 
 async def test_mcp_memory_reconstruct_returns_evidence_pack(async_sqlite_session_factory, monkeypatch):
@@ -290,7 +504,8 @@ async def test_mcp_memory_reconstruct_returns_evidence_pack(async_sqlite_session
         user_id=_TEST_USER_ID,
     )
 
-    assert payload["confidence"] == 0.82
+    assert payload["confidence"] == payload["supporting_evidence"][0]["confidence"]
+    assert payload["confidence"] != 0.82
     assert payload["supporting_evidence"][0]["source_span_id"] == spans[0].id
     assert payload["trajectory"][0]["action_kind"] == "seed_cues"
 
@@ -333,7 +548,8 @@ async def test_brain_recall_compatibility_alias_reads_reconstructive_memory_with
 
     assert payload["compatibility_alias"] == "brain_recall"
     assert payload["memory_system"] == "reconstructive"
-    assert payload["evidence_pack"]["confidence"] == 0.81
+    assert payload["evidence_pack"]["confidence"] == payload["memories"][0]["similarity"]
+    assert payload["evidence_pack"]["confidence"] != 0.81
     assert payload["memories"][0]["memory_system"] == "reconstructive"
     assert payload["memories"][0]["source_span_id"] is not None
 
@@ -343,8 +559,9 @@ async def test_brain_recall_compatibility_alias_reads_reconstructive_memory_with
     assert memory_table_exists.first() is None
 
 
-async def test_ingest_memory_source_creates_reconstructable_graph(async_sqlite_session_factory):
+async def test_ingest_memory_source_creates_reconstructable_graph(async_sqlite_session_factory, monkeypatch):
     session = await _session(async_sqlite_session_factory)
+    _mock_embedding_runtime(monkeypatch)
 
     ingested = await ingest_memory_source(
         session,
@@ -364,14 +581,199 @@ async def test_ingest_memory_source_creates_reconstructable_graph(async_sqlite_s
     assert ingested.tag_node_ids
     assert ingested.edge_ids
 
+    embedding = (
+        await session.scalars(
+            select(MemoryNodeEmbedding).where(MemoryNodeEmbedding.node_id == ingested.content_node_id)
+        )
+    ).one()
+    assert embedding.embedding_kind == "content"
+
     pack = await reconstruct_memory(
         session,
         query="cite source spans",
         org_id=_TEST_ORG_ID,
         user_id=_TEST_USER_ID,
     )
-    assert pack.confidence == 0.88
+    assert pack.confidence == pytest.approx(0.9964)
+    assert pack.supporting_evidence[0].storage_confidence == 0.88
     assert "cite source spans" in pack.supporting_evidence[0].text.lower()
+
+
+async def test_embedding_failure_leaves_complete_backfillable_ingest(async_sqlite_session_factory):
+    session = await _session(async_sqlite_session_factory)
+
+    ingested = await ingest_memory_source(
+        session,
+        content="Embedding outages must not leave half-written memory graphs.",
+        content_kind="policy",
+        source_kind="manual_note",
+        org_id=_TEST_ORG_ID,
+        user_id=_TEST_USER_ID,
+        visibility="org",
+        confidence=0.9,
+    )
+    await session.flush()
+
+    assert await session.get(MemoryNode, ingested.content_node_id) is not None
+    assert await session.get(MemoryAssertionNode, ingested.assertion_id) is not None
+    assert ingested.edge_ids
+    embeddings = list(
+        (
+            await session.scalars(
+                select(MemoryNodeEmbedding).where(
+                    MemoryNodeEmbedding.node_id == ingested.content_node_id
+                )
+            )
+        ).all()
+    )
+    assert embeddings == []
+
+
+async def test_embedding_backfill_is_batched_idempotent_and_excludes_cues_and_tags(
+    async_sqlite_session_factory,
+    monkeypatch,
+):
+    session = await _session(async_sqlite_session_factory)
+    _mock_embedding_runtime(monkeypatch)
+    node_repo = MemoryNodeRepository(session)
+    assertion_repo = MemoryAssertionRepository(session)
+
+    content = await node_repo.upsert_node(
+        draft=NodeDraft(
+            node_kind="content",
+            content_kind="fact",
+            canonical_label="Backfill target",
+            text="The content-node wording.",
+            confidence=0.7,
+        ),
+        org_id=_TEST_ORG_ID,
+        user_id=_TEST_USER_ID,
+        visibility="org",
+    )
+    cue = await node_repo.upsert_node(
+        draft=NodeDraft(node_kind="cue", canonical_label="backfill", confidence=0.7),
+        org_id=_TEST_ORG_ID,
+        user_id=_TEST_USER_ID,
+        visibility="org",
+    )
+    second_content = await node_repo.upsert_node(
+        draft=NodeDraft(
+            node_kind="summary",
+            content_kind="summary",
+            canonical_label="Second backfill target",
+            text="A second batch proves cursor-based resume.",
+            confidence=0.6,
+        ),
+        org_id=_TEST_ORG_ID,
+        user_id=_TEST_USER_ID,
+        visibility="org",
+    )
+    await assertion_repo.create_assertion(
+        draft=AssertionDraft(
+            node_id=content.id,
+            claim_text="A divergent assertion wording that also needs recall coverage.",
+            confidence=0.7,
+        )
+    )
+
+    first = await backfill_memory_node_embeddings(
+        session,
+        batch_size=1,
+        limit=1,
+        commit_batches=True,
+    )
+    resumed = await backfill_memory_node_embeddings(
+        session,
+        batch_size=1,
+        after_id=first.last_node_id or 0,
+        commit_batches=True,
+    )
+    repeated = await backfill_memory_node_embeddings(
+        session,
+        batch_size=1,
+        commit_batches=False,
+    )
+
+    assert first.scanned == 1
+    assert first.created == 2
+    assert resumed.scanned == 1
+    assert resumed.created == 1
+    assert repeated.created == 0
+    assert repeated.skipped == 3
+    rows = list((await session.scalars(select(MemoryNodeEmbedding))).all())
+    assert {(row.node_id, row.embedding_kind) for row in rows} == {
+        (content.id, "content"),
+        (content.id, "assertion"),
+        (second_content.id, "content"),
+    }
+    assert all(row.node_id != cue.id for row in rows)
+
+
+async def test_recall_observation_receives_agent_run_id(monkeypatch):
+    from brain.app.mcp import server as mcp_server
+
+    observe = AsyncMock(return_value={"retrieval_decision_id": None})
+    monkeypatch.setattr(mcp_server, "observe_retrieval", observe)
+    monkeypatch.setattr(mcp_server, "_async_log_retrieval", AsyncMock())
+
+    class _AttentionController:
+        def materialize_selection(self, memories, decision):
+            del decision
+            return SimpleNamespace(
+                selected=list(memories),
+                suppressed=[],
+                lazy_load_eligible=[],
+            )
+
+    monkeypatch.setattr(mcp_server, "AttentionController", _AttentionController)
+    result = await mcp_server._finalize_recall_response(
+        query="Aritzia account",
+        memories=[{"id": 1, "similarity": 0.83}],
+        limit=3,
+        user_id=_TEST_USER_ID,
+        org_id=_TEST_ORG_ID,
+        attention_debug=False,
+        expand_lazy_load=False,
+        run_id=72,
+    )
+
+    assert result["memories"] == [{"id": 1, "similarity": 0.83}]
+    assert observe.await_args.kwargs["run_id"] == 72
+
+
+async def test_retrieval_log_records_actual_match_score(monkeypatch):
+    from brain.app.mcp import server as mcp_server
+
+    captured = {}
+
+    class _RetrievalLogs:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+
+    class _Session:
+        async def flush(self):
+            return None
+
+    class _UnitOfWork:
+        async def __aenter__(self):
+            self.retrieval_logs = _RetrievalLogs()
+            self.session = _Session()
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+
+    monkeypatch.setattr(mcp_server, "UnitOfWork", _UnitOfWork)
+    await mcp_server._async_log_retrieval(
+        "Aritzia account",
+        [
+            {"id": 1, "similarity": 0.83, "confidence": 0.83},
+            {"id": 2, "similarity": 0.41, "confidence": 0.41},
+        ],
+    )
+
+    assert captured["top_score"] == 0.83
+    assert captured["results_returned"] == 2
 
 
 async def test_brain_encode_compatibility_alias_writes_reconstructive_memory(async_sqlite_session_factory, monkeypatch):
