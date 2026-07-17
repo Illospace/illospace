@@ -1,9 +1,9 @@
-"""Tests for brain.systems.memory.harvest - LLM-first memory extraction contract."""
+"""Tests for post-session LLM-first memory extraction."""
 
 import json
 from unittest.mock import MagicMock, patch
 
-from brain.systems.memory.harvest import (
+from brain.systems.sessions.harvest_extraction import (
     HarvestItem,
     RAW_EPISODE_CONFIDENCE,
     _fallback_raw_episode,
@@ -48,7 +48,7 @@ VALID_MODEL_RESPONSE = json.dumps({
 
 
 class TestExtractHarvestItems:
-    @patch("brain.systems.memory.harvest._call_ollama")
+    @patch("brain.systems.sessions.harvest_extraction._call_ollama")
     def test_ollama_extraction_uses_strict_schema(self, mock_ollama):
         mock_ollama.return_value = VALID_MODEL_RESPONSE
 
@@ -65,8 +65,8 @@ class TestExtractHarvestItems:
         assert items[1].visibility_for("org-1") == "org"
         mock_ollama.assert_called_once()
 
-    @patch("brain.systems.memory.harvest.get_provider")
-    @patch("brain.systems.memory.harvest.resolve_llm_client")
+    @patch("brain.systems.sessions.harvest_extraction.get_provider")
+    @patch("brain.systems.sessions.harvest_extraction.resolve_llm_client")
     def test_openai_extraction_uses_provider_neutral_response_format(self, mock_resolve, mock_get_provider):
         llm = MagicMock()
         llm.provider = "openai"
@@ -90,7 +90,7 @@ class TestExtractHarvestItems:
     def test_empty_messages_returns_empty(self):
         assert extract_harvest_items([]) == []
 
-    @patch("brain.systems.memory.harvest._call_ollama")
+    @patch("brain.systems.sessions.harvest_extraction._call_ollama")
     def test_provider_unavailable_returns_low_confidence_raw_episode_only(self, mock_ollama):
         mock_ollama.return_value = None
         messages = [
@@ -107,7 +107,7 @@ class TestExtractHarvestItems:
         assert items[0].confidence == RAW_EPISODE_CONFIDENCE
         assert "connection pooling" in items[0].content
 
-    @patch("brain.systems.memory.harvest._call_ollama")
+    @patch("brain.systems.sessions.harvest_extraction._call_ollama")
     def test_invalid_llm_output_returns_low_confidence_raw_episode_only(self, mock_ollama):
         mock_ollama.return_value = "not json"
 
@@ -117,7 +117,7 @@ class TestExtractHarvestItems:
         assert items[0].raw_episode is True
         assert items[0].harvest_type == "raw_episode"
 
-    @patch("brain.systems.memory.harvest._call_ollama")
+    @patch("brain.systems.sessions.harvest_extraction._call_ollama")
     def test_valid_empty_extraction_does_not_create_raw_episode(self, mock_ollama):
         mock_ollama.return_value = json.dumps({"schema_version": 1, "memories": []})
 

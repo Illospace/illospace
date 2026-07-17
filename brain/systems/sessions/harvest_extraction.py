@@ -1,4 +1,4 @@
-"""LLM-first memory harvest extraction.
+"""LLM-first post-session harvest extraction.
 
 This module owns the deterministic contract around memory extraction:
 models decide semantics, while Python validates schema, length, safety,

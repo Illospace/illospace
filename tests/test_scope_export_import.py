@@ -1,122 +1,12 @@
-"""Tests for scope classifier, export scrubbing, and import parsing."""
+"""Tests for export scrubbing and import parsing."""
 import json
 import os
 import sys
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
 
-from brain.systems.memory.scope import classify_scope
 from brain.app.cli.brain_export import regex_scrub, scrub_content
-
-
-# ============================================================
-# Scope classifier tests
-# ============================================================
-
-class TestClassifyScope:
-    """Test the heuristic scope classifier."""
-
-    def test_lesson_without_personal_info_is_universal(self):
-        assert classify_scope(
-            "Always verify data values from the source of truth before coding",
-            "lesson"
-        ) == "universal"
-
-    def test_lesson_with_name_is_personal(self):
-        assert classify_scope(
-            "Alex prefers robust solutions over quick patches",
-            "lesson"
-        ) == "personal"
-
-    def test_session_type_is_personal(self):
-        assert classify_scope(
-            "Discussed architecture patterns for the platform",
-            "session"
-        ) == "personal"
-
-    def test_daily_log_is_personal(self):
-        assert classify_scope(
-            "Fixed several bugs in the API layer today",
-            "daily_log"
-        ) == "personal"
-
-    def test_principle_type_is_universal(self):
-        assert classify_scope(
-            "DRY — extract, abstract, reuse. Never copy-paste.",
-            "principle"
-        ) == "universal"
-
-    def test_ip_address_is_personal(self):
-        assert classify_scope(
-            "Connect to the server at 192.168.1.100 for debugging",
-            "lesson"
-        ) == "personal"
-
-    def test_token_is_personal(self):
-        assert classify_scope(
-            "Use ghp_abc123def456 for authentication",
-            "lesson"
-        ) == "personal"
-
-    def test_email_is_personal(self):
-        assert classify_scope(
-            "Send the report to user@example.com",
-            "lesson"
-        ) == "personal"
-
-    def test_generic_engineering_principle_is_universal(self):
-        assert classify_scope(
-            "When debugging, always trace the data path end-to-end. "
-            "Never assume values — verify them.",
-            "lesson"
-        ) == "universal"
-
-    def test_illo_reference_is_personal(self):
-        assert classify_scope(
-            "The illo platform uses a microservices architecture",
-            "lesson"
-        ) == "personal"
-
-    def test_file_path_is_personal(self):
-        assert classify_scope(
-            "Check /home/example/projects/backend/main.py for the entry point",
-            "lesson"
-        ) == "personal"
-
-    def test_dream_type_without_personal_is_universal(self):
-        assert classify_scope(
-            "Connection between error handling patterns and resilience architecture",
-            "dream"
-        ) == "universal"
-
-    def test_emotion_type_is_personal(self):
-        assert classify_scope(
-            "Felt satisfied with the debugging approach",
-            "emotion"
-        ) == "personal"
-
-    def test_ambiguous_defaults_to_personal(self):
-        assert classify_scope(
-            "Something happened today that was interesting",
-            "observation"
-        ) == "personal"
-
-    def test_date_reference_is_personal(self):
-        assert classify_scope(
-            "on 2026-03-02 we shipped the new feature",
-            "lesson"
-        ) == "personal"
-
-    def test_universal_patterns_boost(self):
-        """Multiple universal signals without personal info → universal."""
-        assert classify_scope(
-            "Best practice: always use a strategy pattern when handling "
-            "multiple error types in an architecture",
-            "observation"
-        ) == "universal"
 
 
 # ============================================================

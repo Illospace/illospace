@@ -1,32 +1,29 @@
 # Reconstructive Memory Rewrite
 
-Status: proposal
+Status: shipped architecture reference
 Date: 2026-06-15
 Source paper: [Memory is Reconstructed, Not Retrieved: Graph Memory for LLM Agents](https://arxiv.org/html/2606.06036v1)
 Related implementation reference: [Ji-shuo/MRAgent](https://github.com/Ji-shuo/MRAgent)
 
 ## Short Version
 
-If we take the paper seriously and do not care about legacy compatibility, Illo should stop treating memory as "ranked text snippets fetched before reasoning." The memory system should become a reconstructive evidence engine.
-
-The current Illo system has many valuable pieces: scoped memory, pgvector, graph edges, truth/freshness, source provenance, DAG summaries, retrieval feedback, run evidence, and team visibility. But the center of gravity is still passive:
-
-1. Build a query embedding.
-2. Fetch top candidates.
-3. Expand one graph hop or merge pools.
-4. Rank/suppress with the attention controller.
-5. Put selected memory text into context.
+Illo no longer treats memory as ranked text snippets fetched before reasoning.
+The production system ingests source-backed evidence into a reconstructive graph
+and records bounded reconstruction runs that return evidence packs.
 
 MRAgent's useful claim is different: memory access should be an active, stateful reasoning process. The agent should use partial evidence to decide what cue, tag, time window, entity, topic, or source span to inspect next. Retrieval should produce a traceable evidence path, not only a list of chunks.
 
-So the no-legacy recommendation is:
+The implemented architecture follows these principles:
 
-- Delete the current flat memory/retrieval abstraction as the primary API.
-- Replace it with a Cue-Tag-Content graph over immutable source material.
+- Use a Cue-Tag-Content graph over immutable source material instead of a flat
+  memory row as the primary abstraction.
 - Make "reconstruction runs" first-class runtime objects.
 - Make the LLM choose bounded graph actions during recall.
 - Return evidence packs and trajectories to runs, UI, evals, and learning.
-- Keep Illo's governance strengths, but move them into the new graph and reconstruction runtime.
+- Keep Illo's governance strengths in the graph and reconstruction runtime.
+
+`brain_recall` remains only as a compatibility name for the reconstructive
+controller. It is not a parallel retrieval implementation.
 
 ## What The Paper Changes
 
@@ -51,30 +48,22 @@ These are reconstruction problems, not retrieval problems.
 
 ## Current Illo Memory Shape
 
-The current system is roughly:
+The live model is source-backed: immutable sources contain spans; graph nodes
+and assertions derive from those spans; typed edges connect cues, tags, content,
+and evidence. Reconstruction runs own the bounded search trace and produce an
+evidence pack rather than a list of flat memory rows.
 
-- `brain/platform/db/models/memory.py`
-  - `Memory` is the primary unit.
-  - `Edge` stores typed memory-to-memory relationships.
-  - memory rows carry content, type, tier, salience, embeddings, tags, source metadata, truth metadata, visibility, user, and org.
-- `brain/platform/db/models/memory_dag.py`
-  - `MemorySummary` and `SummaryLineage` build a summary DAG over memories.
-- `brain/platform/db/repositories/memories.py`
-  - Owns inserts, vector recall, graph-augmented recall, visibility checks, edge activation, and many read paths.
-- `brain/systems/memory/harvest.py`
-  - Extracts durable memory candidates from conversations.
-- `brain/systems/memory/attention_controller.py`
-  - Ranks candidate memories/summaries, logs decisions, marks lazy-load candidates, and records usefulness.
-- `brain/systems/memory/retrieval_pools.py`
-  - Runs exploit/explore/narrative retrieval pools.
-- `brain/systems/memory/truth_maintenance.py`, `source_freshness.py`, `conflict_scout.py`, `conflict_resolver.py`
-  - Maintain freshness, contradiction, review, and truth status.
-- `brain/app/mcp/server.py`
-  - Exposes `brain_recall` as graph-augmented memory search and `brain_encode` as memory write.
-- `brain/systems/learning/context_evals.py`
-  - Evaluates selected memory usage and stale/conflicted inclusion.
+The model and repository contracts live under
+`brain/platform/db/models/reconstructive_memory.py` and
+`brain/platform/db/repositories/reconstructive_memory.py`. Ingestion and recall
+behavior live under `brain/systems/reconstructive_memory/`. Post-session
+extraction belongs to `brain/systems/sessions/`; it feeds the same source-backed
+ingestion path instead of owning a second memory store.
 
-This is a strong second-generation memory system. It is not yet a reconstructive memory system.
+The small `brain/systems/memory/` package is reserved for runtime seams that
+still have direct consumers, such as attention decision logging and the shared
+embedding client. It must not grow another storage, generation, or retrieval
+implementation.
 
 ## What Should Be Gone
 
@@ -117,7 +106,9 @@ Replace it with a reconstructive recall tool that can run to completion, plus lo
 
 ### Delete Retrieval Pools As A Primary Strategy
 
-`retrieval_pools.py` is useful as a transitional experiment, but exploit/explore/narrative pools are still passive. They pick a more diverse candidate list before reasoning starts. They do not make retrieval depend on evidence found during reasoning.
+The retired exploit/explore/narrative pool experiment was a useful transitional
+baseline, but passive pools only diversify a candidate list before reasoning.
+They do not make retrieval depend on evidence found during reasoning.
 
 In the new design, "explore" and "narrative" become actions the reconstruction policy can choose, not fixed slots allocated before the search.
 
@@ -219,7 +210,8 @@ No graph action should be able to traverse into content the caller cannot see.
 
 ### Truth, Freshness, And Conflict
 
-Keep the intent of `truth_maintenance.py`, `source_freshness.py`, `conflict_scout.py`, and `conflict_resolver.py`, but integrate them into reconstruction.
+Keep the intent of truth, freshness, and conflict policy, but integrate those
+signals into reconstruction instead of a parallel legacy pipeline.
 
 Truth should not be a post-processing decoration on retrieved memories. It should influence traversal:
 
@@ -514,7 +506,9 @@ Fields:
 
 ## New Extraction Pipeline
 
-The extraction pipeline should replace `harvest.py`, `encoder.py`, direct `brain_encode`, and much of manual memory insertion.
+Source-backed ingestion is the owner behind post-session extraction and the
+thin `brain_encode` compatibility surface; there is no independent legacy
+harvest or encoder storage path.
 
 Pipeline:
 
@@ -681,81 +675,14 @@ New write tools:
 
 Most agents should call `memory_ingest_source`, not manually write claims.
 
-## New Module Layout
+## Runtime Ownership
 
-Suggested clean package:
+`brain/systems/reconstructive_memory/` owns source ingestion, reconstruction,
+and evidence-pack contracts. Database details stay behind the reconstructive
+repository. MCP and agent tools call those services; they do not construct a
+second recall path in the application layer.
 
-```text
-brain/systems/reconstructive_memory/
-  __init__.py
-  contracts.py
-  source_ingest.py
-  span_segmenter.py
-  extraction.py
-  normalization.py
-  graph_store.py
-  indexes.py
-  reconstruction_state.py
-  actions.py
-  policy.py
-  controller.py
-  evidence_pack.py
-  compaction.py
-  truth.py
-  freshness.py
-  feedback.py
-  evals.py
-  tools.py
-```
-
-Database repositories should move from "memory repository does everything" to narrower stores:
-
-```text
-brain/platform/db/repositories/
-  memory_sources.py
-  memory_nodes.py
-  memory_edges.py
-  memory_assertions.py
-  memory_reconstruction.py
-```
-
-The MCP and agent tool layer should call service APIs, not construct recall logic directly in `brain/app/mcp/server.py`.
-
-## Current File Impact
-
-If this were a true rewrite, these are the affected areas.
-
-### Replace
-
-- `brain/platform/db/models/memory.py`
-  - Replace `Memory`, `Edge`, and tag storage with the node/edge/source/assertion schema.
-- `brain/platform/db/models/memory_dag.py`
-  - Delete as a separate model family. Summaries become graph nodes.
-- `brain/platform/db/repositories/memories.py`
-  - Split into source/node/edge/assertion/reconstruction repositories.
-- `brain/systems/memory/harvest.py`
-  - Replace with source-backed extraction.
-- `brain/systems/memory/attention_controller.py`
-  - Replace candidate ranker with reconstruction controller.
-- `brain/systems/memory/retrieval.py`
-  - Replace query preprocessing with query-kind and cue-seeding.
-- `brain/systems/memory/retrieval_pools.py`
-  - Delete. Fold exploration into active policy actions.
-- `brain/app/mcp/server.py`
-  - Replace `brain_recall` and `brain_encode` implementation with thin wrappers over reconstructive memory tools.
-
-### Rebuild Around The New Model
-
-- `brain/systems/memory/truth_maintenance.py`
-- `brain/systems/memory/source_freshness.py`
-- `brain/systems/memory/conflict_scout.py`
-- `brain/systems/memory/conflict_resolver.py`
-- `brain/systems/memory/retrieval_feedback.py`
-- `brain/systems/learning/context_signals.py`
-- `brain/systems/learning/context_evals.py`
-- `brain/systems/runs/evidence.py`
-
-### Update Product Surfaces
+Product surfaces follow the same boundary:
 
 - Memory admin pages should show source-backed graph nodes, not a flat memory list.
 - Run traces should show reconstruction paths.
@@ -909,26 +836,18 @@ MRAgent is a research memory engine. Illo is a team workspace and agent runtime.
 
 The useful import is active reconstruction over an associative graph, not the exact benchmark implementation.
 
-## Migration If We Truly Ignore Legacy
+## Migration Contract
 
-If legacy does not matter, do not migrate old memory rows in place.
-
-Recommended path:
-
-1. Freeze old memory writes.
-2. Export every old memory row as a `memory_sources` record with provenance saying `legacy_memory_import`.
-3. Export old edges as source-backed candidate edges with low confidence unless they have evidence.
-4. Re-run the extraction pipeline over legacy rows.
-5. Rebuild cues, tags, content nodes, assertions, embeddings, and summaries from scratch.
-6. Drop old tables after validation.
-
-Old memory content should be treated as source material, not as already-correct graph truth.
+The reconstructive migration creates the source, span, node, assertion, edge,
+run, step, evidence, and feedback schema, then removes any leftover flat-memory
+tables when they exist. A fresh install follows the same single Alembic chain
+and never requires the deleted tables to exist.
 
 ## Definition Of Done
 
 This rewrite is successful when:
 
-- `brain_recall` no longer exists as the main abstraction.
+- `brain_recall` is only a thin compatibility alias over reconstructive recall.
 - Memory writes happen through source-backed extraction.
 - Agent runs receive evidence packs instead of memory snippet lists.
 - Every recall produces a reconstruction trace.
