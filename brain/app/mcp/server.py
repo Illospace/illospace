@@ -14,6 +14,9 @@ MCP Tools Exposed:
     brain_recall(query, limit?)       — semantic memory search
     memory_reconstruct(query, limit?) — source-backed active evidence reconstruction
     memory_ingest_source(content, ...) — ingest source-backed reconstructive memory
+    memory_link(source_node, target_node, relationship, reason) — curate an edge
+    memory_supersede(old_node, new_content|new_node, reason) — replace stale memory
+    memory_archive(node_ids, reason) — archive obsolete memory
     brain_guardrails(skill?)          — skill-specific guardrails + recent failures
     brain_skills(task)                — task planning + skill catalog recommendation
     skill_view(name, section?)        — load a skill card/summary/procedure section
@@ -58,10 +61,6 @@ async def _maybe_await(value: Any) -> Any:
 
 async def _session_execute(session: Any, *args: Any, **kwargs: Any) -> Any:
     return await _maybe_await(session.execute(*args, **kwargs))
-
-
-async def _session_flush(session: Any) -> None:
-    await _maybe_await(session.flush())
 
 
 def _jsonish(value: Any, default: Any) -> Any:
@@ -193,19 +192,30 @@ def _validate_skill_asset_path(path: str) -> str:
     return cleaned
 
 
-async def _async_log_retrieval(query: str, results: list) -> None:
-    """Insert a row into retrieval_log for metrics tracking. Non-blocking."""
+async def _async_log_retrieval(
+    query: str,
+    results: list,
+    *,
+    reconstruction_run_id: int | None,
+    org_id: str | None,
+) -> dict[str, Any] | None:
+    """Record reconstructive retrieval attribution. Failures stay non-critical."""
+    if reconstruction_run_id is None:
+        return None
     try:
-        top_score = max((r.get("similarity", 0) for r in results), default=0)
+        from brain.systems.memory.retrieval_feedback import record_reconstruction_retrieval_feedback
+
         async with UnitOfWork() as uow:
-            await _maybe_await(uow.retrieval_logs.create(
-                query_text=query[:500],
-                results_returned=len(results),
-                top_score=round(float(top_score), 4),
-            ))
-            await _session_flush(uow.session)
+            return await record_reconstruction_retrieval_feedback(
+                uow.session,
+                query=query,
+                evidence=results,
+                reconstruction_run_id=reconstruction_run_id,
+                org_id=org_id,
+            )
     except Exception as e:
-        logger.debug(f"retrieval_log insert failed (non-critical): {e}")
+        logger.debug(f"reconstructive retrieval feedback failed (non-critical): {e}")
+        return None
 
 
 async def async_tool_brain_recall(
@@ -347,7 +357,101 @@ async def async_tool_memory_reconstruct(
             run_id=parsed_run_id,
             thread_id=thread_id,
         )
-    return pack.to_dict()
+    payload = pack.to_dict()
+    await _async_log_retrieval(
+        query,
+        list(payload.get("supporting_evidence") or []),
+        reconstruction_run_id=pack.reconstruction_run_id,
+        org_id=org_id,
+    )
+    return payload
+
+
+async def async_tool_memory_link(
+    source_node: int,
+    target_node: int,
+    relationship: str,
+    reason: str,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    run_id: int | str | None = None,
+) -> dict:
+    """Create a deliberate relationship between two visible memory nodes."""
+    from brain.systems.reconstructive_memory.curation import link_memories
+
+    return await _execute_memory_curation(
+        "memory_link",
+        link_memories,
+        user_id=user_id,
+        source_node_id=source_node,
+        target_node_id=target_node,
+        relationship=relationship,
+        reason=reason,
+        org_id=org_id,
+        run_id=run_id,
+    )
+
+
+async def async_tool_memory_supersede(
+    old_node: int,
+    reason: str,
+    new_content: str | None = None,
+    new_node: int | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    run_id: int | str | None = None,
+) -> dict:
+    """Supersede one visible memory with new content or an existing node."""
+    from brain.systems.reconstructive_memory.curation import supersede_memory
+
+    return await _execute_memory_curation(
+        "memory_supersede",
+        supersede_memory,
+        user_id=user_id,
+        old_node_id=old_node,
+        new_content=new_content,
+        new_node_id=new_node,
+        reason=reason,
+        org_id=org_id,
+        run_id=run_id,
+    )
+
+
+async def async_tool_memory_archive(
+    node_ids: list[int],
+    reason: str,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    run_id: int | str | None = None,
+) -> dict:
+    """Archive visible memory nodes with source-backed curation provenance."""
+    from brain.systems.reconstructive_memory.curation import archive_memories
+
+    return await _execute_memory_curation(
+        "memory_archive",
+        archive_memories,
+        user_id=user_id,
+        node_ids=node_ids,
+        reason=reason,
+        org_id=org_id,
+        run_id=run_id,
+    )
+
+
+async def _execute_memory_curation(
+    tool_name: str,
+    operation: Any,
+    *,
+    user_id: str | None,
+    **kwargs: Any,
+) -> dict:
+    if not user_id:
+        return {"error": f"{tool_name} requires user context (missing user_id)"}
+    try:
+        async with UnitOfWork() as uow:
+            return await operation(uow.session, user_id=user_id, **kwargs)
+    except (LookupError, ValueError) as exc:
+        return {"error": str(exc)}
 
 
 async def _finalize_recall_response(
@@ -363,7 +467,6 @@ async def _finalize_recall_response(
     run_id: int | None = None,
 ) -> dict:
 
-    await _async_log_retrieval(query, memories)
     service_retrieval = service_retrieval or user_id == "system"
     if not user_id and not org_id and not service_retrieval and not memories:
         return {
@@ -1534,6 +1637,56 @@ TOOLS = {
                 "limit": {"type": "integer", "description": "Maximum supporting evidence items", "default": 5},
             },
             "required": ["query"],
+        },
+    },
+    "memory_link": {
+        "function": async_tool_memory_link,
+        "description": "Create a deliberate, reason-backed relationship between two visible memory nodes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_node": {"type": "integer", "minimum": 1},
+                "target_node": {"type": "integer", "minimum": 1},
+                "relationship": {"type": "string", "minLength": 1, "maxLength": 60},
+                "reason": {"type": "string", "minLength": 3},
+            },
+            "required": ["source_node", "target_node", "relationship", "reason"],
+        },
+    },
+    "memory_supersede": {
+        "function": async_tool_memory_supersede,
+        "description": "Replace a stale visible memory with new content or an existing visible node.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "old_node": {"type": "integer", "minimum": 1},
+                "new_content": {"type": "string", "minLength": 20},
+                "new_node": {"type": "integer", "minimum": 1},
+                "reason": {"type": "string", "minLength": 3},
+            },
+            "required": ["old_node", "reason"],
+            "oneOf": [
+                {"required": ["new_content"], "not": {"required": ["new_node"]}},
+                {"required": ["new_node"], "not": {"required": ["new_content"]}},
+            ],
+        },
+    },
+    "memory_archive": {
+        "function": async_tool_memory_archive,
+        "description": "Archive obsolete or redundant visible memory nodes with a durable reason.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node_ids": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 1},
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "uniqueItems": True,
+                },
+                "reason": {"type": "string", "minLength": 3},
+            },
+            "required": ["node_ids", "reason"],
         },
     },
     "brain_guardrails": {

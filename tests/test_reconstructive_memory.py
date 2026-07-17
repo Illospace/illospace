@@ -25,6 +25,7 @@ from brain.platform.db.models.reconstructive_memory import (
     ReconstructionRun,
     ReconstructionStep,
 )
+from brain.platform.db.models.system import RetrievalLog
 from brain.platform.db.repositories.reconstructive_memory import (
     AssertionDraft,
     EdgeDraft,
@@ -34,6 +35,7 @@ from brain.platform.db.repositories.reconstructive_memory import (
     MemoryNodeRepository,
     MemorySourceRepository,
     NodeDraft,
+    ReconstructiveMemoryCompatibilityRepository,
     SourceSpanDraft,
 )
 from brain.systems.reconstructive_memory.controller import reconstruct_memory
@@ -65,6 +67,7 @@ async def _session(async_sqlite_session_factory):
             MemorySource.__table__,
             MemorySpan.__table__,
             MemoryNode.__table__,
+            RetrievalLog.__table__,
             MemoryNodeEmbedding.__table__,
             MemoryAssertionNode.__table__,
             MemoryEdgeNode.__table__,
@@ -195,16 +198,26 @@ def test_reconstructive_memory_models_expose_clean_slate_tables():
 def test_reconstructive_memory_tools_are_registered_for_agents():
     from brain.systems.runs.tool_catalog.definitions.brain import BRAIN_TOOLS
     from brain.systems.runs.tool_catalog.registry import get_tool_registration
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
 
     tool_names = {tool["name"] for tool in BRAIN_TOOLS}
+    handlers = _get_tool_handlers()
     assert "memory_reconstruct" in tool_names
     assert "memory_ingest_source" in tool_names
+    assert {"memory_link", "memory_supersede", "memory_archive"} <= tool_names
     reconstruct_registration = get_tool_registration("memory_reconstruct")
     ingest_registration = get_tool_registration("memory_ingest_source")
     assert reconstruct_registration is not None
     assert ingest_registration is not None
     assert reconstruct_registration.side_effect_class == "read_only"
     assert ingest_registration.permission == "write_memory"
+    for tool_name in ("memory_link", "memory_supersede", "memory_archive"):
+        assert tool_name in handlers
+        registration = get_tool_registration(tool_name)
+        assert registration is not None
+        assert registration.permission == "write_memory"
+        assert registration.side_effect_class == "memory_curation"
+        assert registration.output_budget_chars == 4_000
 
 
 async def test_source_backed_graph_can_be_written_and_reconstructed(async_sqlite_session_factory):
@@ -509,6 +522,138 @@ async def test_mcp_memory_reconstruct_returns_evidence_pack(async_sqlite_session
     assert payload["supporting_evidence"][0]["source_span_id"] == spans[0].id
     assert payload["trajectory"][0]["action_kind"] == "seed_cues"
 
+    retrieval_log = (
+        await session.scalars(
+            select(RetrievalLog).where(RetrievalLog.query_text == "replacement memory tool")
+        )
+    ).one()
+    assert retrieval_log.was_relevant is True
+    assert retrieval_log.feedback == "hit"
+    assert retrieval_log.top_result_id == node.id
+    assert retrieval_log.top_score == payload["supporting_evidence"][0]["confidence"]
+    feedback_rows = list(
+        (
+            await session.scalars(
+                select(ReconstructionFeedback).where(
+                    ReconstructionFeedback.reconstruction_run_id == payload["reconstruction_run_id"]
+                )
+            )
+        ).all()
+    )
+    assert len(feedback_rows) >= 1
+    assert feedback_rows[0].target_node_id == node.id
+    assert feedback_rows[0].signal_kind == "selected_evidence_proxy"
+    assert feedback_rows[0].details["proxy"] == "selected_into_completed_evidence_pack"
+    assert feedback_rows[0].details["retrieval_log_id"] == retrieval_log.id
+
+
+async def test_agent_memory_curation_tools_persist_provenance_and_hide_superseded_memory(
+    async_sqlite_session_factory,
+    monkeypatch,
+):
+    session = await _session(async_sqlite_session_factory)
+    ingested = []
+    for content, kind in (
+        ("Related checkout guidance describes the supported customer flow.", "procedure"),
+        ("Related payment guidance describes the supported customer flow.", "procedure"),
+        ("Widget deployment guidance says to use the retired legacy rollout path.", "procedure"),
+        ("Obsolete widget deployment note has no continuing operational value.", "fact"),
+    ):
+        ingested.append(
+            await ingest_memory_source(
+                session,
+                content=content,
+                content_kind=kind,
+                source_kind="manual_note",
+                org_id=_TEST_ORG_ID,
+                user_id=_TEST_USER_ID,
+                visibility="org",
+                confidence=0.8,
+            )
+        )
+    await session.flush()
+
+    class _PatchedUnitOfWork:
+        async def __aenter__(self):
+            self.session = session
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            if exc_type is None:
+                await session.flush()
+            else:
+                await session.rollback()
+            return False
+
+    from brain.app.mcp import server as mcp_server
+    from brain.systems.runs.execution_context import AgentExecutionContext, bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.common import _wrap_memory_curation
+
+    monkeypatch.setattr(mcp_server, "UnitOfWork", _PatchedUnitOfWork)
+    with bind_agent_context(
+        AgentExecutionContext(
+            user_id=_TEST_USER_ID,
+            org_id=_TEST_ORG_ID,
+            run=SimpleNamespace(run_id=346),
+        )
+    ):
+        link_result = await _wrap_memory_curation(mcp_server.async_tool_memory_link)(
+            source_node=ingested[0].content_node_id,
+            target_node=ingested[1].content_node_id,
+            relationship="supports guidance",
+            reason="Both memories govern the same supported customer flow.",
+        )
+        supersede_result = await _wrap_memory_curation(mcp_server.async_tool_memory_supersede)(
+            old_node=ingested[2].content_node_id,
+            new_content="Widget deployment guidance now requires the verified progressive rollout path.",
+            reason="Live deployment verification disproved the retired rollout guidance.",
+        )
+        archive_result = await _wrap_memory_curation(mcp_server.async_tool_memory_archive)(
+            node_ids=[ingested[3].content_node_id],
+            reason="The note is obsolete and duplicates current verified guidance.",
+        )
+
+    assert "error" not in link_result
+    assert "error" not in supersede_result
+    assert "error" not in archive_result
+    edges = list((await session.scalars(select(MemoryEdgeNode))).all())
+    deliberate_edges = {edge.id: edge for edge in edges if edge.created_by == "agent_curation"}
+    assert link_result["edge_id"] in deliberate_edges
+    assert supersede_result["edge_id"] in deliberate_edges
+    assert deliberate_edges[link_result["edge_id"]].edge_kind == "supports_guidance"
+    assert deliberate_edges[supersede_result["edge_id"]].edge_kind == "superseded_by"
+    assert deliberate_edges[link_result["edge_id"]].evidence_span_ids
+    assert deliberate_edges[supersede_result["edge_id"]].evidence_span_ids
+
+    old_node = await session.get(MemoryNode, ingested[2].content_node_id)
+    archived_node = await session.get(MemoryNode, ingested[3].content_node_id)
+    assert old_node.truth_status == "superseded"
+    assert old_node.freshness_status == "stale"
+    assert archived_node.archived_at is not None
+    old_payload = await ReconstructiveMemoryCompatibilityRepository(session).get(old_node.id)
+    assert old_payload["superseded_by"] == supersede_result["new_node"]
+
+    curation_sources = [
+        source
+        for source in (await session.scalars(select(MemorySource))).all()
+        if source.source_kind == "agent_curation" and source.structured_payload.get("action")
+    ]
+    payload_by_action = {source.structured_payload["action"]: source.structured_payload for source in curation_sources}
+    assert payload_by_action["link"]["reason"] == link_result["reason"]
+    assert payload_by_action["supersede"]["reason"] == supersede_result["reason"]
+    assert payload_by_action["archive"]["reason"] == archive_result["reason"]
+    assert all(source.authority_principal == _TEST_USER_ID for source in curation_sources)
+    assert all(source.structured_payload["created_by"] == "agent_curation" for source in curation_sources)
+
+    recall = await mcp_server.async_tool_memory_reconstruct(
+        query="Widget deployment guidance rollout path",
+        org_id=_TEST_ORG_ID,
+        user_id=_TEST_USER_ID,
+    )
+    recalled_node_ids = {item["node_id"] for item in recall["supporting_evidence"]}
+    assert ingested[2].content_node_id not in recalled_node_ids
+    assert supersede_result["new_node"] in recalled_node_ids
+
 
 async def test_brain_recall_compatibility_alias_reads_reconstructive_memory_without_legacy_table(
     async_sqlite_session_factory,
@@ -552,6 +697,8 @@ async def test_brain_recall_compatibility_alias_reads_reconstructive_memory_with
     assert payload["evidence_pack"]["confidence"] != 0.81
     assert payload["memories"][0]["memory_system"] == "reconstructive"
     assert payload["memories"][0]["source_span_id"] is not None
+    retrieval_log_count = await session.scalar(text("SELECT COUNT(*) FROM retrieval_log"))
+    assert retrieval_log_count == 1
 
     memory_table_exists = await session.execute(
         text("SELECT name FROM sqlite_master WHERE type='table' AND name='memories'")
@@ -743,25 +890,18 @@ async def test_recall_observation_receives_agent_run_id(monkeypatch):
 
 async def test_retrieval_log_records_actual_match_score(monkeypatch):
     from brain.app.mcp import server as mcp_server
+    from brain.systems.memory import retrieval_feedback
 
-    captured = {}
-
-    class _RetrievalLogs:
-        async def create(self, **kwargs):
-            captured.update(kwargs)
-
-    class _Session:
-        async def flush(self):
-            return None
+    recorder = AsyncMock(return_value={"retrieval_log_id": 11})
+    monkeypatch.setattr(retrieval_feedback, "record_reconstruction_retrieval_feedback", recorder)
 
     class _UnitOfWork:
         async def __aenter__(self):
-            self.retrieval_logs = _RetrievalLogs()
-            self.session = _Session()
+            self.session = object()
             return self
 
         async def __aexit__(self, exc_type, exc, tb):
-            del exc_type, exc, tb
+            return False
 
     monkeypatch.setattr(mcp_server, "UnitOfWork", _UnitOfWork)
     await mcp_server._async_log_retrieval(
@@ -770,10 +910,13 @@ async def test_retrieval_log_records_actual_match_score(monkeypatch):
             {"id": 1, "similarity": 0.83, "confidence": 0.83},
             {"id": 2, "similarity": 0.41, "confidence": 0.41},
         ],
+        reconstruction_run_id=17,
+        org_id=_TEST_ORG_ID,
     )
 
-    assert captured["top_score"] == 0.83
-    assert captured["results_returned"] == 2
+    assert recorder.await_args.kwargs["reconstruction_run_id"] == 17
+    assert recorder.await_args.kwargs["evidence"][0]["confidence"] == 0.83
+    assert recorder.await_args.kwargs["org_id"] == _TEST_ORG_ID
 
 
 async def test_brain_encode_compatibility_alias_writes_reconstructive_memory(async_sqlite_session_factory, monkeypatch):

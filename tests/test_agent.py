@@ -368,6 +368,9 @@ class TestToolDefinitions:
         assert "skill_view" in names
         assert "skill_asset" in names
         assert "brain_encode" in names
+        assert "memory_link" in names
+        assert "memory_supersede" in names
+        assert "memory_archive" in names
         assert "brain_vault" in names
         assert "runtime_settings" in names
         assert "read_self_context" in names
@@ -461,6 +464,9 @@ class TestBrainGate:
             "skill_view",
             "skill_asset",
             "brain_encode",
+            "memory_link",
+            "memory_supersede",
+            "memory_archive",
         ):
             assert name in _BRAIN_TOOL_NAMES
         assert "runtime_settings" in _BRAIN_TOOL_NAMES

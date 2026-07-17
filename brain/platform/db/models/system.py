@@ -141,7 +141,7 @@ class RetrievalLog(Base):
     was_relevant: Mapped[Optional[bool]] = mapped_column(nullable=True)
     feedback: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     org_id: Mapped[Optional[str]] = mapped_column(
-        UUID(as_uuid=False),
+        UUID(as_uuid=False).with_variant(String, "sqlite"),
         ForeignKey("orgs.id", ondelete="SET NULL"),
         nullable=True,
         index=True,

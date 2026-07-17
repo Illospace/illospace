@@ -18,9 +18,13 @@ Automatic feedback (memory-DAG):
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.platform.db.repositories.reconstructive_memory import ReconstructionRepository
+from brain.platform.db.repositories.system import RetrievalLogRepository
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 logger = logging.getLogger(__name__)
@@ -36,6 +40,86 @@ BOOST_SUCCESS = 0.05
 PENALTY_FAILURE = 0.03
 BOOST_EXPLICIT = 0.3
 PENALTY_EXPLICIT = 0.2
+
+
+async def record_reconstruction_retrieval_feedback(
+    session: AsyncSession,
+    *,
+    query: str,
+    evidence: list[dict[str, Any]],
+    reconstruction_run_id: int,
+    org_id: str | None,
+) -> dict[str, Any]:
+    """Persist the one reconstructive retrieval/feedback attribution path.
+
+    V1 proxy: evidence selected into a completed evidence pack is considered
+    relevant. This records what was returned to the agent, not a verified final-
+    answer citation; the explicit proxy label keeps that distinction queryable.
+    """
+
+    normalized_evidence = [item for item in evidence if isinstance(item, dict)]
+    top_item = normalized_evidence[0] if normalized_evidence else {}
+    top_result_id = _feedback_node_id(top_item)
+    top_score = max((_feedback_score(item) for item in normalized_evidence), default=0.0)
+    was_relevant = bool(normalized_evidence)
+    retrieval_log = await RetrievalLogRepository(session).create_reconstruction_log(
+        query_text=query[:500],
+        results_returned=len(normalized_evidence),
+        top_result_id=top_result_id,
+        top_score=round(top_score, 4),
+        was_relevant=was_relevant,
+        feedback="hit" if was_relevant else "miss",
+        org_id=org_id,
+    )
+
+    feedback_repo = ReconstructionRepository(session)
+    feedback_ids: list[int] = []
+    if normalized_evidence:
+        for rank, item in enumerate(normalized_evidence):
+            feedback = await feedback_repo.add_feedback(
+                reconstruction_run_id=reconstruction_run_id,
+                signal_kind="selected_evidence_proxy",
+                target_node_id=_feedback_node_id(item),
+                details={
+                    "proxy": "selected_into_completed_evidence_pack",
+                    "retrieval_log_id": retrieval_log.id,
+                    "rank": rank,
+                    "confidence": _feedback_score(item),
+                },
+            )
+            feedback_ids.append(feedback.id)
+    else:
+        feedback = await feedback_repo.add_feedback(
+            reconstruction_run_id=reconstruction_run_id,
+            signal_kind="no_evidence_proxy",
+            details={
+                "proxy": "completed_evidence_pack_was_empty",
+                "retrieval_log_id": retrieval_log.id,
+            },
+        )
+        feedback_ids.append(feedback.id)
+
+    return {
+        "retrieval_log_id": retrieval_log.id,
+        "was_relevant": was_relevant,
+        "feedback_ids": feedback_ids,
+    }
+
+
+def _feedback_node_id(item: dict[str, Any]) -> int | None:
+    value = item.get("node_id", item.get("id"))
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _feedback_score(item: dict[str, Any]) -> float:
+    value = item.get("confidence", item.get("similarity", 0.0))
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 async def apply_retrieval_feedback(log_id: int, feedback: str, *, cur=None) -> dict:

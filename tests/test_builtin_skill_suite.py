@@ -171,6 +171,10 @@ def test_uwear_triage_scheduled_memory_contract():
         "### What Makes a Good Memory",
         "## Stable Phrasing and Dedup",
         "`normalized_key`",
+        "memory_supersede",
+        "memory_archive",
+        "memory_link",
+        "concrete reason grounded in the current authoritative source",
         "Bad — ephemeral count",
         "Bad — delivery receipt",
     ):
