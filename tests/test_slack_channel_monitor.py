@@ -639,3 +639,88 @@ async def test_monitor_channel_preserves_identity_map_metadata():
     # Adding a monitor must not clobber the existing identity map.
     assert connection.metadata_["slack"]["identity_map"] == {"U1": "user-1"}
     assert connection.metadata_["slack"]["monitored_channels"][0]["channel_id"] == "C_ALERTS"
+
+
+def test_channel_monitor_replays_2026_07_16_requests_without_silence():
+    """Both #358 anchor messages reach a visible-action classifier branch."""
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
+    messages = [
+        "demande assez facile a faire je pense",
+        (
+            "@Illo bug in staging, downloading in bulk make ZIPs that cant be opened "
+            "(also abnormaly just 6kb zips vs excpected 3MB and more for multiples photos)"
+        ),
+    ]
+
+    run_messages = []
+    for message in messages:
+        monitored_payload = _channel_monitor_payload()
+        monitored_payload["text"] = message
+        work = build_slack_work_intake_payload(
+            org_id="org1",
+            authority_user_id="user1",
+            payload=monitored_payload,
+        )
+        run_message = work["payload"]["run_message"]
+        assert f"Message text: {message}" in run_message
+        assert "ask exactly ONE focused clarifying question in-thread" in run_message
+        run_messages.append(run_message)
+
+    bulk_download_run_message = run_messages[1]
+    assert "root-cause hypothesis naming the target repo" in bulk_download_run_message
+    assert "repo and incident clear" in bulk_download_run_message
+    assert (
+        "include the investigation findings in the issue body"
+        in bulk_download_run_message.lower()
+    )
+    assert "same run" in bulk_download_run_message
+
+
+def test_channel_monitor_third_branch_preserves_casual_commentary_silence():
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
+    work = build_slack_work_intake_payload(
+        org_id="org1",
+        authority_user_id="user1",
+        payload=_channel_monitor_payload(),
+    )
+
+    run_message = work["payload"]["run_message"]
+    # The silence branch must survive the #358 third branch: chatter and pure alert
+    # commentary still get no visible action.
+    assert (
+        "Casual chatter, or discussion about an existing alert that does not itself ask for "
+        "work: take NO visible action. Do not reply."
+    ) in run_message
+    # ...but proximity to an alert must not by itself route a human request into
+    # silence — that misread is what produced run 1562 (#358 instance 1).
+    assert "NOT alert commentary merely because it arrived near an alert" in run_message
+    assert "does not apply to casual chatter or genuine commentary" in run_message
+
+
+@pytest.mark.parametrize("event_type", ["app_mention", "message"])
+def test_every_app_mention_inbound_event_requires_a_visible_response(event_type):
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
+    envelope = normalize_slack_socket_event(
+        _socket_mode_channel_message(
+            type=event_type,
+            text="<@BILLO> not enough detail yet",
+        ),
+        bot_user_id="BILLO",
+        monitored_channels={"C_ALERTS"},
+    )
+
+    assert envelope is not None
+    assert envelope["origin"] == "slack.app_mention"
+    work = build_slack_work_intake_payload(
+        org_id="org1",
+        authority_user_id="user1",
+        payload=envelope["payload"],
+    )
+    metadata = work["payload"]["metadata"]
+    assert metadata["required_response_tool"] == "post_slack_reply"
+    assert metadata["final_answer_target_surface"] == "slack"
+    assert "No visible action taken." not in work["payload"]["run_message"]
