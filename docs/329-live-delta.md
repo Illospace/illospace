@@ -6,6 +6,14 @@ the intended environment. The command replaces the manual #329/#344 record-id
 runbooks; playbook ids come from the global database sequence and are never
 predicted or pinned.
 
+Deployment first runs forward-only migration
+`0028_deactivate_pinned_chantier_digest`. Revision `0027_chantier_digest_v2`
+is historical and remains byte-identical to `main`; `0028` removes its live
+record-`1274` contract from coordinator cycle `2` and appends a safe revision.
+It does not require doc `1155` v8 and never raises merely because activation is
+pending. Missing prerequisites are logged and left unchanged, so migration
+replay cannot hold a deployment behind this operator-run activation.
+
 ## Slug resolution contract
 
 The bundled core document resolves each on-demand playbook in Domain `37` by
@@ -52,24 +60,31 @@ Before writing, it requires:
   Domain `37`, in that `doc_page` type, and in the core record's organization;
 - core content that differs from the bundle to still be v7, so a newer live
   edit is never overwritten silently; and
+- coordinator cycle `2` plus its revision history to be present and
+  unambiguous; and
 - every bundled source file to be readable.
 
 A missing playbook is created with a database-assigned id. A correct existing
 playbook is left untouched; stale content is replaced with the bundled bytes
 using its locked current version. Core record `1155` is updated last and must
-be v8 or newer afterward. Every record is then read back and byte-verified
-before commit.
+be v8 or newer afterward. Every record is then read back and byte-verified.
+Only after that verification does the same transaction set cycle `2` and its
+new latest revision to the slug-based v2 mission. If either half fails, both
+the documents and mission roll back.
 
 Any missing core target, occupied or duplicate slug, cross-domain/wrong-type
 record, archived target, concurrent version change, unreadable asset, or
 post-write mismatch raises an error and rolls back the entire transaction.
 Once all six records match, another `--apply` changes no rows or versions.
+It also leaves the already-correct mission and revision untouched.
 
 ## Production activation (Reda)
 
 Run from the deployed checkout after the image containing this change is
 available. This is the step that changes doc `1155` from live v7 to v8; merging
-this code alone does not activate it.
+this code alone does not activate it. The normal deploy's Alembic step runs
+`0028` before these commands, so the coordinator no longer points at unrelated
+record `1274` while activation is pending.
 
 ```bash
 cd ~/illospace
@@ -90,13 +105,17 @@ docker compose --env-file deploy/compose/.env \
   python -m brain.app.cli.activate_uwear_engineering_triage --check
 ```
 
-The first command reports the required creates/updates. The second proves the
-write path is a no-op (`created=0 updated=0 unchanged=6`). The final read-only
-check must also report six unchanged documents.
+The first command reports the required creates/updates and
+`mission_updated=true`. The second proves the write path is a no-op
+(`created=0 updated=0 unchanged=6 mission_updated=false`). The final read-only
+check must also report six unchanged documents and `mission_updated=false`.
 
 Afterward, verify the live acceptance query separately and run one read-only
 coordinator dry run. The query for record `1155` must return v8, `true`, and its
 content must be byte-identical to the deployed `SKILL.md`. Each of the five
 slugs above must resolve to exactly one active Domain `37` `doc_page` with the
 listed fingerprint. The dry-run digest plan must be chantier-primary while its
-footer still covers Reda, Axel, and JB.
+footer still covers Reda, Axel, and JB. Coordinator cycle `2` and its latest
+revision must contain slug `uwear-engineering-triage-chantier-operations` and
+must not contain `record 1274`; historical revision `47` remains append-only
+evidence of the superseded mission.

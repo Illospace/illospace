@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import importlib
 
-import pytest
 import sqlalchemy as sa
 
 
 MIGRATION_MODULE = "brain.platform.db.alembic.versions.0027_chantier_digest_v2"
+REPAIR_MODULE = (
+    "brain.platform.db.alembic.versions.0028_deactivate_pinned_chantier_digest"
+)
 
 
 def _schema() -> tuple[sa.MetaData, dict[str, sa.Table]]:
@@ -192,8 +194,9 @@ def test_v2_contract_stays_visible_at_front_of_near_cap_mission():
     assert prompt.endswith("z" * 12_000)
 
 
-def test_migration_fails_before_mutating_cycle_when_doc_1155_is_still_v7():
+def test_migration_replay_with_cycle_2_and_doc_1155_v7_does_not_raise(caplog):
     migration = importlib.import_module(MIGRATION_MODULE)
+    repair = importlib.import_module(REPAIR_MODULE)
     engine = sa.create_engine("sqlite://")
     metadata, tables = _schema()
     metadata.create_all(engine)
@@ -207,21 +210,29 @@ def test_migration_fails_before_mutating_cycle_when_doc_1155_is_still_v7():
             .values(version=7, data={"slug": "uwear-engineering-triage", "content": "v7"})
         )
 
-        with pytest.raises(RuntimeError, match="record 1155.*v8"):
-            migration._upgrade(connection)
+        migration._upgrade(connection)
+        repair._upgrade(connection)
+        repair._upgrade(connection)
 
         prompt = connection.execute(
             sa.select(tables["cycles"].c.prompt).where(tables["cycles"].c.id == 2)
         ).scalar_one()
-        revision_count = connection.execute(
-            sa.select(sa.func.count()).select_from(tables["cycle_revisions"])
-        ).scalar_one()
+        revisions = connection.execute(
+            sa.select(tables["cycle_revisions"])
+            .where(tables["cycle_revisions"].c.cycle_id == 2)
+            .order_by(tables["cycle_revisions"].c.revision_number)
+        ).mappings().all()
         assert prompt == "Run the existing owner-primary coordinator mission."
-        assert revision_count == 3
+        assert "record 1274" in revisions[-2]["prompt"]
+        assert revisions[-1]["prompt"] == prompt
+        assert [row["revision_number"] for row in revisions] == [1, 2, 3]
+        assert "deploy remains usable" in caplog.text
 
 
-def test_migration_fails_when_doc_1155_v8_does_not_contain_chantier_contract():
-    migration = importlib.import_module(MIGRATION_MODULE)
+def test_repair_migration_no_ops_loudly_when_unactivated_cycle_has_no_pinned_contract(
+    caplog,
+):
+    repair = importlib.import_module(REPAIR_MODULE)
     engine = sa.create_engine("sqlite://")
     metadata, tables = _schema()
     metadata.create_all(engine)
@@ -232,30 +243,9 @@ def test_migration_fails_when_doc_1155_v8_does_not_contain_chantier_contract():
             tables["domain_records"]
             .update()
             .where(tables["domain_records"].c.id == 1155)
-            .values(data={"slug": "uwear-engineering-triage", "content": "unrelated v8"})
+            .values(version=7, data={"slug": "uwear-engineering-triage", "content": "v7"})
         )
 
-        with pytest.raises(RuntimeError, match="chantier operating model"):
-            migration._upgrade(connection)
+        repair._upgrade(connection)
 
-
-def test_mission_contract_resolves_chantier_playbook_by_slug():
-    migration = importlib.import_module(MIGRATION_MODULE)
-
-    assert "uwear-engineering-triage-chantier-operations" in migration._MISSION_CONTRACT
-    assert "record 1274" not in migration._MISSION_CONTRACT
-
-
-def test_mission_prompt_replaces_an_older_v2_block_without_losing_legacy_mission():
-    migration = importlib.import_module(MIGRATION_MODULE)
-    legacy = "Keep the owner-primary details that are not superseded."
-    old_prompt = (
-        "Chantier-primary digest contract v2: Load playbook record 1274."
-        f"\n\n{legacy}"
-    )
-
-    prompt = migration._mission_prompt(old_prompt)
-
-    assert prompt.startswith(migration._MISSION_CONTRACT)
-    assert prompt.endswith(legacy)
-    assert "record 1274" not in prompt
+        assert "slug-based activation remains pending" in caplog.text
