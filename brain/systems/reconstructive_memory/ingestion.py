@@ -7,6 +7,7 @@ nodes, and graph edges in one transaction.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -23,6 +24,8 @@ from brain.platform.db.repositories.reconstructive_memory import (
     NodeDraft,
     SourceSpanDraft,
 )
+
+logger = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
 _STOP_WORDS = {
@@ -229,6 +232,24 @@ async def ingest_memory_source(
                 org_id=org_id,
                 visibility=visibility,
             )
+        )
+
+    try:
+        from brain.systems.reconstructive_memory.embeddings import embed_node_texts
+
+        await embed_node_texts(
+            session,
+            node=content_node,
+            assertion_texts=(assertion.claim_text,),
+        )
+    except Exception as exc:
+        # Embeddings are a recoverable derivative. The complete source-backed
+        # graph remains valid and the backfill CLI can fill this explicit gap.
+        logger.warning(
+            "Memory graph ingest completed but embedding failed for node %s; "
+            "leaving a backfillable gap: %s",
+            content_node.id,
+            exc,
         )
 
     return IngestedMemorySource(

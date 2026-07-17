@@ -60,6 +60,14 @@ writes.
   never as part of a scheduled digest run. Always-on core rule: close
   candidates are approval batches; never close GitHub issues or PRs without
   delegated authority.
+- **Chantier operations** — record `1274`, asset
+  `references/chantier-operations.md`. Fetch before every scheduled digest and
+  before filing or recording a new work item. It defines chantier-primary
+  digests, attach-at-triage, induction, freshness, and close-out. Always-on core
+  rules: check active chantiers before filing; attach an exact match, but only
+  PROPOSE (never auto-create) a chantier for an ungrouped family; never let an
+  active chantier disappear silently or hide one that is stale, blocked, or
+  missing `next_step`.
 
 ## Coordination Pipeline
 
@@ -75,6 +83,9 @@ Build the complete picture before forming any opinion. Required sources:
   repo so coverage is verifiable.
 - The full active GitHub Ticket Tracker Domain id `1` state — not just the
   most recently updated records.
+- Every active Domain `1` `chantier` record, with an exact active-chantier
+  count and its state, goal, refs, owner, next step, progress note, and update
+  time.
 - GitHub Event Feed Domain id `38` events since the last run.
 - Teammate replies to your last check-in (Slack thread and Cortex thread).
 
@@ -105,6 +116,8 @@ disappear. Every digest run must also:
   the stalest items surface first.
 - Treat `Blocked` and `High` priority records as must-surface regardless of
   age. An item does not stop existing because nobody touched it.
+- Treat every active chantier untouched for 3+ days, missing `next_step`, or
+  carrying a blocker as must-surface.
 
 **Reconcile counts.** `query_records` reports `returned` and
 `total_matching`; GitHub reads report exact open counts. The rule: prefer ONE
@@ -130,65 +143,75 @@ after the first successful post). Exactly one = read it and retain its
 `record_id` and `version` for the later update. More than one exact match =
 degraded evidence; say so and do not post a normal brief. The snapshot stores
 the COMPLETE posted workset (not a delta): run id, timestamp, Slack message
-id, and per-person items with ref, state, and next action.
+id, active chantiers with slug, state, member refs, blockers, and next step,
+plus per-person items with ref, state, and next action.
 
-**Diff in two stages.** First, before judging, revalidate every item from the
-snapshot against the full current state (Phase A): merged, closed, moved,
-blocked, stale (untouched 3+ days while `Todo`/`In Progress`/`Blocked`), or
-unchanged. Second, after Phase C selects the new priority workset, compare its
-membership against the snapshot: every item that was in the last brief but
-not in the new one needs an explicit stated reason — merged, closed,
-superseded by a named item, or deprioritized by a named human. A generic "not
-priority anymore" is not a reason. An item that would leave with no reason is
-a red flag: surface it instead of letting it vanish — silent disappearance is
-how teammates' work got dropped.
+**Diff in two stages.** First, before judging, revalidate every chantier and
+item from the snapshot against the full current state (Phase A): chantier
+state/member/blocker movement; item merge, close, move, blocker, or staleness
+(untouched 3+ days while `Todo`/`In Progress`/`Blocked`). Second, after Phase C
+selects the new workset, compare its membership against the snapshot. Every
+chantier or item that was in the last brief but not in the new one needs an
+explicit stated reason — goal met/closed, paused by a named human, merged,
+closed, superseded by a named item, or deprioritized by a named human. A
+generic "not priority anymore" is not a reason. Anything that would leave
+without a reason is a red flag: surface it instead. The no-silent-departure
+rule applies equally to chantiers and loose items.
 
 Do not reconstruct the previous workset from memory or from the visible tail
 of a listing; read the snapshot record.
 
 ### Phase C — Judge, then post
 
-Apply intelligence to the diffed picture: prioritize, cluster, decide owners
-and next actions, form rebalancing recommendations. Run the **Before Posting**
-gates, then post per the **Team Digest Contract**. After a successful normal
-post, update the snapshot record in the same run (per Phase B: by `record_id`
-with `expected_version`, complete workset — or create it after a first-ever
-post). Skipped runs, failed posts, and DEGRADED briefs do NOT advance the
-snapshot: continuity keeps pointing at the last good digest.
+Apply intelligence to the diffed picture: report chantier movement first,
+keep genuinely ungrouped work loose, decide owners and next actions, and form
+rebalancing recommendations. Run the **Before Posting** gates, then post per
+the **Team Digest Contract**. After a successful normal post, update the
+snapshot record in the same run (per Phase B: by `record_id` with
+`expected_version`, complete workset — or create it after a first-ever post).
+Skipped runs, failed posts, and DEGRADED briefs do NOT advance the snapshot:
+continuity keeps pointing at the last good digest.
 
 ## Team Digest Contract
 
-The daily brief is for three humans. Its shape is a contract, not a style
-suggestion:
+The daily brief is chantier-primary and ends with accountability for all three
+humans. Its shape is a contract, not a style suggestion:
 
-- **One section per teammate — Reda, Axel, JB — every brief, no exceptions.**
-  A missing name reads as "I have nothing to do." That silence is worse than
-  a wrong item, because nobody knows to correct it.
-- An empty section is a strong claim — it may only be made after checking ALL
+- Include a scope line with exact Phase-A item counts plus the exact active
+  chantier count, e.g. `Scope: 128 open issues + 12 open PRs across 4 repos,
+  45 active tracker records, 6 active chantiers; posting movement, not the full
+  backlog.`
+- Give every active chantier with material movement its own section: state,
+  one goal-progress line, what moved since the last digest, next step,
+  blockers, and owner(s). Collapse the others into a one-line `Quiet chantiers`
+  roll-up instead of repeating full sections.
+- Include a `Loose items` section for tickets belonging to no chantier. Never
+  force-group unrelated work to make the digest look tidy. Optional trailing
+  sections when non-empty: `Unclaimed pool`, and `Cleanup — safe to close`.
+- End with a **Per-person recap** footer containing Reda, Axel, and JB — every
+  brief, no exceptions. Each person's line gives their top next action or the
+  explicit empty claim below. The footer changes position, not coverage: a
+  missing name still reads as "I have nothing to do" without evidence.
+- An empty per-person recap is a strong claim — it may only be made after checking ALL
   of: tracker records with that person as exact `assignee` (not just a name
   search), GitHub issues assigned to their handle, PRs they authored, and
   builder-first engineering candidates. Say which checks ran, e.g. `JB: no
   active items — no tracker records assigned jb/JB, no GitHub issues assigned
-  jbk83, no open jbk83-authored PRs.` Follow it with a rebalancing
-  recommendation or an explicit `no rebalancing available because <reason>`
+  jbk83, no open jbk83-authored PRs.` Add a rebalancing recommendation or an
+  explicit `no rebalancing available because <reason>`
   (see **Rebalancing Recommendations**). Never invent filler to avoid an
   empty section.
 - If coverage is still degraded at daily-brief time (see **Truncation &
   Degraded Evidence**), the 8:00 ET brief still posts — titled
-  `DEGRADED — coverage incomplete`, still with all three teammate sections,
-  naming exactly which slices are missing, and making NO absence, departure,
-  suppression, or rebalancing claims about the missing slices. On any other
-  run, do not post while degraded.
-- Optional trailing sections when non-empty: `Unclaimed pool`, and
-  `Cleanup — safe to close`.
-- Include a scope line with the exact counts from Phase A, e.g. `Scope: 128
-  open issues + 12 open PRs across 4 repos, 45 active tracker records;
-  posting the priority workset, not the full backlog.`
-- "Material change" (the bar for posting on non-8:00 runs) means: an item
-  entered or left the priority workset, a state/owner/blocker change, a merge
-  or ship, an incident, or a teammate question answered. Nothing material =
-  no post; record `Slack skipped: no material change` in the run's
-  self-review ledger.
+  `DEGRADED — coverage incomplete`, still with the complete three-name recap
+  footer, naming exactly which slices are missing, and making NO absence,
+  departure, suppression, or rebalancing claims about the missing slices. On
+  any other run, do not post while degraded.
+- For chantiers, "material change" (the bar for posting on non-8:00 runs) is
+  anchored at chantier granularity: a chantier changed state, gained or lost
+  members, or hit/cleared a blocker. A loose item entering/leaving/changing,
+  an incident, or a teammate answer is also material. Nothing material = no
+  post; record `Slack skipped: no material change` in the self-review ledger.
 
 ## Workflow
 
@@ -208,6 +231,11 @@ steps below are the per-item triage method used inside it.
 5. If closing, merging, or changing production-facing state is possible,
    recommend it first and wait for explicit human approval unless the user
    delegated that authority.
+
+Before filing or recording a new item, follow **On-demand Run Modes: Chantier
+operations**. A matching active chantier must gain the typed ref, the issue
+body line `Part of chantier: <slug>`, and an updated `progress_note`. A related
+family without a chantier triggers a proposal, never automatic creation.
 
 ## Uwear Repos
 
@@ -481,15 +509,20 @@ fix any that fail:
    every reopened ticket (Ladder case 3) names the builder and the failed fix
    without reassigning the issue.
 5. **Coverage gate:** every Phase A source was swept and counts reconcile
-   (`returned` = `total_matching`, GitHub counts covered); every teammate —
-   Reda, Axel, JB — has a section; no truncation marker was left unresolved.
-6. **Continuity gate:** every item that appeared in the last posted brief but
-   not in this one has an explicit stated reason for leaving.
-7. **Rebalancing gate:** every empty or fully-blocked teammate section carries
+   (`returned` = `total_matching`, GitHub counts and active chantiers covered);
+   the recap footer names Reda, Axel, and JB; no truncation marker remains.
+6. **Continuity gate:** every chantier or loose item that appeared in the last
+   posted brief but not in this one has an explicit stated reason for leaving.
+7. **Freshness gate:** every active chantier untouched for 3+ days or missing
+   `next_step` is surfaced with its owner and a concrete refresh action.
+8. **Close-out gate:** when deploy-verified member states show the chantier goal
+   is met, propose closing it with an outcome summary in the goal's language —
+   never summarize success as PR counts.
+9. **Rebalancing gate:** every empty or fully-blocked teammate recap carries
    either a concrete evidence-cited move recommendation or `no rebalancing
    available because <reason>` naming the candidate pool and the disqualifying
    ownership evidence. No `assignee` (tracker or GitHub) was mutated.
-8. **Promotion gate:** every open `staging -> main` PR has an explicit
+10. **Promotion gate:** every open `staging -> main` PR has an explicit
    include/exclude decision recorded this run, naming its required checks and
    linked blockers as checked. Unknown health = degraded evidence; exclusion
    requires all required checks green, no linked `Blocked` record, and no
@@ -535,9 +568,9 @@ brittle:
 - Verify links from GitHub URLs, Domain record URL fields, or other live tool
   evidence. If a tracker record has no verified URL, write `tracker record
   1140` instead of fabricating a link.
-- Group the priority workset by verified owner mention or plain name, one owner
-  section per teammate per the **Team Digest Contract**. Within each owner
-  section, list tickets/issues first, then PRs/review/merge items.
+- Group the body by moving chantier, then quiet chantiers and `Loose items`, per
+  the **Team Digest Contract**. End with the three-name per-person recap footer;
+  use verified owner mentions there when available.
 - Keep one work item per bullet where possible: owner or verified mention,
   linked item, state or blocker, and next action.
 - The Slack post should still ship if an optional link or mention cannot be
@@ -548,5 +581,5 @@ brittle:
 Triage is done when every item in scope has a state, owner or explicit reason
 for no owner, next action, dependency check, and enough evidence for another
 agent or teammate to continue without re-discovering the same facts. A digest
-run is additionally done only when the three-section brief passed every
-**Before Posting** gate and the snapshot record was updated.
+run is additionally done only when its chantier-primary brief and three-name
+recap footer passed every **Before Posting** gate and the snapshot was updated.
