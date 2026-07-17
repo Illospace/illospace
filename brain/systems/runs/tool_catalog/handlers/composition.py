@@ -42,9 +42,12 @@ from brain.systems.runs.tool_catalog.handlers.cycles import _handle_manage_cycle
 from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
 from brain.systems.runs.tool_catalog.handlers.inbound import _handle_manage_inbound
 from brain.systems.runs.tool_catalog.handlers.github import (
+    _handle_add_github_sub_issue,
     _handle_check_fix_deploy_state,
     _handle_create_github_issue,
+    _handle_list_github_sub_issues,
     _handle_read_github_source,
+    _handle_remove_github_sub_issue,
 )
 from brain.systems.runs.tool_catalog.handlers.ideas import _handle_manage_idea
 from brain.systems.runs.tool_catalog.handlers.launch_handoffs import _handle_create_launch_handoff
@@ -294,6 +297,18 @@ def _get_tool_handlers(
         "create_github_issue": _private_async_adapter(
             "_handle_create_github_issue",
             _handle_create_github_issue,
+        ),
+        "add_github_sub_issue": _private_async_adapter(
+            "_handle_add_github_sub_issue",
+            _handle_add_github_sub_issue,
+        ),
+        "remove_github_sub_issue": _private_async_adapter(
+            "_handle_remove_github_sub_issue",
+            _handle_remove_github_sub_issue,
+        ),
+        "list_github_sub_issues": _private_async_adapter(
+            "_handle_list_github_sub_issues",
+            _handle_list_github_sub_issues,
         ),
         "check_fix_deploy_state": _private_async_adapter(
             "_handle_check_fix_deploy_state",

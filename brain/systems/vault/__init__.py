@@ -662,12 +662,19 @@ async def async_resolve_project_bound_env_tokens(
     target_registry_id: int | None = None,
     github_app_only: bool = False,
 ) -> dict[str, str]:
-    """Return env-name/token pairs for matching org project bindings."""
+    """Return env-name/token pairs for matching org project bindings.
+
+    Matching bindings for the same GitHub App and env name mint one token
+    down-scoped to their combined repository names. Cross-repository GitHub
+    operations can therefore use one installation identity without widening
+    its permissions or repository access beyond the supplied bindings.
+    """
     if not project_slug and not project_slugs and target_registry_id is None:
         return {}
     clean_org_id = _require_org_id(org_id)
     clean_actor_user_id = _require_actor_user_id(actor_user_id)
-    env_assignments: list[tuple[str, str | None, str | None, str | None]] = []
+    env_assignments: list[tuple[str, str | None, list[str] | None, str | None]] = []
+    github_app_assignments: dict[tuple[str, int], dict[str, Any]] = {}
     async with UnitOfWork() as uow:
         for binding, secret in [
             (binding, secret)
@@ -682,22 +689,30 @@ async def async_resolve_project_bound_env_tokens(
             if github_app_only and getattr(secret, "category", None) != "github_app":
                 continue
             if getattr(secret, "category", None) == "github_app":
-                secret.last_accessed_at = datetime.now(timezone.utc)
-                secret.access_count = (secret.access_count or 0) + 1
-                await _async_log_access(
-                    org_id=clean_org_id,
-                    actor_user_id=clean_actor_user_id,
-                    secret_id=secret.id,
-                    key_name=secret.key_name,
-                    action="read",
-                    # github_app mint reads audit as agent on the binding lane.
-                    accessed_by="agent",
-                    uow=uow,
-                )
                 repo_name = binding.project_slug.split("/")[-1]
-                decrypted = _decrypt(bytes(secret.encrypted_value))
-                env_assignments.append((binding.env_name, None, repo_name, decrypted))
-                decrypted = None
+                assignment_key = (binding.env_name, int(secret.id))
+                assignment = github_app_assignments.get(assignment_key)
+                if assignment is None:
+                    secret.last_accessed_at = datetime.now(timezone.utc)
+                    secret.access_count = (secret.access_count or 0) + 1
+                    await _async_log_access(
+                        org_id=clean_org_id,
+                        actor_user_id=clean_actor_user_id,
+                        secret_id=secret.id,
+                        key_name=secret.key_name,
+                        action="read",
+                        # github_app mint reads audit as agent on the binding lane.
+                        accessed_by="agent",
+                        uow=uow,
+                    )
+                    assignment = {
+                        "env_name": binding.env_name,
+                        "repo_names": [],
+                        "decrypted_blob": _decrypt(bytes(secret.encrypted_value)),
+                    }
+                    github_app_assignments[assignment_key] = assignment
+                if repo_name not in assignment["repo_names"]:
+                    assignment["repo_names"].append(repo_name)
                 continue
             if normalize_agent_access_level(getattr(secret, "agent_access_level", None)) == VAULT_AGENT_ACCESS_MANUAL:
                 continue
@@ -714,9 +729,20 @@ async def async_resolve_project_bound_env_tokens(
             )
             env_assignments.append((binding.env_name, _decrypt(bytes(secret.encrypted_value)), None, None))
 
+    env_assignments.extend(
+        (
+            str(assignment["env_name"]),
+            None,
+            list(assignment["repo_names"]),
+            str(assignment["decrypted_blob"]),
+        )
+        for assignment in github_app_assignments.values()
+    )
+    github_app_assignments.clear()
+
     env: dict[str, str] = {}
     while env_assignments:
-        env_name, value, repo_name, decrypted_blob = env_assignments.pop(0)
+        env_name, value, repo_names, decrypted_blob = env_assignments.pop(0)
         if decrypted_blob is None:
             assert value is not None
             env[env_name] = value
@@ -726,11 +752,11 @@ async def async_resolve_project_bound_env_tokens(
             async_mint_installation_token,
         )
 
-        assert repo_name is not None
+        assert repo_names is not None
         try:
             env[env_name] = await async_mint_installation_token(
                 decrypted_blob,
-                repositories=[repo_name],
+                repositories=repo_names,
                 permissions=DEFAULT_INSTALLATION_PERMISSIONS,
             )
         finally:

@@ -173,6 +173,36 @@ def test_create_github_issue_tool_is_registered_and_exposed():
     assert registration.risk_class == "high"
 
 
+def test_github_sub_issue_tools_are_registered_and_exposed():
+    from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+    from brain.systems.runs.tool_catalog.registry import get_tool_registration
+
+    handlers = _get_tool_handlers()
+    for name in (
+        "add_github_sub_issue",
+        "remove_github_sub_issue",
+        "list_github_sub_issues",
+    ):
+        assert name in _names(COORDINATOR_TOOLS)
+        assert name in _names(WORKER_TOOLS)
+        assert name in handlers
+
+    for name in ("add_github_sub_issue", "remove_github_sub_issue"):
+        registration = get_tool_registration(name)
+        assert registration is not None
+        assert registration.permission == "write_workspace"
+        assert registration.risk_class == "high"
+        assert registration.reversibility == "reversible"
+        assert registration.action_manifest is True
+        assert registration.output_budget_chars == 8_000
+
+    read_registration = get_tool_registration("list_github_sub_issues")
+    assert read_registration is not None
+    assert read_registration.side_effect_class == "read_only"
+    assert read_registration.output_budget_chars == 18_000
+
+
 def test_publish_thread_artifact_tool_is_registered_and_exposed():
     from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
     from brain.systems.runs.tool_handlers import _get_tool_handlers

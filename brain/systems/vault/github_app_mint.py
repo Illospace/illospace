@@ -19,8 +19,9 @@ from brain.systems.cortex.project_context.github import (
 )
 from brain.systems.vault.runtime_secrets import RuntimeSecretUnavailable
 
-# Minted installation tokens carry issues:write (to file issues) plus read-only
-# contents, pull_requests, and checks, so the same App token serves
+# Minted installation tokens carry issues:write (to file issues and manage
+# native parent/sub-issue relationships) plus read-only contents,
+# pull_requests, and checks, so the same App token serves
 # read_github_source PR-listing/detail (including check-runs) and project-bound
 # git-clone/source reads. This lets the legacy
 # personal-PAT read fallbacks (GITHUB_TOKEN__AXEL_LEGACY via GH_TOKEN, and the

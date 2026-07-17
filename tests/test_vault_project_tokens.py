@@ -482,6 +482,71 @@ async def test_resolve_project_bound_env_tokens_can_filter_to_github_app_only(pa
     }
 
 
+async def test_github_app_binding_mints_one_token_for_cross_repo_operation(
+    patch_uow,
+    session,
+    monkeypatch,
+):
+    from brain.systems.vault import async_resolve_project_bound_env_tokens
+
+    github_app = await _secret(
+        session,
+        "GITHUB_APP__ILLO",
+        "github-app-blob",
+        access_level="manual",
+        category="github_app",
+    )
+    for project_slug in (
+        "uwear-ai/uwear-coordination",
+        "uwear-ai/uwear-backend",
+    ):
+        await _binding(
+            session,
+            github_app,
+            project_slug=project_slug,
+            env_name="GITHUB_TOKEN",
+        )
+
+    mint_calls = []
+
+    async def async_mint_installation_token(decrypted_blob, *, repositories, permissions):
+        mint_calls.append({
+            "decrypted_blob": decrypted_blob,
+            "repositories": repositories,
+            "permissions": permissions,
+        })
+        return "cross-repo-installation-token"
+
+    monkeypatch.setattr(
+        "brain.systems.vault.github_app_mint.async_mint_installation_token",
+        async_mint_installation_token,
+    )
+
+    env = await async_resolve_project_bound_env_tokens(
+        actor_user_id=OTHER_USER_ID,
+        org_id=ORG_ID,
+        project_slugs=[
+            "uwear-ai/uwear-coordination",
+            "uwear-ai/uwear-backend",
+        ],
+        github_app_only=True,
+    )
+
+    assert env == {"GITHUB_TOKEN": "cross-repo-installation-token"}
+    assert mint_calls == [{
+        "decrypted_blob": "github-app-blob",
+        "repositories": ["uwear-backend", "uwear-coordination"],
+        "permissions": {
+            "issues": "write",
+            "contents": "read",
+            "pull_requests": "read",
+            "checks": "read",
+        },
+    }]
+    await session.refresh(github_app)
+    assert github_app.access_count == 1
+
+
 async def test_create_github_issue_uses_minted_github_app_project_binding(
     patch_uow,
     session,
