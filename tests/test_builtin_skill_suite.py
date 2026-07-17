@@ -53,7 +53,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.5.0"
+    assert bundle.manifest.version == "1.6.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -138,16 +138,51 @@ def test_uwear_triage_chantier_primary_digest_keeps_person_coverage():
     assert "outcome summary in the goal's language" in procedure
 
 
-def test_uwear_triage_live_delta_fingerprints_exact_bundle_mirrors():
+def test_uwear_triage_scheduled_memory_contract():
     from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
     from brain.systems.skills.bundles import load_skill_bundle
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
-    note = (Path(__file__).parents[1] / "docs" / "329-live-delta.md").read_text()
+    procedure = bundle.skill_markdown
+    memory = _uwear_triage_asset(bundle, "references/memory.md")
+
+    for expected in (
+        "## Memory",
+        "At run START",
+        "memory_reconstruct",
+        "load-bearing claim against live sources",
+        "At run END",
+        "memory_ingest_source",
+        "What future runs need:",
+        "confidence=0.9",
+        "cap inferences at `0.7`",
+        "record `1275`",
+        "`references/memory.md`",
+    ):
+        assert expected in procedure
+
+    for expected in (
+        "## Run Start — Recall on Subject",
+        "## Run End — Select One Durable Outcome",
+        "### What Makes a Good Memory",
+        "## Stable Phrasing and Dedup",
+        "`normalized_key`",
+        "Bad — ephemeral count",
+        "Bad — delivery receipt",
+    ):
+        assert expected in memory
+
+
+def test_uwear_triage_memory_delta_fingerprints_exact_bundle_mirrors():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    note = (Path(__file__).parents[1] / "docs" / "344-live-delta.md").read_text()
     mirrors = (
-        (bundle.skill_markdown, "v8"),
+        (bundle.skill_markdown, "v9"),
         (
-            _uwear_triage_asset(bundle, "references/chantier-operations.md"),
+            _uwear_triage_asset(bundle, "references/memory.md"),
             "content",
         ),
     )
@@ -261,6 +296,7 @@ def test_uwear_triage_on_demand_run_mode_split():
         "references/creating-work-items.md",
         "references/backlog-maintenance.md",
         "references/chantier-operations.md",
+        "references/memory.md",
     ):
         # The core names each playbook asset path, and every playbook carries
         # the provenance preamble pointing back at the core doc.
