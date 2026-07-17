@@ -1,7 +1,7 @@
 schema_version = 1
 name = "uwear-engineering-triage"
 display_name = "Uwear Engineering Triage"
-version = "1.6.0"
+version = "1.7.0"
 description = "Uwear engineering operating model for triaging GitHub issues and PRs, assigning Reda/Axel/JB, and moving work through backlog, staging, review, merge, and closure."
 license = "UNLICENSED"
 source = "self_hosted"
@@ -39,3 +39,4 @@ asset_2 = "references/creating-work-items.md"
 asset_3 = "references/backlog-maintenance.md"
 asset_4 = "references/chantier-record-contract.md"
 asset_5 = "references/chantier-operations.md"
+asset_6 = "references/memory.md"

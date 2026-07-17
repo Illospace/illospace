@@ -20,13 +20,15 @@ from brain.app.scheduler.runtime import normalize_owner_mode as _normalize_owner
 from brain.app.scheduler.runtime import normalize_run_status
 
 DEFAULT_SCHEDULER_TIMEZONE = os.getenv("SCHEDULER_DEFAULT_TIMEZONE", "America/Toronto")
+CATALOG_HANDLER_KIND = "scheduler_builtin"
+CATALOG_RETIRE_REASON = "removed from scheduler catalog"
 
 SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
     {
         "job_key": "nightly_sleep",
         "family": "nightly_sleep",
         "program_key": "nightly_sleep",
-        "handler_kind": "scheduler_builtin",
+        "handler_kind": CATALOG_HANDLER_KIND,
         "handler_ref": "brain.app.scheduler.programs:nightly_sleep",
         "cron_expr": "0 3 * * *",
         "default_payload": {
@@ -60,7 +62,7 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
         "job_key": "curiosity_cron",
         "family": "curiosity_cron",
         "program_key": "curiosity",
-        "handler_kind": "scheduler_builtin",
+        "handler_kind": CATALOG_HANDLER_KIND,
         "handler_ref": "brain.app.scheduler.programs:curiosity",
         "cron_expr": "0 22 * * *",
         "default_payload": {
@@ -325,13 +327,16 @@ async def async_sync_scheduler_catalog(
     now: datetime | None = None,
     job_keys: tuple[str, ...] | None = None,
 ) -> dict[str, int]:
-    """Ensure built-in scheduler jobs exist without touching legacy cron tables."""
+    """Reconcile built-in jobs and soft-retire removed entries on a full sync."""
     now = now or datetime.now(timezone.utc)
     owner_mode = normalize_owner_mode(owner_mode)
     if owner_mode != OWNER_MODE_SCHEDULER:
         raise ValueError("Legacy cron/mirror owner modes are retired; use owner_mode='scheduler'.")
 
     selected_keys = {_slugify(key) for key in job_keys or ()}
+    catalog_job_keys = {
+        _slugify(str(definition["job_key"])) for definition in SCHEDULER_CATALOG
+    }
     upserted = 0
     for definition in SCHEDULER_CATALOG:
         aliases = {
@@ -363,8 +368,29 @@ async def async_sync_scheduler_catalog(
             now=now,
         )
         upserted += 1
+
+    retired = 0
+    if not selected_keys:
+        catalog_jobs = await session.scalars(
+            select(SchedulerJob).where(
+                SchedulerJob.owner_mode == owner_mode,
+                SchedulerJob.handler_kind == CATALOG_HANDLER_KIND,
+            )
+        )
+        for job in catalog_jobs.all():
+            if _slugify(job.job_key) in catalog_job_keys:
+                continue
+            if not job.enabled and job.pause_reason == CATALOG_RETIRE_REASON:
+                continue
+            retired_job = await async_retire_scheduler_job(
+                session,
+                job.job_key,
+                reason=CATALOG_RETIRE_REASON,
+            )
+            if retired_job is not None:
+                retired += 1
     await session.flush()
-    return {"upserted": upserted}
+    return {"upserted": upserted, "retired": retired}
 
 
 async def async_list_scheduler_jobs(session: AsyncSession) -> list[dict[str, Any]]:

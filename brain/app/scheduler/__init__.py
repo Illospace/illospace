@@ -7,7 +7,11 @@ from brain.app.scheduler.catalog import (
     async_upsert_scheduler_job,
     normalize_owner_mode,
 )
-from brain.app.scheduler.daemon import async_scheduler_daemon_tick, async_scheduler_health_snapshot
+from brain.app.scheduler.daemon import (
+    async_scheduler_daemon_startup,
+    async_scheduler_daemon_tick,
+    async_scheduler_health_snapshot,
+)
 from brain.app.scheduler.executor import (
     async_claim_scheduler_run,
     async_drain_scheduler,
@@ -54,6 +58,7 @@ __all__ = [
     "async_resume_scheduler_run",
     "async_run_scheduler_job",
     "async_run_scheduler_run",
+    "async_scheduler_daemon_startup",
     "async_scheduler_daemon_tick",
     "async_scheduler_health_snapshot",
     "async_set_scheduler_job_load_shed",

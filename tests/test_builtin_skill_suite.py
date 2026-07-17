@@ -53,7 +53,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.6.0"
+    assert bundle.manifest.version == "1.7.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -142,28 +142,76 @@ def test_uwear_triage_chantier_primary_digest_keeps_person_coverage():
     assert "outcome summary in the goal's language" in procedure
 
 
-def test_uwear_triage_live_delta_fingerprints_exact_bundle_mirrors():
+def test_uwear_triage_scheduled_memory_contract():
     from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
     from brain.systems.skills.bundles import load_skill_bundle
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
-    core_note = (Path(__file__).parents[1] / "docs" / "329-live-delta.md").read_text()
-    declare_note = (Path(__file__).parents[1] / "docs" / "331-live-delta.md").read_text()
+    procedure = bundle.skill_markdown
+    memory = _uwear_triage_asset(bundle, "references/memory.md")
+
+    for expected in (
+        "## Memory",
+        "At run START",
+        "memory_reconstruct",
+        "load-bearing claim against live sources",
+        "At run END",
+        "memory_ingest_source",
+        "What future runs need:",
+        "confidence=0.9",
+        "cap inferences at `0.7`",
+        "record `1275`",
+        "`references/memory.md`",
+    ):
+        assert expected in procedure
+
+    for expected in (
+        "## Run Start — Recall on Subject",
+        "## Run End — Select One Durable Outcome",
+        "### What Makes a Good Memory",
+        "## Stable Phrasing and Dedup",
+        "`normalized_key`",
+        "Bad — ephemeral count",
+        "Bad — delivery receipt",
+    ):
+        assert expected in memory
+
+
+def test_uwear_triage_memory_delta_fingerprints_exact_bundle_mirrors():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    note = (Path(__file__).parents[1] / "docs" / "344-live-delta.md").read_text()
     mirrors = (
-        (bundle.skill_markdown, "v8", core_note),
+        (bundle.skill_markdown, "v9"),
         (
-            _uwear_triage_asset(bundle, "references/chantier-operations.md"),
-            "declare content",
-            declare_note,
+            _uwear_triage_asset(bundle, "references/memory.md"),
+            "content",
         ),
     )
 
-    for content, label, note in mirrors:
+    for content, label in mirrors:
         encoded = content.encode("utf-8")
         fingerprint = hashlib.sha256(encoded).hexdigest()
         assert f"characters: `{len(content)}`" in note, label
         assert f"bytes: `{len(encoded)}`" in note, label
         assert f"SHA-256: `{fingerprint}`" in note, label
+
+
+def test_uwear_triage_declare_delta_fingerprints_exact_bundle_mirrors():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    note = (Path(__file__).parents[1] / "docs" / "331-live-delta.md").read_text()
+    content = _uwear_triage_asset(bundle, "references/chantier-operations.md")
+    encoded = content.encode("utf-8")
+    fingerprint = hashlib.sha256(encoded).hexdigest()
+
+    assert f"characters: `{len(content)}`" in note
+    assert f"bytes: `{len(encoded)}`" in note
+    assert f"SHA-256: `{fingerprint}`" in note
 
 
 def test_uwear_triage_skill_distinguishes_internal_tracker_from_real_github_issue():
@@ -267,6 +315,7 @@ def test_uwear_triage_on_demand_run_mode_split():
         "references/creating-work-items.md",
         "references/backlog-maintenance.md",
         "references/chantier-operations.md",
+        "references/memory.md",
     ):
         # The core names each playbook asset path, and every playbook carries
         # the provenance preamble pointing back at the core doc.
