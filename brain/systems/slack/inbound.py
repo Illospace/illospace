@@ -12,10 +12,16 @@ from brain.platform.db.models.org import User
 from brain.systems.inbound.service import _clean_optional, _complete_event
 from brain.systems.inbound.status import STATUS_FAILED, STATUS_PROCESSED
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
+from brain.systems.slack.chantier_declare import (
+    ChantierDeclareResult,
+    apply_chantier_declare_run_contract,
+    maybe_declare_chantier_from_slack,
+)
 from brain.systems.slack.triggers import (
     SLACK_MESSAGE_ENVELOPE_KIND,
     build_slack_work_intake_payload,
 )
+from brain.systems.user_domains.service import DomainError, DomainNotFound
 
 ACTION_SLACK_RUN_ADMITTED = "slack.run_admitted"
 
@@ -50,6 +56,21 @@ async def process_slack_message_envelope(
         )
 
     slack_payload = dict(normalized.get("payload") or {})
+    chantier_declare: ChantierDeclareResult | None = None
+    chantier_declare_error: str | None = None
+    try:
+        chantier_declare = await maybe_declare_chantier_from_slack(
+            session,
+            org_id=str(context.org_id),
+            actor_user_id=authority_user_id,
+            origin=str(normalized.get("origin") or ""),
+            text=str(slack_payload.get("text") or ""),
+        )
+    except (DomainError, DomainNotFound) as exc:
+        # Missing/mismatched Domain-1 configuration must be visible in the
+        # declaration thread, but it must not take down the normal Slack lane.
+        chantier_declare_error = str(exc)
+
     slack_thread_id = _slack_conversation_thread_id(slack_payload)
     trigger_payload = build_slack_work_intake_payload(
         org_id=context.org_id,
@@ -59,6 +80,12 @@ async def process_slack_message_envelope(
         connection_id=context.connection_id,
         idempotency_key=_clean_optional(normalized.get("idempotency_key")),
     )
+    if chantier_declare is not None or chantier_declare_error is not None:
+        apply_chantier_declare_run_contract(
+            trigger_payload,
+            result=chantier_declare,
+            error=chantier_declare_error,
+        )
     trigger_metadata = dict((trigger_payload.get("payload") or {}).get("metadata") or {})
     trigger_metadata["slack_thread_id"] = slack_thread_id
     trigger_payload["payload"] = {

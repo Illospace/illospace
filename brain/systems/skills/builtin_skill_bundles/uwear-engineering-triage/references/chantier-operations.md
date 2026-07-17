@@ -177,5 +177,54 @@ unless the human explicitly delegated it.
 
 ## Declare Flow
 
-Reserved for ticket #331. Do not declare or auto-create a chantier from this
-playbook.
+The declaration door is an explicit Illo app mention containing the keyword
+`chantier`, preferably in this compact shape:
+
+`@Illo chantier: <title or slug> — done means <outcome> [kind: <kind>] [owner: <name>] [next_step: <step>] [links]`
+
+Do not infer a declaration from related vocabulary, a proposal, passive channel
+monitoring, or an ordinary mention without the `chantier` keyword. A direct
+message that was not normalized as an Illo app mention is not this flow. Questions
+such as "what chantiers are active?" remain reads, not declarations.
+
+The Slack mention lane persists the record before the conversational reply:
+
+1. Parse the title and `Done means ...` goal. Best-effort extras are `kind:`,
+   `owner:`, `next_step:`, and pasted links. Convert GitHub issue URLs to the
+   record contract's `github:<owner>/<repo>:issue:<n>` ref; retain other links
+   as typed `slack` or `url` refs.
+2. Derive a lowercase kebab slug. Before creating, lock the chantier object and
+   match all active records by exact slug, normalized title, or a title whose
+   kebab form is the same slug. A match is an update of that record; never create
+   a second record. The persisted slug remains immutable.
+3. New records start in `exploring`. Guess `incident`, `quality`, `feature`, or
+   `gtm` conservatively unless `kind:` is explicit. Preserve an existing kind,
+   owner, goal, and next step when a re-declaration omits those explicit values;
+   merge new refs without duplicating them.
+4. If no goal is supplied, persist a clearly inferred `Done means ...` goal and
+   label it as inferred in the reply. If no `next_step` can be inferred, persist
+   the contract placeholder and ask directly for `next_step` in the reply.
+
+Reply in the declaration's Slack thread, even when the mention was top-level.
+Say `created` or `updated`, then echo the slug, goal, explicit/guessed kind,
+builder-first owner suggestion, next step (or the request for one), and mirror
+outcome. An explicit `owner:` wins. Otherwise prefer the likely implementation
+builder from current ownership evidence; use `builder TBD` when the evidence is
+insufficient rather than assigning the declarer or coordinator by reflex.
+
+For engineering chantiers (`feature`, `incident`, or `quality`), open the GitHub
+parent mirror only when `parent_issue` is blank. Use `create_github_issue` with
+title `[Chantier] <title>` and a body containing the slug, `Done means ...` goal,
+and key refs. Before creating, search open and closed issues in the target repo
+for the exact slug or `[Chantier] <title>`; link an existing exact match rather
+than creating a duplicate. On success, update the same record's `parent_issue`
+with `expected_version`, then attach pasted GitHub issue refs through the native
+`add_github_sub_issue` tool. An existing `parent_issue` is proof the mirror was
+already opened; never open it again.
+
+The Domain record is the durable primary write. Repo ambiguity, missing GitHub
+credentials/scopes, or unavailable mirror/sub-issue tooling never rolls it back
+and never makes the declare fail. Degrade loudly in-thread as
+`mirror pending: <specific reason>`; when the interface itself is unavailable,
+the required wording is `mirror pending tooling`. Never claim a mirror exists
+without the returned GitHub issue number and URL.
