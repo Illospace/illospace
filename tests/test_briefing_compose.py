@@ -103,6 +103,79 @@ def test_handoff_input_carries_dossier_and_provenance():
     assert all("chars)" in part["excerpt"] for part in truncated_parts)
 
 
+def test_chantier_context_flows_to_both_audiences_within_brief_cap():
+    dossier = assemble_dossier(
+        [
+            SourcePiece(
+                source="record",
+                ref="domain_record:1238",
+                title="Handoff dossiers inherit chantier context",
+                body="external_id: github:Illospace/illospace:issue:330; status: In Progress",
+                weight=10,
+            ),
+            SourcePiece(
+                source="chantier",
+                ref="domain_record:1400",
+                title="Agent runtime chantier layer",
+                body=(
+                    "goal: Done means no work arrives cold; state: building; kind: feature; "
+                    "owner: Reda; next_step: ship context; siblings: contract (state: Done); "
+                    "artifacts: PRD (doc: specs/chantier.md)"
+                ),
+                weight=10,
+            ),
+        ],
+        job_ref="domain_record:1238",
+        budget=DossierBudget(),
+    )
+
+    packet = _compose(dossier)
+
+    chantier_line = next(
+        line for line in packet.human_brief.splitlines() if line.startswith("*Chantier:*")
+    )
+    assert "goal: Done means no work arrives cold" in chantier_line
+    assert "state: building" in chantier_line
+    assert "siblings: contract (state: Done)" in chantier_line
+    assert "artifacts: PRD (doc: specs/chantier.md)" in chantier_line
+    assert len(packet.human_brief) <= BRIEF_CHAR_CAP
+    chantier_parts = [
+        part for part in packet.handoff_input.context_parts if part["source"] == "chantier"
+    ]
+    assert len(chantier_parts) == 1
+    assert "siblings: contract (state: Done)" in chantier_parts[0]["excerpt"]
+
+
+def test_oversized_chantier_is_honestly_trimmed_for_both_audiences():
+    dossier = assemble_dossier(
+        [
+            SourcePiece(source="record", ref="r1", title="Item", body="item context", weight=10),
+            SourcePiece(
+                source="chantier",
+                ref="domain_record:1400",
+                title="Large chantier",
+                body="goal: Done means " + "sibling state and artifact context " * 200,
+                weight=10,
+            ),
+        ],
+        job_ref="domain_record:1238",
+        budget=DossierBudget(excerpt_chars=600),
+    )
+    packet = _compose(dossier, ask="Implement with all acceptance criteria " * 20)
+
+    chantier_line = next(
+        line for line in packet.human_brief.splitlines() if line.startswith("*Chantier:*")
+    )
+    assert "chars)" in chantier_line
+    assert len(packet.human_brief) <= BRIEF_CHAR_CAP
+    chantier_part = next(
+        part for part in packet.handoff_input.context_parts if part["source"] == "chantier"
+    )
+    assert chantier_part["truncated"] is True
+    assert chantier_part["omitted_chars"] > 0
+    assert "chars)" in chantier_part["excerpt"]
+
+
 def test_revision_stable_for_identical_inputs():
     assert _compose().idempotency_key == _compose().idempotency_key
 

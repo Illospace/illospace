@@ -30,6 +30,10 @@ Design stances, each load-bearing (and each cross-family-review hardened):
   own hints, the tracker record's canonical ``repo``/``pr_number`` (or
   ``pr_url``) identity, and explicit ``owner/repo#N`` text in the job's
   title/description — no fuzzy search.
+- **Goal context without fan-out.** A tracker item's stable ``external_id``
+  is matched against Domain-1 chantier ``refs``. Sibling states come from
+  one bounded tracker-record query; chantier membership never causes a
+  per-sibling GitHub read.
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ from brain.systems.briefing.core import DossierBudget, SourcePiece
 # Conservative same-job reference pattern: explicit owner/repo#N only.
 _GITHUB_REF_RE = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)\b")
 _MAX_GITHUB_REFS = 4
+_MAX_CHANTIER_MEMBER_RECORDS = 100
 _SLACK_PAGE_CAP = 50
 _SLACK_MAX_PAGES = 3
 # The ONLY team-visible surface (ingress envelope vocabulary). Everything
@@ -56,6 +61,9 @@ _PUBLIC_CHANNEL_TYPE = PUBLIC_CHANNEL_TYPE  # back-compat alias
 
 JOB_REF_IDEA_PREFIX = "idea:"
 JOB_REF_RECORD_PREFIX = "domain_record:"
+_TRACKER_DOMAIN_SLUG = "github-ticket-tracker"
+_CHANTIER_OBJECT_KEY = "chantier"
+_TICKET_OBJECT_KEY = "ticket"
 
 
 @dataclass(frozen=True)
@@ -265,6 +273,178 @@ def _record_piece(record: Any) -> SourcePiece | None:
     )
 
 
+def _chantier_refs(record: Any) -> list[dict[str, str]]:
+    """Return the typed-ref contract, defensively normalized for rendering."""
+    refs = (dict(getattr(record, "data", None) or {})).get("refs") or []
+    if not isinstance(refs, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    for item in refs:
+        if not isinstance(item, dict):
+            continue
+        source = _text(item.get("source")).lower()
+        ref = _text(item.get("ref"))
+        if not source or not ref:
+            continue
+        normalized.append({"source": source, "ref": ref, "title": _text(item.get("title"))})
+    return normalized
+
+
+def _tracker_state(record: Any) -> str:
+    data = dict(getattr(record, "data", None) or {})
+    return _text(data.get("status") or data.get("state")) or "unavailable"
+
+
+def _chantier_piece(
+    chantier: Any,
+    *,
+    subject_external_id: str,
+    members_by_external_id: dict[str, Any],
+    member_lookup_capped: int = 0,
+) -> SourcePiece:
+    """Render one chantier's goal, state, siblings, and artifact refs.
+
+    The body stays marker-free here. Dossier assembly owns every excerpt and
+    section cut, so oversized goal context receives the same cumulative
+    ``omitted_chars`` markers and floors as every other source.
+    """
+    data = dict(getattr(chantier, "data", None) or {})
+    sibling_bits: list[str] = []
+    artifact_bits: list[str] = []
+    for item in _chantier_refs(chantier):
+        source = item["source"]
+        ref = item["ref"]
+        title = item["title"]
+        if source == "github":
+            if ref == subject_external_id:
+                continue
+            member = members_by_external_id.get(ref)
+            label = title or _text(getattr(member, "title", "")) or ref
+            sibling_bits.append(f"{label} ({ref}, state: {_tracker_state(member)})")
+            continue
+        label = title or source
+        artifact_bits.append(f"{label} ({source}: {ref})")
+
+    if member_lookup_capped:
+        sibling_bits.append(f"{member_lookup_capped} additional member states not gathered (cap)")
+
+    body_bits = [
+        f"goal: {_text(data.get('goal')) or 'not recorded'}",
+        f"state: {_text(data.get('state')) or 'not recorded'}",
+        f"kind: {_text(data.get('kind')) or 'not recorded'}",
+        f"owner: {_text(data.get('owner')) or 'unclaimed'}",
+        f"next_step: {_text(data.get('next_step')) or 'not recorded'}",
+        f"siblings: {', '.join(sibling_bits) if sibling_bits else 'none'}",
+        f"artifacts: {', '.join(artifact_bits) if artifact_bits else 'none'}",
+    ]
+    slug = _text(data.get("slug"))
+    title = (
+        _text(getattr(chantier, "title", ""))
+        or _text(data.get("title"))
+        or slug
+        or f"chantier {getattr(chantier, 'id', '?')}"
+    )
+    return SourcePiece(
+        source="chantier",
+        ref=f"{JOB_REF_RECORD_PREFIX}{getattr(chantier, 'id', '')}",
+        title=title,
+        body="; ".join(body_bits),
+        ts=getattr(chantier, "updated_at", None),
+        weight=10,
+    )
+
+
+async def _chantier_pieces_for_record(
+    session: Any, *, org_id: str, record: Any
+) -> list[SourcePiece]:
+    """Find the subject's chantier(s) and batch-load their tracker members.
+
+    Membership is the v1 contract's exact typed ref match. The second query
+    is one batch DB read for all sibling external ids across all matching
+    chantiers — deliberately no GitHub fan-out inside packet minting.
+    """
+    subject_data = dict(getattr(record, "data", None) or {})
+    subject_external_id = _text(subject_data.get("external_id"))
+    if not subject_external_id:
+        return []
+
+    from brain.platform.db.models.domain import Domain, DomainObjectType, DomainRecord
+
+    with _no_autoflush(session):
+        chantiers = (
+            await session.execute(
+                select(DomainRecord)
+                .join(DomainObjectType, DomainObjectType.id == DomainRecord.object_type_id)
+                .join(Domain, Domain.id == DomainRecord.domain_id)
+                .where(
+                    DomainRecord.org_id == str(org_id),
+                    Domain.slug == _TRACKER_DOMAIN_SLUG,
+                    Domain.archived_at.is_(None),
+                    DomainObjectType.key == _CHANTIER_OBJECT_KEY,
+                    DomainObjectType.archived_at.is_(None),
+                    DomainRecord.archived_at.is_(None),
+                    DomainRecord.data["refs"].contains([{"ref": subject_external_id}]),
+                )
+                .order_by(DomainRecord.id)
+            )
+        ).scalars().all()
+    # The JSONB predicate is authoritative in production. Keep this exact
+    # defensive filter as well so malformed legacy rows cannot leak a false
+    # chantier association through a permissive test/alternate dialect.
+    chantiers = [
+        chantier
+        for chantier in chantiers
+        if subject_external_id in {item["ref"] for item in _chantier_refs(chantier)}
+    ]
+    if not chantiers:
+        return []
+
+    member_external_ids = sorted({
+        item["ref"]
+        for chantier in chantiers
+        for item in _chantier_refs(chantier)
+        if item["source"] == "github" and item["ref"] != subject_external_id
+    })
+    capped_count = max(0, len(member_external_ids) - _MAX_CHANTIER_MEMBER_RECORDS)
+    member_external_ids = member_external_ids[:_MAX_CHANTIER_MEMBER_RECORDS]
+
+    members_by_external_id: dict[str, Any] = {subject_external_id: record}
+    if member_external_ids:
+        with _no_autoflush(session):
+            members = (
+                await session.execute(
+                    select(DomainRecord)
+                    .join(DomainObjectType, DomainObjectType.id == DomainRecord.object_type_id)
+                    .where(
+                        DomainRecord.org_id == str(org_id),
+                        DomainRecord.domain_id.in_({
+                            int(getattr(chantier, "domain_id")) for chantier in chantiers
+                        }),
+                        DomainObjectType.key == _TICKET_OBJECT_KEY,
+                        DomainObjectType.archived_at.is_(None),
+                        DomainRecord.archived_at.is_(None),
+                        DomainRecord.data["external_id"].astext.in_(member_external_ids),
+                    )
+                    .order_by(DomainRecord.id)
+                    .limit(_MAX_CHANTIER_MEMBER_RECORDS)
+                )
+            ).scalars().all()
+        for member in members:
+            external_id = _text((dict(getattr(member, "data", None) or {})).get("external_id"))
+            if external_id and external_id not in members_by_external_id:
+                members_by_external_id[external_id] = member
+
+    return [
+        _chantier_piece(
+            chantier,
+            subject_external_id=subject_external_id,
+            members_by_external_id=members_by_external_id,
+            member_lookup_capped=capped_count,
+        )
+        for chantier in chantiers
+    ]
+
+
 def _idea_piece(idea: Any) -> SourcePiece:
     details = dict(getattr(idea, "agent_details", None) or {})
     assignment = details.get("assignment") or {}
@@ -459,6 +639,12 @@ async def gather_pieces(
         deploy = _deploy_piece(record)
         if deploy:
             result.pieces.append(deploy)
+        try:
+            result.pieces.extend(
+                await _chantier_pieces_for_record(session, org_id=org_id, record=record)
+            )
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"chantier: lookup unavailable — {type(exc).__name__}")
     if idea is not None:
         result.pieces.append(_idea_piece(idea))
         evidence = _evidence_piece(idea)

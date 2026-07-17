@@ -85,18 +85,61 @@ class WriteForbiddenSession:
     async def execute(self, stmt):
         params = stmt.compile().params
         scalars = {str(v) for v in params.values() if not isinstance(v, (list, tuple, set))}
-        in_list = next(
-            (set(map(str, v)) for v in params.values() if isinstance(v, (list, tuple, set))), None
+        in_lists = [
+            set(map(str, v)) for v in params.values() if isinstance(v, (list, tuple, set))
+        ]
+        chantier_needle = next(
+            (
+                str(item["ref"])
+                for value in params.values()
+                if isinstance(value, list)
+                for item in value
+                if isinstance(item, dict) and item.get("ref")
+            ),
+            None,
         )
         entity = stmt.column_descriptions[0]["entity"].__name__
 
         if entity == "Idea":
             rows = [i for i in self._ideas
                     if str(i.id) in scalars and str(i.org_id) in scalars]
-        elif entity == "DomainRecord" and in_list is not None:
-            rows = [r for r in self._records
+        elif entity == "DomainRecord" and chantier_needle is not None:
+            rows = [
+                r for r in self._records
+                if str(r.org_id) in scalars
+                and getattr(r, "object_key", None) == "chantier"
+                and chantier_needle
+                in {
+                    str(item.get("ref"))
+                    for item in dict(r.data or {}).get("refs") or []
+                    if isinstance(item, dict)
+                }
+            ]
+        elif entity == "DomainRecord" and in_lists:
+            external_ids = next(
+                (
+                    values
+                    for values in in_lists
+                    if any(
+                        str(dict(r.data or {}).get("external_id")) in values
+                        for r in self._records
+                        if dict(r.data or {}).get("external_id")
+                    )
+                ),
+                None,
+            )
+            if external_ids is not None:
+                rows = [
+                    r for r in self._records
                     if str(r.org_id) in scalars
-                    and str(dict(r.data or {}).get("pr_number")) in in_list]
+                    and getattr(r, "object_key", None) == "ticket"
+                    and str(dict(r.data or {}).get("external_id")) in external_ids
+                ]
+            else:
+                in_list = in_lists[0]
+                rows = [r for r in self._records
+                        if str(r.org_id) in scalars
+                        and str(dict(r.data or {}).get("pr_number")) in in_list]
         elif entity == "DomainRecord":
             rows = [r for r in self._records
                     if str(r.id) in scalars and str(r.org_id) in scalars]
@@ -150,8 +193,10 @@ class FakeGithub:
     def __init__(self, refs=None, error: Exception | None = None):
         self._refs = refs or {}
         self._error = error
+        self.calls: list[tuple[str, int]] = []
 
     async def read_ref(self, *, repo_slug, number):
+        self.calls.append((repo_slug, number))
         if self._error:
             raise self._error
         return self._refs.get((repo_slug, number))
@@ -419,6 +464,153 @@ async def test_related_tracker_records_are_gathered_and_self_excluded():
     assert "domain_record:1300" in refs  # related found, org-scoped
     assert "domain_record:1301" not in refs  # foreign org never leaks
     assert refs.count("domain_record:1238") == 1  # self not duplicated
+
+
+async def test_item_in_chantier_gathers_goal_sibling_states_and_artifact_refs():
+    subject_external_id = "github:Illospace/illospace:issue:330"
+    subject = SimpleNamespace(
+        id=1238,
+        org_id=_ORG,
+        domain_id=1,
+        object_key="ticket",
+        title="Handoff dossiers inherit chantier context",
+        data={"external_id": subject_external_id, "status": "In Progress"},
+        updated_at=_T0,
+    )
+    sibling_a = SimpleNamespace(
+        id=1237,
+        org_id=_ORG,
+        domain_id=1,
+        object_key="ticket",
+        title="Chantier record contract",
+        data={
+            "external_id": "github:Illospace/illospace:issue:327",
+            "status": "Done",
+        },
+        updated_at=_T0,
+    )
+    sibling_b = SimpleNamespace(
+        id=1239,
+        org_id=_ORG,
+        domain_id=1,
+        object_key="ticket",
+        title="Chantier-aware check-ins",
+        data={
+            "external_id": "github:Illospace/illospace:issue:331",
+            "status": "Todo",
+        },
+        updated_at=_T0,
+    )
+    chantier = SimpleNamespace(
+        id=1400,
+        org_id=_ORG,
+        domain_id=1,
+        object_key="chantier",
+        title="Agent runtime chantier layer",
+        data={
+            "slug": "agent-runtime-chantier-layer",
+            "title": "Agent runtime chantier layer",
+            "goal": "Done means no work arrives cold at an item boundary.",
+            "kind": "feature",
+            "state": "building",
+            "owner": "Reda",
+            "refs": [
+                {"source": "github", "ref": subject_external_id, "title": "Handoff dossier"},
+                {
+                    "source": "github",
+                    "ref": "github:Illospace/illospace:issue:327",
+                    "title": "Chantier record contract",
+                },
+                {
+                    "source": "github",
+                    "ref": "github:Illospace/illospace:issue:331",
+                    "title": "Chantier-aware check-ins",
+                },
+                {"source": "doc", "ref": "specs/chantier.md", "title": "PRD"},
+                {"source": "url", "ref": "https://figma.example/chantier", "title": "Mockups"},
+            ],
+            "next_step": "Ship chantier context in handoff packets.",
+        },
+        updated_at=_T0,
+    )
+    session = WriteForbiddenSession(records=[subject, chantier, sibling_a, sibling_b])
+    github = FakeGithub()
+
+    result = await gather_pieces(
+        session,
+        org_id=_ORG,
+        job_ref="domain_record:1238",
+        slack=None,
+        github=github,
+        budget=DossierBudget(),
+    )
+
+    chantier_pieces = [piece for piece in result.pieces if piece.source == "chantier"]
+    assert len(chantier_pieces) == 1
+    body = chantier_pieces[0].body
+    assert "goal: Done means no work arrives cold at an item boundary." in body
+    assert "state: building" in body
+    assert "Chantier record contract (github:Illospace/illospace:issue:327, state: Done)" in body
+    assert "Chantier-aware check-ins (github:Illospace/illospace:issue:331, state: Todo)" in body
+    assert "PRD (doc: specs/chantier.md)" in body
+    assert "Mockups (url: https://figma.example/chantier)" in body
+    assert github.calls == []  # sibling state is DB context, never a GitHub fan-out
+    assert result.source_notes == []
+    dossier = assemble_dossier(
+        result.pieces,
+        job_ref="domain_record:1238",
+        budget=DossierBudget(),
+        source_notes=result.source_notes,
+    )
+    chantier_section = next(section for section in dossier.sections if section.source == "chantier")
+    assert chantier_section.items[0].ref == "domain_record:1400"
+
+
+async def test_item_not_in_chantier_keeps_previous_bytes():
+    subject = SimpleNamespace(
+        id=1238,
+        org_id=_ORG,
+        domain_id=1,
+        object_key="ticket",
+        title="Ship handoff context",
+        data={
+            "external_id": "github:Illospace/illospace:issue:330",
+            "status": "ready-for-agent",
+        },
+        updated_at=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+    result = await gather_pieces(
+        WriteForbiddenSession(records=[subject]),
+        org_id=_ORG,
+        job_ref="domain_record:1238",
+        slack=None,
+        github=FakeGithub(),
+        budget=DossierBudget(),
+    )
+    dossier = assemble_dossier(
+        result.pieces,
+        job_ref="domain_record:1238",
+        budget=DossierBudget(),
+        source_notes=result.source_notes,
+    )
+    packet = compose_packet(dossier, org_id=_ORG, ask="Implement the ticket")
+
+    assert dossier.render_text() == (
+        "# Ship handoff context\n\n"
+        "job: domain_record:1238\n\n"
+        "## record (1 item)\n"
+        "- [domain_record:1238] Ship handoff context: "
+        "external_id: github:Illospace/illospace:issue:330; status: ready-for-agent"
+    )
+    assert packet.human_brief == (
+        "*Ship handoff context* → unclaimed\n"
+        "*What happened:* external_id: github:Illospace/illospace:issue:330; "
+        "status: ready-for-agent\n"
+        "*Evidence:* none gathered\n"
+        "*Prior decisions:* none on record\n"
+        "*Ask:* Implement the ticket\n"
+        "Launch: {launch_url}"
+    )
 
 
 async def test_evidence_piece_from_idea_attribution():

@@ -212,6 +212,24 @@ def test_lone_oversized_item_is_recut_to_fit_source_budget():
     assert len(_render_section(section)) <= 260  # the real rendered artifact fits
 
 
+def test_oversized_chantier_context_is_recut_with_an_honest_marker():
+    body = "goal: Done means " + "every sibling arrives with context " * 80
+    dossier = assemble_dossier(
+        [_piece("chantier", "domain_record:1400", title="Runtime chantier", body=body)],
+        job_ref="domain_record:1238",
+        budget=_budget(source_overrides={"chantier": 260}, excerpt_chars=1200),
+    )
+    section = dossier.sections[0]
+    item = section.items[0]
+    normalized = " ".join(body.split())
+
+    assert section.source == "chantier"
+    assert item.truncated
+    assert item.rendered_excerpt.endswith(f"(+{item.omitted_chars} chars)")
+    assert len(item.excerpt) + item.omitted_chars == len(normalized)
+    assert len(_render_section(section)) <= 260
+
+
 def test_total_budget_sheds_lowest_priority_first_and_keeps_top_item():
     pieces = [
         _piece("record", "r1", body="word " * 50, weight=5),
@@ -262,6 +280,21 @@ def test_total_chars_is_render_length():
 def test_golden_fixture_snapshot():
     fixture = FIXTURE_DIR / "uwear_bug.json"
     expected = json.loads((FIXTURE_DIR / "uwear_bug.expected.json").read_text())
+    data = json.loads(fixture.read_text())
+    from brain.systems.briefing.__main__ import _piece as piece_from_dict
+
+    dossier = assemble_dossier(
+        [piece_from_dict(item) for item in data["pieces"]],
+        job_ref=data["job_ref"],
+        budget=DossierBudget(**data["budget"]),
+        headline=data.get("headline"),
+    )
+    assert dossier.to_dict() == expected
+
+
+def test_chantier_handoff_golden_fixture_snapshot():
+    fixture = FIXTURE_DIR / "chantier_handoff.json"
+    expected = json.loads((FIXTURE_DIR / "chantier_handoff.expected.json").read_text())
     data = json.loads(fixture.read_text())
     from brain.systems.briefing.__main__ import _piece as piece_from_dict
 

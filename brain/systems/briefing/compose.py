@@ -1,7 +1,8 @@
 """Illo Brain — Packet composer (pure).
 
 One :class:`~brain.systems.briefing.core.Dossier` in, one *packet* out:
-(a) a short Slack-mrkdwn human brief and (b) a ready
+(a) a short Slack-mrkdwn human brief, including an explicit chantier line
+when goal context exists, and (b) a ready
 :class:`~brain.systems.launch_handoffs.LaunchHandoffCreateInput` for the
 assignee's own coding agent. Deterministic by design — briefs must be
 trusted, and determinism is the trust floor; model-polished phrasing is a
@@ -56,9 +57,25 @@ _IDEMPOTENCY_KEY_MAX = 120  # LaunchHandoff.idempotency_key column cap
 _EVIDENCE_REFS = 5
 
 # Per-line content caps and the floors the tighten cascade may shrink to.
-_CAPS = {"headline": 150, "owner": 60, "narrative": 300, "evidence": 300, "decisions": 300, "ask": 300}
-_FLOORS = {"headline": 80, "owner": 60, "narrative": 60, "evidence": 90, "decisions": 60, "ask": 80}
-_TIGHTEN_ORDER = ("narrative", "ask", "decisions", "evidence", "headline")
+_CAPS = {
+    "headline": 150,
+    "owner": 60,
+    "narrative": 300,
+    "chantier": 400,
+    "evidence": 300,
+    "decisions": 300,
+    "ask": 300,
+}
+_FLOORS = {
+    "headline": 80,
+    "owner": 60,
+    "narrative": 60,
+    "chantier": 90,
+    "evidence": 90,
+    "decisions": 60,
+    "ask": 80,
+}
+_TIGHTEN_ORDER = ("narrative", "ask", "decisions", "evidence", "chantier", "headline")
 
 # Sections whose refs read as evidence links in the brief.
 _EVIDENCE_SOURCES = ("github_issue", "github_pr", "deploy_state", "evidence")
@@ -146,6 +163,13 @@ def _decision_item(dossier: Dossier) -> DossierItem | None:
     return None
 
 
+def _chantier_item(dossier: Dossier) -> DossierItem | None:
+    for section in dossier.sections:
+        if section.source == "chantier" and section.items:
+            return section.items[0]
+    return None
+
+
 def _evidence_refs(dossier: Dossier) -> list[str]:
     refs: list[str] = []
     for source in _EVIDENCE_SOURCES:
@@ -201,22 +225,28 @@ def _render_brief(
     owner = _shorten_text(owner_label or UNCLAIMED_LABEL, caps["owner"])
     narrative_item = _narrative_item(dossier)
     narrative = _shorten_item(narrative_item, caps["narrative"]) if narrative_item else "no gathered context"
+    chantier_item = _chantier_item(dossier)
     decision_item = _decision_item(dossier)
     decisions = _shorten_item(decision_item, caps["decisions"]) if decision_item else "none on record"
     ask_line = f"*Ask:* {_shorten_text(ask, caps['ask'])}"
     note = _omissions_note(dossier)
     if note:
         ask_line = f"{ask_line}   ·   {note}"
-    return "\n".join(
+    lines = [
+        f"*{headline}* → {owner}",
+        f"*What happened:* {narrative}",
+    ]
+    if chantier_item is not None:
+        lines.append(f"*Chantier:* {_shorten_item(chantier_item, caps['chantier'])}")
+    lines.extend(
         [
-            f"*{headline}* → {owner}",
-            f"*What happened:* {narrative}",
             f"*Evidence:* {_evidence_line(_evidence_refs(dossier), caps['evidence'])}",
             f"*Prior decisions:* {decisions}",
             ask_line,
             _LAUNCH_LINE,
         ]
     )
+    return "\n".join(lines)
 
 
 def _context_parts(dossier: Dossier) -> list[dict[str, Any]]:
