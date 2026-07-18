@@ -376,6 +376,59 @@ class AsyncAgentRunEngine:
         status: RunStatus = RunStatus.COMPLETED,
         execution_claim: ExecutionClaim | None = None,
     ) -> AgentRun:
+        row = await self.store.require_run(run_id)
+        if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
+            return to_domain(row)
+        try:
+            from brain.systems.slack.chantier_reconciliation import (
+                ChantierDeclareGuaranteeError,
+                guarantee_chantier_record_for_run,
+            )
+
+            guarantee = await guarantee_chantier_record_for_run(
+                self.store.session,
+                run=row,
+                output=output,
+            )
+        except ChantierDeclareGuaranteeError as exc:
+            failure = str(exc).strip() or "tracker-record verification failed"
+            await self.store.update_metadata(
+                run_id,
+                {
+                    "chantier_declare_guarantee": {
+                        "status": "failed",
+                        "error": failure,
+                    }
+                },
+            )
+            await self.store.append_event(
+                run_event(
+                    run_id,
+                    "run.chantier_declare_guarantee_failed",
+                    {"error": failure},
+                    root_run_id=row.root_run_id,
+                )
+            )
+            return await self.fail(
+                run_id,
+                f"Chantier declare failed: {failure}",
+                final_output=f"Chantier declare failed: {failure}",
+                execution_claim=execution_claim,
+            )
+        if guarantee is not None:
+            guarantee_metadata = guarantee.as_metadata()
+            await self.store.update_metadata(
+                run_id,
+                {"chantier_declare_guarantee": guarantee_metadata},
+            )
+            await self.store.append_event(
+                run_event(
+                    run_id,
+                    "run.chantier_declare_guaranteed",
+                    guarantee_metadata,
+                    root_run_id=row.root_run_id,
+                )
+            )
         async with self._atomic_terminal_write():
             row = await self.store.require_run(run_id)
             if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
