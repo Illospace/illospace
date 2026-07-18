@@ -814,6 +814,7 @@ async def async_get_repo_issue_parent(
         issue_data = issue if isinstance(issue, dict) else {}
         parent_slug: str | None = None
         parent: Any = None
+        parent_payload: dict[str, Any] | None = None
         if token:
             parent_lookup = await _async_request(
                 client,
@@ -830,13 +831,11 @@ async def async_get_repo_issue_parent(
             parent_reference = _graphql_parent_reference(parent_lookup)
             if parent_reference is not None:
                 parent_slug, parent_issue_number = parent_reference
-                parent_owner, parent_repo = parent_slug.split("/", 1)
-                parent = await _async_request(
-                    client,
-                    "GET",
-                    f"/repos/{parent_owner}/{parent_repo}/issues/{parent_issue_number}",
-                    token=token,
-                )
+                # Installation tokens are commonly down-scoped to the child repo.
+                # The GraphQL relationship already provides the authoritative parent
+                # reference; hydrating it through the parent repo would turn a valid
+                # cross-repo relationship into a false 404 for App-only callers.
+                parent_payload = _issue_reference(parent_slug, parent_issue_number)
         else:
             try:
                 parent = await _async_request(
@@ -850,9 +849,8 @@ async def async_get_repo_issue_parent(
                     raise
             if isinstance(parent, dict):
                 parent_slug = parse_github_repo_slug(str(parent.get("html_url") or ""))
-    parent_payload = _issue_payload(parent) if isinstance(parent, dict) else None
-    if parent_payload is not None:
-        parent_payload["repo"] = parent_slug
+                parent_payload = _issue_payload(parent)
+                parent_payload["repo"] = parent_slug
     return {
         "repo": slug,
         "issue": _issue_payload(issue_data),
