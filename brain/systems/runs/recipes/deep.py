@@ -8,7 +8,7 @@ import re
 from collections.abc import Mapping
 from typing import Any, Iterable
 
-from brain.systems.personality import agent_profile_prompt_section, soul_prompt_section
+from brain.systems.personality import agent_contract_prompt_section, soul_prompt_section
 from brain.systems.runs.assignments import AcceptanceCriteria, EvidenceRequirement, WorkerAssignment
 from brain.systems.runs.domain import AgentRun, AgentRunArtifact, ArtifactType, RunProfile, RunRecipe
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
@@ -535,7 +535,7 @@ class DeepRecipe(BaseRunRecipe):
         model, thinking = await _coordinator_model_and_thinking(runtime)
         system_prompt = "\n\n".join((
             soul_prompt_section(),
-            agent_profile_prompt_section(),
+            agent_contract_prompt_section(),
             DEEP_COORDINATOR_SYNTHESIS_INSTRUCTIONS,
         ))
         payload = _coordinator_synthesis_payload(runtime, node_results)
