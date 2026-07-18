@@ -16,13 +16,13 @@ from sqlalchemy.orm import aliased
 
 from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
 from brain.systems.runs.events import run_event
-from brain.systems.runs.presentation import public_tool_event_payload
 from brain.systems.runs.status import (
     RunStatus,
     TERMINAL_RUN_STATUSES,
     coerce_run_status,
 )
 from brain.systems.runs.store import AsyncAgentRunStore
+from brain.systems.runs.ui_events import public_run_event_payload
 from brain.app.api.auth import get_current_user
 from brain.app.api.services.notifications import (
     async_build_notification_summary,
@@ -319,9 +319,7 @@ def _apply_run_events_to_item(item: dict[str, Any], events: list[Any]) -> None:
         event_type = str(getattr(event, "event_type", "") or "")
         if event_type not in _RUN_WORK_EVENT_TYPES:
             continue
-        payload = dict(getattr(event, "payload", None) or {})
-        if event_type in {"run.tool_started", "run.tool_completed", "run.tool_failed"}:
-            payload = public_tool_event_payload(payload, event_type)
+        payload = public_run_event_payload(getattr(event, "payload", None), event_type)
         at = _event_created_at(event)
         label = _activity_from_event(event_type, payload)
         if label:

@@ -1154,6 +1154,38 @@ def test_run_events_public_tool_summary_hides_command_secrets():
     assert "ghp_" not in json.dumps(item["tool_calls"])
 
 
+def test_run_events_public_activity_trace_hides_raw_failure_diagnostics():
+    from brain.app.api.routers.cortex._idea_ops import _apply_run_events_to_item
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+    raw_error = "peer closed connection without sending complete message body"
+    failed_at = datetime(2026, 5, 3, 22, 0, 5, tzinfo=timezone.utc)
+    item = {
+        "type": "run",
+        "id": "7",
+        "run_id": 7,
+        "profile": "fast",
+        "status": "failed",
+        "failed_at": failed_at.isoformat(),
+    }
+    events = [
+        SimpleNamespace(
+            event_type="run.failed",
+            payload={
+                "error": raw_error,
+                "failure_category": "upstream",
+            },
+            created_at=failed_at,
+            sequence_no=1,
+        ),
+    ]
+
+    _apply_run_events_to_item(item, events)
+
+    assert item["activity_trace"][0]["error"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert raw_error not in json.dumps(item)
+
+
 def test_unified_stream_run_work_events_query_is_bounded():
     from brain.app.api.routers.cortex._idea_ops import (
         _RUN_WORK_EVENT_LIMIT_PER_RUN,
