@@ -48,6 +48,7 @@ from brain.systems.runs.tool_catalog.handlers.github import (
     _handle_list_github_sub_issues,
     _handle_read_github_source,
     _handle_remove_github_sub_issue,
+    _handle_update_github_issue,
 )
 from brain.systems.runs.tool_catalog.handlers.ideas import _handle_manage_idea
 from brain.systems.runs.tool_catalog.handlers.launch_handoffs import _handle_create_launch_handoff
@@ -303,6 +304,10 @@ def _get_tool_handlers(
         "create_github_issue": _private_async_adapter(
             "_handle_create_github_issue",
             _handle_create_github_issue,
+        ),
+        "update_github_issue": _private_async_adapter(
+            "_handle_update_github_issue",
+            _handle_update_github_issue,
         ),
         "add_github_sub_issue": _private_async_adapter(
             "_handle_add_github_sub_issue",

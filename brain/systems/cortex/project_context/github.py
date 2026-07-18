@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -970,6 +971,324 @@ async def async_create_repo_issue(
     return {
         "repo": slug,
         "issue": _issue_payload(created if isinstance(created, dict) else {}),
+    }
+
+
+def _issue_update_field_result(
+    *,
+    status: str,
+    requested: Any,
+    applied: Any,
+    failed: Any | None = None,
+    error: GitHubConnectorError | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": status,
+        "requested": requested,
+        "applied": applied,
+    }
+    if failed is not None:
+        result["failed"] = failed
+    if error is not None:
+        result["status_code"] = error.status_code
+        result["error"] = error.message
+    return result
+
+
+async def async_update_repo_issue(
+    slug: str,
+    issue_number: int,
+    *,
+    assignees_add: list[str] | None = None,
+    assignees_remove: list[str] | None = None,
+    labels_add: list[str] | None = None,
+    labels_remove: list[str] | None = None,
+    labels_set: list[str] | None = None,
+    state: str | None = None,
+    title: str | None = None,
+    body: str | None = None,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Update one issue field at a time, then read the issue back.
+
+    GitHub validates assignees and labels independently. Keeping each requested
+    field in its own REST call lets a valid ownership transfer survive an
+    invalid label while giving the caller an honest per-field receipt.
+    """
+
+    if isinstance(issue_number, bool) or not isinstance(issue_number, int) or issue_number < 1:
+        raise GitHubConnectorError(status_code=422, message="Issue number must be positive.")
+
+    def clean_list(values: list[str] | None) -> list[str]:
+        return [str(value).strip() for value in (values or []) if str(value).strip()]
+
+    clean_assignees_add = clean_list(assignees_add)
+    clean_assignees_remove = clean_list(assignees_remove)
+    clean_labels_add = clean_list(labels_add)
+    clean_labels_remove = clean_list(labels_remove)
+    clean_labels_set = clean_list(labels_set) if labels_set is not None else None
+    clean_state = str(state or "").strip().lower() or None
+    if clean_state not in {None, "open", "closed"}:
+        raise GitHubConnectorError(status_code=422, message="Issue state must be open or closed.")
+    clean_title = str(title).strip() if title is not None else None
+    if title is not None and not clean_title:
+        raise GitHubConnectorError(status_code=422, message="Issue title cannot be empty.")
+    clean_body = str(body) if body is not None else None
+    if clean_labels_set is not None and (clean_labels_add or clean_labels_remove):
+        raise GitHubConnectorError(
+            status_code=422,
+            message="labels_set cannot be combined with labels_add or labels_remove.",
+        )
+
+    requested_updates = any((
+        clean_assignees_add,
+        clean_assignees_remove,
+        clean_labels_add,
+        clean_labels_remove,
+        clean_labels_set is not None,
+        clean_state is not None,
+        clean_title is not None,
+        clean_body is not None,
+    ))
+    if not requested_updates:
+        raise GitHubConnectorError(status_code=422, message="At least one issue update field is required.")
+
+    owner, repo = slug.split("/", 1)
+    issue_path = f"/repos/{owner}/{repo}/issues/{issue_number}"
+    fields: dict[str, dict[str, Any]] = {}
+    applied: dict[str, Any] = {}
+    failed: dict[str, dict[str, Any]] = {}
+
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        async def apply_field(
+            key: str,
+            requested: Any,
+            *,
+            method: str,
+            path: str,
+            payload: dict[str, Any] | None = None,
+        ) -> None:
+            try:
+                await _async_request(
+                    client,
+                    method,
+                    path,
+                    token=token,
+                    json=payload,
+                )
+            except GitHubConnectorError as exc:
+                field_result = _issue_update_field_result(
+                    status="failed",
+                    requested=requested,
+                    applied=[] if isinstance(requested, list) else None,
+                    failed=requested,
+                    error=exc,
+                )
+                fields[key] = field_result
+                failed[key] = field_result
+                return
+            fields[key] = _issue_update_field_result(
+                status="applied",
+                requested=requested,
+                applied=requested,
+            )
+            applied[key] = requested
+
+        if clean_assignees_add:
+            await apply_field(
+                "assignees_add",
+                clean_assignees_add,
+                method="POST",
+                path=f"{issue_path}/assignees",
+                payload={"assignees": clean_assignees_add},
+            )
+        if clean_assignees_remove:
+            await apply_field(
+                "assignees_remove",
+                clean_assignees_remove,
+                method="DELETE",
+                path=f"{issue_path}/assignees",
+                payload={"assignees": clean_assignees_remove},
+            )
+        if clean_labels_set is not None:
+            await apply_field(
+                "labels_set",
+                clean_labels_set,
+                method="PUT",
+                path=f"{issue_path}/labels",
+                payload={"labels": clean_labels_set},
+            )
+        if clean_labels_add:
+            await apply_field(
+                "labels_add",
+                clean_labels_add,
+                method="POST",
+                path=f"{issue_path}/labels",
+                payload={"labels": clean_labels_add},
+            )
+        if clean_labels_remove:
+            removed: list[str] = []
+            removal_errors: list[tuple[str, GitHubConnectorError]] = []
+            for label in clean_labels_remove:
+                try:
+                    await _async_request(
+                        client,
+                        "DELETE",
+                        f"{issue_path}/labels/{quote(label, safe='')}",
+                        token=token,
+                    )
+                except GitHubConnectorError as exc:
+                    removal_errors.append((label, exc))
+                else:
+                    removed.append(label)
+            if removal_errors:
+                first_error = removal_errors[0][1]
+                failed_labels = [label for label, _error in removal_errors]
+                field_result = _issue_update_field_result(
+                    status="partial" if removed else "failed",
+                    requested=clean_labels_remove,
+                    applied=removed,
+                    failed=failed_labels,
+                    error=first_error,
+                )
+                if len(removal_errors) > 1:
+                    field_result["errors"] = [
+                        {
+                            "label": label,
+                            "status_code": error.status_code,
+                            "error": error.message,
+                        }
+                        for label, error in removal_errors
+                    ]
+                fields["labels_remove"] = field_result
+                failed["labels_remove"] = field_result
+                if removed:
+                    applied["labels_remove"] = removed
+            else:
+                fields["labels_remove"] = _issue_update_field_result(
+                    status="applied",
+                    requested=clean_labels_remove,
+                    applied=removed,
+                )
+                applied["labels_remove"] = removed
+        if clean_state is not None:
+            await apply_field(
+                "state",
+                clean_state,
+                method="PATCH",
+                path=issue_path,
+                payload={"state": clean_state},
+            )
+        if clean_title is not None:
+            await apply_field(
+                "title",
+                clean_title,
+                method="PATCH",
+                path=issue_path,
+                payload={"title": clean_title},
+            )
+        if clean_body is not None:
+            await apply_field(
+                "body",
+                clean_body,
+                method="PATCH",
+                path=issue_path,
+                payload={"body": clean_body},
+            )
+
+        issue: dict[str, Any] | None = None
+        try:
+            read_back = await _async_request(
+                client,
+                "GET",
+                issue_path,
+                token=token,
+            )
+        except GitHubConnectorError as exc:
+            field_result = _issue_update_field_result(
+                status="failed",
+                requested=True,
+                applied=False,
+                failed=True,
+                error=exc,
+            )
+            fields["read_back"] = field_result
+            failed["read_back"] = field_result
+        else:
+            raw_issue = read_back if isinstance(read_back, dict) else {}
+            assignee_logins = {
+                str(item.get("login") or "").casefold()
+                for item in raw_issue.get("assignees") or []
+                if isinstance(item, dict) and item.get("login")
+            }
+            label_names = {
+                str(item.get("name") if isinstance(item, dict) else item).casefold()
+                for item in raw_issue.get("labels") or []
+                if (isinstance(item, str) and item) or (isinstance(item, dict) and item.get("name"))
+            }
+
+            def read_back_confirms(key: str, value: Any) -> bool:
+                if key == "assignees_add":
+                    return "assignees" in raw_issue and {
+                        str(item).casefold() for item in value
+                    } <= assignee_logins
+                if key == "assignees_remove":
+                    return "assignees" in raw_issue and not (
+                        {str(item).casefold() for item in value} & assignee_logins
+                    )
+                if key == "labels_add":
+                    return "labels" in raw_issue and {
+                        str(item).casefold() for item in value
+                    } <= label_names
+                if key == "labels_remove":
+                    return "labels" in raw_issue and not (
+                        {str(item).casefold() for item in value} & label_names
+                    )
+                if key == "labels_set":
+                    return "labels" in raw_issue and {
+                        str(item).casefold() for item in value
+                    } == label_names
+                if key == "state":
+                    return str(raw_issue.get("state") or "").casefold() == str(value).casefold()
+                if key == "title":
+                    return raw_issue.get("title") == value
+                if key == "body":
+                    return raw_issue.get("body") == value
+                return False
+
+            for key, value in list(applied.items()):
+                if read_back_confirms(key, value):
+                    fields[key]["verified"] = True
+                    continue
+                verification_error = GitHubConnectorError(
+                    status_code=502,
+                    message=f"GitHub read-back did not confirm {key}.",
+                )
+                field_result = _issue_update_field_result(
+                    status="failed",
+                    requested=fields[key]["requested"],
+                    applied=[] if isinstance(value, list) else None,
+                    failed=fields[key]["requested"],
+                    error=verification_error,
+                )
+                field_result["verified"] = False
+                fields[key] = field_result
+                failed[key] = field_result
+                del applied[key]
+
+            issue = _issue_payload(raw_issue)
+
+    is_partial = bool(applied) and bool(failed)
+    return {
+        "repo": slug,
+        "issue_number": issue_number,
+        "ok": not failed,
+        "partial": is_partial,
+        "status": "partial" if is_partial else ("failed" if failed else "applied"),
+        "fields": fields,
+        "applied": applied,
+        "failed": failed,
+        "issue": issue,
     }
 
 

@@ -22,6 +22,7 @@ from brain.systems.cortex.project_context.github import (
     async_list_repo_pull_requests,
     async_list_repo_sub_issues,
     async_remove_repo_sub_issue,
+    async_update_repo_issue,
     parse_github_repo_slug,
 )
 from brain.systems.deploy_state import (
@@ -543,6 +544,160 @@ async def _handle_create_github_issue(
             "status_code": last_error.status_code,
             "no_write_token": last_error.status_code in auth_statuses,
             "repo": repo_slug,
+        })
+    return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
+
+
+def _update_has_only_auth_failures(payload: dict[str, Any]) -> bool:
+    if payload.get("applied"):
+        return False
+    failed = payload.get("failed")
+    if not isinstance(failed, dict) or not failed:
+        return False
+    status_codes = {
+        result.get("status_code")
+        for result in failed.values()
+        if isinstance(result, dict)
+    }
+    return bool(status_codes) and status_codes <= {401, 403, 404}
+
+
+async def _handle_update_github_issue(
+    repo: str | None = None,
+    issue_number: int | None = None,
+    assignees_add: list[str] | str | None = None,
+    assignees_remove: list[str] | str | None = None,
+    labels_add: list[str] | str | None = None,
+    labels_remove: list[str] | str | None = None,
+    labels_set: list[str] | str | None = None,
+    state: str | None = None,
+    title: str | None = None,
+    body: str | None = None,
+    token_secret_key: str | None = None,
+) -> str:
+    """Update a real GitHub issue using the issue-create App write lane."""
+
+    repo_slug = parse_github_repo_slug(repo or "")
+    if not repo_slug:
+        return json.dumps({"error": "update_github_issue requires repo as owner/name or a GitHub URL"})
+    clean_issue_number = _positive_int(issue_number)
+    if clean_issue_number is None:
+        return json.dumps({"error": "update_github_issue requires a positive issue_number"})
+
+    clean_assignees_add = _string_list(assignees_add)
+    clean_assignees_remove = _string_list(assignees_remove)
+    clean_labels_add = _string_list(labels_add)
+    clean_labels_remove = _string_list(labels_remove)
+    clean_labels_set = _string_list(labels_set) if labels_set is not None else None
+    clean_state = _clean(state)
+    if clean_state is not None:
+        clean_state = clean_state.lower()
+    if clean_state not in {None, "open", "closed"}:
+        return json.dumps({
+            "error": "update_github_issue state must be open or closed",
+            "status_code": 422,
+        })
+    clean_title = str(title).strip() if title is not None else None
+    if title is not None and not clean_title:
+        return json.dumps({
+            "error": "update_github_issue title must be non-empty when provided",
+            "status_code": 422,
+        })
+    clean_body = str(body) if body is not None else None
+    if clean_labels_set is not None and (clean_labels_add or clean_labels_remove):
+        return json.dumps({
+            "error": "update_github_issue labels_set cannot be combined with labels_add or labels_remove",
+            "status_code": 422,
+        })
+    if not any((
+        clean_assignees_add,
+        clean_assignees_remove,
+        clean_labels_add,
+        clean_labels_remove,
+        clean_labels_set is not None,
+        clean_state is not None,
+        clean_title is not None,
+        clean_body is not None,
+    )):
+        return json.dumps({
+            "error": "update_github_issue requires at least one field to update",
+            "status_code": 422,
+        })
+
+    candidates = await _github_token_candidates(
+        repo_slug=repo_slug,
+        token_secret_key=token_secret_key,
+        for_write=True,
+    )
+    write_candidates = [candidate for candidate in candidates if candidate.get("token")]
+    if not write_candidates:
+        return json.dumps({
+            "error": (
+                f"No GitHub App identity is connected for {repo_slug}. Connect the GitHub App "
+                "for this repo (or pass token_secret_key) so Illo can update the issue."
+            ),
+            "status_code": 401,
+            "no_write_token": True,
+            "repo": repo_slug,
+            "issue_number": clean_issue_number,
+        })
+
+    last_error: GitHubConnectorError | None = None
+    fallback_status_code: int | None = None
+    auth_statuses = {401, 403, 404}
+    for index, candidate in enumerate(write_candidates):
+        try:
+            payload = await async_update_repo_issue(
+                repo_slug,
+                clean_issue_number,
+                assignees_add=clean_assignees_add,
+                assignees_remove=clean_assignees_remove,
+                labels_add=clean_labels_add,
+                labels_remove=clean_labels_remove,
+                labels_set=clean_labels_set,
+                state=clean_state,
+                title=clean_title,
+                body=clean_body,
+                token=str(candidate["token"]),
+            )
+        except GitHubConnectorError as exc:
+            last_error = exc
+            if exc.status_code in auth_statuses and index < len(write_candidates) - 1:
+                continue
+            return json.dumps({
+                "error": exc.message,
+                "status_code": exc.status_code,
+                "no_write_token": exc.status_code in auth_statuses,
+                "repo": repo_slug,
+                "issue_number": clean_issue_number,
+                "token_key_name": candidate.get("key_name"),
+            })
+
+        if _update_has_only_auth_failures(payload) and index < len(write_candidates) - 1:
+            status_codes = [
+                result.get("status_code")
+                for result in payload.get("failed", {}).values()
+                if isinstance(result, dict)
+            ]
+            fallback_status_code = next((code for code in status_codes if code is not None), None)
+            continue
+
+        payload["token_secret_key_used"] = bool(candidate.get("key_name"))
+        payload["token_source"] = candidate["source"]
+        payload["token_key_name"] = candidate.get("key_name")
+        if fallback_status_code is not None:
+            payload["fallback_from_status_code"] = fallback_status_code
+        if _update_has_only_auth_failures(payload):
+            payload["no_write_token"] = True
+        return json.dumps(payload, default=str)
+
+    if last_error is not None:
+        return json.dumps({
+            "error": last_error.message,
+            "status_code": last_error.status_code,
+            "no_write_token": last_error.status_code in auth_statuses,
+            "repo": repo_slug,
+            "issue_number": clean_issue_number,
         })
     return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
 
@@ -1073,5 +1228,6 @@ __all__ = [
     "_handle_list_github_sub_issues",
     "_handle_read_github_source",
     "_handle_remove_github_sub_issue",
+    "_handle_update_github_issue",
     "github_read_ref_for_backend",
 ]

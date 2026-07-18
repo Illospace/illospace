@@ -138,6 +138,79 @@ GITHUB_TOOLS = [
         },
     },
     {
+        "name": "update_github_issue",
+        "description": (
+            "Update an EXISTING real GitHub issue via the GitHub API. This can transfer ownership, "
+            "change labels, open or close the issue, and edit its title or body. Each requested "
+            "field is applied independently, followed by an exact issue read-back. The result "
+            "reports applied and failed fields separately, so a partial update is never presented "
+            "as total success. This uses the same project-bound GitHub App write identity as issue "
+            "creation; the resulting GitHub issues webhook keeps configured mirrored ticket records "
+            "in sync. labels_set replaces every label and is mutually exclusive with labels_add and "
+            "labels_remove."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Target repository as owner/name, GitHub URL, or git remote URL.",
+                },
+                "issue_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Number of the existing issue to update.",
+                },
+                "assignees_add": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "GitHub login handles to add as assignees.",
+                },
+                "assignees_remove": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "GitHub login handles to remove as assignees.",
+                },
+                "labels_add": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Existing repository label names to add.",
+                },
+                "labels_remove": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Label names to remove.",
+                },
+                "labels_set": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Replace all issue labels with this exact list; [] clears every label. "
+                        "Do not combine with labels_add or labels_remove."
+                    ),
+                },
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed"],
+                    "description": "New issue state.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Replacement issue title. Must be non-empty when provided.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Replacement Markdown body; an empty string clears the body.",
+                },
+                "token_secret_key": {
+                    "type": "string",
+                    "description": "Optional Vault secret key holding a write-capable GitHub token.",
+                },
+            },
+            "required": ["repo", "issue_number"],
+        },
+    },
+    {
         "name": "add_github_sub_issue",
         "description": (
             "Link a REAL GitHub issue as a native sub-issue of a chantier parent issue. This is an "
