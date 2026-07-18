@@ -224,7 +224,7 @@ def _chantier_object_definition() -> dict:
                 "key": "kind",
                 "field_type": "enum",
                 "required": True,
-                "options": ["feature", "incident", "quality", "gtm"],
+                "options": ["feature", "incident", "quality", "gtm", "sunset"],
             },
             {
                 "key": "state",
@@ -339,6 +339,35 @@ def test_slack_chantier_declaration_parses_mechanical_contract():
         {"source": "url", "ref": "https://example.com/spec"},
     )
     assert parse_chantier_declaration("<@BILLO> what chantier are active?") is None
+
+
+async def test_slack_chantier_declare_persists_explicit_sunset_kind(session):
+    from brain.systems.slack.chantier_declare import maybe_declare_chantier_from_slack
+
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+
+    result = await maybe_declare_chantier_from_slack(
+        session,
+        org_id=ORG_ID,
+        actor_user_id=USER_ID,
+        origin="slack.app_mention",
+        text=(
+            "<@BILLO> chantier: shopify app sunset — "
+            "done means the retired app is removed with its rider kind: sunset"
+        ),
+    )
+
+    records = await service.list_records(ORG_ID, domain.id, object_key="chantier")
+    assert result is not None and result.operation == "created"
+    assert result.data["kind"] == "sunset"
+    assert len(records) == 1
+    assert records[0].data["kind"] == "sunset"
 
 
 async def test_slack_chantier_duplicate_declare_updates_one_record(session):
@@ -897,6 +926,28 @@ async def test_chantier_contract_creates_updates_and_queries_full_records(sessio
         "updated_at": "2026-07-16T16:00:00Z",
     }
     assert [record.id for record in queried] == [created.id]
+
+
+@pytest.mark.parametrize("kind", ["feature", "incident", "quality", "gtm"])
+async def test_chantier_contract_still_accepts_existing_kinds(session, kind):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+    data = _chantier_record_data()
+    data.update(slug=f"{kind}-chantier", title=f"{kind.title()} chantier", kind=kind)
+
+    record = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "chantier",
+        data=data,
+    )
+
+    assert record.data["kind"] == kind
 
 
 @pytest.mark.parametrize(

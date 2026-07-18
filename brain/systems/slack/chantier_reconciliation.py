@@ -42,7 +42,10 @@ _CHANTIER_RE = re.compile(r"\bchantier\b", re.IGNORECASE)
 _PRD_RE = re.compile(r"\b(?:prd|product requirements? document)\b", re.IGNORECASE)
 _SLUG_LABEL_RE = re.compile(r"\bslug\s*[:=]\s*`?([a-z0-9]+(?:-[a-z0-9]+)*)", re.IGNORECASE)
 _DONE_MEANS_RE = re.compile(r"\bdone\s+means\s*:?[ \t]*(.+?)(?:\r?\n|$)", re.IGNORECASE)
-_KIND_RE = re.compile(r"\bkind\s*:\s*(feature|incident|quality|gtm)\b", re.IGNORECASE)
+_KIND_RE = re.compile(
+    r"\bkind\s*:\s*(feature|incident|quality|gtm|sunset)\b",
+    re.IGNORECASE,
+)
 _NEXT_STEP_RE = re.compile(r"\bnext[_ ]step\s*:\s*(.+?)(?:\r?\n|$)", re.IGNORECASE)
 _PREVIEW_JSON_SCALAR_RE = re.compile(
     r'"(?P<key>ok|error|viewer_url|public_url|url|channel_id|thread_ts|channel|ts)"'

@@ -30,7 +30,10 @@ GITHUB_SUB_ISSUE_TOOL = "add_github_sub_issue"
 _CHANTIER_KEYWORD_RE = re.compile(r"\bchantier\b", re.IGNORECASE)
 _SLACK_MENTION_RE = re.compile(r"<@[A-Z0-9]+>", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
-_KIND_RE = re.compile(r"\bkind\s*:\s*(feature|incident|quality|gtm)\b", re.IGNORECASE)
+_KIND_RE = re.compile(
+    r"\bkind\s*:\s*(feature|incident|quality|gtm|sunset)\b",
+    re.IGNORECASE,
+)
 _LABELED_VALUE_BOUNDARY = (
     r"(?=\s+(?:kind|owner|goal|next[_ ]step)\s*:|\s+https?://|$)"
 )
