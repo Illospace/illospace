@@ -100,6 +100,131 @@ async def test_scheduled_cycle_retries_provider_error_text_before_returning_safe
     assert streamed_deltas == []
 
 
+async def test_interactive_slack_transport_disconnect_retries_stream_and_completes(monkeypatch):
+    import httpx
+
+    from brain.platform.integrations.providers import is_transient_transport_disconnect
+    from brain.systems.runs import direct_agent
+
+    raw_error = (
+        "peer closed connection without sending complete message body "
+        "(incomplete chunked read)"
+    )
+    provider_calls = []
+
+    class FakeStream:
+        def __init__(self, attempt):
+            self.attempt = attempt
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            if self.attempt == 1:
+                yield SimpleNamespace(type="text", text="Partial answer")
+                raise httpx.RemoteProtocolError(raw_error)
+            yield SimpleNamespace(type="text", text="Recovered answer")
+
+        def get_final_message(self):
+            return _response("Recovered answer")
+
+    class FakeProvider:
+        def stream(self, request):
+            provider_calls.append(request)
+            return FakeStream(len(provider_calls))
+
+        def create(self, _request):
+            raise AssertionError("Interactive calls should stream")
+
+        def is_api_error(self, _exc):
+            return False
+
+        def is_retryable_error(self, exc):
+            return is_transient_transport_disconnect(exc)
+
+    monkeypatch.setattr(direct_agent, "get_provider", lambda *_args, **_kwargs: FakeProvider())
+    monkeypatch.setattr(direct_agent, "_API_RETRY_DELAYS", (0,))
+
+    result = await direct_agent.run_agent_async(
+        message="Continue the design conversation",
+        model="claude-sonnet-4-6",
+        tools=[],
+        persist_session=False,
+        session_id="interactive-transport-retry",
+        resolved_llm=_FakeLLM(),
+        on_stream_delta=lambda _delta: None,
+        metadata={"execution_provenance": {"origin": "slack_teammate"}},
+    )
+
+    assert len(provider_calls) == 2
+    assert result.success is True
+    assert result.output == "Recovered answer"
+    assert result.error is None
+
+
+async def test_interactive_slack_transport_disconnect_retry_is_bounded(monkeypatch):
+    import httpx
+
+    from brain.platform.integrations.providers import is_transient_transport_disconnect
+    from brain.systems.runs import direct_agent
+
+    raw_error = (
+        "peer closed connection without sending complete message body "
+        "(incomplete chunked read)"
+    )
+    provider_calls = []
+
+    class BrokenStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            raise httpx.RemoteProtocolError(raw_error)
+            yield  # pragma: no cover - make this a generator
+
+        def get_final_message(self):
+            raise AssertionError("A disconnected stream has no final message")
+
+    class FakeProvider:
+        def stream(self, request):
+            provider_calls.append(request)
+            return BrokenStream()
+
+        def create(self, _request):
+            raise AssertionError("Interactive calls should stream")
+
+        def is_api_error(self, _exc):
+            return False
+
+        def is_retryable_error(self, exc):
+            return is_transient_transport_disconnect(exc)
+
+    monkeypatch.setattr(direct_agent, "get_provider", lambda *_args, **_kwargs: FakeProvider())
+    monkeypatch.setattr(direct_agent, "_API_RETRY_DELAYS", (0,))
+
+    result = await direct_agent.run_agent_async(
+        message="Continue the design conversation",
+        model="claude-sonnet-4-6",
+        tools=[],
+        persist_session=False,
+        session_id="interactive-transport-exhausted",
+        resolved_llm=_FakeLLM(),
+        on_stream_delta=lambda _delta: None,
+        metadata={"execution_provenance": {"origin": "slack_teammate"}},
+    )
+
+    assert len(provider_calls) == 2
+    assert result.success is False
+    assert result.output == ""
+    assert result.error == raw_error
+
+
 async def test_run_agent_async_basic_completion_uses_async_session_hooks(monkeypatch):
     from brain.systems.runs import direct_agent
 

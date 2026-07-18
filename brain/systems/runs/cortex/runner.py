@@ -21,6 +21,7 @@ from brain.kernel import config as brain_config
 from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, PROCESSING_RUN_STATUS_VALUES
 from brain.systems.cortex.status import PROTECTED_IDEA_STATUSES
 from brain.systems.runs.engine import AsyncAgentRunEngine
+from brain.systems.runs.interactive_reply import is_interactive_transport_fallback
 from brain.systems.runs.events import activity_event, run_event
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.store import AsyncAgentRunStore
@@ -677,12 +678,15 @@ async def _settle_slack_origin_run_async(
 ) -> dict[str, Any] | None:
     if not _run_is_slack_origin(run):
         return None
-    if _run_is_headless(run):
+    if _run_is_headless(run) and run.parent_run_id is not None:
         return None
     final_answer, artifact_id = await _latest_final_answer_artifact(session, run=run)
     if not final_answer:
         return None
-    if await _slack_reply_already_recorded(session, run=run):
+    transport_fallback = is_interactive_transport_fallback(final_answer)
+    if _run_is_headless(run) and not transport_fallback:
+        return None
+    if not transport_fallback and await _slack_reply_already_recorded(session, run=run):
         return None
 
     target = _slack_response_target(run)

@@ -892,6 +892,55 @@ async def test_cycle_final_answer_store_never_persists_raw_provider_error(sessio
     assert "help.openai.com" not in direct_artifact.text
 
 
+async def test_interactive_slack_transport_failure_never_persists_raw_error_as_final_answer(
+    monkeypatch,
+    session_factory,
+):
+    from brain.systems.runs.interactive_reply import INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE
+    from brain.systems.runs.recipes.fast import FastRecipe
+
+    raw_error = (
+        "peer closed connection without sending complete message body "
+        "(incomplete chunked read)"
+    )
+
+    async def fake_invoke(_spec):
+        return SimpleNamespace(output="", success=False, error=raw_error)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda _role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", lambda **_kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
+
+    session = session_factory()
+    result = await AsyncAgentRunEngine(
+        session,
+        recipes={"fast": FastRecipe()},
+    ).run(
+        _run_request(
+            thread_id="slack:T789:C456:1716900000.000100",
+            message="Continue the design conversation",
+            target_ref={"kind": "slack_message", "originating_surface": "slack"},
+            model_policy={"model": "openai/gpt-5.4", "thinking": "high"},
+            metadata={"origin": "slack_teammate", "originating_surface": "slack"},
+        )
+    )
+
+    final_answers = list(
+        (
+            await session.scalars(
+                select(AgentRunArtifactRow).where(
+                    AgentRunArtifactRow.run_id == result.id,
+                    AgentRunArtifactRow.artifact_type == "final_answer",
+                )
+            )
+        ).all()
+    )
+
+    assert result.status == RunStatus.FAILED
+    assert [artifact.text for artifact in final_answers] == [INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE]
+    assert all(raw_error not in str(artifact.text) for artifact in final_answers)
+
+
 async def test_failed_cycle_engine_events_do_not_surface_raw_provider_error(session_factory):
     raw_provider_error = (
         "An error occurred while processing your request. Contact help.openai.com with request ID "

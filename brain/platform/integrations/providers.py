@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Iterator
 
 import anthropic
+import httpx
 
 from brain.platform.integrations.openai_codex_client import (
     OpenAICodexError,
@@ -89,6 +90,10 @@ _RETRYABLE_OPENAI_STREAM_TERMS = (
     "timed out",
 )
 _RETRYABLE_PROVIDER_STATUS_CODES = {408, 409, 429, 500, 502, 503, 529}
+_TRANSIENT_TRANSPORT_DISCONNECT_TERMS = (
+    "incomplete chunked read",
+    "peer closed connection",
+)
 
 
 def _openai_stream_error_message(error: Any) -> str:
@@ -106,6 +111,32 @@ def _openai_stream_error_message(error: Any) -> str:
 def _is_retryable_openai_error_message(message: str) -> bool:
     lowered = str(message or "").lower()
     return any(term in lowered for term in _RETRYABLE_OPENAI_STREAM_TERMS)
+
+
+def is_transient_transport_disconnect(error: BaseException | str | None) -> bool:
+    """Return whether an error is a retry-safe remote protocol disconnect."""
+
+    pending: list[BaseException | str] = [error] if error is not None else []
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if isinstance(current, BaseException):
+            identity = id(current)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if isinstance(current, httpx.RemoteProtocolError) or (
+                current.__class__.__module__.startswith("httpcore")
+                and current.__class__.__name__ == "RemoteProtocolError"
+            ):
+                return True
+            for nested in (current.__cause__, current.__context__):
+                if nested is not None:
+                    pending.append(nested)
+        lowered = str(current or "").lower()
+        if any(term in lowered for term in _TRANSIENT_TRANSPORT_DISCONNECT_TERMS):
+            return True
+    return False
 
 
 def _provider_error_status_code(exc: Exception) -> int | None:
@@ -297,6 +328,7 @@ class AnthropicProvider(LLMProvider):
             isinstance(exc, anthropic.InternalServerError)
             or status_code in _RETRYABLE_PROVIDER_STATUS_CODES
             or _is_retryable_openai_error_message(str(exc))
+            or is_transient_transport_disconnect(exc)
         )
 
     def is_api_error(self, exc: Exception) -> bool:
@@ -545,7 +577,9 @@ class OpenAIProvider(LLMProvider):
             and exc.__class__.__name__ == "InternalServerError"
         ) or (
             status_code in _RETRYABLE_PROVIDER_STATUS_CODES
-        ) or isinstance(exc, OpenAICodexRetryableError) or _is_retryable_openai_error_message(str(exc))
+        ) or isinstance(exc, OpenAICodexRetryableError) or _is_retryable_openai_error_message(
+            str(exc)
+        ) or is_transient_transport_disconnect(exc)
 
     def is_api_error(self, exc: Exception) -> bool:
         return exc.__class__.__module__.startswith("openai") or isinstance(exc, OpenAICodexError)
