@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import httpx
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -327,10 +328,28 @@ class TestAnthropicProvider:
 
         assert not p.is_retryable_error(ProviderStatusError("bad request"))
 
+    def test_remote_protocol_disconnect_is_retryable(self):
+        p = AnthropicProvider(MagicMock())
+
+        assert p.is_retryable_error(
+            httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body (incomplete chunked read)"
+            )
+        )
+
 
 # ── OpenAIProvider ────────────────────────────────────────────────
 
 class TestOpenAIProvider:
+    def test_remote_protocol_disconnect_is_retryable(self):
+        p = OpenAIProvider(MagicMock())
+
+        assert p.is_retryable_error(
+            httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body (incomplete chunked read)"
+            )
+        )
+
     def test_stream_translates_request_to_responses_api(self):
         client = MagicMock()
         mock_resp = MagicMock()

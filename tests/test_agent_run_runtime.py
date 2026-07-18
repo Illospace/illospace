@@ -464,6 +464,80 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert any(_artifact_type(artifact) == "file_observation" for artifact in runtime.store.artifacts)
 
 
+@pytest.mark.parametrize(
+    ("replay_index", "origin"),
+    [
+        (1, "slack_teammate"),
+        (2, "slack_channel_monitor"),
+        (3, "slack_teammate"),
+        (4, "slack_channel_monitor"),
+    ],
+)
+async def test_fast_interactive_slack_transport_failure_returns_plain_language_fallback(
+    monkeypatch,
+    replay_index,
+    origin,
+):
+    from brain.systems.runs.interactive_reply import INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE
+    from brain.systems.runs.recipes.fast import FastRecipe
+
+    raw_error = (
+        "peer closed connection without sending complete message body "
+        "(incomplete chunked read)"
+    )
+    calls = []
+
+    async def fake_invoke(_spec):
+        calls.append(replay_index)
+        return SimpleNamespace(output="", success=False, error=raw_error)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda _role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", lambda **_kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime("fast")
+    runtime.request = replace(
+        runtime.request,
+        metadata={"origin": origin, "originating_surface": "slack"},
+        target_ref={"kind": "slack_message", "originating_surface": "slack"},
+    )
+
+    result = await FastRecipe().execute(runtime)
+
+    assert calls == [replay_index]
+    assert result.status.value == "failed"
+    assert result.output == INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE
+    assert raw_error not in result.output
+
+
+async def test_fast_interactive_slack_logic_failure_is_not_rewritten_or_retried(monkeypatch):
+    from brain.systems.runs.recipes.fast import FastRecipe
+
+    logic_error = "Final reply policy rejected an invalid response"
+    calls = []
+
+    async def fake_invoke(_spec):
+        calls.append("invoke")
+        return SimpleNamespace(output="", success=False, error=logic_error)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda _role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", lambda **_kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime("fast")
+    runtime.request = replace(
+        runtime.request,
+        metadata={"origin": "slack_teammate", "originating_surface": "slack"},
+        target_ref={"kind": "slack_message", "originating_surface": "slack"},
+    )
+
+    result = await FastRecipe().execute(runtime)
+
+    assert calls == ["invoke"]
+    assert result.status.value == "failed"
+    assert result.output == logic_error
+
+
 async def test_fast_discussion_run_can_ack_visibly_before_spawning_child(monkeypatch):
     from brain.systems.runs.domain import RunRecipe
     from brain.systems.runs.events import run_event
@@ -4261,6 +4335,91 @@ async def test_runner_keeps_headless_slack_child_silent(monkeypatch):
     monkeypatch.setattr(runner, "_slack_client_for_run", fail_client_for_run)
 
     assert await runner._settle_slack_origin_run_async(object(), run) is None
+
+
+async def test_runner_posts_transport_fallback_for_headless_slack_monitor(monkeypatch):
+    from brain.systems.runs.cortex import runner
+    from brain.systems.runs.interactive_reply import INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE
+
+    run = SimpleNamespace(
+        id=81,
+        parent_run_id=None,
+        root_run_id=81,
+        thread_id="slack:T789:C456:1716900000.000100",
+        status="failed",
+        org_id="org-1",
+        user_id="user-1",
+        target_ref={
+            "kind": "slack_message",
+            "slack_trigger": {
+                "channel_id": "C456",
+                "channel_type": "channel",
+                "message_ts": "1716900000.000100",
+                "thread_ts": "1716900000.000100",
+                "response_target": {
+                    "channel_id": "C456",
+                    "thread_ts": "1716900000.000100",
+                },
+            },
+        },
+        metadata_={
+            "origin": "slack_channel_monitor",
+            "originating_surface": "slack",
+            "final_answer_target_surface": "headless",
+            "headless": True,
+        },
+    )
+    final_artifact = SimpleNamespace(
+        id=104,
+        run_id=81,
+        artifact_type="final_answer",
+        text=INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE,
+    )
+    earlier_progress_reply = SimpleNamespace(
+        payload={
+            "tool_name": "post_slack_reply",
+            "args": {"body": "I’m checking that now."},
+            "result": '{"ok": true, "ts": "1716900001.000200"}',
+        }
+    )
+    calls = []
+
+    class FakeSession:
+        def __init__(self):
+            self.scalar_calls = 0
+
+        async def scalars(self, _stmt):
+            self.scalar_calls += 1
+            if self.scalar_calls == 1:
+                return _ScalarRows([final_artifact])
+            return _ScalarRows([earlier_progress_reply])
+
+    class FakeSlackClient:
+        async def post_message(self, **kwargs):
+            calls.append(kwargs)
+            return {"ok": True, "channel": kwargs["channel"], "ts": "1716900400.000500"}
+
+        async def set_assistant_status(self, **_kwargs):
+            return {"ok": True}
+
+    async def fake_client_for_run(run_arg):
+        assert run_arg is run
+        return FakeSlackClient()
+
+    monkeypatch.setattr(runner, "_slack_client_for_run", fake_client_for_run)
+
+    session = FakeSession()
+    result = await runner._settle_slack_origin_run_async(session, run)
+
+    assert result["surface"] == "slack"
+    assert session.scalar_calls == 1
+    assert calls == [
+        {
+            "channel": "C456",
+            "text": INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE,
+            "thread_ts": "1716900000.000100",
+        }
+    ]
 
 
 async def test_runner_does_not_mirror_after_same_run_ai_timeline_tool_message():
