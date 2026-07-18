@@ -6,10 +6,10 @@ import logging
 from typing import Any
 
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime, cancel_event_is_set
+from brain.systems.runs.failures import failure_category_for_error, safe_terminal_run_message
 from brain.systems.runs.tools import wrap_tool_handlers
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
-from brain.systems.runs.interactive_reply import interactive_transport_fallback
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.shared import (
@@ -209,31 +209,33 @@ class FastRecipe(BaseRunRecipe):
             result = await invoke_direct_agent_async(spec)
         except Exception as exc:
             logger.exception("fast_recipe_failed", extra={"run_id": runtime.run.id})
-            fallback = interactive_transport_fallback(
-                exc,
-                runtime.request.metadata,
-                runtime.request.target_ref,
+            category = failure_category_for_error(exc)
+            return RunRecipeResult(
+                error=str(exc),
+                final_output=safe_terminal_run_message(RunStatus.FAILED, category),
+                failure_category=category,
+                status=RunStatus.FAILED,
             )
-            if fallback:
-                return RunRecipeResult(output=fallback, status=RunStatus.FAILED)
-            return RunRecipeResult(output=f"Fast run failed: {exc}", status=RunStatus.FAILED)
 
         output = str(getattr(result, "output", "") or "").strip()
         if await cancel_event_is_set(runtime.cancel_event):
-            return RunRecipeResult(output="user_canceled", status=RunStatus.CANCELED)
+            return RunRecipeResult(error="user_canceled", status=RunStatus.CANCELED)
         status = RunStatus.COMPLETED if getattr(result, "success", False) else RunStatus.FAILED
         if str(getattr(result, "error", "") or "") == "Cancelled by runner":
             status = RunStatus.CANCELED
         result_error = getattr(result, "error", None)
-        fallback = interactive_transport_fallback(
-            result_error,
-            runtime.request.metadata,
-            runtime.request.target_ref,
-        )
-        if fallback:
-            output = fallback
-        elif result_error and not output:
-            output = str(result_error)
+        if status == RunStatus.FAILED:
+            error = str(result_error or output or "fast_recipe_failed")
+            category = failure_category_for_error(error)
+            return RunRecipeResult(
+                error=error,
+                final_output=safe_terminal_run_message(status, category),
+                failure_category=category,
+                status=status,
+                post_completion_tasks=tuple(getattr(result, "post_completion_tasks", ()) or ()),
+            )
+        if status == RunStatus.CANCELED:
+            return RunRecipeResult(error=str(result_error or "user_canceled"), status=status)
         return RunRecipeResult(
             output=output,
             status=status,

@@ -15,6 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.systems.runs.context import RunContextLoader
 from brain.systems.runs.domain import AgentRun, AgentRunRequest, ArtifactType, RunProfile, RunRecipe
 from brain.systems.runs.events import activity_event, run_event, text_delta_event
+from brain.systems.runs.failures import (
+    RunFailureCategory,
+    coerce_failure_category,
+    failure_category_for_error,
+    safe_terminal_run_message,
+)
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.store import (
     AsyncAgentRunStore,
@@ -37,8 +43,15 @@ class AsyncRunRecipeHandler(Protocol):
 
 @dataclass(frozen=True)
 class RunRecipeResult:
-    output: str
+    """Recipe outcome with successful output separated from failure presentation."""
+
+    output: str = ""
     status: RunStatus = RunStatus.COMPLETED
+    # Internal diagnostic text. It may contain provider or exception details.
+    error: str | None = None
+    # Optional user-safe text. Failed runs must never put raw errors here.
+    final_output: str | None = None
+    failure_category: RunFailureCategory | str | None = None
     artifacts: tuple = ()
     post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = ()
 
@@ -326,7 +339,12 @@ class AsyncAgentRunEngine:
             if inspect.isawaitable(result):
                 result = await result
         except Exception as exc:
-            return await self.fail(run.id, str(exc), execution_claim=execution_claim)
+            return await self.fail(
+                run.id,
+                str(exc),
+                failure_category=failure_category_for_error(exc),
+                execution_claim=execution_claim,
+            )
         for artifact in result.artifacts:
             await self.store.append_artifact(artifact)
         if await cancel_event_is_set(cancel_event):
@@ -343,21 +361,23 @@ class AsyncAgentRunEngine:
                 execution_claim=execution_claim,
             )
         if result_status == RunStatus.FAILED:
+            error = str(result.error or result.output or "recipe_failed")
             return await self.fail(
                 run.id,
-                result.output or "recipe_failed",
-                final_output=result.output or None,
+                error,
+                final_output=result.final_output,
+                failure_category=result.failure_category or failure_category_for_error(error),
                 execution_claim=execution_claim,
             )
         if result_status == RunStatus.CANCELED:
             return await self.cancel(
                 run.id,
-                reason=result.output or None,
+                reason=result.error or result.output or None,
                 execution_claim=execution_claim,
             )
         completed = await self.complete(
             run.id,
-            output=result.output,
+            output=result.final_output if result.final_output is not None else result.output,
             status=result_status,
             execution_claim=execution_claim,
         )
@@ -412,7 +432,8 @@ class AsyncAgentRunEngine:
             return await self.fail(
                 run_id,
                 f"Chantier declare failed: {failure}",
-                final_output=f"Chantier declare failed: {failure}",
+                final_output=safe_terminal_run_message(RunStatus.FAILED, RunFailureCategory.INTERNAL),
+                failure_category=RunFailureCategory.INTERNAL,
                 execution_claim=execution_claim,
             )
         if guarantee is not None:
@@ -467,12 +488,18 @@ class AsyncAgentRunEngine:
         error: str,
         *,
         final_output: str | None = None,
+        failure_category: RunFailureCategory | str | None = None,
         execution_claim: ExecutionClaim | None = None,
     ) -> AgentRun:
         async with self._atomic_terminal_write():
             row = await self.store.require_run(run_id)
             if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
                 return to_domain(row)
+            category = coerce_failure_category(failure_category or failure_category_for_error(error))
+            await self.store.update_metadata(
+                run_id,
+                {"failure": {"category": category.value}},
+            )
             safe_error = await self.store.safe_cycle_provider_error_text(run_id, str(error or ""))
             failed = await self.store.set_status(
                 run_id,
