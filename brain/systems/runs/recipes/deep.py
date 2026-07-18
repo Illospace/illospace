@@ -8,7 +8,11 @@ import re
 from collections.abc import Mapping
 from typing import Any, Iterable
 
-from brain.systems.personality import agent_contract_prompt_section, soul_prompt_section
+from brain.systems.personality import (
+    agent_contract_prompt_section,
+    person_context_prompt_section,
+    soul_prompt_section,
+)
 from brain.systems.runs.assignments import AcceptanceCriteria, EvidenceRequirement, WorkerAssignment
 from brain.systems.runs.domain import AgentRun, AgentRunArtifact, ArtifactType, RunProfile, RunRecipe
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
@@ -533,11 +537,19 @@ class DeepRecipe(BaseRunRecipe):
     async def _synthesize_with_coordinator(self, runtime: RunRuntime, node_results: dict[str, dict[str, Any]]) -> str:
         fallback = self._synthesize_output(node_results)
         model, thinking = await _coordinator_model_and_thinking(runtime)
-        system_prompt = "\n\n".join((
-            soul_prompt_section(),
-            agent_contract_prompt_section(),
-            DEEP_COORDINATOR_SYNTHESIS_INSTRUCTIONS,
-        ))
+        system_prompt = "\n\n".join(
+            section
+            for section in (
+                soul_prompt_section(),
+                person_context_prompt_section(
+                    runtime.request.metadata,
+                    verified_user_id=runtime.request.user_id,
+                ),
+                agent_contract_prompt_section(),
+                DEEP_COORDINATOR_SYNTHESIS_INSTRUCTIONS,
+            )
+            if section.strip()
+        )
         payload = _coordinator_synthesis_payload(runtime, node_results)
         await runtime.store.append_event(
             run_event(

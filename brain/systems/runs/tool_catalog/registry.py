@@ -460,6 +460,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "expected_effect": "post an Illo-authored reply to Slack",
         "output_budget_chars": 8_000,
     },
+    "react_to_slack_message": {
+        "permission": "write_chat",
+        "risk_class": "low",
+        "side_effect_class": "chat_message",
+        "reversibility": "reversible",
+        "action_manifest": True,
+        "expected_effect": "add one Illo-authored emoji reaction to a Slack message",
+        "output_budget_chars": 4_000,
+    },
     "post_thread_discussion_reply": {
         "permission": "write_chat",
         "risk_class": "medium",

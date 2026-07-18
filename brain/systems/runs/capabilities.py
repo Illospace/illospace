@@ -308,7 +308,12 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         "category": "external_surface",
         "summary": "Illo can participate in Slack conversations and enumerate bot-visible or previously observed Slack conversations when a Slack source connection is registered for the workspace.",
         "aliases": ("slack", "team chat", "chat teammate", "slack integration"),
-        "tools": ("manage_slack", "read_slack_conversation", "post_slack_reply"),
+        "tools": (
+            "manage_slack",
+            "read_slack_conversation",
+            "post_slack_reply",
+            "react_to_slack_message",
+        ),
         "status_check": {"tool": "manage_slack", "args": {"action": "status"}},
         "setup": {
             "mode": "guided_user_action",

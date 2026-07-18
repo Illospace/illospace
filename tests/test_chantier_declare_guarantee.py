@@ -108,7 +108,7 @@ def _chantier_object_definition() -> dict:
                 "key": "kind",
                 "field_type": "enum",
                 "required": True,
-                "options": ["feature", "incident", "quality", "gtm"],
+                "options": ["feature", "incident", "quality", "gtm", "sunset"],
             },
             {
                 "key": "state",
@@ -172,7 +172,7 @@ def _publication() -> PublishedChantierPrd:
         slug="connector-framework",
         title="Connector Framework",
         goal="Done means connectors share one verified declaration contract.",
-        kind="feature",
+        kind="sunset",
         next_step="Implement the first connector against the shared contract.",
         prd_ref={"source": "url", "ref": PRD_URL, "title": "Connector Framework PRD"},
         anchor_ref={"source": "slack", "ref": SLACK_REF, "title": "Slack declaration anchor"},
@@ -257,6 +257,7 @@ async def _append_prd_and_anchor_events(
                     "body": (
                         "Declared the connector framework chantier. Slug: connector-framework\n"
                         "Done means connectors share one verified declaration contract.\n"
+                        "kind: sunset\n"
                         "next_step: Implement the first connector against the shared contract."
                     )
                     if declaration
@@ -332,6 +333,7 @@ async def test_declare_missing_tracker_record_self_heals_before_success_and_dige
     )
     assert len(records) == 1
     assert records[0].data["slug"] == "connector-framework"
+    assert records[0].data["kind"] == "sunset"
     refs = {(item["source"], item["ref"]) for item in records[0].data["refs"]}
     assert ("url", PRD_URL) in refs
     assert ("slack", SLACK_REF) in refs

@@ -25,7 +25,7 @@ creates, updates, and query results.
 | `slug` | text | yes | Stable after creation; lowercase kebab-case, maximum 80 characters. |
 | `title` | text | yes | Human-readable chantier title, maximum 500 characters. |
 | `goal` | long text | yes | Outcome hook beginning with `Done means …`, maximum 4,000 characters. |
-| `kind` | enum | yes | `feature`, `incident`, `quality`, or `gtm`. |
+| `kind` | enum | yes | `feature`, `incident`, `quality`, `gtm`, or `sunset`. |
 | `state` | enum | yes | `exploring`, `building`, `shipping`, `verifying`, `done`, or `paused`. This chantier state composes with, and does not replace, member tickets' Deploy-State Ladder. |
 | `owner` | text | no | Next-action owner, using the ticket record's builder-first ownership semantics; maximum 120 characters. |
 | `refs` | JSON array | yes | Typed references with the item shape below. An empty array is valid. |
