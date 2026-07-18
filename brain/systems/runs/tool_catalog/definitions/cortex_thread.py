@@ -354,6 +354,29 @@ CHAT_TOOLS = [
         },
     },
     {
+        "name": "react_to_slack_message",
+        "description": (
+            "Add one emoji reaction to a Slack message as Illo. Use this instead of a text reply "
+            "only when a short social acknowledgement is enough, such as thanks, agreement, or "
+            "celebration. A reaction never replaces an answer, clarification, task update, or "
+            "incident response. This tool is target-locked to the Slack message that triggered "
+            "the run; channel and timestamp cannot be supplied."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "emoji": {
+                    "type": "string",
+                    "description": (
+                        "Slack emoji name without colons, such as white_check_mark, thumbsup, "
+                        "heart, or tada. Use one fitting reaction; never stack reactions."
+                    ),
+                },
+            },
+            "required": ["emoji"],
+        },
+    },
+    {
         "name": "post_ai_timeline_message",
         "description": (
             "Post an Illo-authored message into the linked Thread AI Timeline. "
@@ -482,6 +505,36 @@ CHAT_TOOLS = [
                 "user_id": {
                     "type": "string",
                     "description": "Illospace user id, required for link_identity.",
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": (
+                        "Optional name the person explicitly wants Illo to use in Slack DMs. "
+                        "Used only with link_identity and never exposed in shared channels."
+                    ),
+                },
+                "communication_preferences": {
+                    "type": "object",
+                    "description": (
+                        "Optional delivery preferences for link_identity. Invalid or unknown "
+                        "values are ignored."
+                    ),
+                    "properties": {
+                        "tone": {
+                            "type": "string",
+                            "enum": ["neutral", "warm", "casual", "formal", "direct"],
+                        },
+                        "brevity": {
+                            "type": "string",
+                            "enum": ["brief", "balanced", "detailed"],
+                        },
+                        "humour": {
+                            "type": "string",
+                            "enum": ["none", "light", "welcome"],
+                        },
+                        "language": {"type": "string"},
+                        "timezone": {"type": "string"},
+                    },
                 },
                 "channel_id": {
                     "type": "string",

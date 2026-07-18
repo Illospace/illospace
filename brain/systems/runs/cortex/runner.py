@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager, suppress
@@ -245,6 +246,7 @@ _THREAD_DISCUSSION_SURFACE = "thread_discussion"
 _THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
 _SLACK_SURFACE = "slack"
 _SLACK_REPLY_TOOL = "post_slack_reply"
+_SLACK_VISIBLE_ACTION_TOOLS = {_SLACK_REPLY_TOOL, "react_to_slack_message"}
 _NON_TIMELINE_FINAL_ANSWER_TARGETS = {
     "discussion",
     "headless",
@@ -588,7 +590,7 @@ async def _settle_thread_discussion_conversation_run_async(
     }
 
 
-async def _slack_reply_already_recorded(
+async def _slack_visible_action_already_recorded(
     session,
     *,
     run: AgentRunRow,
@@ -612,10 +614,25 @@ async def _slack_reply_already_recorded(
         payload = getattr(event, "payload", None)
         if not isinstance(payload, dict):
             continue
-        if str(payload.get("tool_name") or payload.get("tool") or "") != _SLACK_REPLY_TOOL:
+        tool_name = str(payload.get("tool_name") or payload.get("tool") or "")
+        if tool_name not in _SLACK_VISIBLE_ACTION_TOOLS:
             continue
-        result_preview = str(payload.get("result") or "").lower()
-        if '"error"' not in result_preview and "'error'" not in result_preview:
+        raw_result = payload.get("result")
+        try:
+            result_payload = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+        except (TypeError, ValueError):
+            if tool_name == _SLACK_REPLY_TOOL and isinstance(raw_result, str):
+                compact_prefix = "".join(raw_result[:80].lower().split())
+                if compact_prefix.startswith('{"ok":true,'):
+                    return True
+            continue
+        if not isinstance(result_payload, dict) or result_payload.get("ok") is not True:
+            continue
+        if tool_name == "react_to_slack_message" and result_payload.get(
+            "counts_as_visible_response"
+        ) is not True:
+            continue
+        if tool_name in _SLACK_VISIBLE_ACTION_TOOLS:
             return True
     return False
 
@@ -686,7 +703,10 @@ async def _settle_slack_origin_run_async(
     transport_fallback = is_interactive_transport_fallback(final_answer)
     if _run_is_headless(run) and not transport_fallback:
         return None
-    if not transport_fallback and await _slack_reply_already_recorded(session, run=run):
+    if not transport_fallback and await _slack_visible_action_already_recorded(
+        session,
+        run=run,
+    ):
         return None
 
     target = _slack_response_target(run)

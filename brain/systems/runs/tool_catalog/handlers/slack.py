@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from typing import Any
 
+from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _current_runtime_secret_context
-from brain.systems.slack.client import SlackDeliveryError
+from brain.systems.slack.client import SlackApiError, SlackDeliveryError
 from brain.systems.slack.uploads import slack_image_upload_from_data_url
 
 
@@ -67,6 +70,82 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "n", "off"}:
             return False
     return bool(value)
+
+
+_SLACK_EMOJI_NAME_PATTERN = re.compile(r"^[a-z0-9_+\-]{1,80}$")
+
+
+def _normalize_slack_emoji_name(value: Any) -> str:
+    emoji = str(value or "").strip().strip(":").lower()
+    if not emoji:
+        raise ValueError("react_to_slack_message requires an emoji name")
+    if not _SLACK_EMOJI_NAME_PATTERN.fullmatch(emoji):
+        raise ValueError(
+            "react_to_slack_message emoji must be a Slack emoji name without colons"
+        )
+    return emoji
+
+
+async def _durable_slack_reaction_state(
+    *,
+    channel_id: str,
+    message_ts: str,
+    emoji: str,
+) -> dict[str, Any]:
+    """Read persisted action manifests to survive run recovery and replay."""
+
+    run_id = _execution_metadata().get("run_id")
+    try:
+        run_id = int(run_id or 0)
+    except (TypeError, ValueError):
+        run_id = 0
+    if run_id <= 0:
+        return {"enabled": False}
+
+    from sqlalchemy import select
+
+    from brain.platform.db.models.agent_run import ActionManifestRow
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+    try:
+        async with UnitOfWork() as uow:
+            rows = list(
+                (
+                    await uow.session.scalars(
+                        select(ActionManifestRow).where(
+                            ActionManifestRow.run_id == run_id,
+                            ActionManifestRow.tool_name == "react_to_slack_message",
+                        )
+                    )
+                ).all()
+            )
+    except Exception as exc:
+        return {"enabled": True, "error": str(exc)}
+
+    conflicting_emoji = None
+    already_succeeded = False
+    for row in rows:
+        target = getattr(row, "target", None)
+        target = dict(target) if isinstance(target, dict) else {}
+        target_channel = str(target.get("channel_id") or "").strip()
+        target_ts = str(target.get("message_ts") or "").strip()
+        if target_channel and target_channel != channel_id:
+            continue
+        if target_ts and target_ts != message_ts:
+            continue
+        attempted_emoji = str(target.get("emoji") or "").strip().strip(":").lower()
+        if not attempted_emoji:
+            continue
+        if attempted_emoji != emoji:
+            conflicting_emoji = attempted_emoji
+            break
+        if str(getattr(row, "outcome_status", "") or "") == "succeeded":
+            already_succeeded = True
+    return {
+        "enabled": True,
+        "conflicting_emoji": conflicting_emoji,
+        "already_succeeded": already_succeeded,
+    }
 
 
 def _normalize_slack_channel_types(value: Any) -> str:
@@ -348,6 +427,144 @@ async def _handle_post_slack_reply(
     )
 
 
+async def _handle_react_to_slack_message(
+    emoji: str,
+) -> str:
+    """React once to the triggering Slack message."""
+
+    try:
+        normalized_emoji = _normalize_slack_emoji_name(emoji)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+
+    trigger = _current_slack_trigger()
+    target_channel = str(trigger.get("channel_id") or "").strip()
+    target_message_ts = str(trigger.get("message_ts") or "").strip()
+    if not target_channel or not target_message_ts:
+        return json.dumps(
+            {
+                "error": "react_to_slack_message requires a Slack-triggered run"
+            }
+        )
+
+    durable_state = await _durable_slack_reaction_state(
+        channel_id=target_channel,
+        message_ts=target_message_ts,
+        emoji=normalized_emoji,
+    )
+    if durable_state.get("error"):
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "react_to_slack_message could not verify prior reaction state",
+            }
+        )
+    if durable_state.get("conflicting_emoji"):
+        return json.dumps(
+            {
+                "ok": False,
+                "error": (
+                    "react_to_slack_message cannot stack a different emoji on the "
+                    "triggering Slack message in one run"
+                ),
+                "channel_id": target_channel,
+                "message_ts": target_message_ts,
+                "emoji": normalized_emoji,
+                "attempted_emoji": durable_state["conflicting_emoji"],
+                "reaction_already_attempted": True,
+            }
+        )
+    if durable_state.get("already_succeeded"):
+        return json.dumps(
+            {
+                "ok": True,
+                "channel_id": target_channel,
+                "message_ts": target_message_ts,
+                "emoji": normalized_emoji,
+                "deduplicated": True,
+                "counts_as_visible_response": True,
+                "slack": {"ok": True, "durable_replay": True},
+            }
+        )
+
+    reaction_attempts: dict[tuple[str, str], dict[str, str]] = get_or_create_agent_run_state(
+        "slack_reaction_attempts",
+        dict,
+    )
+    target = (target_channel, target_message_ts)
+    attempt = reaction_attempts.get(target)
+    if attempt is not None and attempt.get("emoji") != normalized_emoji:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": (
+                    "react_to_slack_message cannot stack a different emoji on the "
+                    "triggering Slack message in one run"
+                ),
+                "channel_id": target_channel,
+                "message_ts": target_message_ts,
+                "emoji": normalized_emoji,
+                "attempted_emoji": attempt.get("emoji"),
+                "reaction_already_attempted": True,
+            }
+        )
+    if attempt is not None and attempt.get("status") != "failed":
+        return json.dumps(
+            {
+                "ok": False,
+                "error": (
+                    "react_to_slack_message already attempted this emoji for the "
+                    "triggering Slack message in this run"
+                ),
+                "channel_id": target_channel,
+                "message_ts": target_message_ts,
+                "emoji": normalized_emoji,
+                "reaction_already_attempted": True,
+            }
+        )
+    if attempt is None:
+        attempt = {"emoji": normalized_emoji, "status": "in_flight"}
+        reaction_attempts[target] = attempt
+    else:
+        attempt["status"] = "in_flight"
+
+    try:
+        client = await _slack_client_from_runtime()
+        response = await client.add_reaction(
+            channel=target_channel,
+            timestamp=target_message_ts,
+            name=normalized_emoji,
+        )
+        deduplicated = False
+    except asyncio.CancelledError:
+        attempt["status"] = "failed"
+        raise
+    except SlackApiError as exc:
+        if exc.error != "already_reacted":
+            attempt["status"] = "failed"
+            return json.dumps({"ok": False, "error": str(exc)})
+        response = {"ok": True, "already_reacted": True}
+        deduplicated = True
+    except Exception as exc:
+        attempt["status"] = "failed"
+        return json.dumps({"ok": False, "error": str(exc)})
+
+    attempt["status"] = "succeeded"
+    await _clear_processing_status(client, trigger)
+    return json.dumps(
+        {
+            "ok": True,
+            "channel_id": target_channel,
+            "message_ts": target_message_ts,
+            "emoji": normalized_emoji,
+            "deduplicated": deduplicated,
+            "counts_as_visible_response": True,
+            "slack": response,
+        },
+        default=str,
+    )
+
+
 async def _handle_read_slack_conversation(
     scope: str = "thread",
     channel_id: str | None = None,
@@ -434,6 +651,8 @@ async def _slack_connection_for_tool(session, *, org_id: str, connection_id: str
 
 
 def _slack_connection_payload(connection) -> dict[str, Any]:
+    metadata = dict(connection.metadata_ or {})
+    metadata.pop("identity_links", None)
     return {
         "id": str(connection.id),
         "display_name": connection.display_name,
@@ -441,7 +660,7 @@ def _slack_connection_payload(connection) -> dict[str, Any]:
         "status": connection.status,
         "last_seen_at": connection.last_seen_at.isoformat() if connection.last_seen_at else None,
         "last_error": connection.last_error,
-        "metadata": connection.metadata_ or {},
+        "metadata": metadata,
     }
 
 
@@ -450,6 +669,8 @@ async def _handle_manage_slack(
     connection_id: str | None = None,
     slack_user_id: str | None = None,
     user_id: str | None = None,
+    display_name: str | None = None,
+    communication_preferences: dict[str, Any] | None = None,
     channel_types: str | list[str] | None = None,
     channel_id: str | None = None,
     channel_name: str | None = None,
@@ -583,6 +804,8 @@ async def _handle_manage_slack(
                 slack_user_id=str(slack_user_id or ""),
                 user_id=str(user_id or ""),
                 org_id=org_id,
+                display_name=display_name,
+                communication_preferences=communication_preferences,
             )
             return json.dumps({"ok": True, "mapping": mapping}, default=str)
         if normalized_action == "unlink_identity":

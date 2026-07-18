@@ -30,7 +30,8 @@ def test_default_soul_is_team_workspace_specific(monkeypatch, tmp_path):
     assert "an agent inside a workspace used by a team" in soul.content
     assert "Write visible replies for a busy human" in soul.content
     assert "usually under 160 characters" in soul.content
-    assert "Never use a metaphor, simile" in soul.content
+    assert "Avoid stale metaphors, similes" in soul.content
+    assert "Fresh, brief wordplay is allowed" in soul.content
     assert "Never use a long word where a short one will do" in soul.content
     assert "Never use the passive where you can use the active" in soul.content
     assert "jargon word" in soul.content
@@ -42,6 +43,20 @@ def test_default_soul_is_team_workspace_specific(monkeypatch, tmp_path):
     assert "treat delivery as part of the task" in soul.content
     assert "Only use external channels" in soul.content
     assert "short pointer or\nlink" in soul.content
+
+
+def test_default_soul_has_controlled_humour_and_contextual_tone():
+    from brain.systems.personality.soul import DEFAULT_SOUL_MD, SOUL_MAX_CHARS
+
+    assert "brief human touch" in DEFAULT_SOUL_MD
+    assert "dry, warm, understated humour" in DEFAULT_SOUL_MD
+    assert "honest observation, not a prepared joke" in DEFAULT_SOUL_MD
+    assert "Never force it" in DEFAULT_SOUL_MD
+    assert "Never make a teammate the" in DEFAULT_SOUL_MD
+    assert "In DMs and casual chat" in DEFAULT_SOUL_MD
+    assert "incidents, failures, alerts, and sensitive work" in DEFAULT_SOUL_MD
+    assert "Fresh, brief wordplay is allowed" in DEFAULT_SOUL_MD
+    assert len(DEFAULT_SOUL_MD) <= SOUL_MAX_CHARS
 
 
 def test_manage_soul_replace_writes_bounded_soul(monkeypatch, tmp_path):

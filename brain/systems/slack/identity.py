@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.org import User
+from brain.systems.personality.person_context import normalize_communication_preferences
 
 
 class SlackIdentityMappingError(ValueError):
@@ -42,6 +43,8 @@ async def link_slack_identity(
     slack_user_id: str,
     user_id: str,
     org_id: str | None = None,
+    display_name: str | None = None,
+    communication_preferences: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     """Link a Slack user id to an Illospace user id for one Slack connection."""
 
@@ -60,6 +63,28 @@ async def link_slack_identity(
     identity_map[clean_slack_user_id] = clean_user_id
     slack_metadata["identity_map"] = identity_map
     root["slack"] = slack_metadata
+
+    identity_links = root.get("identity_links")
+    identity_links = dict(identity_links) if isinstance(identity_links, Mapping) else {}
+    slack_links = identity_links.get("slack")
+    slack_links = dict(slack_links) if isinstance(slack_links, Mapping) else {}
+    existing_link = slack_links.get(clean_slack_user_id)
+    existing_link = dict(existing_link) if isinstance(existing_link, Mapping) else {}
+    if _clean(existing_link.get("user_id")) != clean_user_id:
+        existing_link = {}
+    existing_metadata = existing_link.get("metadata")
+    link_metadata = dict(existing_metadata) if isinstance(existing_metadata, Mapping) else {}
+    if communication_preferences is not None:
+        link_metadata["communication_preferences"] = normalize_communication_preferences(
+            communication_preferences
+        )
+    slack_links[clean_slack_user_id] = {
+        "user_id": clean_user_id,
+        "display_name": _clean(display_name) or existing_link.get("display_name") or None,
+        "metadata": link_metadata,
+    }
+    identity_links["slack"] = slack_links
+    root["identity_links"] = identity_links
     connection.metadata_ = root
     await session.flush()
     return {"slack_user_id": clean_slack_user_id, "user_id": clean_user_id}
@@ -81,6 +106,20 @@ async def unlink_slack_identity(
     identity_map.pop(clean_slack_user_id, None)
     slack_metadata["identity_map"] = identity_map
     root["slack"] = slack_metadata
+
+    identity_links = root.get("identity_links")
+    identity_links = dict(identity_links) if isinstance(identity_links, Mapping) else {}
+    slack_links = identity_links.get("slack")
+    slack_links = dict(slack_links) if isinstance(slack_links, Mapping) else {}
+    slack_links.pop(clean_slack_user_id, None)
+    if slack_links:
+        identity_links["slack"] = slack_links
+    else:
+        identity_links.pop("slack", None)
+    if identity_links:
+        root["identity_links"] = identity_links
+    else:
+        root.pop("identity_links", None)
     connection.metadata_ = root
     await session.flush()
     return {"slack_user_id": clean_slack_user_id, "removed": removed}

@@ -23,6 +23,7 @@ oauth_config:
       - im:write
       - mpim:history
       - mpim:read
+      - reactions:write
       - users:read
 settings:
   event_subscriptions:

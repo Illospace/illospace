@@ -9,7 +9,9 @@ public Slack Events API endpoint.
 1. Create a Slack app from `deploy/slack/illo-self-hosted-manifest.yml`.
 2. Enable Socket Mode in Slack.
 3. Install the app to your Slack workspace. Existing installations should be
-   reinstalled after manifest scope changes so `chat:write.public` is granted.
+   reinstalled after manifest scope changes so `chat:write.public` and
+   `reactions:write` are granted. Updating the manifest alone does not grant a
+   new scope to an existing installation.
 4. Save `SLACK_BOT_TOKEN` to Illospace Vault, or set it as an environment
    variable for the connector process.
 5. Save `SLACK_APP_TOKEN` to Illospace Vault, or set it as an environment
@@ -55,13 +57,20 @@ Optional Slack hints:
   simple request directly with `post_slack_reply`, or to make longer work
   durable with `spawn_worker`/`manage_idea` and then post a natural Slack update
   describing what it actually did.
+- For a purely social acknowledgement, Illo may use
+  `react_to_slack_message` instead of posting text. The tool is locked to the
+  message that triggered the run and permits one emoji choice per run. It never
+  replaces an answer, clarification, task update, or incident response. A
+  failed attempt may retry the same emoji safely, but it cannot switch emoji
+  and stack reactions.
 - If Illo creates or selects a Cortex Thread, it should share only the
   `thread_url` returned by that tool. Slack ids and run ids are never converted
   into Thread URLs.
 - When a Slack-origin run or non-headless Slack-origin child run reaches a
   terminal final answer, the runner posts that generated final answer back to
   Slack unless the same run already completed a successful `post_slack_reply`
-  call.
+  call or a successful `react_to_slack_message` call marked as a visible
+  response. Failed reaction calls do not suppress the generated text fallback.
 - Regular channel messages without an Illo mention are ignored.
 - The default manifest subscribes to `app_mention` and `message.im` only. It
   keeps channel history scopes for context reads, but avoids generic channel
@@ -75,6 +84,7 @@ Optional Slack hints:
 - Slack-origin runs receive normal Illospace tools plus:
   - `read_slack_conversation`
   - `post_slack_reply`
+  - `react_to_slack_message`
   - `manage_slack`
 
 ## Identity Mapping
@@ -85,6 +95,13 @@ Slack connection owner as the authority user while preserving Slack provenance.
 When identity matters, Illo can use `manage_slack` to inspect connection health
 and link a Slack user id to an Illospace user id. Once linked, later Slack runs
 from that Slack user are attributed to the mapped Illospace user.
+
+`manage_slack(action="link_identity")` may also save an explicit Slack DM name
+and bounded communication preferences: tone, brevity, humour, language, and
+timezone. Illo uses these only after the Slack identity map and profile link
+agree on the same Illospace user. It never substitutes the connection owner's
+profile for an unmapped speaker, and it does not put the private DM name into a
+shared-channel prompt.
 
 
 ## Channel inventory

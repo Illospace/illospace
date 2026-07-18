@@ -11,6 +11,7 @@ from brain.platform.db.models.inbound import InboundEventRow
 from brain.platform.db.models.org import User
 from brain.systems.inbound.service import _clean_optional, _complete_event
 from brain.systems.inbound.status import STATUS_FAILED, STATUS_PROCESSED
+from brain.systems.personality.person_context import normalize_person_context
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.systems.slack.chantier_declare import (
     ChantierDeclareResult,
@@ -35,7 +36,11 @@ async def process_slack_message_envelope(
 ) -> dict[str, Any]:
     """Admit an Illo run for a normalized Slack mention or DM."""
 
-    authority_user_id = await _slack_run_user_id(session, context=context, normalized=normalized)
+    authority_user_id, person_context = await _slack_run_identity(
+        session,
+        context=context,
+        normalized=normalized,
+    )
     if not authority_user_id:
         return await _complete_event(
             session,
@@ -79,6 +84,7 @@ async def process_slack_message_envelope(
         inbound_event_id=str(event.id),
         connection_id=context.connection_id,
         idempotency_key=_clean_optional(normalized.get("idempotency_key")),
+        person_context=person_context,
     )
     if chantier_declare is not None or chantier_declare_error is not None:
         apply_chantier_declare_run_contract(
@@ -176,6 +182,22 @@ async def _slack_run_user_id(
 ) -> str | None:
     """Resolve Slack actor mapping, falling back to connection authority."""
 
+    authority_user_id, _person_context = await _slack_run_identity(
+        session,
+        context=context,
+        normalized=normalized,
+    )
+    return authority_user_id
+
+
+async def _slack_run_identity(
+    session: AsyncSession,
+    *,
+    context: Any,
+    normalized: Mapping[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Resolve execution authority and a separate verified speaker identity."""
+
     payload = dict(normalized.get("payload") or {})
     slack_user_id = _clean_optional(payload.get("slack_user_id"))
     if slack_user_id:
@@ -190,8 +212,58 @@ async def _slack_run_user_id(
                     if mapped_user_id:
                         user = await session.get(User, mapped_user_id)
                         if user is not None and str(user.org_id) == str(context.org_id):
-                            return mapped_user_id
-    return context.owner_user_id
+                            person_context = _linked_slack_person_context(
+                                metadata,
+                                slack_user_id=slack_user_id,
+                                mapped_user_id=mapped_user_id,
+                                channel_type=payload.get("channel_type"),
+                            )
+                            return mapped_user_id, person_context
+    return context.owner_user_id, None
+
+
+def _linked_slack_person_context(
+    connection_metadata: Mapping[str, Any],
+    *,
+    slack_user_id: str,
+    mapped_user_id: str,
+    channel_type: Any,
+) -> dict[str, Any] | None:
+    """Read explicit Slack preferences only after authority mapping."""
+
+    identity_links = connection_metadata.get("identity_links")
+    if not isinstance(identity_links, Mapping):
+        return None
+    slack_links = identity_links.get("slack")
+    if not isinstance(slack_links, Mapping):
+        return None
+    raw_link = slack_links.get(slack_user_id)
+    if not isinstance(raw_link, Mapping):
+        return None
+    if _clean_optional(raw_link.get("user_id")) != mapped_user_id:
+        return None
+
+    link_metadata = raw_link.get("metadata")
+    link_metadata = dict(link_metadata) if isinstance(link_metadata, Mapping) else {}
+    raw_preferences = link_metadata.get("communication_preferences")
+    preferences = dict(raw_preferences) if isinstance(raw_preferences, Mapping) else {}
+    if str(channel_type or "").strip().lower() == "im":
+        address_as = _clean_optional(raw_link.get("display_name"))
+        if address_as:
+            preferences.setdefault("address_as", address_as)
+    else:
+        preferences.pop("address_as", None)
+
+    person_context = normalize_person_context(
+        {
+            "mapping": "verified",
+            "user_id": mapped_user_id,
+            "source": "slack_identity_link",
+            "preferences": preferences,
+        },
+        verified_user_id=mapped_user_id,
+    )
+    return person_context or None
 
 
 __all__ = ["process_slack_message_envelope"]

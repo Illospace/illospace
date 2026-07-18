@@ -19,7 +19,11 @@ from brain.systems.runs.recipes.shared import (
 )
 from brain.systems.runs.recipes.surface_guidance import response_surface_guidance
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
-from brain.systems.personality import agent_contract_prompt_section, soul_prompt_section
+from brain.systems.personality import (
+    agent_contract_prompt_section,
+    person_context_prompt_section,
+    soul_prompt_section,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +56,13 @@ _THREAD_DISCUSSION_SURFACE = "thread_discussion"
 _THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
 
 
-def build_fast_system_prompt(prompt_context: str = "") -> str:
+def build_fast_system_prompt(
+    prompt_context: str = "",
+    person_context: str = "",
+) -> str:
     sections = [
         soul_prompt_section(),
+        person_context,
         agent_contract_prompt_section(),
         FAST_RUNTIME_PROMPT,
     ]
@@ -64,7 +72,10 @@ def build_fast_system_prompt(prompt_context: str = "") -> str:
 
 
 def _disabled_tool_names(runtime: RunRuntime) -> set[str]:
-    return disabled_tool_names_from_metadata(runtime.request.metadata)
+    disabled = disabled_tool_names_from_metadata(runtime.request.metadata)
+    if runtime.request.metadata.get("slack_monitor"):
+        disabled.add("react_to_slack_message")
+    return disabled
 
 
 def _runtime_context_maps(runtime: RunRuntime):
@@ -170,7 +181,13 @@ class FastRecipe(BaseRunRecipe):
         prompt_context = "\n\n".join(
             section for section in (surface_guidance, context.prompt_context()) if section.strip()
         )
-        system_prompt = build_fast_system_prompt(prompt_context)
+        system_prompt = build_fast_system_prompt(
+            prompt_context,
+            person_context_prompt_section(
+                runtime.request.metadata,
+                verified_user_id=runtime.request.user_id,
+            ),
+        )
         spec = build_direct_agent_invocation(
             message=context.message,
             system_prompt=system_prompt,

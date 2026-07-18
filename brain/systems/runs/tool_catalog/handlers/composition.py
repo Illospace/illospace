@@ -76,6 +76,7 @@ from brain.systems.runs.tool_catalog.handlers.self_context import _handle_read_s
 from brain.systems.runs.tool_catalog.handlers.slack import (
     _handle_manage_slack,
     _handle_post_slack_reply,
+    _handle_react_to_slack_message,
     _handle_read_slack_conversation,
 )
 from brain.systems.runs.tool_catalog.handlers.thread_artifacts import _handle_publish_thread_artifact
@@ -333,6 +334,10 @@ def _get_tool_handlers(
         "post_slack_reply": _private_async_adapter(
             "_handle_post_slack_reply",
             _handle_post_slack_reply,
+        ),
+        "react_to_slack_message": _private_async_adapter(
+            "_handle_react_to_slack_message",
+            _handle_react_to_slack_message,
         ),
         "post_thread_discussion_reply": _private_async_adapter(
             "_handle_post_thread_discussion_reply",

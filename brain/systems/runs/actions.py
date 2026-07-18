@@ -383,6 +383,19 @@ def build_action_target(
             "title": _json_safe(kwargs_dict.get("title")),
             "content_type": _json_safe(kwargs_dict.get("content_type")),
         })
+    if tool_name == "react_to_slack_message":
+        target_ref = context_dict.get("target_ref")
+        target_ref = dict(target_ref) if isinstance(target_ref, Mapping) else {}
+        slack_trigger = target_ref.get("slack_trigger")
+        slack_trigger = dict(slack_trigger) if isinstance(slack_trigger, Mapping) else {}
+        target = {
+            "emoji": _json_safe(kwargs_dict.get("emoji")),
+        }
+        if slack_trigger.get("channel_id"):
+            target["channel_id"] = _json_safe(slack_trigger.get("channel_id"))
+        if slack_trigger.get("message_ts"):
+            target["message_ts"] = _json_safe(slack_trigger.get("message_ts"))
+        return ActionTarget(target)
     if tool_name in {"manage_cycle", "manage_cron_job"}:
         return ActionTarget({
             "action": _json_safe(_arg_at(args, kwargs_dict, "action", 0)),

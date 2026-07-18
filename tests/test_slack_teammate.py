@@ -21,6 +21,7 @@ MANIFEST_PATH = ROOT / "deploy" / "slack" / "illo-self-hosted-manifest.yml"
 ORG_ID = "11111111-1111-4111-8111-111111111111"
 USER_ID = "22222222-2222-4222-8222-222222222222"
 MAPPED_USER_ID = "55555555-5555-4555-8555-555555555555"
+OTHER_MAPPED_USER_ID = "66666666-6666-4666-8666-666666666666"
 CONNECTION_ID = "33333333-3333-4333-8333-333333333333"
 
 
@@ -130,6 +131,7 @@ def test_self_hosted_slack_manifest_supports_illo_teammate_loop():
         "im:write",
         "mpim:history",
         "mpim:read",
+        "reactions:write",
         "users:read",
     }.issubset(bot_scopes)
 
@@ -357,6 +359,9 @@ def test_slack_adapter_builds_teammate_trigger():
     assert trigger.target["channel_id"] == "C456"
     assert trigger.payload["user_id"] == "owner-1"
     assert trigger.payload["metadata"]["required_response_tool"] == "post_slack_reply"
+    assert trigger.payload["metadata"]["alternative_response_tools"] == [
+        "react_to_slack_message"
+    ]
     assert trigger.payload["metadata"]["final_answer_target_surface"] == "slack"
     assert trigger.payload["metadata"]["inbound_event"]["event_id"] == "inbound-1"
     assert trigger.payload["metadata"]["slack_trigger"]["response_target"] == {
@@ -367,6 +372,8 @@ def test_slack_adapter_builds_teammate_trigger():
     assert "Decide whether this is a simple Slack reply" in trigger.payload["run_message"]
     assert "thread_url" in trigger.payload["run_message"]
     assert "post_slack_reply" in trigger.payload["run_message"]
+    assert "purely social acknowledgement" in trigger.payload["run_message"]
+    assert "a reaction never replaces the answer" in trigger.payload["run_message"]
 
 
 @pytest.mark.asyncio
@@ -409,6 +416,7 @@ async def test_slack_work_intake_builds_surface_aware_agent_run_request():
     }
     assert request.metadata["source"] == "slack"
     assert request.metadata["required_response_tool"] == "post_slack_reply"
+    assert request.metadata["alternative_response_tools"] == ["react_to_slack_message"]
     assert request.metadata["final_answer_target_surface"] == "slack"
     assert request.metadata["slack_trigger"]["channel_type"] == "im"
 
@@ -741,6 +749,272 @@ async def test_post_slack_reply_tool_posts_to_triggering_thread(monkeypatch):
             "thread_ts": "1716900000.000100",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_react_to_slack_message_uses_triggering_message_and_clears_status(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_react_to_slack_message
+
+    calls = []
+
+    class _SlackClient:
+        async def add_reaction(self, **kwargs):
+            calls.append(("reaction", kwargs))
+            return {"ok": True}
+
+        async def set_assistant_status(self, **kwargs):
+            calls.append(("status", kwargs))
+            return {"ok": True}
+
+    async def slack_client():
+        return _SlackClient()
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    with bind_agent_context(
+        {
+            "org_id": ORG_ID,
+            "run_id": 9,
+            "slack_trigger": {
+                "channel_id": "C456",
+                "message_ts": "1716900000.000100",
+                "thread_ts": "1716900000.000100",
+            },
+        }
+    ):
+        result = json.loads(await _handle_react_to_slack_message(emoji=":thumbsup:"))
+
+    assert result == {
+        "ok": True,
+        "channel_id": "C456",
+        "message_ts": "1716900000.000100",
+        "emoji": "thumbsup",
+        "deduplicated": False,
+        "counts_as_visible_response": True,
+        "slack": {"ok": True},
+    }
+    assert calls == [
+        (
+            "reaction",
+            {
+                "channel": "C456",
+                "timestamp": "1716900000.000100",
+                "name": "thumbsup",
+            },
+        ),
+        (
+            "status",
+            {
+                "channel_id": "C456",
+                "thread_ts": "1716900000.000100",
+                "status": "",
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_react_to_slack_message_treats_existing_reaction_as_success(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_react_to_slack_message
+    from brain.systems.slack.client import SlackApiError
+
+    class _SlackClient:
+        async def add_reaction(self, **_kwargs):
+            raise SlackApiError("already_reacted")
+
+    async def slack_client():
+        return _SlackClient()
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    with bind_agent_context(
+        {
+            "slack_trigger": {
+                "channel_id": "C456",
+                "message_ts": "1716900000.000100",
+            },
+        }
+    ):
+        result = json.loads(await _handle_react_to_slack_message(emoji="white_check_mark"))
+
+    assert result["ok"] is True
+    assert result["deduplicated"] is True
+    assert result["emoji"] == "white_check_mark"
+
+
+@pytest.mark.asyncio
+async def test_react_to_slack_message_allows_only_one_reaction_per_triggered_message(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_react_to_slack_message
+
+    calls = []
+
+    class _SlackClient:
+        async def add_reaction(self, **kwargs):
+            calls.append(kwargs)
+            return {"ok": True}
+
+    async def slack_client():
+        return _SlackClient()
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    with bind_agent_context(
+        {
+            "run_id": 9,
+            "slack_trigger": {
+                "channel_id": "C456",
+                "message_ts": "1716900000.000100",
+            },
+        }
+    ):
+        first = json.loads(await _handle_react_to_slack_message(emoji="thumbsup"))
+        second = json.loads(await _handle_react_to_slack_message(emoji="tada"))
+
+    assert first["ok"] is True
+    assert second == {
+        "ok": False,
+        "error": (
+            "react_to_slack_message cannot stack a different emoji on the triggering "
+            "Slack message in one run"
+        ),
+        "channel_id": "C456",
+        "message_ts": "1716900000.000100",
+        "emoji": "tada",
+        "attempted_emoji": "thumbsup",
+        "reaction_already_attempted": True,
+    }
+    assert calls == [
+        {
+            "channel": "C456",
+            "timestamp": "1716900000.000100",
+            "name": "thumbsup",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_react_to_slack_message_retries_same_emoji_after_transient_failure(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_react_to_slack_message
+    from brain.systems.slack.client import SlackApiError
+
+    calls = []
+
+    class _SlackClient:
+        async def add_reaction(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise SlackApiError("ratelimited")
+            return {"ok": True}
+
+    async def slack_client():
+        return _SlackClient()
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        slack_client,
+    )
+
+    with bind_agent_context(
+        {
+            "run_id": 9,
+            "slack_trigger": {
+                "channel_id": "C456",
+                "message_ts": "1716900000.000100",
+            },
+        }
+    ):
+        first = json.loads(await _handle_react_to_slack_message(emoji="thumbsup"))
+        second = json.loads(await _handle_react_to_slack_message(emoji="thumbsup"))
+
+    assert first["ok"] is False
+    assert "ratelimited" in first["error"]
+    assert second["ok"] is True
+    assert calls == [
+        {
+            "channel": "C456",
+            "timestamp": "1716900000.000100",
+            "name": "thumbsup",
+        },
+        {
+            "channel": "C456",
+            "timestamp": "1716900000.000100",
+            "name": "thumbsup",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_react_to_slack_message_blocks_distinct_emoji_after_run_recovery(monkeypatch):
+    from types import SimpleNamespace
+
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_react_to_slack_message
+
+    class _Rows:
+        def all(self):
+            return [
+                SimpleNamespace(
+                    target={
+                        "channel_id": "C456",
+                        "message_ts": "1716900000.000100",
+                        "emoji": "thumbsup",
+                    },
+                    outcome_status="succeeded",
+                )
+            ]
+
+    class _Session:
+        async def scalars(self, _stmt):
+            return _Rows()
+
+    class _UnitOfWork:
+        session = _Session()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def fail_slack_client():
+        raise AssertionError("durable reaction guard should run before Slack")
+
+    monkeypatch.setattr(
+        "brain.platform.db.repositories.unit_of_work.UnitOfWork",
+        _UnitOfWork,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        fail_slack_client,
+    )
+
+    with bind_agent_context(
+        {
+            "execution_metadata": {"run_id": 9},
+            "slack_trigger": {
+                "channel_id": "C456",
+                "message_ts": "1716900000.000100",
+            },
+        }
+    ):
+        result = json.loads(await _handle_react_to_slack_message(emoji="tada"))
+
+    assert result["ok"] is False
+    assert result["attempted_emoji"] == "thumbsup"
+    assert result["reaction_already_attempted"] is True
 
 
 @pytest.mark.asyncio
@@ -1362,7 +1636,12 @@ def test_slack_tools_are_available_on_normal_illo_tool_surface():
     from brain.systems.runs.tool_definitions import CHAT_TOOLS
 
     names = {tool["name"] for tool in CHAT_TOOLS}
-    assert {"post_slack_reply", "read_slack_conversation", "manage_slack"} <= names
+    assert {
+        "post_slack_reply",
+        "react_to_slack_message",
+        "read_slack_conversation",
+        "manage_slack",
+    } <= names
     slack_reply = next(tool for tool in CHAT_TOOLS if tool["name"] == "post_slack_reply")
     properties = slack_reply["input_schema"]["properties"]
     assert {"image_data", "image_filename", "image_title", "image_alt"} <= set(properties)
@@ -1370,6 +1649,11 @@ def test_slack_tools_are_available_on_normal_illo_tool_surface():
     for keyword in ("anyOf", "oneOf", "allOf", "not", "enum"):
         assert keyword not in slack_reply["input_schema"]
     assert "required" not in slack_reply["input_schema"]
+    reaction = next(tool for tool in CHAT_TOOLS if tool["name"] == "react_to_slack_message")
+    assert reaction["input_schema"]["required"] == ["emoji"]
+    assert "never replaces an answer" in reaction["description"]
+    assert "target-locked" in reaction["description"]
+    assert "Defaults to" not in reaction["description"]
 
 
 def test_manage_slack_tool_definition_has_no_operator_setup_action():
@@ -1377,6 +1661,7 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
 
     tool = next(tool for tool in CHAT_TOOLS if tool["name"] == "manage_slack")
     actions = tool["input_schema"]["properties"]["action"]["enum"]
+    properties = tool["input_schema"]["properties"]
     serialized_tool = json.dumps(tool)
 
     assert actions == [
@@ -1389,6 +1674,12 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
         "monitor_channel",
         "unmonitor_channel",
     ]
+    assert {"display_name", "communication_preferences"} <= set(properties)
+    assert properties["communication_preferences"]["properties"]["humour"]["enum"] == [
+        "none",
+        "light",
+        "welcome",
+    ]
     assert "setup_instructions" not in serialized_tool
     assert "SLACK_" not in serialized_tool
     assert "docker" not in serialized_tool
@@ -1397,6 +1688,39 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
     assert "secret" not in serialized_tool
     assert "does not" not in serialized_tool.lower()
     assert "cannot" not in serialized_tool.lower()
+
+
+def test_manage_slack_connection_payload_redacts_private_identity_profiles():
+    from types import SimpleNamespace
+
+    from brain.systems.runs.tool_catalog.handlers.slack import _slack_connection_payload
+
+    connection = SimpleNamespace(
+        id="conn-1",
+        display_name="Slack",
+        remote_agent_id="T1",
+        status="online",
+        last_seen_at=None,
+        last_error=None,
+        metadata_={
+            "slack": {"team_id": "T1", "identity_map": {"U1": "user-1"}},
+            "identity_links": {
+                "slack": {
+                    "U1": {
+                        "user_id": "user-1",
+                        "display_name": "Private DM Name",
+                        "metadata": {"communication_preferences": {"tone": "warm"}},
+                    }
+                }
+            },
+        },
+    )
+
+    payload = _slack_connection_payload(connection)
+
+    assert "identity_links" not in payload["metadata"]
+    assert "Private DM Name" not in json.dumps(payload)
+    assert payload["metadata"]["slack"]["identity_map"] == {"U1": "user-1"}
 
 
 @pytest.mark.asyncio
@@ -1760,6 +2084,8 @@ async def test_slack_connector_processes_actionable_socket_payload(session):
     assert result["inbound"]["status"] == "processed"
     run = (await session.scalars(select(AgentRunRow))).one()
     assert run.metadata_["required_response_tool"] == "post_slack_reply"
+    assert "person_context" not in run.metadata_
+    assert run.metadata_["work_intake"]["actor"]["name"] == "Slack user U123"
 
 
 @pytest.mark.asyncio
@@ -1785,6 +2111,100 @@ async def test_slack_identity_mapping_uses_linked_illospace_user_for_run(session
     run = (await session.scalars(select(AgentRunRow))).one()
     assert run.user_id == MAPPED_USER_ID
     assert run.metadata_["slack_trigger"]["slack_user_id"] == "U123"
+    assert "person_context" not in run.metadata_
+    assert run.metadata_["work_intake"]["actor"]["name"] == "Slack user U123"
+
+
+@pytest.mark.asyncio
+async def test_slack_identity_link_supplies_explicit_dm_communication_preferences(session):
+    from brain.systems.inbound.service import submit_inbound_envelope
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    connection = await _seed_slack_connection(session)
+    session.add(User(id=MAPPED_USER_ID, org_id=ORG_ID, name="Internal Name", email="alex@example.com"))
+    connection.metadata_ = {
+        "slack": {
+            "team_id": "T789",
+            "bot_user_id": "BILLO",
+            "identity_map": {"U123": MAPPED_USER_ID},
+        },
+        "identity_links": {
+            "slack": {
+                "U123": {
+                    "user_id": MAPPED_USER_ID,
+                    "display_name": "Alex in Slack",
+                    "metadata": {
+                        "communication_preferences": {
+                            "tone": "casual",
+                            "brevity": "brief",
+                            "humor": "light",
+                            "private_notes": "do not expose",
+                        }
+                    },
+                }
+            }
+        },
+    }
+    await session.flush()
+
+    socket_payload = _socket_mode_app_mention(
+        type="message",
+        channel="D123",
+        channel_type="im",
+        text="thanks",
+    )
+    envelope = normalize_slack_socket_event(socket_payload, bot_user_id="BILLO")
+
+    await submit_inbound_envelope(session, connection=connection, envelope=envelope)
+
+    run = (await session.scalars(select(AgentRunRow))).one()
+    assert run.user_id == MAPPED_USER_ID
+    assert run.metadata_["person_context"] == {
+        "mapping": "verified",
+        "user_id": MAPPED_USER_ID,
+        "source": "slack_identity_link",
+        "preferences": {
+            "tone": "casual",
+            "brevity": "brief",
+            "humour": "light",
+            "address_as": "Alex in Slack",
+        },
+    }
+    assert "Internal Name" not in str(run.metadata_)
+    assert "private_notes" not in str(run.metadata_)
+    assert run.metadata_["work_intake"]["actor"]["name"] == "Slack user U123"
+
+
+def test_slack_person_context_rejects_mismatched_identity_link_and_shared_address():
+    from brain.systems.slack.inbound import _linked_slack_person_context
+
+    metadata = {
+        "identity_links": {
+            "slack": {
+                "U123": {
+                    "user_id": "different-user",
+                    "display_name": "Private Name",
+                    "metadata": {"communication_preferences": {"tone": "warm"}},
+                }
+            }
+        }
+    }
+    assert _linked_slack_person_context(
+        metadata,
+        slack_user_id="U123",
+        mapped_user_id=MAPPED_USER_ID,
+        channel_type="im",
+    ) is None
+
+    metadata["identity_links"]["slack"]["U123"]["user_id"] = MAPPED_USER_ID
+    person = _linked_slack_person_context(
+        metadata,
+        slack_user_id="U123",
+        mapped_user_id=MAPPED_USER_ID,
+        channel_type="channel",
+    )
+    assert person["preferences"] == {"tone": "warm"}
+    assert "address_as" not in person["preferences"]
 
 
 @pytest.mark.asyncio
@@ -1801,13 +2221,128 @@ async def test_slack_identity_mapping_service_links_user(session):
         slack_user_id="U123",
         user_id=MAPPED_USER_ID,
         org_id=ORG_ID,
+        display_name="Alex in Slack",
+        communication_preferences={
+            "tone": "casual",
+            "brevity": "brief",
+            "humor": "light",
+            "private_notes": "discard",
+        },
     )
     mappings = await list_slack_identity_mappings(session, connection_id=str(connection.id), org_id=ORG_ID)
 
     assert mapping == {"slack_user_id": "U123", "user_id": MAPPED_USER_ID}
-    assert mappings == [{"slack_user_id": "U123", "user_id": MAPPED_USER_ID, "user_name": "Alex"}]
+    assert mappings == [
+        {"slack_user_id": "U123", "user_id": MAPPED_USER_ID, "user_name": "Alex"}
+    ]
     refreshed = await session.get(ExternalAgentConnectionRow, connection.id)
     assert refreshed.metadata_["slack"]["identity_map"] == {"U123": MAPPED_USER_ID}
+    assert refreshed.metadata_["identity_links"]["slack"]["U123"] == {
+        "user_id": MAPPED_USER_ID,
+        "display_name": "Alex in Slack",
+        "metadata": {
+            "communication_preferences": {
+                "tone": "casual",
+                "brevity": "brief",
+                "humour": "light",
+            }
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_slack_identity_relink_clears_previous_person_profile(session):
+    from brain.systems.slack.identity import link_slack_identity
+
+    connection = await _seed_slack_connection(session)
+    session.add(User(id=MAPPED_USER_ID, org_id=ORG_ID, name="Alex", email="alex@example.com"))
+    session.add(
+        User(
+            id=OTHER_MAPPED_USER_ID,
+            org_id=ORG_ID,
+            name="Sam",
+            email="sam@example.com",
+        )
+    )
+    await session.flush()
+
+    await link_slack_identity(
+        session,
+        connection_id=str(connection.id),
+        slack_user_id="U123",
+        user_id=MAPPED_USER_ID,
+        org_id=ORG_ID,
+        display_name="Alex in Slack",
+        communication_preferences={"tone": "casual", "humour": "light"},
+    )
+    await link_slack_identity(
+        session,
+        connection_id=str(connection.id),
+        slack_user_id="U123",
+        user_id=OTHER_MAPPED_USER_ID,
+        org_id=ORG_ID,
+    )
+
+    refreshed = await session.get(ExternalAgentConnectionRow, connection.id)
+    assert refreshed.metadata_["identity_links"]["slack"]["U123"] == {
+        "user_id": OTHER_MAPPED_USER_ID,
+        "display_name": None,
+        "metadata": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_manage_slack_link_identity_persists_communication_profile(
+    session,
+    monkeypatch,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_manage_slack
+
+    connection = await _seed_slack_connection(session)
+    session.add(User(id=MAPPED_USER_ID, org_id=ORG_ID, name="Alex", email="alex@example.com"))
+    await session.flush()
+
+    class _UnitOfWork:
+        def __init__(self):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        "brain.platform.db.repositories.unit_of_work.UnitOfWork",
+        _UnitOfWork,
+    )
+
+    with bind_agent_context({"org_id": ORG_ID}):
+        result = json.loads(
+            await _handle_manage_slack(
+                action="link_identity",
+                connection_id=str(connection.id),
+                slack_user_id="U123",
+                user_id=MAPPED_USER_ID,
+                display_name="Alex in Slack",
+                communication_preferences={
+                    "tone": "warm",
+                    "brevity": "brief",
+                    "humour": "light",
+                },
+            )
+        )
+
+    assert result["ok"] is True
+    await session.refresh(connection)
+    profile = connection.metadata_["identity_links"]["slack"]["U123"]
+    assert profile["display_name"] == "Alex in Slack"
+    assert profile["metadata"]["communication_preferences"] == {
+        "tone": "warm",
+        "brevity": "brief",
+        "humour": "light",
+    }
 
 
 @pytest.mark.asyncio

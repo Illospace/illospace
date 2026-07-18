@@ -47,6 +47,7 @@ COMMAND_OUTPUT_TOOLS = frozenset({"exec_command", "run_script", "test_runner"})
 CHAT_MESSAGE_TOOLS = frozenset({
     "post_chat_message",
     "post_slack_reply",
+    "react_to_slack_message",
     "post_thread_discussion_reply",
     "post_ai_timeline_message",
 })
@@ -394,6 +395,7 @@ class AsyncRunToolExecutor:
             "worker_name": recipe,
             "idea_id": thread_id,
             "root_run_id": resolved_root_run_id,
+            "target_ref": dict(getattr(run, "target_ref", None) or {}),
         }
         return context
 
@@ -501,6 +503,7 @@ def _handler_context_from_action_context(action_context: dict[str, Any]) -> dict
         "worker_name": action_context.get("worker_name"),
         "idea_id": action_context.get("idea_id"),
         "root_run_id": action_context.get("root_run_id"),
+        "target_ref": action_context.get("target_ref"),
     }
 
     existing_metadata = getattr(current_agent_context(), "execution_metadata", None)
