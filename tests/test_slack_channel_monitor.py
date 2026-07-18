@@ -317,6 +317,8 @@ def test_build_payload_for_channel_message_is_headless_and_not_forced_reply():
     run_message = payload["payload"]["run_message"]
     assert "monitoring Slack #alerts" in run_message
     assert "👀" in run_message
+    assert "Do not use react_to_slack_message" in run_message
+    assert "alternative_response_tools" not in metadata
 
 
 def test_channel_monitor_framing_routes_feature_requests_to_tickets():
@@ -359,6 +361,7 @@ def test_build_payload_for_mention_still_forces_reply():
 
     metadata = payload["payload"]["metadata"]
     assert metadata["required_response_tool"] == "post_slack_reply"
+    assert metadata["alternative_response_tools"] == ["react_to_slack_message"]
     assert metadata["final_answer_target_surface"] == "slack"
     assert "headless" not in metadata
     # Origin-scoped: the monitored-channel threading exception must NOT change

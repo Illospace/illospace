@@ -19,6 +19,10 @@ def response_surface_guidance(
         ("originating_surface", "triggering_surface", "source_surface", "surface"),
     )
     response_tool = _first_text((target, meta), ("required_response_tool",))
+    alternative_response_tools = _first_string_list(
+        (target, meta),
+        ("alternative_response_tools",),
+    )
     final_surface = _first_text((target, meta), ("final_answer_target_surface",))
 
     lines = ["## Response Surface and Delegation"]
@@ -26,6 +30,12 @@ def response_surface_guidance(
         lines.append(f"- Originating surface: {originating_surface}.")
     if response_tool:
         lines.append(f"- User-visible response tool for that surface: {response_tool}.")
+    if alternative_response_tools:
+        lines.append(
+            "- Alternative user-visible response tools when they fully fit: "
+            + ", ".join(alternative_response_tools)
+            + "."
+        )
     if final_surface:
         lines.append(f"- Final answer target surface: {final_surface}.")
     lines.extend(
@@ -52,6 +62,23 @@ def _first_text(containers: tuple[Mapping[str, Any], ...], keys: tuple[str, ...]
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return ""
+
+
+def _first_string_list(
+    containers: tuple[Mapping[str, Any], ...],
+    keys: tuple[str, ...],
+) -> list[str]:
+    for container in containers:
+        if not isinstance(container, Mapping):
+            continue
+        for key in keys:
+            value = container.get(key)
+            if not isinstance(value, (list, tuple)):
+                continue
+            values = [str(item).strip() for item in value if str(item).strip()]
+            if values:
+                return list(dict.fromkeys(values))
+    return []
 
 
 __all__ = ["response_surface_guidance"]
