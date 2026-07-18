@@ -18,6 +18,22 @@ class InboundSubmissionResult:
     mutated_inbound: bool = False
 
 
+def _result_handling(action_result: dict[str, Any]) -> dict[str, Any]:
+    handling = action_result.get("handling")
+    if isinstance(handling, dict):
+        return dict(handling)
+    if action_result.get("operation") == "slack_run_admitted":
+        return dict(action_result)
+    return {}
+
+
+def _run_id(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 async def read_inbound_submission_result(
     session: AsyncSession,
     *,
@@ -32,21 +48,27 @@ async def read_inbound_submission_result(
         raise ValueError("Inbound event not found")
 
     action_result = dict(event.action_result or {})
-    handling = dict(action_result.get("handling") or {})
+    handling = _result_handling(action_result)
     reconciled = False
     current_run_status = None
-    if handling.get("run_id") is not None:
-        try:
-            run_id = int(handling["run_id"])
-        except (TypeError, ValueError):
-            run_id = None
-        if run_id is not None:
-            run = await session.get(AgentRunRow, run_id)
-            current_run_status = getattr(run, "status", None) if run is not None else None
-            receipt = await reconcile_inbound_triage_run(session, run_id)
-            reconciled = receipt is not None
-            if reconciled:
-                await session.refresh(event)
+    selected_run_id = _run_id(handling.get("run_id"))
+    if selected_run_id is not None:
+        run = await session.get(AgentRunRow, selected_run_id)
+        current_run_status = getattr(run, "status", None) if run is not None else None
+        receipt = await reconcile_inbound_triage_run(session, selected_run_id)
+        reconciled = receipt is not None
+        if reconciled:
+            await session.refresh(event)
+
+    # Reconciliation can replace a failed monitored-channel run. Re-read the
+    # event-owned contract so illo_get_result follows the replacement rather
+    # than returning the original terminal run forever.
+    action_result = dict(event.action_result or {})
+    handling = _result_handling(action_result)
+    current_run_id = _run_id(handling.get("run_id"))
+    if current_run_id is not None and current_run_id != selected_run_id:
+        current_run = await session.get(AgentRunRow, current_run_id)
+        current_run_status = getattr(current_run, "status", None) if current_run is not None else None
 
     receipts = await inbound_admin.list_receipts(
         session,
@@ -57,8 +79,6 @@ async def read_inbound_submission_result(
     receipt_payloads = [inbound_admin.serialize_receipt(receipt) for receipt in receipts]
     event_payload = inbound_admin.serialize_event(event, include_payload=include_payload)
 
-    action_result = dict(event.action_result or {})
-    handling = dict(action_result.get("handling") or {})
     preservation = dict(action_result.get("preservation") or {})
     evidence_contract = dict(handling.get("evidence_contract") or {})
     requires_evidence = bool(
@@ -79,6 +99,10 @@ async def read_inbound_submission_result(
             "handling_status": handling.get("status"),
             "run_id": handling.get("run_id"),
             "run_status": handling.get("run_status") or current_run_status,
+            "retry_attempt": handling.get("retry_attempt"),
+            "original_run_id": handling.get("original_run_id"),
+            "replacement_run_id": handling.get("replacement_run_id"),
+            "retry_lineage": handling.get("retry_lineage"),
             "requires_durable_evidence": requires_evidence,
             "evidence_status": evidence_status,
             "evidence_contract": evidence_contract or preservation or None,

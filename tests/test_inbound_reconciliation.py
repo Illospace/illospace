@@ -41,6 +41,10 @@ from brain.platform.db.models.packet_delivery import PacketBriefDelivery
 from brain.systems.briefing.deliver import deliver_pending_briefs
 from brain.systems.briefing.gather import SlackThreadRead
 from brain.systems.inbound.reconciliation import reconcile_inbound_triage_run
+from brain.systems.runs.events import run_event
+from brain.systems.runs.interactive_reply import INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE
+from brain.systems.runs.status import RunStatus
+from brain.systems.runs.store import AsyncAgentRunStore
 
 _ORG = str(uuid.uuid4())
 _CONN = str(uuid.uuid4())
@@ -157,25 +161,39 @@ def posts(monkeypatch):
 def _slack_envelope() -> dict:
     return {
         "kind": "slack_message",
+        "origin": "slack.channel_message",
+        "idempotency_key": "slack:T1:C0ALERTS:1752600000.0",
         "summary": "Rollbar: generation pipeline exploding",
         "payload": {
+            "origin": "slack.channel_message",
+            "event_kind": "channel_message",
+            "team_id": "T1",
             "channel_id": "C0ALERTS",
             "channel_type": "channel",
             "thread_ts": "1752600000.0",
             "message_ts": "1752600000.0",
+            "slack_user_id": "U0AXEL",
             "bot_user_id": "B0ILLO",
+            "text": "Rollbar: generation pipeline exploding",
         },
         "hints": {},
     }
 
 
-async def _seed_slack_lane(session, *, tool_results, run_status="completed") -> tuple[str, int]:
+async def _seed_slack_lane(
+    session,
+    *,
+    tool_results,
+    run_status="completed",
+) -> tuple[str, int]:
     """One slack_teammate_run admission, receipt terminal at admission (the
     production shape written by brain/systems/slack/inbound.py)."""
     event = InboundEventRow(
         org_id=_ORG,
         connection_id=_CONN,
+        kind="slack_message",
         origin="slack.channel_message",
+        idempotency_key="slack:T1:C0ALERTS:1752600000.0",
         envelope=_slack_envelope(),
         status="processed",
         action_type="slack.run_admitted",
@@ -188,10 +206,18 @@ async def _seed_slack_lane(session, *, tool_results, run_status="completed") -> 
         user_id=_RUN_USER,
         thread_id=f"slack:T1:C0ALERTS:1752600000.0",
         profile="fast",
-        recipe="illo",
+        recipe="fast",
         status=run_status,
         input_message="monitor triage",
-        metadata_={"inbound_event": {"event_id": str(event.id)}},
+        target_ref={"kind": "slack_message", "slack_thread_id": "slack:T1:C0ALERTS:1752600000.0"},
+        metadata_={
+            "origin": "slack_channel_monitor",
+            "slack_monitor": True,
+            "headless": True,
+            "inbound_event": {"event_id": str(event.id)},
+        },
+        source_idempotency_scope="slack",
+        source_idempotency_key="slack:T1:C0ALERTS:1752600000.0",
         completed_at=_NOW if run_status == "completed" else None,
         failed_at=_NOW if run_status == "failed" else None,
     )
@@ -346,6 +372,132 @@ async def test_failed_slack_run_never_mints(session, posts, caplog):
     skipped = [r for r in caplog.records if "packet mint skipped" in r.getMessage()]
     assert len(skipped) == 1
     assert "run_status=failed" in skipped[0].getMessage()
+
+
+async def test_transient_failed_monitor_run_readmits_once_and_replacement_replies(session, posts):
+    event_id, original_run_id = await _seed_slack_lane(
+        session,
+        tool_results=[],
+        run_status="running",
+    )
+
+    store = AsyncAgentRunStore(session)
+    await store.set_status(
+        original_run_id,
+        RunStatus.FAILED,
+        reason=INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE,
+    )
+
+    receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
+    runs = list((await session.scalars(select(AgentRunRow).order_by(AgentRunRow.id.asc()))).all())
+    assert len(runs) == 2
+    replacement = runs[1]
+    assert replacement.source_idempotency_scope == "slack"
+    assert replacement.source_idempotency_key == "slack:T1:C0ALERTS:1752600000.0:attempt:1"
+    assert replacement.metadata_["retry_attempt"] == 1
+    assert replacement.metadata_["inbound_event"]["retry_attempt"] == 1
+    assert replacement.metadata_["inbound_event"]["original_run_id"] == original_run_id
+
+    event = await session.get(InboundEventRow, event_id)
+    assert event.action_result["run_id"] == replacement.id
+    assert event.action_result["original_run_id"] == original_run_id
+    assert event.action_result["replacement_run_id"] == replacement.id
+    assert event.action_result["retry_attempt"] == 1
+    assert event.action_result["retry_lineage"] == [
+        {"run_id": original_run_id, "retry_attempt": 0},
+        {"run_id": replacement.id, "retry_attempt": 1},
+    ]
+    assert receipt.tool_use["run_id"] == replacement.id
+    assert receipt.target["run_id"] == replacement.id
+
+    # Re-processing the original terminal run before the replacement executes
+    # is inert: the receipt already follows attempt 1.
+    await reconcile_inbound_triage_run(session, original_run_id)
+    assert len(list((await session.scalars(select(AgentRunRow))).all())) == 2
+
+    # The replacement executes the original monitored-channel contract and
+    # explicitly posts a Slack reply. Reconciliation must not mint a third run.
+    await store.set_status(replacement.id, RunStatus.STARTING)
+    await store.set_status(replacement.id, RunStatus.RUNNING)
+    await store.append_event(run_event(
+        replacement.id,
+        "run.tool_completed",
+        {"tool_name": "post_slack_reply", "args": {}, "result": _REPLY_RESULT},
+        root_run_id=replacement.root_run_id,
+    ))
+    await store.set_status(replacement.id, RunStatus.COMPLETED)
+    await reconcile_inbound_triage_run(session, original_run_id)
+
+    runs = list((await session.scalars(select(AgentRunRow))).all())
+    assert len(runs) == 2
+    reply_events = list((await session.scalars(
+        select(AgentRunEventRow).where(
+            AgentRunEventRow.run_id == replacement.id,
+            AgentRunEventRow.event_type == "run.tool_completed",
+        )
+    )).all())
+    assert [event.payload["tool_name"] for event in reply_events] == ["post_slack_reply"]
+
+
+async def test_second_transient_failure_is_terminal_and_result_shows_retry_lineage(session, posts):
+    from brain.systems.inbound.results import read_inbound_submission_result
+
+    event_id, original_run_id = await _seed_slack_lane(
+        session,
+        tool_results=[],
+        run_status="running",
+    )
+    store = AsyncAgentRunStore(session)
+    await store.set_status(
+        original_run_id,
+        RunStatus.FAILED,
+        reason=INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE,
+    )
+    replacement = (await session.scalars(
+        select(AgentRunRow).where(AgentRunRow.id != original_run_id)
+    )).one()
+    await store.set_status(
+        replacement.id,
+        RunStatus.FAILED,
+        reason=INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE,
+    )
+    await reconcile_inbound_triage_run(session, replacement.id)
+
+    assert len(list((await session.scalars(select(AgentRunRow))).all())) == 2
+    result = await read_inbound_submission_result(
+        session,
+        org_id=_ORG,
+        connection_id=_CONN,
+        event_id=event_id,
+    )
+    assert result.payload["run_id"] == replacement.id
+    assert result.payload["run_status"] == "failed"
+    assert result.payload["retry_attempt"] == 1
+    assert result.payload["original_run_id"] == original_run_id
+    assert result.payload["replacement_run_id"] == replacement.id
+    assert result.payload["retry_lineage"] == [
+        {"run_id": original_run_id, "retry_attempt": 0},
+        {"run_id": replacement.id, "retry_attempt": 1},
+    ]
+
+
+async def test_non_transient_failed_monitor_run_is_not_readmitted(session, posts):
+    event_id, original_run_id = await _seed_slack_lane(
+        session,
+        tool_results=[],
+        run_status="running",
+    )
+
+    await AsyncAgentRunStore(session).set_status(
+        original_run_id,
+        RunStatus.FAILED,
+        reason="Refused because the requested operation violates policy",
+    )
+
+    assert len(list((await session.scalars(select(AgentRunRow))).all())) == 1
+    event = await session.get(InboundEventRow, event_id)
+    assert event.action_result["run_id"] == original_run_id
+    assert "retry_attempt" not in event.action_result
 
 
 async def test_submit_lane_mints_on_durable_work_without_post(session, posts):
