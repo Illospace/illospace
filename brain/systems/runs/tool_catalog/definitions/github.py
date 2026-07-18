@@ -217,7 +217,8 @@ GITHUB_TOOLS = [
             "external GitHub write. Parent and child may be in different repositories owned by the "
             "same organization. The tool resolves the child's issue number to GitHub's numeric issue "
             "id, requests a GitHub App token scoped to both repositories, and is idempotent when the "
-            "child is already linked. Use the parent's native sub-issue rollup as the progress surface; "
+            "child is already linked. The result verifies the relationship against the parent's "
+            "authoritative native sub-issue list. Use that parent-side rollup as the progress surface; "
             "do not maintain a duplicate checklist in the parent body."
         ),
         "input_schema": {
@@ -300,9 +301,10 @@ GITHUB_TOOLS = [
         "name": "list_github_sub_issues",
         "description": (
             "Read native GitHub sub-issue relationships. Use action='list' with a parent issue to "
-            "inspect its bounded sub-issue rollup, or action='get_parent' with a member ticket to "
-            "answer which parent issue tracks it. This tool is read-only and accepts owner/name, "
-            "GitHub URL, or git remote repo values."
+            "inspect its bounded, authoritative sub-issue rollup or verify a newly linked child. Use "
+            "action='get_parent' with a member ticket to resolve its parent by the child's global "
+            "GitHub node id, including a parent in another repository. This tool is read-only and "
+            "accepts owner/name, GitHub URL, or git remote repo values."
         ),
         "input_schema": {
             "type": "object",

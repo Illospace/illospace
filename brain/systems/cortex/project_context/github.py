@@ -17,6 +17,21 @@ GITHUB_REPO_PAGE_LIMIT = 10
 GITHUB_SEARCH_LIMIT = 10
 GITHUB_ITEM_LIMIT = 100
 
+GITHUB_ISSUE_PARENT_QUERY = """
+query GetIssueParent($issueId: ID!) {
+  node(id: $issueId) {
+    ... on Issue {
+      parent {
+        number
+        repository {
+          nameWithOwner
+        }
+      }
+    }
+  }
+}
+""".strip()
+
 
 @dataclass
 class GitHubConnectorError(Exception):
@@ -656,6 +671,82 @@ def _numeric_issue_id(issue: Any, *, slug: str, issue_number: int) -> int:
     return issue_id
 
 
+def _issue_node_id(issue: Any, *, slug: str, issue_number: int) -> str:
+    node_id = issue.get("node_id") if isinstance(issue, dict) else None
+    if not isinstance(node_id, str) or not node_id.strip():
+        raise GitHubConnectorError(
+            status_code=502,
+            message=f"GitHub issue response for {slug}#{issue_number} omitted its node id.",
+        )
+    return node_id.strip()
+
+
+def _graphql_parent_reference(data: Any) -> tuple[str, int] | None:
+    errors = data.get("errors") if isinstance(data, dict) else None
+    if isinstance(errors, list) and errors:
+        messages = [
+            str(error.get("message") or "Unknown GraphQL error")
+            for error in errors
+            if isinstance(error, dict)
+        ]
+        raise GitHubConnectorError(
+            status_code=502,
+            message=f"GitHub GraphQL parent lookup failed: {'; '.join(messages) or 'unknown error'}",
+        )
+
+    payload = data.get("data") if isinstance(data, dict) else None
+    node = payload.get("node") if isinstance(payload, dict) else None
+    if not isinstance(node, dict):
+        raise GitHubConnectorError(
+            status_code=502,
+            message="GitHub GraphQL parent lookup did not resolve the child issue node.",
+        )
+    parent = node.get("parent")
+    if parent is None:
+        return None
+    repository = parent.get("repository") if isinstance(parent, dict) else None
+    parent_slug = parse_github_repo_slug(
+        str(repository.get("nameWithOwner") or "") if isinstance(repository, dict) else ""
+    )
+    parent_number = parent.get("number") if isinstance(parent, dict) else None
+    if (
+        parent_slug is None
+        or not isinstance(parent_number, int)
+        or isinstance(parent_number, bool)
+        or parent_number < 1
+    ):
+        raise GitHubConnectorError(
+            status_code=502,
+            message="GitHub GraphQL parent lookup returned an incomplete parent reference.",
+        )
+    return parent_slug, parent_number
+
+
+async def _async_list_parent_sub_issues(
+    client: httpx.AsyncClient,
+    slug: str,
+    issue_number: int,
+    *,
+    token: str | None,
+    page: int = 1,
+) -> list[Any]:
+    """Read the authoritative parent-side sub-issue collection."""
+
+    owner, repo = slug.split("/", 1)
+    data = await _async_request(
+        client,
+        "GET",
+        f"/repos/{owner}/{repo}/issues/{issue_number}/sub_issues",
+        token=token,
+        params={"per_page": GITHUB_ITEM_LIMIT, "page": page},
+    )
+    return data if isinstance(data, list) else []
+
+
+def _contains_sub_issue(items: list[Any], child_id: int) -> bool:
+    return any(isinstance(item, dict) and item.get("id") == child_id for item in items)
+
+
 async def async_list_repo_sub_issues(
     slug: str,
     issue_number: int,
@@ -666,7 +757,6 @@ async def async_list_repo_sub_issues(
 ) -> dict[str, Any]:
     """List one bounded page of a parent issue's native GitHub sub-issues."""
 
-    owner, repo = slug.split("/", 1)
     max_items = max(1, min(int(limit or 30), GITHUB_ITEM_LIMIT))
     page_kind = f"github_sub_issues:{slug}#{issue_number}"
     position = decode_page_token(cursor, kind=page_kind)
@@ -679,14 +769,13 @@ async def async_list_repo_sub_issues(
         raise InvalidPageToken("Invalid pagination cursor")
 
     async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
-        data = await _async_request(
+        items = await _async_list_parent_sub_issues(
             client,
-            "GET",
-            f"/repos/{owner}/{repo}/issues/{issue_number}/sub_issues",
+            slug,
+            issue_number,
             token=token,
-            params={"per_page": GITHUB_ITEM_LIMIT, "page": page},
+            page=page,
         )
-    items = data if isinstance(data, list) else []
     selected = items[page_index : page_index + max_items]
     next_position = None
     if page_index + max_items < len(items):
@@ -712,7 +801,7 @@ async def async_get_repo_issue_parent(
     *,
     token: str | None = None,
 ) -> dict[str, Any]:
-    """Return the native parent of one issue, or ``None`` when it has none."""
+    """Resolve an issue's native parent by global node id, across repositories."""
 
     owner, repo = slug.split("/", 1)
     async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
@@ -722,21 +811,50 @@ async def async_get_repo_issue_parent(
             f"/repos/{owner}/{repo}/issues/{issue_number}",
             token=token,
         )
-        try:
-            parent = await _async_request(
+        issue_data = issue if isinstance(issue, dict) else {}
+        parent_slug: str | None = None
+        parent: Any = None
+        parent_payload: dict[str, Any] | None = None
+        if token:
+            parent_lookup = await _async_request(
                 client,
-                "GET",
-                f"/repos/{owner}/{repo}/issues/{issue_number}/parent",
+                "POST",
+                "/graphql",
                 token=token,
+                json={
+                    "query": GITHUB_ISSUE_PARENT_QUERY,
+                    "variables": {
+                        "issueId": _issue_node_id(issue_data, slug=slug, issue_number=issue_number),
+                    },
+                },
             )
-        except GitHubConnectorError as exc:
-            if exc.status_code != 404:
-                raise
-            parent = None
+            parent_reference = _graphql_parent_reference(parent_lookup)
+            if parent_reference is not None:
+                parent_slug, parent_issue_number = parent_reference
+                # Installation tokens are commonly down-scoped to the child repo.
+                # The GraphQL relationship already provides the authoritative parent
+                # reference; hydrating it through the parent repo would turn a valid
+                # cross-repo relationship into a false 404 for App-only callers.
+                parent_payload = _issue_reference(parent_slug, parent_issue_number)
+        else:
+            try:
+                parent = await _async_request(
+                    client,
+                    "GET",
+                    f"/repos/{owner}/{repo}/issues/{issue_number}/parent",
+                    token=None,
+                )
+            except GitHubConnectorError as exc:
+                if exc.status_code != 404:
+                    raise
+            if isinstance(parent, dict):
+                parent_slug = parse_github_repo_slug(str(parent.get("html_url") or ""))
+                parent_payload = _issue_payload(parent)
+                parent_payload["repo"] = parent_slug
     return {
         "repo": slug,
-        "issue": _issue_payload(issue if isinstance(issue, dict) else {}),
-        "parent": _issue_payload(parent) if isinstance(parent, dict) else None,
+        "issue": _issue_payload(issue_data),
+        "parent": parent_payload,
     }
 
 
@@ -760,19 +878,19 @@ async def async_add_repo_sub_issue(
             token=token,
         )
         child_id = _numeric_issue_id(child, slug=child_slug, issue_number=child_issue_number)
-        current = await _async_request(
+        current_items = await _async_list_parent_sub_issues(
             client,
-            "GET",
-            f"/repos/{parent_owner}/{parent_repo}/issues/{parent_issue_number}/sub_issues",
+            parent_slug,
+            parent_issue_number,
             token=token,
-            params={"per_page": GITHUB_ITEM_LIMIT, "page": 1},
         )
-        current_items = current if isinstance(current, list) else []
-        if any(isinstance(item, dict) and item.get("id") == child_id for item in current_items):
+        if _contains_sub_issue(current_items, child_id):
             return {
                 "action": "already_linked",
                 "changed": False,
                 "already_linked": True,
+                "verified": True,
+                "verification_source": "parent_sub_issues",
                 "parent": _issue_reference(parent_slug, parent_issue_number),
                 "child": {"repo": child_slug, **_issue_payload(child)},
             }
@@ -783,10 +901,19 @@ async def async_add_repo_sub_issue(
             token=token,
             json={"sub_issue_id": child_id},
         )
+        read_back = await _async_list_parent_sub_issues(
+            client,
+            parent_slug,
+            parent_issue_number,
+            token=token,
+        )
+        verified = _contains_sub_issue(read_back, child_id)
     return {
         "action": "linked",
         "changed": True,
         "already_linked": False,
+        "verified": verified,
+        "verification_source": "parent_sub_issues",
         "parent": _issue_reference(parent_slug, parent_issue_number),
         "child": {"repo": child_slug, **_issue_payload(linked if isinstance(linked, dict) else child)},
     }
@@ -812,15 +939,13 @@ async def async_remove_repo_sub_issue(
             token=token,
         )
         child_id = _numeric_issue_id(child, slug=child_slug, issue_number=child_issue_number)
-        current = await _async_request(
+        current_items = await _async_list_parent_sub_issues(
             client,
-            "GET",
-            f"/repos/{parent_owner}/{parent_repo}/issues/{parent_issue_number}/sub_issues",
+            parent_slug,
+            parent_issue_number,
             token=token,
-            params={"per_page": GITHUB_ITEM_LIMIT, "page": 1},
         )
-        current_items = current if isinstance(current, list) else []
-        if not any(isinstance(item, dict) and item.get("id") == child_id for item in current_items):
+        if not _contains_sub_issue(current_items, child_id):
             return {
                 "action": "already_unlinked",
                 "changed": False,
