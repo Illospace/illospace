@@ -28,17 +28,24 @@ complete.
 
 3. Call `add_github_sub_issue` with both repos set to
    `Illospace/illospace` and the two issue numbers. Expect `action: "linked"`
-   and `changed: true`.
+   and `changed: true`. Also require `verified: true` with
+   `verification_source: "parent_sub_issues"`; this read-back comes from the
+   parent's authoritative native sub-issue list.
 
 4. Repeat the same add call. Expect `action: "already_linked"`,
    `already_linked: true`, and `changed: false`.
 
-5. List the parent again. Expect the child number and URL in `sub_issues`, and
-   confirm GitHub's issue page renders its native progress rollup.
+5. List the parent again. This parent-side list is the manual verification
+   recipe for same-repo and cross-repo children: expect the child number and
+   URL in `sub_issues`, and confirm GitHub's issue page renders its native
+   progress rollup. Do not use a child-scoped `get_parent` result as proof that
+   a just-completed link write failed.
 
 6. Call `list_github_sub_issues` with `action: "get_parent"`, the child issue
    number, and `repo: "Illospace/illospace"`. Expect the scratch parent in
-   `parent`.
+   `parent`. Repeat this diagnostic with a temporary child in another repository
+   under the same owner when validating cross-repo access; the returned parent
+   must still identify `Illospace/illospace`.
 
 7. Call `remove_github_sub_issue` with the same refs. Expect
    `action: "unlinked"` and `changed: true`. Repeat it once and expect

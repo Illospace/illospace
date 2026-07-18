@@ -26,10 +26,26 @@ _H = "brain.systems.runs.tool_catalog.handlers.github"
 def _issue(repo: str, number: int, issue_id: int, title: str = "Issue") -> dict:
     return {
         "id": issue_id,
+        "node_id": f"I_{issue_id}",
         "number": number,
         "title": title,
         "state": "open",
+        "url": f"https://api.github.com/repos/{repo}/issues/{number}",
+        "repository_url": f"https://api.github.com/repos/{repo}",
         "html_url": f"https://github.com/{repo}/issues/{number}",
+    }
+
+
+def _graphql_parent(repo: str, number: int) -> dict:
+    return {
+        "data": {
+            "node": {
+                "parent": {
+                    "number": number,
+                    "repository": {"nameWithOwner": repo},
+                }
+            }
+        }
     }
 
 
@@ -48,7 +64,7 @@ def _vault_patches(*, bound_env: dict[str, str]):
 async def test_add_sub_issue_resolves_cross_repo_issue_number_to_numeric_id():
     child = _issue("uwear-ai/uwear-backend", 42, 987654, "Backend ticket")
     linked = dict(child)
-    request = AsyncMock(side_effect=[child, [], linked])
+    request = AsyncMock(side_effect=[child, [], linked, [child]])
 
     with patch(f"{_C}._async_request", new=request):
         payload = await async_add_repo_sub_issue(
@@ -61,14 +77,44 @@ async def test_add_sub_issue_resolves_cross_repo_issue_number_to_numeric_id():
 
     assert payload["action"] == "linked"
     assert payload["changed"] is True
+    assert payload["verified"] is True
+    assert payload["verification_source"] == "parent_sub_issues"
+    assert payload["parent"]["repo"] == "uwear-ai/uwear-coordination"
+    assert payload["parent"]["number"] == 7
     assert payload["child"]["repo"] == "uwear-ai/uwear-backend"
     assert [call.args[1:3] for call in request.await_args_list] == [
         ("GET", "/repos/uwear-ai/uwear-backend/issues/42"),
         ("GET", "/repos/uwear-ai/uwear-coordination/issues/7/sub_issues"),
         ("POST", "/repos/uwear-ai/uwear-coordination/issues/7/sub_issues"),
+        ("GET", "/repos/uwear-ai/uwear-coordination/issues/7/sub_issues"),
     ]
     assert request.await_args_list[2].kwargs["json"] == {"sub_issue_id": 987654}
     assert all(call.kwargs["token"] == "app-token" for call in request.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_add_same_repo_sub_issue_still_links_and_verifies():
+    child = _issue("uwear-ai/uwear-backend", 42, 987654, "Backend ticket")
+    request = AsyncMock(side_effect=[child, [], child, [child]])
+
+    with patch(f"{_C}._async_request", new=request):
+        payload = await async_add_repo_sub_issue(
+            "uwear-ai/uwear-backend",
+            7,
+            "uwear-ai/uwear-backend",
+            42,
+            token="app-token",
+        )
+
+    assert payload["action"] == "linked"
+    assert payload["changed"] is True
+    assert payload["verified"] is True
+    assert payload["parent"]["repo"] == "uwear-ai/uwear-backend"
+    assert payload["child"]["repo"] == "uwear-ai/uwear-backend"
+    assert request.await_args_list[-1].args[1:3] == (
+        "GET",
+        "/repos/uwear-ai/uwear-backend/issues/7/sub_issues",
+    )
 
 
 @pytest.mark.asyncio
@@ -88,6 +134,8 @@ async def test_add_sub_issue_is_idempotent_when_child_is_already_linked():
     assert payload["action"] == "already_linked"
     assert payload["changed"] is False
     assert payload["already_linked"] is True
+    assert payload["verified"] is True
+    assert payload["verification_source"] == "parent_sub_issues"
     assert request.await_count == 2
     assert all(call.args[1] == "GET" for call in request.await_args_list)
 
@@ -116,9 +164,9 @@ async def test_remove_sub_issue_uses_official_singular_endpoint_and_numeric_id()
 
 
 @pytest.mark.asyncio
-async def test_list_sub_issues_and_parent_lookup_use_native_endpoints():
+async def test_list_sub_issues_and_same_repo_parent_lookup_are_unchanged():
     child = _issue("uwear-ai/uwear-backend", 42, 987654)
-    parent = _issue("uwear-ai/uwear-coordination", 7, 123456, "Chantier")
+    parent = _issue("uwear-ai/uwear-backend", 7, 123456, "Chantier")
 
     with patch(f"{_C}._async_request", new=AsyncMock(return_value=[child])) as request:
         listed = await async_list_repo_sub_issues(
@@ -133,13 +181,75 @@ async def test_list_sub_issues_and_parent_lookup_use_native_endpoints():
         "/repos/uwear-ai/uwear-coordination/issues/7/sub_issues",
     )
 
-    with patch(f"{_C}._async_request", new=AsyncMock(side_effect=[child, parent])) as request:
+    with patch(
+        f"{_C}._async_request",
+        new=AsyncMock(
+            side_effect=[
+                child,
+                _graphql_parent("uwear-ai/uwear-backend", 7),
+                parent,
+            ]
+        ),
+    ) as request:
         lookup = await async_get_repo_issue_parent(
             "uwear-ai/uwear-backend",
             42,
             token="read-token",
         )
 
+    assert lookup["parent"]["number"] == 7
+    assert lookup["parent"]["repo"] == "uwear-ai/uwear-backend"
+    assert request.await_args_list[1].args[1:3] == ("POST", "/graphql")
+    assert request.await_args_list[1].kwargs["json"]["variables"] == {"issueId": "I_987654"}
+    assert request.await_args_list[2].args[1:3] == (
+        "GET",
+        "/repos/uwear-ai/uwear-backend/issues/7",
+    )
+
+
+@pytest.mark.asyncio
+async def test_cross_repo_parent_lookup_resolves_via_child_node_id():
+    child = _issue("uwear-ai/uwear-aiapp", 648, 987654, "App ticket")
+    parent = _issue("uwear-ai/uwear-backend", 1102, 123456, "Production Automation")
+    request = AsyncMock(
+        side_effect=[
+            child,
+            _graphql_parent("uwear-ai/uwear-backend", 1102),
+            parent,
+        ]
+    )
+
+    with patch(f"{_C}._async_request", new=request):
+        lookup = await async_get_repo_issue_parent(
+            "uwear-ai/uwear-aiapp",
+            648,
+            token="read-token",
+        )
+
+    assert lookup["parent"]["repo"] == "uwear-ai/uwear-backend"
+    assert lookup["parent"]["number"] == 1102
+    assert [call.args[1:3] for call in request.await_args_list] == [
+        ("GET", "/repos/uwear-ai/uwear-aiapp/issues/648"),
+        ("POST", "/graphql"),
+        ("GET", "/repos/uwear-ai/uwear-backend/issues/1102"),
+    ]
+    assert request.await_args_list[1].kwargs["json"]["variables"] == {"issueId": "I_987654"}
+
+
+@pytest.mark.asyncio
+async def test_public_parent_lookup_preserves_native_rest_reader():
+    child = _issue("uwear-ai/uwear-backend", 42, 987654)
+    parent = _issue("uwear-ai/uwear-backend", 7, 123456, "Chantier")
+    request = AsyncMock(side_effect=[child, parent])
+
+    with patch(f"{_C}._async_request", new=request):
+        lookup = await async_get_repo_issue_parent(
+            "uwear-ai/uwear-backend",
+            42,
+            token=None,
+        )
+
+    assert lookup["parent"]["repo"] == "uwear-ai/uwear-backend"
     assert lookup["parent"]["number"] == 7
     assert request.await_args_list[1].args[1:3] == (
         "GET",
