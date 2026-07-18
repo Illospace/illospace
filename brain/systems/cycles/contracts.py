@@ -12,6 +12,16 @@ from brain.systems.cycles.degradation import mandatory_escalations
 
 SCHEDULED_REVIEW_WINDOW_HOURS = 24
 
+# One source of truth for the base result-contract keys and the visible sections
+# named in the launch prompt. The gate validates these same labels/aliases.
+RESULT_CONTRACT_OUTPUT_SECTIONS = {
+    "answer_the_cycle_mission": "the mission result body (no extra label required)",
+    "summarize_workspace_evidence_or_explicit_gaps": "`Evidence reviewed:`",
+    "report_evidence_health": "`Evidence health:`",
+    "record_next_action_or_blocker": "`Next action:` or `Blocker:`",
+    "short_self_review_summary": "`Self-review summary:`",
+}
+
 
 def _aware_utc(value: datetime | None) -> datetime | None:
     if value is not None and value.tzinfo is None:
@@ -45,13 +55,7 @@ def cycle_result_contract(
     """The minimum output contract for autonomous cycle runs."""
     contract = {
         "kind": "autonomous_cycle_run_result",
-        "required_outputs": [
-            "answer_the_cycle_mission",
-            "summarize_workspace_evidence_or_explicit_gaps",
-            "report_evidence_health",
-            "record_next_action_or_blocker",
-            "short_self_review_summary",
-        ],
+        "required_outputs": list(RESULT_CONTRACT_OUTPUT_SECTIONS),
         "degraded_when": [
             "workspace_evidence_sources_fail_or_return_unexpectedly_sparse_results",
             "the_run_cannot_access_required_context_or_output_targets",
