@@ -6,22 +6,34 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends
 from sqlalchemy import func, select, text
 
 from brain.app.api.auth import get_current_user
+from brain.app.api.routers.cortex._helpers import _a_require_idea_for_user
 from brain.app.api.routers.cortex._router import router
 from brain.platform.db.constraints import sql_string_list
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
-from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
+from brain.platform.db.models.idea import IdeaStateLog, IdeaThread
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cortex.status import (
     ANALYTICS_QUEUED_IDEA_STATUS_VALUES,
     SUGGESTED_IDEA_STATUS_VALUES,
 )
+from brain.systems.runs.cortex.read_models import (
+    public_failures_for_run_ids,
+    public_run_linked_message,
+    run_id_from_public_message_metadata,
+)
 from brain.systems.runs.presentation import public_tool_event_payload
 
 logger = logging.getLogger(__name__)
+
+
+def _activity_thread_run_id(row: IdeaThread) -> int | None:
+    if str(row.role or "").strip().lower() not in {"illo", "assistant"}:
+        return None
+    return run_id_from_public_message_metadata(row.metadata_)
 
 
 # ── Analytics ──────────────────────────────────────────────────
@@ -64,9 +76,7 @@ async def analytics(user: dict[str, Any] = Depends(get_current_user)):
 @router.get("/ideas/{idea_id}/activity-timeline")
 async def activity_timeline(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
     async with UnitOfWork() as uow:
-        idea = await uow.session.get(Idea, idea_id)
-        if not idea:
-            raise HTTPException(status_code=404, detail=f"Idea {idea_id} not found")
+        idea = await _a_require_idea_for_user(uow.session, idea_id, user)
 
         events = []
         events.append({
@@ -96,11 +106,30 @@ async def activity_timeline(idea_id: str, user: dict[str, Any] = Depends(get_cur
             .order_by(IdeaThread.created_at)
         )
         role_map = {"user": "You replied", "illo": "Illo replied", "assistant": "Assistant replied"}
-        thread_rows = await uow.session.scalars(stmt)
-        for row in thread_rows.all():
+        thread_rows = list((await uow.session.scalars(stmt)).all())
+        run_ids = {
+            run_id
+            for run_id in (_activity_thread_run_id(row) for row in thread_rows)
+            if run_id is not None
+        }
+        failure_scope: dict[str, str] = {"thread_id": idea_id}
+        if getattr(idea, "org_id", None):
+            failure_scope["org_id"] = str(idea.org_id)
+        failures = await public_failures_for_run_ids(
+            uow.session,
+            run_ids,
+            **failure_scope,
+        )
+        for row in thread_rows:
             prefix = role_map.get(row.role, f"{row.role} replied")
-            snippet = (row.content or "")[:80]
-            if len(row.content or "") > 80:
+            run_id = _activity_thread_run_id(row)
+            content, _metadata = public_run_linked_message(
+                row.content,
+                row.metadata_,
+                failures.get(run_id),
+            )
+            snippet = (content or "")[:80]
+            if len(content or "") > 80:
                 snippet += "..."
             ts = row.created_at
             events.append({

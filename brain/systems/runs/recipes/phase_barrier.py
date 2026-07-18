@@ -195,7 +195,9 @@ async def review_completed_phase(
         decision = PhaseBarrierDecision.from_payload(parsed or {}, raw_output=raw_output)
     except Exception as exc:
         logger.warning("deep_phase_barrier_review_failed run_id=%s node_id=%s error=%s", runtime.run.id, node.id, exc)
-        decision = PhaseBarrierDecision.no_change(f"Phase review failed open: {exc}")
+        decision = PhaseBarrierDecision.no_change(
+            "Phase review was unavailable; continuing without changes."
+        )
     await runtime.store.append_event(
         run_event(
             runtime.run.id,

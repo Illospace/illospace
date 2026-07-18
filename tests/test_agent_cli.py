@@ -94,22 +94,49 @@ class TestCallAgent:
         assert result["text"] == "File-based output"
         assert result["from_file"] is True
 
-    def test_failure_from_agent(self):
+    def test_failure_from_agent_returns_safe_typed_message(self):
+        from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+        raw_error = "peer closed connection without sending complete message body"
         mock_result = MagicMock()
         mock_result.success = False
         mock_result.output = ""
-        mock_result.error = "Agent failed with error"
+        mock_result.error = raw_error
 
         with patch("brain.systems.runs.direct_agent.run_agent", return_value=mock_result):
             result = call_agent("test-session", "hello")
         assert result["success"] is False
-        assert "Agent failed" in result["error"]
+        assert result["error"] == UPSTREAM_FAILED_RUN_MESSAGE
+        assert raw_error not in json.dumps(result)
 
-    def test_exception_returns_error(self):
-        with patch("brain.systems.runs.direct_agent.run_agent", side_effect=Exception("boom")):
+    def test_failed_agent_does_not_return_output_file_diagnostic(self, tmp_path):
+        from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+        raw_error = "peer closed connection without sending complete message body"
+        output_file = tmp_path / "output.txt"
+        output_file.write_text(raw_error)
+        mock_result = MagicMock(success=False, output="", error=raw_error)
+
+        with patch("brain.systems.runs.direct_agent.run_agent", return_value=mock_result):
+            result = call_agent("test-session", "hello", output_file=str(output_file))
+
+        assert result == {
+            "success": False,
+            "text": "",
+            "from_file": False,
+            "error": UPSTREAM_FAILED_RUN_MESSAGE,
+        }
+        assert raw_error not in json.dumps(result)
+
+    def test_exception_returns_safe_error(self):
+        from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
+
+        raw_error = "provider exploded with request secret"
+        with patch("brain.systems.runs.direct_agent.run_agent", side_effect=Exception(raw_error)):
             result = call_agent("test-session", "hello")
         assert result["success"] is False
-        assert "boom" in result["error"]
+        assert result["error"] == DEFAULT_FAILED_RUN_MESSAGE
+        assert raw_error not in json.dumps(result)
 
     def test_empty_response(self):
         mock_result = MagicMock()

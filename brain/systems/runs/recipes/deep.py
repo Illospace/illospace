@@ -17,6 +17,11 @@ from brain.systems.runs.assignments import AcceptanceCriteria, EvidenceRequireme
 from brain.systems.runs.domain import AgentRun, AgentRunArtifact, ArtifactType, RunProfile, RunRecipe
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
 from brain.systems.runs.events import run_event
+from brain.systems.runs.failures import (
+    RunFailureCategory,
+    failure_category_for_error,
+    public_run_failure,
+)
 from brain.systems.runs.graph import DeepPlan, RunEdge, RunNode
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
 from brain.systems.runs.recipes.base import BaseRunRecipe
@@ -94,19 +99,41 @@ class DeepRecipe(BaseRunRecipe):
             verification = self._verification_result(verify_payload)
             verify_status = str((verify_payload or {}).get("status") or "")
             if verification is None and verify_status != RunStatus.COMPLETED.value:
-                output = f"Deep verification failed: verify node ended with status {verify_status or 'missing'}"
-                await runtime.text_delta(output)
-                return RunRecipeResult(output=output, status=RunStatus.FAILED)
+                error = f"Deep verification failed: verify node ended with status {verify_status or 'missing'}"
+                failure = public_run_failure(RunStatus.FAILED, RunFailureCategory.VERIFICATION)
+                final_output = str((failure or {}).get("message") or "")
+                await runtime.text_delta(final_output)
+                return RunRecipeResult(
+                    status=RunStatus.FAILED,
+                    error=error,
+                    final_output=final_output,
+                    failure_category=RunFailureCategory.VERIFICATION,
+                )
             if verification is not None and not verification.passed:
-                output = f"Deep verification failed: {verification.warning or 'gate did not pass'}"
-                await runtime.text_delta(output)
-                return RunRecipeResult(output=output, status=RunStatus.FAILED)
+                error = f"Deep verification failed: {verification.warning or 'gate did not pass'}"
+                failure = public_run_failure(RunStatus.FAILED, RunFailureCategory.VERIFICATION)
+                final_output = str((failure or {}).get("message") or "")
+                await runtime.text_delta(final_output)
+                return RunRecipeResult(
+                    status=RunStatus.FAILED,
+                    error=error,
+                    final_output=final_output,
+                    failure_category=RunFailureCategory.VERIFICATION,
+                )
             output = str((node_results.get("synthesize") or {}).get("output") or "").strip()
             if not output:
                 output = self._synthesize_output(node_results)
         except Exception as exc:
             logger.exception("deep_recipe_failed", extra={"run_id": runtime.run.id})
-            return RunRecipeResult(output=f"Deep run failed: {exc}", status=RunStatus.FAILED)
+            error = f"Deep run failed: {exc}"
+            failure_category = failure_category_for_error(exc)
+            failure = public_run_failure(RunStatus.FAILED, failure_category)
+            return RunRecipeResult(
+                status=RunStatus.FAILED,
+                error=error,
+                final_output=str((failure or {}).get("message") or ""),
+                failure_category=failure_category,
+            )
         await runtime.text_delta(output)
         return RunRecipeResult(output=output, status=RunStatus.COMPLETED)
 
@@ -458,8 +485,17 @@ class DeepRecipe(BaseRunRecipe):
         )
         completed = await self._run_existing_child(runtime, child)
         artifacts = await _child_artifacts(runtime.store, child.id)
-        output = _child_output(artifacts)
         status = _status_value(getattr(completed, "status", RunStatus.FAILED))
+        raw_output = _child_output(artifacts)
+        failure = None
+        if status == RunStatus.COMPLETED.value:
+            output = raw_output
+            evidence_artifacts = artifacts
+        else:
+            category = _worker_failure_category(completed, artifacts, raw_output)
+            failure = public_run_failure(status, category)
+            output = str((failure or {}).get("message") or "")
+            evidence_artifacts = _redacted_failed_worker_artifacts(artifacts, failure)
         event_type = "run.worker_completed" if status == RunStatus.COMPLETED.value else "run.worker_failed"
         await runtime.store.append_event(
             run_event(
@@ -477,14 +513,18 @@ class DeepRecipe(BaseRunRecipe):
                 producer="deep",
             )
         )
-        return worker_evidence_from_artifacts(
+        evidence = worker_evidence_from_artifacts(
             run_id=child.id,
             assignment=assignment,
             status=status,
-            artifacts=artifacts,
+            artifacts=evidence_artifacts,
             output=output,
             node_id=node.id,
         )
+        if failure:
+            evidence["failure"] = failure
+            evidence["failure_category"] = failure["category"]
+        return evidence
 
     async def _run_verification_node(
         self,
@@ -796,6 +836,44 @@ def _child_output(artifacts: list[Any]) -> str:
     return latest_final or latest_worker
 
 
+def _worker_failure_category(completed: Any, artifacts: list[Any], raw_output: str) -> Any:
+    for metadata in (
+        getattr(completed, "metadata", None),
+        getattr(completed, "metadata_", None),
+    ):
+        if not isinstance(metadata, Mapping):
+            continue
+        failure = metadata.get("failure")
+        if isinstance(failure, Mapping) and failure.get("category"):
+            return failure.get("category")
+    for artifact in artifact_payloads(artifacts):
+        payload = artifact.get("payload")
+        failure = payload.get("failure") if isinstance(payload, Mapping) else None
+        if isinstance(failure, Mapping) and failure.get("category"):
+            return failure.get("category")
+    return failure_category_for_error(raw_output)
+
+
+def _redacted_failed_worker_artifacts(
+    artifacts: list[Any],
+    failure: dict[str, str] | None,
+) -> list[dict[str, Any]]:
+    """Keep evidence shape while excluding failed-worker diagnostic content."""
+
+    return [
+        {
+            "id": artifact.get("id"),
+            "artifact_type": artifact.get("artifact_type"),
+            "title": None,
+            "payload": {"failure": dict(failure)} if failure else {},
+            "has_text": False,
+            "text": "",
+            "uri": None,
+        }
+        for artifact in artifact_payloads(artifacts)
+    ]
+
+
 async def _coordinator_model_and_thinking(runtime: RunRuntime) -> tuple[str, str]:
     model_policy = dict(runtime.request.model_policy or {})
     model = model_policy.get("coordinator_model") or model_policy.get("model")
@@ -836,18 +914,26 @@ def _worker_synthesis_rows(node_results: dict[str, dict[str, Any]]) -> list[dict
         if not result.get("assignment"):
             continue
         assignment = _assignment_from_worker_result(result)
-        rows.append(
-            {
-                "node_id": result.get("node_id"),
-                "run_id": result.get("run_id") or result.get("child_run_id"),
-                "role": assignment.role,
-                "status": result.get("status"),
-                "objective": assignment.objective,
-                "output": _truncate(str(result.get("output") or ""), limit=4000),
-                "warning": result.get("warning"),
-                "evidence": _synthesis_artifact_summaries(result.get("artifacts")),
-            }
-        )
+        status = _status_value(result.get("status"))
+        row = {
+            "node_id": result.get("node_id"),
+            "run_id": result.get("run_id") or result.get("child_run_id"),
+            "role": assignment.role,
+            "status": result.get("status"),
+            "objective": assignment.objective,
+            "output": _truncate(str(result.get("output") or ""), limit=4000),
+            "warning": result.get("warning"),
+            "evidence": _synthesis_artifact_summaries(result.get("artifacts")),
+        }
+        if status != RunStatus.COMPLETED.value:
+            failure = _public_worker_failure(result, status=status)
+            row["output"] = failure["message"]
+            row["failure"] = failure
+            row["evidence"] = _synthesis_artifact_summaries(
+                result.get("artifacts"),
+                include_content=False,
+            )
+        rows.append(row)
     return rows
 
 
@@ -858,18 +944,39 @@ def _assignment_from_worker_result(result: Mapping[str, Any]) -> WorkerAssignmen
     )
 
 
-def _synthesis_artifact_summaries(value: Any) -> list[dict[str, Any]]:
+def _public_worker_failure(result: Mapping[str, Any], *, status: str) -> dict[str, str]:
+    existing = result.get("failure")
+    category = existing.get("category") if isinstance(existing, Mapping) else result.get("failure_category")
+    if not category:
+        category = failure_category_for_error(result.get("error") or result.get("output"))
+    failure = public_run_failure(status, category)
+    return failure or {
+        "status": RunStatus.FAILED.value,
+        "category": "internal",
+        "message": "",
+    }
+
+
+def _synthesis_artifact_summaries(
+    value: Any,
+    *,
+    include_content: bool = True,
+) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     for artifact in artifact_payloads(value)[:8]:
         payload = artifact.get("payload") if isinstance(artifact.get("payload"), Mapping) else {}
         summaries.append(
             {
                 "artifact_type": artifact.get("artifact_type"),
-                "title": artifact.get("title"),
-                "has_text": bool(artifact.get("has_text")),
-                "text": _truncate(str(artifact.get("text") or ""), limit=1600),
-                "payload": _truncate(json.dumps(payload, sort_keys=True, default=str), limit=1600) if payload else "",
-                "uri": artifact.get("uri"),
+                "title": artifact.get("title") if include_content else None,
+                "has_text": bool(artifact.get("has_text")) if include_content else False,
+                "text": _truncate(str(artifact.get("text") or ""), limit=1600) if include_content else "",
+                "payload": (
+                    _truncate(json.dumps(payload, sort_keys=True, default=str), limit=1600)
+                    if include_content and payload
+                    else ""
+                ),
+                "uri": artifact.get("uri") if include_content else None,
             }
         )
     return summaries

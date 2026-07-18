@@ -464,6 +464,33 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert any(_artifact_type(artifact) == "file_observation" for artifact in runtime.store.artifacts)
 
 
+async def test_fast_recipe_discards_partial_deltas_when_provider_result_fails(monkeypatch):
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+    from brain.systems.runs.recipes.fast import FastRecipe
+    from brain.systems.runs.status import RunStatus
+
+    raw_delta = "partial provider diagnostic token=fast-stream-secret"
+    raw_error = "peer closed connection without sending complete message body"
+
+    async def fake_invoke(spec):
+        await spec.on_stream_delta(raw_delta)
+        return SimpleNamespace(output=raw_delta, success=False, error=raw_error)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda _role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", lambda **_kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime("fast")
+    result = await FastRecipe().execute(runtime)
+    streamed = json.dumps(runtime.stream.messages)
+
+    assert result.status == RunStatus.FAILED
+    assert result.error == raw_error
+    assert result.final_output == UPSTREAM_FAILED_RUN_MESSAGE
+    assert raw_delta not in streamed
+    assert raw_error not in streamed
+
+
 @pytest.mark.parametrize(
     ("replay_index", "origin"),
     [
@@ -1906,6 +1933,45 @@ async def test_phase_review_payload_excludes_blocked_workers(monkeypatch):
     assert captured["blocked_node_ids"] == ["blocked"]
 
 
+@pytest.mark.asyncio
+async def test_phase_review_recoverable_failure_keeps_diagnostics_internal(monkeypatch):
+    from brain.systems.runs.cortex.read_models import public_run_debug_event_payload
+    from brain.systems.runs.graph import DeepPlan, RunNode
+    from brain.systems.runs.recipes.phase_barrier import review_completed_phase
+
+    raw_diagnostic = "phase provider failed token=phase-secret"
+
+    async def failed_review(_spec):
+        raise RuntimeError(raw_diagnostic)
+
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.phase_barrier.invoke_direct_agent_async",
+        failed_review,
+    )
+    plan = DeepPlan(
+        nodes=(
+            RunNode(id="scout", kind="scout", recipe="scout", status="completed"),
+            RunNode(id="worker", depends_on=("scout",)),
+        )
+    )
+    runtime = _runtime("deep")
+
+    decision = await review_completed_phase(
+        runtime,
+        plan,
+        plan.require_node("scout"),
+        {"scout": {"status": "completed"}},
+    )
+    completed = next(
+        event for event in runtime.store.events
+        if event.event_type == "run.phase_review_completed"
+    )
+    projected = public_run_debug_event_payload(completed, None)
+
+    assert decision.summary == "Phase review was unavailable; continuing without changes."
+    assert raw_diagnostic not in json.dumps(projected)
+
+
 async def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkeypatch):
     from brain.systems.runs.domain import AgentRunArtifact
     from brain.systems.runs.recipes.deep import DeepRecipe
@@ -1989,9 +2055,85 @@ async def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkey
     assert any(event.event_type == "run.coordinator_synthesis_completed" for event in store.events)
 
 
+async def test_deep_synthesis_never_embeds_failed_worker_diagnostics(monkeypatch):
+    from brain.systems.runs.domain import AgentRunArtifact
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+    from brain.systems.runs.recipes.deep import DeepRecipe
+    from brain.systems.runs.status import RunStatus
+
+    raw_error = "peer closed connection without sending complete message body"
+    captured = {}
+
+    async def failed_synthesis(spec):
+        captured["message"] = spec.message
+        return SimpleNamespace(output="", success=False, error="coordinator unavailable")
+
+    monkeypatch.setattr("brain.systems.runs.recipes.deep.invoke_direct_agent_async", failed_synthesis)
+
+    class _ChildEngine:
+        def __init__(self, store):
+            self.store = store
+
+        async def run_existing(self, run_id):
+            run = self.store.runs[run_id]
+            recipe = str(getattr(run.recipe, "value", run.recipe))
+            if recipe == "worker":
+                self.store.append_artifact(
+                    AgentRunArtifact(
+                        run_id=run_id,
+                        root_run_id=42,
+                        artifact_type="worker_result",
+                        title="Failed worker result",
+                        text=raw_error,
+                        payload={"error": raw_error},
+                    )
+                )
+                return SimpleNamespace(
+                    status=RunStatus.FAILED,
+                    id=run_id,
+                    metadata={"failure": {"category": "upstream"}},
+                )
+            self.store.append_artifact(
+                AgentRunArtifact(
+                    run_id=run_id,
+                    root_run_id=42,
+                    artifact_type="final_answer",
+                    title="Scout result",
+                    text="Scout completed.",
+                )
+            )
+            return SimpleNamespace(status=RunStatus.COMPLETED, id=run_id, metadata={})
+
+    store = _Store()
+    runtime = _runtime("deep", message="Inspect the repository.", store=store)
+    runtime.request = replace(
+        runtime.request,
+        metadata={
+            "verification": "skip",
+            "disable_phase_barrier_review": True,
+            "deep_workers": [
+                {"id": "inspect", "role": "inspect", "objective": "Inspect the repository."}
+            ],
+        },
+    )
+    runtime.engine = _ChildEngine(store)
+
+    result = await DeepRecipe().execute(runtime)
+
+    assert result.status == RunStatus.COMPLETED
+    assert UPSTREAM_FAILED_RUN_MESSAGE in result.output
+    assert raw_error not in result.output
+    assert raw_error not in captured["message"]
+    assert raw_error not in json.dumps(runtime.stream.messages)
+    parent_artifacts = [artifact for artifact in store.artifacts if artifact.run_id == runtime.run.id]
+    assert all(raw_error not in str(artifact.text or "") for artifact in parent_artifacts)
+    assert all(raw_error not in json.dumps(artifact.payload, default=str) for artifact in parent_artifacts)
+
+
 async def test_deep_recipe_failed_verification_returns_failed_status(monkeypatch):
     import brain.systems.runs.recipes.deep as deep_module
     from brain.systems.runs.domain import AgentRunArtifact
+    from brain.systems.runs.failures import VERIFICATION_FAILED_RUN_MESSAGE
     from brain.systems.runs.recipes.deep import DeepRecipe
     from brain.systems.runs.status import RunStatus
     _stub_phase_reviews(monkeypatch)
@@ -2018,7 +2160,16 @@ async def test_deep_recipe_failed_verification_returns_failed_status(monkeypatch
     result = await DeepRecipe().execute(runtime)
 
     assert result.status.value == "failed"
-    assert result.output.startswith("Deep verification failed:")
+    assert result.output == ""
+    assert result.error.startswith("Deep verification failed:")
+    assert result.final_output == VERIFICATION_FAILED_RUN_MESSAGE
+    assert result.failure_category.value == "verification"
+    assert sum(
+        event_type == "run.text_delta"
+        and payload.get("delta") == VERIFICATION_FAILED_RUN_MESSAGE
+        for event_type, payload in runtime.stream.messages
+    ) == 1
+    assert "worker run(s) failed" not in json.dumps(runtime.stream.messages)
     verification = [artifact for artifact in store.artifacts if _artifact_type(artifact) == "verifier_evidence"]
     assert verification[-1].payload["passed"] is False
     assert "worker run(s) failed" in verification[-1].payload["warning"]
@@ -2859,6 +3010,35 @@ async def test_runtime_tool_executor_records_policy_blocked_results_as_failed():
     assert runtime.store.artifacts[-1].payload["status"] == "failed"
 
 
+async def test_runtime_tool_executor_classifies_structured_handler_errors_as_failed():
+    from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
+    from brain.systems.runs.presentation import public_tool_event_payload
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+
+    raw_diagnostic = "idea update failed token=tool-handler-secret"
+    runtime = _runtime("worker")
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
+
+    result = await executor.execute(
+        42,
+        ToolExecution(
+            name="manage_idea",
+            args={"action": "update"},
+            handler=lambda **_kwargs: {"status": "error", "error": raw_diagnostic},
+        ),
+        root_run_id=42,
+    )
+
+    assert result["error"] == raw_diagnostic
+    assert not any(event.event_type == "run.tool_completed" for event in runtime.store.events)
+    failed = next(event for event in runtime.store.events if event.event_type == "run.tool_failed")
+    public = public_tool_event_payload(failed.payload, failed.event_type)
+    assert public["failure"]["message"] == DEFAULT_FAILED_RUN_MESSAGE
+    assert public["error"] == DEFAULT_FAILED_RUN_MESSAGE
+    assert raw_diagnostic not in json.dumps(public)
+    assert runtime.store.artifacts[-1].payload["status"] == "failed"
+
+
 async def test_runtime_tool_executor_enforces_policy_before_raw_handler(monkeypatch):
     from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
 
@@ -3648,6 +3828,90 @@ async def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_
     assert worker_result.payload["evidence"]["tool_names"] == ["read_file"]
 
 
+async def test_worker_recipe_keeps_failed_provider_diagnostics_internal(monkeypatch):
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+    from brain.systems.runs.recipes.workers import WorkerRecipe
+
+    raw_error = "peer closed connection without sending complete message body"
+
+    async def fake_invoke(_spec):
+        return SimpleNamespace(output="", success=False, error=raw_error)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.build_agent_tools", lambda _role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.build_tool_handlers", lambda **_kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime("worker")
+    result = await WorkerRecipe().execute(runtime)
+
+    assert result.status.value == "failed"
+    assert result.output == ""
+    assert result.error == raw_error
+    assert result.final_output == UPSTREAM_FAILED_RUN_MESSAGE
+    assert result.artifacts[0].text == UPSTREAM_FAILED_RUN_MESSAGE
+    assert result.artifacts[0].payload["failure"] == {
+        "status": "failed",
+        "category": "upstream",
+        "message": UPSTREAM_FAILED_RUN_MESSAGE,
+    }
+    assert raw_error not in json.dumps(runtime.stream.messages)
+    assert raw_error not in json.dumps(result.artifacts[0].payload)
+
+
+async def test_worker_recipe_buffers_partial_deltas_until_success_is_known(monkeypatch):
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+    from brain.systems.runs.recipes.workers import WorkerRecipe
+    from brain.systems.runs.status import RunStatus
+
+    raw_delta = "partial provider diagnostic token=stream-secret"
+    raw_error = "peer closed connection without sending complete message body"
+
+    async def fake_invoke(spec):
+        await spec.on_stream_delta(raw_delta)
+        return SimpleNamespace(output=raw_delta, success=False, error=raw_error)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.build_agent_tools", lambda _role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.build_tool_handlers", lambda **_kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime("worker")
+    result = await WorkerRecipe().execute(runtime)
+    streamed = json.dumps(runtime.stream.messages)
+
+    assert result.status == RunStatus.FAILED
+    assert result.error == raw_error
+    assert raw_delta not in streamed
+    assert raw_error not in streamed
+    assert any(
+        event_type == "run.text_delta"
+        and payload.get("delta") == UPSTREAM_FAILED_RUN_MESSAGE
+        for event_type, payload in runtime.stream.messages
+    )
+
+
+async def test_worker_recipe_keeps_unexpected_exception_internal(monkeypatch):
+    from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
+    from brain.systems.runs.recipes.workers import WorkerRecipe
+
+    raw_error = "provider exploded with private diagnostic"
+
+    async def fake_invoke(_spec):
+        raise RuntimeError(raw_error)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.build_agent_tools", lambda _role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.build_tool_handlers", lambda **_kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime("worker")
+    result = await WorkerRecipe().execute(runtime)
+
+    assert result.error == raw_error
+    assert result.final_output == DEFAULT_FAILED_RUN_MESSAGE
+    assert result.artifacts[0].text == DEFAULT_FAILED_RUN_MESSAGE
+    assert raw_error not in json.dumps(runtime.stream.messages)
+    assert raw_error not in json.dumps(result.artifacts[0].payload)
+
+
 async def test_worker_recipe_propagates_headless_tool_policy(monkeypatch):
     from brain.systems.runs.recipes.workers import WorkerRecipe
 
@@ -3786,6 +4050,54 @@ def test_run_stream_payload_is_the_single_cortex_projection():
     assert payload["recipe"] == "fast"
     assert payload["status"] == "running"
     assert payload["model_policy"] == {"model": "openai/gpt-5.5", "thinking": "high"}
+
+
+def test_completed_run_stream_scrubs_embedded_subfailure_diagnostics_only():
+    from brain.systems.runs.cortex.read_models import run_stream_payload
+
+    now = datetime(2026, 5, 3, tzinfo=timezone.utc)
+    raw_diagnostic = "child clone failed token=super-secret"
+    row = SimpleNamespace(
+        id=8,
+        thread_id="idea-1",
+        org_id="org-1",
+        user_id="user-1",
+        parent_run_id=None,
+        root_run_id=8,
+        trace_id="run_8",
+        profile="deep",
+        recipe="deep",
+        status="completed",
+        input_message="Inspect the project",
+        target_ref={"kind": "cortex_idea"},
+        workspace_ref={},
+        model_policy={},
+        metadata_={
+            "safe_summary": "Completed with partial evidence",
+            "evidence_health": {
+                "status": "degraded",
+                "failures": [
+                    {"status": "failed", "error": raw_diagnostic, "resource_id": "repo-1"}
+                ],
+            },
+        },
+        created_at=now,
+        updated_at=now,
+        started_at=now,
+        paused_at=None,
+        completed_at=now,
+        failed_at=None,
+        canceled_at=None,
+    )
+
+    payload = run_stream_payload(row)
+
+    assert payload["status"] == "completed"
+    assert payload["metadata"]["safe_summary"] == "Completed with partial evidence"
+    assert payload["metadata"]["evidence_health"]["failures"] == [
+        {"status": "failed", "resource_id": "repo-1"}
+    ]
+    assert raw_diagnostic not in json.dumps(payload)
 
 
 def _async_work_intake_session(idea, *, attachment=None, profiles=None):

@@ -49,6 +49,11 @@ from brain.systems.cortex.thought_lifecycle import (
 from brain.systems.cortex.project_context.resolution import merge_project_context_metadata
 from brain.systems.cortex.thread_links import thread_link_payload
 from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
+from brain.systems.runs.cortex.read_models import (
+    public_failures_for_run_ids,
+    public_run_linked_message,
+    run_id_from_public_message_metadata,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -127,13 +132,17 @@ def _apply_thread_link_fields(payload: dict[str, Any], idea_id: Any) -> None:
     payload["thread_url"] = links["thread_url"]
 
 
-def _thread_message_read_payload(message: IdeaThread) -> dict[str, Any]:
+def _thread_message_read_payload(
+    message: IdeaThread,
+    failure: dict[str, str] | None = None,
+) -> dict[str, Any]:
     metadata = message.metadata_ if isinstance(message.metadata_, dict) else {}
+    content, metadata = public_run_linked_message(message.content, metadata, failure)
     return {
         "id": message.id,
         "idea_id": str(message.idea_id) if message.idea_id else None,
         "role": message.role,
-        "content": message.content,
+        "content": content,
         "attachments": message.attachments or [],
         "metadata": metadata,
         "object_references": metadata.get("object_references") or [],
@@ -742,7 +751,32 @@ async def list_threads(
 ):
     await _require_idea_for_user(db, idea_id, user)
     messages = await IdeaThreadRepository(db).a_list_by_idea(idea_id)
-    return [ThreadMessageRead.model_validate(_thread_message_read_payload(message)) for message in messages]
+    run_ids = {
+        run_id
+        for run_id in (
+            (
+                run_id_from_public_message_metadata(message.metadata_)
+                if str(message.role or "").lower() in {"illo", "assistant"}
+                else None
+            )
+            for message in messages
+        )
+        if run_id is not None
+    }
+    failures = await public_failures_for_run_ids(db, run_ids, thread_id=idea_id)
+    return [
+        ThreadMessageRead.model_validate(
+            _thread_message_read_payload(
+                message,
+                failures.get(
+                    run_id_from_public_message_metadata(message.metadata_)
+                    if str(message.role or "").lower() in {"illo", "assistant"}
+                    else None
+                ),
+            )
+        )
+        for message in messages
+    ]
 
 
 @router.get("/ideas/{idea_id}/visual-blocks", response_model=list[VisualBlockRead])

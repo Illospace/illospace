@@ -21,9 +21,15 @@ from brain.systems.cortex.object_references import (
     merge_object_reference_metadata,
     store_object_references_for_source,
 )
+from brain.systems.runs.cortex.read_models import (
+    public_failures_for_run_ids,
+    public_run_linked_message,
+    run_id_from_public_message_metadata,
+)
 
 THREAD_DISCUSSION_SURFACE = "thread_discussion"
 THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
+THREAD_DISCUSSION_CONVERSATION_PREFIX = "thread-discussion:"
 
 
 class DiscussionCommentCreate(BaseModel):
@@ -37,8 +43,10 @@ def _comment_payload(
     *,
     author_name: str | None = None,
     author_color: str | None = None,
+    failure: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     metadata = comment.metadata_ if isinstance(comment.metadata_, dict) else {}
+    body, metadata = public_run_linked_message(comment.body, metadata, failure)
     return {
         "id": comment.id,
         "thread_id": str(comment.thread_id),
@@ -47,7 +55,7 @@ def _comment_payload(
         "author_kind": comment.author_kind,
         "author_name": author_name,
         "author_color": author_color,
-        "body": comment.body,
+        "body": body,
         "attachments": comment.attachments or [],
         "metadata": metadata,
         "object_references": metadata.get("object_references") or [],
@@ -113,6 +121,7 @@ async def _discussion_comment_payloads(
     *,
     thread_id: str,
     limit: int,
+    org_id: str | None = None,
 ) -> list[dict[str, Any]]:
     stmt = (
         select(ThreadDiscussionComment, User.name.label("author_name"), User.color.label("author_color"))
@@ -121,9 +130,37 @@ async def _discussion_comment_payloads(
         .order_by(ThreadDiscussionComment.created_at.asc(), ThreadDiscussionComment.id.asc())
         .limit(max(1, min(int(limit or 100), 300)))
     )
+    rows = list((await db.execute(stmt)).all())
+    run_ids = {
+        run_id
+        for run_id in (
+            (
+                run_id_from_public_message_metadata(row[0].metadata_)
+                if str(row[0].author_kind or "").lower() == "illo"
+                else None
+            )
+            for row in rows
+        )
+        if run_id is not None
+    }
+    failures = await public_failures_for_run_ids(
+        db,
+        run_ids,
+        thread_id=f"{THREAD_DISCUSSION_CONVERSATION_PREFIX}{thread_id}",
+        org_id=org_id,
+    )
     return [
-        _comment_payload(row[0], author_name=row.author_name, author_color=row.author_color)
-        for row in (await db.execute(stmt)).all()
+        _comment_payload(
+            row[0],
+            author_name=row.author_name,
+            author_color=row.author_color,
+            failure=failures.get(
+                run_id_from_public_message_metadata(row[0].metadata_)
+                if str(row[0].author_kind or "").lower() == "illo"
+                else None
+            ),
+        )
+        for row in rows
     ]
 
 
@@ -158,8 +195,13 @@ async def list_thread_discussion(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    await _require_idea_for_user(db, idea_id, user)
-    return await _discussion_comment_payloads(db, thread_id=idea_id, limit=limit)
+    idea = await _require_idea_for_user(db, idea_id, user)
+    return await _discussion_comment_payloads(
+        db,
+        thread_id=idea_id,
+        limit=limit,
+        org_id=str(idea.org_id) if getattr(idea, "org_id", None) else None,
+    )
 
 
 @router.post("/ideas/{idea_id}/discussion", status_code=201)

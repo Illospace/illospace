@@ -16,18 +16,22 @@ from sqlalchemy.orm import aliased
 
 from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
 from brain.systems.runs.events import run_event
-from brain.systems.runs.presentation import public_tool_event_payload
 from brain.systems.runs.status import (
     RunStatus,
     TERMINAL_RUN_STATUSES,
     coerce_run_status,
 )
 from brain.systems.runs.store import AsyncAgentRunStore
+from brain.systems.runs.ui_events import public_run_event_payload
 from brain.app.api.auth import get_current_user
 from brain.app.api.services.notifications import (
     async_build_notification_summary,
 )
-from brain.systems.runs.cortex.read_models import run_stream_payload
+from brain.systems.runs.cortex.read_models import (
+    public_failed_run_artifact,
+    public_failure_for_run,
+    run_stream_payload,
+)
 from brain.app.api.routers.cortex._helpers import (
     _infer_feedback_tags,
     _parse_message_type,
@@ -127,6 +131,8 @@ async def _append_live_guidance_from_thread_message(
 def _message_run_id(item: dict[str, Any]) -> int | None:
     if item.get("type") != "message":
         return None
+    if str(item.get("role") or "").strip().lower() not in {"illo", "assistant"}:
+        return None
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     if metadata.get("hidden") is True:
         return None
@@ -201,6 +207,27 @@ def _append_final_answer_messages(items: list[dict[str, Any]]) -> None:
             message_run_ids.add(run_id)
             break
     items.extend(additions)
+
+
+def _project_failed_run_message(
+    item: dict[str, Any],
+    failure: dict[str, str] | None,
+) -> None:
+    if failure is None or item.get("type") != "message":
+        return
+    item["content"] = failure["message"]
+    metadata = dict(item.get("metadata") or {})
+    for key in ("error", "final_answer", "output", "reason", "result", "text"):
+        metadata.pop(key, None)
+    metadata["failure"] = dict(failure)
+    item["metadata"] = metadata
+
+
+def _project_run_artifacts(
+    artifacts: list[dict[str, Any]],
+    failure: dict[str, str] | None,
+) -> list[dict[str, Any]]:
+    return [public_failed_run_artifact(artifact, failure) for artifact in artifacts]
 
 
 _RUN_WORK_EVENT_TYPES = {
@@ -310,7 +337,11 @@ def _activity_from_event(event_type: str, payload: dict[str, Any]) -> str | None
     return None
 
 
-def _apply_run_events_to_item(item: dict[str, Any], events: list[Any]) -> None:
+def _apply_run_events_to_item(
+    item: dict[str, Any],
+    events: list[Any],
+    failure: dict[str, str] | None = None,
+) -> None:
     activity_trace: list[dict[str, Any]] = []
     work_log: list[dict[str, Any]] = []
     tool_calls: list[dict[str, Any]] = []
@@ -319,9 +350,11 @@ def _apply_run_events_to_item(item: dict[str, Any], events: list[Any]) -> None:
         event_type = str(getattr(event, "event_type", "") or "")
         if event_type not in _RUN_WORK_EVENT_TYPES:
             continue
-        payload = dict(getattr(event, "payload", None) or {})
-        if event_type in {"run.tool_started", "run.tool_completed", "run.tool_failed"}:
-            payload = public_tool_event_payload(payload, event_type)
+        payload = public_run_event_payload(
+            getattr(event, "payload", None),
+            event_type,
+            failure=failure,
+        )
         at = _event_created_at(event)
         label = _activity_from_event(event_type, payload)
         if label:
@@ -932,6 +965,24 @@ async def unified_stream_payload(
             if item["type"] == "run":
                 item["tool_calls"] = []
 
+        run_rows_by_id = {int(run.id): run for run in all_run_rows}
+        referenced_run_ids = {
+            run_id
+            for run_id in (_message_run_id(item) for item in items)
+            if run_id is not None
+        }
+        missing_referenced_run_ids = referenced_run_ids.difference(run_rows_by_id)
+        if missing_referenced_run_ids:
+            referenced_runs = (
+                await uow.session.scalars(
+                    select(AgentRun).where(
+                        AgentRun.id.in_(sorted(missing_referenced_run_ids)),
+                        AgentRun.thread_id == idea_id,
+                        _visible_run_clause(),
+                    )
+                )
+            ).all()
+            run_rows_by_id.update({int(run.id): run for run in referenced_runs})
         child_runs: dict[int, list[dict[str, Any]]] = {}
         run_artifacts: dict[int, list[dict[str, Any]]] = {}
         run_events: dict[int, list[Any]] = {}
@@ -963,21 +1014,36 @@ async def unified_stream_payload(
                     "created_at": artifact.created_at.isoformat() if artifact.created_at else None,
                 })
 
-            event_stmt = _run_work_events_stmt(run_ids)
+        event_run_ids = sorted(set(run_ids).union(referenced_run_ids))
+        if event_run_ids:
+            event_stmt = _run_work_events_stmt(event_run_ids)
             for event in (await uow.session.scalars(event_stmt)).all():
                 run_events.setdefault(int(event.run_id), []).append(event)
 
         for item in items:
             if item["type"] == "run":
                 run_id = int(item.get("id", 0))
+                run_row = run_rows_by_id.get(run_id)
                 children = child_runs.get(run_id, [])
-                artifacts = run_artifacts.get(run_id, [])
                 events = run_events.get(run_id, [])
+                failure = public_failure_for_run(run_row, events) if run_row is not None else None
+                if failure is not None:
+                    item["failure"] = failure
+                artifacts = _project_run_artifacts(run_artifacts.get(run_id, []), failure)
                 if children:
                     item["child_runs"] = children
                 if artifacts:
                     item["artifacts"] = artifacts
-                _apply_run_events_to_item(item, events)
+                _apply_run_events_to_item(item, events, failure)
+
+        run_failures = {
+            run_id: public_failure_for_run(run, run_events.get(run_id, []))
+            for run_id, run in run_rows_by_id.items()
+        }
+        for item in items:
+            run_id = _message_run_id(item)
+            if run_id is not None:
+                _project_failed_run_message(item, run_failures.get(run_id))
 
         _append_final_answer_messages(items)
 

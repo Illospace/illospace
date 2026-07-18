@@ -892,6 +892,60 @@ async def test_cycle_final_answer_store_never_persists_raw_provider_error(sessio
     assert "help.openai.com" not in direct_artifact.text
 
 
+async def test_runner_setup_failure_never_persists_diagnostic_as_public_output(
+    monkeypatch,
+    session_factory,
+):
+    from brain.systems.runs.cortex import runner
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+    raw_diagnostic = "peer closed connection while cloning token=super-secret"
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    run = await store.create_run(_run_request(thread_id="thread-1", message="materialize"))
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+
+    async def settle(_session, run_id):
+        return {"run_id": run_id}
+
+    monkeypatch.setattr(runner, "_unit_of_work_factory", lambda: lambda: _SessionUoW(session))
+    monkeypatch.setattr(runner, "_settle_terminal_root_run_async", settle)
+
+    result = await runner._mark_run_failed_after_runner_error_async(
+        run.id,
+        raw_diagnostic,
+        final_answer=raw_diagnostic,
+    )
+
+    row = await session.get(AgentRunRow, run.id)
+    artifacts = list(
+        (
+            await session.scalars(
+                select(AgentRunArtifactRow).where(AgentRunArtifactRow.run_id == run.id)
+            )
+        ).all()
+    )
+    text_events = list(
+        (
+            await session.scalars(
+                select(AgentRunEventRow).where(
+                    AgentRunEventRow.run_id == run.id,
+                    AgentRunEventRow.event_type == "run.text_completed",
+                )
+            )
+        ).all()
+    )
+
+    assert result == {"run_id": run.id}
+    assert row is not None
+    assert row.status == RunStatus.FAILED.value
+    assert row.metadata_["failure"] == {"category": "upstream"}
+    assert [artifact.text for artifact in artifacts] == [UPSTREAM_FAILED_RUN_MESSAGE]
+    assert [event.payload for event in text_events] == [{"text": UPSTREAM_FAILED_RUN_MESSAGE}]
+    assert all(raw_diagnostic not in str(value) for value in (artifacts, text_events))
+
+
 async def test_interactive_slack_transport_failure_never_persists_raw_error_as_final_answer(
     monkeypatch,
     session_factory,

@@ -2346,6 +2346,88 @@ class TestCortexReplyHandler:
         assert "manage_slack" in context
         assert "not_connected" in context
 
+    def test_final_reply_context_hides_failed_worker_diagnostics(self):
+        from types import SimpleNamespace
+
+        from brain.systems.runs.direct_agent import _agent_context
+        from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+        from brain.systems.runs.tool_catalog.handlers.cortex_reply import _build_final_reply_check_context
+
+        raw_error = "peer closed connection without sending complete message body"
+        _agent_context.run = SimpleNamespace(
+            run_id=42,
+            total_tokens=0,
+            worker_results=[
+                SimpleNamespace(
+                    skill_name="inspect",
+                    success=False,
+                    output="",
+                    error=raw_error,
+                    trust_status="untrusted",
+                    evidence={},
+                )
+            ],
+        )
+        _agent_context.execution_artifacts = []
+        _agent_context.recent_tool_results = []
+        _agent_context.intent_satisfaction = None
+
+        try:
+            context = _build_final_reply_check_context()
+        finally:
+            _agent_context.run = None
+            _agent_context.execution_artifacts = []
+            _agent_context.recent_tool_results = []
+            _agent_context.intent_satisfaction = None
+
+        assert UPSTREAM_FAILED_RUN_MESSAGE in context
+        assert raw_error not in context
+
+    def test_final_reply_context_hides_failed_evidence_previews(self):
+        from types import SimpleNamespace
+
+        from brain.systems.runs.direct_agent import _agent_context
+        from brain.systems.runs.tool_catalog.handlers.cortex_reply import _build_final_reply_check_context
+
+        raw_error = "provider request failed with private diagnostic"
+        _agent_context.run = SimpleNamespace(
+            run_id=42,
+            total_tokens=0,
+            worker_results=[
+                SimpleNamespace(
+                    skill_name="inspect",
+                    success=False,
+                    output="",
+                    error=raw_error,
+                    trust_status="untrusted",
+                    evidence={"unresolved_uncertainty": [raw_error]},
+                )
+            ],
+        )
+        _agent_context.execution_artifacts = [
+            {"kind": "provider", "summary": raw_error, "path": None, "status": "failed"}
+        ]
+        _agent_context.recent_tool_results = [
+            {
+                "tool_name": "provider_call",
+                "args_preview": "{}",
+                "is_error": True,
+                "result_preview": raw_error,
+            }
+        ]
+        _agent_context.intent_satisfaction = None
+
+        try:
+            context = _build_final_reply_check_context()
+        finally:
+            _agent_context.run = None
+            _agent_context.execution_artifacts = []
+            _agent_context.recent_tool_results = []
+            _agent_context.intent_satisfaction = None
+
+        assert raw_error not in context
+        assert "temporary problem" in context
+
     def test_cortex_reply_whitespace_normalizer_collapses_punctuation_lines(self):
         from brain.systems.runs.tool_catalog.handlers.cortex_reply import _normalize_reply_whitespace
 

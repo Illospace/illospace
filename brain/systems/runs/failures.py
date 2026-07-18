@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import TypedDict
 
 from brain.platform.integrations.provider_error_sentinel import provider_error_kind
 from brain.platform.integrations.providers import is_transient_transport_disconnect
+from brain.contracts.statuses import project_run_status_value
 from brain.systems.runs.status import RunStatus, coerce_run_status
 
 
@@ -13,6 +15,12 @@ class RunFailureCategory(str, Enum):
     INTERNAL = "internal"
     UPSTREAM = "upstream"
     VERIFICATION = "verification"
+
+
+class PublicRunFailure(TypedDict):
+    status: str
+    category: str
+    message: str
 
 
 DEFAULT_FAILED_RUN_MESSAGE = "I hit a temporary problem while working on that — please retry."
@@ -42,7 +50,12 @@ def safe_terminal_run_message(
     status: RunStatus | str | None,
     category: RunFailureCategory | str | None = None,
 ) -> str | None:
-    run_status = coerce_run_status(status, default=RunStatus.FAILED)
+    normalized_status = (
+        status
+        if isinstance(status, RunStatus)
+        else project_run_status_value(status, RunStatus.FAILED.value)
+    )
+    run_status = coerce_run_status(normalized_status, default=RunStatus.FAILED)
     if run_status == RunStatus.COMPLETED:
         return None
     if run_status == RunStatus.CANCELED:
@@ -58,14 +71,38 @@ def safe_terminal_run_message(
     return DEFAULT_FAILED_RUN_MESSAGE
 
 
+def public_run_failure(
+    status: RunStatus | str | None,
+    category: RunFailureCategory | str | None = None,
+) -> PublicRunFailure | None:
+    """Return the canonical public representation of a terminal run failure."""
+
+    normalized_status = (
+        status
+        if isinstance(status, RunStatus)
+        else project_run_status_value(status, RunStatus.FAILED.value)
+    )
+    run_status = coerce_run_status(normalized_status, default=RunStatus.FAILED)
+    message = safe_terminal_run_message(run_status, category)
+    if message is None:
+        return None
+    return {
+        "status": run_status.value,
+        "category": coerce_failure_category(category).value,
+        "message": message,
+    }
+
+
 __all__ = [
     "CANCELED_RUN_MESSAGE",
     "DEFAULT_FAILED_RUN_MESSAGE",
     "EXPIRED_RUN_MESSAGE",
+    "PublicRunFailure",
     "RunFailureCategory",
     "UPSTREAM_FAILED_RUN_MESSAGE",
     "VERIFICATION_FAILED_RUN_MESSAGE",
     "coerce_failure_category",
     "failure_category_for_error",
+    "public_run_failure",
     "safe_terminal_run_message",
 ]

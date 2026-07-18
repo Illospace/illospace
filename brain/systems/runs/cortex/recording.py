@@ -16,6 +16,16 @@ from brain.systems.runs.ids import trace_id_for_run_id
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import IdeaThread
+from brain.systems.runs.cortex.read_models import (
+    public_failed_run_artifact,
+    public_failure_for_run,
+    public_failures_for_run_ids,
+    public_run_debug_event_payload,
+    public_run_linked_message,
+    run_id_from_public_message_metadata,
+    run_stream_payload,
+)
+from brain.systems.runs.failures import public_run_failure
 
 
 async def build_run_run_summary_async(session, run_id: int) -> dict[str, Any]:
@@ -41,6 +51,28 @@ def _run_summary(run: AgentRunRow | None, run_id: int) -> dict[str, Any]:
     }
 
 
+def _public_trace_run(run: AgentRunRow) -> dict[str, Any]:
+    projected = run_stream_payload(run)
+    return _cap_jsonable(
+        {
+            **_run_summary(run, int(run.id)),
+            "parent_run_id": projected.get("parent_run_id"),
+            "root_run_id": projected.get("root_run_id"),
+            "input_message": projected.get("message"),
+            "target_ref": projected.get("target_ref") or {},
+            "workspace_ref": projected.get("workspace_ref") or {},
+            "model_policy": projected.get("model_policy") or {},
+            "context_summary": (
+                projected.get("failure", {}).get("message")
+                if isinstance(projected.get("failure"), dict)
+                else getattr(run, "context_summary", None)
+            ),
+            "metadata": projected.get("metadata") or {},
+            **({"failure": projected["failure"]} if "failure" in projected else {}),
+        }
+    )
+
+
 async def build_run_flight_recorder_async(
     session,
     run_id: int,
@@ -48,6 +80,7 @@ async def build_run_flight_recorder_async(
     summary: dict[str, Any] | None = None,
     **_: Any,
 ) -> dict[str, Any]:
+    resolved_summary = summary or await build_run_run_summary_async(session, run_id)
     events_result = await session.scalars(
         select(AgentRunEventRow)
         .where(AgentRunEventRow.run_id == int(run_id))
@@ -60,26 +93,14 @@ async def build_run_flight_recorder_async(
     )
     events = events_result.all()
     artifacts = artifacts_result.all()
-    artifact_payloads = [
-        artifact.payload
-        for artifact in artifacts
-        if isinstance(artifact.payload, dict)
-    ]
-    worker_recordings = _worker_recordings({"run_artifacts": artifact_payloads})
-    return {
-        "schema_version": 1,
-        "summary": summary or await build_run_run_summary_async(session, run_id),
-        "events": [
-            {
-                "id": event.id,
-                "sequence_no": event.sequence_no,
-                "event_type": event.event_type,
-                "payload": event.payload or {},
-                "created_at": _iso(event.created_at),
-            }
-            for event in events
-        ],
-        "artifacts": [
+    summary_status = str(resolved_summary.get("status") or "")
+    failure = (
+        public_run_failure(summary_status)
+        if summary_status in {"failed", "canceled", "cancelled", "expired"}
+        else None
+    )
+    projected_artifacts = [
+        public_failed_run_artifact(
             {
                 "id": artifact.id,
                 "artifact_type": artifact.artifact_type,
@@ -88,9 +109,31 @@ async def build_run_flight_recorder_async(
                 "text": artifact.text,
                 "uri": artifact.uri,
                 "created_at": _iso(artifact.created_at),
+            },
+            failure,
+        )
+        for artifact in artifacts
+    ]
+    artifact_payloads = [
+        artifact["payload"]
+        for artifact in projected_artifacts
+        if isinstance(artifact.get("payload"), dict)
+    ]
+    worker_recordings = _worker_recordings({"run_artifacts": artifact_payloads})
+    return {
+        "schema_version": 1,
+        "summary": resolved_summary,
+        "events": [
+            {
+                "id": event.id,
+                "sequence_no": event.sequence_no,
+                "event_type": event.event_type,
+                "payload": public_run_debug_event_payload(event, failure),
+                "created_at": _iso(event.created_at),
             }
-            for artifact in artifacts
+            for event in events
         ],
+        "artifacts": projected_artifacts,
         "workers": worker_recordings,
     }
 
@@ -147,9 +190,25 @@ async def build_agent_trace_snapshot_async(
     related_runs = await _runs_by_id_async(session, related_run_ids)
     if not related_runs:
         related_runs = [run]
-    messages = await _trace_messages_async(session, run, max_messages=max_messages)
-    events = await _trace_events_async(session, related_run_ids, max_events=max_events)
-    artifacts = await _trace_artifacts_async(session, related_run_ids, max_artifacts=max_artifacts)
+    failures = _public_failure_map(related_runs)
+    messages = await _trace_messages_async(
+        session,
+        run,
+        max_messages=max_messages,
+        failures=failures,
+    )
+    events = await _trace_events_async(
+        session,
+        related_run_ids,
+        max_events=max_events,
+        failures=failures,
+    )
+    artifacts = await _trace_artifacts_async(
+        session,
+        related_run_ids,
+        max_artifacts=max_artifacts,
+        failures=failures,
+    )
     cycle_state = await _trace_cycle_state_async(
         session,
         idea_id=str(run.thread_id) if getattr(run, "thread_id", None) else None,
@@ -199,17 +258,7 @@ def _agent_trace_snapshot_payload(
             "max_string_chars": TRACE_MAX_STRING_CHARS,
             "large_values": "truncated_in_place",
         },
-        "run": _cap_jsonable({
-            **_run_summary(run, int(run.id)),
-            "parent_run_id": getattr(run, "parent_run_id", None),
-            "root_run_id": getattr(run, "root_run_id", None),
-            "input_message": getattr(run, "input_message", None),
-            "target_ref": getattr(run, "target_ref", None) or {},
-            "workspace_ref": getattr(run, "workspace_ref", None) or {},
-            "model_policy": getattr(run, "model_policy", None) or {},
-            "context_summary": getattr(run, "context_summary", None),
-            "metadata": getattr(run, "metadata_", None) or {},
-        }),
+        "run": _public_trace_run(run),
         "thread": {
             "idea_id": getattr(run, "thread_id", None),
             "messages": messages,
@@ -249,9 +298,25 @@ async def build_thread_trace_snapshot_async(
 
     runs = await _thread_runs_async(session, idea_id, max_runs=max_runs)
     run_ids = [int(run.id) for run in runs if _is_int_like(getattr(run, "id", None))]
-    messages = await _trace_thread_messages_async(session, idea_id, max_messages=max_messages)
-    events = await _trace_events_async(session, run_ids, max_events=max_events)
-    artifacts = await _trace_artifacts_async(session, run_ids, max_artifacts=max_artifacts)
+    failures = _public_failure_map(runs)
+    messages = await _trace_thread_messages_async(
+        session,
+        idea_id,
+        max_messages=max_messages,
+        failures=failures,
+    )
+    events = await _trace_events_async(
+        session,
+        run_ids,
+        max_events=max_events,
+        failures=failures,
+    )
+    artifacts = await _trace_artifacts_async(
+        session,
+        run_ids,
+        max_artifacts=max_artifacts,
+        failures=failures,
+    )
     cycle_state = await _trace_cycle_state_async(session, idea_id=idea_id, runs=runs)
     diagnostics = _trace_diagnostics(runs, events, artifacts, cycle_state)
     return _thread_trace_snapshot_payload(
@@ -310,20 +375,7 @@ def _thread_trace_snapshot_payload(
             "selected_message_count": len(messages),
             "message_limit": max_messages,
         },
-        "runs": [
-            _cap_jsonable({
-                **_run_summary(run, int(run.id)),
-                "parent_run_id": getattr(run, "parent_run_id", None),
-                "root_run_id": getattr(run, "root_run_id", None),
-                "input_message": getattr(run, "input_message", None),
-                "target_ref": getattr(run, "target_ref", None) or {},
-                "workspace_ref": getattr(run, "workspace_ref", None) or {},
-                "model_policy": getattr(run, "model_policy", None) or {},
-                "context_summary": getattr(run, "context_summary", None),
-                "metadata": getattr(run, "metadata_", None) or {},
-            })
-            for run in runs
-        ],
+        "runs": [_public_trace_run(run) for run in runs],
         "run_count": len(runs),
         "run_limit": max_runs,
         "related_run_ids": run_ids,
@@ -446,8 +498,19 @@ async def _thread_runs_async(session, idea_id: str, *, max_runs: int) -> list[Ag
     return list(result.all())
 
 
-async def _trace_messages_async(session, run: AgentRunRow, *, max_messages: int) -> list[dict[str, Any]]:
-    return await _trace_thread_messages_async(session, str(run.thread_id), max_messages=max_messages)
+async def _trace_messages_async(
+    session,
+    run: AgentRunRow,
+    *,
+    max_messages: int,
+    failures: dict[int, dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    return await _trace_thread_messages_async(
+        session,
+        str(run.thread_id),
+        max_messages=max_messages,
+        failures=failures,
+    )
 
 
 async def _runs_by_id_async(session, run_ids: list[int]) -> list[AgentRunRow]:
@@ -461,11 +524,21 @@ async def _runs_by_id_async(session, run_ids: list[int]) -> list[AgentRunRow]:
     return list(result.all())
 
 
+def _public_failure_map(runs: list[AgentRunRow]) -> dict[int, dict[str, str]]:
+    failures: dict[int, dict[str, str]] = {}
+    for run in runs:
+        failure = public_failure_for_run(run)
+        if failure is not None:
+            failures[int(run.id)] = failure
+    return failures
+
+
 async def _trace_thread_messages_async(
     session,
     idea_id: str,
     *,
     max_messages: int | None,
+    failures: dict[int, dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     query = select(IdeaThread).where(IdeaThread.idea_id == str(idea_id))
     if max_messages is None:
@@ -478,19 +551,51 @@ async def _trace_thread_messages_async(
             .limit(max_messages)
         )
         rows = list(reversed(result.all()))
-    return _thread_message_payloads(rows)
+    if failures is None:
+        run_ids = {
+            run_id
+            for run_id in (
+                (
+                    run_id_from_public_message_metadata(row.metadata_)
+                    if str(row.role or "").lower() in {"illo", "assistant"}
+                    else None
+                )
+                for row in rows
+            )
+            if run_id is not None
+        }
+        failures = await public_failures_for_run_ids(
+            session,
+            run_ids,
+            thread_id=idea_id,
+        )
+    return _thread_message_payloads(rows, failures)
 
 
-def _thread_message_payloads(rows: list[IdeaThread]) -> list[dict[str, Any]]:
+def _thread_message_payloads(
+    rows: list[IdeaThread],
+    failures: dict[int, dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
     messages = []
+    failures = failures or {}
     for row in rows:
         metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
+        run_id = (
+            run_id_from_public_message_metadata(metadata)
+            if str(row.role or "").lower() in {"illo", "assistant"}
+            else None
+        )
+        content, metadata = public_run_linked_message(
+            row.content,
+            metadata,
+            failures.get(run_id),
+        )
         messages.append(_cap_jsonable({
             "id": row.id,
             "role": row.role,
             "created_at": _iso(row.created_at),
             "message_type": row.message_type,
-            "content": row.content,
+            "content": content,
             "attachments_count": len(row.attachments or []),
             "metadata": {
                 "run_id": metadata.get("run_id"),
@@ -502,7 +607,13 @@ def _thread_message_payloads(rows: list[IdeaThread]) -> list[dict[str, Any]]:
     return messages
 
 
-async def _trace_events_async(session, run_ids: list[int], *, max_events: int) -> list[dict[str, Any]]:
+async def _trace_events_async(
+    session,
+    run_ids: list[int],
+    *,
+    max_events: int,
+    failures: dict[int, dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
     if not run_ids:
         return []
     per_run_limit = max(10, max_events // max(len(run_ids), 1))
@@ -515,6 +626,7 @@ async def _trace_events_async(session, run_ids: list[int], *, max_events: int) -
             .limit(per_run_limit)
         )
         rows.extend(result.all())
+    failures = failures or {}
     return [
         _cap_jsonable({
             "id": event.id,
@@ -525,13 +637,22 @@ async def _trace_events_async(session, run_ids: list[int], *, max_events: int) -
             "visibility": event.visibility,
             "producer": event.producer,
             "created_at": _iso(event.created_at),
-            "payload": event.payload or {},
+            "payload": public_run_debug_event_payload(
+                event,
+                failures.get(int(event.run_id)),
+            ),
         })
         for event in rows
     ]
 
 
-async def _trace_artifacts_async(session, run_ids: list[int], *, max_artifacts: int) -> list[dict[str, Any]]:
+async def _trace_artifacts_async(
+    session,
+    run_ids: list[int],
+    *,
+    max_artifacts: int,
+    failures: dict[int, dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
     if not run_ids:
         return []
     per_run_limit = max(5, max_artifacts // max(len(run_ids), 1))
@@ -548,8 +669,9 @@ async def _trace_artifacts_async(session, run_ids: list[int], *, max_artifacts: 
         )
         run_rows = result.all()
         rows.extend(reversed(run_rows))
+    failures = failures or {}
     return [
-        _cap_jsonable({
+        _cap_jsonable(public_failed_run_artifact({
             "id": artifact.id,
             "run_id": artifact.run_id,
             "root_run_id": artifact.root_run_id,
@@ -560,7 +682,7 @@ async def _trace_artifacts_async(session, run_ids: list[int], *, max_artifacts: 
             "created_at": _iso(artifact.created_at),
             "text": artifact.text,
             "payload": artifact.payload or {},
-        })
+        }, failures.get(int(artifact.run_id))))
         for artifact in rows
     ]
 
@@ -617,14 +739,14 @@ async def _trace_cycle_state_async(
         }
         if missing_cycle_ids:
             cycle_rows.extend(await _query_cycles_async(session, idea_id=None, cycle_ids=missing_cycle_ids, limit=max_cycles))
-    except Exception as exc:
+    except Exception:
         return {
             "schema_version": 1,
             "cycles": [],
             "cycle_runs": [],
             "cycle_ids": sorted(cycle_ids),
             "cycle_run_ids": sorted(cycle_run_ids),
-            "error": str(exc),
+            "error": "Cycle diagnostics were unavailable.",
         }
 
     cycles = [_cap_jsonable(_cycle_payload(cycle)) for cycle in cycle_rows]
@@ -711,7 +833,11 @@ def _cycle_payload(cycle: Cycle) -> dict[str, Any]:
         "next_run_at": _iso(cycle.next_run_at),
         "last_run_at": _iso(cycle.last_run_at),
         "last_status": cycle.last_status,
-        "last_error": cycle.last_error,
+        "last_error": (
+            "The last scheduled run did not complete."
+            if getattr(cycle, "last_error", None)
+            else None
+        ),
         "deleted_at": _iso(cycle.deleted_at),
         "created_at": _iso(getattr(cycle, "created_at", None)),
         "updated_at": _iso(getattr(cycle, "updated_at", None)),
@@ -726,7 +852,11 @@ def _cycle_run_payload(cycle_run: CycleRun) -> dict[str, Any]:
         "started_at": _iso(cycle_run.started_at),
         "completed_at": _iso(cycle_run.completed_at),
         "status": cycle_run.status,
-        "error": cycle_run.error,
+        "error": (
+            "The scheduled run did not complete."
+            if getattr(cycle_run, "error", None)
+            else None
+        ),
         "skip_reason": cycle_run.skip_reason,
         "idea_id": cycle_run.idea_id,
         "run_id": cycle_run.run_id,

@@ -349,13 +349,15 @@ def _add_error(payload: dict[str, Any], source: str, exc: Exception) -> None:
 async def _latest_run_final_answers(session: Any, run_ids: list[int]) -> dict[int, str]:
     if not run_ids:
         return {}
-    from brain.platform.db.models.agent_run import AgentRunArtifactRow
+    from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunRow
 
     stmt = (
         select(AgentRunArtifactRow.run_id, AgentRunArtifactRow.text)
+        .join(AgentRunRow, AgentRunRow.id == AgentRunArtifactRow.run_id)
         .where(
             AgentRunArtifactRow.run_id.in_(run_ids),
             AgentRunArtifactRow.artifact_type == "final_answer",
+            AgentRunRow.status == "completed",
         )
         .order_by(
             AgentRunArtifactRow.run_id.asc(),
@@ -456,6 +458,7 @@ async def _query_runs(
     limit: int,
 ) -> None:
     from brain.systems.runs.cortex.read_models import project_run_status
+    from brain.systems.runs.failures import public_run_failure
     from brain.platform.db.models.run import AgentRun
     from brain.platform.db.models.idea import Idea
     from brain.platform.db.models.org import User
@@ -494,6 +497,16 @@ async def _query_runs(
         session,
         [int(run.id) for run, _idea, _user in rows],
     )
+    run_failures = {}
+    for run, _idea, _user in rows:
+        status = project_run_status(run.status)
+        if status not in {"failed", "canceled", "expired"}:
+            continue
+        metadata = run.metadata_ if isinstance(run.metadata_, dict) else {}
+        stored_failure = metadata.get("failure") if isinstance(metadata.get("failure"), dict) else {}
+        failure = public_run_failure(status, stored_failure.get("category"))
+        if failure is not None:
+            run_failures[int(run.id)] = failure
     payload["sources"]["runs"] = [
         {
             "id": int(run.id),
@@ -517,14 +530,23 @@ async def _query_runs(
             if isinstance(run.metadata_, dict)
             else (run.model_policy or {}).get("model"),
             "message": _snippet(run.input_message),
-            "last_activity": _snippet(run.context_summary, 240),
-            "output": final_answers.get(int(run.id))
-            or _snippet(
-                ((run.metadata_ or {}).get("final_summary"))
-                if isinstance(run.metadata_, dict)
-                else None,
-                520,
+            "last_activity": (
+                run_failures[int(run.id)]["message"]
+                if int(run.id) in run_failures
+                else _snippet(run.context_summary, 240)
             ),
+            "output": (
+                run_failures[int(run.id)]["message"]
+                if int(run.id) in run_failures
+                else final_answers.get(int(run.id))
+                or _snippet(
+                    ((run.metadata_ or {}).get("final_summary"))
+                    if isinstance(run.metadata_, dict)
+                    else None,
+                    520,
+                )
+            ),
+            **({"failure": run_failures[int(run.id)]} if int(run.id) in run_failures else {}),
             "tool_summary": {
                 "workers_used": ((run.metadata_ or {}).get("usage") or {}).get("workers_used")
                 if isinstance(run.metadata_, dict)
@@ -557,6 +579,11 @@ async def _query_threads(
 ) -> None:
     from brain.platform.db.models.idea import Idea, IdeaThread
     from brain.platform.db.models.org import User
+    from brain.systems.runs.cortex.read_models import (
+        public_failures_for_run_ids,
+        public_run_linked_message,
+        run_id_from_public_message_metadata,
+    )
 
     stmt = (
         select(IdeaThread, Idea, User)
@@ -576,9 +603,37 @@ async def _query_threads(
         stmt = stmt.where(text_match)
 
     rows = await _session_execute_all(session, stmt)
+    run_ids = {
+        run_id
+        for run_id in (
+            (
+                run_id_from_public_message_metadata(thread.metadata_)
+                if str(thread.role or "").lower() in {"illo", "assistant"}
+                else None
+            )
+            for thread, _idea, _user in rows
+        )
+        if run_id is not None
+    }
+    failures = await public_failures_for_run_ids(
+        session,
+        run_ids,
+        thread_id=idea_id,
+        org_id=org_id,
+    )
     thread_rows: list[dict[str, Any]] = []
     for thread, idea, user in rows:
         links = thread_link_payload(thread.idea_id) if thread.idea_id is not None else {}
+        run_id = (
+            run_id_from_public_message_metadata(thread.metadata_)
+            if str(thread.role or "").lower() in {"illo", "assistant"}
+            else None
+        )
+        content, _metadata = public_run_linked_message(
+            thread.content,
+            thread.metadata_,
+            failures.get(run_id),
+        )
         thread_rows.append({
             "id": int(thread.id),
             "type": "thread_message",
@@ -592,7 +647,7 @@ async def _query_threads(
             "message_type": thread.message_type,
             "user_id": str(thread.user_id) if thread.user_id is not None else None,
             "user_name": user.name if user else None,
-            "content": _snippet(thread.content, 520),
+            "content": _snippet(content, 520),
             "provenance": {"table": "idea_threads", "id": int(thread.id)},
         })
     payload["sources"]["threads"] = thread_rows
@@ -670,12 +725,13 @@ async def _query_tool_calls(
     from brain.platform.db.models.agent_run import AgentRunEventRow
     from brain.platform.db.models.run import AgentRun
     from brain.platform.db.models.idea import Idea
+    from brain.systems.runs.presentation import public_tool_event_payload
 
     stmt = (
         select(AgentRunEventRow, AgentRun, Idea)
         .join(AgentRun, AgentRun.id == AgentRunEventRow.run_id)
         .outerjoin(Idea, _uuid_text_equals(Idea.id, AgentRun.thread_id))
-        .where(AgentRunEventRow.event_type == "run.tool_completed")
+        .where(AgentRunEventRow.event_type.in_(("run.tool_completed", "run.tool_failed")))
         .order_by(AgentRunEventRow.created_at.desc().nullslast(), AgentRunEventRow.id.desc())
         .limit(limit)
     )
@@ -695,8 +751,11 @@ async def _query_tool_calls(
         stmt = stmt.where(text_match)
 
     rows = await _session_execute_all(session, stmt)
-    payload["sources"]["tool_calls"] = [
-        {
+    tool_calls = []
+    for event, run, idea in rows:
+        public_event = public_tool_event_payload(event.payload, event.event_type)
+        failure = public_event.get("failure") if isinstance(public_event.get("failure"), dict) else None
+        tool_calls.append({
             "id": int(event.id),
             "type": "tool_call",
             "called_at": _serialize_dt(event.created_at),
@@ -705,14 +764,17 @@ async def _query_tool_calls(
             **_thread_link_fields(idea, run.thread_id),
             "idea_title": _idea_title(idea),
             "run_status": run.status if run else None,
-            "tool_name": (event.payload or {}).get("tool_name"),
-            "source": (event.payload or {}).get("source"),
-            "args": _snippet((event.payload or {}).get("args"), 420),
-            "result": _snippet((event.payload or {}).get("result"), 420),
+            "tool_name": public_event.get("tool_name"),
+            "source": public_event.get("source"),
+            "args": _snippet(public_event.get("args"), 420),
+            "result": _snippet(
+                failure.get("message") if failure else public_event.get("result") or public_event.get("result_preview"),
+                420,
+            ),
+            **({"failure": failure} if failure else {}),
             "provenance": {"table": "agent_run_events", "id": int(event.id)},
-        }
-        for event, run, idea in rows
-    ]
+        })
+    payload["sources"]["tool_calls"] = tool_calls
 
 
 async def _query_project_profiles(

@@ -23,7 +23,12 @@ from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, PROCESSING_RUN_ST
 from brain.systems.cortex.status import PROTECTED_IDEA_STATUSES
 from brain.systems.runs.engine import AsyncAgentRunEngine
 from brain.systems.runs.events import activity_event, run_event
-from brain.systems.runs.failures import coerce_failure_category, safe_terminal_run_message
+from brain.systems.runs.failures import (
+    coerce_failure_category,
+    failure_category_for_error,
+    public_run_failure,
+    safe_terminal_run_message,
+)
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.stream import RunStream
@@ -240,6 +245,7 @@ _TERMINAL_RUN_IDEA_STATUS = {
     "completed": "unread_reply",
     "failed": "failed",
     "canceled": "failed",
+    "expired": "failed",
 }
 _AI_TIMELINE_SURFACES = {"ai_timeline", "thread_timeline", "cortex_thread", "main_thread"}
 _THREAD_DISCUSSION_SURFACE = "thread_discussion"
@@ -422,8 +428,53 @@ async def _latest_final_answer_artifact(session, *, run: AgentRunRow) -> tuple[s
     return text, getattr(artifact, "id", None)
 
 
+async def _public_terminal_run_answer(
+    session,
+    *,
+    run: AgentRunRow,
+) -> tuple[str | None, int | None]:
+    """Use artifacts for successful runs and typed public messages for failures."""
+    run_status = coerce_run_status(getattr(run, "status", None), default=RunStatus.QUEUED)
+    if run_status == RunStatus.COMPLETED:
+        return await _latest_final_answer_artifact(session, run=run)
+    if run_status not in TERMINAL_RUN_STATUSES:
+        return None, None
+
+    failure = public_run_failure(
+        run_status,
+        await _terminal_run_failure_category(session, run=run),
+    )
+    return (failure["message"], None) if failure else (None, None)
+
+
+async def _terminal_run_failure_category(session, *, run: AgentRunRow) -> Any:
+    metadata = _run_metadata(run)
+    failure_metadata = metadata.get("failure") if isinstance(metadata.get("failure"), dict) else {}
+    category = failure_metadata.get("category")
+    if category or not hasattr(session, "scalars"):
+        return category
+    try:
+        events = (
+            await session.scalars(
+                select(AgentRunEventRow)
+                .where(
+                    AgentRunEventRow.run_id == int(run.id),
+                    AgentRunEventRow.event_type == "run.failed",
+                )
+                .order_by(AgentRunEventRow.sequence_no.desc(), AgentRunEventRow.id.desc())
+                .limit(1)
+            )
+        ).all()
+    except Exception:
+        return None
+    if not events:
+        return None
+    payload = dict(getattr(events[0], "payload", None) or {})
+    return payload.get("failure_category") or payload.get("category")
+
+
 async def _latest_unmirrored_final_answer(session, *, run: AgentRunRow, idea: Idea) -> tuple[str | None, int | None]:
-    text, artifact_id = await _latest_final_answer_artifact(session, run=run)
+    text, artifact_id = await _public_terminal_run_answer(session, run=run)
     if not text:
         return None, None
     recent_responses = (
@@ -549,7 +600,7 @@ async def _settle_thread_discussion_conversation_run_async(
         return None
     if await _discussion_reply_already_recorded(session, run=run, thread_id=thread_id):
         return None
-    final_answer, artifact_id = await _latest_final_answer_artifact(session, run=run)
+    final_answer, artifact_id = await _public_terminal_run_answer(session, run=run)
     if not final_answer:
         return None
 
@@ -708,9 +759,9 @@ async def _settle_slack_origin_run_async(
         if await _slack_visible_action_already_recorded(session, run=run):
             return None
     else:
-        metadata = _run_metadata(run)
-        failure = metadata.get("failure") if isinstance(metadata.get("failure"), dict) else {}
-        category = coerce_failure_category(failure.get("category"))
+        category = coerce_failure_category(
+            await _terminal_run_failure_category(session, run=run)
+        )
         final_answer = safe_terminal_run_message(run_status, category)
         if not final_answer:
             return None
@@ -1379,7 +1430,7 @@ async def _async_materialize_project_context(run_id: int) -> tuple[bool, dict[st
             int(run_id),
             "Project context ready" if result.ok else "Project context unavailable",
             workspaces=result.workspaces,
-            errors=result.errors[:3],
+            issue_count=len(result.errors or []),
         )
     if not result.ok:
         details = "; ".join(result.errors[:3]) or "No project workspace was materialized."
@@ -1414,17 +1465,41 @@ async def _mark_run_failed_after_runner_error_async(
         store = AsyncAgentRunStore(uow.session)
         row = await store.require_run(int(run_id))
         if coerce_run_status(row.status, default=RunStatus.FAILED) not in TERMINAL_RUN_STATUSES:
+            category = failure_category_for_error(error)
+            failure = public_run_failure(RunStatus.FAILED, category)
+            await store.update_metadata(
+                int(run_id),
+                {"failure": {"category": category.value}},
+            )
             if final_answer:
-                await store.append_final_answer_once(int(run_id), final_answer, root_run_id=row.root_run_id)
+                # ``final_answer`` is an intent signal from runner setup code. It
+                # can contain materializer diagnostics, so only persist the
+                # canonical public failure message.
+                safe_final_answer = str((failure or {}).get("message") or "")
+                await store.append_final_answer_once(
+                    int(run_id),
+                    safe_final_answer,
+                    root_run_id=row.root_run_id,
+                )
                 await store.append_event(
                     run_event(
                         int(run_id),
                         "run.text_completed",
-                        {"text": final_answer},
+                        {"text": safe_final_answer},
                         root_run_id=row.root_run_id,
                     )
                 )
-            await store.append_event(run_event(int(run_id), "run.failed", {"error": error}, root_run_id=row.root_run_id))
+            await store.append_event(
+                run_event(
+                    int(run_id),
+                    "run.failed",
+                    {
+                        "error": error,
+                        "failure_category": category.value,
+                    },
+                    root_run_id=row.root_run_id,
+                )
+            )
             await store.set_status(int(run_id), RunStatus.FAILED, reason=error[:500])
         return await _settle_terminal_root_run_async(uow.session, int(run_id))
 

@@ -35,6 +35,13 @@ from brain.systems.runs.events import run_event
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore as _AgentRunStore
 from brain.systems.runs.cortex.analytics import RunAuditNotFound, async_build_idea_audit_summary
+from brain.systems.runs.cortex.read_models import (
+    project_run_status,
+    public_failure_for_run,
+    public_failures_for_run_ids,
+    public_run_linked_message,
+    run_id_from_public_message_metadata,
+)
 from brain.platform.db.models.agent_run import AgentRunArtifactRow
 from brain.platform.db.models.run import AgentRun, CortexEvent
 from brain.platform.db.models.idea import Idea, IdeaConnection, IdeaStateLog, IdeaThread
@@ -61,6 +68,50 @@ from brain.systems.services.runtime_introspection import async_get_provider_auth
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
 logger = logging.getLogger(__name__)
+
+_RUN_LINKED_MESSAGE_ROLES = frozenset({"illo", "assistant"})
+
+
+async def _public_thread_message_projections(
+    session: Any,
+    messages: list[IdeaThread],
+    *,
+    idea_id: str,
+) -> list[tuple[IdeaThread, str, dict[str, Any], dict[str, str] | None]]:
+    """Project trusted run-linked messages before they reach another surface."""
+
+    linked_run_ids = {
+        run_id
+        for message in messages
+        for run_id in [
+            (
+                run_id_from_public_message_metadata(message.metadata_)
+                if str(message.role or "").lower() in _RUN_LINKED_MESSAGE_ROLES
+                else None
+            )
+        ]
+        if run_id is not None
+    }
+    failures = await public_failures_for_run_ids(
+        session,
+        linked_run_ids,
+        thread_id=idea_id,
+    )
+    projected = []
+    for message in messages:
+        run_id = (
+            run_id_from_public_message_metadata(message.metadata_)
+            if str(message.role or "").lower() in _RUN_LINKED_MESSAGE_ROLES
+            else None
+        )
+        failure = failures.get(run_id)
+        content, metadata = public_run_linked_message(
+            message.content,
+            message.metadata_,
+            failure,
+        )
+        projected.append((message, str(content or ""), metadata, failure))
+    return projected
 
 
 async def _cancel_active_runs_for_idea(session, idea_id: str, *, reason: str) -> int:
@@ -315,16 +366,24 @@ async def detect_branches(idea_id: str, user: dict[str, Any] = Depends(get_curre
     async with UnitOfWork() as uow:
         await _a_require_idea_for_user(uow.session, idea_id, user)
         stmt = (
-            select(IdeaThread.content, IdeaThread.role)
+            select(IdeaThread)
             .where(IdeaThread.idea_id == idea_id)
             .order_by(IdeaThread.created_at)
         )
-        messages = (await uow.session.execute(stmt)).all()
+        messages = list((await uow.session.scalars(stmt)).all())
+        projected_messages = await _public_thread_message_projections(
+            uow.session,
+            messages,
+            idea_id=idea_id,
+        )
 
     if len(messages) < 8:
         return {"branches": [], "should_split": False, "reason": "Thread too short for meaningful split"}
 
-    thread_text = "\n".join(f"[{m.role}] {m.content[:200]}" for m in messages)
+    thread_text = "\n".join(
+        f"[{message.role}] {content[:200]}"
+        for message, content, _metadata, _failure in projected_messages
+    )
 
     prompt = f"""Analyze this conversation thread and identify distinct sub-topics that have diverged from the original topic. Return ONLY valid JSON, no other text.
 
@@ -369,7 +428,12 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
             .where(IdeaThread.idea_id == idea_id)
             .order_by(IdeaThread.created_at)
         )
-        all_messages = (await uow.session.scalars(stmt)).all()
+        all_messages = list((await uow.session.scalars(stmt)).all())
+        projected_messages = await _public_thread_message_projections(
+            uow.session,
+            all_messages,
+            idea_id=idea_id,
+        )
 
         created_ids = []
         for branch in branches:
@@ -394,7 +458,7 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
             uow.session.add(child)
 
             indices = set(branch.get("message_indices", []))
-            for idx, msg in enumerate(all_messages):
+            for idx, (msg, content, _metadata, failure) in enumerate(projected_messages):
                 if idx in indices:
                     await post_thread_message(
                         uow.session,
@@ -402,8 +466,13 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
                         command=ThreadMessageCommand(
                             idea_id=child_id,
                             role=msg.role,
-                            content=msg.content,
+                            content=content,
                             attachments=msg.attachments or [],
+                            metadata=(
+                                {"failure": dict(failure)}
+                                if failure is not None
+                                else None
+                            ),
                         ),
                         apply_lifecycle=False,
                     )
@@ -675,6 +744,7 @@ async def idea_audit(idea_id: str, user: dict[str, Any] = Depends(get_current_us
     """Aggregate metrics for ALL runs on an idea — pure SQL, no LLM."""
     try:
         async with UnitOfWork() as uow:
+            await _a_require_idea_for_user(uow.session, idea_id, user)
             return await async_build_idea_audit_summary(uow.session, idea_id)
     except RunAuditNotFound:
         raise HTTPException(status_code=404, detail="No runs for this idea")
@@ -688,6 +758,7 @@ async def idea_audit_analyze(
     """Trigger a self-critique run on the idea's conversation audit."""
     # Build a metrics summary to include in the run message
     async with UnitOfWork() as uow:
+        await _a_require_idea_for_user(uow.session, idea_id, user)
         runs = (
             await uow.session.scalars(
                 select(AgentRun)
@@ -715,19 +786,24 @@ async def idea_audit_analyze(
             if isinstance(misses, list):
                 all_misses.extend(misses)
 
-        thread_rows = (
-            await uow.session.execute(
-                text("""
-                    SELECT role, content FROM idea_threads
-                    WHERE idea_id = :idea_id
-                    ORDER BY created_at ASC
-                    LIMIT 50
-                """),
-                {"idea_id": idea_id},
-            )
-        ).fetchall()
+        thread_rows = list(
+            (
+                await uow.session.scalars(
+                    select(IdeaThread)
+                    .where(IdeaThread.idea_id == idea_id)
+                    .order_by(IdeaThread.created_at.asc())
+                    .limit(50)
+                )
+            ).all()
+        )
+        projected_thread_rows = await _public_thread_message_projections(
+            uow.session,
+            thread_rows,
+            idea_id=idea_id,
+        )
         thread_text = "\n".join(
-            f"[{r.role}] {r.content[:500]}" for r in thread_rows
+            f"[{message.role}] {content[:500]}"
+            for message, content, _metadata, _failure in projected_thread_rows
         )
 
         worker_lines: list[str] = []
@@ -802,6 +878,7 @@ async def idea_audit_analysis_result(
     associated with the audit_analyze run.
     """
     async with UnitOfWork() as uow:
+        await _a_require_idea_for_user(uow.session, idea_id, user)
         d = (
             await uow.session.scalars(
                 select(AgentRun)
@@ -817,16 +894,26 @@ async def idea_audit_analysis_result(
         if not d:
             return {"found": False}
 
+        failures = await public_failures_for_run_ids(
+            uow.session,
+            [int(d.id)],
+            thread_id=idea_id,
+        )
+        failure = failures.get(int(d.id)) or public_failure_for_run(d)
+        public_status = project_run_status(d.status)
+
         result: dict[str, Any] = {
             "found": True,
             "run_id": d.id,
-            "status": d.status,
+            "status": public_status,
             "started_at": d.started_at.isoformat() if d.started_at else None,
             "completed_at": d.completed_at.isoformat() if d.completed_at else None,
-            "error": (d.metadata_ or {}).get("error") if isinstance(d.metadata_, dict) else None,
+            "error": failure["message"] if failure is not None else None,
         }
+        if failure is not None:
+            result["failure"] = dict(failure)
 
-        if d.status in ("completed", "failed"):
+        if public_status in ("completed", "failed", "canceled", "expired"):
             msg = (
                 await uow.session.scalars(
                     select(IdeaThread)
@@ -842,8 +929,15 @@ async def idea_audit_analysis_result(
             ).first()
 
             if msg:
-                result["content"] = msg.content
+                content, _metadata = public_run_linked_message(
+                    msg.content,
+                    msg.metadata_,
+                    failure,
+                )
+                result["content"] = str(content or "")
                 result["message_id"] = msg.id
+            elif failure is not None:
+                result["content"] = failure["message"]
             else:
                 fallback = (
                     await uow.session.scalars(
@@ -857,7 +951,12 @@ async def idea_audit_analysis_result(
                     )
                 ).first()
                 if fallback and d.completed_at and d.started_at and fallback.created_at >= d.started_at:
-                    result["content"] = fallback.content
+                    projected_fallback = await _public_thread_message_projections(
+                        uow.session,
+                        [fallback],
+                        idea_id=idea_id,
+                    )
+                    result["content"] = projected_fallback[0][1]
                     result["message_id"] = fallback.id
 
         return result

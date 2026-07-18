@@ -169,6 +169,110 @@ def test_run_event_to_message_projects_non_streaming_final_text():
     assert message["profile"] == "fast"
 
 
+def test_failed_run_replay_replaces_legacy_text_completed_diagnostic():
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+    raw_error = "peer closed connection; password=swordfish"
+    event = SimpleNamespace(
+        id=9,
+        run_id=42,
+        root_run_id=42,
+        sequence_no=5,
+        event_type="run.text_completed",
+        payload={"text": raw_error},
+        created_at=None,
+        _agent_run_thread_id="idea-1",
+        _agent_run_profile="fast",
+        _agent_run_org_id="org-1",
+        _agent_run_status="failed",
+        _agent_run_metadata={"failure": {"category": "upstream"}},
+    )
+
+    message = run_event_to_message(event, replayed=True)
+
+    assert message["type"] == "text_delta"
+    assert message["delta"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert message["failure"] == {
+        "status": "failed",
+        "category": "upstream",
+        "message": UPSTREAM_FAILED_RUN_MESSAGE,
+    }
+    assert raw_error not in json.dumps(message)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "status", "expected_message"),
+    [
+        ("run.canceled", "canceled", "That run was canceled before it finished."),
+        ("run.expired", "expired", "That run timed out before it finished — please retry."),
+    ],
+)
+def test_non_success_terminal_replay_replaces_raw_reason(event_type, status, expected_message):
+    raw_error = "cancel reason included token=super-secret"
+    event = SimpleNamespace(
+        id=10,
+        run_id=42,
+        root_run_id=42,
+        sequence_no=6,
+        event_type=event_type,
+        payload={"reason": raw_error},
+        created_at=None,
+        _agent_run_status=status,
+        _agent_run_metadata={},
+    )
+
+    message = run_event_to_message(event, replayed=True)
+
+    assert message["type"] == "run_completed"
+    assert message["status"] == status
+    assert message["failure"]["message"] == expected_message
+    assert message["error"] == expected_message
+    assert raw_error not in json.dumps(message)
+
+
+def test_expired_status_transition_emits_one_terminal_message_after_running_transition():
+    base = {
+        "run_id": 42,
+        "root_run_id": 42,
+        "created_at": None,
+        "_agent_run_status": "expired",
+        "_agent_run_metadata": {},
+    }
+    events = [
+        SimpleNamespace(
+            **base,
+            id=11,
+            sequence_no=7,
+            event_type="run.status_changed",
+            payload={"from_status": "starting", "to_status": "running"},
+        ),
+        SimpleNamespace(
+            **base,
+            id=12,
+            sequence_no=8,
+            event_type="run.status_changed",
+            payload={"from_status": "running", "to_status": "expired", "reason": "RAW timeout"},
+        ),
+    ]
+
+    messages = [run_event_to_message(event, replayed=True) for event in events]
+
+    assert messages[0] is None
+    assert messages[1]["status"] == "expired"
+    assert messages[1]["failure"]["status"] == "expired"
+    assert "RAW timeout" not in json.dumps(messages)
+
+
+def test_public_failure_normalizes_legacy_cancelled_alias():
+    from brain.systems.runs.failures import CANCELED_RUN_MESSAGE, public_run_failure
+
+    assert public_run_failure("cancelled") == {
+        "status": "canceled",
+        "category": "internal",
+        "message": CANCELED_RUN_MESSAGE,
+    }
+
+
 def test_run_failed_public_projection_replaces_raw_error_with_safe_message():
     from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
 
@@ -195,6 +299,11 @@ def test_run_failed_public_projection_replaces_raw_error_with_safe_message():
     assert message["status"] == "failed"
     assert message["failure_category"] == "upstream"
     assert message["error"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert message["failure"] == {
+        "status": "failed",
+        "category": "upstream",
+        "message": UPSTREAM_FAILED_RUN_MESSAGE,
+    }
     assert raw_error not in json.dumps(message)
 
 
