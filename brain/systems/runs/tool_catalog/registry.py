@@ -363,6 +363,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "expected_effect": "open a real GitHub issue in the target repository",
         "output_budget_chars": 8_000,
     },
+    "update_github_issue": {
+        "permission": "write_workspace",
+        "risk_class": "high",
+        "side_effect_class": "project_context_management",
+        "reversibility": "reversible",
+        "action_manifest": True,
+        "expected_effect": "update fields on a real GitHub issue and read the issue back",
+        "output_budget_chars": 10_000,
+    },
     "add_github_sub_issue": {
         "permission": "write_workspace",
         "risk_class": "high",
