@@ -22,8 +22,8 @@ from brain.kernel import config as brain_config
 from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, PROCESSING_RUN_STATUS_VALUES
 from brain.systems.cortex.status import PROTECTED_IDEA_STATUSES
 from brain.systems.runs.engine import AsyncAgentRunEngine
-from brain.systems.runs.interactive_reply import is_interactive_transport_fallback
 from brain.systems.runs.events import activity_event, run_event
+from brain.systems.runs.failures import coerce_failure_category, safe_terminal_run_message
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.stream import RunStream
@@ -697,17 +697,23 @@ async def _settle_slack_origin_run_async(
         return None
     if _run_is_headless(run) and run.parent_run_id is not None:
         return None
-    final_answer, artifact_id = await _latest_final_answer_artifact(session, run=run)
-    if not final_answer:
+    run_status = coerce_run_status(getattr(run, "status", None), default=RunStatus.QUEUED)
+    if run_status not in TERMINAL_RUN_STATUSES:
         return None
-    transport_fallback = is_interactive_transport_fallback(final_answer)
-    if _run_is_headless(run) and not transport_fallback:
-        return None
-    if not transport_fallback and await _slack_visible_action_already_recorded(
-        session,
-        run=run,
-    ):
-        return None
+    artifact_id = None
+    if run_status == RunStatus.COMPLETED:
+        final_answer, artifact_id = await _latest_final_answer_artifact(session, run=run)
+        if not final_answer or _run_is_headless(run):
+            return None
+        if await _slack_visible_action_already_recorded(session, run=run):
+            return None
+    else:
+        metadata = _run_metadata(run)
+        failure = metadata.get("failure") if isinstance(metadata.get("failure"), dict) else {}
+        category = coerce_failure_category(failure.get("category"))
+        final_answer = safe_terminal_run_message(run_status, category)
+        if not final_answer:
+            return None
 
     target = _slack_response_target(run)
     channel_id = target["channel_id"]

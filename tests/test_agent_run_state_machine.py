@@ -896,7 +896,7 @@ async def test_interactive_slack_transport_failure_never_persists_raw_error_as_f
     monkeypatch,
     session_factory,
 ):
-    from brain.systems.runs.interactive_reply import INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
     from brain.systems.runs.recipes.fast import FastRecipe
 
     raw_error = (
@@ -937,8 +937,24 @@ async def test_interactive_slack_transport_failure_never_persists_raw_error_as_f
     )
 
     assert result.status == RunStatus.FAILED
-    assert [artifact.text for artifact in final_answers] == [INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE]
+    assert result.metadata["failure"] == {"category": "upstream"}
+    assert [artifact.text for artifact in final_answers] == [UPSTREAM_FAILED_RUN_MESSAGE]
     assert all(raw_error not in str(artifact.text) for artifact in final_answers)
+
+    events = list(
+        (
+            await session.scalars(
+                select(AgentRunEventRow).where(AgentRunEventRow.run_id == result.id)
+            )
+        ).all()
+    )
+    failed_events = [event for event in events if event.event_type == "run.failed"]
+    text_completed_events = [event for event in events if event.event_type == "run.text_completed"]
+
+    assert failed_events[-1].payload["error"] == raw_error
+    assert failed_events[-1].payload["failure_category"] == "upstream"
+    assert text_completed_events[-1].payload["text"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert all(raw_error not in str(event.payload) for event in text_completed_events)
 
 
 async def test_failed_cycle_engine_events_do_not_surface_raw_provider_error(session_factory):
@@ -949,7 +965,7 @@ async def test_failed_cycle_engine_events_do_not_surface_raw_provider_error(sess
 
     class ProviderFailureRecipe:
         async def execute(self, _runtime: RunRuntime) -> RunRecipeResult:
-            return RunRecipeResult(output=raw_provider_error, status=RunStatus.FAILED)
+            return RunRecipeResult(error=raw_provider_error, status=RunStatus.FAILED)
 
     session = session_factory()
     result = await AsyncAgentRunEngine(
@@ -983,7 +999,7 @@ async def test_failed_cycle_engine_events_do_not_surface_raw_provider_error(sess
     )
 
     assert result.status == RunStatus.FAILED
-    assert artifacts[-1].text == "upstream_provider_error: server_error"
+    assert not [artifact for artifact in artifacts if artifact.artifact_type == "final_answer"]
     assert all("help.openai.com" not in str(event.payload) for event in events)
 
 

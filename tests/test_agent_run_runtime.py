@@ -478,7 +478,10 @@ async def test_fast_interactive_slack_transport_failure_returns_plain_language_f
     replay_index,
     origin,
 ):
-    from brain.systems.runs.interactive_reply import INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE
+    from brain.systems.runs.failures import (
+        UPSTREAM_FAILED_RUN_MESSAGE,
+        RunFailureCategory,
+    )
     from brain.systems.runs.recipes.fast import FastRecipe
 
     raw_error = (
@@ -506,11 +509,15 @@ async def test_fast_interactive_slack_transport_failure_returns_plain_language_f
 
     assert calls == [replay_index]
     assert result.status.value == "failed"
-    assert result.output == INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE
-    assert raw_error not in result.output
+    assert result.error == raw_error
+    assert result.failure_category == RunFailureCategory.UPSTREAM
+    assert result.final_output == UPSTREAM_FAILED_RUN_MESSAGE
+    assert result.output == ""
+    assert raw_error not in result.final_output
 
 
 async def test_fast_interactive_slack_logic_failure_is_not_rewritten_or_retried(monkeypatch):
+    from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE, RunFailureCategory
     from brain.systems.runs.recipes.fast import FastRecipe
 
     logic_error = "Final reply policy rejected an invalid response"
@@ -535,7 +542,28 @@ async def test_fast_interactive_slack_logic_failure_is_not_rewritten_or_retried(
 
     assert calls == ["invoke"]
     assert result.status.value == "failed"
-    assert result.output == logic_error
+    assert result.error == logic_error
+    assert result.failure_category == RunFailureCategory.INTERNAL
+    assert result.final_output == DEFAULT_FAILED_RUN_MESSAGE
+    assert result.output == ""
+    assert logic_error not in result.final_output
+
+
+def test_failed_run_message_rejects_unknown_category_text():
+    from brain.systems.runs.failures import (
+        DEFAULT_FAILED_RUN_MESSAGE,
+        safe_terminal_run_message,
+    )
+
+    raw_error = (
+        "peer closed connection without sending complete message body "
+        "(incomplete chunked read)"
+    )
+
+    message = safe_terminal_run_message("failed", raw_error)
+
+    assert message == DEFAULT_FAILED_RUN_MESSAGE
+    assert raw_error not in message
 
 
 async def test_fast_discussion_run_can_ack_visibly_before_spawning_child(monkeypatch):
@@ -4464,6 +4492,85 @@ async def test_runner_reports_non_headless_slack_child_final_answer_back_to_slac
     )
 
 
+async def test_runner_replaces_failed_run_artifact_with_typed_safe_message(monkeypatch):
+    from brain.systems.runs.cortex import runner
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+    raw_error = (
+        "peer closed connection without sending complete message body "
+        "(incomplete chunked read)"
+    )
+    run = SimpleNamespace(
+        id=80,
+        parent_run_id=None,
+        root_run_id=80,
+        thread_id="slack:T789:C456:1716900000.000100",
+        status="failed",
+        org_id="org-1",
+        user_id="user-1",
+        target_ref={
+            "kind": "slack_message",
+            "slack_trigger": {
+                "channel_id": "C456",
+                "channel_type": "channel",
+                "message_ts": "1716900000.000100",
+                "thread_ts": "1716900000.000100",
+                "response_target": {
+                    "channel_id": "C456",
+                    "thread_ts": "1716900000.000100",
+                },
+            },
+        },
+        metadata_={
+            "final_answer_target_surface": "slack",
+            "failure": {"category": "upstream"},
+        },
+    )
+    raw_final_artifact = SimpleNamespace(
+        id=104,
+        run_id=80,
+        artifact_type="final_answer",
+        text=raw_error,
+    )
+    calls = []
+
+    class FakeSession:
+        def __init__(self):
+            self.scalar_calls = 0
+
+        async def scalars(self, _stmt):
+            self.scalar_calls += 1
+            return _ScalarRows([raw_final_artifact])
+
+    class FakeSlackClient:
+        async def post_message(self, **kwargs):
+            calls.append(kwargs)
+            return {"ok": True, "channel": kwargs["channel"], "ts": "1716900400.000500"}
+
+        async def set_assistant_status(self, **_kwargs):
+            return {"ok": True}
+
+    async def fake_client_for_run(run_arg):
+        assert run_arg is run
+        return FakeSlackClient()
+
+    monkeypatch.setattr(runner, "_slack_client_for_run", fake_client_for_run)
+
+    session = FakeSession()
+    result = await runner._settle_slack_origin_run_async(session, run)
+
+    assert result["artifact_id"] is None
+    assert session.scalar_calls == 0
+    assert calls == [
+        {
+            "channel": "C456",
+            "text": UPSTREAM_FAILED_RUN_MESSAGE,
+            "thread_ts": "1716900000.000100",
+        }
+    ]
+    assert raw_error not in str(calls)
+
+
 async def test_runner_keeps_headless_slack_child_silent(monkeypatch):
     from brain.systems.runs.cortex import runner
 
@@ -4493,9 +4600,9 @@ async def test_runner_keeps_headless_slack_child_silent(monkeypatch):
     assert await runner._settle_slack_origin_run_async(object(), run) is None
 
 
-async def test_runner_posts_transport_fallback_for_headless_slack_monitor(monkeypatch):
+async def test_runner_posts_typed_failure_for_headless_slack_monitor(monkeypatch):
     from brain.systems.runs.cortex import runner
-    from brain.systems.runs.interactive_reply import INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
 
     run = SimpleNamespace(
         id=81,
@@ -4523,13 +4630,14 @@ async def test_runner_posts_transport_fallback_for_headless_slack_monitor(monkey
             "originating_surface": "slack",
             "final_answer_target_surface": "headless",
             "headless": True,
+            "failure": {"category": "upstream"},
         },
     )
     final_artifact = SimpleNamespace(
         id=104,
         run_id=81,
         artifact_type="final_answer",
-        text=INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE,
+        text="peer closed connection without sending complete message body (incomplete chunked read)",
     )
     earlier_progress_reply = SimpleNamespace(
         payload={
@@ -4568,11 +4676,11 @@ async def test_runner_posts_transport_fallback_for_headless_slack_monitor(monkey
     result = await runner._settle_slack_origin_run_async(session, run)
 
     assert result["surface"] == "slack"
-    assert session.scalar_calls == 1
+    assert session.scalar_calls == 0
     assert calls == [
         {
             "channel": "C456",
-            "text": INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE,
+            "text": UPSTREAM_FAILED_RUN_MESSAGE,
             "thread_ts": "1716900000.000100",
         }
     ]
