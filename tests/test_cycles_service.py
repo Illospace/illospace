@@ -14,6 +14,7 @@ from brain.systems.cycles import execution as cycle_execution
 from brain.systems.cycles import prompts as cycle_prompts
 from brain.systems.cycles import service
 from brain.systems.cycles.common import AGENT_TRIGGERED_CYCLE_ORIGIN, MANUAL_CYCLE_ORIGIN
+from brain.systems.cycles.contracts import cycle_result_contract
 from brain.app.api.routers import cycles as cycles_router
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
@@ -768,6 +769,39 @@ def test_on_demand_cycle_launch_exposes_provenance_and_local_anchor():
     assert "2026-07-15T09:02:31-04:00 (America/New_York)" in message
     assert "EVENT_TRIGGER: merged PR now requires deploy" in message
     assert "## Scheduled Cycle Launch" not in message
+
+
+def test_coordinator_launch_prompt_maps_declared_contract_to_visible_sections():
+    cycle = Cycle()
+    cycle.id = 2
+    cycle.name = "Uwear Ticket Coordinator Check-ins"
+    cycle.prompt = "Publish the chantier-primary coordinator digest."
+    cycle.timezone = "America/Toronto"
+    cycle.model_override = None
+    cycle.thinking_override = None
+
+    run = CycleRun()
+    run.id = 1364
+    run.cycle_id = cycle.id
+    run.scheduled_for = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+    run.guidance_snapshot = []
+    run.output_targets_snapshot = []
+    run.context_snapshot = {"result_contract": cycle_result_contract()}
+
+    idea = Idea()
+    idea.id = "coordinator-digest"
+    idea.title = "Uwear Ticket Coordinator Runs"
+
+    message = cycle_prompts.cycle_run_message(idea, cycle, run)
+    output_section = message.split("## Required Output Sections", 1)[1].split(
+        "## Cycle Memory", 1
+    )[0]
+
+    for key in cycle_result_contract()["required_outputs"]:
+        assert f"`{key}`" in output_section
+    assert "`record_next_action_or_blocker` -> `Next action:` or `Blocker:`" in output_section
+    assert "`short_self_review_summary` -> `Self-review summary:`" in output_section
+    assert "Example required footer:" in output_section
 
 
 @pytest.mark.asyncio
@@ -1575,25 +1609,39 @@ def test_reflex_cycle_satisfied_launch_contract_completes(
     assert session._artifacts[-1] is final_answer
 
 
-def test_coordinator_tracking_summary_does_not_add_undeclared_requirement(monkeypatch):
+def test_coordinator_posted_digest_scores_one_without_repair_or_repost(monkeypatch):
     from brain.systems.cycles import contract_gate
 
     mission = (
-        "Publish the coordinator digest and include its domain-tracking summary line, "
-        "evidence health, next action, and self-review."
+        "Publish the chantier-primary coordinator digest with exact tracker counts, "
+        "moving chantiers, loose items, and the per-person recap."
     )
     answer = (
-        "Coordinator result: the workspace digest completed and all scheduled work is current.\n"
-        "Evidence reviewed: current assignments and workspace activity were inspected.\n"
-        "Evidence health: ok; the available sources were complete.\n"
-        "Tracking summary: the coordination ledger is current.\n"
-        "Next action: review new assignments at the next scheduled run.\n"
-        "Self-review: the advertised result contract is satisfied."
+        "Chantier-primary digest: 3 active chantiers, 8 open issues, and 4 open PRs.\n"
+        "Moving chantier — coordinator reliability: the contract fix is ready for review; "
+        "Reda owns the merge and there are no blockers.\n"
+        "Loose items: none. Per-person recap: Reda reviews; Axel and JB have no queued work.\n"
+        "Evidence reviewed: workspace trackers, GitHub issues, PRs, and chantier records.\n"
+        "Evidence health: ok — every required reader completed and the Slack post succeeded.\n"
+        "Next action: Reda reviews the coordinator contract fix.\n"
+        "Self-review summary: full sweep, reconciled counts, and one complete digest posted."
+    )
+    slack_post = AgentRunEventRow(
+        id=1,
+        run_id=44,
+        root_run_id=44,
+        sequence_no=1,
+        event_type="run.tool_completed",
+        payload={
+            "tool_name": "post_slack_reply",
+            "result": {"status": "ok", "channel": "uwear-engineering"},
+        },
     )
     session, cycle_run, cycle, _ = _contract_finalization_scenario(
         cycle_id=2,
         mission=mission,
         answer=answer,
+        events=[slack_post],
     )
     repair_calls = []
 
@@ -1611,6 +1659,62 @@ def test_coordinator_tracking_summary_does_not_add_undeclared_requirement(monkey
     assert cycle_run.error is None
     assert cycle.last_status == "completed"
     assert cycle.last_error is None
+    evaluation = next(
+        item for item in session.added if item.__class__.__name__ == "CycleRunEvaluation"
+    )
+    assert evaluation.score == 1
+    verdict = evaluation.details["mission_result_contract_verdict"]
+    assert verdict["settlement_status"] == "mission_success"
+    assert verdict["missing_outputs"] == []
+    assert verdict["final_missing_outputs"] == []
+    assert verdict["side_effects_succeeded"] is True
+    assert len(session._events) == 1
+    assert len(session._artifacts) == 1
+
+
+def test_coordinator_unswept_unposted_digest_still_degrades(monkeypatch):
+    from brain.systems.cycles import contract_gate
+
+    session, cycle_run, cycle, _ = _contract_finalization_scenario(
+        cycle_id=2,
+        mission="Sweep the workspace and publish the chantier-primary coordinator digest.",
+        answer="The coordinator could not sweep the workspace or post the digest to Slack.",
+        events=[
+            AgentRunEventRow(
+                id=1,
+                run_id=44,
+                root_run_id=44,
+                sequence_no=1,
+                event_type="run.tool_failed",
+                payload={
+                    "tool_name": "post_slack_reply",
+                    "is_error": True,
+                    "error": "Slack output target unavailable",
+                },
+            )
+        ],
+    )
+
+    async def fake_repair(**kwargs):
+        return None
+
+    monkeypatch.setattr(contract_gate, "_async_repair_cycle_contract_answer", fake_repair)
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+
+    service.finalize_cycle_run_from_run(44, status="completed")
+
+    assert cycle_run.status == "degraded"
+    assert cycle_run.error.startswith("mission_contract_failed: missing")
+    assert cycle.last_status == "degraded"
+    evaluation = next(
+        item for item in session.added if item.__class__.__name__ == "CycleRunEvaluation"
+    )
+    assert evaluation.score == 0
+    verdict = evaluation.details["mission_result_contract_verdict"]
+    assert verdict["settlement_status"] == "mission_contract_failed"
+    assert verdict["side_effects_succeeded"] is False
+    assert "report_evidence_health" in verdict["final_missing_outputs"]
+    assert "short_self_review_summary" in verdict["final_missing_outputs"]
 
 
 @pytest.mark.parametrize(

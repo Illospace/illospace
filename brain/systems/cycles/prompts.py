@@ -14,6 +14,7 @@ from brain.systems.cycles.common import (
     json_list,
 )
 from brain.systems.cycles.contracts import (
+    RESULT_CONTRACT_OUTPUT_SECTIONS,
     cycle_launch_receipt,
     cycle_result_contract,
     cycle_scheduled_review_window,
@@ -158,6 +159,7 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         "- End with a short self-review summary suitable for the Cycle ledger and visible outputs.\n\n"
         "## Result Contract\n"
         f"{_json_block(result_contract)}\n\n"
+        f"{_required_output_sections(result_contract)}"
         "## Cycle Memory\n"
         f"{_json_block(cycle_memory_payload(run))}\n\n"
         "## Cycle Mission\n"
@@ -173,6 +175,35 @@ def _mission_block(prompt: str) -> str:
         f"{prompt[:_MISSION_SEED_MAX_CHARS]}\n\n"
         f"[Cycle mission truncated for launch: {omitted} chars omitted. The full mission remains "
         "authoritative - read it with manage_cycle before deviating from it.]"
+    )
+
+
+def _required_output_sections(result_contract: dict) -> str:
+    required_outputs = [
+        str(value or "").strip()
+        for value in json_list(result_contract.get("required_outputs"))
+        if str(value or "").strip()
+    ]
+    mappings = []
+    for key in required_outputs:
+        section = RESULT_CONTRACT_OUTPUT_SECTIONS.get(key)
+        if section is None:
+            section = "the contract-specific content named by this key"
+        mappings.append(f"- `{key}` -> {section}")
+    if not mappings:
+        return ""
+    mapping_lines = "\n".join(mappings)
+    return (
+        "## Required Output Sections\n"
+        "The declared `required_outputs` keys map to the visible answer sections below. "
+        "Include every mapped section on the first pass; posting the mission body to an "
+        "output target does not replace this requirement, and must not trigger a second post.\n"
+        f"{mapping_lines}\n\n"
+        "Example required footer:\n"
+        "Evidence reviewed: workspace sources swept, or explicit source gaps named.\n"
+        "Evidence health: ok — required readers completed without unresolved warnings.\n"
+        "Next action: name the single next action.\n"
+        "Self-review summary: mission sweep and delivery completed; contract fields checked.\n\n"
     )
 
 
