@@ -20,6 +20,9 @@ CENTRAL_SESSION_BRIDGES = {
 REQUIRED_ALEMBIC_BRIDGES = {
     Path("brain/platform/db/alembic/env.py"),
 }
+REQUIRED_ACTIVATION_CLI_BRIDGES = {
+    Path("brain/app/cli/activate_uwear_engineering_triage.py"),
+}
 SYNC_DB_API_NAMES = {
     "open_unit_of_work",
     "run_unit_of_work_task",
@@ -145,6 +148,7 @@ def test_production_db_references_are_async_shaped():
             if (
                 relative_path not in CENTRAL_SESSION_BRIDGES
                 and relative_path not in REQUIRED_ALEMBIC_BRIDGES
+                and relative_path not in REQUIRED_ACTIVATION_CLI_BRIDGES
                 and RUN_SYNC_REFERENCE.search(line)
             ):
                 offenders.append(f"{relative_path}:{line_number}: {line.strip()}")
@@ -185,6 +189,7 @@ def test_production_async_db_debt_metric_is_zero():
         name: payload["metrics"].get(name)
         for name in zero_target_metrics
     } == {name: 0 for name in zero_target_metrics}
+    assert payload["metrics"]["required_activation_cli_run_sync_refs"] == 2
 
 
 def test_external_agent_sync_session_bridge_is_removed():
