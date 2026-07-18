@@ -28,7 +28,13 @@ def test_default_soul_is_team_workspace_specific(monkeypatch, tmp_path):
 
     assert soul.source == "default"
     assert "an agent inside a workspace used by a team" in soul.content
-    assert "Default to concise" in soul.content
+    assert "Write visible replies for a busy human" in soul.content
+    assert "usually under 160 characters" in soul.content
+    assert "Never use a metaphor, simile" in soul.content
+    assert "Never use a long word where a short one will do" in soul.content
+    assert "Never use the passive where you can use the active" in soul.content
+    assert "jargon word" in soul.content
+    assert "Break any of these rules sooner" in soul.content
     assert "You are not the user's voice" in soul.content
     assert "connected\npersonal agent acting for that member" in soul.content
     assert "not only as a reply to the current user" in soul.content

@@ -18,7 +18,7 @@ from brain.systems.runs.recipes.shared import (
 )
 from brain.systems.runs.recipes.surface_guidance import response_surface_guidance
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
-from brain.systems.personality import agent_profile_prompt_section, soul_prompt_section
+from brain.systems.personality import agent_contract_prompt_section, soul_prompt_section
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ Runtime rules:
 - Make that opening natural to the request; do not use canned acknowledgements.
 - Keep progress updates brief and meaningful when work takes more than a moment.
 - Do not simulate a Deep coordinator graph inside Fast. If the request needs parallel workers, long verification, or durable delegation, make that boundary explicit and prepare a clean handoff.
-- Before finalizing, use the Agent Profile's Final Reply Presenter rules. Include evidence, blockers, or uncertainty only when they change what the user should do next.
+- Before finalizing, apply the Agent Contract. Let SOUL determine the voice and reply shape.
 """
 
 _FAST_HIDDEN_TOOL_NAMES = {"cortex_reply", "cortex_visual_reply"}
@@ -54,7 +54,7 @@ _THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
 def build_fast_system_prompt(prompt_context: str = "") -> str:
     sections = [
         soul_prompt_section(),
-        agent_profile_prompt_section(),
+        agent_contract_prompt_section(),
         FAST_RUNTIME_PROMPT,
     ]
     if prompt_context:

@@ -453,9 +453,9 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert "spawn_worker" in captured["spec"].system_prompt
     assert "headless=true" in captured["spec"].system_prompt
     assert "write one brief task-specific assistant sentence" in captured["spec"].system_prompt
-    assert "## Agent Profile" in captured["spec"].system_prompt
+    assert "## Agent Contract" in captured["spec"].system_prompt
     assert captured["spec"].metadata["max_parallel_tool_calls"] == 4
-    assert "Final Reply Presenter" in captured["spec"].system_prompt
+    assert "Reply Integrity" in captured["spec"].system_prompt
     assert "When the user only confirms, corrects, asks yes/no" in captured["spec"].system_prompt
     assert "config snippets, caveats, or next steps" in captured["spec"].system_prompt
     assert _stream_has(runtime.stream.messages, "run.text_delta", {"delta": "README contents", "run_id": 42})
@@ -620,8 +620,8 @@ async def test_fast_recipe_uses_the_product_prompt_pipeline(monkeypatch):
 
     assert result.status.value == "completed"
     prompt = captured["spec"].system_prompt
-    assert prompt.index("## Agent Soul") < prompt.index("## Agent Profile")
-    assert prompt.index("## Agent Profile") < prompt.index("## Fast Runtime Recipe")
+    assert prompt.index("## Agent Soul") < prompt.index("## Agent Contract")
+    assert prompt.index("## Agent Contract") < prompt.index("## Fast Runtime Recipe")
 
 
 async def test_fast_recipe_keeps_large_project_context_out_of_system_prompt(monkeypatch):
@@ -1765,8 +1765,8 @@ async def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkey
         lambda: "## Agent Soul\nUse the coordinator voice.",
     )
     monkeypatch.setattr(
-        "brain.systems.runs.recipes.deep.agent_profile_prompt_section",
-        lambda: "## Agent Profile\nUse the final reply presenter.",
+        "brain.systems.runs.recipes.deep.agent_contract_prompt_section",
+        lambda: "## Agent Contract\nPreserve reply integrity.",
     )
     captured = {}
 
@@ -1807,9 +1807,9 @@ async def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkey
     assert spec.tools == []
     assert spec.persist_session is False
     assert "## Agent Soul\nUse the coordinator voice." in spec.system_prompt
-    assert "## Agent Profile\nUse the final reply presenter." in spec.system_prompt
-    assert spec.system_prompt.index("## Agent Soul") < spec.system_prompt.index("## Agent Profile")
-    assert spec.system_prompt.index("## Agent Profile") < spec.system_prompt.index("## Deep Coordinator Mode")
+    assert "## Agent Contract\nPreserve reply integrity." in spec.system_prompt
+    assert spec.system_prompt.index("## Agent Soul") < spec.system_prompt.index("## Agent Contract")
+    assert spec.system_prompt.index("## Agent Contract") < spec.system_prompt.index("## Deep Coordinator Mode")
     assert "## Deep Coordinator Mode" in spec.system_prompt
     payload = json.loads(spec.message)
     assert payload["task"] == request_message
