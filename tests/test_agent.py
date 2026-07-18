@@ -2223,6 +2223,7 @@ class TestCortexReplyHandler:
             "manage_slack",
             "read_slack_conversation",
             "post_slack_reply",
+            "react_to_slack_message",
         ]
         with bind_agent_context({
             "execution_metadata": {

@@ -952,6 +952,7 @@ async def test_interactive_slack_transport_failure_never_persists_raw_error_as_f
     text_completed_events = [event for event in events if event.event_type == "run.text_completed"]
 
     assert failed_events[-1].payload["error"] == raw_error
+    assert failed_events[-1].payload["failure_category"] == "upstream"
     assert text_completed_events[-1].payload["text"] == UPSTREAM_FAILED_RUN_MESSAGE
     assert all(raw_error not in str(event.payload) for event in text_completed_events)
 

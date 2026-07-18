@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from brain.systems.personality.person_context import normalize_person_context
+
 SLACK_MESSAGE_ENVELOPE_KIND = "slack_message"
 SLACK_SURFACE = "slack"
 SLACK_REPLY_TOOL = "post_slack_reply"
+SLACK_REACTION_TOOL = "react_to_slack_message"
 SLACK_CHANNEL_MESSAGE_ORIGIN = "slack.channel_message"
 
 
@@ -19,8 +22,13 @@ def build_slack_work_intake_payload(
     connection_id: str | None = None,
     idempotency_key: str | None = None,
     priority: int = 0,
+    person_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     slack_payload = dict(payload or {})
+    verified_person = normalize_person_context(
+        person_context,
+        verified_user_id=str(authority_user_id),
+    )
     trigger = slack_trigger(slack_payload)
     event_type = slack_event_type(slack_payload)
     target = slack_target(trigger)
@@ -45,6 +53,7 @@ def build_slack_work_intake_payload(
         run_message = slack_channel_monitor_message(slack_payload, trigger)
     else:
         metadata["required_response_tool"] = SLACK_REPLY_TOOL
+        metadata["alternative_response_tools"] = [SLACK_REACTION_TOOL]
         metadata["final_answer_target_surface"] = SLACK_SURFACE
         run_message = slack_run_message(slack_payload, trigger)
     if inbound_event_id:
@@ -54,6 +63,9 @@ def build_slack_work_intake_payload(
             "kind": SLACK_MESSAGE_ENVELOPE_KIND,
             "connection_id": connection_id,
         }
+    if verified_person:
+        metadata["person_context"] = verified_person
+    actor_name = f"Slack user {trigger.get('slack_user_id')}"
     return {
         "source": "slack",
         "event_type": event_type,
@@ -61,7 +73,7 @@ def build_slack_work_intake_payload(
             "id": str(authority_user_id),
             "principal_type": "external_slack_user",
             "role": "member",
-            "name": f"Slack user {trigger.get('slack_user_id')}",
+            "name": actor_name,
             "org_id": str(org_id),
             "metadata": {
                 "auth_source": "slack_connection_authority",
@@ -213,6 +225,15 @@ def slack_run_message(payload: Mapping[str, Any], slack_trigger_payload: Mapping
         "Decide whether this is a simple Slack reply or work that should be delegated into Cortex/worker runs.",
         f"For simple requests, reply in Slack with {SLACK_REPLY_TOOL}.",
         (
+            f"For a purely social acknowledgement that needs no answer, use {SLACK_REACTION_TOOL} "
+            "instead of posting text. Use one fitting reaction. Do not react and reply unless "
+            "each action serves a distinct purpose."
+        ),
+        (
+            "Questions, requests, corrections, incidents, and sensitive messages need a clear "
+            f"text response with {SLACK_REPLY_TOOL}; a reaction never replaces the answer."
+        ),
+        (
             "For long-running work, make the delegation durable with manage_idea or spawn_worker, "
             f"then send a model-authored Slack update with {SLACK_REPLY_TOOL}."
         ),
@@ -252,6 +273,7 @@ def slack_channel_monitor_message(
     lines = [
         f"You are passively monitoring Slack {channel_label}. A new message was posted "
         "and has already been acknowledged with a 👀 reaction — do not acknowledge it again.",
+        "Do not use react_to_slack_message for another routine acknowledgement in this passive triage run.",
         "",
         "Classify this message and act accordingly:",
         "- Casual chatter, or discussion about an existing alert that does not itself ask for "
@@ -327,6 +349,7 @@ __all__ = [
     "SLACK_CHANNEL_MESSAGE_ORIGIN",
     "SLACK_MESSAGE_ENVELOPE_KIND",
     "SLACK_REPLY_TOOL",
+    "SLACK_REACTION_TOOL",
     "SLACK_SURFACE",
     "build_slack_work_intake_payload",
     "slack_channel_monitor_message",

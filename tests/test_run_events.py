@@ -169,6 +169,35 @@ def test_run_event_to_message_projects_non_streaming_final_text():
     assert message["profile"] == "fast"
 
 
+def test_run_failed_public_projection_replaces_raw_error_with_safe_message():
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+    raw_error = "peer closed connection without sending complete message body"
+    event = SimpleNamespace(
+        id=9,
+        run_id=42,
+        root_run_id=42,
+        sequence_no=5,
+        event_type="run.failed",
+        payload={
+            "error": raw_error,
+            "failure_category": "upstream",
+        },
+        created_at=None,
+        _agent_run_thread_id="idea-1",
+        _agent_run_profile="fast",
+        _agent_run_org_id="org-1",
+    )
+
+    message = run_event_to_message(event)
+
+    assert message["type"] == "run_completed"
+    assert message["status"] == "failed"
+    assert message["failure_category"] == "upstream"
+    assert message["error"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert raw_error not in json.dumps(message)
+
+
 def test_run_event_to_message_projects_public_tool_display_without_raw_script():
     event = SimpleNamespace(
         id=9,

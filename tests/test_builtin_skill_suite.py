@@ -74,7 +74,7 @@ def test_uwear_triage_bundle_packages_chantier_record_contract():
     contract = _uwear_triage_asset(bundle, "references/chantier-record-contract.md")
 
     assert "# Domain 1 Chantier Record Contract" in contract
-    assert "`feature`, `incident`, `quality`, or `gtm`" in contract
+    assert "`feature`, `incident`, `quality`, `gtm`, or `sunset`" in contract
     assert "`exploring`, `building`, `shipping`, `verifying`, `done`, or `paused`" in contract
     assert contract.count("```json") == 1
     assert '"parent_issue": "github:Illospace/illospace:issue:326"' in contract

@@ -726,6 +726,56 @@ async def test_fast_recipe_uses_the_product_prompt_pipeline(monkeypatch):
     assert prompt.index("## Agent Contract") < prompt.index("## Fast Runtime Recipe")
 
 
+async def test_fast_recipe_injects_verified_person_context(monkeypatch):
+    from brain.systems.runs.recipes.fast import FastRecipe
+
+    captured = {}
+
+    async def fake_invoke(spec):
+        captured["spec"] = spec
+        return SimpleNamespace(output="Noted.", success=True, error=None)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda _role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", lambda **_kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime("fast", message="Thanks, that works.")
+    runtime.request = replace(
+        runtime.request,
+        metadata={
+            "person_context": {
+                "mapping": "verified",
+                "user_id": "user-1",
+                "source": "slack_identity_link",
+                "preferences": {
+                    "address_as": "Alex",
+                    "tone": "casual",
+                    "humour": "light",
+                },
+            }
+        },
+    )
+
+    result = await FastRecipe().execute(runtime)
+
+    assert result.status.value == "completed"
+    prompt = captured["spec"].system_prompt
+    assert "## Conversation Partner" in prompt
+    assert '\"address_as\":\"Alex\"' in prompt
+    assert '\"humour\":\"light\"' in prompt
+    assert "user-1" not in prompt
+    assert prompt.index("## Conversation Partner") < prompt.index("## Agent Contract")
+
+
+def test_fast_recipe_hides_social_reaction_tool_from_passive_slack_monitor():
+    from brain.systems.runs.recipes.fast import _disabled_tool_names
+
+    runtime = _runtime("fast")
+    runtime.request = replace(runtime.request, metadata={"slack_monitor": True})
+
+    assert "react_to_slack_message" in _disabled_tool_names(runtime)
+
+
 async def test_fast_recipe_keeps_large_project_context_out_of_system_prompt(monkeypatch):
     from brain.systems.runs.recipes.fast import FastRecipe
 
@@ -1899,6 +1949,21 @@ async def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkey
     request_message = "Implement the README cleanup and verify the result."
     store = _Store()
     runtime = _runtime("deep", message=request_message, store=store)
+    runtime.request = replace(
+        runtime.request,
+        metadata={
+            "person_context": {
+                "mapping": "verified",
+                "user_id": "user-1",
+                "source": "slack_identity_link",
+                "preferences": {
+                    "address_as": "Alex",
+                    "tone": "casual",
+                    "humour": "light",
+                },
+            }
+        },
+    )
     runtime.engine = _ChildEngine(store)
 
     result = await DeepRecipe().execute(runtime)
@@ -1910,11 +1975,15 @@ async def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkey
     assert spec.persist_session is False
     assert "## Agent Soul\nUse the coordinator voice." in spec.system_prompt
     assert "## Agent Contract\nPreserve reply integrity." in spec.system_prompt
-    assert spec.system_prompt.index("## Agent Soul") < spec.system_prompt.index("## Agent Contract")
+    assert "## Conversation Partner" in spec.system_prompt
+    assert '\"address_as\":\"Alex\"' in spec.system_prompt
+    assert spec.system_prompt.index("## Agent Soul") < spec.system_prompt.index("## Conversation Partner")
+    assert spec.system_prompt.index("## Conversation Partner") < spec.system_prompt.index("## Agent Contract")
     assert spec.system_prompt.index("## Agent Contract") < spec.system_prompt.index("## Deep Coordinator Mode")
     assert "## Deep Coordinator Mode" in spec.system_prompt
     payload = json.loads(spec.message)
     assert payload["task"] == request_message
+    assert "Alex" not in spec.message
     assert "child 101 evidence" in spec.message
     assert any(event.event_type == "run.coordinator_synthesis_started" for event in store.events)
     assert any(event.event_type == "run.coordinator_synthesis_completed" for event in store.events)
@@ -4259,6 +4328,93 @@ async def test_runner_does_not_override_model_authored_slack_reply(monkeypatch):
     monkeypatch.setattr(runner, "_slack_client_for_run", fail_client_for_run)
 
     assert await runner._settle_slack_origin_run_async(FakeSession(), run) is None
+
+
+async def test_runner_does_not_post_text_after_model_authored_slack_reaction(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    run = SimpleNamespace(
+        id=781,
+        parent_run_id=None,
+        thread_id=str(uuid.uuid4()),
+        status="completed",
+        org_id="org-1",
+        user_id="user-1",
+        target_ref={
+            "kind": "slack_message",
+            "slack_trigger": {
+                "channel_id": "C456",
+                "channel_type": "channel",
+                "message_ts": "1716900000.000100",
+                "thread_ts": "1716900000.000100",
+                "response_target": {"channel_id": "C456", "thread_ts": None},
+            },
+        },
+        metadata_={"final_answer_target_surface": "slack"},
+    )
+    final_artifact = SimpleNamespace(
+        id=1021,
+        run_id=781,
+        artifact_type="final_answer",
+        text="Thanks acknowledged.",
+    )
+    reaction_event = SimpleNamespace(
+        payload={
+            "tool_name": "react_to_slack_message",
+            "args": {"emoji": "thumbsup"},
+            "result": (
+                '{"ok": true, "emoji": "thumbsup", '
+                '"counts_as_visible_response": true}'
+            ),
+        }
+    )
+
+    class FakeSession:
+        def __init__(self):
+            self.scalar_calls = 0
+
+        async def scalars(self, stmt):
+            del stmt
+            self.scalar_calls += 1
+            if self.scalar_calls == 1:
+                return _ScalarRows([final_artifact])
+            return _ScalarRows([reaction_event])
+
+    async def fail_client_for_run(_run):
+        raise AssertionError("Slack client should not post text after a successful reaction")
+
+    monkeypatch.setattr(runner, "_slack_client_for_run", fail_client_for_run)
+
+    assert await runner._settle_slack_origin_run_async(FakeSession(), run) is None
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        '{"ok": false, "error": "missing_scope"}',
+        '{"ok": true, "emoji": "thumbsup"}',
+    ],
+)
+async def test_runner_does_not_count_failed_or_unscoped_reaction_as_visible(result):
+    from brain.systems.runs.cortex import runner
+
+    event = SimpleNamespace(
+        payload={
+            "tool_name": "react_to_slack_message",
+            "result": result,
+        }
+    )
+
+    class FakeSession:
+        async def scalars(self, _stmt):
+            return _ScalarRows([event])
+
+    run = SimpleNamespace(id=782)
+
+    assert await runner._slack_visible_action_already_recorded(
+        FakeSession(),
+        run=run,
+    ) is False
 
 
 async def test_runner_reports_non_headless_slack_child_final_answer_back_to_slack(monkeypatch):

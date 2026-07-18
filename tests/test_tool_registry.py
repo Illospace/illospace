@@ -635,3 +635,45 @@ def test_tool_result_truncation_uses_registry_output_budget():
     assert len(resolved.result_text) <= budget
     assert "truncated by tool output budget" in resolved.result_text
     assert resolved.result_text.startswith("{")
+
+
+def test_slack_reaction_is_a_low_risk_audited_chat_action():
+    from brain.systems.runs.actions import build_action_manifest
+    from brain.systems.runs.tool_catalog.registry import get_tool_registration
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+
+    registration = get_tool_registration("react_to_slack_message")
+
+    assert registration is not None
+    assert registration.permission.value == "write_chat"
+    assert registration.risk_class.value == "low"
+    assert registration.side_effect_class.value == "chat_message"
+    assert registration.reversibility.value == "reversible"
+    assert registration.action_manifest is True
+    assert "react_to_slack_message" in _get_tool_handlers()
+
+    manifest = build_action_manifest(
+        "react_to_slack_message",
+        kwargs={"emoji": "thumbsup"},
+    )
+
+    assert manifest is not None
+    assert manifest.target.to_payload() == {"emoji": "thumbsup"}
+
+    targeted_manifest = build_action_manifest(
+        "react_to_slack_message",
+        kwargs={"emoji": "thumbsup"},
+        context={
+            "target_ref": {
+                "slack_trigger": {
+                    "channel_id": "C123",
+                    "message_ts": "1716900000.000100",
+                }
+            }
+        },
+    )
+    assert targeted_manifest.target.to_payload() == {
+        "emoji": "thumbsup",
+        "channel_id": "C123",
+        "message_ts": "1716900000.000100",
+    }

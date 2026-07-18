@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from brain.systems.runs.failures import coerce_failure_category, safe_terminal_run_message
 from brain.systems.runs.presentation import public_tool_event_payload
 from brain.systems.runs.visibility import run_is_headless
 
@@ -114,6 +115,11 @@ def _normalize_ui_payload(ui_type: str, source_type: str, message: dict[str, Any
     elif ui_type == "run_completed":
         if source_type == "run.failed":
             message["status"] = "failed"
+            category = coerce_failure_category(
+                message.get("failure_category") or message.get("category")
+            )
+            message["failure_category"] = category.value
+            message["error"] = safe_terminal_run_message("failed", category)
         elif source_type == "run.canceled":
             message["status"] = "canceled"
         else:

@@ -17,6 +17,12 @@ def test_default_eval_suite_covers_golden_and_chaos_cases():
         "recurring_report",
         "code_doc_update",
         "correction_truth_update",
+        "slack_casual_dm_voice",
+        "slack_social_ack_reaction",
+        "slack_team_coordination_voice",
+        "slack_incident_voice",
+        "slack_personal_failure_voice",
+        "slack_question_needs_text",
         "provider_timeout",
         "embedding_unavailable",
         "scheduler_restart",
@@ -31,9 +37,23 @@ def test_mocked_eval_suite_runs_without_live_provider():
 
     assert payload["live_provider"] is False
     assert payload["passed"] is True
-    assert payload["summary"]["total"] == 10
+    assert payload["summary"]["total"] == 16
     assert payload["summary"]["failed"] == 0
     assert all(case["observed"]["evidence"] for case in payload["results"])
+
+
+def test_conversation_golden_cases_cover_tone_and_chat_native_boundaries():
+    scenarios = {scenario.scenario_id: scenario for scenario in list_default_scenarios()}
+
+    assert scenarios["slack_casual_dm_voice"].expected["forced_joke"] is False
+    assert scenarios["slack_incident_voice"].expected["humour"] == "none"
+    assert scenarios["slack_personal_failure_voice"].expected["tone"] == "kind_direct"
+    assert scenarios["slack_social_ack_reaction"].expected == {
+        "response_tool": "react_to_slack_message",
+        "text_required": False,
+        "max_reactions": 1,
+    }
+    assert scenarios["slack_question_needs_text"].expected["reaction_is_sufficient"] is False
 
 
 def test_eval_suite_returns_machine_readable_failures():

@@ -526,7 +526,15 @@ class AsyncAgentRunEngine:
                         )
                     )
             await self.store.append_event(
-                run_event(run_id, "run.failed", {"error": safe_error}, root_run_id=row.root_run_id)
+                run_event(
+                    run_id,
+                    "run.failed",
+                    {
+                        "error": safe_error,
+                        "failure_category": category.value,
+                    },
+                    root_run_id=row.root_run_id,
+                )
             )
             return failed
 
