@@ -273,13 +273,13 @@ async def test_workspace_tool_calls_project_legacy_structured_failures_safely():
         def all(self):
             return [(event, run, None)]
 
-    class Session:
+    class StubSession:
         def execute(self, _stmt):
             return Result()
 
     payload = {"sources": {}}
     await workspace_data._query_tool_calls(
-        Session(),
+        StubSession(),
         payload,
         start=None,
         end=None,

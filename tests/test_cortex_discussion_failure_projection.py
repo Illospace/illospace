@@ -50,7 +50,7 @@ async def test_discussion_rest_projects_runs_from_the_discussion_conversation(mo
     raw_diagnostic = "legacy traceback token=discussion-secret"
     comment = _legacy_failed_comment(raw_diagnostic)
 
-    class Session:
+    class StubSession:
         async def execute(self, _stmt):
             return _Rows([_JoinedRow(comment)])
 
@@ -61,7 +61,7 @@ async def test_discussion_rest_projects_runs_from_the_discussion_conversation(mo
     }
     lookup = AsyncMock(return_value={7: failure})
     monkeypatch.setattr(_discussion, "public_failures_for_run_ids", lookup)
-    session = Session()
+    session = StubSession()
 
     payload = await _discussion._discussion_comment_payloads(
         session,
@@ -91,11 +91,11 @@ async def test_discussion_read_tool_projects_legacy_failed_comments(monkeypatch)
     raw_diagnostic = "legacy traceback token=tool-secret"
     comment = _legacy_failed_comment(raw_diagnostic)
 
-    class Session:
+    class StubSession:
         async def execute(self, _stmt):
             return _Rows([_JoinedRow(comment)])
 
-    session = Session()
+    session = StubSession()
 
     class UnitOfWork:
         async def __aenter__(self):
