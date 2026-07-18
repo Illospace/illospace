@@ -7,12 +7,45 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Mapping
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
+from brain.platform.db.models.idea import IdeaThread
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.runs.cortex.read_models import (
+    public_failures_for_run_ids,
+    public_run_linked_message,
+    run_id_from_public_message_metadata,
+)
 
 logger = logging.getLogger(__name__)
+
+_RUN_LINKED_MESSAGE_ROLES = frozenset({"illo", "assistant"})
+
+
+def _thread_message_metadata(thread: Mapping[str, object]) -> dict:
+    value = thread.get("metadata") or thread.get("metadata_")
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _thread_message_run_id(thread: Mapping[str, object]) -> int | None:
+    if str(thread.get("role") or "").strip().lower() not in _RUN_LINKED_MESSAGE_ROLES:
+        return None
+    return run_id_from_public_message_metadata(_thread_message_metadata(thread))
+
+
+def _public_thread_message_content(
+    thread: Mapping[str, object],
+    failures: Mapping[int, dict[str, str]],
+) -> object:
+    run_id = _thread_message_run_id(thread)
+    content, _metadata = public_run_linked_message(
+        thread.get("content"),
+        _thread_message_metadata(thread),
+        failures.get(run_id) if run_id is not None else None,
+    )
+    return content
 
 
 async def encode_thought_to_brain(idea_id: str, force: bool = False):
@@ -31,9 +64,30 @@ async def encode_thought_to_brain(idea_id: str, force: bool = False):
             if idea.get("encoded_at") and not force:
                 logger.debug(f"Thought {idea_id[:8]} already encoded, skipping")
                 return
-            threads = (await uow.session.execute(text(
-                "SELECT role, content FROM idea_threads WHERE idea_id = :id ORDER BY created_at"
-            ), {"id": idea_id})).mappings().all()
+            threads = (
+                await uow.session.execute(
+                    select(
+                        IdeaThread.role,
+                        IdeaThread.content,
+                        IdeaThread.metadata_,
+                        IdeaThread.message_type,
+                    )
+                    .where(IdeaThread.idea_id == idea_id)
+                    .order_by(IdeaThread.created_at)
+                )
+            ).mappings().all()
+            linked_run_ids = {
+                run_id
+                for thread in threads
+                for run_id in [_thread_message_run_id(thread)]
+                if run_id is not None
+            }
+            failures = await public_failures_for_run_ids(
+                uow.session,
+                linked_run_ids,
+                thread_id=str(idea.get("id") or idea_id),
+                org_id=str(idea.get("org_id")) if idea.get("org_id") else None,
+            )
 
         title = (idea.get("display_title") or idea.get("title", ""))[:80]
         agent_details = idea.get("agent_details") or []
@@ -43,7 +97,8 @@ async def encode_thought_to_brain(idea_id: str, force: bool = False):
         # Build thread summary for Qwen
         thread_text = f"Title: {title}\n"
         for t in threads[:20]:
-            thread_text += f"[{t['role']}]: {str(t['content'])[:200]}\n"
+            content = _public_thread_message_content(t, failures)
+            thread_text += f"[{t['role']}]: {str(content)[:200]}\n"
         if agent_details:
             thread_text += f"Agent work: {json.dumps(agent_details)[:300]}\n"
         thread_text = thread_text[:1500]

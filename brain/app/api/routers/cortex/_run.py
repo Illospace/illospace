@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from brain.systems.runs.events import run_event
+from brain.systems.runs.presentation import public_tool_event_payload
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.app.api.auth import get_current_user
@@ -133,7 +134,20 @@ async def run_tools(run_id: int, user: dict[str, Any] = Depends(get_current_user
             .order_by(AgentRunEventRow.sequence_no.asc())
         )
         rows = result.all()
-        tools = [{"event_type": row.event_type, "payload": row.payload or {}, "created_at": row.created_at.isoformat()} for row in rows]
+        tools = []
+        for row in rows:
+            payload = public_tool_event_payload(row.payload, row.event_type)
+            if row.event_type == "run.tool_failed":
+                payload.pop("error", None)
+                payload.pop("result", None)
+                payload.pop("result_preview", None)
+            tools.append(
+                {
+                    "event_type": row.event_type,
+                    "payload": payload,
+                    "created_at": row.created_at.isoformat(),
+                }
+            )
         return {"tools": tools, "count": len(tools)}
 
 

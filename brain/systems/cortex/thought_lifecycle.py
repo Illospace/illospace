@@ -653,6 +653,7 @@ def _terminal_run_target_status(run_status: str) -> str | None:
         "failed": "failed",
         "canceled": "failed",
         "cancelled": "failed",
+        "expired": "failed",
     }.get(str(run_status or "").strip().lower())
 
 

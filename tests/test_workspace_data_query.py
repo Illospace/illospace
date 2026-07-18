@@ -250,6 +250,53 @@ def test_workspace_query_scope_accepts_thread_url():
     assert scope["org_id"] == "org-1"
 
 
+async def test_workspace_tool_calls_project_legacy_structured_failures_safely():
+    from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
+    from brain.systems.runs.tool_catalog.handlers import workspace_data
+
+    raw_diagnostic = "legacy handler traceback token=workspace-tool-secret"
+    now = datetime(2026, 7, 18, tzinfo=timezone.utc)
+    event = SimpleNamespace(
+        id=11,
+        run_id=7,
+        event_type="run.tool_completed",
+        payload={
+            "tool_name": "manage_idea",
+            "args": {"action": "update"},
+            "result": json.dumps({"status": "error", "error": raw_diagnostic}),
+        },
+        created_at=now,
+    )
+    run = SimpleNamespace(thread_id="idea-1", status="completed")
+
+    class Result:
+        def all(self):
+            return [(event, run, None)]
+
+    class Session:
+        def execute(self, _stmt):
+            return Result()
+
+    payload = {"sources": {}}
+    await workspace_data._query_tool_calls(
+        Session(),
+        payload,
+        start=None,
+        end=None,
+        org_id=None,
+        user_id=None,
+        person_ids=[],
+        idea_id=None,
+        search=None,
+        limit=10,
+    )
+
+    serialized = json.dumps(payload)
+    assert raw_diagnostic not in serialized
+    assert payload["sources"]["tool_calls"][0]["result"] == DEFAULT_FAILED_RUN_MESSAGE
+    assert payload["sources"]["tool_calls"][0]["failure"]["status"] == "failed"
+
+
 async def test_workspace_data_runs_include_latest_final_answer_artifact():
     from brain.systems.runs.tool_catalog.handlers import workspace_data
 

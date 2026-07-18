@@ -148,12 +148,15 @@ class FastRecipe(BaseRunRecipe):
             user_id=runtime.request.user_id,
             org_id=runtime.request.org_id,
         )
+        pending_deltas: list[str] = []
 
         async def _activity(label: str) -> None:
             await runtime.activity(label)
 
         async def _delta(delta: str) -> None:
-            await runtime.text_delta(delta)
+            # A direct provider can emit partial text before returning a failed
+            # result. Publish only after the terminal result is known-good.
+            pending_deltas.append(str(delta))
 
         async def _guidance() -> list[str]:
             return await runtime.drain_steering()
@@ -253,6 +256,8 @@ class FastRecipe(BaseRunRecipe):
             )
         if status == RunStatus.CANCELED:
             return RunRecipeResult(error=str(result_error or "user_canceled"), status=status)
+        for delta in pending_deltas:
+            await runtime.text_delta(delta)
         return RunRecipeResult(
             output=output,
             status=status,

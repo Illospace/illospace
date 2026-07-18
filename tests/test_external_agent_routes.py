@@ -713,10 +713,121 @@ async def test_hosted_mcp_run_get_returns_tool_events_and_artifacts():
     assert response.status_code == 200
     payload = json.loads(response.json()["result"]["content"][0]["text"])
     assert payload["run"]["run_id"] == 55
-    assert payload["tool_events"][0]["payload"] == {"tool_name": "domain.inspect"}
+    assert payload["tool_events"][0]["payload"]["tool_name"] == "domain.inspect"
+    assert payload["tool_events"][0]["payload"]["display"]["status"] == "completed"
     assert payload["artifacts"][0]["text"] == "Finished."
     assert "events" not in payload
     assert session.order == []
+
+
+async def test_hosted_mcp_run_get_redacts_failed_run_diagnostics():
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+    now = datetime.now(timezone.utc)
+    raw_diagnostic = "provider traceback token=run-get-secret"
+    run = SimpleNamespace(
+        id=55,
+        created_at=now,
+        updated_at=now,
+        org_id="org-1",
+        user_id="user-1",
+        thread_id="idea-1",
+        parent_run_id=None,
+        root_run_id=None,
+        trace_id="trace-1",
+        profile="standard",
+        recipe="default",
+        status="failed",
+        input_message="Do work",
+        target_ref={},
+        workspace_ref={},
+        model_policy={},
+        metadata_={"failure": {"category": "upstream", "error": raw_diagnostic}},
+        context_summary=raw_diagnostic,
+        started_at=now,
+        paused_at=None,
+        completed_at=None,
+        failed_at=now,
+        canceled_at=None,
+    )
+    event = SimpleNamespace(
+        id=91,
+        run_id=55,
+        root_run_id=None,
+        sequence_no=3,
+        event_type="run.failed",
+        payload={"failure_category": "upstream", "error": raw_diagnostic},
+        producer="agent_runtime",
+        visibility="public",
+        created_at=now,
+    )
+    artifact = SimpleNamespace(
+        id=92,
+        run_id=55,
+        root_run_id=None,
+        artifact_type="final_answer",
+        title=raw_diagnostic,
+        payload={"error": raw_diagnostic},
+        text=raw_diagnostic,
+        uri="debug://raw",
+        visibility="public",
+        created_at=now,
+    )
+
+    class ScalarResult:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class RunSession(_AsyncSession):
+        async def get(self, model, row_id):
+            assert row_id == 55
+            return run
+
+        async def scalars(self, stmt):
+            text = str(stmt)
+            if "agent_run_events" in text:
+                return ScalarResult([event])
+            if "agent_run_artifacts" in text:
+                return ScalarResult([artifact])
+            return ScalarResult([])
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ):
+        response = await _request(
+            "POST",
+            "/mcp",
+            session=RunSession(),
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 130,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_read",
+                    "arguments": {
+                        "capability": "run.get",
+                        "arguments": {
+                            "run_id": 55,
+                            "include_events": True,
+                            "include_tool_events": False,
+                        },
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    serialized = json.dumps(payload)
+    assert raw_diagnostic not in serialized
+    assert payload["run"]["failure"]["message"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert payload["events"][0]["payload"]["failure"]["message"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert payload["artifacts"][0]["text"] == UPSTREAM_FAILED_RUN_MESSAGE
 
 
 async def test_hosted_mcp_cycle_manage_create_commits_and_publishes_change():

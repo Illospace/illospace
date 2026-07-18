@@ -30,7 +30,9 @@ from brain.platform.db.models.inbound import (
 )
 from brain.platform.db.models.org import Org, User
 from brain.systems.external_agents import service as external_agents
+from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound import service as inbound_service
+from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
 from brain.systems.runs.execution_context import AgentExecutionContext, bind_agent_context
 from brain.systems.runs.tool_catalog.handlers.inbound import _handle_manage_inbound
 from brain.systems.user_domains.service import AsyncDomainService
@@ -388,6 +390,89 @@ async def test_illo_can_list_attention_events_for_recovery(
     assert {"value": inbound_service.STATUS_REVIEW_REQUIRED, "count": 1} in attention["summary"]["statuses"]
     assert {"value": inbound_service.STATUS_QUARANTINED, "count": 1} in attention["summary"]["statuses"]
     assert {"value": inbound_service.STATUS_FAILED, "count": 1} in attention["summary"]["statuses"]
+
+
+async def test_failed_inbound_serializers_redact_legacy_run_diagnostics():
+    raw_diagnostic = "provider rejected token=super-secret"
+    legacy_outcome = {
+        "triage": {
+            "status": "failed",
+            "run_status": "failed",
+            "final_answer": raw_diagnostic,
+            "result": {"status": "failed", "final_answer": raw_diagnostic},
+        }
+    }
+    event = InboundEventRow(
+        org_id=ORG_ID,
+        connection_id="33333333-3333-4333-8333-333333333333",
+        kind="signal",
+        origin="custom.failed_run",
+        status=inbound_service.STATUS_FAILED,
+        action_result=legacy_outcome,
+        error=raw_diagnostic,
+    )
+    receipt = InboundDecisionReceiptRow(
+        event_id="44444444-4444-4444-8444-444444444444",
+        org_id=ORG_ID,
+        connection_id="33333333-3333-4333-8333-333333333333",
+        status=inbound_service.STATUS_FAILED,
+        outcome=legacy_outcome,
+        tool_use={
+            "status": "failed",
+            "final_answer": raw_diagnostic,
+            "error": raw_diagnostic,
+        },
+        reasoning_summary=raw_diagnostic,
+    )
+
+    event_payload = inbound_admin.serialize_event(event)
+    receipt_payload = inbound_admin.serialize_receipt(receipt)
+    failure = {
+        "status": "failed",
+        "category": "internal",
+        "message": DEFAULT_FAILED_RUN_MESSAGE,
+    }
+
+    assert event_payload["failure"] == failure
+    assert event_payload["error"] == DEFAULT_FAILED_RUN_MESSAGE
+    assert event_payload["action_result"]["triage"]["failure"] == failure
+    assert receipt_payload["failure"] == failure
+    assert receipt_payload["outcome"]["triage"]["result"]["failure"] == failure
+    assert receipt_payload["tool_use"] == {"status": "failed", "failure": failure}
+    assert receipt_payload["reasoning_summary"] is None
+    assert raw_diagnostic not in json.dumps(event_payload)
+    assert raw_diagnostic not in json.dumps(receipt_payload)
+
+
+async def test_generic_failed_inbound_serializers_preserve_non_run_contract():
+    diagnostic = "projection policy rejected this payload"
+    event = InboundEventRow(
+        org_id=ORG_ID,
+        connection_id="33333333-3333-4333-8333-333333333333",
+        kind="signal",
+        origin="custom.projection_failure",
+        status=inbound_service.STATUS_FAILED,
+        action_result={"status": "failed", "reason": "policy_rejected"},
+        error=diagnostic,
+    )
+    receipt = InboundDecisionReceiptRow(
+        event_id="44444444-4444-4444-8444-444444444444",
+        org_id=ORG_ID,
+        connection_id="33333333-3333-4333-8333-333333333333",
+        status=inbound_service.STATUS_FAILED,
+        outcome={"status": "failed", "reason": "policy_rejected"},
+        reasoning_summary=diagnostic,
+    )
+
+    event_payload = inbound_admin.serialize_event(event)
+    receipt_payload = inbound_admin.serialize_receipt(receipt)
+
+    assert "failure" not in event_payload
+    assert event_payload["error"] == diagnostic
+    assert event_payload["action_result"] == {"status": "failed", "reason": "policy_rejected"}
+    assert "failure" not in receipt_payload
+    assert receipt_payload["outcome"] == {"status": "failed", "reason": "policy_rejected"}
+    assert receipt_payload["reasoning_summary"] == diagnostic
 
 
 async def test_dry_run_uses_same_projection_order_as_runtime(

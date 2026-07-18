@@ -436,6 +436,11 @@ async def _handle_read_thread_discussion(
     from brain.platform.db.models.idea import ThreadDiscussionComment
     from brain.platform.db.models.org import User
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.systems.runs.cortex.read_models import (
+        public_failures_for_run_ids,
+        public_run_linked_message,
+        run_id_from_public_message_metadata,
+    )
 
     target_thread_id = str(thread_id or _current_thread_id() or "").strip()
     if not target_thread_id:
@@ -455,10 +460,38 @@ async def _handle_read_thread_discussion(
             .limit(capped_limit)
         )
         rows = list((await uow.session.execute(stmt)).all())
+        run_ids = {
+            run_id
+            for run_id in (
+                (
+                    run_id_from_public_message_metadata(row[0].metadata_)
+                    if str(row[0].author_kind or "").lower() == "illo"
+                    else None
+                )
+                for row in rows
+            )
+            if run_id is not None
+        }
+        failures = await public_failures_for_run_ids(
+            uow.session,
+            run_ids,
+            thread_id=f"{THREAD_DISCUSSION_CONVERSATION_PREFIX}{target_thread_id}",
+            org_id=org_id,
+        )
 
     comments = []
     for row in reversed(rows):
         comment = row[0]
+        run_id = (
+            run_id_from_public_message_metadata(comment.metadata_)
+            if str(comment.author_kind or "").lower() == "illo"
+            else None
+        )
+        body, metadata = public_run_linked_message(
+            comment.body,
+            comment.metadata_,
+            failures.get(run_id),
+        )
         comments.append(
             {
                 "id": comment.id,
@@ -467,9 +500,9 @@ async def _handle_read_thread_discussion(
                 "author_user_id": str(comment.author_user_id) if comment.author_user_id else None,
                 "author_name": row.author_name,
                 "author_color": row.author_color,
-                "body": comment.body,
+                "body": body,
                 "attachments": comment.attachments or [],
-                "metadata": comment.metadata_ or {},
+                "metadata": metadata,
                 "created_at": comment.created_at.isoformat() if comment.created_at else None,
             }
         )

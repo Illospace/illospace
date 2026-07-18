@@ -344,6 +344,34 @@ class AsyncRunToolExecutor:
                 root_run_id=root_run_id,
                 collector=collector,
             )
+        if failure:
+            await self._append_event(
+                run_event(
+                    run_id,
+                    "run.tool_failed",
+                    _event_payload(tool.name, safe_args, error=failure),
+                    root_run_id=root_run_id,
+                )
+            )
+            record = ToolRecord(
+                tool_name=tool.name,
+                args=safe_args,
+                status="failed",
+                artifact_type=artifact_type,
+                side_effect=side_effect,
+                error=failure[:1000],
+            )
+            if collector is not None:
+                collector.append(record)
+            await self._append_artifact(
+                run_id,
+                root_run_id=root_run_id,
+                artifact_type=artifact_type,
+                title=f"{tool.name} failed",
+                payload=record.to_payload(),
+                text=failure[:4000],
+            )
+            return result
         safe_result = redact_tool_result(tool.name, result)
         await self._append_event(
             run_event(

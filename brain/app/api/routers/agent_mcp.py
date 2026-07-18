@@ -52,7 +52,13 @@ from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.results import read_inbound_submission_result
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
-from brain.systems.runs.cortex.read_models import run_stream_payload
+from brain.systems.runs.cortex.read_models import (
+    public_failed_run_artifact,
+    public_failure_for_run,
+    public_run_debug_event_payload,
+    run_stream_payload,
+)
+from brain.systems.runs.failures import public_run_failure
 
 
 router = APIRouter(tags=["agent-mcp"], dependencies=[Depends(rate_limit)])
@@ -749,22 +755,28 @@ async def _validate_cycle_target_idea(
         raise ValueError("target_idea_id must belong to the current workspace")
 
 
-def _serialize_run_event(event: AgentRunEventRow) -> dict[str, Any]:
+def _serialize_run_event(
+    event: AgentRunEventRow,
+    failure: dict[str, str] | None = None,
+) -> dict[str, Any]:
     return {
         "id": event.id,
         "run_id": event.run_id,
         "root_run_id": event.root_run_id,
         "sequence_no": event.sequence_no,
         "event_type": event.event_type,
-        "payload": event.payload or {},
+        "payload": public_run_debug_event_payload(event, failure),
         "producer": event.producer,
         "visibility": event.visibility,
         "created_at": _iso(event.created_at),
     }
 
 
-def _serialize_run_artifact(artifact: AgentRunArtifactRow) -> dict[str, Any]:
-    return {
+def _serialize_run_artifact(
+    artifact: AgentRunArtifactRow,
+    failure: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    return public_failed_run_artifact({
         "id": artifact.id,
         "run_id": artifact.run_id,
         "root_run_id": artifact.root_run_id,
@@ -775,7 +787,7 @@ def _serialize_run_artifact(artifact: AgentRunArtifactRow) -> dict[str, Any]:
         "uri": artifact.uri,
         "visibility": artifact.visibility,
         "created_at": _iso(artifact.created_at),
-    }
+    }, failure)
 
 
 async def _read_run_get(
@@ -790,8 +802,25 @@ async def _read_run_get(
     if run is None or str(run.org_id or "") != str(principal.org_id):
         raise ValueError("Run not found")
 
+    failure_events = list(
+        (
+            await db.scalars(
+                select(AgentRunEventRow)
+                .where(
+                    AgentRunEventRow.run_id == run.id,
+                    AgentRunEventRow.event_type == "run.failed",
+                )
+                .order_by(AgentRunEventRow.sequence_no.desc(), AgentRunEventRow.id.desc())
+                .limit(1)
+            )
+        ).all()
+    )
+    failure = public_failure_for_run(run, failure_events)
     limit = _bounded_limit(arguments.get("limit"), default=50, maximum=200)
-    payload: dict[str, Any] = {"run": run_stream_payload(run)}
+    run_payload = run_stream_payload(run)
+    if failure is not None:
+        run_payload["failure"] = failure
+    payload: dict[str, Any] = {"run": run_payload}
     event_types = _clean_string_list(arguments.get("event_types"))
     include_events = bool(arguments.get("include_events", False))
     include_tool_events = bool(arguments.get("include_tool_events", True))
@@ -804,7 +833,10 @@ async def _read_run_get(
         )
         if event_types:
             event_stmt = event_stmt.where(AgentRunEventRow.event_type.in_(event_types))
-        payload["events"] = [_serialize_run_event(event) for event in (await db.scalars(event_stmt)).all()]
+        payload["events"] = [
+            _serialize_run_event(event, failure)
+            for event in (await db.scalars(event_stmt)).all()
+        ]
     if include_tool_events:
         tool_stmt = (
             select(AgentRunEventRow)
@@ -815,7 +847,10 @@ async def _read_run_get(
             .order_by(AgentRunEventRow.sequence_no.asc(), AgentRunEventRow.id.asc())
             .limit(limit)
         )
-        payload["tool_events"] = [_serialize_run_event(event) for event in (await db.scalars(tool_stmt)).all()]
+        payload["tool_events"] = [
+            _serialize_run_event(event, failure)
+            for event in (await db.scalars(tool_stmt)).all()
+        ]
     if bool(arguments.get("include_artifacts", True)):
         artifact_stmt = (
             select(AgentRunArtifactRow)
@@ -824,7 +859,7 @@ async def _read_run_get(
             .limit(limit)
         )
         payload["artifacts"] = [
-            _serialize_run_artifact(artifact)
+            _serialize_run_artifact(artifact, failure)
             for artifact in (await db.scalars(artifact_stmt)).all()
         ]
     return payload
@@ -1276,7 +1311,18 @@ async def _tool_get_result(
     )
     if result.mutated_inbound:
         await db.commit()
-    return result.payload
+    payload = result.payload
+    for candidate in (
+        payload.get("event"),
+        payload.get("latest_receipt"),
+    ):
+        failure = dict(candidate.get("failure") or {}) if isinstance(candidate, dict) else {}
+        if not failure:
+            continue
+        public_failure = public_run_failure(failure.get("status"), failure.get("category"))
+        if public_failure is not None:
+            return {**payload, "failure": public_failure}
+    return payload
 
 
 async def _add_thread_trigger_result_if_needed(

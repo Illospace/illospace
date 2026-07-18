@@ -986,6 +986,147 @@ def test_unified_stream_synthesizes_visible_final_answer_from_run_artifact():
     assert reply["metadata"]["synthetic_from_run_artifact"] is True
 
 
+def test_unified_stream_projects_legacy_failed_artifact_and_persisted_message_safely():
+    from brain.app.api.routers.cortex._idea_ops import (
+        _append_final_answer_messages,
+        _project_failed_run_message,
+        _project_run_artifacts,
+    )
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+    raw_diagnostic = "peer closed connection; password=swordfish"
+    failure = {
+        "status": "failed",
+        "category": "upstream",
+        "message": UPSTREAM_FAILED_RUN_MESSAGE,
+    }
+    run_item = {
+        "type": "run",
+        "id": "7",
+        "run_id": 7,
+        "profile": "fast",
+        "status": "failed",
+        "failure": failure,
+        "artifacts": _project_run_artifacts(
+            [
+                {
+                    "id": 3,
+                    "artifact_type": "final_answer",
+                    "title": raw_diagnostic,
+                    "payload": {"error": raw_diagnostic},
+                    "text": raw_diagnostic,
+                    "uri": f"internal://{raw_diagnostic}",
+                }
+            ],
+            failure,
+        ),
+    }
+    items = [run_item]
+
+    _append_final_answer_messages(items)
+
+    assert run_item["artifacts"] == [
+        {
+            "id": 3,
+            "artifact_type": "final_answer",
+            "title": None,
+            "payload": {"failure": failure},
+            "text": UPSTREAM_FAILED_RUN_MESSAGE,
+            "uri": None,
+        }
+    ]
+    assert items[-1]["content"] == UPSTREAM_FAILED_RUN_MESSAGE
+
+    persisted = {
+        "type": "message",
+        "content": raw_diagnostic,
+        "metadata": {"run_id": 7, "final_answer": raw_diagnostic},
+    }
+    _project_failed_run_message(persisted, failure)
+    assert persisted["content"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert persisted["metadata"] == {"run_id": 7, "failure": failure}
+    assert raw_diagnostic not in json.dumps([items, persisted])
+
+
+@pytest.mark.asyncio
+async def test_legacy_failure_lookup_is_scoped_to_current_thread_and_org():
+    from brain.systems.runs.cortex.read_models import public_failures_for_run_ids
+
+    org_id = "11111111-1111-4111-8111-111111111111"
+    session = SimpleNamespace(
+        scalars=AsyncMock(return_value=SimpleNamespace(all=lambda: [])),
+    )
+
+    failures = await public_failures_for_run_ids(
+        session,
+        {7},
+        thread_id="idea-1",
+        org_id=org_id,
+    )
+
+    assert failures == {}
+    stmt = session.scalars.await_args.args[0]
+    compiled = stmt.compile()
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "agent_runs.id IN (7)" in sql
+    assert "agent_runs.thread_id = 'idea-1'" in sql
+    assert compiled.params["org_id_1"] == org_id
+
+
+def test_legacy_thread_and_discussion_projection_only_rewrites_trusted_illo_rows():
+    from brain.app.api.routers.cortex._discussion import _comment_payload
+    from brain.app.api.routers.cortex._idea_ops import _message_run_id
+    from brain.app.api.routers.cortex._ideas import _thread_message_read_payload
+    from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
+
+    raw_diagnostic = "legacy failure token=super-secret"
+    failure = {
+        "status": "failed",
+        "category": "internal",
+        "message": DEFAULT_FAILED_RUN_MESSAGE,
+    }
+    user_item = {
+        "type": "message",
+        "role": "user",
+        "content": raw_diagnostic,
+        "metadata": {"run_id": 999},
+    }
+    assert _message_run_id(user_item) is None
+
+    now = datetime(2026, 5, 3, tzinfo=timezone.utc)
+    timeline_message = SimpleNamespace(
+        id=1,
+        idea_id="idea-1",
+        role="illo",
+        content=raw_diagnostic,
+        attachments=[],
+        metadata_={"run_id": 7, "final_answer": raw_diagnostic},
+        user_id=None,
+        created_at=now,
+    )
+    timeline_payload = _thread_message_read_payload(timeline_message, failure)
+    assert timeline_payload["content"] == DEFAULT_FAILED_RUN_MESSAGE
+    assert raw_diagnostic not in json.dumps(timeline_payload, default=str)
+
+    discussion_comment = SimpleNamespace(
+        id=2,
+        thread_id="idea-1",
+        org_id="org-1",
+        author_user_id=None,
+        author_kind="illo",
+        body=raw_diagnostic,
+        attachments=[],
+        metadata_={"created_by_run_id": 7, "final_answer": raw_diagnostic},
+        created_at=now,
+    )
+    discussion_payload = _comment_payload(discussion_comment, failure=failure)
+    assert discussion_payload["body"] == DEFAULT_FAILED_RUN_MESSAGE
+    assert raw_diagnostic not in json.dumps(discussion_payload, default=str)
+
+    user_comment = SimpleNamespace(**{**discussion_comment.__dict__, "author_kind": "user"})
+    assert _comment_payload(user_comment)["body"] == raw_diagnostic
+
+
 def test_unified_stream_does_not_duplicate_existing_run_reply():
     from brain.app.api.routers.cortex._idea_ops import _append_final_answer_messages
 
@@ -1184,6 +1325,335 @@ def test_run_events_public_activity_trace_hides_raw_failure_diagnostics():
 
     assert item["activity_trace"][0]["error"] == UPSTREAM_FAILED_RUN_MESSAGE
     assert raw_error not in json.dumps(item)
+
+
+def test_failed_run_activity_projection_drops_earlier_diagnostic_fields():
+    from brain.app.api.routers.cortex._idea_ops import _apply_run_events_to_item
+    from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
+
+    raw_error = "materializer failed token=activity-secret"
+    failure = {
+        "status": "failed",
+        "category": "internal",
+        "message": DEFAULT_FAILED_RUN_MESSAGE,
+    }
+    item = {"type": "run", "id": "7", "run_id": 7, "status": "failed"}
+    events = [
+        SimpleNamespace(
+            event_type="run.activity",
+            payload={"label": "Project context unavailable", "errors": [raw_error]},
+            created_at=datetime(2026, 5, 3, tzinfo=timezone.utc),
+            sequence_no=1,
+        )
+    ]
+
+    _apply_run_events_to_item(item, events, failure)
+
+    assert item["activity_trace"][0]["activity"] == "Project context unavailable"
+    assert raw_error not in json.dumps(item)
+
+
+@pytest.mark.asyncio
+async def test_run_debug_projects_failed_run_diagnostics_as_typed_safe_failure():
+    from brain.systems.runs.cortex.read_models import serialize_run_debug_async
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+    raw_diagnostic = "peer closed connection; bearer=super-secret"
+    failed_at = datetime(2026, 5, 3, 22, 0, 5, tzinfo=timezone.utc)
+    run = SimpleNamespace(
+        id=7,
+        created_at=failed_at,
+        thread_id="idea-1",
+        org_id="org-1",
+        user_id="user-1",
+        parent_run_id=None,
+        root_run_id=7,
+        trace_id="trace-1",
+        profile="fast",
+        recipe="fast",
+        status="failed",
+        input_message="Do the work",
+        target_ref={},
+        workspace_ref={},
+        model_policy={},
+        metadata_={"failure": {"category": "upstream", "error": raw_diagnostic}},
+        updated_at=failed_at,
+        started_at=failed_at,
+        paused_at=None,
+        completed_at=None,
+        failed_at=failed_at,
+        canceled_at=None,
+    )
+    events = [
+        SimpleNamespace(
+            id=1,
+            run_id=7,
+            sequence_no=1,
+            event_type="run.status_changed",
+            payload={"from_status": "running", "to_status": "failed", "reason": raw_diagnostic},
+            visibility="public",
+            created_at=failed_at,
+        ),
+        SimpleNamespace(
+            id=2,
+            run_id=7,
+            sequence_no=2,
+            event_type="run.failed",
+            payload={"error": raw_diagnostic, "failure_category": "upstream"},
+            visibility="public",
+            created_at=failed_at,
+        ),
+    ]
+    artifacts = [
+        SimpleNamespace(
+            id=3,
+            run_id=7,
+            artifact_type="final_answer",
+            title="Final answer",
+            payload={"error": raw_diagnostic},
+            text=raw_diagnostic,
+            uri=None,
+            visibility="public",
+            created_at=failed_at,
+        )
+    ]
+
+    class _Rows:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _Session:
+        def __init__(self):
+            self._results = iter((events, artifacts))
+
+        async def get(self, _model, run_id):
+            return run if run_id == run.id else None
+
+        async def scalars(self, _stmt):
+            return _Rows(next(self._results))
+
+    class _UnitOfWork:
+        async def __aenter__(self):
+            self.session = _Session()
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    payload = await serialize_run_debug_async(7, uow_factory=_UnitOfWork)
+    failure = {
+        "status": "failed",
+        "category": "upstream",
+        "message": UPSTREAM_FAILED_RUN_MESSAGE,
+    }
+
+    assert payload is not None
+    assert payload["run"]["failure"] == failure
+    assert payload["events"][0]["payload"]["failure"] == failure
+    assert payload["events"][1]["payload"] == {"failure": failure}
+    assert payload["artifacts"][0]["payload"] == {"failure": failure}
+    assert payload["artifacts"][0]["text"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert raw_diagnostic not in json.dumps(payload)
+
+
+def test_completed_parent_debug_sanitizes_failed_child_event_and_artifact():
+    from brain.systems.runs.cortex.read_models import (
+        public_failed_run_artifact,
+        public_run_debug_event_payload,
+    )
+
+    raw_diagnostic = "worker failed bearer=super-secret"
+    event = SimpleNamespace(
+        event_type="run.tool_failed",
+        payload={
+            "tool_name": "run_script",
+            "args": {"description": "Check build", "script": raw_diagnostic},
+            "error": raw_diagnostic,
+            "result": raw_diagnostic,
+        },
+    )
+    event_payload = public_run_debug_event_payload(event, None)
+    artifact = public_failed_run_artifact(
+        {
+            "artifact_type": "worker_result",
+            "text": raw_diagnostic,
+            "payload": {"status": "failed", "error": raw_diagnostic},
+            "uri": f"internal://{raw_diagnostic}",
+        },
+        None,
+    )
+
+    assert event_payload["tool_name"] == "run_script"
+    assert event_payload["display"]["status"] == "failed"
+    assert event_payload["failure"]["status"] == "failed"
+    assert artifact["payload"]["failure"]["status"] == "failed"
+    assert artifact["text"] is None
+    assert artifact["uri"] is None
+    assert raw_diagnostic not in json.dumps([event_payload, artifact])
+
+
+def test_completed_run_debug_sanitizes_legacy_completed_tool_error_result():
+    from brain.systems.runs.cortex.read_models import public_run_debug_event_payload
+    from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
+
+    raw_diagnostic = "provider exploded; password=swordfish"
+    event = SimpleNamespace(
+        event_type="run.tool_completed",
+        payload={
+            "tool_name": "manage_idea",
+            "result": {"status": "error", "error": raw_diagnostic},
+        },
+    )
+
+    payload = public_run_debug_event_payload(event, None)
+
+    assert payload["display"]["status"] == "failed"
+    assert payload["failure"]["message"] == DEFAULT_FAILED_RUN_MESSAGE
+    assert raw_diagnostic not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_run_tools_hides_raw_failed_tool_diagnostics(monkeypatch):
+    from brain.app.api.routers.cortex import _run
+
+    raw_diagnostic = "subprocess failed with bearer=super-secret"
+    failed_at = datetime(2026, 5, 3, 22, 0, 5, tzinfo=timezone.utc)
+    tool_event = SimpleNamespace(
+        event_type="run.tool_failed",
+        payload={
+            "tool_name": "run_script",
+            "args": {"description": "Check the build", "script": "use super-secret"},
+            "error": raw_diagnostic,
+            "result": raw_diagnostic,
+        },
+        created_at=failed_at,
+    )
+
+    class _Rows:
+        def all(self):
+            return [tool_event]
+
+    class _Session:
+        async def scalars(self, _stmt):
+            return _Rows()
+
+    class _UnitOfWork:
+        async def __aenter__(self):
+            self.session = _Session()
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    monkeypatch.setattr(_run, "UnitOfWork", _UnitOfWork)
+    monkeypatch.setattr(_run, "_require_run_for_user", AsyncMock())
+
+    payload = await _run.run_tools(7, user={"org_id": "org-1"})
+
+    assert payload["count"] == 1
+    assert payload["tools"][0]["payload"]["display"]["status"] == "failed"
+    assert "error" not in payload["tools"][0]["payload"]
+    assert "result_preview" not in payload["tools"][0]["payload"]
+    assert raw_diagnostic not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_activity_timeline_projects_only_trusted_legacy_failed_run_messages(monkeypatch):
+    from brain.app.api.routers.cortex import _analytics
+    from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
+
+    raw_diagnostic = "legacy traceback bearer=activity-timeline-secret"
+    created_at = datetime(2026, 5, 3, 20, 0, tzinfo=timezone.utc)
+    thread_rows = [
+        SimpleNamespace(
+            role="illo",
+            content=raw_diagnostic,
+            metadata_={"created_by_run_id": 7, "error": raw_diagnostic},
+            created_at=datetime(2026, 5, 3, 20, 1, tzinfo=timezone.utc),
+        ),
+        SimpleNamespace(
+            role="user",
+            content="Keep this user-authored message",
+            metadata_={"run_id": 999},
+            created_at=datetime(2026, 5, 3, 20, 2, tzinfo=timezone.utc),
+        ),
+        SimpleNamespace(
+            role="assistant",
+            content="Completed assistant answer",
+            metadata_={"run_id": 8},
+            created_at=datetime(2026, 5, 3, 20, 3, tzinfo=timezone.utc),
+        ),
+    ]
+
+    class _Rows:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _Session:
+        def __init__(self):
+            self._scalar_results = iter([_Rows([]), _Rows(thread_rows)])
+
+        async def get(self, _model, _idea_id):
+            return SimpleNamespace(
+                id="idea-1",
+                org_id="org-1",
+                created_at=created_at,
+            )
+
+        async def scalars(self, _stmt):
+            return next(self._scalar_results)
+
+        async def execute(self, _stmt):
+            return _Rows([])
+
+    session = _Session()
+    idea = SimpleNamespace(
+        id="idea-1",
+        org_id="org-1",
+        created_at=created_at,
+    )
+
+    class _UnitOfWork:
+        async def __aenter__(self):
+            self.session = session
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    failure = {
+        "status": "failed",
+        "category": "internal",
+        "message": DEFAULT_FAILED_RUN_MESSAGE,
+    }
+    failure_lookup = AsyncMock(return_value={7: failure})
+    monkeypatch.setattr(_analytics, "UnitOfWork", _UnitOfWork)
+    require_idea = AsyncMock(return_value=idea)
+    monkeypatch.setattr(_analytics, "_a_require_idea_for_user", require_idea)
+    monkeypatch.setattr(_analytics, "public_failures_for_run_ids", failure_lookup)
+
+    payload = await _analytics.activity_timeline("idea-1", user={"org_id": "org-1"})
+
+    failure_lookup.assert_awaited_once_with(
+        session,
+        {7, 8},
+        thread_id="idea-1",
+        org_id="org-1",
+    )
+    require_idea.assert_awaited_once_with(session, "idea-1", {"org_id": "org-1"})
+    labels = [event["label"] for event in payload if event["type"] == "thread_message"]
+    assert labels == [
+        f'Illo replied: "{DEFAULT_FAILED_RUN_MESSAGE}"',
+        'You replied: "Keep this user-authored message"',
+        'Assistant replied: "Completed assistant answer"',
+    ]
+    assert raw_diagnostic not in json.dumps(payload)
 
 
 def test_unified_stream_run_work_events_query_is_bounded():

@@ -333,6 +333,103 @@ async def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
     assert "not copied" not in str(snapshot)
 
 
+@pytest.mark.asyncio
+async def test_failed_run_trace_snapshot_never_replays_raw_diagnostics():
+    from brain.systems.runs.cortex.recording import build_agent_trace_snapshot_async
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+    raw_diagnostic = "provider exploded bearer=trace-secret"
+    now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+    run = _run(
+        status="failed",
+        completed_at=None,
+        failed_at=now,
+        context_summary=raw_diagnostic,
+        metadata_={"failure": {"category": "upstream", "error": raw_diagnostic}},
+    )
+    message = SimpleNamespace(
+        id=9,
+        idea_id="idea-1",
+        role="illo",
+        content=raw_diagnostic,
+        attachments=[],
+        metadata_={"run_id": 42, "error": raw_diagnostic},
+        message_type="message",
+        created_at=now,
+    )
+    event = SimpleNamespace(
+        id=99,
+        run_id=42,
+        root_run_id=42,
+        sequence_no=3,
+        event_type="run.failed",
+        payload={"failure_category": "upstream", "error": raw_diagnostic},
+        producer="agent_runtime",
+        visibility="public",
+        created_at=now,
+    )
+    artifact = SimpleNamespace(
+        id=100,
+        run_id=42,
+        root_run_id=42,
+        artifact_type="final_answer",
+        title=raw_diagnostic,
+        payload={"error": raw_diagnostic},
+        text=raw_diagnostic,
+        uri="debug://raw-diagnostic",
+        visibility="public",
+        created_at=now,
+    )
+    session = AsyncMock()
+    session.scalars.side_effect = [
+        _result([42]),
+        _result([run]),
+        _result([message]),
+        _result([event]),
+        _result([artifact]),
+        _result([]),
+        _result([]),
+    ]
+
+    snapshot = await build_agent_trace_snapshot_async(session, run)
+    serialized = json.dumps(snapshot)
+
+    assert raw_diagnostic not in serialized
+    assert snapshot["run"]["failure"]["message"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert snapshot["thread"]["messages"][0]["content"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert snapshot["events"][0]["payload"]["failure"]["message"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert snapshot["artifacts"][0]["text"] == UPSTREAM_FAILED_RUN_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_cycle_trace_state_redacts_stored_and_query_diagnostics():
+    from brain.systems.runs.cortex.recording import (
+        _cycle_payload,
+        _cycle_run_payload,
+        _trace_cycle_state_async,
+    )
+
+    raw_diagnostic = "scheduler database error token=cycle-secret"
+    cycle_payload = _cycle_payload(_cycle(last_status="failed", last_error=raw_diagnostic))
+    cycle_run_payload = _cycle_run_payload(_cycle_run(status="failed", error=raw_diagnostic))
+
+    class FailingSession:
+        async def scalars(self, _stmt):
+            raise RuntimeError(raw_diagnostic)
+
+    failed_state = await _trace_cycle_state_async(
+        FailingSession(),
+        idea_id="idea-1",
+        runs=[_run(metadata_={"cycle_id": 7})],
+    )
+    serialized = json.dumps([cycle_payload, cycle_run_payload, failed_state])
+
+    assert raw_diagnostic not in serialized
+    assert cycle_payload["last_error"] == "The last scheduled run did not complete."
+    assert cycle_run_payload["error"] == "The scheduled run did not complete."
+    assert failed_state["error"] == "Cycle diagnostics were unavailable."
+
+
 def test_agent_trace_export_zip_contains_shareable_trace_files():
     from brain.systems.runs.cortex.recording import (
         agent_trace_export_filename,

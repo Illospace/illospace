@@ -7,6 +7,13 @@ import json
 
 from brain.systems.runs.tool_catalog.handlers.common import *
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
+from brain.systems.runs.failures import failure_category_for_error, public_run_failure
+
+
+def _safe_failure_message(diagnostic: object) -> str:
+    category = failure_category_for_error(diagnostic)
+    failure = public_run_failure("failed", category)
+    return str((failure or {}).get("message") or "")
 
 
 def _normalize_reply_whitespace(content: str) -> str:
@@ -53,14 +60,18 @@ def _build_final_reply_check_context() -> str:
                 "artifacts": len(evidence.get("artifacts") or []),
                 "uncertainty": len(unresolved),
             }
-            summary = (worker_result.output or worker_result.error or "").strip().replace("\n", " ")
+            if worker_result.success:
+                summary = str(worker_result.output or "").strip().replace("\n", " ")
+            else:
+                diagnostic = getattr(worker_result, "error", None) or getattr(worker_result, "output", None)
+                summary = _safe_failure_message(diagnostic)
             lines.append(
                 f"Worker {idx} [{worker_result.skill_name or 'unknown'} / {status}]: "
                 f"trust={worker_result.trust_status or 'unknown'}; "
                 f"evidence_counts={evidence_counts}; "
                 f"summary={summary[:350] or '(no output)'}"
             )
-            if unresolved:
+            if unresolved and worker_result.success:
                 lines.append(f"Worker {idx} unresolved: {str(unresolved[:3])[:350]}")
 
     intent_profile = getattr(_agent_context, "intent_satisfaction", None)
@@ -83,11 +94,18 @@ def _build_final_reply_check_context() -> str:
             lines.append(f"Intent satisfaction profile: {str(intent_profile)[:900]}")
 
     for idx, artifact in enumerate(execution_artifacts[-3:], 1):
+        if not isinstance(artifact, dict):
+            lines.append(f"Artifact {idx}: {str(artifact)[:350]}")
+            continue
+        artifact_status = str(artifact.get("status") or "").strip().lower()
+        artifact_summary = artifact.get("summary")
+        if artifact_status in {"error", "failed", "failure"}:
+            artifact_summary = _safe_failure_message(artifact_summary)
         try:
             compact = json.dumps(
                 {
                     "kind": artifact.get("kind"),
-                    "summary": artifact.get("summary"),
+                    "summary": artifact_summary,
                     "path": artifact.get("path"),
                     "status": artifact.get("status"),
                 },
@@ -101,13 +119,16 @@ def _build_final_reply_check_context() -> str:
     for idx, tool_result in enumerate(recent_tool_results[-5:], 1):
         if not isinstance(tool_result, dict):
             continue
+        result_preview = tool_result.get("result_preview")
+        if tool_result.get("is_error"):
+            result_preview = _safe_failure_message(result_preview)
         try:
             compact = json.dumps(
                 {
                     "tool_name": tool_result.get("tool_name"),
                     "args_preview": tool_result.get("args_preview"),
                     "is_error": tool_result.get("is_error"),
-                    "result_preview": tool_result.get("result_preview"),
+                    "result_preview": result_preview,
                 },
                 default=str,
                 sort_keys=True,

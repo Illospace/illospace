@@ -135,6 +135,67 @@ async def test_encode_with_agent_work(mock_add_mem, mock_get_client):
 
 
 @patch("brain.platform.gpu_client.get_client")
+async def test_encode_projects_scoped_legacy_run_failures_before_memory_extraction(mock_get_client):
+    from brain.systems.cortex.encode import encode_thought_to_brain
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+    idea_id = "abc12345-0000-0000-0000-000000000000"
+    raw_diagnostic = "legacy provider failure secret=request-token"
+    idea_row = _make_idea_row(title="Mixed legacy thread")
+    thread_rows = [
+        {
+            "role": "user",
+            "content": "User-authored context stays unchanged.",
+            "metadata": {"run_id": 999},
+            "message_type": "message",
+        },
+        {
+            "role": "illo",
+            "content": raw_diagnostic,
+            "metadata": {"run_id": 7},
+            "message_type": "agent_response",
+        },
+        {
+            "role": "assistant",
+            "content": "Completed assistant answer stays unchanged.",
+            "metadata": {"created_by_run_id": 8},
+            "message_type": "agent_response",
+        },
+    ]
+    client = _make_gpu_client("SKIP")
+    mock_get_client.return_value = client
+    failure_lookup = AsyncMock(return_value={
+        7: {
+            "status": "failed",
+            "category": "upstream",
+            "message": UPSTREAM_FAILED_RUN_MESSAGE,
+        }
+    })
+
+    with (
+        patch("brain.systems.cortex.encode.UnitOfWork", side_effect=_make_uow_factory(idea_row, thread_rows)),
+        patch(
+            "brain.systems.cortex.encode.public_failures_for_run_ids",
+            failure_lookup,
+            create=True,
+        ),
+    ):
+        await encode_thought_to_brain(idea_id)
+
+    failure_lookup.assert_awaited_once()
+    assert failure_lookup.await_args.args[1] == {7, 8}
+    assert failure_lookup.await_args.kwargs == {
+        "thread_id": idea_id,
+        "org_id": "org-1",
+    }
+    prompt = client.generate.call_args.kwargs["prompt"]
+    assert UPSTREAM_FAILED_RUN_MESSAGE in prompt
+    assert raw_diagnostic not in prompt
+    assert "User-authored context stays unchanged." in prompt
+    assert "Completed assistant answer stays unchanged." in prompt
+
+
+@patch("brain.platform.gpu_client.get_client")
 @patch("brain.app.cli.memory.add_memory", new_callable=AsyncMock)
 async def test_encode_no_interaction_low_salience(mock_add_mem, mock_get_client):
     """Thought with no interaction should encode with low salience."""

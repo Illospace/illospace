@@ -20,6 +20,7 @@ from brain.systems.inbound.preservation import (
 )
 from brain.systems.inbound.status import STATUS_REVIEW_REQUIRED
 from brain.systems.runs.domain import AgentRun, ArtifactType
+from brain.systems.runs.failures import failure_category_for_error, public_run_failure
 from brain.systems.runs.interactive_reply import is_interactive_transport_fallback
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 
@@ -181,6 +182,25 @@ async def _run_failure_reason(session: AsyncSession, run_id: int) -> str | None:
         if text:
             return text
     return None
+
+
+async def _run_failure_category(session: AsyncSession, run_id: int) -> Any:
+    rows = (
+        await session.scalars(
+            select(AgentRunEventRow)
+            .where(
+                AgentRunEventRow.run_id == int(run_id),
+                AgentRunEventRow.event_type == "run.failed",
+            )
+            .order_by(AgentRunEventRow.sequence_no.desc(), AgentRunEventRow.id.desc())
+        )
+    ).all()
+    for failure_event in rows:
+        payload = _json_dict(failure_event.payload)
+        category = payload.get("failure_category") or payload.get("category")
+        if category:
+            return category
+    return failure_category_for_error(await _run_failure_reason(session, run_id))
 
 
 def _retry_attempt_from_contract(
@@ -545,6 +565,13 @@ async def reconcile_inbound_triage_run(
     now = datetime.now(timezone.utc)
     terminal_at = _run_datetime(row, status)
     final_answer = await _latest_final_answer(session, run_id)
+    stored_failure_category = _json_dict(metadata.get("failure")).get("category")
+    failure = public_run_failure(
+        status,
+        stored_failure_category
+        or (await _run_failure_category(session, run_id) if status == RunStatus.FAILED else None),
+    )
+    public_final_answer = final_answer if failure is None else None
     attribution = await summarize_inbound_run_attribution(session, run_id=run_id, status=status)
     evidence_contract = preservation_evidence_result(
         preservation_contract_from_run_metadata(metadata),
@@ -559,16 +586,20 @@ async def reconcile_inbound_triage_run(
         status=status,
         reconciled_at=now,
         terminal_at=terminal_at,
-        final_answer=final_answer,
+        final_answer=public_final_answer,
     )
     triage_terminal["status"] = outcome_status
     triage_terminal["evidence_contract"] = evidence_contract
+    if failure is not None:
+        triage_terminal["failure"] = failure
 
     outcome = _json_dict(receipt.outcome)
     tool_use = _json_dict(receipt.tool_use)
     outcome_key = "handling" if tool_use.get("type") == "illo_submit" else "triage"
     handling = _json_dict(outcome.get(outcome_key))
-    result_payload = _triage_result(status, final_answer)
+    result_payload = _triage_result(status, public_final_answer)
+    if failure is not None:
+        result_payload["failure"] = failure
     if evidence_missing:
         result_payload = {
             **result_payload,
@@ -592,6 +623,8 @@ async def reconcile_inbound_triage_run(
     if evidence_missing:
         tool_terminal["status"] = outcome_status
     tool_terminal["evidence_contract"] = evidence_contract
+    if failure is not None:
+        tool_terminal["failure"] = failure
     receipt.tool_use = {
         **tool_use,
         **tool_terminal,
@@ -609,7 +642,7 @@ async def reconcile_inbound_triage_run(
     elif status == RunStatus.COMPLETED:
         event.error = None
     else:
-        event.error = final_answer or f"Illo triage run ended with status {status.value}"
+        event.error = failure["message"] if failure is not None else None
 
     await session.flush()
 

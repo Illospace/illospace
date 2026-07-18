@@ -7,11 +7,23 @@ Wraps core.agent.run_agent with a CLI-friendly interface.
 """
 
 import json
+import logging
 import os
 import re
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
+
+from brain.systems.runs.failures import failure_category_for_error, public_run_failure
+
+
+logger = logging.getLogger(__name__)
+
+
+def _public_failure_message(error: BaseException | str | None) -> str:
+    category = failure_category_for_error(error)
+    failure = public_run_failure("failed", category)
+    return str((failure or {}).get("message") or "")
 
 
 def call_agent(
@@ -55,7 +67,7 @@ def call_agent(
         result = invoke_direct_agent(spec)
 
         # Check if agent wrote output to a file directly
-        if output_file and os.path.exists(output_file):
+        if result.success and output_file and os.path.exists(output_file):
             with open(output_file) as f:
                 text = f.read()
             if text.strip():
@@ -67,12 +79,15 @@ def call_agent(
             return {"success": False, "text": "", "from_file": False,
                     "error": "Agent returned empty response"}
         else:
+            error = result.error or "Agent failed"
+            logger.warning("agent_cli_failed error=%s", error)
             return {"success": False, "text": "", "from_file": False,
-                    "error": result.error or "Agent failed"}
+                    "error": _public_failure_message(error)}
 
     except Exception as e:
+        logger.exception("agent_cli_exception")
         return {"success": False, "text": "", "from_file": False,
-                "error": str(e)}
+                "error": _public_failure_message(e)}
 
 
 def extract_json(text: str) -> dict | None:

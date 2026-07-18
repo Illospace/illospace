@@ -94,7 +94,14 @@ def _run_event_replay_stmt(
     limit: int,
 ):
     stmt = (
-        select(AgentRunEventRow, AgentRunRow.thread_id, AgentRunRow.profile, AgentRunRow.org_id)
+        select(
+            AgentRunEventRow,
+            AgentRunRow.thread_id,
+            AgentRunRow.profile,
+            AgentRunRow.org_id,
+            AgentRunRow.status,
+            AgentRunRow.metadata_,
+        )
         .join(AgentRunRow, AgentRunRow.id == AgentRunEventRow.run_id)
         .where(AgentRunEventRow.id > int(last_event_id))
         .order_by(AgentRunEventRow.id.asc())
@@ -111,10 +118,12 @@ def _run_event_replay_stmt(
 
 def _project_replay_rows(rows) -> list[AgentRunEventRow]:
     events = []
-    for event, thread_id, profile, row_org_id in rows:
+    for event, thread_id, profile, row_org_id, status, metadata in rows:
         setattr(event, "_agent_run_thread_id", thread_id)
         setattr(event, "_agent_run_profile", profile)
         setattr(event, "_agent_run_org_id", row_org_id)
+        setattr(event, "_agent_run_status", status)
+        setattr(event, "_agent_run_metadata", metadata)
         events.append(event)
     return events
 

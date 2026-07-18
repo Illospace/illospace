@@ -1,8 +1,8 @@
 """Public presentation helpers for AgentRun work events.
 
 These helpers intentionally produce a small, user-facing projection from
-durable run events. They are used for live UI and API snapshots; trace exports
-continue to read the raw durable event rows for debugging.
+durable run events. They are used for live UI, API snapshots, and safe trace
+exports; raw durable diagnostics remain backend-only.
 """
 
 from __future__ import annotations
@@ -11,6 +11,9 @@ import json
 import re
 from typing import Any
 from urllib.parse import urlparse
+
+from brain.systems.runs.actions import result_failure_summary
+from brain.systems.runs.failures import failure_category_for_error, public_run_failure
 
 
 SENSITIVE_ARG_PARTS = {
@@ -68,7 +71,21 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
     raw = dict(payload or {})
     tool_name = _text(raw.get("tool_name") or raw.get("tool") or "tool") or "tool"
     args = raw.get("args") if isinstance(raw.get("args"), dict) else {}
+    failure_summary = (
+        _text(raw.get("error"))
+        if event_type == "run.tool_failed" and raw.get("error") is not None
+        else result_failure_summary(raw.get("result"))
+        if event_type in {"run.tool_completed", "run.tool_failed"}
+        else None
+    )
+    failure = (
+        public_run_failure("failed", failure_category_for_error(failure_summary))
+        if failure_summary
+        else None
+    )
     status = _status_for_event(event_type, raw.get("status"))
+    if failure is not None:
+        status = "failed"
     display = public_tool_display(tool_name, args, status=status)
 
     public = {
@@ -86,6 +103,11 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
     public["tool_display"] = display
     public["display"] = display
     public["display_label"] = display["label"]
+
+    if failure is not None:
+        public["failure"] = failure
+        public["error"] = failure["message"]
+        return public
 
     if raw.get("error") is not None:
         public["error"] = _redact_text(_text(raw.get("error")) or "")[:500]

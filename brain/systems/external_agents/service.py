@@ -41,6 +41,12 @@ from brain.systems.cortex.project_context.search import search_project_contexts
 from brain.systems.cortex.status import EXTERNAL_TASK_STARTABLE_IDEA_STATUSES
 from brain.systems.external_agents.status import EXTERNAL_AGENT_TASK_TERMINAL_STATUSES
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
+from brain.systems.runs.cortex.read_models import (
+    public_failures_for_run_ids,
+    public_failure_for_run,
+    public_run_linked_message,
+    run_id_from_public_message_metadata,
+)
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
 
@@ -716,7 +722,30 @@ async def _thread_context(session: AsyncSession, idea_id: str, *, limit: int = 3
         ).all()
     )
     rows.reverse()
-    return [_thread_message_payload(row) for row in rows]
+    run_ids = {
+        run_id
+        for run_id in (
+            (
+                run_id_from_public_message_metadata(row.metadata_)
+                if str(row.role or "").lower() in {"illo", "assistant"}
+                else None
+            )
+            for row in rows
+        )
+        if run_id is not None
+    }
+    failures = await public_failures_for_run_ids(session, run_ids, thread_id=idea_id)
+    return [
+        _thread_message_payload(
+            row,
+            failures.get(
+                run_id_from_public_message_metadata(row.metadata_)
+                if str(row.role or "").lower() in {"illo", "assistant"}
+                else None
+            ),
+        )
+        for row in rows
+    ]
 
 
 async def _idea_for_org(session: AsyncSession, *, idea_id: str, org_id: str) -> Idea:
@@ -937,13 +966,17 @@ async def append_artifact(
     return artifact
 
 
-def _thread_message_payload(message: IdeaThread) -> dict[str, Any]:
+def _thread_message_payload(
+    message: IdeaThread,
+    failure: dict[str, str] | None = None,
+) -> dict[str, Any]:
     metadata = _json_dict(message.metadata_)
+    content, metadata = public_run_linked_message(message.content, metadata, failure)
     return {
         "id": message.id,
         "idea_id": str(message.idea_id) if message.idea_id else None,
         "role": message.role,
-        "content": message.content,
+        "content": content,
         "attachments": message.attachments or [],
         "metadata": metadata,
         "object_references": metadata.get("object_references") or [],
@@ -1170,9 +1203,36 @@ async def search_workspace(
                 .limit(remaining)
             )
         ).all()
+        run_ids = {
+            run_id
+            for run_id in (
+                (
+                    run_id_from_public_message_metadata(row[0].metadata_)
+                    if str(row[0].role or "").lower() in {"illo", "assistant"}
+                    else None
+                )
+                for row in rows
+            )
+            if run_id is not None
+        }
+        failures = await public_failures_for_run_ids(
+            session,
+            run_ids,
+            org_id=principal.org_id,
+        )
         for row in rows:
             thread = row[0]
             idea = row[1]
+            run_id = (
+                run_id_from_public_message_metadata(thread.metadata_)
+                if str(thread.role or "").lower() in {"illo", "assistant"}
+                else None
+            )
+            content, _metadata = public_run_linked_message(
+                thread.content,
+                thread.metadata_,
+                failures.get(run_id),
+            )
             links = thread_link_payload(thread.idea_id)
             results.append(
                 {
@@ -1190,7 +1250,7 @@ async def search_workspace(
                     ),
                     "thread_message_id": thread.id,
                     "role": thread.role,
-                    "content": thread.content[:600],
+                    "content": str(content or "")[:600],
                     "created_at": _iso(thread.created_at),
                 }
             )
@@ -1630,9 +1690,14 @@ async def get_headless_ask(
     run: AgentRunRow | None = await session.get(AgentRunRow, int(task.illo_run_id)) if task.illo_run_id else None
     answer = ""
     run_status = None
+    failure = None
     if run is not None:
         run_status = coerce_run_status(run.status)
-        answer = await _latest_run_artifact_text(session, int(run.id))
+        failure = public_failure_for_run(run)
+        if run_status == RunStatus.COMPLETED:
+            answer = await _latest_run_artifact_text(session, int(run.id))
+        elif failure is not None:
+            answer = failure["message"]
         if run_status in TERMINAL_RUN_STATUSES:
             if run_status == RunStatus.COMPLETED:
                 task.status = "completed"
@@ -1640,7 +1705,7 @@ async def get_headless_ask(
                 task.completed_at = task.completed_at or utcnow()
             elif run_status in {RunStatus.FAILED, RunStatus.CANCELED, RunStatus.EXPIRED}:
                 task.status = "failed" if run_status == RunStatus.FAILED else "cancelled"
-                task.error = task.error or f"Illo ask ended with status {run_status.value}"
+                task.error = failure["message"] if failure is not None else "Illo ask did not complete."
                 task.failed_at = task.failed_at or utcnow()
             await session.flush()
             await _refresh_task_if_supported(session, task)
@@ -1652,6 +1717,7 @@ async def get_headless_ask(
             "thread_id": run.thread_id if run is not None else None,
         },
         "answer": answer,
+        **({"failure": failure} if failure is not None else {}),
     }
 
 

@@ -374,6 +374,69 @@ async def test_headless_ask_serializes_after_run_admission_without_lazy_loading(
 
 
 @pytest.mark.asyncio
+async def test_failed_headless_ask_returns_only_the_public_failure(external_agent_session):
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+
+    raw_diagnostic = "provider traceback token=headless-secret"
+    principal = service.AgentBridgePrincipal(
+        connection_id="conn-1",
+        org_id="org-1",
+        owner_user_id="user-1",
+        token_id="token-1",
+        scopes=frozenset(service.DEFAULT_BRIDGE_SCOPES),
+        connection_display_name="Codex",
+        agent_kind="codex",
+    )
+    run = AgentRunRow(
+        org_id="org-1",
+        user_id="user-1",
+        thread_id="external-agent:conn-1:ask-failed",
+        trace_id="run:failed-headless",
+        profile="fast",
+        recipe="fast",
+        status="failed",
+        input_message="Private question",
+        target_ref={},
+        workspace_ref={},
+        model_policy={},
+        context_summary=raw_diagnostic,
+        metadata_={"failure": {"category": "upstream", "error": raw_diagnostic}},
+        failed_at=service.utcnow(),
+    )
+    external_agent_session.add(run)
+    await external_agent_session.flush()
+    task = ExternalAgentTaskRow(
+        id="ask-failed",
+        org_id="org-1",
+        connection_id="conn-1",
+        created_by_user_id="user-1",
+        source_surface="bridge_ask_illo",
+        title="Private question",
+        instructions="Private question",
+        input_parts=[],
+        status="submitted",
+        idempotency_key="ask:failed",
+        illo_run_id=run.id,
+        error=raw_diagnostic,
+        metadata_={"headless": True},
+    )
+    external_agent_session.add(task)
+    await external_agent_session.flush()
+
+    payload = await service.get_headless_ask(
+        external_agent_session,
+        principal,
+        ask_id=task.id,
+    )
+    serialized = str(payload)
+
+    assert raw_diagnostic not in serialized
+    assert payload["answer"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert payload["failure"]["message"] == UPSTREAM_FAILED_RUN_MESSAGE
+    assert payload["ask"]["error"] == UPSTREAM_FAILED_RUN_MESSAGE
+
+
+@pytest.mark.asyncio
 async def test_workspace_search_returns_visible_project_context_profiles(async_sqlite_session_factory):
     _patch_sqlite_for_external_agent_tables()
     session = await async_sqlite_session_factory(

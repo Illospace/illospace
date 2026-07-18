@@ -1407,7 +1407,8 @@ def test_runner_fails_fast_when_project_context_has_no_workspace(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(runner, "UnitOfWork", lambda: FakeUow())
-    monkeypatch.setattr(runner, "_async_record_project_activity", AsyncMock())
+    record_activity = AsyncMock()
+    monkeypatch.setattr(runner, "_async_record_project_activity", record_activity)
     monkeypatch.setattr(
         runner,
         "materialize_project_context_workspaces",
@@ -1431,6 +1432,11 @@ def test_runner_fails_fast_when_project_context_has_no_workspace(monkeypatch):
     assert captured["run_id"] == 49
     assert "Project Context unavailable" in captured["error"]
     assert "did not provide a usable workspace" in captured["final_answer"]
+    public_activity = record_activity.await_args_list[-1]
+    assert public_activity.args[2] == "Project context unavailable"
+    assert public_activity.kwargs["issue_count"] == 1
+    assert "errors" not in public_activity.kwargs
+    assert "repository not found" not in str(public_activity)
 
 
 @pytest.mark.parametrize("materialization_ok", [False, True])

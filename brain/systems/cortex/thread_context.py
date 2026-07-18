@@ -11,6 +11,11 @@ from sqlalchemy import select
 
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunRow
 from brain.platform.db.models.idea import IdeaThread
+from brain.systems.runs.cortex.read_models import (
+    public_failures_for_run_ids,
+    public_run_linked_message,
+    run_id_from_public_message_metadata,
+)
 
 DEFAULT_THREAD_CONTEXT_LIMIT = 16
 DEFAULT_THREAD_CONTEXT_CHAR_LIMIT = 8000
@@ -122,17 +127,40 @@ async def _a_thread_message_entries(session: Any, idea_id: str, *, max_rows: int
         .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
         .limit(max(1, int(max_rows)))
     )
-    rows = result.all()
+    rows = list(result.all())
+    run_ids = {
+        run_id
+        for run_id in (
+            (
+                run_id_from_public_message_metadata(row.metadata_)
+                if _normalize_role(row.role) in {"illo", "assistant"}
+                else None
+            )
+            for row in rows
+        )
+        if run_id is not None
+    }
+    failures = await public_failures_for_run_ids(session, run_ids, thread_id=idea_id)
     entries: list[ThreadContextEntry] = []
     for row in rows:
-        content = _clean_content(row.content)
-        if not content:
-            continue
-        role = _normalize_role(row.role)
-        if role not in {"user", "illo", "assistant"}:
-            continue
         metadata = row.metadata_
         metadata = metadata if isinstance(metadata, dict) else {}
+        role = _normalize_role(row.role)
+        run_id = (
+            run_id_from_public_message_metadata(metadata)
+            if role in {"illo", "assistant"}
+            else None
+        )
+        projected_content, _metadata = public_run_linked_message(
+            row.content,
+            metadata,
+            failures.get(run_id),
+        )
+        content = _clean_content(projected_content)
+        if not content:
+            continue
+        if role not in {"user", "illo", "assistant"}:
+            continue
         entries.append(
             ThreadContextEntry(
                 role="illo" if role == "assistant" else role,
@@ -140,7 +168,7 @@ async def _a_thread_message_entries(session: Any, idea_id: str, *, max_rows: int
                 created_at=row.created_at,
                 source="thread",
                 thread_message_id=_coerce_int(row.id),
-                run_id=_coerce_int(metadata.get("run_id")),
+                run_id=run_id,
             )
         )
     return entries
@@ -152,6 +180,7 @@ async def _a_final_answer_entries(session: Any, idea_id: str, *, max_rows: int) 
         .join(AgentRunRow, AgentRunRow.id == AgentRunArtifactRow.run_id)
         .where(
             AgentRunRow.thread_id == str(idea_id),
+            AgentRunRow.status == "completed",
             AgentRunArtifactRow.artifact_type == "final_answer",
         )
         .order_by(AgentRunArtifactRow.created_at.desc(), AgentRunArtifactRow.id.desc())

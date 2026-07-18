@@ -10,6 +10,7 @@ from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.context import compact_project_reference
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
+from brain.systems.runs.failures import failure_category_for_error, public_run_failure
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.shared import (
     default_run_model,
@@ -98,15 +99,15 @@ class WorkerRecipe(BaseRunRecipe):
             user_id=runtime.request.user_id,
             org_id=runtime.request.org_id,
         )
-        streamed_output = False
+        pending_deltas: list[str] = []
 
         async def _activity(label: str) -> None:
             await runtime.activity(label)
 
         async def _record_delta(delta: str) -> None:
-            nonlocal streamed_output
-            streamed_output = True
-            await runtime.text_delta(delta)
+            # A provider can stream partial diagnostic text before returning a
+            # failed result. Hold deltas until success is known.
+            pending_deltas.append(str(delta))
 
         _delta = _record_delta
 
@@ -164,28 +165,47 @@ class WorkerRecipe(BaseRunRecipe):
             result = await invoke_direct_agent_async(spec)
         except Exception as exc:
             logger.exception("worker_recipe_failed", extra={"run_id": runtime.run.id})
-            output = f"Worker failed: {exc}"
+            error = str(exc)
             status = RunStatus.FAILED
+            failure_category = failure_category_for_error(exc)
+            failure = public_run_failure(status, failure_category)
+            output = ""
             post_completion_tasks = ()
         else:
             output = str(getattr(result, "output", "") or "").strip()
             status = RunStatus.COMPLETED if getattr(result, "success", False) else RunStatus.FAILED
-            if getattr(result, "error", None) and not output:
-                output = str(result.error)
+            error = None
+            failure_category = None
+            failure = None
+            if status == RunStatus.FAILED:
+                error = str(getattr(result, "error", None) or output or "worker_recipe_failed")
+                failure_category = failure_category_for_error(error)
+                failure = public_run_failure(status, failure_category)
+                output = ""
             post_completion_tasks = tuple(getattr(result, "post_completion_tasks", ()) or ())
-        if output and not streamed_output:
-            await runtime.text_delta(output)
+        streamed_output = False
+        if status == RunStatus.COMPLETED:
+            for delta in pending_deltas:
+                await runtime.text_delta(delta)
+            streamed_output = bool(pending_deltas)
+        public_output = output if status == RunStatus.COMPLETED else str((failure or {}).get("message") or "")
+        if public_output and not streamed_output:
+            await runtime.text_delta(public_output)
         worker_result = worker_result_artifact(
             runtime.run.id,
             assignment=assignment,
-            output=output,
+            output=public_output,
             status=status,
             tool_records=tool_records,
             root_run_id=runtime.run.root_run_id,
+            failure=failure,
         )
         return RunRecipeResult(
             output=output,
             status=status,
+            error=error,
+            final_output=public_output if status == RunStatus.FAILED else None,
+            failure_category=failure_category,
             artifacts=(worker_result,),
             post_completion_tasks=post_completion_tasks,
         )
@@ -255,6 +275,7 @@ def worker_result_artifact(
     status: RunStatus,
     tool_records: list[ToolRecord],
     root_run_id: int | None,
+    failure: dict[str, str] | None = None,
 ) -> AgentRunArtifact:
     payload = {
         "status": status.value,
@@ -267,6 +288,8 @@ def worker_result_artifact(
             "artifact_types": sorted({record.artifact_type.value for record in tool_records}),
         },
     }
+    if failure:
+        payload["failure"] = dict(failure)
     return AgentRunArtifact(
         run_id=run_id,
         root_run_id=root_run_id,

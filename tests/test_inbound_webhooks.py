@@ -39,6 +39,7 @@ from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound import service as inbound
 from brain.systems.runs.events import run_event
+from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.user_domains.service import AsyncDomainService
@@ -661,33 +662,63 @@ async def test_inbound_triage_receipt_records_tool_attribution(session):
 
 
 async def test_inbound_triage_receipt_reconciles_when_illo_run_fails(session):
-    final_answer = "Illo triage failed before it could decide on the signal."
+    raw_diagnostic = "Illo triage failed: provider token=super-secret"
     triage = await _queue_unmatched_webhook_triage(
         session,
         origin="jira.ticket_updated",
         issue_key="PROJ-2",
         idempotency_key="jira:PROJ-2:updated",
     )
+    run = await session.get(AgentRunRow, int(triage["run_id"]))
+    run.metadata_ = {**dict(run.metadata_ or {}), "failure": {"category": "upstream"}}
     await _finish_triage_run(
         session,
         triage,
         status=RunStatus.FAILED,
-        final_answer=final_answer,
+        final_answer=raw_diagnostic,
         reason="triage worker crashed",
     )
 
     event = (await session.scalars(select(InboundEventRow))).one()
     receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
+    failure = {
+        "status": "failed",
+        "category": "upstream",
+        "message": UPSTREAM_FAILED_RUN_MESSAGE,
+    }
 
     assert event.status == "failed"
-    assert event.error == final_answer
+    assert event.error == UPSTREAM_FAILED_RUN_MESSAGE
     assert event.action_result["triage"]["status"] == "failed"
+    assert event.action_result["triage"]["failure"] == failure
     assert receipt.status == "failed"
     assert receipt.outcome["triage"]["result"] == {
         "status": "failed",
-        "final_answer": final_answer,
+        "failure": failure,
     }
     assert receipt.tool_use["status"] == "failed"
+    assert raw_diagnostic not in json.dumps(event.action_result)
+    assert raw_diagnostic not in json.dumps(receipt.outcome)
+
+    response = await _post_mcp(
+        session,
+        headers={"Authorization": f"Bearer {RAW_TOKEN}"},
+        json_body={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "illo_get_result",
+                "arguments": {"event_id": str(event.id)},
+            },
+        },
+    )
+    result_payload = json.loads(response.json()["result"]["content"][0]["text"])
+
+    assert result_payload["failure"] == failure
+    assert result_payload["event"]["failure"] == failure
+    assert result_payload["latest_receipt"]["failure"] == failure
+    assert raw_diagnostic not in json.dumps(result_payload)
 
 
 async def test_mcp_submit_rejects_overlong_origin_before_inbound_processing(session):

@@ -21,6 +21,7 @@ from brain.platform.db.models.inbound import (
 )
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import service as inbound_service
+from brain.systems.runs.failures import public_run_failure
 
 
 DEFAULT_SIGNAL_TOKEN_SCOPES = (external_agents.SCOPE_SIGNAL_SUBMIT,)
@@ -1117,7 +1118,8 @@ def _event_failed(row: InboundEventRow) -> bool:
 
 
 def _source_card_event_summary(row: InboundEventRow) -> dict[str, Any]:
-    return {
+    serialized = serialize_event(row)
+    summary = {
         "id": str(row.id),
         "origin": row.origin,
         "kind": row.kind,
@@ -1125,10 +1127,13 @@ def _source_card_event_summary(row: InboundEventRow) -> dict[str, Any]:
         "policy_id": str(row.policy_id) if row.policy_id else None,
         "domain_projection_id": str(row.domain_projection_id) if row.domain_projection_id else None,
         "action_type": row.action_type,
-        "error": row.error,
+        "error": serialized["error"],
         "created_at": _iso(row.created_at),
         "processed_at": _iso(row.processed_at),
     }
+    if "failure" in serialized:
+        summary["failure"] = serialized["failure"]
+    return summary
 
 
 def _dry_run_projection_error(
@@ -1244,7 +1249,74 @@ def serialize_projection(row: InboundDomainProjectionRow) -> dict[str, Any]:
     }
 
 
+_RUN_FAILURE_STATUSES = frozenset({"failed", "canceled", "expired"})
+
+
+def _direct_public_failure_from_payload(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    payload = dict(value)
+    stored_failure = _json_dict(payload.get("failure"))
+    status = str(
+        stored_failure.get("status")
+        or payload.get("run_status")
+        or (
+            payload.get("status")
+            if stored_failure or payload.get("run_id") or payload.get("failure_category")
+            else ""
+        )
+        or ""
+    ).strip()
+    if status in _RUN_FAILURE_STATUSES:
+        return public_run_failure(
+            status,
+            stored_failure.get("category")
+            or payload.get("failure_category")
+            or payload.get("category"),
+        )
+    return None
+
+
+def _public_failure_from_payload(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    payload = dict(value)
+    direct = _direct_public_failure_from_payload(payload)
+    if direct is not None:
+        return direct
+    for key in ("triage", "handling", "result"):
+        nested = _public_failure_from_payload(payload.get(key))
+        if nested is not None:
+            return nested
+    return None
+
+
+def _public_run_outcome(
+    value: Any,
+    inherited_failure: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    payload = _json_dict(value)
+    projected = dict(payload)
+    failure = (
+        _direct_public_failure_from_payload(payload)
+        or inherited_failure
+        or _public_failure_from_payload(payload)
+    )
+    for key in ("triage", "handling", "result"):
+        if isinstance(payload.get(key), dict):
+            projected[key] = _public_run_outcome(payload[key], failure)
+
+    if failure is None:
+        return projected
+    for key in ("final_answer", "error", "reason", "failure_category", "category"):
+        projected.pop(key, None)
+    projected["failure"] = failure
+    return projected
+
+
 def serialize_event(row: InboundEventRow, *, include_payload: bool = False) -> dict[str, Any]:
+    action_result = _public_run_outcome(row.action_result)
+    failure = _public_failure_from_payload(action_result)
     data = {
         "id": str(row.id),
         "org_id": str(row.org_id),
@@ -1258,13 +1330,15 @@ def serialize_event(row: InboundEventRow, *, include_payload: bool = False) -> d
         "status": row.status,
         "confidence": row.confidence,
         "action_type": row.action_type,
-        "action_result": _json_dict(row.action_result),
-        "error": row.error,
+        "action_result": action_result,
+        "error": failure["message"] if failure is not None else row.error,
         "source_actor": _json_dict(row.source_actor),
         "authority_user_id": str(row.authority_user_id) if row.authority_user_id else None,
         "created_at": _iso(row.created_at),
         "processed_at": _iso(row.processed_at),
     }
+    if failure is not None:
+        data["failure"] = failure
     if include_payload:
         data.update(
             {
@@ -1278,18 +1352,29 @@ def serialize_event(row: InboundEventRow, *, include_payload: bool = False) -> d
 
 
 def serialize_receipt(row: InboundDecisionReceiptRow) -> dict[str, Any]:
-    return {
+    raw_outcome = _json_dict(row.outcome)
+    raw_tool_use = _json_dict(row.tool_use)
+    failure = (
+        _public_failure_from_payload(raw_outcome)
+        or _public_failure_from_payload(raw_tool_use)
+    )
+    outcome = _public_run_outcome(raw_outcome, failure)
+    tool_use = _public_run_outcome(raw_tool_use, failure)
+    data = {
         "id": str(row.id),
         "event_id": str(row.event_id),
         "org_id": str(row.org_id),
         "connection_id": str(row.connection_id),
         "policy_id": str(row.policy_id) if row.policy_id else None,
         "status": row.status,
-        "outcome": _json_dict(row.outcome),
+        "outcome": outcome,
         "confidence": row.confidence,
         "target": _json_dict(row.target),
-        "tool_use": _json_dict(row.tool_use),
-        "reasoning_summary": row.reasoning_summary,
+        "tool_use": tool_use,
+        "reasoning_summary": None if failure is not None else row.reasoning_summary,
         "reusable_pattern_candidate": _json_dict(row.reusable_pattern_candidate),
         "created_at": _iso(row.created_at),
     }
+    if failure is not None:
+        data["failure"] = failure
+    return data
