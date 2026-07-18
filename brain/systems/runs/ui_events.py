@@ -34,6 +34,21 @@ _INTERNAL_TO_UI_TYPE = {
 }
 
 
+def public_run_event_payload(payload: Any, source_type: str) -> dict[str, Any]:
+    """Project one durable event payload into its safe public representation."""
+
+    projected = dict(payload or {})
+    if source_type in {"run.tool_started", "run.tool_completed", "run.tool_failed"}:
+        projected = public_tool_event_payload(projected, source_type)
+    if source_type == "run.failed":
+        category = coerce_failure_category(
+            projected.get("failure_category") or projected.get("category")
+        )
+        projected["failure_category"] = category.value
+        projected["error"] = safe_terminal_run_message("failed", category)
+    return projected
+
+
 def run_event_to_ui_message(
     event: Any,
     *,
@@ -51,9 +66,7 @@ def run_event_to_ui_message(
     if ui_type is None:
         return None
 
-    payload = dict(getattr(event, "payload", None) or {})
-    if source_type in {"run.tool_started", "run.tool_completed", "run.tool_failed"}:
-        payload = public_tool_event_payload(payload, source_type)
+    payload = public_run_event_payload(getattr(event, "payload", None), source_type)
     event_id = int(getattr(event, "id", 0) or payload.get("event_id") or 0)
     run_id = int(getattr(event, "run_id", 0) or payload.get("run_id") or 0)
     root_run_id = int(getattr(event, "root_run_id", None) or payload.get("root_run_id") or run_id)
@@ -115,11 +128,6 @@ def _normalize_ui_payload(ui_type: str, source_type: str, message: dict[str, Any
     elif ui_type == "run_completed":
         if source_type == "run.failed":
             message["status"] = "failed"
-            category = coerce_failure_category(
-                message.get("failure_category") or message.get("category")
-            )
-            message["failure_category"] = category.value
-            message["error"] = safe_terminal_run_message("failed", category)
         elif source_type == "run.canceled":
             message["status"] = "canceled"
         else:
@@ -133,4 +141,8 @@ def _text(value: Any) -> str | None:
     return text or None
 
 
-__all__ = ["STABLE_RUN_EVENT_TYPES", "run_event_to_ui_message"]
+__all__ = [
+    "STABLE_RUN_EVENT_TYPES",
+    "public_run_event_payload",
+    "run_event_to_ui_message",
+]
