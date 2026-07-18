@@ -43,6 +43,16 @@ REQUIRED_SQLALCHEMY_RUN_SYNC_REASON = (
     "SQLAlchemy's async schema tooling requires AsyncConnection.run_sync to "
     "enter metadata inspection/DDL helpers that are synchronous by design."
 )
+REQUIRED_ACTIVATION_CLI_RUN_SYNC = {
+    "brain/app/cli/activate_uwear_engineering_triage.py": {
+        "session_run_sync",
+    },
+}
+REQUIRED_ACTIVATION_CLI_RUN_SYNC_REASON = (
+    "The one-shot Uwear triage activation CLI uses one AsyncConnection.run_sync "
+    "boundary to execute its reflection-heavy, atomic SQLAlchemy Core migration; "
+    "it is not imported by the application runtime."
+)
 OFFLINE_SQLITE_BENCH_SURFACES = {
     "scripts/bench_agent_run_deep_child_runs.py": {
         "sqlalchemy_create_engine",
@@ -99,6 +109,10 @@ LEGACY_SYNC_TEST_HARNESSES = {
     "tests/test_workspace_apps_service.py": {
         "sqlalchemy_create_engine",
         "sqlalchemy_sync_session",
+    },
+    "tests/test_uwear_triage_activation.py": {
+        "sqlalchemy_create_engine",
+        "sync_session_method_call",
     },
 }
 LEGACY_SYNC_TEST_HARNESS_REASON = (
@@ -486,6 +500,8 @@ def iter_matches(paths: Iterable[Path]) -> Iterable[Match]:
 def zero_target_exemption_reason(match: Match) -> str | None:
     if match.category in REQUIRED_SQLALCHEMY_RUN_SYNC.get(match.path, set()):
         return REQUIRED_SQLALCHEMY_RUN_SYNC_REASON
+    if match.category in REQUIRED_ACTIVATION_CLI_RUN_SYNC.get(match.path, set()):
+        return REQUIRED_ACTIVATION_CLI_RUN_SYNC_REASON
     if match.category in OFFLINE_SQLITE_BENCH_SURFACES.get(match.path, set()):
         return OFFLINE_SQLITE_BENCH_REASON
     if match.category in LEGACY_SYNC_TEST_HARNESSES.get(match.path, set()):
@@ -516,6 +532,10 @@ def summarize(matches: list[Match], *, top: int) -> dict[str, object]:
     required_sqlalchemy_run_sync_refs = sum(
         1 for match in matches
         if zero_target_exemption_reason(match) == REQUIRED_SQLALCHEMY_RUN_SYNC_REASON
+    )
+    required_activation_cli_run_sync_refs = sum(
+        1 for match in matches
+        if zero_target_exemption_reason(match) == REQUIRED_ACTIVATION_CLI_RUN_SYNC_REASON
     )
     offline_sqlite_bench_refs = sum(
         1 for match in matches
@@ -548,6 +568,7 @@ def summarize(matches: list[Match], *, top: int) -> dict[str, object]:
         "cli_and_script_refs": by_scope["cli"] + by_scope["scripts"],
         "test_refs": by_scope["tests"],
         "required_sqlalchemy_run_sync_refs": required_sqlalchemy_run_sync_refs,
+        "required_activation_cli_run_sync_refs": required_activation_cli_run_sync_refs,
         "offline_sqlite_bench_refs": offline_sqlite_bench_refs,
         "legacy_sync_test_harness_refs": legacy_sync_test_harness_refs,
     }
@@ -572,6 +593,10 @@ def summarize(matches: list[Match], *, top: int) -> dict[str, object]:
             "required_sqlalchemy_run_sync_refs": {
                 "count": required_sqlalchemy_run_sync_refs,
                 "reason": REQUIRED_SQLALCHEMY_RUN_SYNC_REASON,
+            },
+            "required_activation_cli_run_sync_refs": {
+                "count": required_activation_cli_run_sync_refs,
+                "reason": REQUIRED_ACTIVATION_CLI_RUN_SYNC_REASON,
             },
             "offline_sqlite_bench_refs": {
                 "count": offline_sqlite_bench_refs,

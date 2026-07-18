@@ -291,3 +291,41 @@ def test_metric_reports_but_exempts_required_sqlalchemy_run_sync():
     assert summary["metrics"]["required_sqlalchemy_run_sync_refs"] == 1
     payload = metrics.matches_payload(matches)
     assert [item["zero_target_exempt"] for item in payload] == [True, False]
+
+
+def test_metric_exempts_only_the_documented_activation_cli_sync_boundary():
+    metrics = _load_metrics_module()
+    path = "brain/app/cli/activate_uwear_engineering_triage.py"
+    matches = [
+        metrics.Match(
+            path=path,
+            line_number=580,
+            category="session_run_sync",
+            scope="cli",
+            in_async_function=True,
+            line="return await connection.run_sync(lambda bind: _activate(bind, apply=True))",
+        ),
+        metrics.Match(
+            path=path,
+            line_number=582,
+            category="session_run_sync",
+            scope="cli",
+            in_async_function=True,
+            line="return await connection.run_sync(lambda bind: _activate(bind, apply=False))",
+        ),
+        metrics.Match(
+            path="brain/app/cli/another_command.py",
+            line_number=10,
+            category="session_run_sync",
+            scope="cli",
+            in_async_function=True,
+            line="await connection.run_sync(work)",
+        ),
+    ]
+
+    summary = metrics.summarize(matches, top=10)
+
+    assert summary["metrics"]["repo_wide_sync_shaped_refs"] == 1
+    assert summary["metrics"]["required_activation_cli_run_sync_refs"] == 2
+    payload = metrics.matches_payload(matches)
+    assert [item["zero_target_exempt"] for item in payload] == [True, True, False]
