@@ -7,6 +7,9 @@ import sqlalchemy as sa
 
 
 MIGRATION_MODULE = "brain.platform.db.alembic.versions.0026_chantier_object_type"
+SUNSET_MIGRATION_MODULE = (
+    "brain.platform.db.alembic.versions.0029_chantier_sunset_kind"
+)
 
 
 def _schema() -> tuple[sa.MetaData, dict[str, sa.Table]]:
@@ -53,6 +56,17 @@ def _schema() -> tuple[sa.MetaData, dict[str, sa.Table]]:
             sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
             sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
             sa.UniqueConstraint("object_type_id", "key"),
+        ),
+        "domain_records": sa.Table(
+            "domain_records",
+            metadata,
+            sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+            sa.Column("domain_id", sa.Integer, nullable=False),
+            sa.Column("object_type_id", sa.Integer, nullable=False),
+            sa.Column("data", sa.JSON, nullable=False),
+            sa.Column("version", sa.Integer, nullable=False, server_default="1"),
+            sa.Column("archived_at", sa.DateTime(timezone=True)),
+            sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         ),
     }
     return metadata, tables
@@ -262,3 +276,59 @@ def test_migration_is_a_noop_when_domain_schema_tables_are_absent():
 
     with engine.begin() as connection:
         migration._upgrade(connection)
+
+
+def test_sunset_migration_extends_contract_and_rekinds_target_record_idempotently():
+    contract_migration = importlib.import_module(MIGRATION_MODULE)
+    sunset_migration = importlib.import_module(SUNSET_MIGRATION_MODULE)
+    engine = sa.create_engine("sqlite://")
+    metadata, tables = _schema()
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        _seed(connection, tables)
+        contract_migration._upgrade(connection)
+        chantier = connection.execute(
+            sa.select(tables["domain_object_types"]).where(
+                tables["domain_object_types"].c.domain_id == 1,
+                tables["domain_object_types"].c.key == "chantier",
+            )
+        ).mappings().one()
+        connection.execute(
+            tables["domain_records"].insert(),
+            [
+                {
+                    "id": 10,
+                    "domain_id": 1,
+                    "object_type_id": chantier["id"],
+                    "data": {"slug": "shopify-app-sunset", "kind": "quality"},
+                    "version": 4,
+                },
+                {
+                    "id": 11,
+                    "domain_id": 1,
+                    "object_type_id": chantier["id"],
+                    "data": {"slug": "another-quality-chantier", "kind": "quality"},
+                    "version": 2,
+                },
+            ],
+        )
+
+        sunset_migration._upgrade(connection)
+        sunset_migration._upgrade(connection)
+
+        kind = connection.execute(
+            sa.select(tables["domain_field_definitions"]).where(
+                tables["domain_field_definitions"].c.object_type_id == chantier["id"],
+                tables["domain_field_definitions"].c.key == "kind",
+            )
+        ).mappings().one()
+        records = connection.execute(
+            sa.select(tables["domain_records"]).order_by(tables["domain_records"].c.id)
+        ).mappings().all()
+
+        assert kind["options"] == ["feature", "incident", "quality", "gtm", "sunset"]
+        assert records[0]["data"]["kind"] == "sunset"
+        assert records[0]["version"] == 5
+        assert records[1]["data"]["kind"] == "quality"
+        assert records[1]["version"] == 2
