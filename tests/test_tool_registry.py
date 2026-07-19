@@ -606,6 +606,10 @@ def test_manage_cycle_schema_matches_canonical_runtime_policy():
     assert "reopen_archived" not in properties
     assert "add_guidance" in properties["action"]["enum"]
     assert "add_output_target" in properties["action"]["enum"]
+    assert properties["result_contract_profile"]["enum"] == [
+        "standard",
+        "material_alert",
+    ]
 
 
 def test_launch_handoff_tool_schema_offers_codex_and_claude():

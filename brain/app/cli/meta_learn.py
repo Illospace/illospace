@@ -33,7 +33,7 @@ _vec_to_pg = vec_to_pg
 # Meta-learning data store (JSON file for meta-criteria tracking)
 # ---------------------------------------------------------------------------
 
-META_STATE_PATH = str(Path(config.BRAIN_DIR) / "brain" / "platform" / "data" / "meta_state.json")
+META_STATE_PATH = str(Path(config.PRIVATE_HOME) / "meta-learning" / "meta_state.json")
 
 
 def _load_meta_state():

@@ -11,6 +11,12 @@ from brain.systems.cycles.common import SCHEDULED_CYCLE_ORIGIN, json_dict
 from brain.systems.cycles.degradation import mandatory_escalations
 
 SCHEDULED_REVIEW_WINDOW_HOURS = 24
+CYCLE_RESULT_CONTRACT_PROFILE_STANDARD = "standard"
+CYCLE_RESULT_CONTRACT_PROFILE_MATERIAL_ALERT = "material_alert"
+VALID_CYCLE_RESULT_CONTRACT_PROFILES = {
+    CYCLE_RESULT_CONTRACT_PROFILE_STANDARD,
+    CYCLE_RESULT_CONTRACT_PROFILE_MATERIAL_ALERT,
+}
 
 # One source of truth for the base result-contract keys and the visible sections
 # named in the launch prompt. The gate validates these same labels/aliases.
@@ -49,13 +55,37 @@ def cycle_scheduled_review_window(scheduled_for: datetime | None) -> dict[str, A
     }
 
 
+def normalize_cycle_result_contract_profile(profile: str | None) -> str:
+    """Return a validated explicit profile, defaulting legacy runs to standard."""
+    clean_profile = str(
+        profile or CYCLE_RESULT_CONTRACT_PROFILE_STANDARD
+    ).strip().lower()
+    if clean_profile not in VALID_CYCLE_RESULT_CONTRACT_PROFILES:
+        raise ValueError(
+            "cycle result-contract profile must be one of: "
+            f"{', '.join(sorted(VALID_CYCLE_RESULT_CONTRACT_PROFILES))}"
+        )
+    return clean_profile
+
+
 def cycle_result_contract(
     degradation_tracking: dict[str, Any] | None = None,
+    *,
+    profile: str | None = None,
 ) -> dict[str, Any]:
     """The minimum output contract for autonomous cycle runs."""
+    clean_profile = normalize_cycle_result_contract_profile(profile)
+    required_outputs = list(RESULT_CONTRACT_OUTPUT_SECTIONS)
+    if clean_profile == CYCLE_RESULT_CONTRACT_PROFILE_MATERIAL_ALERT:
+        required_outputs = [
+            "answer_the_cycle_mission",
+            "summarize_workspace_evidence_or_explicit_gaps",
+            "report_evidence_health",
+        ]
     contract = {
         "kind": "autonomous_cycle_run_result",
-        "required_outputs": list(RESULT_CONTRACT_OUTPUT_SECTIONS),
+        "profile": clean_profile,
+        "required_outputs": required_outputs,
         "degraded_when": [
             "workspace_evidence_sources_fail_or_return_unexpectedly_sparse_results",
             "the_run_cannot_access_required_context_or_output_targets",

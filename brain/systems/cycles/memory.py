@@ -201,7 +201,10 @@ def _build_cycle_run_memory_snapshot(
         getattr(cycle, "degradation_state", None),
         scheduled_for=scheduled_for,
     )
-    result_contract = cycle_result_contract(degradation_tracking)
+    result_contract = cycle_result_contract(
+        degradation_tracking,
+        profile=launch_context.get("result_contract_profile"),
+    )
 
     return {
         "revision_id": revision.id if revision is not None else None,

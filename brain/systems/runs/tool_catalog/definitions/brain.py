@@ -916,6 +916,14 @@ BRAIN_TOOLS = [
                     "type": "string",
                     "description": "Why this Cycle change is useful. Required by convention for autonomous changes.",
                 },
+                "result_contract_profile": {
+                    "type": "string",
+                    "enum": ["standard", "material_alert"],
+                    "description": (
+                        "Explicit result-contract profile for action='run'. Use material_alert only for a concise, "
+                        "single-focus alert; omit it for the strict standard contract. Never infer this from time."
+                    ),
+                },
                 "output_target_type": {
                     "type": "string",
                     "description": "Output target type, such as cycle_ledger, thread, domain, project_file, workspace_app, or chat.",

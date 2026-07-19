@@ -804,6 +804,82 @@ def test_coordinator_launch_prompt_maps_declared_contract_to_visible_sections():
     assert "Example required footer:" in output_section
 
 
+def test_material_alert_contract_keeps_evidence_gate_without_digest_footer_fields():
+    from brain.systems.cycles.contract_gate import evaluate_cycle_result_contract
+
+    contract = cycle_result_contract(profile="material_alert")
+
+    assert contract["profile"] == "material_alert"
+    assert contract["required_outputs"] == [
+        "answer_the_cycle_mission",
+        "summarize_workspace_evidence_or_explicit_gaps",
+        "report_evidence_health",
+    ]
+
+    alert = (
+        "Uwear engineering changed materially: the deploy queue now preserves one active "
+        "release per project. Evidence reviewed: workspace run receipts and the merged change. "
+        "Evidence health: ok."
+    )
+    reduced_review = evaluate_cycle_result_contract(
+        candidate_answer=alert,
+        result_contract=contract,
+        mission="Post one concise material engineering change alert.",
+    )
+    strict_review = evaluate_cycle_result_contract(
+        candidate_answer=alert,
+        result_contract=cycle_result_contract(),
+        mission="Publish the coordinator digest.",
+    )
+
+    assert reduced_review["approved"] is True
+    assert strict_review["approved"] is False
+    assert strict_review["missing_outputs"] == [
+        "record_next_action_or_blocker",
+        "short_self_review_summary",
+    ]
+
+
+def test_material_alert_launch_prompt_does_not_request_digest_footer_fields():
+    cycle = Cycle()
+    cycle.id = 2
+    cycle.name = "Uwear Ticket Coordinator Check-ins"
+    cycle.prompt = "Post one concise Uwear material engineering change alert."
+    cycle.timezone = "America/Toronto"
+    cycle.model_override = None
+    cycle.thinking_override = None
+
+    run = CycleRun()
+    run.id = 1884
+    run.cycle_id = cycle.id
+    run.scheduled_for = datetime(2026, 7, 18, 19, 47, tzinfo=timezone.utc)
+    run.guidance_snapshot = []
+    run.output_targets_snapshot = []
+    run.context_snapshot = {
+        "launch_context": {
+            "origin": AGENT_TRIGGERED_CYCLE_ORIGIN,
+            "source": "manage_cycle",
+            "result_contract_profile": "material_alert",
+        },
+        "result_contract": cycle_result_contract(profile="material_alert"),
+    }
+
+    idea = Idea()
+    idea.id = "coordinator-material-alert"
+    idea.title = "Uwear Ticket Coordinator Runs"
+
+    message = cycle_prompts.cycle_run_message(idea, cycle, run)
+    output_section = message.split("## Required Output Sections", 1)[1].split(
+        "## Cycle Memory", 1
+    )[0]
+
+    assert "`record_next_action_or_blocker`" not in output_section
+    assert "`short_self_review_summary`" not in output_section
+    assert "Next action:" not in output_section
+    assert "Self-review summary:" not in output_section
+    assert "End with a short self-review summary" not in message
+
+
 @pytest.mark.asyncio
 async def test_async_run_cycle_now_uses_native_uow_without_sync_bridges(monkeypatch):
     cycle = Cycle()
@@ -839,6 +915,39 @@ async def test_async_run_cycle_now_uses_native_uow_without_sync_bridges(monkeypa
         "source": "cycle.run_now",
     }
     assert all(uow.entered for uow in factory.uows)
+
+
+@pytest.mark.asyncio
+async def test_async_run_cycle_now_snapshots_material_alert_contract_profile(monkeypatch):
+    cycle = Cycle()
+    cycle.id = 5
+    cycle.prompt = "Post one concise material engineering alert"
+    cycle.deleted_at = None
+    cycle.org_id = None
+    cycle.user_id = None
+    cycle.timezone = "America/Toronto"
+
+    created_runs = []
+    factory = _AsyncUnitOfWorkFactory([
+        _AsyncRunNowCreateSession(cycle, created_runs),
+        _AsyncRunNowLoadSession(created_runs),
+    ])
+
+    async def fake_async_execute_cycle_run(_run_id):
+        created_runs[0].status = "completed"
+
+    monkeypatch.setattr(service, "UnitOfWork", factory)
+    monkeypatch.setattr(service, "async_execute_cycle_run", fake_async_execute_cycle_run)
+
+    await service.async_run_cycle_now(
+        cycle.id,
+        launch_context={"result_contract_profile": "material_alert"},
+    )
+
+    snapshot = created_runs[0].context_snapshot
+    assert snapshot["launch_context"]["result_contract_profile"] == "material_alert"
+    assert snapshot["result_contract"]["profile"] == "material_alert"
+    assert "short_self_review_summary" not in snapshot["result_contract"]["required_outputs"]
 
 
 @pytest.mark.asyncio
@@ -1318,7 +1427,76 @@ async def test_manage_cycle_run_propagates_agent_trigger_provenance(monkeypatch)
             "actor_id": "1438",
             "thread_id": "reflex-thread",
             "rationale": "EVENT_TRIGGER: PR #990 merged and needs deploy",
+            "result_contract_profile": "standard",
         },
+    }
+
+
+@pytest.mark.asyncio
+async def test_manage_cycle_run_persists_explicit_material_alert_contract_profile(monkeypatch):
+    from brain.systems.runs.tool_catalog.handlers import cycles as cycle_handlers
+    from brain.systems.runs.execution_context import bind_agent_context
+
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 8,13,18 * * *",
+        timezone_name="America/New_York",
+    )
+    factory = _AsyncUnitOfWorkFactory([_AsyncCycleListSession([cycle])])
+    captured = {}
+
+    async def fake_run_cycle_now(cycle_id, *, launch_context=None):
+        captured["cycle_id"] = cycle_id
+        captured["launch_context"] = launch_context
+        return {"id": 99, "cycle_id": cycle_id, "status": "queued"}
+
+    monkeypatch.setattr(cycle_handlers, "UnitOfWork", factory)
+    monkeypatch.setattr(cycle_handlers, "async_run_cycle_now", fake_run_cycle_now)
+    monkeypatch.setattr(cycle_handlers, "publish_cycle_change", lambda **_kwargs: None)
+
+    with bind_agent_context(
+        {
+            "user_id": "user-1",
+            "org_id": None,
+            "run_id": 1438,
+            "idea_id": "reflex-thread",
+        }
+    ):
+        payload = json.loads(
+            await cycle_handlers._handle_manage_cycle_async(
+                action="run",
+                id=cycle.id,
+                rationale="Uwear material engineering change",
+                result_contract_profile="material_alert",
+            )
+        )
+
+    assert payload["run"]["id"] == 99
+    assert captured["launch_context"]["result_contract_profile"] == "material_alert"
+
+
+@pytest.mark.asyncio
+async def test_manage_cycle_run_rejects_unknown_result_contract_profile_before_loading_cycle(
+    monkeypatch,
+):
+    from brain.systems.runs.tool_catalog.handlers import cycles as cycle_handlers
+    from brain.systems.runs.execution_context import bind_agent_context
+
+    def forbidden_unit_of_work():
+        raise AssertionError("invalid profiles must fail before database access")
+
+    monkeypatch.setattr(cycle_handlers, "UnitOfWork", forbidden_unit_of_work)
+
+    with bind_agent_context({"user_id": "user-1", "idea_id": "reflex-thread"}):
+        payload = json.loads(
+            await cycle_handlers._handle_manage_cycle_async(
+                action="run",
+                id=2,
+                result_contract_profile="inferred_off_slot",
+            )
+        )
+
+    assert payload == {
+        "error": "cycle result-contract profile must be one of: material_alert, standard"
     }
 
 

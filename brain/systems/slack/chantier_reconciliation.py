@@ -121,7 +121,7 @@ async def reconcile_published_chantier_prd(
     actor_user_id: str | None = None,
     run_id: int | None = None,
 ) -> ChantierReconciliationReport:
-    """Report or repair a published PRD whose exact-slug record has drifted."""
+    """Report or repair a published PRD by exact slug or typed-ref identity."""
 
     service = AsyncDomainService(session)
     domain = next(
@@ -172,7 +172,44 @@ async def reconcile_published_chantier_prd(
         )
 
     expected_refs = publication.linked_refs()
-    record = matches[0] if matches else None
+    ref_matches = _records_with_overlapping_refs(records, expected_refs)
+    if len(ref_matches) > 1:
+        ids = ", ".join(str(candidate.id) for candidate in ref_matches)
+        if repair:
+            raise ChantierDeclareGuaranteeError(
+                f"Published refs for chantier {publication.slug!r} match multiple "
+                f"active chantier records: {ids}"
+            )
+        return ChantierReconciliationReport(
+            slug=publication.slug,
+            domain_id=domain.id,
+            record_id=None,
+            operation="ambiguous_ref_overlap",
+            drift=("ambiguous_ref_overlap",),
+            source=publication.source,
+        )
+    slug_record = matches[0] if matches else None
+    ref_record = ref_matches[0] if ref_matches else None
+    if (
+        slug_record is not None
+        and ref_record is not None
+        and slug_record.id != ref_record.id
+    ):
+        ids = f"{slug_record.id}, {ref_record.id}"
+        if repair:
+            raise ChantierDeclareGuaranteeError(
+                f"Published slug and refs for chantier {publication.slug!r} resolve "
+                f"to different active chantier records: {ids}"
+            )
+        return ChantierReconciliationReport(
+            slug=publication.slug,
+            domain_id=domain.id,
+            record_id=None,
+            operation="conflicting_identity",
+            drift=("conflicting_identity",),
+            source=publication.source,
+        )
+    record = ref_record or slug_record
     drift: list[str] = []
     if record is None:
         drift.append("missing_record")
@@ -224,12 +261,14 @@ async def reconcile_published_chantier_prd(
         limit=500,
         order="updated_asc",
     )
-    verified_matches = _records_with_slug(verified_records, publication.slug)
-    if len(verified_matches) != 1 or _missing_refs(verified_matches[0], expected_refs):
+    verified = next(
+        (candidate for candidate in verified_records if candidate.id == record.id),
+        None,
+    )
+    if verified is None or _missing_refs(verified, expected_refs):
         raise ChantierDeclareGuaranteeError(
             f"Chantier {publication.slug!r} tracker record failed post-repair verification"
         )
-    verified = verified_matches[0]
     return ChantierReconciliationReport(
         slug=publication.slug,
         domain_id=domain.id,
@@ -506,6 +545,30 @@ def _records_with_slug(records: Sequence[DomainRecord], slug: str) -> list[Domai
         record
         for record in records
         if str((record.data or {}).get("slug") or "").casefold() == needle
+    ]
+
+
+def _records_with_overlapping_refs(
+    records: Sequence[DomainRecord],
+    expected: Sequence[Mapping[str, str]],
+) -> list[DomainRecord]:
+    expected_identities = {
+        (str(item.get("source") or ""), str(item.get("ref") or ""))
+        for item in expected
+        if str(item.get("source") or "") and str(item.get("ref") or "")
+    }
+    if not expected_identities:
+        return []
+    return [
+        record
+        for record in records
+        if expected_identities.intersection(
+            {
+                (str(item.get("source") or ""), str(item.get("ref") or ""))
+                for item in (record.data or {}).get("refs", [])
+                if isinstance(item, Mapping)
+            }
+        )
     ]
 
 

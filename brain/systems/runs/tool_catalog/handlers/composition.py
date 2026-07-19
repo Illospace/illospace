@@ -42,6 +42,7 @@ from brain.systems.runs.tool_catalog.handlers.cycles import _handle_manage_cycle
 from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
 from brain.systems.runs.tool_catalog.handlers.inbound import _handle_manage_inbound
 from brain.systems.runs.tool_catalog.handlers.github import (
+    _handle_add_github_issue_comment,
     _handle_add_github_sub_issue,
     _handle_check_fix_deploy_state,
     _handle_create_github_issue,
@@ -309,6 +310,10 @@ def _get_tool_handlers(
         "update_github_issue": _private_async_adapter(
             "_handle_update_github_issue",
             _handle_update_github_issue,
+        ),
+        "add_github_issue_comment": _private_async_adapter(
+            "_handle_add_github_issue_comment",
+            _handle_add_github_issue_comment,
         ),
         "add_github_sub_issue": _private_async_adapter(
             "_handle_add_github_sub_issue",
