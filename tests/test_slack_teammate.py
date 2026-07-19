@@ -11,6 +11,7 @@ from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompile
 import yaml
 
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
+from brain.platform.db.models.domain import Domain, DomainObjectType, DomainRecord
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundEventRow
 from brain.platform.db.models.org import Org, User
@@ -57,6 +58,9 @@ async def session(async_sqlite_session_factory):
         [
             Org.__table__,
             User.__table__,
+            Domain.__table__,
+            DomainObjectType.__table__,
+            DomainRecord.__table__,
             ExternalAgentConnectionRow.__table__,
             AgentRunRow.__table__,
             AgentRunEventRow.__table__,

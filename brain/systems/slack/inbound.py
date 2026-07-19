@@ -70,6 +70,8 @@ async def process_slack_message_envelope(
             actor_user_id=authority_user_id,
             origin=str(normalized.get("origin") or ""),
             text=str(slack_payload.get("text") or ""),
+            channel_id=str(slack_payload.get("channel_id") or "") or None,
+            thread_ts=str(slack_payload.get("thread_ts") or "") or None,
         )
     except (DomainError, DomainNotFound) as exc:
         # Missing/mismatched Domain-1 configuration must be visible in the

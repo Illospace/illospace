@@ -14,6 +14,7 @@ import json
 import re
 from typing import Any, Mapping, Sequence
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.domain import DomainRecord
@@ -28,6 +29,13 @@ GITHUB_PARENT_MIRROR_TOOL = "create_github_issue"
 GITHUB_SUB_ISSUE_TOOL = "add_github_sub_issue"
 
 _CHANTIER_KEYWORD_RE = re.compile(r"\bchantier\b", re.IGNORECASE)
+_PLAIN_DECLARE_PREFIX_RE = re.compile(
+    r"(?:\b(?:declare|déclare)(?:\s+(?:a|the|new|un))?"
+    r"|\b(?:create|open|start)(?:\s+(?:a|new))?"
+    r"|\bkick\s+off(?:\s+(?:a|new))?"
+    r"|\b(?:new|nouveau))\s*$",
+    re.IGNORECASE,
+)
 _SLACK_MENTION_RE = re.compile(r"<@[A-Z0-9]+>", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 _KIND_RE = re.compile(
@@ -54,14 +62,6 @@ _GITHUB_ISSUE_URL_RE = re.compile(
     r"^https?://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/"
     r"(?P<repo>[A-Za-z0-9_.-]+)/issues/(?P<number>[1-9][0-9]*)(?:[/?#].*)?$",
     re.IGNORECASE,
-)
-_QUESTION_PREFIXES = (
-    "are there",
-    "list",
-    "show",
-    "status",
-    "what",
-    "which",
 )
 
 
@@ -129,13 +129,7 @@ def parse_chantier_declaration(text: str) -> ChantierDeclaration | None:
     tail = raw[keyword.end() :].strip()
     used_colon = tail.startswith(":")
     tail = tail.lstrip(" \t:-–—")
-    if not tail or (
-        not used_colon
-        and (
-            prefix.startswith(_QUESTION_PREFIXES)
-            or tail.casefold().startswith(_QUESTION_PREFIXES)
-        )
-    ):
+    if not tail or (not used_colon and _PLAIN_DECLARE_PREFIX_RE.search(prefix) is None):
         return None
 
     urls = [_trim_url(url) for url in _URL_RE.findall(tail)]
@@ -199,10 +193,19 @@ async def maybe_declare_chantier_from_slack(
     actor_user_id: str | None,
     origin: str,
     text: str,
+    channel_id: str | None = None,
+    thread_ts: str | None = None,
 ) -> ChantierDeclareResult | None:
     """Create/update a chantier only through the explicit app-mention door."""
 
     if str(origin or "").strip() != SLACK_APP_MENTION_ORIGIN:
+        return None
+    if await _thread_belongs_to_chantier(
+        session,
+        org_id=org_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+    ):
         return None
     declaration = parse_chantier_declaration(text)
     if declaration is None:
@@ -213,6 +216,56 @@ async def maybe_declare_chantier_from_slack(
         actor_user_id=actor_user_id,
         declaration=declaration,
     )
+
+
+async def _thread_belongs_to_chantier(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    channel_id: str | None,
+    thread_ts: str | None,
+) -> bool:
+    clean_thread_ts = str(thread_ts or "").strip()
+    if not clean_thread_ts:
+        return False
+
+    service = AsyncDomainService(session)
+    domain = next(
+        (item for item in await service.list_domains(org_id) if item.slug == TRACKER_DOMAIN_SLUG),
+        None,
+    )
+    if domain is None:
+        return False
+    try:
+        object_type = await service.get_object_type(domain.id, CHANTIER_OBJECT_KEY)
+    except DomainNotFound:
+        return False
+    records = (
+        await session.scalars(
+            select(DomainRecord).where(
+                DomainRecord.org_id == org_id,
+                DomainRecord.domain_id == domain.id,
+                DomainRecord.object_type_id == object_type.id,
+                DomainRecord.archived_at.is_(None),
+            )
+        )
+    ).all()
+    clean_channel_id = str(channel_id or "").strip()
+    suffix = (
+        f":{clean_channel_id}:{clean_thread_ts}"
+        if clean_channel_id
+        else f":{clean_thread_ts}"
+    )
+    for record in records:
+        refs = (record.data or {}).get("refs")
+        for ref in refs if isinstance(refs, list) else ():
+            if not isinstance(ref, Mapping):
+                continue
+            if str(ref.get("source") or "").casefold() != "slack":
+                continue
+            if str(ref.get("ref") or "").strip().endswith(suffix):
+                return True
+    return False
 
 
 async def upsert_chantier_declaration(
