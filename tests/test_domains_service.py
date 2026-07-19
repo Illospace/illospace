@@ -341,6 +341,22 @@ def test_slack_chantier_declaration_parses_mechanical_contract():
     assert parse_chantier_declaration("<@BILLO> what chantier are active?") is None
 
 
+def test_slack_chantier_declaration_requires_declare_intent_without_colon():
+    from brain.systems.slack.chantier_declare import parse_chantier_declaration
+
+    assert parse_chantier_declaration("super, so this chantier is locked") is None
+    assert parse_chantier_declaration("is the chantier ready?") is None
+    assert parse_chantier_declaration("the chantier looks good") is None
+    assert parse_chantier_declaration("chantier update please") is None
+
+    declared = parse_chantier_declaration("declare chantier reliability")
+    assert declared is not None and declared.title == "reliability"
+    colon = parse_chantier_declaration("chantier: Reliability push")
+    assert colon is not None and colon.title == "Reliability push"
+    french = parse_chantier_declaration("nouveau chantier fiabilité")
+    assert french is not None and french.title == "fiabilité"
+
+
 async def test_slack_chantier_declare_persists_explicit_sunset_kind(session):
     from brain.systems.slack.chantier_declare import maybe_declare_chantier_from_slack
 
@@ -503,6 +519,46 @@ async def test_slack_chantier_router_does_not_create_without_keyword(session):
     assert ordinary_mention is None
     assert dm_with_keyword is None
     assert records == []
+
+
+async def test_slack_chantier_declare_skips_bound_chantier_thread(session):
+    from brain.systems.slack.chantier_declare import maybe_declare_chantier_from_slack
+
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+    data = _chantier_record_data()
+    data["refs"] = [
+        *data["refs"],
+        {
+            "source": "slack",
+            "ref": "slack:TTEAM:CCHANTIER:1784408445.531609",
+        },
+    ]
+    existing = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "chantier",
+        data=data,
+    )
+
+    result = await maybe_declare_chantier_from_slack(
+        session,
+        org_id=ORG_ID,
+        actor_user_id=USER_ID,
+        origin="slack.app_mention",
+        text="<@BILLO> chantier: junk declaration",
+        channel_id="CCHANTIER",
+        thread_ts="1784408445.531609",
+    )
+
+    records = await service.list_records(ORG_ID, domain.id, object_key="chantier")
+    assert result is None
+    assert [record.id for record in records] == [existing.id]
 
 
 async def test_slack_chantier_declare_run_contract_requires_threaded_echo_and_mirror(session):
