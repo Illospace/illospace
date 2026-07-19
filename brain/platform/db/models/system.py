@@ -40,7 +40,7 @@ class ConsolidationRun(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     run_date: Mapped[date] = mapped_column(Date, nullable=False)
-    phase: Mapped[str] = mapped_column(String(20), nullable=False)
+    phase: Mapped[str] = mapped_column(String(64), nullable=False)
     started_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         server_default=text("NOW()"), nullable=True

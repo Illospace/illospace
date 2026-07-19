@@ -757,3 +757,970 @@ async def test_exact_counts_retry_search_422_with_healthy_secondary_token():
     assert result["counts"] == {"issues": 17, "pull_requests": 4}
     assert result["fallback_from_status_code"] == 422
     assert attempts == ["primary-token", "secondary-token"]
+
+
+def test_read_github_source_schema_exposes_pinned_source_actions():
+    from brain.systems.runs.tool_catalog.definitions.github import GITHUB_TOOLS
+
+    definition = next(tool for tool in GITHUB_TOOLS if tool["name"] == "read_github_source")
+    properties = definition["input_schema"]["properties"]
+
+    assert {"get_file", "list_tree", "grep"} <= set(properties["action"]["enum"])
+    assert properties["ref"]["type"] == "string"
+    assert properties["path"]["type"] == "string"
+    assert properties["query"]["type"] == "string"
+    assert properties["query"]["maxLength"] == 500
+    assert properties["ref"]["maxLength"] == 512
+    assert properties["path"]["maxLength"] == 4096
+    assert properties["case_sensitive"]["default"] is False
+    assert properties["line_start"]["minimum"] == 1
+    assert properties["line_end"]["minimum"] == 1
+
+
+def test_read_github_source_registration_advertises_bounded_source_evidence():
+    from brain.systems.runs.tool_catalog.registry import get_tool_registration
+    from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
+
+    registration = get_tool_registration("read_github_source")
+    coordinator_names = {tool["name"] for tool in COORDINATOR_TOOLS}
+    worker_names = {tool["name"] for tool in WORKER_TOOLS}
+
+    assert registration is not None
+    assert registration.side_effect_class == "read_only"
+    assert registration.output_budget_chars == 18_000
+    assert "pinned source" in registration.expected_effect
+    assert "read_github_source" in coordinator_names
+    assert "read_github_source" in worker_names
+
+
+@pytest.mark.asyncio
+async def test_get_file_reads_numbered_lines_at_resolved_ref_with_project_token():
+    import base64
+
+    requests: list[tuple[str, str | None, dict | None]] = []
+    commit_sha = "a" * 40
+    tree_sha = "b" * 40
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        requests.append((path, token, params))
+        if path.endswith("/commits/main"):
+            return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+        if path.endswith("/contents/brain/app.py"):
+            content = b"first\nneedle = True\nlast\n"
+            return {
+                "type": "file",
+                "path": "brain/app.py",
+                "sha": "blob-sha",
+                "size": len(content),
+                "encoding": "base64",
+                "content": base64.b64encode(content).decode("ascii"),
+            }
+        raise AssertionError(path)
+
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_resolve_project_bound_env_tokens",
+        new=AsyncMock(return_value={"GITHUB_TOKEN": "installation-token"}),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_secrets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        payload = json.loads(
+            await _handle_read_github_source(
+                action="get_file",
+                repo="uwear-ai/uwear-backend",
+                ref="main",
+                path="/brain/app.py",
+                line_start=2,
+                line_end=3,
+            )
+        )
+
+    assert payload["resolved_ref"] == commit_sha
+    assert payload["path"] == "brain/app.py"
+    assert payload["content"] == "2: needle = True\n3: last"
+    assert payload["citation_range"] == "brain/app.py:2-3"
+    assert payload["truncated"] is False
+    assert payload["token_source"] == "project_binding:GITHUB_TOKEN"
+    assert requests == [
+        ("/repos/uwear-ai/uwear-backend/commits/main", "installation-token", None),
+        (
+            "/repos/uwear-ai/uwear-backend/contents/brain/app.py",
+            "installation-token",
+            {"ref": commit_sha},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_file_stays_below_tool_output_budget_for_escape_heavy_source():
+    import base64
+
+    commit_sha = "1" * 40
+    tree_sha = "2" * 40
+    source = ("\\" * 20_000).encode("utf-8")
+    requested_ref = "r" * 512
+    requested_path = f"{'p' * 4092}.txt"
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+        return {
+            "type": "file",
+            "path": "generated.txt",
+            "sha": "blob-sha",
+            "size": len(source),
+            "encoding": "base64",
+            "content": base64.b64encode(source).decode("ascii"),
+        }
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        result = await _handle_read_github_source(
+            action="get_file",
+            repo="acme/widgets",
+            ref=requested_ref,
+            path=requested_path,
+        )
+
+    payload = json.loads(result)
+    assert len(result) < 18_000
+    assert "error" not in payload, payload
+    assert payload["requested_ref"] == requested_ref
+    assert payload["path"] == requested_path
+    assert payload["truncated"] is True
+    assert payload["line_truncated"] is True
+    assert payload["evidence_health"] == {"status": "warning", "completeness": "line_truncated"}
+
+
+@pytest.mark.asyncio
+async def test_get_file_uses_existing_auth_fallback_for_a_rejected_project_token():
+    import base64
+
+    attempts: list[str | None] = []
+    commit_sha = "9" * 40
+    tree_sha = "0" * 40
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        attempts.append(token)
+        if token == "rejected-token":
+            raise GitHubConnectorError(status_code=403, message="Forbidden")
+        if "/commits/" in path:
+            return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+        source = b"healthy\n"
+        return {
+            "type": "file",
+            "path": "health.py",
+            "sha": "blob",
+            "size": len(source),
+            "encoding": "base64",
+            "content": base64.b64encode(source).decode("ascii"),
+        }
+
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_resolve_project_bound_env_tokens",
+        new=AsyncMock(
+            return_value={
+                "GITHUB_TOKEN": "rejected-token",
+                "GITHUB_TOKEN__SECONDARY": "healthy-token",
+            }
+        ),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_secrets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        payload = json.loads(
+            await _handle_read_github_source(
+                action="get_file",
+                repo="acme/widgets",
+                ref="main",
+                path="health.py",
+            )
+        )
+
+    assert payload["content"] == "1: healthy"
+    assert payload["token_source"] == "project_binding:GITHUB_TOKEN__SECONDARY"
+    assert payload["fallback_from_status_code"] == 403
+    assert attempts == ["rejected-token", "healthy-token", "healthy-token"]
+
+
+@pytest.mark.asyncio
+async def test_missing_source_path_does_not_poison_same_run_token_for_valid_read():
+    import base64
+
+    commit_sha = "7" * 40
+    tree_sha = "8" * 40
+    requested_paths: list[str] = []
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+        requested_paths.append(path)
+        if path.endswith("/contents/missing.py"):
+            raise GitHubConnectorError(status_code=404, message="Path not found")
+        source = b"healthy\n"
+        return {
+            "type": "file",
+            "path": "valid.py",
+            "sha": "blob",
+            "size": len(source),
+            "encoding": "base64",
+            "content": base64.b64encode(source).decode("ascii"),
+        }
+
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_resolve_project_bound_env_tokens",
+        new=AsyncMock(return_value={"GITHUB_TOKEN": "healthy-token"}),
+    ), patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_secrets",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        missing = json.loads(
+            await _handle_read_github_source(
+                action="get_file",
+                repo="acme/widgets",
+                ref="main",
+                path="missing.py",
+            )
+        )
+        valid = json.loads(
+            await _handle_read_github_source(
+                action="get_file",
+                repo="acme/widgets",
+                ref="main",
+                path="valid.py",
+            )
+        )
+
+    assert missing["status_code"] == 404
+    assert valid["content"] == "1: healthy"
+    assert requested_paths == [
+        "/repos/acme/widgets/contents/missing.py",
+        "/repos/acme/widgets/contents/valid.py",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_file_rejects_a_line_start_beyond_end_of_file():
+    import base64
+
+    source = b"one\ntwo\nthree\n"
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": "a" * 40, "commit": {"tree": {"sha": "b" * 40}}}
+        return {
+            "type": "file",
+            "path": "short.py",
+            "sha": "blob",
+            "size": len(source),
+            "encoding": "base64",
+            "content": base64.b64encode(source).decode("ascii"),
+        }
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        payload = json.loads(
+            await _handle_read_github_source(
+                action="get_file",
+                repo="acme/widgets",
+                ref="main",
+                path="short.py",
+                line_start=10,
+            )
+        )
+
+    assert payload["status_code"] == 416
+    assert "line_start" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_file_returns_a_coherent_empty_result_for_an_empty_file():
+    import base64
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": "a" * 40, "commit": {"tree": {"sha": "b" * 40}}}
+        return {
+            "type": "file",
+            "path": "empty.py",
+            "sha": "blob",
+            "size": 0,
+            "encoding": "base64",
+            "content": base64.b64encode(b"").decode("ascii"),
+        }
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        payload = json.loads(
+            await _handle_read_github_source(
+                action="get_file",
+                repo="acme/widgets",
+                ref="main",
+                path="empty.py",
+            )
+        )
+
+    assert payload["total_lines"] == 0
+    assert payload["line_start"] == 1
+    assert payload["line_end"] is None
+    assert payload["content"] == ""
+    assert payload["citation_range"] is None
+    assert payload["truncated"] is False
+    assert payload["evidence_health"] == {"status": "ok", "completeness": "complete"}
+
+
+@pytest.mark.asyncio
+async def test_get_file_fails_boundedly_when_metadata_leaves_no_room_to_advance():
+    import base64
+
+    requested_path = "/".join(["\x01" * 97 for _ in range(16)])
+    source = b"x\n"
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": "a" * 40, "commit": {"tree": {"sha": "b" * 40}}}
+        return {
+            "type": "file",
+            "path": requested_path,
+            "sha": "blob",
+            "size": len(source),
+            "encoding": "base64",
+            "content": base64.b64encode(source).decode("ascii"),
+        }
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        result = await _handle_read_github_source(
+            action="get_file",
+            repo="acme/widgets",
+            ref="main",
+            path=requested_path,
+        )
+
+    payload = json.loads(result)
+    assert len(result) < 18_000
+    assert payload["status_code"] == 413
+    assert "output budget" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_list_tree_is_bounded_and_paginates_at_the_resolved_ref():
+    commit_sha = "c" * 40
+    tree_sha = "d" * 40
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+        if "/git/trees/" in path:
+            assert path.endswith(f"/git/trees/{tree_sha}")
+            assert params == {"recursive": "1"}
+            return {
+                "sha": tree_sha,
+                "truncated": False,
+                "tree": [
+                    {"path": "README.md", "type": "blob", "sha": "readme", "size": 12},
+                    {"path": "src/a.py", "type": "blob", "sha": "a", "size": 20},
+                    {"path": "src/b.py", "type": "blob", "sha": "b", "size": 30},
+                ],
+            }
+        raise AssertionError(path)
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        first = json.loads(
+            await _handle_read_github_source(
+                action="list_tree",
+                repo="acme/widgets",
+                ref="main",
+                path="src",
+                limit=1,
+            )
+        )
+        second = json.loads(
+            await _handle_read_github_source(
+                action="list_tree",
+                repo="acme/widgets",
+                ref="main",
+                path="src",
+                limit=1,
+                cursor=first["next_page"],
+            )
+        )
+
+    assert first["resolved_ref"] == commit_sha
+    assert [entry["path"] for entry in first["entries"]] == ["src/a.py"]
+    assert first["truncated"] is True
+    assert first["next_page"]
+    assert [entry["path"] for entry in second["entries"]] == ["src/b.py"]
+    assert second["truncated"] is False
+    assert second["next_page"] is None
+    assert second["evidence_health"] == {"status": "ok", "completeness": "complete"}
+
+
+@pytest.mark.asyncio
+async def test_list_tree_reports_upstream_truncation_even_when_another_local_page_exists():
+    commit_sha = "c" * 40
+    tree_sha = "d" * 40
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+        return {
+            "sha": tree_sha,
+            "truncated": True,
+            "tree": [
+                {"path": "a.py", "type": "blob", "sha": "a", "size": 1},
+                {"path": "b.py", "type": "blob", "sha": "b", "size": 1},
+            ],
+        }
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        payload = json.loads(
+            await _handle_read_github_source(
+                action="list_tree",
+                repo="acme/widgets",
+                ref="main",
+                limit=1,
+            )
+        )
+
+    assert payload["next_page"]
+    assert payload["source_truncated"] is True
+    assert payload["evidence_health"] == {"status": "warning", "completeness": "source_truncated"}
+
+
+@pytest.mark.asyncio
+async def test_list_tree_rejects_a_non_finite_cursor_position():
+    import hashlib
+
+    from brain.kernel.common.pagination import encode_page_token
+
+    commit_sha = "c" * 40
+    tree_sha = "d" * 40
+    prefix_fingerprint = hashlib.sha256(b"").hexdigest()[:20]
+    cursor = encode_page_token(
+        f"github_tree:acme/widgets:{commit_sha}:{prefix_fingerprint}",
+        {"offset": float("inf")},
+    )
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        assert "/commits/" in path
+        return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        payload = json.loads(
+            await _handle_read_github_source(
+                action="list_tree",
+                repo="acme/widgets",
+                ref="main",
+                cursor=cursor,
+            )
+        )
+
+    assert payload == {"error": "Invalid pagination cursor"}
+
+
+@pytest.mark.asyncio
+async def test_grep_rejects_a_non_finite_cursor_position():
+    import hashlib
+
+    from brain.kernel.common.pagination import encode_page_token
+
+    commit_sha = "e" * 40
+    tree_sha = "f" * 40
+    fingerprint = hashlib.sha256("needle\0\0False".encode("utf-8")).hexdigest()[:20]
+    cursor = encode_page_token(
+        f"github_grep:acme/widgets:{commit_sha}:{fingerprint}",
+        {"file_index": float("inf"), "line": 1},
+    )
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        assert "/commits/" in path
+        return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        payload = json.loads(
+            await _handle_read_github_source(
+                action="grep",
+                repo="acme/widgets",
+                ref="main",
+                query="needle",
+                cursor=cursor,
+            )
+        )
+
+    assert payload == {"error": "Invalid pagination cursor"}
+
+
+@pytest.mark.asyncio
+async def test_list_tree_pages_before_exceeding_the_tool_output_budget():
+    commit_sha = "3" * 40
+    tree_sha = "4" * 40
+    entries = [
+        {
+            "path": f"src/{index:03d}-{'nested-' * 45}.py",
+            "type": "blob",
+            "sha": f"blob-{index}",
+            "size": 10,
+        }
+        for index in range(60)
+    ]
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+        return {"sha": tree_sha, "truncated": False, "tree": entries}
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        result = await _handle_read_github_source(
+            action="list_tree",
+            repo="acme/widgets",
+            ref="main",
+            path="src",
+            limit=100,
+        )
+
+    payload = json.loads(result)
+    assert len(result) < 18_000
+    assert 0 < payload["returned"] < 60
+    assert payload["truncated"] is True
+    assert payload["next_page"]
+
+
+@pytest.mark.asyncio
+async def test_list_tree_fails_boundedly_when_one_entry_cannot_fit_the_envelope():
+    requested_path = "/".join(["\x01" * 97 for _ in range(16)])
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": "a" * 40, "commit": {"tree": {"sha": "b" * 40}}}
+        return {
+            "sha": "b" * 40,
+            "truncated": False,
+            "tree": [{"path": requested_path, "type": "blob", "sha": "blob", "size": 1}],
+        }
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        result = await _handle_read_github_source(
+            action="list_tree",
+            repo="acme/widgets",
+            ref="main",
+            path=requested_path,
+        )
+
+    payload = json.loads(result)
+    assert len(result) < 18_000
+    assert payload["status_code"] == 413
+    assert "output budget" in payload["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["list_tree", "grep"])
+async def test_source_directory_actions_reject_a_missing_path_prefix(action: str):
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": "a" * 40, "commit": {"tree": {"sha": "b" * 40}}}
+        return {
+            "sha": "b" * 40,
+            "truncated": False,
+            "tree": [{"path": "src/app.py", "type": "blob", "sha": "blob", "size": 1}],
+        }
+
+    kwargs = {"query": "needle"} if action == "grep" else {}
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        payload = json.loads(
+            await _handle_read_github_source(
+                action=action,
+                repo="acme/widgets",
+                ref="main",
+                path="missing",
+                **kwargs,
+            )
+        )
+
+    assert payload["status_code"] == 404
+    assert "prefix" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_grep_returns_bounded_path_line_citations_and_resumable_cursor():
+    import base64
+
+    commit_sha = "e" * 40
+    tree_sha = "f" * 40
+    source = b"first\nNeedle here\nsecond NEEDLE here\n"
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+        if "/git/trees/" in path:
+            return {
+                "sha": tree_sha,
+                "truncated": False,
+                "tree": [
+                    {"path": "src/app.py", "type": "blob", "sha": "blob-1", "size": len(source)},
+                    {"path": "vendor/ignored.py", "type": "blob", "sha": "blob-2", "size": 10},
+                ],
+            }
+        if path.endswith("/git/blobs/blob-1"):
+            return {
+                "sha": "blob-1",
+                "encoding": "base64",
+                "size": len(source),
+                "content": base64.b64encode(source).decode("ascii"),
+            }
+        raise AssertionError(path)
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        first = json.loads(
+            await _handle_read_github_source(
+                action="grep",
+                repo="acme/widgets",
+                ref="main",
+                path="src",
+                query="needle",
+                limit=1,
+            )
+        )
+        second = json.loads(
+            await _handle_read_github_source(
+                action="grep",
+                repo="acme/widgets",
+                ref=first["resolved_ref"],
+                path="src",
+                query="needle",
+                limit=1,
+                cursor=first["next_page"],
+            )
+        )
+
+    assert first["matches"] == [
+        {
+            "path": "src/app.py",
+            "line": 2,
+            "column": 1,
+            "text": "Needle here",
+            "citation": "src/app.py:2",
+            "text_truncated": False,
+            "prefix_truncated": False,
+            "suffix_truncated": False,
+        }
+    ]
+    assert first["truncated"] is True
+    assert first["next_page"]
+    assert first["scan_budget"]["max_files"] > 0
+    assert first["scan_budget"]["max_bytes"] > 0
+    assert second["matches"][0]["citation"] == "src/app.py:3"
+    assert second["truncated"] is False
+    assert second["next_page"] is None
+    assert second["evidence_health"] == {"status": "ok", "completeness": "complete"}
+
+
+@pytest.mark.asyncio
+async def test_grep_centers_its_bounded_snippet_on_a_late_line_match():
+    import base64
+
+    source = (("x" * 400) + "needle" + ("y" * 400)).encode("utf-8")
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": "a" * 40, "commit": {"tree": {"sha": "b" * 40}}}
+        if "/git/trees/" in path:
+            return {
+                "sha": "b" * 40,
+                "truncated": False,
+                "tree": [{"path": "src/long.py", "type": "blob", "sha": "blob", "size": len(source)}],
+            }
+        return {
+            "sha": "blob",
+            "encoding": "base64",
+            "size": len(source),
+            "content": base64.b64encode(source).decode("ascii"),
+        }
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        payload = json.loads(
+            await _handle_read_github_source(
+                action="grep",
+                repo="acme/widgets",
+                ref="main",
+                query="needle",
+            )
+        )
+
+    match = payload["matches"][0]
+    assert "needle" in match["text"]
+    assert match["column"] == 401
+    assert match["prefix_truncated"] is True
+    assert match["suffix_truncated"] is True
+    assert len(match["text"]) <= 300
+
+
+@pytest.mark.asyncio
+async def test_grep_fails_boundedly_when_one_match_cannot_fit_the_envelope():
+    import base64
+
+    requested_path = "/".join(["\\" * 125 for _ in range(30)])
+    source = b"needle\n"
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": "a" * 40, "commit": {"tree": {"sha": "b" * 40}}}
+        if "/git/trees/" in path:
+            return {
+                "sha": "b" * 40,
+                "truncated": False,
+                "tree": [{"path": requested_path, "type": "blob", "sha": "blob", "size": len(source)}],
+            }
+        return {
+            "sha": "blob",
+            "encoding": "base64",
+            "size": len(source),
+            "content": base64.b64encode(source).decode("ascii"),
+        }
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        result = await _handle_read_github_source(
+            action="grep",
+            repo="acme/widgets",
+            ref="main",
+            path=requested_path,
+            query="needle",
+        )
+
+    payload = json.loads(result)
+    assert len(result) < 18_000
+    assert payload["status_code"] == 413
+    assert "output budget" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_grep_marks_evidence_incomplete_when_a_source_file_is_skipped():
+    commit_sha = "5" * 40
+    tree_sha = "6" * 40
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+        if "/git/trees/" in path:
+            return {
+                "sha": tree_sha,
+                "truncated": False,
+                "tree": [
+                    {
+                        "path": "generated/minified.js",
+                        "type": "blob",
+                        "sha": "large-blob",
+                        "size": 200_000,
+                    }
+                ],
+            }
+        raise AssertionError("oversized blob should not be fetched")
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        payload = json.loads(
+            await _handle_read_github_source(
+                action="grep",
+                repo="acme/widgets",
+                ref="main",
+                query="needle",
+            )
+        )
+
+    assert payload["matches"] == []
+    assert payload["skipped_large_files"] == 1
+    assert payload["truncated"] is True
+    assert payload["next_page"] is None
+    assert payload["evidence_health"] == {"status": "warning", "completeness": "files_skipped"}
+
+
+@pytest.mark.asyncio
+async def test_grep_skips_nul_containing_blobs_as_incomplete_binary_evidence():
+    import base64
+
+    commit_sha = "c" * 40
+    tree_sha = "d" * 40
+    source = b"\x00needle\n"
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+        if "/git/trees/" in path:
+            return {
+                "sha": tree_sha,
+                "truncated": False,
+                "tree": [{"path": "asset.bin", "type": "blob", "sha": "binary", "size": len(source)}],
+            }
+        return {
+            "sha": "binary",
+            "encoding": "base64",
+            "size": len(source),
+            "content": base64.b64encode(source).decode("ascii"),
+        }
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        payload = json.loads(
+            await _handle_read_github_source(
+                action="grep",
+                repo="acme/widgets",
+                ref="main",
+                query="needle",
+            )
+        )
+
+    assert payload["matches"] == []
+    assert payload["skipped_binary_files"] == 1
+    assert payload["search_incomplete"] is True
+    assert payload["evidence_health"] == {"status": "warning", "completeness": "files_skipped"}
+
+
+@pytest.mark.asyncio
+async def test_grep_cursor_carries_skipped_file_evidence_to_the_final_page():
+    import base64
+
+    commit_sha = "a" * 40
+    tree_sha = "b" * 40
+    source = b"needle one\nneedle two\n"
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+        if "/git/trees/" in path:
+            return {
+                "sha": tree_sha,
+                "truncated": False,
+                "tree": [
+                    {"path": "a-large.txt", "type": "blob", "sha": "large", "size": 200_000},
+                    {"path": "b.py", "type": "blob", "sha": "small", "size": len(source)},
+                ],
+            }
+        return {
+            "sha": "small",
+            "encoding": "base64",
+            "size": len(source),
+            "content": base64.b64encode(source).decode("ascii"),
+        }
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        first = json.loads(
+            await _handle_read_github_source(
+                action="grep",
+                repo="acme/widgets",
+                ref="main",
+                query="needle",
+                limit=1,
+            )
+        )
+        final = json.loads(
+            await _handle_read_github_source(
+                action="grep",
+                repo="acme/widgets",
+                ref=first["resolved_ref"],
+                query="needle",
+                limit=1,
+                cursor=first["next_page"],
+            )
+        )
+
+    assert final["matches"][0]["citation"] == "b.py:2"
+    assert final["skipped_large_files"] == 1
+    assert final["search_incomplete"] is True
+    assert final["evidence_health"] == {"status": "warning", "completeness": "files_skipped"}
+
+
+@pytest.mark.asyncio
+async def test_grep_pages_before_match_evidence_exceeds_the_tool_output_budget():
+    import base64
+
+    commit_sha = "7" * 40
+    tree_sha = "8" * 40
+    source = "\n".join(f"needle {index} " + ("\\" * 400) for index in range(60)).encode("utf-8")
+
+    async def fake_request(client, method, path, *, token=None, params=None, json=None):
+        if "/commits/" in path:
+            return {"sha": commit_sha, "commit": {"tree": {"sha": tree_sha}}}
+        if "/git/trees/" in path:
+            return {
+                "sha": tree_sha,
+                "truncated": False,
+                "tree": [{"path": "src/generated.py", "type": "blob", "sha": "blob", "size": len(source)}],
+            }
+        return {
+            "sha": "blob",
+            "encoding": "base64",
+            "size": len(source),
+            "content": base64.b64encode(source).decode("ascii"),
+        }
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ):
+        result = await _handle_read_github_source(
+            action="grep",
+            repo="acme/widgets",
+            ref="main",
+            query="needle",
+            limit=100,
+        )
+
+    payload = json.loads(result)
+    assert len(result) < 18_000
+    assert 0 < payload["returned"] < 50
+    assert payload["truncated"] is True
+    assert payload["next_page"]

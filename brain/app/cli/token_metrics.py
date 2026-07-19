@@ -27,6 +27,9 @@ from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.runs.token_usage import async_summarize_recent_run_usage
 
 
+TOKEN_BASELINE_PATH = Path(config.PRIVATE_HOME) / "token-metrics" / "token_baseline.json"
+
+
 async def _runs_for_period(days: int, *, limit: int = 10_000) -> list[dict]:
     since = datetime.now(timezone.utc) - timedelta(days=days)
     async with UnitOfWork() as uow:
@@ -282,9 +285,8 @@ async def baseline_snapshot() -> dict:
     }
 
     # Save to file
-    baseline_path = str(Path(config.BRAIN_DIR) / "brain" / "platform" / "data" / "token_baseline.json")
-    os.makedirs(os.path.dirname(baseline_path), exist_ok=True)
-    with open(baseline_path, "w") as f:
+    os.makedirs(TOKEN_BASELINE_PATH.parent, exist_ok=True)
+    with open(TOKEN_BASELINE_PATH, "w") as f:
         json.dump(baseline, f, indent=2, default=str)
 
     return baseline
@@ -310,8 +312,7 @@ async def cmd_wasteful(args):
 async def cmd_baseline(args):
     data = await baseline_snapshot()
     print(json.dumps(data, indent=2, default=str))
-    baseline_path = str(Path(config.BRAIN_DIR) / "brain" / "platform" / "data" / "token_baseline.json")
-    print(f"\nBaseline saved to: {baseline_path}", file=sys.stderr)
+    print(f"\nBaseline saved to: {TOKEN_BASELINE_PATH}", file=sys.stderr)
 
 
 def main():

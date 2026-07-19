@@ -27,6 +27,7 @@ from brain.systems.runs.engine import AsyncAgentRunEngine
 from brain.systems.runs.events import run_event
 from brain.systems.runs.status import RunStatus
 from brain.systems.slack.chantier_reconciliation import (
+    ChantierDeclareGuaranteeError,
     PublishedChantierPrd,
     reconcile_published_chantier_prd,
 )
@@ -192,6 +193,27 @@ def _record_data() -> dict:
     }
 
 
+async def _create_chantier_record(session, domain_id, *, slug: str, title: str, refs):
+    data = _record_data()
+    data.update({"slug": slug, "title": title, "refs": refs})
+    return await AsyncDomainService(session).create_record(
+        ORG_ID,
+        domain_id,
+        "chantier",
+        data=data,
+    )
+
+
+def _mismatched_publication() -> PublishedChantierPrd:
+    publication = _publication()
+    return PublishedChantierPrd(
+        slug="v3-canonical-agent-mcp-repositioning-automation-builder-chat",
+        title="V3 Canonical Agent MCP Repositioning Automation Builder Chat",
+        prd_ref=publication.prd_ref,
+        anchor_ref=publication.anchor_ref,
+    )
+
+
 async def _running_engine(session, *, message: str):
     engine = AsyncAgentRunEngine(session, recipes={})
     run = await engine.store.create_run(
@@ -339,6 +361,94 @@ async def test_declare_missing_tracker_record_self_heals_before_success_and_dige
     assert ("slack", SLACK_REF) in refs
 
 
+async def test_declare_fails_loudly_when_exact_ref_overlap_is_ambiguous(session):
+    domain = await _create_tracker(session)
+    service = AsyncDomainService(session)
+    candidates = []
+    for slug, title, matching_ref in (
+        ("connector-framework", "Connector Framework", _publication().prd_ref),
+        (
+            "automation-builder-chat",
+            "Automation Builder Chat",
+            _publication().anchor_ref,
+        ),
+    ):
+        candidates.append(
+            await _create_chantier_record(
+                session,
+                domain.id,
+                slug=slug,
+                title=title,
+                refs=[matching_ref],
+            )
+        )
+    engine, run = await _running_engine(
+        session,
+        message="Declare the connector-framework chantier and publish its PRD.",
+    )
+    await _append_prd_and_anchor_events(engine, run.id)
+
+    failed = await engine.complete(run.id, output="Connector framework declared.")
+
+    assert failed.status == RunStatus.FAILED
+    guarantee = (await engine.store.require_run(run.id)).metadata_[
+        "chantier_declare_guarantee"
+    ]
+    assert guarantee["status"] == "failed"
+    assert "multiple active chantier records" in guarantee["error"]
+    assert all(str(candidate.id) in guarantee["error"] for candidate in candidates)
+    records = await service.list_records(ORG_ID, domain.id, object_key="chantier")
+    assert {record.id for record in records} == {candidate.id for candidate in candidates}
+
+
+async def test_reconciliation_fails_when_slug_and_exact_refs_resolve_to_different_records(
+    session,
+):
+    domain = await _create_tracker(session)
+    service = AsyncDomainService(session)
+    records = []
+    for slug, title, refs in (
+        (
+            "connector-framework",
+            "Connector Framework",
+            [
+                {
+                    "source": "github",
+                    "ref": "github:Illospace/illospace:issue:371",
+                    "title": "Declare guarantee issue",
+                }
+            ],
+        ),
+        (
+            "agent-mcp-repositioning",
+            "Agent MCP Repositioning",
+            [_publication().prd_ref],
+        ),
+    ):
+        records.append(
+            await _create_chantier_record(
+                session,
+                domain.id,
+                slug=slug,
+                title=title,
+                refs=refs,
+            )
+        )
+
+    with pytest.raises(ChantierDeclareGuaranteeError) as raised:
+        await reconcile_published_chantier_prd(
+            session,
+            org_id=ORG_ID,
+            publication=_publication(),
+            repair=True,
+        )
+
+    assert "resolve to different active chantier records" in str(raised.value)
+    assert all(str(record.id) in str(raised.value) for record in records)
+    remaining = await service.list_records(ORG_ID, domain.id, object_key="chantier")
+    assert {record.id for record in remaining} == {record.id for record in records}
+
+
 async def test_reconciliation_reports_published_prd_without_record_ref(session):
     domain = await _create_tracker(session)
 
@@ -354,6 +464,114 @@ async def test_reconciliation_reports_published_prd_without_record_ref(session):
     assert report.operation == "missing_record"
     assert report.drift == ("missing_record",)
     assert report.repaired is False
+
+
+async def test_reconciliation_reuses_active_chantier_when_publication_refs_are_subset(session):
+    domain = await _create_tracker(session)
+    service = AsyncDomainService(session)
+    canonical = await _create_chantier_record(
+        session,
+        domain.id,
+        slug="agent-mcp-repositioning",
+        title="Agent MCP Repositioning",
+        refs=[
+            *_publication().linked_refs(),
+            {
+                "source": "github",
+                "ref": "github:Illospace/illospace:issue:376",
+                "title": "Canonical chantier issue",
+            },
+        ],
+    )
+    canonical_version = canonical.version
+
+    report = await reconcile_published_chantier_prd(
+        session,
+        org_id=ORG_ID,
+        publication=_mismatched_publication(),
+        repair=True,
+    )
+
+    assert report.record_id == canonical.id
+    assert report.operation == "verified"
+    assert report.repaired is False
+    records = await service.list_records(ORG_ID, domain.id, object_key="chantier")
+    assert [record.id for record in records] == [canonical.id]
+    assert records[0].data["slug"] == "agent-mcp-repositioning"
+    assert records[0].version == canonical_version
+
+
+async def test_reconciliation_ref_overlap_reuses_canonical_and_merges_missing_refs(
+    session,
+):
+    domain = await _create_tracker(session)
+    service = AsyncDomainService(session)
+    canonical = await _create_chantier_record(
+        session,
+        domain.id,
+        slug="agent-mcp-repositioning",
+        title="Agent MCP Repositioning",
+        refs=[
+            _publication().prd_ref,
+            {
+                "source": "github",
+                "ref": "github:Illospace/illospace:issue:376",
+                "title": "Canonical chantier issue",
+            },
+        ],
+    )
+
+    report = await reconcile_published_chantier_prd(
+        session,
+        org_id=ORG_ID,
+        publication=_mismatched_publication(),
+        repair=True,
+    )
+
+    assert report.record_id == canonical.id
+    assert report.operation == "linked_missing_refs"
+    records = await service.list_records(ORG_ID, domain.id, object_key="chantier")
+    assert [record.id for record in records] == [canonical.id]
+    assert records[0].data["slug"] == "agent-mcp-repositioning"
+    refs = {(item["source"], item["ref"]) for item in records[0].data["refs"]}
+    assert refs == {
+        ("url", PRD_URL),
+        ("slack", SLACK_REF),
+        ("github", "github:Illospace/illospace:issue:376"),
+    }
+
+
+async def test_reconciliation_does_not_match_by_title_or_untyped_ref_value(session):
+    domain = await _create_tracker(session)
+    service = AsyncDomainService(session)
+    canonical = await _create_chantier_record(
+        session,
+        domain.id,
+        slug="agent-mcp-repositioning",
+        title=_publication().title,
+        refs=[
+            {
+                "source": "doc",
+                "ref": PRD_URL,
+                "title": "Different typed identity",
+            }
+        ],
+    )
+
+    report = await reconcile_published_chantier_prd(
+        session,
+        org_id=ORG_ID,
+        publication=_publication(),
+        repair=True,
+    )
+
+    assert report.record_id != canonical.id
+    assert report.operation == "created_missing_record"
+    records = await service.list_records(ORG_ID, domain.id, object_key="chantier")
+    assert {record.data["slug"] for record in records} == {
+        "agent-mcp-repositioning",
+        "connector-framework",
+    }
 
 
 async def test_non_declare_run_with_prd_and_slack_post_is_unaffected(session):

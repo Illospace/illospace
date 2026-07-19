@@ -47,12 +47,14 @@ from brain.platform.async_io import (
 logging.basicConfig(level=logging.INFO, format='[curiosity] %(message)s')
 logger = logging.getLogger(__name__)
 
-SCRIPT_DIR = Path(config.BRAIN_DIR) / "brain" / "platform" / "data"
-STATE_FILE = SCRIPT_DIR / "curiosity_state.json"
-READINGS_DIR = SCRIPT_DIR / "readings"
-BRIEFS_DIR = SCRIPT_DIR / "briefs"
-READINGS_DIR.mkdir(exist_ok=True)
-BRIEFS_DIR.mkdir(exist_ok=True)
+SCRIPT_DIR = Path(config.BRAIN_DIR) / "brain" / "app" / "cli"
+RUNTIME_DIR = Path(config.PRIVATE_HOME) / "curiosity"
+STATE_FILE = RUNTIME_DIR / "curiosity_state.json"
+READINGS_DIR = RUNTIME_DIR / "readings"
+BRIEFS_DIR = RUNTIME_DIR / "briefs"
+LOGS_DIR = RUNTIME_DIR / "logs"
+READINGS_DIR.mkdir(parents=True, exist_ok=True)
+BRIEFS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Max age for content — anything older is skipped
 MAX_CONTENT_AGE_DAYS = 30
@@ -513,7 +515,7 @@ async def run_reading_cycle(specific_url=None):
 
     # Build prompt and write it for the child agent
     prompt = build_analysis_prompt(source, content, brain_context)
-    prompt_file = SCRIPT_DIR / "logs" / f"curiosity-prompt-{datetime.now().strftime('%Y-%m-%d')}.txt"
+    prompt_file = LOGS_DIR / f"curiosity-prompt-{datetime.now().strftime('%Y-%m-%d')}.txt"
     await ensure_dir(prompt_file.parent, parents=True, exist_ok=True)
     await write_text_async(prompt_file, prompt)
 
@@ -522,7 +524,7 @@ async def run_reading_cycle(specific_url=None):
 
     # The scheduler-owned curiosity program handles child agent execution around
     # this prompt. Output goes to a JSON file that we then encode.
-    output_file = SCRIPT_DIR / "logs" / f"curiosity-output-{datetime.now().strftime('%Y-%m-%d')}.json"
+    output_file = LOGS_DIR / f"curiosity-output-{datetime.now().strftime('%Y-%m-%d')}.json"
 
     # Update state
     state["last_reads"][source["id"]] = datetime.now().isoformat()

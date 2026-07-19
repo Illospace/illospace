@@ -10,14 +10,18 @@ from typing import Any
 from brain.kernel.common.pagination import InvalidPageToken
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
+    async_add_repo_issue_comment,
     async_add_repo_sub_issue,
     async_create_repo_issue,
+    async_grep_repo,
     async_get_repo_issue_parent,
     async_get_pull_request_deploy_info,
     async_get_pull_request,
     async_get_pull_request_checks,
     async_get_repo_counts,
     async_get_repo_by_slug,
+    async_get_repo_file,
+    async_list_repo_tree,
     async_list_repo_issues,
     async_list_repo_pull_requests,
     async_list_repo_sub_issues,
@@ -145,8 +149,8 @@ async def _github_token_candidates(
     bindings. Writes may also use an explicit ``token_secret_key``. Reads keep
     the broader project-binding and vault-inventory fallback behavior.
 
-    ``repo_slugs`` lets a cross-repository write mint one installation token
-    down-scoped to every participating repository binding.
+    ``repo_slugs`` lets a cross-repository operation mint one installation
+    token down-scoped to every participating repository binding.
 
     ``org_id``/``user_id`` override the run context for BACKEND callers (e.g.
     dossier gathering) where no ``_agent_context`` exists; tool handlers omit
@@ -262,6 +266,12 @@ async def _read_with_token(
     pull_number: int | None,
     sha: str | None,
     cursor: str | None,
+    ref: str | None,
+    path: str | None,
+    line_start: int,
+    line_end: int | None,
+    query: str | None,
+    case_sensitive: bool,
 ) -> dict[str, Any]:
     if action in {"repo", "get_repo"}:
         repo = await async_get_repo_by_slug(repo_slug, token=token)
@@ -310,9 +320,38 @@ async def _read_with_token(
             token=token,
             state=state,
         )
+    if action == "get_file":
+        return await async_get_repo_file(
+            repo_slug,
+            str(path or ""),
+            ref=str(ref or ""),
+            token=token,
+            line_start=line_start,
+            line_end=line_end,
+        )
+    if action == "list_tree":
+        return await async_list_repo_tree(
+            repo_slug,
+            ref=str(ref or ""),
+            token=token,
+            path=path,
+            limit=_limit(limit),
+            cursor=cursor,
+        )
+    if action == "grep":
+        return await async_grep_repo(
+            repo_slug,
+            str(query or ""),
+            ref=str(ref or ""),
+            token=token,
+            path=path,
+            case_sensitive=bool(case_sensitive),
+            limit=_limit(limit),
+            cursor=cursor,
+        )
     raise ValueError(
         "read_github_source action must be get_repo, list_issues, list_pull_requests, "
-        "get_pull_request, pull_request_checks, or get_counts"
+        "get_pull_request, pull_request_checks, get_counts, get_file, list_tree, or grep"
     )
 
 
@@ -334,8 +373,14 @@ async def _handle_read_github_source(
     limit: int = 30,
     token_secret_key: str | None = None,
     cursor: str | None = None,
+    ref: str | None = None,
+    path: str | None = None,
+    line_start: int = 1,
+    line_end: int | None = None,
+    query: str | None = None,
+    case_sensitive: bool = False,
 ) -> str:
-    """Read GitHub repo metadata, issues, pull requests, counts, or CI checks."""
+    """Read GitHub metadata, work items, CI, or bounded source at a ref."""
 
     repo_slug = parse_github_repo_slug(repo or "")
     if not repo_slug:
@@ -358,12 +403,15 @@ async def _handle_read_github_source(
         "counts",
         "get_counts",
         "exact_counts",
+        "get_file",
+        "list_tree",
+        "grep",
     }
     if clean_action not in valid_actions:
         return json.dumps({
             "error": (
                 "read_github_source action must be get_repo, list_issues, list_pull_requests, "
-                "get_pull_request, pull_request_checks, or get_counts"
+                "get_pull_request, pull_request_checks, get_counts, get_file, list_tree, or grep"
             )
         })
     if clean_action in {"pull_request", "get_pull_request", "pr"}:
@@ -378,6 +426,28 @@ async def _handle_read_github_source(
     clean_sha = _clean(sha)
     if clean_action in {"pull_request_checks", "pr_checks", "checks"} and not clean_sha:
         return json.dumps({"error": "pull_request_checks requires sha"})
+    clean_ref = _clean(ref)
+    clean_path = _clean(path)
+    raw_query = str(query) if query is not None else None
+    clean_query = raw_query if raw_query and raw_query.strip() else None
+    if clean_action in {"get_file", "list_tree", "grep"} and not clean_ref:
+        return json.dumps({"error": f"{clean_action} requires ref"})
+    if clean_action == "grep" and not clean_query:
+        return json.dumps({"error": "grep requires query"})
+    if clean_action == "get_file":
+        if not clean_path:
+            return json.dumps({"error": "get_file requires path"})
+        clean_line_start = _positive_int(line_start)
+        if clean_line_start is None:
+            return json.dumps({"error": "get_file line_start must be a positive integer"})
+        clean_line_end = _positive_int(line_end) if line_end is not None else None
+        if line_end is not None and clean_line_end is None:
+            return json.dumps({"error": "get_file line_end must be a positive integer"})
+        if clean_line_end is not None and clean_line_end < clean_line_start:
+            return json.dumps({"error": "get_file line_end must be greater than or equal to line_start"})
+    else:
+        clean_line_start = 1
+        clean_line_end = None
 
     candidates = await _github_token_candidates(
         repo_slug=repo_slug,
@@ -409,7 +479,14 @@ async def _handle_read_github_source(
         # The generated query is valid, so GitHub Search's 422 can mean that
         # this candidate cannot search the private repository.
         retry_statuses.add(422)
-    negative_cache_statuses = {401, 404}
+    # Source-path and ref 404s are ordinary content misses, not proof that the
+    # token cannot see the repository. Caching them would poison later valid
+    # reads for the same repository during this agent run.
+    negative_cache_statuses = (
+        {401}
+        if clean_action in {"get_file", "list_tree", "grep"}
+        else {401, 404}
+    )
     attempted_token_sources: list[str] = []
     for index, candidate in enumerate(read_candidates):
         attempted_token_sources.append(candidate["source"])
@@ -431,6 +508,12 @@ async def _handle_read_github_source(
                 pull_number=clean_pull_number,
                 sha=clean_sha,
                 cursor=_clean(cursor),
+                ref=clean_ref,
+                path=clean_path,
+                line_start=clean_line_start,
+                line_end=clean_line_end,
+                query=clean_query,
+                case_sensitive=bool(case_sensitive),
             )
         except InvalidPageToken as exc:
             return json.dumps({"error": str(exc)})
@@ -545,6 +628,80 @@ async def _handle_create_github_issue(
             "no_write_token": last_error.status_code in auth_statuses,
             "repo": repo_slug,
         })
+    return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
+
+
+async def _handle_add_github_issue_comment(
+    repo: str | None = None,
+    issue_number: int | None = None,
+    body: str | None = None,
+    token_secret_key: str | None = None,
+) -> str:
+    """Append one comment without changing issue fields."""
+
+    repo_slug = parse_github_repo_slug(repo or "")
+    if not repo_slug:
+        return json.dumps({
+            "error": "add_github_issue_comment requires repo as owner/name or a GitHub URL"
+        })
+    clean_issue_number = _positive_int(issue_number)
+    if clean_issue_number is None:
+        return json.dumps({"error": "add_github_issue_comment requires a positive issue_number"})
+    raw_body = str(body) if body is not None else ""
+    if not raw_body.strip():
+        return json.dumps({
+            "error": "add_github_issue_comment requires a non-empty body",
+            "status_code": 422,
+        })
+
+    candidates = await _github_token_candidates(
+        repo_slug=repo_slug,
+        token_secret_key=token_secret_key,
+        for_write=True,
+    )
+    write_candidates = [candidate for candidate in candidates if candidate.get("token")]
+    if not write_candidates:
+        return json.dumps({
+            "error": (
+                f"No GitHub App identity is connected for {repo_slug}. Connect the GitHub App "
+                "for this repo (or pass token_secret_key) so Illo can comment on the issue."
+            ),
+            "status_code": 401,
+            "no_write_token": True,
+            "repo": repo_slug,
+            "issue_number": clean_issue_number,
+        })
+
+    auth_statuses = {401, 403, 404}
+    fallback_status_code: int | None = None
+    for index, candidate in enumerate(write_candidates):
+        try:
+            payload = await async_add_repo_issue_comment(
+                repo_slug,
+                clean_issue_number,
+                body=raw_body,
+                token=str(candidate["token"]),
+            )
+        except GitHubConnectorError as exc:
+            if exc.status_code in auth_statuses and index < len(write_candidates) - 1:
+                fallback_status_code = exc.status_code
+                continue
+            return json.dumps({
+                "error": exc.message,
+                "status_code": exc.status_code,
+                "no_write_token": exc.status_code in auth_statuses,
+                "repo": repo_slug,
+                "issue_number": clean_issue_number,
+                "token_key_name": candidate.get("key_name"),
+            })
+
+        payload["token_secret_key_used"] = bool(candidate.get("key_name"))
+        payload["token_source"] = candidate["source"]
+        payload["token_key_name"] = candidate.get("key_name")
+        if fallback_status_code is not None:
+            payload["fallback_from_status_code"] = fallback_status_code
+        return json.dumps(payload, default=str)
+
     return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
 
 
@@ -881,6 +1038,7 @@ async def _handle_list_github_sub_issues(
     limit: int = 30,
     cursor: str | None = None,
     token_secret_key: str | None = None,
+    counterpart_repo: str | None = None,
 ) -> str:
     """List a parent's native children or look up one issue's parent."""
 
@@ -896,8 +1054,26 @@ async def _handle_list_github_sub_issues(
     if clean_action == "get_parent" and _clean(cursor):
         return json.dumps({"error": "list_github_sub_issues cursor is only valid for action=list"})
 
+    counterpart_slug = None
+    if _clean(counterpart_repo):
+        counterpart_slug = parse_github_repo_slug(counterpart_repo or "")
+        if not counterpart_slug:
+            return json.dumps({
+                "error": "list_github_sub_issues counterpart_repo must be owner/name or a GitHub URL"
+            })
+        if counterpart_slug.split("/", 1)[0].lower() != repo_slug.split("/", 1)[0].lower():
+            return json.dumps({
+                "error": "GitHub sub-issue counterpart_repo must have the same repository owner",
+                "status_code": 422,
+            })
+    repo_slugs = list(dict.fromkeys([repo_slug, counterpart_slug] if counterpart_slug else [repo_slug]))
+    cross_repo_read = (
+        counterpart_slug is not None
+        and counterpart_slug.lower() != repo_slug.lower()
+    )
     candidates = await _github_token_candidates(
         repo_slug=repo_slug,
+        repo_slugs=repo_slugs if counterpart_slug else None,
         token_secret_key=token_secret_key,
     )
     read_state = _github_read_state()
@@ -919,39 +1095,79 @@ async def _handle_list_github_sub_issues(
         return json.dumps({"error": "No GitHub token candidates were available"})
     attempted_token_sources: list[str] = []
     last_error: GitHubConnectorError | None = None
+    unverified_payload: dict[str, Any] | None = None
     for index, candidate in enumerate(read_candidates):
-        attempted_token_sources.append(str(candidate["source"]))
+        candidate_source = str(candidate["source"])
+        attempted_token_sources.append(candidate_source)
+        raw_response_auth_source = (
+            candidate_source
+            if cross_repo_read and candidate_source.startswith("project_binding:")
+            else None
+        )
         try:
             if clean_action == "list":
+                list_kwargs: dict[str, Any] = {
+                    "token": candidate.get("token"),
+                    "limit": _limit(limit),
+                    "cursor": _clean(cursor),
+                }
+                if raw_response_auth_source:
+                    list_kwargs["raw_response_auth_source"] = raw_response_auth_source
                 payload = await async_list_repo_sub_issues(
                     repo_slug,
                     clean_issue_number,
-                    token=candidate.get("token"),
-                    limit=_limit(limit),
-                    cursor=_clean(cursor),
+                    **list_kwargs,
                 )
             else:
+                parent_kwargs: dict[str, Any] = {"token": candidate.get("token")}
+                if raw_response_auth_source:
+                    parent_kwargs["raw_response_auth_source"] = raw_response_auth_source
                 payload = await async_get_repo_issue_parent(
                     repo_slug,
                     clean_issue_number,
-                    token=candidate.get("token"),
+                    **parent_kwargs,
                 )
         except InvalidPageToken as exc:
             return json.dumps({"error": str(exc)})
         except GitHubConnectorError as exc:
             last_error = exc
-            if exc.status_code in {401, 404}:
+            if exc.status_code == 401 or (
+                exc.status_code == 404 and clean_action != "get_parent"
+            ):
                 read_state.rejected[(candidate.get("token"), repo_slug)] = exc
-            if exc.status_code in {401, 403, 404} and index < len(read_candidates) - 1:
+            retry_statuses = {401, 403, 404, 502}
+            if index < len(read_candidates) - 1 and (
+                exc.status_code in retry_statuses or unverified_payload is not None
+            ):
                 continue
+            if unverified_payload is not None:
+                unverified_payload["attempted_token_sources"] = list(
+                    attempted_token_sources
+                )
+                unverified_payload["last_candidate_error"] = {
+                    "source": candidate["source"],
+                    "status_code": exc.status_code,
+                    "error": exc.message,
+                }
+                return json.dumps(unverified_payload, default=str)
             return json.dumps({
                 "error": exc.message,
                 "status_code": exc.status_code,
                 "attempted_token_sources": attempted_token_sources,
             })
+        if clean_action == "get_parent" and payload.get("verified") is False:
+            payload["token_secret_key_used"] = bool(candidate.get("key_name"))
+            payload["token_source"] = candidate["source"]
+            payload["attempted_token_sources"] = list(attempted_token_sources)
+            unverified_payload = payload
+            if index < len(read_candidates) - 1:
+                continue
+            return json.dumps(unverified_payload, default=str)
         read_state.preferred[repo_slug] = candidate.get("token")
         payload["token_secret_key_used"] = bool(candidate.get("key_name"))
         payload["token_source"] = candidate["source"]
+        if unverified_payload is not None:
+            payload["attempted_token_sources"] = list(attempted_token_sources)
         if last_error is not None:
             payload["fallback_from_status_code"] = last_error.status_code
         return json.dumps(payload, default=str)
@@ -1222,6 +1438,7 @@ async def github_read_ref_for_backend(
 
 
 __all__ = [
+    "_handle_add_github_issue_comment",
     "_handle_add_github_sub_issue",
     "_handle_check_fix_deploy_state",
     "_handle_create_github_issue",

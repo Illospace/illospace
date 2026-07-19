@@ -340,7 +340,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "side_effect_class": "read_only",
         "reversibility": "none",
         "expected_effect": (
-            "read bounded GitHub repository metadata, issues, pull requests, exact counts, or CI checks"
+            "read bounded GitHub repository metadata, work items, CI checks, or pinned source evidence"
         ),
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
@@ -371,6 +371,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "action_manifest": True,
         "expected_effect": "update fields on a real GitHub issue and read the issue back",
         "output_budget_chars": 10_000,
+    },
+    "add_github_issue_comment": {
+        "permission": "write_workspace",
+        "risk_class": "high",
+        "side_effect_class": "append_only",
+        "reversibility": "append_only",
+        "action_manifest": True,
+        "expected_effect": "append a real comment to an existing GitHub issue",
+        "output_budget_chars": 8_000,
     },
     "add_github_sub_issue": {
         "permission": "write_workspace",

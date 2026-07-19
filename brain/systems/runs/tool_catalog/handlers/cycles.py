@@ -16,6 +16,7 @@ from brain.systems.cycles.access import (
     target_idea_scope_conditions,
 )
 from brain.systems.cycles.common import AGENT_TRIGGERED_CYCLE_ORIGIN
+from brain.systems.cycles.contracts import normalize_cycle_result_contract_profile
 from brain.systems.cycles.commands import (
     UNSET_CYCLE_FIELD,
     async_add_guidance_to_cycle,
@@ -51,6 +52,7 @@ class ManageCycleArgs:
     target_idea_id: str | None = None
     guidance: str | None = None
     rationale: str | None = None
+    result_contract_profile: str | None = None
     output_target_type: str | None = None
     output_target_id: str | None = None
     output_target_label: str | None = None
@@ -81,6 +83,7 @@ async def _handle_manage_cycle(
     target_idea_id: str | None = None,
     guidance: str | None = None,
     rationale: str | None = None,
+    result_contract_profile: str | None = None,
     output_target_type: str | None = None,
     output_target_id: str | None = None,
     output_target_label: str | None = None,
@@ -101,6 +104,7 @@ async def _handle_manage_cycle(
         target_idea_id=target_idea_id,
         guidance=guidance,
         rationale=rationale,
+        result_contract_profile=result_contract_profile,
         output_target_type=output_target_type,
         output_target_id=output_target_id,
         output_target_label=output_target_label,
@@ -123,6 +127,7 @@ async def _handle_manage_cycle_async(
     target_idea_id: str | None = None,
     guidance: str | None = None,
     rationale: str | None = None,
+    result_contract_profile: str | None = None,
     output_target_type: str | None = None,
     output_target_id: str | None = None,
     output_target_label: str | None = None,
@@ -154,6 +159,7 @@ async def _handle_manage_cycle_async(
         target_idea_id=target_idea_id,
         guidance=guidance,
         rationale=rationale,
+        result_contract_profile=result_contract_profile,
         output_target_type=output_target_type,
         output_target_id=output_target_id,
         output_target_label=output_target_label,
@@ -245,6 +251,9 @@ async def _action_delete(ctx: ManageCycleContext) -> dict[str, Any]:
 
 
 async def _action_run(ctx: ManageCycleContext) -> dict[str, Any]:
+    result_contract_profile = normalize_cycle_result_contract_profile(
+        ctx.args.result_contract_profile
+    )
     async with UnitOfWork() as uow:
         cycle = await _load_cycle(uow.session, ctx.actor, ctx.args.id)
         event = cycle_change_event(cycle)
@@ -257,6 +266,7 @@ async def _action_run(ctx: ManageCycleContext) -> dict[str, Any]:
             "actor_id": ctx.actor.source_id,
             "thread_id": getattr(_agent_context, "idea_id", None),
             "rationale": _optional_text(ctx.args.rationale),
+            "result_contract_profile": result_contract_profile,
         },
     )
     publish_cycle_change(action="run", **event)

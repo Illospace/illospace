@@ -135,6 +135,19 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         f"- Trigger rationale: {trigger_rationale}\n" if trigger_rationale else ""
     )
     degradation_instruction = _degradation_instruction(envelope["degradation_tracking"])
+    completion_instruction = (
+        "- End with a short self-review summary suitable for the Cycle ledger and visible outputs.\n"
+        if "short_self_review_summary" in json_list(result_contract.get("required_outputs"))
+        else (
+            "- Keep the visible answer in the mission's concise alert format; do not add a "
+            "digest-only next-action or self-review footer.\n"
+        )
+    )
+    evidence_gap_destination = (
+        "your self-review"
+        if "short_self_review_summary" in json_list(result_contract.get("required_outputs"))
+        else "the visible answer"
+    )
     return (
         f"[Idea: \"{idea.title}\" | {idea.id}]\n\n"
         f"## {launch_title}\n"
@@ -154,9 +167,10 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         "- Use Cycle memory, revisions, guidance, output targets, and the workspace state as source of truth.\n"
         "- You may create, update, delete, or run Cycles when that is the right workspace action; include rationale.\n"
         "- If an output target is unavailable, repair or replace it when possible instead of treating it as a blocker.\n"
-        "- Report evidence health explicitly. Follow next_page tokens to completion; routine pagination is not degradation and fully paginated reads are evidence_health=ok. If readers fail, warn, return unexpectedly sparse data, or cannot page to completion, mark the run degraded in your self-review and name the gap.\n"
+        "- Report evidence health explicitly. Follow next_page tokens to completion; routine pagination is not degradation and fully paginated reads are evidence_health=ok. If readers fail, warn, return unexpectedly sparse data, or cannot page to completion, mark the run degraded in "
+        f"{evidence_gap_destination} and name the gap.\n"
         f"{degradation_instruction}"
-        "- End with a short self-review summary suitable for the Cycle ledger and visible outputs.\n\n"
+        f"{completion_instruction}\n"
         "## Result Contract\n"
         f"{_json_block(result_contract)}\n\n"
         f"{_required_output_sections(result_contract)}"
@@ -193,6 +207,22 @@ def _required_output_sections(result_contract: dict) -> str:
     if not mappings:
         return ""
     mapping_lines = "\n".join(mappings)
+    example_lines: list[str] = []
+    if "summarize_workspace_evidence_or_explicit_gaps" in required_outputs:
+        example_lines.append(
+            "Evidence reviewed: workspace sources swept, or explicit source gaps named."
+        )
+    if "report_evidence_health" in required_outputs:
+        example_lines.append(
+            "Evidence health: ok — required readers completed without unresolved warnings."
+        )
+    if "record_next_action_or_blocker" in required_outputs:
+        example_lines.append("Next action: name the single next action.")
+    if "short_self_review_summary" in required_outputs:
+        example_lines.append(
+            "Self-review summary: mission sweep and delivery completed; contract fields checked."
+        )
+    example = "\n".join(example_lines)
     return (
         "## Required Output Sections\n"
         "The declared `required_outputs` keys map to the visible answer sections below. "
@@ -200,10 +230,7 @@ def _required_output_sections(result_contract: dict) -> str:
         "output target does not replace this requirement, and must not trigger a second post.\n"
         f"{mapping_lines}\n\n"
         "Example required footer:\n"
-        "Evidence reviewed: workspace sources swept, or explicit source gaps named.\n"
-        "Evidence health: ok — required readers completed without unresolved warnings.\n"
-        "Next action: name the single next action.\n"
-        "Self-review summary: mission sweep and delivery completed; contract fields checked.\n\n"
+        f"{example}\n\n"
     )
 
 
