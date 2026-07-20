@@ -774,6 +774,45 @@ def test_on_demand_cycle_launch_exposes_provenance_and_local_anchor():
     assert "## Scheduled Cycle Launch" not in message
 
 
+@pytest.mark.asyncio
+async def test_uwear_coordinator_pre_sweep_harvests_alert_resolution(monkeypatch):
+    import brain.systems.deploy_state_sweep as deploy_sweep
+
+    calls = []
+
+    async def fake_harvest(session, *, org_id):
+        calls.append((session, org_id))
+        return {
+            "updated": 1,
+            "movements": [
+                {
+                    "record_id": 1131,
+                    "outcome": "verified",
+                    "message_ts": "1784492290.000000",
+                }
+            ],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(deploy_sweep, "run_alert_resolution_harvest", fake_harvest)
+    cycle = Cycle()
+    cycle.name = "Uwear Ticket Coordinator Check-ins"
+    cycle.org_id = "org-1"
+    run = CycleRun()
+    run.context_snapshot = {"launch_context": {"origin": "cycle_scheduler"}}
+    fake_session = object()
+
+    summary = await service._async_maybe_harvest_alert_resolution(
+        fake_session,
+        cycle,
+        run,
+    )
+
+    assert calls == [(fake_session, "org-1")]
+    assert summary["movements"][0]["record_id"] == 1131
+    assert run.context_snapshot["alert_resolution_harvest"] == summary
+
+
 def test_coordinator_launch_prompt_maps_declared_contract_to_visible_sections():
     cycle = Cycle()
     cycle.id = 2

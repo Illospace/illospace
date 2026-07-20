@@ -339,6 +339,21 @@ def test_channel_monitor_framing_routes_feature_requests_to_tickets():
     assert "email/profile id" in run_message
 
 
+def test_channel_monitor_framing_preserves_alert_thread_provenance_on_tracker_records():
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
+    payload = build_slack_work_intake_payload(
+        org_id="org1",
+        authority_user_id="user1",
+        payload=_channel_monitor_payload(),
+    )
+
+    run_message = payload["payload"]["run_message"]
+    assert "alert_slack_channel" in run_message
+    assert "alert_slack_thread_ts" in run_message
+    assert "future sweeps can re-read human resolution replies" in run_message
+
+
 def test_build_payload_for_mention_still_forces_reply():
     from brain.systems.slack.triggers import build_slack_work_intake_payload
 

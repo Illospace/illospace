@@ -41,9 +41,9 @@ Expected memory mirror fingerprint:
 Core record `1155`, slug `uwear-engineering-triage`, must become the exact
 mirror of `SKILL.md`:
 
-- characters: `33943` (must remain `< 34000`);
-- bytes: `34075`; and
-- SHA-256: `6c318a9c20e2a8c3ce66fbacb2c0edf095d30a85e913c0caa855e6da452b0f9a`.
+- characters: `33945` (must remain `< 34000`);
+- bytes: `34077`; and
+- SHA-256: `2d634b8caad5dcd172de8cba6b56d04bbab3806ff1429b9aebc5cb3301809fa6`.
 
 ## Safety and idempotency
 

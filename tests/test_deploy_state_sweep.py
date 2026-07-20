@@ -20,8 +20,11 @@ from brain.platform.db.models.domain import (
     DomainRelationType,
 )
 from brain.systems.deploy_state_sweep import (
+    AlertThreadSource,
     DEPLOY_STATE_FIELD_DEFINITIONS,
+    alert_thread_source_from_run,
     ensure_deploy_state_fields,
+    run_alert_resolution_harvest,
     run_deploy_sweep,
     run_deploy_verification,
 )
@@ -86,7 +89,7 @@ async def _domain(session, *, name="Engineering", object_key="github_ticket"):
                     {
                         "key": "status",
                         "field_type": "enum",
-                        "options": ["Todo", "In Progress", "Done"],
+                        "options": ["Todo", "In Progress", "In Review", "Done"],
                     },
                     {"key": "progress_note", "field_type": "long_text"},
                 ],
@@ -345,6 +348,306 @@ async def test_verification_closes_only_quiet_through_window_and_never_reopens(
     assert already_verified.data["status"] == "Done"
     assert summary["verified"] == 2
     assert summary["not_quiet"] == 1
+
+
+class _ReadOnlySlackClient:
+    def __init__(self, messages):
+        self.messages = list(messages)
+        self.reads = []
+
+    async def conversation_replies(self, *, channel, thread_ts, limit, cursor=None):
+        self.reads.append(
+            {
+                "channel": channel,
+                "thread_ts": thread_ts,
+                "limit": limit,
+                "cursor": cursor,
+            }
+        )
+        return {"messages": self.messages, "response_metadata": {"next_cursor": ""}}
+
+    async def post_message(self, **kwargs):  # pragma: no cover - must never be called
+        raise AssertionError(f"resolution harvest attempted a Slack post: {kwargs}")
+
+
+async def test_alert_thread_harvest_advances_and_cites_human_resolution_as_digest_movement(
+    session, monkeypatch
+):
+    from brain.systems.change_notifications import render_outbound
+    from brain.systems.change_notifications_cycle import _normalize_event
+
+    monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", REPO)
+    domain = await _domain(session)
+    await ensure_deploy_state_fields(session, org_id=ORG_ID)
+    record = await _record(
+        session,
+        domain,
+        title="ArtDirection label bleed",
+        status="In Progress",
+        deploy_state="prod_pending",
+    )
+    slack = _ReadOnlySlackClient(
+        [
+            {
+                "ts": "1784484952.000000",
+                "bot_id": "B_RETOOL",
+                "subtype": "bot_message",
+                "text": "Customer alert parent",
+            },
+            {
+                "ts": "1784490212.000000",
+                "user": "U_JB",
+                "text": (
+                    "PR uwear-ai/uwear-backend#1142 merged; "
+                    "ça devrait etre bon la c'est deploy"
+                ),
+            },
+            {
+                "ts": "1784492290.000000",
+                "user": "U_REDA",
+                "text": "top ca a l'air detre fix la",
+            },
+        ]
+    )
+
+    summary = await run_alert_resolution_harvest(
+        session,
+        org_id=ORG_ID,
+        slack_client=slack,
+        sources=[
+            AlertThreadSource(
+                record=record,
+                channel_id="C_ALERTS",
+                thread_ts="1784484952.000000",
+                bot_user_id="B_ILLO",
+            )
+        ],
+    )
+
+    await session.refresh(record)
+    assert record.data["status"] == "Done"
+    assert record.data["deploy_state"] == "verified"
+    assert record.data["fix_pr"] == "uwear-ai/uwear-backend#1142"
+    assert record.data["deployed_at"] == datetime.fromtimestamp(
+        1784490212, tz=timezone.utc
+    ).isoformat()
+    assert record.data["verified_at"] == datetime.fromtimestamp(
+        1784492290, tz=timezone.utc
+    ).isoformat()
+    assert record.data["resolution_confirmed_ts"] == "1784492290.000000"
+    assert record.data["alert_slack_channel"] == "C_ALERTS"
+    assert record.data["alert_slack_thread_ts"] == "1784484952.000000"
+    assert "Slack ts 1784492290.000000" in record.data["progress_note"]
+    assert summary["verified"] == 1
+    assert summary["updated"] == 1
+    assert summary["movements"] == [
+        {
+            "record_id": record.id,
+            "outcome": "verified",
+            "message_ts": "1784492290.000000",
+        }
+    ]
+    assert slack.reads == [
+        {
+            "channel": "C_ALERTS",
+            "thread_ts": "1784484952.000000",
+            "limit": 200,
+            "cursor": None,
+        }
+    ]
+
+    movement_event = (
+        await session.scalars(
+            select(DomainEvent)
+            .where(
+                DomainEvent.record_id == record.id,
+                DomainEvent.reason.like("alert_resolution_harvest:%"),
+            )
+            .order_by(DomainEvent.id.desc())
+        )
+    ).first()
+    assert movement_event is not None
+    digest = render_outbound([_normalize_event(movement_event)])["digest"]
+    assert digest is not None
+    assert "outcome: fix verified in the alert thread" in digest
+    assert "Slack ts 1784492290.000000" in digest
+    assert "open hypothesis" not in digest.lower()
+
+
+async def test_alert_thread_harvest_keeps_open_when_later_human_still_reproduces(
+    session, monkeypatch
+):
+    monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", REPO)
+    domain = await _domain(session)
+    await ensure_deploy_state_fields(session, org_id=ORG_ID)
+    record = await _record(
+        session,
+        domain,
+        title="Generation still bleeds labels",
+        status="In Progress",
+        deploy_state="prod_pending",
+    )
+    slack = _ReadOnlySlackClient(
+        [
+            {
+                "ts": "1784490212.000000",
+                "user": "U_JB",
+                "text": "c'est deploy, ça devrait etre bon",
+            },
+            {
+                "ts": "1784492290.000000",
+                "user": "U_REDA",
+                "text": "top, ca a l'air d'etre fix",
+            },
+            {
+                "ts": "1784493000.000000",
+                "user": "U_AXEL",
+                "text": "Still reproduces for profile 154453; the label bleed is not fixed.",
+            },
+        ]
+    )
+
+    summary = await run_alert_resolution_harvest(
+        session,
+        org_id=ORG_ID,
+        slack_client=slack,
+        sources=[
+            AlertThreadSource(
+                record=record,
+                channel_id="C_ALERTS",
+                thread_ts="1784484952.000000",
+                bot_user_id="B_ILLO",
+            )
+        ],
+    )
+
+    await session.refresh(record)
+    assert record.data["status"] == "Todo"
+    assert record.data["deploy_state"] is None
+    assert record.data["resolution_confirmed_ts"] == "1784492290.000000"
+    assert record.data["resolution_reproduced_ts"] == "1784493000.000000"
+    assert "Still reproduces for profile 154453" in record.data["progress_note"]
+    assert "Slack ts 1784493000.000000" in record.data["progress_note"]
+    assert summary["reproduced"] == 1
+    assert summary["verified"] == 0
+    assert summary["updated"] == 1
+    assert len(slack.reads) == 1
+
+    # Re-reading the same thread is idempotent: the older fix claims cannot
+    # re-close a record after the later reproduction timestamp was persisted.
+    version_after_reproduce = record.version
+    replay = await run_alert_resolution_harvest(
+        session,
+        org_id=ORG_ID,
+        slack_client=slack,
+        sources=[
+            AlertThreadSource(
+                record=record,
+                channel_id="C_ALERTS",
+                thread_ts="1784484952.000000",
+                bot_user_id="B_ILLO",
+            )
+        ],
+    )
+    await session.refresh(record)
+    assert replay["updated"] == 0
+    assert replay["skipped"] == 1
+    assert record.version == version_after_reproduce
+    assert record.data["status"] == "Todo"
+    assert record.data["deploy_state"] is None
+
+
+async def test_alert_thread_harvest_advances_deploy_claim_without_premature_done(
+    session, monkeypatch
+):
+    monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", REPO)
+    domain = await _domain(session)
+    await ensure_deploy_state_fields(session, org_id=ORG_ID)
+    record = await _record(
+        session,
+        domain,
+        title="Deploy claimed, verification pending",
+        status="Todo",
+        deploy_state="prod_pending",
+    )
+    slack = _ReadOnlySlackClient(
+        [
+            {
+                "ts": "1784490212.000000",
+                "user": "U_JB",
+                "text": "PR #1142 merged and deployed",
+            }
+        ]
+    )
+
+    summary = await run_alert_resolution_harvest(
+        session,
+        org_id=ORG_ID,
+        slack_client=slack,
+        sources=[
+            AlertThreadSource(
+                record=record,
+                channel_id="C_ALERTS",
+                thread_ts="1784484952.000000",
+            )
+        ],
+    )
+
+    await session.refresh(record)
+    assert record.data["status"] == "In Review"
+    assert record.data["deploy_state"] == "deployed"
+    assert record.data["fix_pr"] == f"{REPO}#1142"
+    assert record.data["resolution_confirmed_ts"] == "1784490212.000000"
+    assert summary["deployed"] == 1
+    assert summary["verified"] == 0
+
+
+def test_alert_source_is_recovered_only_from_monitored_slack_run_provenance():
+    from types import SimpleNamespace
+
+    record = SimpleNamespace(id=1131, data={})
+    monitored = SimpleNamespace(
+        metadata_={"origin": "slack_channel_monitor", "slack_monitor": True},
+        target_ref={
+            "kind": "slack_message",
+            "slack_trigger": {
+                "channel_id": "C_ALERTS",
+                "thread_ts": "1784484952.000000",
+                "message_ts": "1784484952.000000",
+                "bot_user_id": "B_ILLO",
+            },
+        },
+    )
+    ordinary = SimpleNamespace(
+        metadata_={"origin": "slack_teammate"},
+        target_ref=monitored.target_ref,
+    )
+
+    source = alert_thread_source_from_run(record, monitored)
+    assert source is not None
+    assert source.channel_id == "C_ALERTS"
+    assert source.thread_ts == "1784484952.000000"
+    assert alert_thread_source_from_run(record, ordinary) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("deployed", "deployed"),
+        ("ça devrait etre bon la c'est deploy", "deployed"),
+        ("top ca a l'air detre fix la", "verified"),
+        ("PR uwear-ai/uwear-backend#1142 merged", "deployed"),
+        ("still reproduces for profile 154453", "reproduced"),
+        ("c'est fix mais pas deploy", None),
+        ("PR #1142 is not merged yet", None),
+    ],
+)
+def test_alert_resolution_phrase_classifier_handles_en_fr_and_unshipped_negation(
+    text, expected
+):
+    from brain.systems.deploy_state_sweep import _resolution_kind
+
+    assert _resolution_kind(text) == expected
 
 
 async def test_sweep_exception_does_not_propagate_from_inbound_hook(session, monkeypatch):
