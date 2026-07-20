@@ -39,7 +39,10 @@ from brain.systems.runs.tool_catalog.handlers.chat import (
     _handle_read_thread_discussion,
 )
 from brain.systems.runs.tool_catalog.handlers.cycles import _handle_manage_cycle
-from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
+from brain.systems.runs.tool_catalog.handlers.domains import (
+    _handle_manage_domain,
+    _handle_merge_chantier,
+)
 from brain.systems.runs.tool_catalog.handlers.inbound import _handle_manage_inbound
 from brain.systems.runs.tool_catalog.handlers.github import (
     _handle_add_github_issue_comment,
@@ -378,6 +381,10 @@ def _get_tool_handlers(
         ),
         "manage_cycle": _private_async_adapter("_handle_manage_cycle", _handle_manage_cycle),
         "manage_domain": _private_async_adapter("_handle_manage_domain", _handle_manage_domain),
+        "merge_chantier": _private_async_adapter(
+            "_handle_merge_chantier",
+            _handle_merge_chantier,
+        ),
         "manage_inbound": _private_async_adapter("_handle_manage_inbound", _handle_manage_inbound),
         "manage_idea": _private_async_adapter("_handle_manage_idea", _handle_manage_idea),
         "manage_project": _private_async_adapter("_handle_manage_project", _handle_manage_project),

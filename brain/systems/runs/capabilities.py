@@ -209,9 +209,9 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         "key": "domains",
         "name": "Domains",
         "category": "core_workspace",
-        "summary": "Illo can inspect and mutate user-created structured workspace databases, schemas, records, and Domain audit events.",
-        "aliases": ("domain", "domains", "workspace records", "structured records", "team database"),
-        "tools": ("read_workspace_records", "manage_domain"),
+        "summary": "Illo can inspect and mutate user-created structured workspace databases, schemas, records, Domain audit events, and retire duplicate chantiers into a canonical record.",
+        "aliases": ("domain", "domains", "workspace records", "structured records", "team database", "merge chantier", "retire chantier"),
+        "tools": ("read_workspace_records", "manage_domain", "merge_chantier"),
     },
     {
         "key": "cycles",

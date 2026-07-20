@@ -296,6 +296,8 @@ def test_mission_contract_resolves_chantier_playbook_by_slug():
 
     assert "uwear-engineering-triage-chantier-operations" in activation.MISSION_CONTRACT
     assert "record 1274" not in activation.MISSION_CONTRACT
+    assert "excluding every record with superseded_by" in activation.MISSION_CONTRACT
+    assert "active non-superseded chantiers" in activation.MISSION_CONTRACT
 
 
 def test_mission_prompt_replaces_pinned_v2_block_without_losing_legacy_mission():

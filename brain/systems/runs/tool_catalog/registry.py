@@ -433,6 +433,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         # overflow here is loud (degraded-evidence note) rather than silent.
         "output_budget_chars": 40_000,
     },
+    "merge_chantier": {
+        "permission": "write_domain",
+        "risk_class": "medium",
+        "side_effect_class": "domain_management",
+        "reversibility": "variable",
+        "action_manifest": True,
+        "expected_effect": "merge and retire a duplicate chantier record",
+        "output_budget_chars": 12_000,
+    },
     "manage_inbound": {
         "permission": "manage_inbound",
         "risk_class": "high",

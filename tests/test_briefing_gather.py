@@ -566,6 +566,49 @@ async def test_item_in_chantier_gathers_goal_sibling_states_and_artifact_refs():
     assert chantier_section.items[0].ref == "domain_record:1400"
 
 
+async def test_superseded_chantier_is_excluded_from_context_digest_sweep():
+    subject_external_id = "github:Illospace/illospace:issue:386"
+    subject = SimpleNamespace(
+        id=1386,
+        org_id=_ORG,
+        domain_id=1,
+        object_key="ticket",
+        title="Deduplicate chantier declarations",
+        data={"external_id": subject_external_id, "status": "In Progress"},
+        updated_at=_T0,
+    )
+    superseded = SimpleNamespace(
+        id=2096,
+        org_id=_ORG,
+        domain_id=1,
+        object_key="chantier",
+        title="Duplicate placeholder",
+        data={
+            "slug": "duplicate-placeholder",
+            "title": "Duplicate placeholder",
+            "goal": "Done means duplicate placeholder reaches its stated outcome.",
+            "kind": "feature",
+            # The superseded marker wins even if malformed legacy state was not paused.
+            "state": "exploring",
+            "superseded_by": "agent-mcp-repositioning",
+            "refs": [{"source": "github", "ref": subject_external_id}],
+            "next_step": "Clarify the next most valuable step.",
+        },
+        updated_at=_T0,
+    )
+
+    result = await gather_pieces(
+        WriteForbiddenSession(records=[subject, superseded]),
+        org_id=_ORG,
+        job_ref="domain_record:1386",
+        slack=None,
+        github=FakeGithub(),
+        budget=DossierBudget(),
+    )
+
+    assert [piece for piece in result.pieces if piece.source == "chantier"] == []
+
+
 async def test_item_not_in_chantier_keeps_previous_bytes():
     subject = SimpleNamespace(
         id=1238,

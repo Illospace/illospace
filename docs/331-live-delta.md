@@ -15,13 +15,14 @@ contents of:
 
 Expected content fingerprint:
 
-- characters: `11557`;
-- bytes: `11565`; and
-- SHA-256: `61e78f92198db86916c5ebe753244fb862cb529a7295ec5a89df4d962efa9751`.
+- characters: `13411`;
+- bytes: `13419`; and
+- SHA-256: `37ca4a2739c6c1cf75d738f4fe6c03cf33a865c0e9d24e33bc2793237c393f61`.
 
 Read record `1274` back and require byte identity. Do not overwrite a newer
-unreconciled live edit. Domain `1` already has the chantier schema from #327;
-this issue has no Alembic migration or other schema activation.
+unreconciled live edit. Domain `1` has the base chantier schema from #327; run
+the current Alembic chain through `0032_chantier_superseded_by` before invoking
+the #386 `merge_chantier` retirement operation.
 
 ## 2. illo-dev Slack acceptance
 
