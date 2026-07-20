@@ -916,12 +916,12 @@ BRAIN_TOOLS = [
                     "type": "string",
                     "description": "Why this Cycle change is useful. Required by convention for autonomous changes.",
                 },
-                "result_contract_profile": {
+                "run_kind": {
                     "type": "string",
-                    "enum": ["standard", "material_alert"],
+                    "enum": ["scheduled_digest", "off_slot_material_alert"],
                     "description": (
-                        "Explicit result-contract profile for action='run'. Use material_alert only for a concise, "
-                        "single-focus alert; omit it for the strict standard contract. Never infer this from time."
+                        "Explicit coordinator run kind for action='run'. Use off_slot_material_alert for a concise, "
+                        "single-focus alert and scheduled_digest for the full digest contract."
                     ),
                 },
                 "output_target_type": {

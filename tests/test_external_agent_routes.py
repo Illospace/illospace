@@ -890,8 +890,9 @@ async def test_hosted_mcp_cycle_manage_run_propagates_external_trigger_provenanc
     cycle = _cycle_row()
     captured = {}
 
-    async def run_cycle_now(cycle_id, *, launch_context=None):
+    async def run_cycle_now(cycle_id, *, run_kind, launch_context=None):
         captured["cycle_id"] = cycle_id
+        captured["run_kind"] = run_kind
         captured["launch_context"] = launch_context
         return {"id": 77, "cycle_id": cycle_id, "status": "queued"}
 
@@ -932,6 +933,7 @@ async def test_hosted_mcp_cycle_manage_run_propagates_external_trigger_provenanc
     payload = json.loads(response.json()["result"]["content"][0]["text"])
     assert payload["run"]["id"] == 77
     assert captured["cycle_id"] == cycle.id
+    assert captured["run_kind"] == "off_slot_material_alert"
     assert captured["launch_context"] == {
         "origin": "external_agent_triggered_cycle",
         "source": "illo_act.cycle.manage",

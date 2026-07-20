@@ -74,8 +74,8 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         "delete": {"required": ["id"], "optional": [], "effect": "archive/disable a cycle"},
         "run": {
             "required": ["id"],
-            "optional": ["result_contract_profile", "rationale"],
-            "effect": "run a cycle immediately with an explicit result-contract profile",
+            "optional": ["run_kind", "rationale"],
+            "effect": "run a cycle immediately with an explicit coordinator run kind",
         },
         "add_guidance": {
             "required": ["id", "guidance"],

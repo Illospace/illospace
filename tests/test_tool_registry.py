@@ -606,9 +606,9 @@ def test_manage_cycle_schema_matches_canonical_runtime_policy():
     assert "reopen_archived" not in properties
     assert "add_guidance" in properties["action"]["enum"]
     assert "add_output_target" in properties["action"]["enum"]
-    assert properties["result_contract_profile"]["enum"] == [
-        "standard",
-        "material_alert",
+    assert properties["run_kind"]["enum"] == [
+        "scheduled_digest",
+        "off_slot_material_alert",
     ]
 
 

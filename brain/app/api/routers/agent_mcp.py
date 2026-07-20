@@ -29,7 +29,11 @@ from brain.platform.db.models.idea import Idea
 from brain.systems.cortex.thread_links import thread_id_from_reference
 from brain.systems.cortex.project_context.search import search_project_contexts
 from brain.systems.cycles.access import CycleActor, cycle_scope_conditions, target_idea_scope_conditions
-from brain.systems.cycles.common import EXTERNAL_AGENT_TRIGGERED_CYCLE_ORIGIN
+from brain.systems.cycles.common import (
+    EXTERNAL_AGENT_TRIGGERED_CYCLE_ORIGIN,
+    OFF_SLOT_MATERIAL_ALERT_RUN_KIND,
+)
+from brain.systems.cycles.contracts import normalize_cycle_run_kind
 from brain.systems.cycles.commands import (
     UNSET_CYCLE_FIELD,
     async_add_guidance_to_cycle as command_add_cycle_guidance,
@@ -673,6 +677,7 @@ ACT_CAPABILITIES: dict[str, dict[str, Any]] = {
             "config": "object",
             "output_target_id": "integer",
             "rationale": "string",
+            "run_kind": "scheduled_digest | off_slot_material_alert",
         },
     },
     "identity.manage": {
@@ -1172,8 +1177,13 @@ async def _act_manage_cycle(
         return _cycle_mutation_payload("delete", cycle, {"ok": True, "id": cycle.id})
 
     if action == "run":
+        run_kind = normalize_cycle_run_kind(
+            _clean_optional_string(arguments.get("run_kind"))
+            or OFF_SLOT_MATERIAL_ALERT_RUN_KIND
+        )
         result = await async_run_cycle_now(
             cycle.id,
+            run_kind=run_kind,
             launch_context={
                 "origin": EXTERNAL_AGENT_TRIGGERED_CYCLE_ORIGIN,
                 "source": "illo_act.cycle.manage",
