@@ -10,6 +10,9 @@ MIGRATION_MODULE = "brain.platform.db.alembic.versions.0026_chantier_object_type
 SUNSET_MIGRATION_MODULE = (
     "brain.platform.db.alembic.versions.0029_chantier_sunset_kind"
 )
+SUPERSEDED_MIGRATION_MODULE = (
+    "brain.platform.db.alembic.versions.0032_chantier_superseded_by"
+)
 
 
 def _schema() -> tuple[sa.MetaData, dict[str, sa.Table]]:
@@ -332,3 +335,55 @@ def test_sunset_migration_extends_contract_and_rekinds_target_record_idempotentl
         assert records[0]["version"] == 5
         assert records[1]["data"]["kind"] == "quality"
         assert records[1]["version"] == 2
+
+
+def test_superseded_migration_adds_repeatable_retirement_field_without_touching_records():
+    contract_migration = importlib.import_module(MIGRATION_MODULE)
+    superseded_migration = importlib.import_module(SUPERSEDED_MIGRATION_MODULE)
+    engine = sa.create_engine("sqlite://")
+    metadata, tables = _schema()
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        _seed(connection, tables)
+        contract_migration._upgrade(connection)
+        chantier = connection.execute(
+            sa.select(tables["domain_object_types"]).where(
+                tables["domain_object_types"].c.domain_id == 1,
+                tables["domain_object_types"].c.key == "chantier",
+            )
+        ).mappings().one()
+        connection.execute(
+            tables["domain_records"].insert(),
+            {
+                "id": 2096,
+                "domain_id": 1,
+                "object_type_id": chantier["id"],
+                "data": {"slug": "duplicate", "state": "exploring"},
+                "version": 1,
+            },
+        )
+
+        superseded_migration._upgrade(connection)
+        superseded_migration._upgrade(connection)
+
+        fields = connection.execute(
+            sa.select(tables["domain_field_definitions"]).where(
+                tables["domain_field_definitions"].c.object_type_id == chantier["id"],
+                tables["domain_field_definitions"].c.key == "superseded_by",
+            )
+        ).mappings().all()
+        record = connection.execute(
+            sa.select(tables["domain_records"]).where(
+                tables["domain_records"].c.id == 2096
+            )
+        ).mappings().one()
+
+        assert len(fields) == 1
+        assert fields[0]["required"] is False
+        assert fields[0]["validation"] == {
+            "max_length": 80,
+            "pattern": r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        }
+        assert record["data"] == {"slug": "duplicate", "state": "exploring"}
+        assert record["version"] == 1

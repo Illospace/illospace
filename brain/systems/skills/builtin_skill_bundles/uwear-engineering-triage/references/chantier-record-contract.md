@@ -32,6 +32,7 @@ creates, updates, and query results.
 | `parent_issue` | text or null | no | GitHub mirror parent issue in external-id format. |
 | `next_step` | text | yes | One non-empty line naming the next most valuable step; maximum 500 characters. |
 | `progress_note` | long text | no | Progress context using the ticket record convention; maximum 2,000 characters. |
+| `superseded_by` | text or null | no | Canonical chantier slug when this record was retired as a duplicate. A superseded record is never active, even if legacy data still carries an active state. |
 | `created_at` | datetime or null | no | ISO 8601 source timestamp, following existing Domain-1 timestamp conventions. |
 | `updated_at` | datetime or null | no | ISO 8601 source timestamp, following existing Domain-1 timestamp conventions. |
 
@@ -76,6 +77,7 @@ cross-repository by construction.
   "parent_issue": "github:Illospace/illospace:issue:326",
   "next_step": "Merge the object-schema migration after its Domain and Alembic checks pass.",
   "progress_note": "The keystone schema is implemented and awaiting verification.",
+  "superseded_by": null,
   "created_at": "2026-07-16T14:00:00Z",
   "updated_at": "2026-07-16T16:00:00Z"
 }

@@ -65,6 +65,7 @@ _COMPOSITION_PATCH_NAMES = (
     "_handle_read_thread_messages",
     "_handle_manage_cycle",
     "_handle_manage_domain",
+    "_handle_merge_chantier",
     "_handle_manage_inbound",
     "_handle_manage_idea",
     "_handle_manage_project",

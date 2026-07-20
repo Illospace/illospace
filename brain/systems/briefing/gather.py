@@ -369,6 +369,7 @@ async def _chantier_pieces_for_record(
         return []
 
     from brain.platform.db.models.domain import Domain, DomainObjectType, DomainRecord
+    from brain.systems.chantiers import is_superseded_chantier
 
     with _no_autoflush(session):
         chantiers = (
@@ -394,7 +395,8 @@ async def _chantier_pieces_for_record(
     chantiers = [
         chantier
         for chantier in chantiers
-        if subject_external_id in {item["ref"] for item in _chantier_refs(chantier)}
+        if not is_superseded_chantier(chantier)
+        and subject_external_id in {item["ref"] for item in _chantier_refs(chantier)}
     ]
     if not chantiers:
         return []

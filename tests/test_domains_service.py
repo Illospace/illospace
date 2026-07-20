@@ -278,6 +278,14 @@ def _chantier_object_definition() -> dict:
                 "validation": {"pattern": r"^[^\r\n]+$"},
             },
             {"key": "progress_note", "field_type": "long_text"},
+            {
+                "key": "superseded_by",
+                "field_type": "text",
+                "validation": {
+                    "max_length": 80,
+                    "pattern": r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                },
+            },
             {"key": "created_at", "field_type": "datetime"},
             {"key": "updated_at", "field_type": "datetime"},
         ],
@@ -306,6 +314,7 @@ def _chantier_record_data() -> dict:
         "parent_issue": "github:Illospace/illospace:issue:326",
         "next_step": "Land the record contract and unblock member-ticket work.",
         "progress_note": "Schema implementation is in review.",
+        "superseded_by": None,
         "created_at": "2026-07-16T14:00:00Z",
         "updated_at": "2026-07-16T15:00:00Z",
     }
@@ -483,6 +492,48 @@ async def test_slack_chantier_declare_matches_obvious_title_and_reuses_parent_mi
     assert result.mirror_status == "linked"
     assert result.data["parent_issue"] == "github:Illospace/illospace:issue:326"
     assert [record.id for record in records] == [existing.id]
+
+
+async def test_slack_chantier_declare_attaches_high_confidence_family_without_insert(session):
+    from brain.systems.slack.chantier_declare import maybe_declare_chantier_from_slack
+
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+    canonical_data = _chantier_record_data()
+    canonical_data.update(
+        slug="agent-mcp-repositioning",
+        title="Agent MCP Repositioning",
+        goal="Done means the agent MCP surface has one canonical product position.",
+    )
+    canonical = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "chantier",
+        data=canonical_data,
+    )
+
+    attached = await maybe_declare_chantier_from_slack(
+        session,
+        org_id=ORG_ID,
+        actor_user_id=USER_ID,
+        origin="slack.app_mention",
+        text=(
+            "<@BILLO> chantier: V3 canonical agent MCP repositioning automation builder chat — "
+            "done means the agent MCP surface has one canonical product position"
+        ),
+    )
+
+    records = await service.list_records(ORG_ID, domain.id, object_key="chantier")
+    assert attached is not None and attached.operation == "updated"
+    assert attached.record_id == canonical.id
+    assert attached.data["slug"] == "agent-mcp-repositioning"
+    assert attached.data["title"] == "Agent MCP Repositioning"
+    assert [record.id for record in records] == [canonical.id]
 
 
 async def test_slack_chantier_router_does_not_create_without_keyword(session):
@@ -1057,6 +1108,34 @@ async def test_chantier_contract_rejects_invalid_records(session, mutate, match)
         await service.create_record(ORG_ID, domain.id, "chantier", data=data)
 
 
+async def test_chantier_contract_rejects_vaporware_placeholder_pattern(session):
+    from brain.systems.chantiers import MISSING_NEXT_STEP, placeholder_goal
+
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+    data = _chantier_record_data()
+    data.update(
+        slug="empty-placeholder",
+        title="Empty placeholder",
+        goal=placeholder_goal("Empty placeholder"),
+        owner=None,
+        refs=[],
+        parent_issue=None,
+        next_step=MISSING_NEXT_STEP,
+        progress_note=None,
+    )
+
+    with pytest.raises(DomainError, match="placeholder records are rejected"):
+        await service.create_record(ORG_ID, domain.id, "chantier", data=data)
+
+    assert await service.list_records(ORG_ID, domain.id, object_key="chantier") == []
+
+
 async def test_chantier_slug_is_stable_after_creation(session):
     service = AsyncDomainService(session)
     domain = await service.create_domain(
@@ -1166,6 +1245,161 @@ async def test_manage_domain_round_trips_a_chantier_record(session, monkeypatch)
     assert updated["data"]["state"] == "shipping"
     assert queried["returned"] == queried["total_matching"] == 1
     assert queried["records"][0]["id"] == created["id"]
+
+
+def test_merge_chantier_tool_is_registered_as_a_versioned_domain_write():
+    from brain.systems.runs.tool_catalog.definitions.domain_inbound import DOMAIN_TOOLS
+    from brain.systems.runs.tool_catalog.registry import get_tool_registration
+    from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+
+    definition = next(tool for tool in DOMAIN_TOOLS if tool["name"] == "merge_chantier")
+    assert definition["input_schema"]["required"] == [
+        "duplicate_record_id",
+        "canonical_record_id",
+        "expected_duplicate_version",
+        "expected_canonical_version",
+        "reason",
+    ]
+    assert "merge_chantier" in {tool["name"] for tool in COORDINATOR_TOOLS}
+    assert "merge_chantier" in {tool["name"] for tool in WORKER_TOOLS}
+    assert "merge_chantier" in _get_tool_handlers()
+    registration = get_tool_registration("merge_chantier")
+    assert registration is not None
+    assert registration.permission == "write_domain"
+    assert registration.action_manifest is True
+
+
+def test_merge_chantier_refs_folds_duplicate_evidence_without_duplicates():
+    from brain.systems.chantiers import merge_chantier_refs
+
+    canonical_ref = {"source": "github", "ref": "github:Illospace/illospace:issue:386"}
+    duplicate_ref = {"source": "url", "ref": "https://example.com/duplicate-prd"}
+
+    assert merge_chantier_refs(
+        [canonical_ref],
+        [canonical_ref, duplicate_ref],
+    ) == [canonical_ref, duplicate_ref]
+
+
+async def test_merge_chantier_2096_into_1993_removes_duplicate_from_digest_set(
+    session,
+    monkeypatch,
+):
+    from brain.platform.db.repositories import unit_of_work
+    from brain.systems.chantiers import (
+        MISSING_NEXT_STEP,
+        active_chantier_records,
+        is_placeholder_chantier,
+        placeholder_goal,
+    )
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.domains import _handle_merge_chantier
+
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[_chantier_object_definition()],
+    )
+    object_type = await service.get_object_type(domain.id, "chantier")
+    fields = await service.list_fields(object_type.id)
+
+    async def seed_record(record_id: int, data: dict) -> DomainRecord:
+        normalized = service.validate_record_data(fields, data)
+        record = DomainRecord(
+            id=record_id,
+            org_id=ORG_ID,
+            domain_id=domain.id,
+            object_type_id=object_type.id,
+            title=data["title"],
+            data=normalized,
+            search_text=data["title"],
+        )
+        session.add(record)
+        await session.flush()
+        return record
+
+    for record_id, slug in (
+        (1990, "coordinator-reliability"),
+        (1991, "clothing-intake"),
+        (1992, "shopify-sunset"),
+    ):
+        data = _chantier_record_data()
+        data.update(slug=slug, title=slug.replace("-", " ").title())
+        await seed_record(record_id, data)
+
+    canonical_data = _chantier_record_data()
+    canonical_data.update(
+        slug="agent-mcp-repositioning",
+        title="Agent MCP Repositioning",
+        goal="Done means the agent MCP product position is canonical.",
+    )
+    canonical = await seed_record(1993, canonical_data)
+
+    duplicate_title = "V3 canonical agent MCP repositioning automation builder chat"
+    duplicate_data = _chantier_record_data()
+    duplicate_data.update(
+        slug="v3-canonical-agent-mcp-repositioning-automation-builder-chat",
+        title=duplicate_title,
+        goal=placeholder_goal(duplicate_title),
+        state="exploring",
+        owner=None,
+        refs=[],
+        parent_issue=None,
+        next_step=MISSING_NEXT_STEP,
+        progress_note=None,
+    )
+    duplicate = await seed_record(2096, duplicate_data)
+
+    class SessionUnitOfWork:
+        def __init__(self, *args, **kwargs):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            if exc_type is None:
+                await session.flush()
+            return False
+
+    monkeypatch.setattr(unit_of_work, "UnitOfWork", SessionUnitOfWork)
+    with bind_agent_context({"org_id": ORG_ID, "user_id": USER_ID}):
+        merged = json.loads(
+            await _handle_merge_chantier(
+                duplicate_record_id=2096,
+                canonical_record_id=1993,
+                expected_duplicate_version=1,
+                expected_canonical_version=1,
+                reason="Issue #386 duplicate retirement",
+            )
+        )
+        repeated = json.loads(
+            await _handle_merge_chantier(
+                duplicate_record_id=2096,
+                canonical_record_id=1993,
+                expected_duplicate_version=1,
+                expected_canonical_version=1,
+                reason="Issue #386 duplicate retirement retry",
+            )
+        )
+
+    assert merged["status"] == "merged"
+    assert merged["canonical"]["id"] == canonical.id == 1993
+    assert merged["duplicate"]["id"] == duplicate.id == 2096
+    assert merged["duplicate"]["data"]["state"] == "paused"
+    assert merged["duplicate"]["data"]["superseded_by"] == "agent-mcp-repositioning"
+    assert merged["active_chantier_count"] == 4
+    assert set(merged["digest_record_ids"]) == {1990, 1991, 1992, 1993}
+    assert repeated["status"] == "already_merged"
+
+    records = await service.list_records(ORG_ID, domain.id, object_key="chantier")
+    digest_records = active_chantier_records(records)
+    assert {record.id for record in digest_records} == {1990, 1991, 1992, 1993}
+    assert 2096 not in {record.id for record in digest_records}
+    assert not any(is_placeholder_chantier(record.data) for record in digest_records)
 
 
 async def test_domain_events_drop_non_uuid_idea_ids(session):

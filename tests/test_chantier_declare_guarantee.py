@@ -155,6 +155,14 @@ def _chantier_object_definition() -> dict:
                 "validation": {"pattern": r"^[^\r\n]+$"},
             },
             {"key": "progress_note", "field_type": "long_text"},
+            {
+                "key": "superseded_by",
+                "field_type": "text",
+                "validation": {
+                    "max_length": 80,
+                    "pattern": r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                },
+            },
         ],
     }
 
@@ -190,6 +198,7 @@ def _record_data() -> dict:
         "state": "exploring",
         "refs": publication.linked_refs(),
         "next_step": publication.next_step,
+        "superseded_by": None,
     }
 
 
@@ -501,6 +510,42 @@ async def test_reconciliation_reuses_active_chantier_when_publication_refs_are_s
     assert records[0].version == canonical_version
 
 
+async def test_reconciliation_reuses_high_confidence_2096_family_instead_of_creating(session):
+    domain = await _create_tracker(session)
+    service = AsyncDomainService(session)
+    canonical = await _create_chantier_record(
+        session,
+        domain.id,
+        slug="agent-mcp-repositioning",
+        title="Agent MCP Repositioning",
+        refs=[
+            {
+                "source": "github",
+                "ref": "github:Illospace/illospace:issue:376",
+                "title": "Canonical chantier issue",
+            }
+        ],
+    )
+    publication = PublishedChantierPrd(
+        slug="v3-canonical-agent-mcp-repositioning-automation-builder-chat",
+        title="V3 Canonical Agent MCP Repositioning Automation Builder Chat",
+        goal="Done means the agent MCP product position is canonical.",
+    )
+
+    report = await reconcile_published_chantier_prd(
+        session,
+        org_id=ORG_ID,
+        publication=publication,
+        repair=True,
+    )
+
+    assert report.record_id == canonical.id
+    assert report.operation == "verified"
+    records = await service.list_records(ORG_ID, domain.id, object_key="chantier")
+    assert [record.id for record in records] == [canonical.id]
+    assert records[0].data["slug"] == "agent-mcp-repositioning"
+
+
 async def test_reconciliation_ref_overlap_reuses_canonical_and_merges_missing_refs(
     session,
 ):
@@ -541,7 +586,7 @@ async def test_reconciliation_ref_overlap_reuses_canonical_and_merges_missing_re
     }
 
 
-async def test_reconciliation_does_not_match_by_title_or_untyped_ref_value(session):
+async def test_reconciliation_exact_title_match_wins_over_untyped_ref_value(session):
     domain = await _create_tracker(session)
     service = AsyncDomainService(session)
     canonical = await _create_chantier_record(
@@ -565,12 +610,15 @@ async def test_reconciliation_does_not_match_by_title_or_untyped_ref_value(sessi
         repair=True,
     )
 
-    assert report.record_id != canonical.id
-    assert report.operation == "created_missing_record"
+    assert report.record_id == canonical.id
+    assert report.operation == "linked_missing_refs"
     records = await service.list_records(ORG_ID, domain.id, object_key="chantier")
-    assert {record.data["slug"] for record in records} == {
-        "agent-mcp-repositioning",
-        "connector-framework",
+    assert [record.id for record in records] == [canonical.id]
+    refs = {(item["source"], item["ref"]) for item in records[0].data["refs"]}
+    assert refs == {
+        ("doc", PRD_URL),
+        ("url", PRD_URL),
+        ("slack", SLACK_REF),
     }
 
 

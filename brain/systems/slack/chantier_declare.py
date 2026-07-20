@@ -18,13 +18,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.domain import DomainRecord
+from brain.systems.chantiers import (
+    CHANTIER_OBJECT_KEY,
+    MISSING_NEXT_STEP,
+    TRACKER_DOMAIN_SLUG,
+    is_active_chantier,
+    list_all_chantier_records,
+    match_active_chantier,
+    merge_chantier_refs,
+    slugify_chantier,
+    title_key,
+)
 from brain.systems.user_domains.service import AsyncDomainService, DomainNotFound
 
 
-TRACKER_DOMAIN_SLUG = "github-ticket-tracker"
-CHANTIER_OBJECT_KEY = "chantier"
 SLACK_APP_MENTION_ORIGIN = "slack.app_mention"
-MISSING_NEXT_STEP = "Clarify the next most valuable step."
 GITHUB_PARENT_MIRROR_TOOL = "create_github_issue"
 GITHUB_SUB_ISSUE_TOOL = "add_github_sub_issue"
 
@@ -257,6 +265,8 @@ async def _thread_belongs_to_chantier(
         else f":{clean_thread_ts}"
     )
     for record in records:
+        if not is_active_chantier(record):
+            continue
         refs = (record.data or {}).get("refs")
         for ref in refs if isinstance(refs, list) else ():
             if not isinstance(ref, Mapping):
@@ -289,14 +299,20 @@ async def upsert_chantier_declaration(
     # predates this flow and intentionally has no new database constraint, so a
     # lock on its object type is the migration-free concurrency boundary.
     await service.get_object_type(domain.id, CHANTIER_OBJECT_KEY, for_update=True)
-    records = await service.list_records(
-        org_id,
-        domain.id,
-        object_key=CHANTIER_OBJECT_KEY,
-        limit=500,
+    records = await list_all_chantier_records(
+        service,
+        org_id=org_id,
+        domain_id=domain.id,
         order="updated_asc",
     )
-    existing = _matching_record(records, declaration)
+    match = match_active_chantier(
+        records,
+        slug=declaration.slug,
+        title=declaration.title,
+        goal=declaration.goal,
+        refs=declaration.refs,
+    )
+    existing = match.record if match is not None else None
     reason = "Slack chantier declaration"
 
     if existing is None:
@@ -324,7 +340,6 @@ async def upsert_chantier_declaration(
     else:
         current = dict(existing.data or {})
         patch: dict[str, Any] = {
-            "title": declaration.title,
             "refs": _merge_refs(current.get("refs"), declaration.refs),
         }
         if declaration.goal_is_explicit or not current.get("goal"):
@@ -498,39 +513,18 @@ def _matching_record(
     records: Sequence[DomainRecord],
     declaration: ChantierDeclaration,
 ) -> DomainRecord | None:
-    incoming_title = _title_key(declaration.title)
-    for record in sorted(records, key=lambda item: item.id):
-        data = dict(record.data or {})
-        if str(data.get("slug") or "").casefold() == declaration.slug.casefold():
-            return record
-        stored_title = str(data.get("title") or record.title or "")
-        if _title_key(stored_title) == incoming_title:
-            return record
-        if _slugify(stored_title) == declaration.slug:
-            return record
-    return None
+    match = match_active_chantier(
+        records,
+        slug=declaration.slug,
+        title=declaration.title,
+        goal=declaration.goal,
+        refs=declaration.refs,
+    )
+    return match.record if match is not None else None
 
 
 def _merge_refs(existing: Any, incoming: Sequence[Mapping[str, str]]) -> list[dict[str, str]]:
-    merged: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    candidates = list(existing) if isinstance(existing, list) else []
-    candidates.extend(incoming)
-    for item in candidates:
-        if not isinstance(item, Mapping):
-            continue
-        source = str(item.get("source") or "").strip()
-        ref = str(item.get("ref") or "").strip()
-        key = (source, ref)
-        if not source or not ref or key in seen:
-            continue
-        clean = {"source": source, "ref": ref}
-        title = str(item.get("title") or "").strip()
-        if title:
-            clean["title"] = title
-        merged.append(clean)
-        seen.add(key)
-    return merged
+    return merge_chantier_refs(existing, incoming)
 
 
 def _refs_from_urls(urls: Sequence[str]) -> list[dict[str, str]]:
@@ -601,12 +595,11 @@ def _clean_optional(value: str | None, *, limit: int, one_line: bool = False) ->
 
 
 def _slugify(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").casefold()).strip("-")
-    return re.sub(r"-+", "-", slug)[:80].rstrip("-")
+    return slugify_chantier(value)
 
 
 def _title_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+    return title_key(value)
 
 
 def _guess_kind(value: str) -> str:

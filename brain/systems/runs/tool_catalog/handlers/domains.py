@@ -329,4 +329,56 @@ async def _handle_manage_domain(
         return json.dumps({"error": str(exc)})
 
 
+async def _handle_merge_chantier(
+    duplicate_record_id: int,
+    canonical_record_id: int,
+    expected_duplicate_version: int,
+    expected_canonical_version: int,
+    reason: str,
+) -> str:
+    """Run the first-class duplicate retirement operation in Domain 1."""
+
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.systems.chantiers import merge_chantier_records
+    from brain.systems.user_domains.service import (
+        AsyncDomainService,
+        DomainNotFound,
+    )
+
+    org_id, user_id, run_id, _idea_id = _domain_context()
+    if not org_id:
+        return json.dumps({"error": "merge_chantier could not access this workspace context"})
+
+    try:
+        async with UnitOfWork() as uow:
+            result = await merge_chantier_records(
+                uow.session,
+                org_id=org_id,
+                duplicate_record_id=int(duplicate_record_id),
+                canonical_record_id=int(canonical_record_id),
+                expected_duplicate_version=int(expected_duplicate_version),
+                expected_canonical_version=int(expected_canonical_version),
+                reason=reason,
+                actor_user_id=str(user_id) if user_id else None,
+                run_id=run_id,
+            )
+            service = AsyncDomainService(uow.session)
+            return json.dumps(
+                {
+                    "status": result.status,
+                    "domain_id": result.domain_id,
+                    "canonical": await service.serialize_record(result.canonical),
+                    "duplicate": await service.serialize_record(result.duplicate),
+                    "active_chantier_count": result.active_chantier_count,
+                    "digest_record_ids": list(result.active_record_ids),
+                },
+                default=str,
+            )
+    except (TypeError, ValueError, DomainNotFound) as exc:
+        return json.dumps({"error": str(exc)})
+    except Exception as exc:
+        logger.exception("merge_chantier failed: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
 __all__ = [name for name in globals() if not name.startswith("__")]
