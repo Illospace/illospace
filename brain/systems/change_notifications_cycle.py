@@ -19,7 +19,7 @@ from brain.systems.change_notifications import DEFAULT_URGENT_TERMS, render_outb
 
 
 async def _maybe_run_deploy_verification(session, org_id) -> dict | None:
-    """Run the additive close-only verifier when deploy-state is armed."""
+    """Harvest alert-thread outcomes, then run the close-only verifier."""
     import logging
     from datetime import datetime, timezone
 
@@ -28,14 +28,23 @@ async def _maybe_run_deploy_verification(session, org_id) -> dict | None:
     if session is None or not deploy_feature_enabled():
         return None
     try:
-        from brain.systems.deploy_state_sweep import run_deploy_verification
+        from brain.systems.deploy_state_sweep import (
+            run_alert_resolution_harvest,
+            run_deploy_verification,
+        )
 
         async with session.begin_nested():
-            return await run_deploy_verification(
+            harvest = await run_alert_resolution_harvest(
+                session,
+                org_id=org_id,
+            )
+            verification = await run_deploy_verification(
                 session,
                 org_id=org_id,
                 now=datetime.now(timezone.utc),
             )
+            verification["resolution_harvest"] = harvest
+            return verification
     except Exception:
         logging.getLogger("illo.notify").exception("deploy verification failed safely")
         return None
@@ -50,17 +59,33 @@ def _normalize_event(row) -> dict:
     # under "data" — so read those from there, not the top level.
     data = after.get("data") or {}
     event_type = getattr(row, "event_type", "") or ""
-    return {
+    action = event_type.split(".")[-1] if event_type else "updated"
+    noteworthy = None
+    reason = str(getattr(row, "reason", "") or "")
+    if reason.startswith("alert_resolution_harvest:"):
+        _, outcome, message_ts = (reason.split(":", 2) + [""])[:3]
+        action = {
+            "deployed": "movement: fix deployed from the alert thread",
+            "verified": "outcome: fix verified in the alert thread",
+            "reproduced": "movement: fix claim reversed; still reproduces per alert thread",
+        }.get(outcome, "movement: alert-thread resolution changed")
+        if message_ts:
+            action += f" (Slack ts {message_ts})"
+        noteworthy = True
+    normalized = {
         "event_type": event_type,
         "title": after.get("title") or data.get("title") or data.get("name") or data.get("summary"),
         "object_key": after.get("object_key"),
         "url": data.get("url") or data.get("html_url"),
         "labels": data.get("labels") or [],
         "priority": data.get("priority"),
-        "action": event_type.split(".")[-1] if event_type else "updated",
+        "action": action,
         "owner_id": data.get("owner_id"),
         "record_id": getattr(row, "record_id", None),
     }
+    if noteworthy is not None:
+        normalized["noteworthy"] = noteworthy
+    return normalized
 
 
 async def _load_change_events(session, org_id, since, *, limit: int = 500) -> list:

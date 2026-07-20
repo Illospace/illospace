@@ -53,7 +53,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.8.0"
+    assert bundle.manifest.version == "1.9.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -249,6 +249,27 @@ def test_uwear_triage_skill_keeps_slack_formatting_contract():
     assert "Prefer Slack-native links" in procedure
     assert "Never invent Slack user ids" in procedure
     assert "Fall back gracefully" in procedure
+
+
+def test_uwear_triage_harvests_alert_thread_resolution_before_digesting():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    procedure = bundle.skill_markdown
+    playbook = _uwear_triage_asset(bundle, "references/chantier-operations.md")
+
+    for expected in (
+        "Resolution harvest",
+        "alert_slack_channel",
+        "alert_slack_thread_ts",
+        "resolution_confirmed_ts",
+        "later human reply says the problem still reproduces",
+        "read-only on Slack",
+        "movement/outcome",
+    ):
+        assert expected in playbook
+    assert "alert-resolution replies" in procedure
 
 
 def test_uwear_triage_skill_keeps_backlog_hygiene_contract():

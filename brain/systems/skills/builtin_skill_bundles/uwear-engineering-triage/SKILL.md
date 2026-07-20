@@ -93,7 +93,7 @@ Build the complete picture before forming any opinion. Required sources:
   count and its state, goal, refs, owner, next step, progress note, and update
   time.
 - GitHub Event Feed Domain id `38` events since the last run.
-- Teammate replies to your last check-in (Slack thread and Cortex thread).
+- Teammate check-in and alert-resolution replies (Slack and Cortex threads).
 
 **Fan out workers — and collect them honestly.** `spawn_worker` is
 fire-and-forget: it returns a queued `child_run_id`; there is no join

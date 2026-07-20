@@ -329,6 +329,9 @@ def slack_channel_monitor_message(
         "(scope=recent_channel or thread) for more context before deciding. An internal Domain/"
         "tracker record is NOT a GitHub issue — only a successful create_github_issue opens a real "
         "issue; never describe a tracker record as a filed GitHub issue.",
+        "When an automated alert creates or updates a Domain 1 tracker record, preserve this "
+        "origin in the structured alert_slack_channel and alert_slack_thread_ts fields when the "
+        "schema exposes them, so future sweeps can re-read human resolution replies.",
         "",
         f"Channel: {channel_id}" + (f" ({channel_name})" if channel_name else ""),
         f"Team: {slack_trigger_payload.get('team_id')}",

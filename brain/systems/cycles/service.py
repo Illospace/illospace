@@ -77,6 +77,7 @@ ACTIVE_RUN_STATUSES = CYCLE_RUN_ACTIVE_STATUSES
 TERMINAL_RUN_STATUSES = CYCLE_RUN_TERMINAL_STATUSES
 DEFAULT_STALE_CYCLE_RUN_SECONDS = 60
 DEFAULT_CYCLE_RUN_CATCHUP_WINDOW_SECONDS = 24 * 60 * 60
+_UWEAR_COORDINATOR_CYCLE_NAME = "Uwear Ticket Coordinator Check-ins"
 RUN_STATUS_TO_CYCLE_RUN_STATUS = {
     "completed": "completed",
     "failed": "failed",
@@ -143,6 +144,30 @@ async def _async_admit_cycle_run(
         ),
     )
     return result.run_id if result.ok else None
+
+
+async def _async_maybe_harvest_alert_resolution(session, cycle: Cycle, run: CycleRun) -> dict | None:
+    """Refresh alert-sourced tracker outcomes before the Uwear digest sweep.
+
+    The delegated harvester calls only Slack's thread-read API. Failures are
+    recorded as degraded pre-sweep evidence and never block the cycle launch.
+    """
+    if cycle.name != _UWEAR_COORDINATOR_CYCLE_NAME:
+        return None
+    try:
+        from brain.systems.deploy_state_sweep import run_alert_resolution_harvest
+
+        summary = await run_alert_resolution_harvest(
+            session,
+            org_id=str(cycle.org_id),
+        )
+    except Exception as exc:  # noqa: BLE001 - scheduled sweep must degrade safely
+        logger.exception("coordinator alert-resolution harvest failed safely")
+        summary = {"errors": [str(exc)], "updated": 0, "movements": []}
+    context_snapshot = dict(run.context_snapshot or {})
+    context_snapshot["alert_resolution_harvest"] = summary
+    run.context_snapshot = context_snapshot
+    return summary
 
 
 async def _async_append_cycle_thread_message(
@@ -423,6 +448,11 @@ async def async_execute_cycle_run(run_id: int) -> None:
         owner = await uow.session.get(User, cycle.user_id)
         cycle.execution_mode = REUSABLE_THREAD_EXECUTION_MODE
         cycle.reopen_archived = True
+
+        # Refresh alert-sourced tracker outcomes before the coordinator composes
+        # its digest. No-op for every other cycle (name-gated) and degrades its
+        # own Slack/DB errors, so it never breaks a cycle launch.
+        await _async_maybe_harvest_alert_resolution(uow.session, cycle, run)
 
         target = await async_resolve_cycle_execution_target(
             uow.session,

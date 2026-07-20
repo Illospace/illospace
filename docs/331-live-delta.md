@@ -15,9 +15,9 @@ contents of:
 
 Expected content fingerprint:
 
-- characters: `11557`;
-- bytes: `11565`; and
-- SHA-256: `61e78f92198db86916c5ebe753244fb862cb529a7295ec5a89df4d962efa9751`.
+- characters: `12490`;
+- bytes: `12500`; and
+- SHA-256: `826c4fac76c7b21732be3e9f3cf27017e0e1dec68fc5b704a3e11468f60fa97b`.
 
 Read record `1274` back and require byte identity. Do not overwrite a newer
 unreconciled live edit. Domain `1` already has the chantier schema from #327;

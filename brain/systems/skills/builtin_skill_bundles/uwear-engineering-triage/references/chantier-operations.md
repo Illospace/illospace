@@ -40,6 +40,23 @@ existing exact item counts and adds the active-chantier count, for example:
 
 `Scope: 128 open issues + 12 open PRs across 4 repos, 45 active tracker records, 6 active chantiers; posting movement, not the full backlog.`
 
+### Resolution harvest
+
+Before diffing or composing, re-read the source thread for every tracker record
+carrying `alert_slack_channel` and `alert_slack_thread_ts`; consider human
+replies only. A deploy or named merged/promoted PR advances `deploy_state` to
+`deployed`. A human `c'est fix` / `ça a l'air d'être fix` confirmation advances
+it to `verified`, moves `status` to `Done`, and stores its Slack timestamp in
+`resolution_confirmed_ts`. If a later human reply says the problem still reproduces,
+the later reply wins: keep the record open, clear `deploy_state`, store
+`resolution_reproduced_ts`, and quote the reproduce note and timestamp in
+`progress_note`.
+
+This path is read-only on Slack: call `read_slack_conversation`, never post or
+react, even when the source thread is muted. Narrate the persisted change once
+as movement/outcome in the next digest; never repeat the pre-harvest framing as
+an unchanged open hypothesis.
+
 For each active chantier, read `slug`, `title`, `goal`, `state`, `owner`,
 `refs`, `next_step`, `progress_note`, and `updated_at`. Resolve member refs
 against the deploy-verified current state; do not infer goal completion from a
