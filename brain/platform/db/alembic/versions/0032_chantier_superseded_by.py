@@ -1,7 +1,7 @@
 """Add the chantier superseded-by retirement link.
 
 Revision ID: 0032_chantier_superseded_by
-Revises: 0031_scheduler_failure_guard
+Revises: 0030_consolidation_phase_width
 Create Date: 2026-07-20
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 revision = "0032_chantier_superseded_by"
-down_revision = "0031_scheduler_failure_guard"
+down_revision = "0030_consolidation_phase_width"
 branch_labels = None
 depends_on = None
 
