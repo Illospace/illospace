@@ -596,6 +596,18 @@ class AsyncDomainService:
                 )
 
         normalized = self.validate_record_data(fields, data)
+        if domain.slug == "github-ticket-tracker" and obj.key == "chantier":
+            # The tracker schema predates object-level constraints. Keep this
+            # cross-field invariant at the shared persistence boundary so
+            # declare, completion repair, and manage_domain cannot create the
+            # vaporware-shaped placeholder from issue #386.
+            from brain.systems.chantiers import is_placeholder_chantier
+
+            if is_placeholder_chantier(normalized):
+                raise DomainError(
+                    "Chantier placeholder records are rejected: provide at least one durable "
+                    "ref, an explicit Done-means goal or next step, or an owner"
+                )
         record = DomainRecord(
             org_id=org_id,
             domain_id=domain.id,

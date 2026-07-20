@@ -134,6 +134,54 @@ DOMAIN_TOOLS = [
             "required": ["action"],
         },
     },
+    {
+        "name": "merge_chantier",
+        "description": (
+            "Retire a duplicate Domain-1 chantier into its canonical chantier. The operation "
+            "merges typed refs into the canonical record, then sets the duplicate to state=paused "
+            "with superseded_by=<canonical slug>. It is idempotent for the same already-completed "
+            "merge and returns the post-write active-chantier count and digest record ids. Read both "
+            "records first and supply their current versions; this does not mutate GitHub or production "
+            "unless invoked in that workspace."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "duplicate_record_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Duplicate chantier record to pause and mark superseded.",
+                },
+                "canonical_record_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Canonical active chantier record that survives the merge.",
+                },
+                "expected_duplicate_version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Current duplicate version from the pre-write read.",
+                },
+                "expected_canonical_version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Current canonical version from the pre-write read.",
+                },
+                "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Auditable explanation for selecting the canonical chantier.",
+                },
+            },
+            "required": [
+                "duplicate_record_id",
+                "canonical_record_id",
+                "expected_duplicate_version",
+                "expected_canonical_version",
+                "reason",
+            ],
+        },
+    },
 ]
 
 # ── Inbound Coordination Tools ────────────────────────────────

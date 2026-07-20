@@ -6,17 +6,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from brain.systems.cycles.common import SCHEDULED_CYCLE_ORIGIN, json_dict
+from brain.systems.cycles.common import (
+    OFF_SLOT_MATERIAL_ALERT_RUN_KIND,
+    SCHEDULED_CYCLE_ORIGIN,
+    SCHEDULED_DIGEST_RUN_KIND,
+    json_dict,
+)
 
 from brain.systems.cycles.degradation import mandatory_escalations
 
 SCHEDULED_REVIEW_WINDOW_HOURS = 24
-CYCLE_RESULT_CONTRACT_PROFILE_STANDARD = "standard"
-CYCLE_RESULT_CONTRACT_PROFILE_MATERIAL_ALERT = "material_alert"
-VALID_CYCLE_RESULT_CONTRACT_PROFILES = {
-    CYCLE_RESULT_CONTRACT_PROFILE_STANDARD,
-    CYCLE_RESULT_CONTRACT_PROFILE_MATERIAL_ALERT,
-}
 
 # One source of truth for the base result-contract keys and the visible sections
 # named in the launch prompt. The gate validates these same labels/aliases.
@@ -27,6 +26,24 @@ RESULT_CONTRACT_OUTPUT_SECTIONS = {
     "record_next_action_or_blocker": "`Next action:` or `Blocker:`",
     "short_self_review_summary": "`Self-review summary:`",
 }
+
+# Keep each coordinator run kind's complete contract visible here. Do not derive
+# one from the other: their answer formats intentionally have different footers.
+CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND = {
+    SCHEDULED_DIGEST_RUN_KIND: (
+        "answer_the_cycle_mission",
+        "summarize_workspace_evidence_or_explicit_gaps",
+        "report_evidence_health",
+        "record_next_action_or_blocker",
+        "short_self_review_summary",
+    ),
+    OFF_SLOT_MATERIAL_ALERT_RUN_KIND: (
+        "answer_the_cycle_mission",
+        "summarize_workspace_evidence_or_explicit_gaps",
+        "report_evidence_health",
+    ),
+}
+VALID_CYCLE_RUN_KINDS = frozenset(CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND)
 
 
 def _aware_utc(value: datetime | None) -> datetime | None:
@@ -55,36 +72,30 @@ def cycle_scheduled_review_window(scheduled_for: datetime | None) -> dict[str, A
     }
 
 
-def normalize_cycle_result_contract_profile(profile: str | None) -> str:
-    """Return a validated explicit profile, defaulting legacy runs to standard."""
-    clean_profile = str(
-        profile or CYCLE_RESULT_CONTRACT_PROFILE_STANDARD
-    ).strip().lower()
-    if clean_profile not in VALID_CYCLE_RESULT_CONTRACT_PROFILES:
+def normalize_cycle_run_kind(run_kind: str | None) -> str:
+    """Return a validated coordinator run kind."""
+    clean_run_kind = str(run_kind or "").strip().lower()
+    if clean_run_kind not in VALID_CYCLE_RUN_KINDS:
         raise ValueError(
-            "cycle result-contract profile must be one of: "
-            f"{', '.join(sorted(VALID_CYCLE_RESULT_CONTRACT_PROFILES))}"
+            "cycle run_kind must be one of: "
+            f"{', '.join(sorted(VALID_CYCLE_RUN_KINDS))}"
         )
-    return clean_profile
+    return clean_run_kind
 
 
 def cycle_result_contract(
     degradation_tracking: dict[str, Any] | None = None,
     *,
-    profile: str | None = None,
+    run_kind: str,
 ) -> dict[str, Any]:
     """The minimum output contract for autonomous cycle runs."""
-    clean_profile = normalize_cycle_result_contract_profile(profile)
-    required_outputs = list(RESULT_CONTRACT_OUTPUT_SECTIONS)
-    if clean_profile == CYCLE_RESULT_CONTRACT_PROFILE_MATERIAL_ALERT:
-        required_outputs = [
-            "answer_the_cycle_mission",
-            "summarize_workspace_evidence_or_explicit_gaps",
-            "report_evidence_health",
-        ]
+    clean_run_kind = normalize_cycle_run_kind(run_kind)
+    required_outputs = list(
+        CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND[clean_run_kind]
+    )
     contract = {
         "kind": "autonomous_cycle_run_result",
-        "profile": clean_profile,
+        "run_kind": clean_run_kind,
         "required_outputs": required_outputs,
         "degraded_when": [
             "workspace_evidence_sources_fail_or_return_unexpectedly_sparse_results",
@@ -166,6 +177,9 @@ def cycle_launch_receipt(
         "timezone": timezone_name,
         "local_scheduled_for": local_scheduled_for,
         "scheduled_review_window": cycle_scheduled_review_window(scheduled_for),
-        "result_contract": result_contract or cycle_result_contract(),
+        "result_contract": result_contract
+        or cycle_result_contract(
+            run_kind=str(launch.get("run_kind") or SCHEDULED_DIGEST_RUN_KIND)
+        ),
         "evidence_health": pending_evidence_health_receipt(scheduled_for),
     }

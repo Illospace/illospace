@@ -130,7 +130,7 @@ def test_required_digest_contract_and_prompt_name_escalated_cause():
         state = _record_degraded_run(state, first_at + timedelta(minutes=30 * offset))
     scheduled_for = datetime(2026, 7, 14, 17, 0, tzinfo=timezone.utc)
     tracking = degradation_tracking_for_run(state, scheduled_for=scheduled_for)
-    contract = cycle_result_contract(tracking)
+    contract = cycle_result_contract(tracking, run_kind="scheduled_digest")
     cause = contract["mandatory_degradation_escalations"][0]
 
     missing = evaluate_cycle_result_contract(

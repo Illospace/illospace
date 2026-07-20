@@ -349,6 +349,16 @@ def test_uwear_triage_on_demand_run_mode_split():
         assert "> On-demand mode playbook" in playbook
         assert "record `1155`" in playbook
 
+    chantier_playbook = _uwear_triage_asset(
+        bundle,
+        "references/chantier-operations.md",
+    )
+    assert "## Merge / Retire a Duplicate" in chantier_playbook
+    assert "`merge_chantier`" in chantier_playbook
+    assert "duplicate/hygiene narration" in chantier_playbook
+    assert "duplicate record `2096`" in chantier_playbook
+    assert "canonical record `1993`" in chantier_playbook
+
 
 def test_builtin_skills_have_structured_routing_metadata():
     from brain.systems.skills.builtin import BUILTIN_SKILLS

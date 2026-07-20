@@ -14,6 +14,7 @@ from brain.platform.db.models.cycle import (
 )
 from brain.systems.cycles.common import (
     CYCLE_LEDGER_OUTPUT_TARGET_TYPE,
+    SCHEDULED_DIGEST_RUN_KIND,
     actor_id,
     actor_type,
     cycle_run_launch_context,
@@ -203,7 +204,9 @@ def _build_cycle_run_memory_snapshot(
     )
     result_contract = cycle_result_contract(
         degradation_tracking,
-        profile=launch_context.get("result_contract_profile"),
+        run_kind=str(
+            launch_context.get("run_kind") or SCHEDULED_DIGEST_RUN_KIND
+        ),
     )
 
     return {

@@ -20,6 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.agent_run import AgentRunEventRow
 from brain.platform.db.models.domain import DomainRecord
+from brain.systems.chantiers import (
+    active_chantier_records,
+    list_all_chantier_records,
+    match_active_chantier,
+)
 from brain.systems.slack.chantier_declare import (
     CHANTIER_OBJECT_KEY,
     MISSING_NEXT_STEP,
@@ -148,13 +153,13 @@ async def reconcile_published_chantier_prd(
         return report
 
     await service.get_object_type(domain.id, CHANTIER_OBJECT_KEY, for_update=repair)
-    records = await service.list_records(
-        org_id,
-        domain.id,
-        object_key=CHANTIER_OBJECT_KEY,
-        limit=500,
+    records = await list_all_chantier_records(
+        service,
+        org_id=org_id,
+        domain_id=domain.id,
         order="updated_asc",
     )
+    records = active_chantier_records(records)
     matches = _records_with_slug(records, publication.slug)
     if len(matches) > 1:
         ids = ", ".join(str(record.id) for record in matches)
@@ -210,6 +215,15 @@ async def reconcile_published_chantier_prd(
             source=publication.source,
         )
     record = ref_record or slug_record
+    if record is None:
+        text_match = match_active_chantier(
+            records,
+            slug=publication.slug,
+            title=publication.title,
+            goal=publication.goal,
+            refs=expected_refs,
+        )
+        record = text_match.record if text_match is not None else None
     drift: list[str] = []
     if record is None:
         drift.append("missing_record")
@@ -254,11 +268,10 @@ async def reconcile_published_chantier_prd(
         )
         operation = "linked_missing_refs"
 
-    verified_records = await service.list_records(
-        org_id,
-        domain.id,
-        object_key=CHANTIER_OBJECT_KEY,
-        limit=500,
+    verified_records = await list_all_chantier_records(
+        service,
+        org_id=org_id,
+        domain_id=domain.id,
         order="updated_asc",
     )
     verified = next(

@@ -103,6 +103,18 @@ def _scheduler_health_payload(
     expired_leases: int,
 ) -> dict[str, Any]:
     scoped_jobs = _job_scope(jobs, owner_mode)
+    alerts = [
+        {
+            "type": "repeated_scheduler_job_failure",
+            "job_key": job["job_key"],
+            "consecutive_failures": job["failure_guard"]["consecutive_failures"],
+            "failure_signature": job["failure_guard"]["failure_signature"],
+            "last_error": job["failure_guard"]["last_error"],
+            "alerted_at": job["failure_guard"]["alerted_at"],
+        }
+        for job in scoped_jobs
+        if job["failure_guard"]["alerted_at"] is not None
+    ]
     paused_jobs = [
         {
             "job_key": job["job_key"],
@@ -165,6 +177,11 @@ def _scheduler_health_payload(
                 health_reasons.append(f"{run_statuses['retryable']} retryable run(s)")
             if run_statuses.get(RUN_STATUS_SHELVED, 0):
                 health_reasons.append(f"{run_statuses[RUN_STATUS_SHELVED]} shelved run(s)")
+        if alerts:
+            health_status = "degraded"
+            health_reasons.append(
+                f"{len(alerts)} repeated scheduler job failure alert(s)"
+            )
 
     job_owner_counts = Counter(job["owner_mode"] for job in jobs)
     jobs_enabled = sum(1 for job in scoped_jobs if job["enabled"])
@@ -186,6 +203,7 @@ def _scheduler_health_payload(
             "expired_leases": expired_leases,
             "lagging_jobs": len(lagging_jobs),
             "lag_seconds": lag_seconds,
+            "active_alerts": len(alerts),
         },
         "health": {
             "status": health_status,
@@ -201,6 +219,7 @@ def _scheduler_health_payload(
             "oldest_due_at": oldest_due_at,
             "lagging_jobs": lagging_jobs,
         },
+        "alerts": alerts,
         "jobs": jobs,
         "runs": runs,
     }

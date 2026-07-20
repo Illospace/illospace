@@ -12,9 +12,14 @@ it coordinates member work but never replaces the lifecycle, ownership, or
 deploy verification of its member tickets and PRs.
 
 For this playbook, an **active chantier** has state `exploring`, `building`,
-`shipping`, or `verifying`. A `paused` or `done` chantier is not active, but it
-still participates in snapshot continuity: when it leaves the active digest,
-state who paused or closed it and why.
+`shipping`, or `verifying` **and has no `superseded_by` value**. Exclude a
+superseded record before the active count, digest sweep, snapshot diff,
+freshness check, and duplicate/hygiene narration, even if malformed legacy data
+still carries an active state. A `paused` or `done` chantier is not active, but
+it still participates in snapshot continuity: when it leaves the active digest,
+state who paused or closed it and why. A duplicate retired with
+`merge_chantier` has its explicit `superseded_by` reason and must not be
+re-narrated as unresolved hygiene.
 
 ## When to Load
 
@@ -211,16 +216,23 @@ The Slack mention lane persists the record before the conversational reply:
    record contract's `github:<owner>/<repo>:issue:<n>` ref; retain other links
    as typed `slack` or `url` refs.
 2. Derive a lowercase kebab slug. Before creating, lock the chantier object and
-   match all active records by exact slug, normalized title, or a title whose
-   kebab form is the same slug. A match is an update of that record; never create
-   a second record. The persisted slug remains immutable.
+   match all active records in evidence order: exact typed refs, exact slug or
+   normalized title, then one high-confidence title/slug/root-cause match. A
+   stable root of at least three fully contained title/slug tokens is high
+   confidence; broad one- or two-token vocabulary is not. Conflicting or
+   multiple matches fail loudly for human resolution. A single match is an
+   update of that record; never create a second record. Preserve the matched
+   record's stable slug and title.
 3. New records start in `exploring`. Guess `incident`, `quality`, `feature`, or
    `gtm` conservatively unless `kind:` is explicit. Preserve an existing kind,
    owner, goal, and next step when a re-declaration omits those explicit values;
    merge new refs without duplicating them.
-4. If no goal is supplied, persist a clearly inferred `Done means ...` goal and
-   label it as inferred in the reply. If no `next_step` can be inferred, persist
-   the contract placeholder and ask directly for `next_step` in the reply.
+4. If no goal is supplied, derive a clearly inferred `Done means ...` goal and
+   label it as inferred in the reply. If no `next_step` can be inferred, use the
+   contract placeholder and ask directly for `next_step` in the reply. Reject a
+   new record when all placeholder signals occur together: empty `refs`, the
+   generic inferred goal, the generic next step, and no owner. Ask for at least
+   one durable ref, explicit goal/next step, or owner instead.
 
 Reply in the declaration's Slack thread, even when the mention was top-level.
 Say `created` or `updated`, then echo the slug, goal, explicit/guessed kind,
@@ -245,3 +257,22 @@ and never makes the declare fail. Degrade loudly in-thread as
 `mirror pending: <specific reason>`; when the interface itself is unavailable,
 the required wording is `mirror pending tooling`. Never claim a mirror exists
 without the returned GitHub issue number and URL.
+
+## Merge / Retire a Duplicate
+
+Use the first-class `merge_chantier` tool after a human or exact evidence has
+selected the canonical record. Read both records immediately before the write
+and supply both `expected_*_version` values plus an audit reason. The operation:
+
+1. merges unique typed refs from the duplicate into the canonical record;
+2. sets the duplicate to `state: paused` and
+   `superseded_by: <canonical slug>`;
+3. reads the chantier set back and returns the active count plus the exact
+   record ids eligible for the next digest.
+
+Repeating the same merge is an idempotent `already_merged` result. A duplicate
+already superseded by a different slug, an inactive canonical record, a version
+mismatch, or cross-object ids fail without claiming retirement. For the known
+production repair, invoke this operation on duplicate record `2096` and
+canonical record `1993` only after re-reading their current versions; production
+execution is deliberately separate from code deployment.

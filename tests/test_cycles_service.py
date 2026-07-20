@@ -14,7 +14,10 @@ from brain.systems.cycles import execution as cycle_execution
 from brain.systems.cycles import prompts as cycle_prompts
 from brain.systems.cycles import service
 from brain.systems.cycles.common import AGENT_TRIGGERED_CYCLE_ORIGIN, MANUAL_CYCLE_ORIGIN
-from brain.systems.cycles.contracts import cycle_result_contract
+from brain.systems.cycles.contracts import (
+    CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND,
+    cycle_result_contract,
+)
 from brain.app.api.routers import cycles as cycles_router
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
@@ -825,7 +828,9 @@ def test_coordinator_launch_prompt_maps_declared_contract_to_visible_sections():
     run.scheduled_for = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
     run.guidance_snapshot = []
     run.output_targets_snapshot = []
-    run.context_snapshot = {"result_contract": cycle_result_contract()}
+    run.context_snapshot = {
+        "result_contract": cycle_result_contract(run_kind="scheduled_digest")
+    }
 
     idea = Idea()
     idea.id = "coordinator-digest"
@@ -836,19 +841,49 @@ def test_coordinator_launch_prompt_maps_declared_contract_to_visible_sections():
         "## Cycle Memory", 1
     )[0]
 
-    for key in cycle_result_contract()["required_outputs"]:
+    for key in cycle_result_contract(
+        run_kind="scheduled_digest"
+    )["required_outputs"]:
         assert f"`{key}`" in output_section
     assert "`record_next_action_or_blocker` -> `Next action:` or `Blocker:`" in output_section
     assert "`short_self_review_summary` -> `Self-review summary:`" in output_section
     assert "Example required footer:" in output_section
 
 
+@pytest.mark.parametrize(
+    ("run_kind", "expected_outputs"),
+    [
+        (
+            "scheduled_digest",
+            RESULT_CONTRACT_REQUIRED_OUTPUTS,
+        ),
+        (
+            "off_slot_material_alert",
+            [
+                "answer_the_cycle_mission",
+                "summarize_workspace_evidence_or_explicit_gaps",
+                "report_evidence_health",
+            ],
+        ),
+    ],
+)
+def test_coordinator_run_kind_contracts_are_explicit(run_kind, expected_outputs):
+    contract = cycle_result_contract(run_kind=run_kind)
+
+    assert contract["run_kind"] == run_kind
+    assert contract["required_outputs"] == expected_outputs
+    assert (
+        tuple(expected_outputs)
+        == CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND[run_kind]
+    )
+
+
 def test_material_alert_contract_keeps_evidence_gate_without_digest_footer_fields():
     from brain.systems.cycles.contract_gate import evaluate_cycle_result_contract
 
-    contract = cycle_result_contract(profile="material_alert")
+    contract = cycle_result_contract(run_kind="off_slot_material_alert")
 
-    assert contract["profile"] == "material_alert"
+    assert contract["run_kind"] == "off_slot_material_alert"
     assert contract["required_outputs"] == [
         "answer_the_cycle_mission",
         "summarize_workspace_evidence_or_explicit_gaps",
@@ -867,7 +902,7 @@ def test_material_alert_contract_keeps_evidence_gate_without_digest_footer_field
     )
     strict_review = evaluate_cycle_result_contract(
         candidate_answer=alert,
-        result_contract=cycle_result_contract(),
+        result_contract=cycle_result_contract(run_kind="scheduled_digest"),
         mission="Publish the coordinator digest.",
     )
 
@@ -898,9 +933,11 @@ def test_material_alert_launch_prompt_does_not_request_digest_footer_fields():
         "launch_context": {
             "origin": AGENT_TRIGGERED_CYCLE_ORIGIN,
             "source": "manage_cycle",
-            "result_contract_profile": "material_alert",
+            "run_kind": "off_slot_material_alert",
         },
-        "result_contract": cycle_result_contract(profile="material_alert"),
+        "result_contract": cycle_result_contract(
+            run_kind="off_slot_material_alert"
+        ),
     }
 
     idea = Idea()
@@ -942,7 +979,10 @@ async def test_async_run_cycle_now_uses_native_uow_without_sync_bridges(monkeypa
     monkeypatch.setattr(service, "open_unit_of_work", _fail_sync_bridge, raising=False)
     monkeypatch.setattr(service, "run_unit_of_work_task", _fail_sync_bridge, raising=False)
 
-    payload = await service.async_run_cycle_now(cycle.id)
+    payload = await service.async_run_cycle_now(
+        cycle.id,
+        run_kind="scheduled_digest",
+    )
 
     assert executed_run_ids == [99]
     assert payload["id"] == 99
@@ -952,12 +992,13 @@ async def test_async_run_cycle_now_uses_native_uow_without_sync_bridges(monkeypa
     assert payload["context_snapshot"]["launch_context"] == {
         "origin": MANUAL_CYCLE_ORIGIN,
         "source": "cycle.run_now",
+        "run_kind": "scheduled_digest",
     }
     assert all(uow.entered for uow in factory.uows)
 
 
 @pytest.mark.asyncio
-async def test_async_run_cycle_now_snapshots_material_alert_contract_profile(monkeypatch):
+async def test_async_run_cycle_now_snapshots_off_slot_material_alert_contract(monkeypatch):
     cycle = Cycle()
     cycle.id = 5
     cycle.prompt = "Post one concise material engineering alert"
@@ -980,12 +1021,12 @@ async def test_async_run_cycle_now_snapshots_material_alert_contract_profile(mon
 
     await service.async_run_cycle_now(
         cycle.id,
-        launch_context={"result_contract_profile": "material_alert"},
+        run_kind="off_slot_material_alert",
     )
 
     snapshot = created_runs[0].context_snapshot
-    assert snapshot["launch_context"]["result_contract_profile"] == "material_alert"
-    assert snapshot["result_contract"]["profile"] == "material_alert"
+    assert snapshot["launch_context"]["run_kind"] == "off_slot_material_alert"
+    assert snapshot["result_contract"]["run_kind"] == "off_slot_material_alert"
     assert "short_self_review_summary" not in snapshot["result_contract"]["required_outputs"]
 
 
@@ -1092,6 +1133,10 @@ async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeyp
     assert cycle.last_status == "running"
     assert admissions[0]["metadata"]["origin"] == "cycle"
     assert admissions[0]["metadata"]["launch_envelope"]["origin"] == "scheduled_cycle"
+    assert (
+        admissions[0]["metadata"]["launch_envelope"]["launch_context"]["run_kind"]
+        == "scheduled_digest"
+    )
     assert admissions[0]["metadata"]["launch_envelope"]["launch_mode"] == "background_cycle_run"
     assert admissions[0]["metadata"]["launch_envelope"]["active_instruction_source"] == "cycle.prompt"
     assert admissions[0]["metadata"]["launch_envelope"]["scheduled_review_window"] == {
@@ -1105,6 +1150,7 @@ async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeyp
         ),
     }
     assert admissions[0]["metadata"]["contract"]["result"]["kind"] == "autonomous_cycle_run_result"
+    assert admissions[0]["metadata"]["contract"]["result"]["run_kind"] == "scheduled_digest"
     assert admissions[0]["metadata"]["evidence_health"]["status"] == "pending"
     assert (
         admissions[0]["metadata"]["launch_receipt"]["scheduled_review_window"]["start_at"]
@@ -1431,8 +1477,9 @@ async def test_manage_cycle_run_propagates_agent_trigger_provenance(monkeypatch)
     factory = _AsyncUnitOfWorkFactory([_AsyncCycleListSession([cycle])])
     captured = {}
 
-    async def fake_run_cycle_now(cycle_id, *, launch_context=None):
+    async def fake_run_cycle_now(cycle_id, *, run_kind, launch_context=None):
         captured["cycle_id"] = cycle_id
+        captured["run_kind"] = run_kind
         captured["launch_context"] = launch_context
         return {"id": 99, "cycle_id": cycle_id, "status": "queued"}
 
@@ -1459,6 +1506,7 @@ async def test_manage_cycle_run_propagates_agent_trigger_provenance(monkeypatch)
     assert payload["run"]["id"] == 99
     assert captured == {
         "cycle_id": cycle.id,
+        "run_kind": "off_slot_material_alert",
         "launch_context": {
             "origin": AGENT_TRIGGERED_CYCLE_ORIGIN,
             "source": "manage_cycle",
@@ -1466,13 +1514,12 @@ async def test_manage_cycle_run_propagates_agent_trigger_provenance(monkeypatch)
             "actor_id": "1438",
             "thread_id": "reflex-thread",
             "rationale": "EVENT_TRIGGER: PR #990 merged and needs deploy",
-            "result_contract_profile": "standard",
         },
     }
 
 
 @pytest.mark.asyncio
-async def test_manage_cycle_run_persists_explicit_material_alert_contract_profile(monkeypatch):
+async def test_manage_cycle_run_can_select_explicit_scheduled_digest_contract(monkeypatch):
     from brain.systems.runs.tool_catalog.handlers import cycles as cycle_handlers
     from brain.systems.runs.execution_context import bind_agent_context
 
@@ -1483,8 +1530,9 @@ async def test_manage_cycle_run_persists_explicit_material_alert_contract_profil
     factory = _AsyncUnitOfWorkFactory([_AsyncCycleListSession([cycle])])
     captured = {}
 
-    async def fake_run_cycle_now(cycle_id, *, launch_context=None):
+    async def fake_run_cycle_now(cycle_id, *, run_kind, launch_context=None):
         captured["cycle_id"] = cycle_id
+        captured["run_kind"] = run_kind
         captured["launch_context"] = launch_context
         return {"id": 99, "cycle_id": cycle_id, "status": "queued"}
 
@@ -1504,24 +1552,24 @@ async def test_manage_cycle_run_persists_explicit_material_alert_contract_profil
             await cycle_handlers._handle_manage_cycle_async(
                 action="run",
                 id=cycle.id,
-                rationale="Uwear material engineering change",
-                result_contract_profile="material_alert",
+                rationale="Re-run the scheduled digest",
+                run_kind="scheduled_digest",
             )
         )
 
     assert payload["run"]["id"] == 99
-    assert captured["launch_context"]["result_contract_profile"] == "material_alert"
+    assert captured["run_kind"] == "scheduled_digest"
 
 
 @pytest.mark.asyncio
-async def test_manage_cycle_run_rejects_unknown_result_contract_profile_before_loading_cycle(
+async def test_manage_cycle_run_rejects_unknown_run_kind_before_loading_cycle(
     monkeypatch,
 ):
     from brain.systems.runs.tool_catalog.handlers import cycles as cycle_handlers
     from brain.systems.runs.execution_context import bind_agent_context
 
     def forbidden_unit_of_work():
-        raise AssertionError("invalid profiles must fail before database access")
+        raise AssertionError("invalid run kinds must fail before database access")
 
     monkeypatch.setattr(cycle_handlers, "UnitOfWork", forbidden_unit_of_work)
 
@@ -1530,12 +1578,15 @@ async def test_manage_cycle_run_rejects_unknown_result_contract_profile_before_l
             await cycle_handlers._handle_manage_cycle_async(
                 action="run",
                 id=2,
-                result_contract_profile="inferred_off_slot",
+                run_kind="inferred_off_slot",
             )
         )
 
     assert payload == {
-        "error": "cycle result-contract profile must be one of: material_alert, standard"
+        "error": (
+            "cycle run_kind must be one of: "
+            "off_slot_material_alert, scheduled_digest"
+        )
     }
 
 
@@ -1859,6 +1910,7 @@ def test_coordinator_posted_digest_scores_one_without_repair_or_repost(monkeypat
         mission=mission,
         answer=answer,
         events=[slack_post],
+        launch_contract=cycle_result_contract(run_kind="scheduled_digest"),
     )
     repair_calls = []
 
@@ -1884,9 +1936,91 @@ def test_coordinator_posted_digest_scores_one_without_repair_or_repost(monkeypat
     assert verdict["settlement_status"] == "mission_success"
     assert verdict["missing_outputs"] == []
     assert verdict["final_missing_outputs"] == []
+    assert verdict["enforced_required_outputs"] == RESULT_CONTRACT_REQUIRED_OUTPUTS
     assert verdict["side_effects_succeeded"] is True
     assert len(session._events) == 1
     assert len(session._artifacts) == 1
+
+
+@pytest.mark.parametrize(
+    ("run_id", "answer"),
+    [
+        (
+            1857,
+            "Material engineering alert: deploy admission now preserves the active release "
+            "when a duplicate trigger arrives. Evidence reviewed: merged change, deploy "
+            "receipt, Slack post, and tracker update. Evidence health: ok. Next action: "
+            "monitor the next trigger.",
+        ),
+        (
+            1884,
+            "Material engineering alert: chantier movement now records the newly blocked "
+            "member and owner in the tracker. Evidence reviewed: current chantier, issue, "
+            "Slack post, and tracker update. Evidence health: ok. Self-review summary: "
+            "single material change verified and posted once.",
+        ),
+    ],
+    ids=["run-1857-no-self-review", "run-1884-no-next-action"],
+)
+def test_off_slot_material_alert_settles_completed_without_digest_footer_fields(
+    monkeypatch,
+    run_id,
+    answer,
+):
+    from brain.systems.cycles import contract_gate
+
+    side_effects = [
+        AgentRunEventRow(
+            id=1,
+            run_id=44,
+            root_run_id=44,
+            sequence_no=1,
+            event_type="run.tool_completed",
+            payload={
+                "tool_name": "post_slack_reply",
+                "result": {"status": "ok", "channel": "4_software"},
+            },
+        ),
+        AgentRunEventRow(
+            id=2,
+            run_id=44,
+            root_run_id=44,
+            sequence_no=2,
+            event_type="run.tool_completed",
+            payload={
+                "tool_name": "update_domain_record",
+                "result": {"status": "ok", "record_id": run_id},
+            },
+        ),
+    ]
+    contract = cycle_result_contract(run_kind="off_slot_material_alert")
+    session, cycle_run, cycle, _ = _contract_finalization_scenario(
+        cycle_id=2,
+        mission="Post one concise material engineering change alert.",
+        answer=answer,
+        events=side_effects,
+        launch_contract=contract,
+    )
+    repair_calls = []
+
+    async def fake_repair(**kwargs):
+        repair_calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(contract_gate, "_async_repair_cycle_contract_answer", fake_repair)
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+
+    service.finalize_cycle_run_from_run(44, status="completed")
+
+    assert repair_calls == []
+    assert cycle_run.status == "completed"
+    assert cycle_run.error is None
+    assert cycle.last_status == "completed"
+    verdict = cycle_run.context_snapshot["mission_result_contract_verdict"]
+    assert verdict["settlement_status"] == "mission_success"
+    assert verdict["missing_outputs"] == []
+    assert verdict["final_missing_outputs"] == []
+    assert verdict["enforced_required_outputs"] == contract["required_outputs"]
 
 
 def test_coordinator_unswept_unposted_digest_still_degrades(monkeypatch):
@@ -1910,6 +2044,7 @@ def test_coordinator_unswept_unposted_digest_still_degrades(monkeypatch):
                 },
             )
         ],
+        launch_contract=cycle_result_contract(run_kind="scheduled_digest"),
     )
 
     async def fake_repair(**kwargs):

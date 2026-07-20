@@ -2162,7 +2162,11 @@ class TestCortexReplyHandler:
         domains = payload["capabilities"][0]
         assert domains["source"] == "tool_registry"
         assert domains["category"] == "core_workspace"
-        assert domains["tools"] == ["read_workspace_records", "manage_domain"]
+        assert domains["tools"] == [
+            "read_workspace_records",
+            "manage_domain",
+            "merge_chantier",
+        ]
         assert {detail["name"] for detail in domains["tool_details"]} == set(domains["tools"])
         assert any("domain" in (detail["expected_effect"] or "").lower() for detail in domains["tool_details"])
 
