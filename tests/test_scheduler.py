@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -843,7 +844,7 @@ async def test_async_run_scheduler_run_persists_step_failures_and_resumes(sessio
     assert all("brain.jobs.pipelines.consolidate" not in call for call in calls)
 
 
-async def test_scheduler_step_crash_is_persisted_in_snapshot_and_logs(session, caplog):
+async def test_scheduler_step_crash_is_persisted_in_snapshot_without_log_storm(session, caplog):
     job = _make_scheduler_job(
         default_payload={
             "name": "Nightly Sleep",
@@ -891,7 +892,90 @@ async def test_scheduler_step_crash_is_persisted_in_snapshot_and_logs(session, c
     assert snapshot["health"]["status"] == "degraded"
     assert snapshot["runs"][0]["status"] == "retryable"
     assert snapshot["runs"][0]["error_text"] == failed.error_text
-    assert "Scheduler step crashed" in caplog.text
+    assert "Scheduler step crashed" not in caplog.text
+
+
+async def test_identical_scheduler_failures_emit_one_durable_alert(session, caplog, monkeypatch):
+    monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "3")
+    caplog.set_level(logging.ERROR, logger="brain.app.scheduler.executor")
+    job = _make_scheduler_job(
+        retry_policy={"max_attempts": 5, "backoff_seconds": 0},
+        default_payload={
+            "name": "Nightly Sleep",
+            "step_plan": [
+                {
+                    "step_key": "memory_consolidation",
+                    "sequence_no": 1,
+                    "command": "python3 -m brain.jobs.pipelines.consolidate --phase all",
+                }
+            ],
+        },
+    )
+    session.add(job)
+    await session.flush()
+    run = (
+        await async_materialize_due_runs(
+            session,
+            now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
+        )
+    )[0]
+
+    failure_text = (
+        "asyncpg.exceptions.StringDataRightTruncationError: "
+        "value too long for type character varying(20)"
+    )
+
+    def failing_runner(command, *, cwd=None):
+        return SimpleNamespace(returncode=1, stdout="", stderr=failure_text)
+
+    alert_timestamps = []
+    for minute in range(2, 6):
+        failed = await async_run_scheduler_run(
+            session,
+            run.id,
+            owner_id="tester",
+            runner=failing_runner,
+            now=datetime(2026, 4, 21, 3, minute, tzinfo=timezone.utc),
+        )
+        await session.refresh(job)
+        alert_timestamps.append(job.failure_alerted_at)
+        assert failed.status == "retryable"
+
+    alerts = [record for record in caplog.records if record.getMessage().startswith("Scheduler job repeated failure alert")]
+    snapshot = await async_scheduler_health_snapshot(
+        session,
+        now=datetime(2026, 4, 21, 3, 6, tzinfo=timezone.utc),
+    )
+
+    assert len(alerts) == 1
+    assert job.consecutive_failure_count == 4
+    assert alert_timestamps[:2] == [None, None]
+    assert alert_timestamps[2] is not None
+    assert alert_timestamps[3] == alert_timestamps[2]
+    assert snapshot["alerts"] == [
+        {
+            "type": "repeated_scheduler_job_failure",
+            "job_key": "nightly_sleep",
+            "consecutive_failures": 4,
+            "failure_signature": job.failure_signature,
+            "last_error": failure_text,
+            "alerted_at": alert_timestamps[2].isoformat(),
+        }
+    ]
+
+    succeeded = await async_run_scheduler_run(
+        session,
+        run.id,
+        owner_id="tester",
+        runner=lambda command, *, cwd=None: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        now=datetime(2026, 4, 21, 3, 6, tzinfo=timezone.utc),
+    )
+    await session.refresh(job)
+
+    assert succeeded.status == RUN_STATUS_SETTLED_SUCCESS
+    assert job.consecutive_failure_count == 0
+    assert job.failure_signature is None
+    assert job.failure_alerted_at is None
 
 
 async def test_retry_policy_backoff_controls_automatic_reclaim(session):

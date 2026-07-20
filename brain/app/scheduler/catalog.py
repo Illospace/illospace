@@ -135,6 +135,12 @@ def _serialize_job(job: SchedulerJob) -> dict[str, Any]:
         "pause_reason": job.pause_reason,
         "last_started_at": job.last_started_at.isoformat() if job.last_started_at else None,
         "last_finished_at": job.last_finished_at.isoformat() if job.last_finished_at else None,
+        "failure_guard": {
+            "failure_signature": job.failure_signature,
+            "consecutive_failures": int(job.consecutive_failure_count or 0),
+            "last_error": job.last_failure_error,
+            "alerted_at": job.failure_alerted_at.isoformat() if job.failure_alerted_at else None,
+        },
         "created_at": job.created_at.isoformat() if getattr(job, "created_at", None) else None,
     }
 
