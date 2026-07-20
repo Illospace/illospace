@@ -480,6 +480,7 @@ class AsyncAgentRunEngine:
             await self.store.append_event(
                 run_event(run_id, "run.completed", {"status": status.value}, root_run_id=row.root_run_id)
             )
+            await self._queue_chantier_continuation(run_id)
             return completed
 
     async def fail(
@@ -536,6 +537,7 @@ class AsyncAgentRunEngine:
                     root_run_id=row.root_run_id,
                 )
             )
+            await self._queue_chantier_continuation(run_id)
             return failed
 
     async def cancel(
@@ -560,7 +562,18 @@ class AsyncAgentRunEngine:
             await self.store.append_event(
                 run_event(run_id, "run.canceled", {"reason": reason}, root_run_id=row.root_run_id)
             )
+            await self._queue_chantier_continuation(run_id)
             return canceled
+
+    async def _queue_chantier_continuation(self, run_id: int) -> int | None:
+        from brain.systems.runs.chantier_continuation import (
+            queue_chantier_continuation_for_terminal_run,
+        )
+
+        return await queue_chantier_continuation_for_terminal_run(
+            self.store.session,
+            terminal_run_id=run_id,
+        )
 
     @asynccontextmanager
     async def _atomic_terminal_write(self):

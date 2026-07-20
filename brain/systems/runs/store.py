@@ -171,10 +171,11 @@ def _source_idempotency_parts(request: AgentRunRequest) -> tuple[str | None, str
             break
     if not key:
         return None, None
-    # Slack can deliver one human mention through multiple event shapes and even
-    # duplicate connector rows. Lock the canonical Slack message identity at the
-    # run boundary without changing idempotency semantics for unrelated sources.
-    if not key.startswith("slack:"):
+    # Slack can deliver one human mention through multiple event shapes and the
+    # chantier completion hook can race across terminal workers. Lock both
+    # canonical event identities at the run boundary without changing
+    # idempotency semantics for unrelated sources.
+    if not key.startswith(("slack:", "chantier:")):
         return None, None
 
     work_intake = metadata.get("work_intake")
