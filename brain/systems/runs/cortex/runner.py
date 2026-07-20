@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import tempfile
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import uuid
 
 from sqlalchemy import func, select
@@ -46,6 +46,9 @@ from brain.systems.cortex.project_context.materializer import (
 from brain.systems.cortex.thought_lifecycle import TerminalRunSettlementCommand, settle_terminal_run
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaThread, ThreadDiscussionComment
+
+if TYPE_CHECKING:
+    from brain.systems.slack.thread_mute import ThreadPostMute
 
 logger = logging.getLogger(__name__)
 UnitOfWork = None
@@ -740,6 +743,31 @@ async def _clear_slack_processing_status(client: Any, trigger: dict[str, Any]) -
         await set_status(channel_id=channel_id, thread_ts=thread_ts, status="")
 
 
+async def _record_slack_thread_mute(
+    session,
+    *,
+    run: AgentRunRow,
+    mute: ThreadPostMute,
+    channel_id: str,
+    thread_ts: str,
+) -> None:
+    await AsyncAgentRunStore(session).append_event(
+        run_event(
+            int(run.id),
+            "run.slack_post_suppressed",
+            {
+                "reason": "thread_post_muted",
+                "ledger_line": mute.ledger_line,
+                "muted_by": mute.user,
+                "muted_at": mute.ts,
+                "channel_id": channel_id,
+                "thread_ts": thread_ts,
+            },
+            root_run_id=run.root_run_id,
+        )
+    )
+
+
 async def _settle_slack_origin_run_async(
     session,
     run: AgentRunRow,
@@ -772,6 +800,33 @@ async def _settle_slack_origin_run_async(
         return None
     try:
         client = await _slack_client_for_run(run)
+        if target["thread_ts"]:
+            from brain.systems.slack.thread_mute import read_thread_post_mute
+
+            mute = await read_thread_post_mute(
+                client,
+                channel_id=channel_id,
+                thread_ts=target["thread_ts"],
+                illo_user_id=str(target["trigger"].get("bot_user_id") or "").strip() or None,
+            )
+            if mute is not None:
+                await _clear_slack_processing_status(client, target["trigger"])
+                await _record_slack_thread_mute(
+                    session,
+                    run=run,
+                    mute=mute,
+                    channel_id=channel_id,
+                    thread_ts=target["thread_ts"],
+                )
+                return {
+                    "surface": _SLACK_SURFACE,
+                    "run_id": int(run.id),
+                    "artifact_id": artifact_id,
+                    "channel_id": channel_id,
+                    "thread_ts": target["thread_ts"],
+                    "suppressed": True,
+                    "ledger_line": mute.ledger_line,
+                }
         response = await client.post_message(
             channel=channel_id,
             text=final_answer,
