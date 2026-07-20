@@ -10,6 +10,7 @@ from typing import Any
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _current_runtime_secret_context
 from brain.systems.slack.client import SlackApiError, SlackDeliveryError
+from brain.systems.slack.thread_mute import read_thread_post_mute
 from brain.systems.slack.uploads import slack_image_upload_from_data_url
 
 
@@ -361,6 +362,36 @@ async def _handle_post_slack_reply(
 
     try:
         client = await _slack_client_from_runtime()
+        if target_thread_ts:
+            mute = await read_thread_post_mute(
+                client,
+                channel_id=target_channel,
+                thread_ts=target_thread_ts,
+                illo_user_id=str(trigger.get("bot_user_id") or "").strip() or None,
+            )
+            if mute is not None:
+                await _clear_processing_status(client, trigger)
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "posted": False,
+                        "suppressed": True,
+                        "reason": "thread_post_muted",
+                        "ledger_line": mute.ledger_line,
+                        "muted_by": mute.user,
+                        "muted_at": mute.ts,
+                        "channel_id": target_channel,
+                        "thread_ts": target_thread_ts,
+                        "visibility": target_visibility,
+                        "counts_as_visible_response": True,
+                        "submitted_chars": len(text),
+                        "posted_chars": 0,
+                        "submitted_bytes": len(text.encode("utf-8")),
+                        "posted_bytes": 0,
+                        "chunk_count": 0,
+                        "truncated": False,
+                    }
+                )
         target_channel = await _resolve_post_channel(client, target_channel, target_visibility)
         if image_upload is not None:
             response = await client.upload_file(
