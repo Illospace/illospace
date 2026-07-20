@@ -45,6 +45,8 @@ from brain.app.scheduler.runtime import (
     async_finish_run,
     async_find_scheduler_job,
     async_heartbeat_lease,
+    async_record_scheduler_job_failure,
+    async_reset_scheduler_job_failure_guard,
     async_retry_run,
     async_set_scheduler_job_load_shed as async_set_scheduler_job_load_shed_state,
     async_set_scheduler_job_owner_mode as async_set_scheduler_job_owner_mode_state,
@@ -425,6 +427,39 @@ def _retryable_failure_summary(
     return RUN_STATUS_SETTLED_FAILURE, retry_summary
 
 
+async def _async_apply_failure_guard(
+    session: AsyncSession,
+    job: SchedulerJob,
+    run: SchedulerRun,
+    *,
+    failure_key: str,
+    error_text: str,
+    now: datetime,
+) -> None:
+    guard = await async_record_scheduler_job_failure(
+        session,
+        job,
+        failure_identity=f"{failure_key}\n{error_text}",
+        error_text=error_text,
+        now=now,
+    )
+    run.result_summary = {
+        **(run.result_summary or {}),
+        "failure_guard": guard,
+    }
+    if guard["alert_emitted"]:
+        logger.error(
+            "Scheduler job repeated failure alert: job_key=%s run_id=%s "
+            "consecutive_failures=%s failure_signature=%s error=%s",
+            job.job_key,
+            run.id,
+            guard["consecutive_failures"],
+            guard["failure_signature"],
+            error_text,
+        )
+    await session.flush()
+
+
 async def _async_run_step(
     session: AsyncSession,
     run: SchedulerRun,
@@ -485,13 +520,6 @@ async def _async_run_step(
                     "error": str(exc),
                 }
             )
-            logger.exception(
-                "Scheduler step crashed: run_id=%s job_key=%s step_key=%s command=%s",
-                run.id,
-                job.job_key,
-                step.step_key,
-                list(command),
-            )
             await async_update_run_step(
                 session,
                 step,
@@ -510,15 +538,6 @@ async def _async_run_step(
         results.append(summary)
         if int(getattr(proc, "returncode", 1)) != 0:
             error_text = summary["stderr_tail"] or summary["stdout_tail"] or "step failed"
-            logger.error(
-                "Scheduler step failed: run_id=%s job_key=%s step_key=%s "
-                "returncode=%s error=%s",
-                run.id,
-                job.job_key,
-                step.step_key,
-                summary["returncode"],
-                error_text,
-            )
             await async_update_run_step(
                 session,
                 step,
@@ -642,6 +661,14 @@ async def async_run_scheduler_run(
                 error_text=result["error"],
                 now=now,
             )
+            await _async_apply_failure_guard(
+                session,
+                job,
+                run,
+                failure_key=step_key,
+                error_text=result["error"],
+                now=now,
+            )
             return run
 
     await async_finish_run(
@@ -652,6 +679,7 @@ async def async_run_scheduler_run(
         error_text=None,
         now=now,
     )
+    await async_reset_scheduler_job_failure_guard(session, job)
     return run
 
 
@@ -801,6 +829,12 @@ async def async_execute_scheduler_run(
         raw_result = _invoke_handler(handler, payload, now=now)
         normalized_result = _normalize_handler_result(raw_result)
         final_status = _final_status_from_handler_result(normalized_result)
+        handler_failed = final_status == RUN_STATUS_SETTLED_FAILURE
+        handler_error_text = str(
+            normalized_result.get("error")
+            or normalized_result.get("reason")
+            or "handler failed"
+        )
         run.result_summary = {
             "handler_ref": job.handler_ref,
             "handler_status": normalized_result.get("status"),
@@ -812,7 +846,7 @@ async def async_execute_scheduler_run(
                 "lease_id": lease.id,
             },
         }
-        if final_status == RUN_STATUS_SETTLED_FAILURE:
+        if handler_failed:
             final_status, run.result_summary = _retryable_failure_summary(
                 job,
                 run,
@@ -829,10 +863,8 @@ async def async_execute_scheduler_run(
         run.status = final_status
         if final_status == "blocked":
             run.error_text = str(normalized_result.get("reason") or normalized_result.get("message") or "blocked")
-        elif final_status == RUN_STATUS_SETTLED_FAILURE:
-            run.error_text = str(
-                normalized_result.get("error") or normalized_result.get("reason") or "handler failed"
-            )
+        elif handler_failed:
+            run.error_text = handler_error_text
         else:
             run.error_text = None
 
@@ -860,7 +892,7 @@ async def async_execute_scheduler_run(
             now=now,
         )
         run.status = failure_status
-        run.error_text = str(exc)
+        run.error_text = f"{type(exc).__name__}: {exc}"
         run.result_summary = failure_summary
         step.status = run.status
         step.finished_at = now
@@ -871,6 +903,18 @@ async def async_execute_scheduler_run(
         job.last_finished_at = now
         await async_release_scheduler_lease(session, lease, reason=f"run_{run.status}", now=now)
         await session.flush()
+
+    if run.status in {RUN_STATUS_RETRYABLE, RUN_STATUS_SETTLED_FAILURE}:
+        await _async_apply_failure_guard(
+            session,
+            job,
+            run,
+            failure_key=f"handler_execute:{job.handler_ref}",
+            error_text=run.error_text or "handler failed",
+            now=now,
+        )
+    elif run.status == RUN_STATUS_SETTLED_SUCCESS:
+        await async_reset_scheduler_job_failure_guard(session, job)
 
     return run
 

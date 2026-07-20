@@ -90,6 +90,14 @@ class SchedulerJob(Base, CreatedAtMixin):
     last_finished_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    failure_signature: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    consecutive_failure_count: Mapped[int] = mapped_column(
+        Integer, server_default=text("0"), default=0
+    )
+    failure_alerted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_failure_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("job_key", name="uq_scheduler_jobs_job_key"),

@@ -1,11 +1,12 @@
 """Scheduler run, lease, and step helpers."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import os
+from pathlib import Path
 import re
 import socket
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 from brain.kernel.common.time import ensure_utc
@@ -35,6 +36,7 @@ RUN_STATUS_EXECUTING = "executing"
 
 RETRY_POLICY_DEFAULT_MAX_ATTEMPTS = 2
 RETRY_POLICY_DEFAULT_BACKOFF_SECONDS = 0
+SCHEDULER_FAILURE_ALERT_THRESHOLD_DEFAULT = 3
 
 LEASE_TTL_SECONDS = int(os.getenv("SCHEDULER_LEASE_TTL_SECONDS", "7200"))
 
@@ -106,6 +108,97 @@ def normalize_retry_policy(policy: dict[str, Any] | None) -> dict[str, int]:
         "max_attempts": max(1, max_attempts),
         "backoff_seconds": max(0, backoff_seconds),
     }
+
+
+def scheduler_failure_alert_threshold() -> int:
+    """Return the number of identical failures that opens one durable alert."""
+    try:
+        configured = int(
+            os.getenv(
+                "SCHEDULER_FAILURE_ALERT_THRESHOLD",
+                str(SCHEDULER_FAILURE_ALERT_THRESHOLD_DEFAULT),
+            )
+        )
+    except (TypeError, ValueError):
+        configured = SCHEDULER_FAILURE_ALERT_THRESHOLD_DEFAULT
+    return max(1, configured)
+
+
+def _scheduler_failure_guard_state(job: SchedulerJob) -> dict[str, Any]:
+    return {
+        "failure_signature": job.failure_signature,
+        "consecutive_failures": int(job.consecutive_failure_count or 0),
+        "last_error": job.last_failure_error,
+        "alerted_at": (
+            job.failure_alerted_at.isoformat() if job.failure_alerted_at else None
+        ),
+    }
+
+
+async def async_record_scheduler_job_failure(
+    session: AsyncSession,
+    job: SchedulerJob,
+    *,
+    failure_identity: str,
+    error_text: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Persist an identical-failure streak and mark only its threshold edge."""
+    now = _utcnow(now)
+    locked_job = await session.scalar(
+        select(SchedulerJob)
+        .where(SchedulerJob.id == job.id)
+        .with_for_update()
+    )
+    if locked_job is None:
+        raise ValueError(f"Scheduler job {job.id} not found")
+
+    signature = sha256(failure_identity.strip().encode("utf-8")).hexdigest()
+    if locked_job.failure_signature == signature:
+        locked_job.consecutive_failure_count = int(
+            locked_job.consecutive_failure_count or 0
+        ) + 1
+    else:
+        locked_job.failure_signature = signature
+        locked_job.consecutive_failure_count = 1
+        locked_job.failure_alerted_at = None
+
+    locked_job.last_failure_error = error_text
+    alert_emitted = False
+    if (
+        int(locked_job.consecutive_failure_count or 0)
+        >= scheduler_failure_alert_threshold()
+        and locked_job.failure_alerted_at is None
+    ):
+        locked_job.failure_alerted_at = now
+        alert_emitted = True
+
+    await session.flush()
+    return {
+        **_scheduler_failure_guard_state(locked_job),
+        "alert_emitted": alert_emitted,
+    }
+
+
+async def async_reset_scheduler_job_failure_guard(
+    session: AsyncSession,
+    job: SchedulerJob,
+) -> None:
+    """Close a repeated-failure alert after the job succeeds."""
+    if not any(
+        (
+            job.failure_signature,
+            job.consecutive_failure_count,
+            job.failure_alerted_at,
+            job.last_failure_error,
+        )
+    ):
+        return
+    job.failure_signature = None
+    job.consecutive_failure_count = 0
+    job.failure_alerted_at = None
+    job.last_failure_error = None
+    await session.flush()
 
 
 def retry_available(job: SchedulerJob, run: SchedulerRun) -> bool:
