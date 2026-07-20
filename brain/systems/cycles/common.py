@@ -11,6 +11,8 @@ SCHEDULED_CYCLE_ORIGIN = "scheduled_cycle"
 MANUAL_CYCLE_ORIGIN = "manual_cycle"
 AGENT_TRIGGERED_CYCLE_ORIGIN = "agent_triggered_cycle"
 EXTERNAL_AGENT_TRIGGERED_CYCLE_ORIGIN = "external_agent_triggered_cycle"
+SCHEDULED_DIGEST_RUN_KIND = "scheduled_digest"
+OFF_SLOT_MATERIAL_ALERT_RUN_KIND = "off_slot_material_alert"
 
 
 def validate_nonempty_trimmed(value: str, field_name: str) -> str:
@@ -70,6 +72,7 @@ def cycle_run_launch_context(run) -> dict:
     return {
         "origin": SCHEDULED_CYCLE_ORIGIN,
         "source": "cycle_scheduler",
+        "run_kind": SCHEDULED_DIGEST_RUN_KIND,
     }
 
 

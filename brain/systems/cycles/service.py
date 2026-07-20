@@ -19,6 +19,7 @@ from brain.systems.cycles.common import (
     MANUAL_CYCLE_ORIGIN,
     REUSABLE_THREAD_EXECUTION_MODE,
     SCHEDULED_CYCLE_ORIGIN,
+    SCHEDULED_DIGEST_RUN_KIND,
     THREAD_OUTPUT_TARGET_TYPE,
     canonical_execution_mode,
     json_dict,
@@ -26,6 +27,7 @@ from brain.systems.cycles.common import (
     validate_nonempty_trimmed,
     validate_thinking_override,
 )
+from brain.systems.cycles.contracts import normalize_cycle_run_kind
 from brain.systems.cycles.contract_gate import (
     async_prepare_cycle_run_visible_finalization,
     cycle_finalization_status_from_verdict,
@@ -216,13 +218,16 @@ async def _async_append_cycle_auth_blocked_thread_message(
 async def async_run_cycle_now(
     cycle_id: int,
     *,
+    run_kind: str,
     launch_context: dict | None = None,
 ) -> dict:
     scheduled_for = datetime.now(timezone.utc)
+    clean_run_kind = normalize_cycle_run_kind(run_kind)
     launch = {
         "origin": MANUAL_CYCLE_ORIGIN,
         "source": "cycle.run_now",
         **json_dict(launch_context),
+        "run_kind": clean_run_kind,
     }
     async with UnitOfWork() as uow:
         cycle = await uow.session.get(Cycle, cycle_id)
@@ -358,6 +363,7 @@ async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
                     "launch_context": {
                         "origin": SCHEDULED_CYCLE_ORIGIN,
                         "source": "cycle_scheduler",
+                        "run_kind": SCHEDULED_DIGEST_RUN_KIND,
                     }
                 },
             )

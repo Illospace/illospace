@@ -9,6 +9,7 @@ from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import Idea
 from brain.systems.cycles.common import (
     SCHEDULED_CYCLE_ORIGIN,
+    SCHEDULED_DIGEST_RUN_KIND,
     cycle_run_launch_context,
     json_dict,
     json_list,
@@ -28,10 +29,15 @@ _MISSION_SEED_MAX_CHARS = 12_000
 def cycle_launch_envelope(cycle: Cycle, run: CycleRun) -> dict:
     context_snapshot = json_dict(getattr(run, "context_snapshot", None))
     degradation_tracking = json_dict(context_snapshot.get("degradation_tracking"))
+    launch_context = cycle_run_launch_context(run)
     result_contract = context_snapshot.get("result_contract")
     if not isinstance(result_contract, dict):
-        result_contract = cycle_result_contract(degradation_tracking)
-    launch_context = cycle_run_launch_context(run)
+        result_contract = cycle_result_contract(
+            degradation_tracking,
+            run_kind=str(
+                launch_context.get("run_kind") or SCHEDULED_DIGEST_RUN_KIND
+            ),
+        )
     origin = str(launch_context.get("origin") or SCHEDULED_CYCLE_ORIGIN)
     timezone_name = str(getattr(cycle, "timezone", None) or "UTC")
     try:

@@ -23,6 +23,7 @@ from brain.systems.cycles.commands import (
     cycle_change_event,
 )
 from brain.systems.cycles.events import publish_cycle_change
+from brain.systems.cycles.common import SCHEDULED_DIGEST_RUN_KIND
 from brain.systems.cycles.serializers import serialize_cycle, serialize_cycle_run
 from brain.systems.cycles.service import async_run_cycle_now
 from brain.platform.db.models.cycle import Cycle, CycleRun
@@ -217,7 +218,10 @@ async def run_cycle(
         "cycle_id": cycle_id,
         "target_idea_id": cycle.target_idea_id,
     }
-    payload = await async_run_cycle_now(cycle_id)
+    payload = await async_run_cycle_now(
+        cycle_id,
+        run_kind=SCHEDULED_DIGEST_RUN_KIND,
+    )
     publish_cycle_change(
         action="run",
         **event,
