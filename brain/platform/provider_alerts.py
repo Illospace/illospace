@@ -28,10 +28,7 @@ _ALERT_HEADER = re.compile(
     r"(?:CRITICAL|HIGH|MEDIUM|LOW|CONTENT[ _-]?POLICY)"
 )
 _ALERT_MARKER = re.compile(r"(?i)\bALERT\s*[—–-]")
-_PROVIDER_MARKER = re.compile(
-    r"(?i)\b(?:provider|model (?:call|generation)|seedream|fal|vertex|oom)\b"
-    r"|Runtime\.OutOfMemory"
-)
+_GENERIC_PROVIDER_CONTEXT = re.compile(r"(?i)\b(?:provider|model (?:call|generation))\b")
 _TYPED_REASON_AFTER = re.compile(
     r"(?i)\b(?:typed\s+)?(?:error[ _-]?reason|reason[ _-]?code|reason|type)"
     r"\s*[:=]\s*[\"']?([a-z][a-z0-9_. -]{1,40})"
@@ -160,6 +157,25 @@ def _configured_values(policy: Mapping[str, Any], key: str) -> set[str]:
         for value in rule.get(key) or []
         if _token(value)
     }
+
+
+def _provider_alert_candidate(body: str, policy: Mapping[str, Any]) -> bool:
+    # Generic context keeps status-only rules eligible. Named providers and
+    # error types are owned exclusively by the policy below.
+    if _GENERIC_PROVIDER_CONTEXT.search(body):
+        return True
+    configured = _configured_values(policy, "providers_any") | _configured_values(
+        policy,
+        "error_types",
+    )
+    if not configured:
+        return False
+    marker = re.compile(
+        r"(?<![a-z0-9])(?:"
+        + "|".join(re.escape(value) for value in sorted(configured, key=len, reverse=True))
+        + r")(?![a-z0-9])"
+    )
+    return marker.search(_token(body)) is not None
 
 
 def _typed_reason(body: str, configured_reasons: set[str]) -> str | None:
@@ -294,9 +310,11 @@ def classify_provider_alert_body(
     """Classify and rewrite an alert body, or return ``None`` for ordinary text."""
 
     original_body = str(body or "")
-    if not _ALERT_MARKER.search(original_body) or not _PROVIDER_MARKER.search(original_body):
+    if not _ALERT_MARKER.search(original_body):
         return None
     policy = load_provider_alert_policy(policy_path)
+    if not _provider_alert_candidate(original_body, policy):
+        return None
     evidence = _provider_alert_evidence(original_body, policy)
     matched = next(
         (

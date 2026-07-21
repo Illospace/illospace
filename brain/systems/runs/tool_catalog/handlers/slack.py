@@ -3,29 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 import json
-import logging
 import re
 from typing import Any
 
 from brain.platform.provider_alerts import (
-    ProviderAlertDecision,
     ProviderAlertPolicyError,
     classify_provider_alert_body,
 )
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _current_runtime_secret_context
 from brain.systems.slack.client import SlackApiError, SlackDeliveryError
-from brain.systems.slack.provider_alert_gate import (
-    gate_provider_alert_post,
-    record_provider_alert_posted,
-)
+from brain.systems.slack.provider_alert_posting import post_provider_alert
 from brain.systems.slack.thread_mute import read_thread_post_mute
 from brain.systems.slack.uploads import slack_image_upload_from_data_url
-
-
-logger = logging.getLogger(__name__)
-
 
 def _execution_metadata() -> dict[str, Any]:
     metadata = getattr(_agent_context, "execution_metadata", None)
@@ -84,31 +76,6 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "n", "off"}:
             return False
     return bool(value)
-
-
-def _provider_alert_result(decision: ProviderAlertDecision) -> dict[str, Any]:
-    return {
-        "provider_alert": True,
-        "alert_signature": decision.signature,
-        "alert_classification": decision.classification,
-        "alert_severity": decision.severity,
-        "alert_rule_id": decision.rule_id,
-        "alert_policy_source": decision.policy_source,
-        "alert_escalation_reason": decision.escalation_reason,
-    }
-
-
-def _posted_slack_message_ts(response: Any) -> str | None:
-    if not isinstance(response, dict):
-        return None
-    direct = str(response.get("ts") or "").strip()
-    if direct:
-        return direct
-    message = response.get("message")
-    if isinstance(message, dict):
-        nested = str(message.get("ts") or "").strip()
-        return nested or None
-    return None
 
 
 _SLACK_EMOJI_NAME_PATTERN = re.compile(r"^[a-z0-9_+\-]{1,80}$")
@@ -349,6 +316,47 @@ async def _clear_processing_status(client: Any, trigger: dict[str, Any]) -> None
         return
 
 
+async def _post_slack_content(
+    client: Any,
+    channel_id: str,
+    *,
+    text: str,
+    thread_ts: str | None,
+    visibility: str,
+    user_id: str | None,
+    trigger: dict[str, Any],
+    image_upload: Any,
+) -> tuple[Any, str | None]:
+    if image_upload is not None:
+        response = await client.upload_file(
+            channel=channel_id,
+            file_bytes=image_upload.file_bytes,
+            filename=image_upload.filename,
+            title=image_upload.title,
+            initial_comment=text if text.strip() else None,
+            thread_ts=thread_ts,
+            alt_txt=image_upload.alt_txt,
+            content_type=image_upload.content_type,
+        )
+    elif visibility == "ephemeral":
+        target_user = str(user_id or trigger.get("slack_user_id") or "").strip()
+        if not target_user:
+            return None, json.dumps({"error": "ephemeral Slack replies require a Slack user id"})
+        response = await client.post_ephemeral(
+            channel=channel_id,
+            user=target_user,
+            text=text,
+            thread_ts=thread_ts,
+        )
+    else:
+        response = await client.post_message(
+            channel=channel_id,
+            text=text,
+            thread_ts=thread_ts,
+        )
+    return response, None
+
+
 async def _handle_post_slack_reply(
     body: str = "",
     channel_id: str | None = None,
@@ -418,7 +426,6 @@ async def _handle_post_slack_reply(
     if not target_channel:
         return json.dumps({"error": "post_slack_reply requires channel_id outside a Slack-triggered run"})
 
-    alert_ledger_record_error: str | None = None
     try:
         client = await _slack_client_from_runtime()
         if target_thread_ts:
@@ -452,114 +459,50 @@ async def _handle_post_slack_reply(
                     }
                 )
         if alert_decision is not None:
-            target_channel = await _resolve_post_channel(
+            return await post_provider_alert(
                 client,
-                target_channel,
-                target_visibility,
-            )
-            alert_org_id = str(
-                getattr(_agent_context, "org_id", None)
-                or _execution_metadata().get("org_id")
-                or ""
-            ).strip()
-            if not alert_org_id:
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "posted": False,
-                        "error": "provider_alert_org_context_required",
-                        "submitted_chars": len(submitted_text),
-                        "posted_chars": 0,
-                        **_provider_alert_result(alert_decision),
-                    }
-                )
-            try:
-                alert_gate = await gate_provider_alert_post(
+                org_id=str(
+                    getattr(_agent_context, "org_id", None)
+                    or _execution_metadata().get("org_id")
+                    or ""
+                ).strip(),
+                channel_id=target_channel,
+                thread_ts=target_thread_ts,
+                visibility=target_visibility,
+                illo_user_id=str(trigger.get("bot_user_id") or "").strip() or None,
+                submitted_body=submitted_text,
+                decision=alert_decision,
+                uploaded_image=image_upload is not None,
+                resolve_channel=partial(
+                    _resolve_post_channel,
                     client,
-                    org_id=alert_org_id,
-                    channel_id=target_channel,
-                    illo_user_id=str(trigger.get("bot_user_id") or "").strip() or None,
-                    decision=alert_decision,
-                )
-            except Exception as exc:
-                logger.exception("provider alert ledger gate failed")
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "posted": False,
-                        "error": "provider_alert_ledger_unavailable",
-                        "detail": str(exc),
-                        "submitted_chars": len(submitted_text),
-                        "posted_chars": 0,
-                        **_provider_alert_result(alert_decision),
-                    }
-                )
-            if alert_gate.suppress:
-                await _clear_processing_status(client, trigger)
-                return json.dumps(
-                    {
-                        "ok": True,
-                        "posted": False,
-                        "suppressed": True,
-                        "reason": alert_gate.reason,
-                        "delta_line": alert_gate.delta_line,
-                        "acknowledged_by": alert_gate.acknowledged_by,
-                        "acknowledged_at": alert_gate.acknowledged_at,
-                        "channel_id": target_channel,
-                        "thread_ts": target_thread_ts,
-                        "visibility": target_visibility,
-                        "counts_as_visible_response": True,
-                        "submitted_chars": len(submitted_text),
-                        "posted_chars": 0,
-                        "submitted_bytes": len(submitted_text.encode("utf-8")),
-                        "posted_bytes": 0,
-                        "chunk_count": 0,
-                        "truncated": False,
-                        **_provider_alert_result(alert_decision),
-                    }
-                )
-        target_channel = await _resolve_post_channel(client, target_channel, target_visibility)
-        if image_upload is not None:
-            response = await client.upload_file(
-                channel=target_channel,
-                file_bytes=image_upload.file_bytes,
-                filename=image_upload.filename,
-                title=image_upload.title,
-                initial_comment=text if text.strip() else None,
-                thread_ts=target_thread_ts,
-                alt_txt=image_upload.alt_txt,
-                content_type=image_upload.content_type,
-            )
-        elif target_visibility == "ephemeral":
-            target_user = str(user_id or trigger.get("slack_user_id") or "").strip()
-            if not target_user:
-                return json.dumps({"error": "ephemeral Slack replies require a Slack user id"})
-            response = await client.post_ephemeral(
-                channel=target_channel,
-                user=target_user,
-                text=text,
-                thread_ts=target_thread_ts,
-            )
-        else:
-            response = await client.post_message(
-                channel=target_channel,
-                text=text,
-                thread_ts=target_thread_ts,
-            )
-        if alert_decision is not None:
-            try:
-                await record_provider_alert_posted(
-                    org_id=alert_org_id,
-                    channel_id=target_channel,
-                    message_ts=_posted_slack_message_ts(response),
+                    visibility=target_visibility,
+                ),
+                post=partial(
+                    _post_slack_content,
+                    client,
+                    text=text,
                     thread_ts=target_thread_ts,
-                    decision=alert_decision,
-                )
-            except Exception as exc:
-                # Slack has already accepted the post. Report the ledger fault
-                # without lying about delivery and inviting an immediate retry.
-                alert_ledger_record_error = str(exc)
-                logger.exception("provider alert post succeeded but ledger finalization failed")
+                    visibility=target_visibility,
+                    user_id=user_id,
+                    trigger=trigger,
+                    image_upload=image_upload,
+                ),
+                clear_processing_status=partial(_clear_processing_status, client, trigger),
+            )
+        target_channel = await _resolve_post_channel(client, target_channel, target_visibility)
+        response, early_result = await _post_slack_content(
+            client,
+            target_channel,
+            text=text,
+            thread_ts=target_thread_ts,
+            visibility=target_visibility,
+            user_id=user_id,
+            trigger=trigger,
+            image_upload=image_upload,
+        )
+        if early_result is not None:
+            return early_result
         await _clear_processing_status(client, trigger)
     except SlackDeliveryError as exc:
         return json.dumps(exc.to_result())
@@ -593,15 +536,6 @@ async def _handle_post_slack_reply(
             "chunk_count": int(response.get("chunk_count", 1)),
             "truncated": bool(response.get("truncated", False)),
             "slack": response,
-            **(
-                {
-                    "posted": True,
-                    "alert_ledger_record_error": alert_ledger_record_error,
-                    **_provider_alert_result(alert_decision),
-                }
-                if alert_decision is not None
-                else {}
-            ),
         },
         default=str,
     )
