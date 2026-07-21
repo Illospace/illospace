@@ -1,11 +1,12 @@
 """Scheduler catalog and due-run materialization tests."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,8 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
 
 import brain.app.scheduler.catalog as scheduler_catalog
+import brain.app.scheduler.executor as scheduler_executor
+import brain.systems.feedback.heuristics as heuristics
 from brain.app.scheduler.catalog import async_list_scheduler_jobs, async_sync_scheduler_catalog
 from brain.app.scheduler.contracts import (
     extract_declared_actions,
@@ -33,7 +36,11 @@ from brain.app.scheduler.executor import (
     async_set_scheduler_job_paused,
 )
 from brain.app.scheduler.planner import async_materialize_due_runs
-from brain.app.scheduler.programs import build_scheduler_step_plan
+from brain.app.scheduler.programs import (
+    build_scheduler_step_plan,
+    get_step_specs,
+    nightly_heuristic_review_command,
+)
 from brain.app.scheduler.runtime import (
     RUN_STATUS_EXPIRED,
     RUN_STATUS_SETTLED_SUCCESS,
@@ -531,6 +538,41 @@ async def test_nightly_step_plan_can_accept_budget_allowed_step_subset(session):
     assert step_plan[2]["payload"]["night_budget"]["work_type"] == "reflection_dream"
 
 
+async def test_nightly_heuristic_review_wrappers_await_and_report_counts(monkeypatch, capsys):
+    awaited = False
+
+    async def fake_nightly_heuristic_review():
+        nonlocal awaited
+        awaited = True
+        return {"pruned": 0, "skills_updated": 2}
+
+    monkeypatch.setattr(heuristics, "nightly_heuristic_review", fake_nightly_heuristic_review)
+    command = nightly_heuristic_review_command()
+    namespace = {}
+
+    await asyncio.to_thread(exec, command[2], namespace)
+
+    assert awaited is True
+    assert namespace["r"] == {"pruned": 0, "skills_updated": 2}
+    assert not asyncio.iscoroutine(namespace["r"])
+    assert capsys.readouterr().out.strip() == (
+        "Nightly heuristic review ran: pruned=0, skills_updated=2"
+    )
+
+    job = _make_scheduler_job()
+    run = SimpleNamespace(scheduled_for=datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc))
+    program_command = next(
+        step.command for step in get_step_specs(job, run) if step.step_key == "heuristic_review"
+    )
+    assert program_command == command
+    assert scheduler_executor._nightly_wrapper_commands(
+        date(2026, 4, 21), split_steps=False
+    )[4] == command
+    assert scheduler_executor._nightly_step_commands(
+        "heuristic_review", date(2026, 4, 21)
+    ) == [command]
+
+
 async def test_scheduler_lease_claim_and_reclaim(session):
     job = _make_scheduler_job(
         owner_mode="scheduler",
@@ -895,20 +937,15 @@ async def test_scheduler_step_crash_is_persisted_in_snapshot_without_log_storm(s
     assert "Scheduler step crashed" not in caplog.text
 
 
-async def test_identical_scheduler_failures_emit_one_durable_alert(session, caplog, monkeypatch):
+async def test_repeated_heuristic_review_failure_emits_one_durable_alert(session, caplog, monkeypatch):
     monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "3")
     caplog.set_level(logging.ERROR, logger="brain.app.scheduler.executor")
     job = _make_scheduler_job(
         retry_policy={"max_attempts": 5, "backoff_seconds": 0},
         default_payload={
             "name": "Nightly Sleep",
-            "step_plan": [
-                {
-                    "step_key": "memory_consolidation",
-                    "sequence_no": 1,
-                    "command": "python3 -m brain.jobs.pipelines.consolidate --phase all",
-                }
-            ],
+            "scheduler_split_steps": True,
+            "night_budget_allowed_steps": ["heuristic_review"],
         },
     )
     session.add(job)
@@ -920,12 +957,12 @@ async def test_identical_scheduler_failures_emit_one_durable_alert(session, capl
         )
     )[0]
 
-    failure_text = (
-        "asyncpg.exceptions.StringDataRightTruncationError: "
-        "value too long for type character varying(20)"
-    )
+    failure_text = "RuntimeError: nightly heuristic review failed"
 
-    def failing_runner(command, *, cwd=None):
+    def failing_runner(command, *, cwd=None, env=None, timeout_seconds=None):
+        if "nightly scheduler wrapper initialized" in " ".join(command):
+            return SimpleNamespace(returncode=0, stdout="wrapper ready", stderr="")
+        assert command == nightly_heuristic_review_command()
         return SimpleNamespace(returncode=1, stdout="", stderr=failure_text)
 
     alert_timestamps = []
@@ -948,7 +985,9 @@ async def test_identical_scheduler_failures_emit_one_durable_alert(session, capl
     )
 
     assert len(alerts) == 1
+    assert caplog.text.count(failure_text) == 1
     assert job.consecutive_failure_count == 4
+    assert failed.result_summary["failed_step"] == "heuristic_review"
     assert alert_timestamps[:2] == [None, None]
     assert alert_timestamps[2] is not None
     assert alert_timestamps[3] == alert_timestamps[2]
@@ -967,12 +1006,28 @@ async def test_identical_scheduler_failures_emit_one_durable_alert(session, capl
         session,
         run.id,
         owner_id="tester",
-        runner=lambda command, *, cwd=None: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        runner=lambda command, *, cwd=None: SimpleNamespace(
+            returncode=0,
+            stdout="Nightly heuristic review ran: pruned=0, skills_updated=0",
+            stderr="",
+        ),
         now=datetime(2026, 4, 21, 3, 6, tzinfo=timezone.utc),
     )
     await session.refresh(job)
 
+    success_snapshot = await async_scheduler_health_snapshot(
+        session,
+        now=datetime(2026, 4, 21, 3, 6, tzinfo=timezone.utc),
+    )
+    heuristic_step = next(
+        step for step in success_snapshot["runs"][0]["result_summary"]["steps"]
+        if step["step_key"] == "heuristic_review"
+    )
+
     assert succeeded.status == RUN_STATUS_SETTLED_SUCCESS
+    assert heuristic_step["results"][0]["stdout_tail"] == (
+        "Nightly heuristic review ran: pruned=0, skills_updated=0"
+    )
     assert job.consecutive_failure_count == 0
     assert job.failure_signature is None
     assert job.failure_alerted_at is None
