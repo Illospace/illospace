@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 import json
 import re
 from typing import Any
 
+from brain.platform.provider_alerts import (
+    ProviderAlertPolicyError,
+    classify_provider_alert_body,
+)
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _current_runtime_secret_context
 from brain.systems.slack.client import SlackApiError, SlackDeliveryError
+from brain.systems.slack.provider_alert_posting import post_provider_alert
 from brain.systems.slack.thread_mute import read_thread_post_mute
 from brain.systems.slack.uploads import slack_image_upload_from_data_url
-
 
 def _execution_metadata() -> dict[str, Any]:
     metadata = getattr(_agent_context, "execution_metadata", None)
@@ -311,6 +316,47 @@ async def _clear_processing_status(client: Any, trigger: dict[str, Any]) -> None
         return
 
 
+async def _post_slack_content(
+    client: Any,
+    channel_id: str,
+    *,
+    text: str,
+    thread_ts: str | None,
+    visibility: str,
+    user_id: str | None,
+    trigger: dict[str, Any],
+    image_upload: Any,
+) -> tuple[Any, str | None]:
+    if image_upload is not None:
+        response = await client.upload_file(
+            channel=channel_id,
+            file_bytes=image_upload.file_bytes,
+            filename=image_upload.filename,
+            title=image_upload.title,
+            initial_comment=text if text.strip() else None,
+            thread_ts=thread_ts,
+            alt_txt=image_upload.alt_txt,
+            content_type=image_upload.content_type,
+        )
+    elif visibility == "ephemeral":
+        target_user = str(user_id or trigger.get("slack_user_id") or "").strip()
+        if not target_user:
+            return None, json.dumps({"error": "ephemeral Slack replies require a Slack user id"})
+        response = await client.post_ephemeral(
+            channel=channel_id,
+            user=target_user,
+            text=text,
+            thread_ts=thread_ts,
+        )
+    else:
+        response = await client.post_message(
+            channel=channel_id,
+            text=text,
+            thread_ts=thread_ts,
+        )
+    return response, None
+
+
 async def _handle_post_slack_reply(
     body: str = "",
     channel_id: str | None = None,
@@ -324,7 +370,8 @@ async def _handle_post_slack_reply(
 ) -> str:
     """Post an Illo-authored reply to the originating Slack surface."""
 
-    text = str(body or "")
+    submitted_text = str(body or "")
+    text = submitted_text
     try:
         image_upload = slack_image_upload_from_data_url(
             image_data,
@@ -336,6 +383,25 @@ async def _handle_post_slack_reply(
         return json.dumps({"error": str(exc)})
     if not text.strip() and image_upload is None:
         return json.dumps({"error": "post_slack_reply requires body or image_data"})
+
+    # Coordinator-side generators should apply the same checked-in map while
+    # composing summaries.  This posting-path gate is still the authority, so a
+    # fresh run cannot ship a generated false-HIGH provider alert.
+    try:
+        alert_decision = classify_provider_alert_body(text)
+    except ProviderAlertPolicyError as exc:
+        return json.dumps(
+            {
+                "ok": False,
+                "posted": False,
+                "error": "provider_alert_policy_unavailable",
+                "detail": str(exc),
+                "submitted_chars": len(submitted_text),
+                "posted_chars": 0,
+            }
+        )
+    if alert_decision is not None:
+        text = alert_decision.body
 
     trigger = _current_slack_trigger()
     response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
@@ -392,34 +458,51 @@ async def _handle_post_slack_reply(
                         "truncated": False,
                     }
                 )
+        if alert_decision is not None:
+            return await post_provider_alert(
+                client,
+                org_id=str(
+                    getattr(_agent_context, "org_id", None)
+                    or _execution_metadata().get("org_id")
+                    or ""
+                ).strip(),
+                channel_id=target_channel,
+                thread_ts=target_thread_ts,
+                visibility=target_visibility,
+                illo_user_id=str(trigger.get("bot_user_id") or "").strip() or None,
+                submitted_body=submitted_text,
+                decision=alert_decision,
+                uploaded_image=image_upload is not None,
+                resolve_channel=partial(
+                    _resolve_post_channel,
+                    client,
+                    visibility=target_visibility,
+                ),
+                post=partial(
+                    _post_slack_content,
+                    client,
+                    text=text,
+                    thread_ts=target_thread_ts,
+                    visibility=target_visibility,
+                    user_id=user_id,
+                    trigger=trigger,
+                    image_upload=image_upload,
+                ),
+                clear_processing_status=partial(_clear_processing_status, client, trigger),
+            )
         target_channel = await _resolve_post_channel(client, target_channel, target_visibility)
-        if image_upload is not None:
-            response = await client.upload_file(
-                channel=target_channel,
-                file_bytes=image_upload.file_bytes,
-                filename=image_upload.filename,
-                title=image_upload.title,
-                initial_comment=text if text.strip() else None,
-                thread_ts=target_thread_ts,
-                alt_txt=image_upload.alt_txt,
-                content_type=image_upload.content_type,
-            )
-        elif target_visibility == "ephemeral":
-            target_user = str(user_id or trigger.get("slack_user_id") or "").strip()
-            if not target_user:
-                return json.dumps({"error": "ephemeral Slack replies require a Slack user id"})
-            response = await client.post_ephemeral(
-                channel=target_channel,
-                user=target_user,
-                text=text,
-                thread_ts=target_thread_ts,
-            )
-        else:
-            response = await client.post_message(
-                channel=target_channel,
-                text=text,
-                thread_ts=target_thread_ts,
-            )
+        response, early_result = await _post_slack_content(
+            client,
+            target_channel,
+            text=text,
+            thread_ts=target_thread_ts,
+            visibility=target_visibility,
+            user_id=user_id,
+            trigger=trigger,
+            image_upload=image_upload,
+        )
+        if early_result is not None:
+            return early_result
         await _clear_processing_status(client, trigger)
     except SlackDeliveryError as exc:
         return json.dumps(exc.to_result())
