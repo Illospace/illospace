@@ -71,6 +71,7 @@ EXPECTED_TABLES = {
     "project_narratives",
     "project_profile_access",
     "project_profiles",
+    "provider_alert_ledger",
     "provider_health_snapshots",
     "resource_leases",
     "reconstruction_evidence",

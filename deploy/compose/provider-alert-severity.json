@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "default_severity": "high",
+  "throttle_minutes": 30,
+  "abnormal_volume_threshold": 20,
+  "rules": [
+    {
+      "id": "seedream_fal_422_typed_content_policy",
+      "providers_any": ["seedream", "fal"],
+      "status_codes": [422],
+      "typed_reasons": ["nsfw", "user_input", "invalid_user_input", "content_policy"],
+      "classification": "content_policy",
+      "severity": "low",
+      "escalate_on": [
+        "broken_refund_or_fallback",
+        "abnormal_volume",
+        "safe_input_misclassified"
+      ]
+    },
+    {
+      "id": "seedream_fal_422_missing_typed_reason",
+      "providers_any": ["seedream", "fal"],
+      "status_codes": [422],
+      "typed_reason_absent": true,
+      "classification": "provider_failure",
+      "severity": "high",
+      "escalation_reason": "missing_typed_reason"
+    },
+    {
+      "id": "vertex_401",
+      "providers_any": ["vertex"],
+      "status_codes": [401],
+      "classification": "provider_auth_unavailable",
+      "severity": "high"
+    },
+    {
+      "id": "provider_504_timeout",
+      "status_codes": [504],
+      "classification": "provider_timeout",
+      "severity": "high"
+    },
+    {
+      "id": "runtime_out_of_memory",
+      "error_types": ["Runtime.OutOfMemory", "OutOfMemory", "OOM"],
+      "classification": "provider_resource_exhausted",
+      "severity": "high"
+    }
+  ],
+  "escalation_signals": {
+    "broken_refund_or_fallback": [
+      "(?:refund|fallback)[^\\n]{0,60}(?:broken|failed|missing|not working|did not work|didn't work)",
+      "(?:broken|failed|missing)[^\\n]{0,40}(?:refund|fallback)"
+    ],
+    "abnormal_volume": [
+      "abnormal volume",
+      "unexpected (?:spike|surge)",
+      "volume (?:spike|surge)"
+    ],
+    "safe_input_misclassified": [
+      "safe input(?:s)?\\s+(?:was|were|is|are)?\\s*misclassified",
+      "false positive on safe input",
+      "known-safe input"
+    ]
+  }
+}
