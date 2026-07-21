@@ -193,10 +193,16 @@ def sqlite_postgres_ddl_patch():
 TEST_DB_URL = os.environ.get("TEST_DB_URL")
 
 
-requires_db = pytest.mark.skipif(
-    not TEST_DB_URL,
-    reason="TEST_DB_URL not set — run via scripts/test-with-db.sh",
-)
+requires_db = pytest.mark.requires_db
+
+
+def pytest_collection_modifyitems(config, items):
+    if TEST_DB_URL is not None:
+        return
+    skip_db = pytest.mark.skip(reason="TEST_DB_URL not set — run in the Postgres CI lane")
+    for item in items:
+        if "requires_db" in item.keywords:
+            item.add_marker(skip_db)
 
 
 @pytest.fixture

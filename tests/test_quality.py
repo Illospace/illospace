@@ -11,9 +11,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 from brain.systems.quality.checks import check_content_quality, cap_salience
 from brain.systems.memory.embeddings import vec_to_pg
 
-_HAS_DB = bool(os.environ.get("TEST_DB_URL"))
-
-
 class TestContentQuality:
     def test_rejects_empty(self):
         ok, reason = check_content_quality("")
@@ -81,7 +78,7 @@ class TestSalienceCap:
         assert cap_salience(4.0, "research") == 4.0
 
 
-@pytest.mark.skipif(not _HAS_DB, reason="TEST_DB_URL not set — requires live database")
+@pytest.mark.requires_db
 class TestDeduplication:
     """Test near-duplicate detection at write time (requires live DB)."""
 

@@ -212,6 +212,7 @@ async def test_openapi_registers_notification_routes():
     assert "/api/notifications/read-all" in paths
 
 
+@pytest.mark.requires_db
 async def test_notification_preferences_are_persisted(notification_db_session: AsyncSession):
     request_as = _build_request_as(notification_db_session)
     response = await request_as(USER_2_ID, "GET", "/api/notifications/preferences")
@@ -240,6 +241,7 @@ async def test_notification_preferences_are_persisted(notification_db_session: A
     assert user.message_notifications_enabled is False
 
 
+@pytest.mark.requires_db
 async def test_workspace_notification_read_marks_user_mentions_seen(notification_db_session: AsyncSession):
     notification_id = await _seed_workspace_notification(notification_db_session)
 
