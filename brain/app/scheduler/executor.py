@@ -29,7 +29,12 @@ from brain.platform.db.models.scheduler import (
 from brain.app.scheduler.catalog import normalize_owner_mode
 from brain.app.scheduler.contracts import validate_scheduler_run_contract
 from brain.app.scheduler.planner import async_materialize_due_runs
-from brain.app.scheduler.programs import NIGHTLY_SLEEP_STEP_KEYS, WRAPPER_STEP_KEY, build_scheduler_step_plan
+from brain.app.scheduler.programs import (
+    NIGHTLY_SLEEP_STEP_KEYS,
+    WRAPPER_STEP_KEY,
+    build_scheduler_step_plan,
+    nightly_heuristic_review_command,
+)
 from brain.app.scheduler.runtime import (
     LEASE_TTL_SECONDS,
     RUN_STATUS_CLAIMED,
@@ -250,11 +255,7 @@ def _nightly_wrapper_commands(target_date: date, *, split_steps: bool) -> list[l
         ["python3", "-m", "brain.app.cli.skills", "evolve"],
         ["python3", "-m", "brain.app.cli.meta_learn", "cross-pollinate"],
         ["python3", "-m", "brain.app.cli.meta_learn", "evolve"],
-        _python_one_liner(
-            "from brain.systems.feedback.heuristics import nightly_heuristic_review; "
-            "r = nightly_heuristic_review(); "
-            "print(f'Pruned: {r[\"pruned\"]}, Fitness updated: {r[\"skills_updated\"]}')"
-        ),
+        nightly_heuristic_review_command(),
         _python_one_liner(
             "from brain.systems.feedback.meta_evolution import run_meta_evolution; "
             "stats = run_meta_evolution(); "
@@ -280,11 +281,7 @@ def _nightly_step_commands(step_key: str, target_date: date) -> list[list[str]]:
             ["python3", "-m", "brain.app.cli.meta_learn", "evolve"],
         ],
         "heuristic_review": [
-            _python_one_liner(
-                "from brain.systems.feedback.heuristics import nightly_heuristic_review; "
-                "r = nightly_heuristic_review(); "
-                "print(f'Pruned: {r[\"pruned\"]}, Fitness updated: {r[\"skills_updated\"]}')"
-            ),
+            nightly_heuristic_review_command(),
         ],
         "meta_evolution": [
             _python_one_liner(

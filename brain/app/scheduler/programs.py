@@ -223,6 +223,17 @@ def _python_one_liner(code: str) -> list[str]:
     return ["python3", "-c", code]
 
 
+def nightly_heuristic_review_command() -> list[str]:
+    """Run the async heuristic review from a synchronous scheduler process."""
+    return _python_one_liner(
+        "import asyncio; "
+        "from brain.systems.feedback.heuristics import nightly_heuristic_review; "
+        "r = asyncio.run(nightly_heuristic_review()); "
+        "print(f'Nightly heuristic review ran: pruned={r[\"pruned\"]}, "
+        "skills_updated={r[\"skills_updated\"]}')"
+    )
+
+
 def _nightly_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
     target_date = _target_date(job, run)
     return [
@@ -232,11 +243,7 @@ def _nightly_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
         StepSpec("meta_learning_evolve", ["python3", "-m", "brain.app.cli.meta_learn", "evolve"], "Meta-learning evolve"),
         StepSpec(
             "heuristic_review",
-            _python_one_liner(
-                "from brain.systems.feedback.heuristics import nightly_heuristic_review; "
-                "r = nightly_heuristic_review(); "
-                "print(f'Pruned: {r[\"pruned\"]}, Fitness updated: {r[\"skills_updated\"]}')"
-            ),
+            nightly_heuristic_review_command(),
             "Heuristic review",
         ),
         StepSpec(

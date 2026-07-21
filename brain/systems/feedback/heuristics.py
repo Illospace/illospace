@@ -514,7 +514,7 @@ async def nightly_heuristic_review():
 
         logger.info(
             f"Nightly heuristic review: pruned={stats['pruned']}, "
-            f"fitness_updated={stats['skills_updated']}/{len(skills)}"
+            f"skills_updated={stats['skills_updated']}/{len(skills)}"
         )
     except Exception as e:
         logger.warning(f"Nightly heuristic review failed: {e}")
