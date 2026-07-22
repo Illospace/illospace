@@ -10,6 +10,7 @@ from brain.platform.db.models.scheduler import SchedulerJob, SchedulerRun
 
 NIGHTLY_SLEEP_STEP_KEYS: tuple[str, ...] = (
     "memory_consolidation",
+    "nightly_memory_maintenance",
     "skill_evolution",
     "meta_learning",
     "heuristic_review",
@@ -31,6 +32,10 @@ NIGHTLY_SLEEP_STEP_BUDGET_HINTS: dict[str, dict[str, object]] = {
     "memory_consolidation": {
         "work_type": "memory_conflict_resolution",
         "estimated_tokens": 18_000,
+    },
+    "nightly_memory_maintenance": {
+        "work_type": "memory_conflict_resolution",
+        "estimated_tokens": 1_000,
     },
     "skill_evolution": {
         "work_type": "skill_eval",
@@ -238,6 +243,11 @@ def _nightly_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
     target_date = _target_date(job, run)
     return [
         StepSpec("consolidate_all", ["python3", "-m", "brain.jobs.pipelines.consolidate", "--phase", "all"], "Memory consolidation"),
+        StepSpec(
+            "nightly_memory_maintenance",
+            ["python3", "-m", "brain.jobs.pipelines.nightly_memory_maintenance", "--date", target_date, "--apply"],
+            "Auditable memory expiry maintenance",
+        ),
         StepSpec("skill_evolution", ["python3", "-m", "brain.app.cli.skills", "evolve"], "Skill evolution"),
         StepSpec("meta_learning_cross_pollinate", ["python3", "-m", "brain.app.cli.meta_learn", "cross-pollinate"], "Meta-learning cross-pollination"),
         StepSpec("meta_learning_evolve", ["python3", "-m", "brain.app.cli.meta_learn", "evolve"], "Meta-learning evolve"),
