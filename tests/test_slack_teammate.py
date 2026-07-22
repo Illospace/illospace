@@ -2353,7 +2353,7 @@ async def test_manage_slack_link_identity_persists_communication_profile(
 async def test_post_slack_reply_accepts_slack_rewrites_without_false_truncation(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
-    from brain.systems.slack.client import SlackWebClient
+    from brain.systems.slack.client import SlackWebClient, split_slack_message
 
     headline = "*Uwear 08:00 ET daily engineering brief*\n"
     pull_url = "https://github.com/uwear-ai/illospace/pull/357"
@@ -2418,8 +2418,7 @@ async def test_post_slack_reply_accepts_slack_rewrites_without_false_truncation(
     assert result["posted_chars"] == sum(len(text) for text in stored_texts)
     assert result["truncated"] is False
     assert result["chunk_count"] == len(submitted_chunks) == 2
-    assert "thread_ts" not in submitted_chunks[0]
-    assert submitted_chunks[1]["thread_ts"] == "1716900200.000001"
+    assert all("thread_ts" not in chunk for chunk in submitted_chunks)
     assert stored_texts[0].startswith(headline)
     assert f"<{pull_url}>" in stored_texts[0]
     assert "<!here>" in stored_texts[0]
@@ -2427,7 +2426,7 @@ async def test_post_slack_reply_accepts_slack_rewrites_without_false_truncation(
     assert "&lt;priority&gt;" in stored_texts[0]
     assert "<@U123>" in stored_texts[0]
     assert stored_texts[-1].endswith(footer)
-    assert "".join(str(chunk["text"]) for chunk in submitted_chunks) == body
+    assert [str(chunk["text"]) for chunk in submitted_chunks] == split_slack_message(body, 4000)
     assert "".join(stored_texts) != body
 
 
@@ -2435,7 +2434,7 @@ async def test_post_slack_reply_accepts_slack_rewrites_without_false_truncation(
 async def test_post_slack_reply_surfaces_receiver_side_tail_truncation(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
-    from brain.systems.slack.client import SlackWebClient
+    from brain.systems.slack.client import SlackWebClient, split_slack_message
 
     body = "digest headline\n" + ("evidence\n" * 520) + "Reda | Axel | JB"
 
@@ -2479,7 +2478,8 @@ async def test_post_slack_reply_surfaces_receiver_side_tail_truncation(monkeypat
     assert result["submitted_chars"] == len(body)
     assert result["posted_chars"] == 1000
     assert result["submitted_bytes"] == len(body.encode("utf-8"))
-    assert result["posted_bytes"] == 1000
+    first_chunk_tail = split_slack_message(body, 4000)[0][-1000:]
+    assert result["posted_bytes"] == len(first_chunk_tail.encode("utf-8"))
     assert result["truncated"] is True
 
 
