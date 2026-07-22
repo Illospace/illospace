@@ -14,10 +14,11 @@ unchanged rather than guessing that a fix did or did not ship.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Mapping
+
+from brain.platform.provider_alerts import AlertSignature, parse_rollbar_alert
 
 
 class DeployState(StrEnum):
@@ -48,70 +49,6 @@ class MergeKind(StrEnum):
     HOTFIX = "hotfix"
     FIX_TO_STAGING = "fix_to_staging"
     OTHER = "other"
-
-
-@dataclass(frozen=True, slots=True)
-class AlertSignature:
-    """Structured identity and occurrence information from a Rollbar alert."""
-
-    project: str
-    item_number: int
-    title: str
-    occurrence_milestone: int | None = None
-
-    @property
-    def signature(self) -> str:
-        return f"{self.project}#{self.item_number}"
-
-    @property
-    def milestone(self) -> int | None:
-        """Short alias used by triage callers."""
-        return self.occurrence_milestone
-
-
-_ROLLBAR_ITEM_RE = re.compile(
-    r"https?://app\.rollbar\.com/[^\s|>]+/item/"
-    r"(?P<project>[^/\s|>]+)/(?P<item>\d+)"
-    r"(?:[^|>]*\|(?P<label>[^>]*))?",
-    re.IGNORECASE,
-)
-_MILESTONE_RE = re.compile(
-    r"\b(?P<count>\d+)(?:st|nd|rd|th)\s+(?:error|occurrence)\s*:\s*",
-    re.IGNORECASE,
-)
-_NEW_ITEM_RE = re.compile(r"\bnew\s+item\b\s*:?\s*", re.IGNORECASE)
-_ITEM_PREFIX_RE = re.compile(r"^\s*#?\d+\s*")
-
-
-def parse_rollbar_alert(text: str | None) -> AlertSignature | None:
-    """Parse Rollbar's Slack attachment fallback into a stable signature.
-
-    The caller assembles the text (including attachment fallback/title text).
-    Messages without a Rollbar item URL return ``None`` even if they contain an
-    issue-like ``#123`` fragment, avoiding false matches on ordinary Slack text.
-    """
-    if not text:
-        return None
-    match = _ROLLBAR_ITEM_RE.search(str(text))
-    if not match:
-        return None
-
-    label = (match.group("label") or "").strip()
-    label = _ITEM_PREFIX_RE.sub("", label, count=1)
-    milestone_match = _MILESTONE_RE.search(label)
-    milestone = int(milestone_match.group("count")) if milestone_match else None
-    if milestone_match:
-        title = label[milestone_match.end():]
-    else:
-        title = _NEW_ITEM_RE.sub("", label, count=1)
-    title = title.strip().rstrip("> ")
-
-    return AlertSignature(
-        project=match.group("project"),
-        item_number=int(match.group("item")),
-        title=title,
-        occurrence_milestone=milestone,
-    )
 
 
 def as_utc_datetime(value: datetime | str | None) -> datetime | None:

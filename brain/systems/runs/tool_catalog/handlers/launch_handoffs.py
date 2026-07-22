@@ -39,6 +39,9 @@ def _current_source_ref(explicit: dict[str, Any] | None = None) -> dict[str, Any
     trigger = getattr(_agent_context, "chat_trigger", None)
     if isinstance(trigger, dict) and trigger:
         source_ref.setdefault("trigger", trigger)
+    slack_trigger = getattr(_agent_context, "slack_trigger", None)
+    if isinstance(slack_trigger, dict) and slack_trigger:
+        source_ref.setdefault("slack_trigger", slack_trigger)
     run_id = getattr(_agent_context, "run_id", None)
     if run_id is not None:
         source_ref.setdefault("illo_run_id", run_id)
@@ -70,6 +73,18 @@ async def _handle_create_launch_handoff(
     if not org_id:
         return json.dumps({"error": "create_launch_handoff could not access this workspace context"})
 
+    clean_context_parts = _clean_object_list(context_parts or [])
+    clean_acceptance_criteria = _clean_list(acceptance_criteria or [])
+    if not clean_context_parts and not clean_acceptance_criteria:
+        return json.dumps(
+            {
+                "error": (
+                    "create_launch_handoff requires context_parts or "
+                    "acceptance_criteria evidence"
+                )
+            }
+        )
+
     actor_user_id = str(getattr(_agent_context, "user_id", "") or "").strip() or None
     handoff_metadata = {
         **_clean_dict(metadata),
@@ -78,7 +93,7 @@ async def _handle_create_launch_handoff(
     }
     try:
         async with UnitOfWork() as uow:
-            row = await launch_handoffs.create_launch_handoff(
+            row, created = await launch_handoffs.create_launch_handoff_with_status(
                 uow.session,
                 launch_handoffs.LaunchHandoffCreateInput(
                     org_id=org_id,
@@ -89,18 +104,27 @@ async def _handle_create_launch_handoff(
                     summary=summary,
                     source_surface=_current_source_surface(source_surface),
                     source_ref=_current_source_ref(source_ref),
-                    context_parts=_clean_object_list(context_parts or []),
-                    acceptance_criteria=_clean_list(acceptance_criteria or []),
+                    context_parts=clean_context_parts,
+                    acceptance_criteria=clean_acceptance_criteria,
                     repo_origin_url=repo_origin_url,
                     branch_hint=branch_hint,
                     idempotency_key=idempotency_key,
                     metadata=handoff_metadata,
                 ),
+                derive_rollbar_idempotency=True,
             )
             payload = launch_handoffs.serialize_launch_handoff(row)
     except launch_handoffs.LaunchHandoffError as exc:
         return json.dumps({"error": str(exc)})
-    return json.dumps({"ok": True, "handoff": payload, "launch_url": payload["launch_url"]}, default=str)
+    return json.dumps(
+        {
+            "ok": True,
+            "reused": not created,
+            "handoff": payload,
+            "launch_url": payload["launch_url"],
+        },
+        default=str,
+    )
 
 
 __all__ = ["_handle_create_launch_handoff"]

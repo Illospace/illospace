@@ -973,6 +973,13 @@ def action_policy_for_tool(
         return None
     if tool_name == "manage_domain" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "query_records", "get_record", "events"}:
         return None
+    if tool_name == "manage_slack" and _arg_at(
+        args_tuple,
+        kwargs_dict,
+        "action",
+        0,
+    ) in {"status", "list_channels", "list_mappings", "list_monitored", "open_alert_surges"}:
+        return None
     if tool_name == "manage_inbound" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {
         "help",
         "schema",

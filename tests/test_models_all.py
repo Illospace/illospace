@@ -72,6 +72,8 @@ EXPECTED_TABLES = {
     "project_profile_access",
     "project_profiles",
     "provider_alert_ledger",
+    "provider_alert_occurrences",
+    "provider_alert_surges",
     "provider_health_snapshots",
     "resource_leases",
     "reconstruction_evidence",

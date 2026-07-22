@@ -327,6 +327,11 @@ async def process_socket_payload(
         # channel knows Illo has seen it, independent of whether the ensuing
         # triage run decides to reply.
         await _acknowledge_monitored_message(config, envelope)
+        await _handle_monitored_provider_alert(
+            connection=connection,
+            config=config,
+            envelope=envelope,
+        )
     inbound = await submit_inbound_envelope(
         session,
         connection=connection,
@@ -343,6 +348,61 @@ async def process_socket_payload(
     ):
         await _set_processing_status(config, envelope)
     return {"ack": ack, "ignored": False, "inbound": inbound}
+
+
+def _slack_message_datetime(message_ts: str) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(float(message_ts), tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+async def _handle_monitored_provider_alert(
+    *,
+    connection: ExternalAgentConnectionRow | Mapping[str, Any],
+    config: SlackConnectorConfig,
+    envelope: dict[str, Any],
+) -> None:
+    """Record Rollbar alert identity before the corresponding triage run starts."""
+
+    from brain.systems.slack.provider_alert_surge import (
+        handle_provider_alert_ingest_durable,
+    )
+
+    payload = dict(envelope.get("payload") or {})
+    org_id = _connection_org_id(connection)
+    channel_id = str(payload.get("channel_id") or "").strip()
+    message_ts = str(payload.get("message_ts") or "").strip()
+    text = str(payload.get("text") or "")
+    if not org_id or not channel_id or not message_ts:
+        return
+    try:
+        result = await handle_provider_alert_ingest_durable(
+            SlackWebClient(config.bot_token),
+            org_id=org_id,
+            channel_id=channel_id,
+            message_ts=message_ts,
+            text=text,
+            occurred_at=_slack_message_datetime(message_ts),
+        )
+    except Exception as exc:
+        logger.exception("provider_alert_ingest_failed: %s", exc)
+        return
+    if result is None:
+        return
+    payload["provider_alert"] = {
+        "service": result.alert.service,
+        "subsystem": result.alert.subsystem,
+        "external_id": result.alert.external_id,
+        "tracked_signature": result.alert.signature,
+        "signature_title": result.alert.signature_title,
+        "occurrence_milestone": result.alert.occurrence_milestone,
+        "is_new_error": result.alert.is_new_error,
+        "surge_open": result.surge is not None,
+        "material_posted": result.material_posted,
+        "material_post_error": result.material_post_error,
+    }
+    envelope["payload"] = payload
 
 
 def _connection_org_id(connection: ExternalAgentConnectionRow | Mapping[str, Any]) -> str | None:

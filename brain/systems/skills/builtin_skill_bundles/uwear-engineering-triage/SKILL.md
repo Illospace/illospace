@@ -77,9 +77,8 @@ in Domain `37`, asset `references/memory.md`, using the live-first fallback.
 
 ## Coordination Pipeline
 
-Every scheduled coordinator run follows three phases, in order: sweep
-everything, diff against what was last posted, and only then judge and post.
-Do not compose a workset or a Slack post from the first convenient listing.
+Every scheduled run sweeps everything, diffs the last post, then judges and
+posts; never compose from the first convenient listing.
 
 ### Phase A — Sweep everything
 
@@ -94,6 +93,8 @@ Build the complete picture before forming any opinion. Required sources:
   time.
 - GitHub Event Feed Domain id `38` events since the last run.
 - Teammate check-in and alert-resolution replies (Slack and Cortex threads).
+- At digest run start, read durable rolling-window incidents with
+  `manage_slack` `action="open_alert_surges"`.
 
 **Fan out workers — and collect them honestly.** `spawn_worker` is
 fire-and-forget: it returns a queued `child_run_id`; there is no join
@@ -180,13 +181,14 @@ continuity keeps pointing at the last good digest.
 
 ## Team Digest Contract
 
-The daily brief is chantier-primary and ends with accountability for all three
-humans. Its shape is a contract, not a style suggestion:
+The daily brief is chantier-primary, ends with all-three-human accountability,
+and has this mandatory shape:
 
-- Include a scope line with exact Phase-A item counts plus the exact active
-  chantier count, e.g. `Scope: 128 open issues + 12 open PRs across 4 repos,
-  45 active tracker records, 6 active chantiers; posting movement, not the full
-  backlog.`
+- Any open surge is the lead incident section, before `Scope`; name its
+  subsystem, window, signatures, owner, and next action. Its ticket alone is
+  not a substitute.
+- Include a scope line with exact Phase-A issue, PR, tracker, and active
+  chantier counts.
 - Give every active chantier with material movement its own section: state,
   one goal-progress line, what moved since the last digest, next step,
   blockers, and owner(s). Collapse the others into a one-line `Quiet chantiers`

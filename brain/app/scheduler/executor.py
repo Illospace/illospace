@@ -252,6 +252,14 @@ def _nightly_wrapper_commands(target_date: date, *, split_steps: bool) -> list[l
 
     return [
         ["python3", "-m", "brain.jobs.pipelines.consolidate", "--phase", "all"],
+        [
+            "python3",
+            "-m",
+            "brain.jobs.pipelines.nightly_memory_maintenance",
+            "--date",
+            target_date.isoformat(),
+            "--apply",
+        ],
         ["python3", "-m", "brain.app.cli.skills", "evolve"],
         ["python3", "-m", "brain.app.cli.meta_learn", "cross-pollinate"],
         ["python3", "-m", "brain.app.cli.meta_learn", "evolve"],
@@ -275,6 +283,14 @@ def _nightly_wrapper_commands(target_date: date, *, split_steps: bool) -> list[l
 def _nightly_step_commands(step_key: str, target_date: date) -> list[list[str]]:
     mapping: dict[str, list[list[str]]] = {
         "memory_consolidation": [["python3", "-m", "brain.jobs.pipelines.consolidate", "--phase", "all"]],
+        "nightly_memory_maintenance": [[
+            "python3",
+            "-m",
+            "brain.jobs.pipelines.nightly_memory_maintenance",
+            "--date",
+            target_date.isoformat(),
+            "--apply",
+        ]],
         "skill_evolution": [["python3", "-m", "brain.app.cli.skills", "evolve"]],
         "meta_learning": [
             ["python3", "-m", "brain.app.cli.meta_learn", "cross-pollinate"],

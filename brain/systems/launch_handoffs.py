@@ -6,6 +6,8 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import StrEnum
+from hashlib import sha256
 from typing import Any
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
@@ -14,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.launch_handoff import LaunchHandoff
 from brain.systems.cortex.thread_links import public_app_base_url
+from brain.systems.deploy_state import parse_rollbar_alert
 
 LAUNCH_HANDOFF_OBJECT_TYPE = "launch_handoff"
 TARGET_CODEX = "codex"
@@ -26,6 +29,12 @@ _URL_CANDIDATE_RE = re.compile(
     re.IGNORECASE,
 )
 _TRAILING_PUNCTUATION = ".,;:!?"
+_DERIVED_IDEMPOTENCY_KEY_PREFIX = "derived:launch-handoff:v1:"
+_RETIRED_IDEMPOTENCY_KEY_PREFIX = "retired:lh:v1:"
+_SYSTEM_METADATA_NAMESPACE = "_illo_system"
+_IDEMPOTENCY_METADATA_NAMESPACE = "idempotency"
+_DERIVED_KEY_KIND = "rollbar_slack"
+_RETIREMENT_REASON = "derived_key_holder_not_actionable"
 
 
 class LaunchHandoffError(ValueError):
@@ -34,6 +43,17 @@ class LaunchHandoffError(ValueError):
 
 class LaunchHandoffNotFound(LaunchHandoffError):
     """Raised when a handoff is missing or outside the caller's org."""
+
+
+class _ReuseScope(StrEnum):
+    STRICT = "strict"
+    ACTIONABLE = "actionable"
+
+
+@dataclass(frozen=True, slots=True)
+class _IdempotencyDecision:
+    key: str | None
+    reuse_scope: _ReuseScope
 
 
 @dataclass(frozen=True)
@@ -90,6 +110,98 @@ def _uuid_or_none(value: Any) -> str | None:
         return str(uuid.UUID(text))
     except ValueError:
         return None
+
+
+def derive_launch_handoff_idempotency_key(
+    source_ref: dict[str, Any] | None,
+    *,
+    created_by_user_id: Any = None,
+) -> str | None:
+    """Derive from Rollbar Slack text and ``created_by_user_id`` or ``unassigned``."""
+    slack_trigger = _json_dict(_json_dict(source_ref).get("slack_trigger"))
+    text = slack_trigger.get("text")
+    if not isinstance(text, str):
+        return None
+    alert = parse_rollbar_alert(text)
+    if alert is None:
+        return None
+    owner = (_clean_optional_string(created_by_user_id) or "unassigned").casefold()
+    digest = sha256(f"{alert.signature}\0{owner}".encode("utf-8")).hexdigest()
+    return f"{_DERIVED_IDEMPOTENCY_KEY_PREFIX}{digest}"
+
+
+def _idempotency_metadata(metadata: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    updated = _json_dict(metadata)
+    system = _json_dict(updated.get(_SYSTEM_METADATA_NAMESPACE))
+    idempotency = _json_dict(system.get(_IDEMPOTENCY_METADATA_NAMESPACE))
+    system[_IDEMPOTENCY_METADATA_NAMESPACE] = idempotency
+    updated[_SYSTEM_METADATA_NAMESPACE] = system
+    return updated, idempotency
+
+
+def _record_refire(row: LaunchHandoff, now: datetime) -> None:
+    updated, idempotency = _idempotency_metadata(row.metadata_)
+    raw_count = idempotency.get("refire_count", 0)
+    try:
+        current_count = int(raw_count)
+    except (TypeError, ValueError):
+        current_count = 0
+    idempotency["refire_count"] = max(0, current_count) + 1
+    idempotency["last_refire_at"] = now.isoformat()
+    row.metadata_ = updated
+    row.updated_at = now
+
+
+def _retire_derived_key(row: LaunchHandoff, now: datetime) -> None:
+    """Retire one non-actionable derived-key holder without erasing its history."""
+    retired_key = _clean_optional_string(row.idempotency_key)
+    updated, idempotency = _idempotency_metadata(row.metadata_)
+    if (
+        not retired_key
+        or not retired_key.startswith(_DERIVED_IDEMPOTENCY_KEY_PREFIX)
+        or idempotency.get("key_kind") != _DERIVED_KEY_KIND
+    ):
+        raise LaunchHandoffError("Refusing to retire a caller-supplied idempotency key")
+
+    retired_at = now.isoformat()
+    idempotency.update(
+        {
+            "retired_key": retired_key,
+            "retired_at": retired_at,
+            "retirement_reason": _RETIREMENT_REASON,
+        }
+    )
+    digest = sha256(f"{retired_key}\0{row.id}\0{retired_at}".encode("utf-8")).hexdigest()
+    row.idempotency_key = f"{_RETIRED_IDEMPOTENCY_KEY_PREFIX}{digest}"
+    row.metadata_ = updated
+    row.updated_at = now
+
+
+def _resolve_idempotency(
+    handoff_input: LaunchHandoffCreateInput,
+    source_ref: dict[str, Any],
+    *,
+    derive_rollbar_idempotency: bool,
+) -> _IdempotencyDecision:
+    explicit_key = _clean_optional_string(handoff_input.idempotency_key)
+    if explicit_key:
+        return _IdempotencyDecision(explicit_key, _ReuseScope.STRICT)
+    if derive_rollbar_idempotency:
+        return _IdempotencyDecision(
+            derive_launch_handoff_idempotency_key(
+                source_ref,
+                created_by_user_id=handoff_input.created_by_user_id,
+            ),
+            _ReuseScope.ACTIONABLE,
+        )
+    return _IdempotencyDecision(None, _ReuseScope.STRICT)
+
+
+def _is_actionable(row: LaunchHandoff, now: datetime) -> bool:
+    expires_at = row.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return row.status == "open" and (expires_at is None or expires_at > now)
 
 
 def parse_member_agent_targets(raw: str | None) -> dict[str, str]:
@@ -214,16 +326,27 @@ def codex_deep_link_for_handoff(row: LaunchHandoff) -> str:
 async def create_launch_handoff(
     session: AsyncSession,
     handoff_input: LaunchHandoffCreateInput,
+    *,
+    derive_rollbar_idempotency: bool = False,
 ) -> LaunchHandoff:
-    row, _created = await create_launch_handoff_with_status(session, handoff_input)
+    row, _created = await create_launch_handoff_with_status(
+        session,
+        handoff_input,
+        derive_rollbar_idempotency=derive_rollbar_idempotency,
+    )
     return row
 
 
 async def create_launch_handoff_with_status(
     session: AsyncSession,
     handoff_input: LaunchHandoffCreateInput,
+    *,
+    derive_rollbar_idempotency: bool = False,
 ) -> tuple[LaunchHandoff, bool]:
     """Create a handoff, or return the existing row on an idempotency hit.
+
+    The launch tool may opt into actionable Rollbar reuse. All other callers
+    get strict reuse only when they supply an idempotency key.
 
     The boolean is the caller's noise gate: a REUSED row (``False``) means
     the packet already went out — mint must post nothing to Slack.
@@ -232,22 +355,44 @@ async def create_launch_handoff_with_status(
     clean_title = _required_string(handoff_input.title, "title")
     clean_instructions = _required_string(handoff_input.instructions, "instructions")
     clean_target_tool = (_clean_optional_string(handoff_input.target_tool) or TARGET_CODEX).lower()
-    clean_idempotency_key = _clean_optional_string(handoff_input.idempotency_key)
-    if clean_idempotency_key:
-        existing = await session.scalar(
+    clean_source_ref = _json_dict(handoff_input.source_ref)
+    clean_metadata = _json_dict(handoff_input.metadata)
+    clean_metadata.pop(_SYSTEM_METADATA_NAMESPACE, None)
+    decision = _resolve_idempotency(
+        handoff_input,
+        clean_source_ref,
+        derive_rollbar_idempotency=derive_rollbar_idempotency,
+    )
+    if decision.key and decision.reuse_scope is _ReuseScope.ACTIONABLE:
+        clean_metadata, idempotency = _idempotency_metadata(clean_metadata)
+        idempotency["key_kind"] = _DERIVED_KEY_KIND
+
+    now = datetime.now(timezone.utc)
+    existing = None
+    if decision.key:
+        holder = await session.scalar(
             select(LaunchHandoff).where(
                 LaunchHandoff.org_id == clean_org_id,
-                LaunchHandoff.idempotency_key == clean_idempotency_key,
+                LaunchHandoff.idempotency_key == decision.key,
             )
         )
-        if existing is not None:
-            return existing, False
+        if holder is not None:
+            if decision.reuse_scope is _ReuseScope.STRICT or _is_actionable(holder, now):
+                existing = holder
+            else:
+                _retire_derived_key(holder, now)
+                await session.flush()
+
+    if existing is not None:
+        _record_refire(existing, now)
+        await session.flush()
+        return existing, False
 
     row = LaunchHandoff(
         org_id=clean_org_id,
         created_by_user_id=_uuid_or_none(handoff_input.created_by_user_id),
         source_surface=_clean_optional_string(handoff_input.source_surface) or "illo",
-        source_ref=_json_dict(handoff_input.source_ref),
+        source_ref=clean_source_ref,
         target_tool=clean_target_tool,
         title=clean_title,
         summary=_clean_optional_string(handoff_input.summary),
@@ -256,8 +401,8 @@ async def create_launch_handoff_with_status(
         context_parts=_json_object_list(handoff_input.context_parts),
         repo_origin_url=_clean_optional_string(handoff_input.repo_origin_url),
         branch_hint=_clean_optional_string(handoff_input.branch_hint),
-        idempotency_key=clean_idempotency_key,
-        metadata_=_json_dict(handoff_input.metadata),
+        idempotency_key=decision.key,
+        metadata_=clean_metadata,
     )
     session.add(row)
     await session.flush()
