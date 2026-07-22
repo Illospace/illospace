@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
 
 from brain.app.api.routers import launch_handoffs as launch_handoffs_router
 from brain.app.api.schemas.launch_handoffs import LaunchHandoffCreateRequest
 from brain.platform.db.models.launch_handoff import LaunchHandoff
 from brain.systems.launch_handoffs import (
     LaunchHandoffCreateInput,
+    LaunchHandoffError,
+    _retire_derived_key,
     create_launch_handoff_with_status,
     derive_launch_handoff_idempotency_key,
 )
@@ -20,60 +24,15 @@ from brain.systems.runs.tool_catalog.handlers.launch_handoffs import (
 )
 
 
-pytestmark = pytest.mark.asyncio
-
 _ORG_ID = "11111111-1111-4111-8111-111111111111"
 _OWNER_ID = "22222222-2222-4222-8222-222222222222"
-
-
-class _LaunchHandoffSession:
-    def __init__(self) -> None:
-        self.rows = []
-        self.flush_count = 0
-
-    async def scalar(self, statement):
-        values = {str(value) for value in statement.compile().params.values()}
-        rows = [
-            row
-            for row in self.rows
-            if str(row.org_id) in values and str(row.idempotency_key) in values
-        ]
-        sql = str(statement)
-        if "launch_handoffs.status =" in sql:
-            rows = [row for row in rows if row.status == "open"]
-        if "launch_handoffs.expires_at IS NULL" in sql:
-            now = next(
-                value
-                for value in statement.compile().params.values()
-                if isinstance(value, datetime)
-            )
-            rows = [
-                row
-                for row in rows
-                if row.expires_at is None or row.expires_at > now
-            ]
-        if "launch_handoffs.created_at DESC" in sql:
-            rows.sort(
-                key=lambda row: (row.created_at, str(row.id)),
-                reverse=True,
-            )
-        return rows[0] if rows else None
-
-    def add(self, row) -> None:
-        if not row.id:
-            row.id = f"handoff-{len(self.rows) + 1}"
-        if row.status is None:
-            row.status = "open"
-        if row.launch_count is None:
-            row.launch_count = 0
-        self.rows.append(row)
-
-    async def flush(self) -> None:
-        self.flush_count += 1
+_OTHER_OWNER_ID = "33333333-3333-4333-8333-333333333333"
+_DERIVED_PREFIX = "derived:launch-handoff:v1:"
+_RETIRED_PREFIX = "retired:lh:v1:"
 
 
 class _UnitOfWork:
-    def __init__(self, session: _LaunchHandoffSession) -> None:
+    def __init__(self, session) -> None:
         self.session = session
 
     async def __aenter__(self):
@@ -81,6 +40,24 @@ class _UnitOfWork:
 
     async def __aexit__(self, *_args):
         return False
+
+
+@pytest.fixture
+async def session(async_sqlite_session_factory):
+    return await async_sqlite_session_factory([LaunchHandoff.__table__])
+
+
+def _rollbar_source(item_number: int = 2206, occurrence: int = 1) -> dict:
+    return {
+        "slack_trigger": {
+            "text": (
+                f"<https://app.rollbar.com/a/uwear/fix/item/Uwear-API/{item_number}|"
+                f"#{item_number} {occurrence}th occurrence: ClientError>"
+            ),
+            "thread_ts": f"1784700{occurrence}.000001",
+        },
+        "illo_run_id": occurrence,
+    }
 
 
 def _payload(
@@ -104,305 +81,263 @@ def _payload(
     )
 
 
-async def test_replaying_thirty_alerts_for_four_rollbar_items_mints_four_rows():
-    session = _LaunchHandoffSession()
+def _idempotency_state(row: LaunchHandoff) -> dict:
+    return row.metadata_["_illo_system"]["idempotency"]
 
-    for alert_index in range(30):
-        item_number = 2200 + (alert_index % 4)
-        source_ref = {
-            "trigger": {
-                "text": (
-                    f"<https://app.rollbar.com/a/uwear/fix/item/Uwear-API/{item_number}|"
-                    f"#{item_number} {alert_index + 1}th occurrence: ClientError>"
-                ),
-                "thread_ts": f"1784700{alert_index}.000001",
+
+@pytest.mark.parametrize(
+    ("source_ref", "owner"),
+    [
+        ({}, _OWNER_ID),
+        ({"slack_trigger": {}}, _OWNER_ID),
+        ({"slack_trigger": {"text": None}}, _OWNER_ID),
+        (
+            {
+                "slack_trigger": {
+                    "text": {"url": _rollbar_source()["slack_trigger"]["text"]}
+                }
             },
-            "illo_run_id": alert_index + 1000,
-        }
-        await create_launch_handoff_with_status(session, _payload(source_ref=source_ref))
-
-    assert len(session.rows) == 4
-    assert {row.metadata_["refire_count"] for row in session.rows} == {6, 7}
-
-
-async def test_existing_open_handoff_reports_an_idempotency_hit():
-    session = _LaunchHandoffSession()
-    source_ref = {"external_id": "github:Illospace/illospace:issue:409"}
-
-    row, created = await create_launch_handoff_with_status(
-        session, _payload(source_ref=source_ref)
-    )
-    row.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
-    replayed, replay_created = await create_launch_handoff_with_status(
-        session, _payload(source_ref=source_ref)
-    )
-
-    assert row.status == "open"
-    assert replayed is row
-    assert created is True
-    assert replay_created is False
-    assert len(session.rows) == 1
+            _OWNER_ID,
+        ),
+        ({"trigger": _rollbar_source()["slack_trigger"]}, _OWNER_ID),
+        ({"external_id": "Uwear-API#2206"}, _OWNER_ID),
+        ({"url": "https://github.com/Illospace/illospace/issues/409"}, _OWNER_ID),
+        ({"slack_trigger": {"text": "ordinary Slack message mentioning #2206"}}, _OWNER_ID),
+    ],
+)
+def test_key_derivation_fails_closed_without_the_rollbar_slack_contract(source_ref, owner):
+    assert derive_launch_handoff_idempotency_key(
+        source_ref,
+        created_by_user_id=owner,
+    ) is None
 
 
-async def test_launched_derived_handoff_does_not_suppress_a_new_mint():
-    session = _LaunchHandoffSession()
-    source_ref = {"external_id": "github:Illospace/illospace:issue:409"}
-    launched, _ = await create_launch_handoff_with_status(
-        session, _payload(source_ref=source_ref)
-    )
-    launched.status = "launched"
-    original_refire_count = launched.metadata_.get("refire_count")
+@pytest.mark.parametrize(
+    ("occurrence", "owner", "identity_owner"),
+    [
+        (1, _OWNER_ID, _OWNER_ID),
+        (30, _OWNER_ID, _OWNER_ID),
+        (30, None, "unassigned"),
+    ],
+)
+def test_key_derivation_uses_rollbar_signature_and_explicit_owner(
+    occurrence,
+    owner,
+    identity_owner,
+):
+    expected_digest = sha256(
+        f"Uwear-API#2206\0{identity_owner}".encode("utf-8")
+    ).hexdigest()
 
-    replacement, created = await create_launch_handoff_with_status(
-        session, _payload(source_ref=source_ref)
-    )
-
-    assert created is True
-    assert replacement is not launched
-    assert replacement.status == "open"
-    assert launched.status == "launched"
-    assert launched.metadata_.get("refire_count") == original_refire_count
-    assert len(session.rows) == 2
-
-
-async def test_expired_derived_handoff_does_not_suppress_a_new_mint():
-    session = _LaunchHandoffSession()
-    source_ref = {"external_id": "rollbar:Uwear-API#2206"}
-    expired, _ = await create_launch_handoff_with_status(
-        session, _payload(source_ref=source_ref)
-    )
-    expired.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-    original_refire_count = expired.metadata_.get("refire_count")
-
-    replacement, created = await create_launch_handoff_with_status(
-        session, _payload(source_ref=source_ref)
-    )
-
-    assert created is True
-    assert replacement is not expired
-    assert expired.metadata_.get("refire_count") == original_refire_count
-    assert len(session.rows) == 2
+    assert derive_launch_handoff_idempotency_key(
+        _rollbar_source(occurrence=occurrence),
+        created_by_user_id=owner,
+    ) == f"{_DERIVED_PREFIX}{expected_digest}"
 
 
-async def test_derived_key_reuses_the_most_recent_actionable_handoff():
-    session = _LaunchHandoffSession()
-    source_ref = {"external_id": "tracked-item-with-duplicate-open-rows"}
-    derived_key = derive_launch_handoff_idempotency_key(
+def test_key_derivation_is_scoped_to_the_created_by_user():
+    source_ref = _rollbar_source()
+
+    assert derive_launch_handoff_idempotency_key(
         source_ref,
         created_by_user_id=_OWNER_ID,
-    )
-    assert derived_key is not None
-    older = LaunchHandoff(
-        id="handoff-older",
-        org_id=_ORG_ID,
-        created_by_user_id=_OWNER_ID,
-        source_ref=source_ref,
-        title="Older open handoff",
-        instructions="Older instructions",
-        idempotency_key=derived_key,
-        status="open",
-        expires_at=None,
-        metadata_={},
-    )
-    older.created_at = datetime(2026, 7, 20, tzinfo=timezone.utc)
-    newer = LaunchHandoff(
-        id="handoff-newer",
-        org_id=_ORG_ID,
-        created_by_user_id=_OWNER_ID,
-        source_ref=source_ref,
-        title="Newer open handoff",
-        instructions="Newer instructions",
-        idempotency_key=derived_key,
-        status="open",
-        expires_at=None,
-        metadata_={},
-    )
-    newer.created_at = datetime(2026, 7, 21, tzinfo=timezone.utc)
-    session.rows.extend([older, newer])
-
-    reused, created = await create_launch_handoff_with_status(
-        session, _payload(source_ref=source_ref)
+    ) != derive_launch_handoff_idempotency_key(
+        source_ref,
+        created_by_user_id=_OTHER_OWNER_ID,
     )
 
-    assert created is False
-    assert reused is newer
-    assert newer.metadata_["refire_count"] == 1
-    assert older.metadata_ == {}
+
+async def test_replaying_thirty_alerts_for_four_rollbar_items_mints_four_rows(session):
+    for alert_index in range(30):
+        item_number = 2200 + (alert_index % 4)
+        await create_launch_handoff_with_status(
+            session,
+            _payload(source_ref=_rollbar_source(item_number, alert_index + 1)),
+            derive_rollbar_idempotency=True,
+        )
+
+    rows = list((await session.scalars(select(LaunchHandoff))).all())
+    assert len(rows) == 4
+    assert {_idempotency_state(row)["refire_count"] for row in rows} == {6, 7}
 
 
-async def test_stale_row_releases_derived_key_before_real_database_insert(
-    async_sqlite_session_factory,
-):
-    session = await async_sqlite_session_factory([LaunchHandoff.__table__])
-    source_ref = {"external_id": "tracked-item-recurrence"}
-    launched, _ = await create_launch_handoff_with_status(
-        session, _payload(source_ref=source_ref)
-    )
-    launched.status = "launched"
-    await session.flush()
-    derived_key = launched.idempotency_key
-
-    replacement, created = await create_launch_handoff_with_status(
-        session, _payload(source_ref=source_ref)
-    )
-
-    assert created is True
-    assert replacement.idempotency_key == derived_key
-    assert launched.idempotency_key is None
-
-
-async def test_repeated_hits_bump_occurrence_metadata_without_overwriting_the_handoff():
-    session = _LaunchHandoffSession()
-    source_ref = {"tracked_issue": {"external_id": "Uwear-API#2206"}}
-    original, _ = await create_launch_handoff_with_status(
+async def test_actionable_derived_key_reuses_without_overwriting_the_handoff(session):
+    source_ref = _rollbar_source()
+    original, created = await create_launch_handoff_with_status(
         session,
         _payload(
             source_ref=source_ref,
             title="Original title",
             instructions="Original instructions",
-            metadata={"kept": "value"},
+            metadata={
+                "kept": "value",
+                "refire_count": "caller-owned",
+                "_illo_system": {"idempotency": {"refire_count": 999}},
+            },
         ),
+        derive_rollbar_idempotency=True,
+    )
+    original.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    replayed, replay_created = await create_launch_handoff_with_status(
+        session,
+        _payload(
+            source_ref=_rollbar_source(occurrence=2),
+            title="Replacement title",
+            instructions="Replacement instructions",
+            metadata={"replacement": True},
+        ),
+        derive_rollbar_idempotency=True,
     )
 
-    for replay_index in range(1, 4):
-        replayed, created = await create_launch_handoff_with_status(
-            session,
-            _payload(
-                source_ref={**source_ref, "alert_event_id": f"event-{replay_index}"},
-                title=f"Replacement title {replay_index}",
-                instructions=f"Replacement instructions {replay_index}",
-                metadata={"replacement": replay_index},
-            ),
-        )
-        assert replayed is original
-        assert created is False
-        assert replayed.metadata_["refire_count"] == replay_index
-        assert replayed.metadata_["last_refire_at"].endswith("+00:00")
-
+    assert created is True
+    assert replay_created is False
+    assert replayed is original
     assert original.title == "Original title"
     assert original.instructions == "Original instructions"
     assert original.source_ref == source_ref
     assert original.metadata_["kept"] == "value"
+    assert original.metadata_["refire_count"] == "caller-owned"
     assert "replacement" not in original.metadata_
+    assert _idempotency_state(original)["refire_count"] == 1
+    assert _idempotency_state(original)["last_refire_at"].endswith("+00:00")
 
 
-async def test_explicit_idempotency_key_takes_precedence_over_tracked_identity():
-    session = _LaunchHandoffSession()
-
-    first, first_created = await create_launch_handoff_with_status(
+@pytest.mark.parametrize(
+    ("status", "expires_at"),
+    [
+        ("launched", None),
+        ("open", datetime.now(timezone.utc) - timedelta(seconds=1)),
+    ],
+)
+async def test_non_actionable_derived_holder_is_retired_before_replacement(
+    session,
+    status,
+    expires_at,
+):
+    holder, _ = await create_launch_handoff_with_status(
         session,
-        _payload(
-            source_ref={"external_id": "ticket-A"},
-            idempotency_key="caller:shared-key",
-        ),
+        _payload(source_ref=_rollbar_source()),
+        derive_rollbar_idempotency=True,
     )
-    second, second_created = await create_launch_handoff_with_status(
+    holder.status = status
+    holder.expires_at = expires_at
+    await session.flush()
+    derived_key = holder.idempotency_key
+
+    replacement, created = await create_launch_handoff_with_status(
         session,
-        _payload(
-            source_ref={"external_id": "ticket-B"},
-            idempotency_key="caller:shared-key",
-        ),
+        _payload(source_ref=_rollbar_source(occurrence=2)),
+        derive_rollbar_idempotency=True,
     )
 
-    assert first.idempotency_key == "caller:shared-key"
-    assert first_created is True
-    assert second is first
-    assert second_created is False
-    assert len(session.rows) == 1
+    assert created is True
+    assert replacement is not holder
+    assert replacement.idempotency_key == derived_key
+    assert holder.idempotency_key.startswith(_RETIRED_PREFIX)
+    assert len(holder.idempotency_key) <= 120
+    state = _idempotency_state(holder)
+    assert state["retired_key"] == derived_key
+    assert state["retired_at"].endswith("+00:00")
+    assert state["retirement_reason"] == "derived_key_holder_not_actionable"
+    assert len((await session.scalars(select(LaunchHandoff))).all()) == 2
 
 
-async def test_explicit_key_still_dedupes_against_a_launched_handoff():
-    session = _LaunchHandoffSession()
+async def test_retired_tombstones_are_unique_across_recurrences(session):
+    first, _ = await create_launch_handoff_with_status(
+        session,
+        _payload(source_ref=_rollbar_source()),
+        derive_rollbar_idempotency=True,
+    )
+    first.status = "launched"
+    second, _ = await create_launch_handoff_with_status(
+        session,
+        _payload(source_ref=_rollbar_source(occurrence=2)),
+        derive_rollbar_idempotency=True,
+    )
+    second.status = "launched"
+    await create_launch_handoff_with_status(
+        session,
+        _payload(source_ref=_rollbar_source(occurrence=3)),
+        derive_rollbar_idempotency=True,
+    )
+
+    assert first.idempotency_key != second.idempotency_key
+    assert first.idempotency_key.startswith(_RETIRED_PREFIX)
+    assert second.idempotency_key.startswith(_RETIRED_PREFIX)
+
+
+@pytest.mark.parametrize(
+    "caller_key",
+    ["caller:strict-key", f"{_DERIVED_PREFIX}caller-controlled"],
+)
+def test_retirement_refuses_a_caller_supplied_key(caller_key):
+    row = LaunchHandoff(
+        id="44444444-4444-4444-8444-444444444444",
+        org_id=_ORG_ID,
+        title="Caller keyed",
+        instructions="Keep strict",
+        idempotency_key=caller_key,
+        metadata_={},
+    )
+
+    with pytest.raises(LaunchHandoffError, match="caller-supplied"):
+        _retire_derived_key(row, datetime.now(timezone.utc))
+
+    assert row.idempotency_key == caller_key
+    assert row.metadata_ == {}
+
+
+async def test_explicit_key_remains_strict_after_launch(session):
     explicit_key = "caller:strict-request-key"
     launched, _ = await create_launch_handoff_with_status(
         session,
-        _payload(source_ref={}, idempotency_key=explicit_key),
+        _payload(source_ref=_rollbar_source(), idempotency_key=explicit_key),
+        derive_rollbar_idempotency=True,
     )
     launched.status = "launched"
 
     replayed, created = await create_launch_handoff_with_status(
         session,
-        _payload(source_ref={}, idempotency_key=explicit_key),
+        _payload(source_ref=_rollbar_source(occurrence=2), idempotency_key=explicit_key),
+        derive_rollbar_idempotency=True,
     )
 
     assert created is False
     assert replayed is launched
-    assert replayed.status == "launched"
-    assert replayed.metadata_["refire_count"] == 1
-    assert len(session.rows) == 1
+    assert replayed.idempotency_key == explicit_key
+    assert _idempotency_state(replayed)["refire_count"] == 1
 
 
-async def test_missing_tracked_identity_preserves_null_key_and_mints_each_time():
-    session = _LaunchHandoffSession()
+async def test_missing_rollbar_identity_keeps_null_key_and_mints_each_time(session):
+    source_ref = {
+        "external_id": "Uwear-API#2206",
+        "record": {"id": 2206, "url": _rollbar_source()["slack_trigger"]["text"]},
+    }
 
-    for run_id in (100, 101):
+    for _ in range(2):
         _row, created = await create_launch_handoff_with_status(
             session,
-            _payload(
-                source_ref={
-                    "illo_run_id": run_id,
-                    "thread_ts": f"1784700{run_id}.000001",
-                    "alert_event_id": f"event-{run_id}",
-                    "record": {
-                        "id": run_id,
-                        "title": "Alert event",
-                        "status": "open",
-                    },
-                }
-            ),
+            _payload(source_ref=source_ref),
+            derive_rollbar_idempotency=True,
         )
         assert created is True
 
-    assert len(session.rows) == 2
-    assert [row.idempotency_key for row in session.rows] == [None, None]
+    rows = list((await session.scalars(select(LaunchHandoff))).all())
+    assert [row.idempotency_key for row in rows] == [None, None]
 
 
-async def test_derived_key_is_owner_scoped_and_ignores_volatile_source_fields():
-    first_ref = {
-        "rollbar_item": "Uwear-API#2206",
-        "illo_run_id": 1,
-        "thread_ts": "1784700000.000001",
-    }
-    second_ref = {
-        "rollbar_item": "uwear-api#2206",
-        "illo_run_id": 2,
-        "thread_ts": "1784709999.000001",
-    }
-
-    first = derive_launch_handoff_idempotency_key(
-        first_ref, created_by_user_id=_OWNER_ID
-    )
-    second = derive_launch_handoff_idempotency_key(
-        second_ref, created_by_user_id=_OWNER_ID
-    )
-    other_owner = derive_launch_handoff_idempotency_key(
-        first_ref,
-        created_by_user_id="33333333-3333-4333-8333-333333333333",
-    )
-
-    assert first == second
-    assert first is not None and first.startswith("derived:launch-handoff:v1:")
-    assert other_owner != first
-
-
-async def test_tool_handler_rejects_evidence_free_mint_and_accepts_evidence():
-    session = _LaunchHandoffSession()
-    uow = _UnitOfWork(session)
+async def test_tool_handler_opts_into_rollbar_identity_and_requires_evidence(session):
     context = {
         "org_id": _ORG_ID,
         "user_id": _OWNER_ID,
         "run_id": 409,
-        "slack_trigger": {
-            "text": (
-                "<https://app.rollbar.com/a/uwear/fix/item/Uwear-API/2206|"
-                "#2206 30th occurrence: ClientError>"
-            )
-        },
+        "slack_trigger": _rollbar_source()["slack_trigger"],
     }
 
     with bind_agent_context(context), patch(
         "brain.platform.db.repositories.unit_of_work.UnitOfWork",
-        return_value=uow,
+        return_value=_UnitOfWork(session),
     ):
         rejected = json.loads(
             await _handle_create_launch_handoff(
@@ -412,36 +347,51 @@ async def test_tool_handler_rejects_evidence_free_mint_and_accepts_evidence():
                 acceptance_criteria=[],
             )
         )
-        accepted = json.loads(
+        first = json.loads(
             await _handle_create_launch_handoff(
                 title="Alert with evidence",
                 instructions="Investigate it.",
                 context_parts=[{"source": "rollbar", "ref": "Uwear-API#2206"}],
-                acceptance_criteria=[],
+            )
+        )
+        replay = json.loads(
+            await _handle_create_launch_handoff(
+                title="Repeated alert",
+                instructions="Investigate it again.",
+                acceptance_criteria=["Confirm the failure."],
             )
         )
 
     assert rejected == {
         "error": "create_launch_handoff requires context_parts or acceptance_criteria evidence"
     }
-    assert accepted["ok"] is True
-    assert len(session.rows) == 1
-    assert session.rows[0].source_ref["slack_trigger"] == context["slack_trigger"]
-    assert session.rows[0].idempotency_key.startswith("derived:launch-handoff:v1:")
+    assert first["ok"] is True
+    assert first["reused"] is False
+    assert replay["handoff"]["id"] == first["handoff"]["id"]
+    # A refire must be distinguishable from the first mint so the caller can post
+    # the annotation line without a second Launch: block (issue #409, check 2).
+    assert replay["reused"] is True
+    rows = list((await session.scalars(select(LaunchHandoff))).all())
+    assert len(rows) == 1
+    assert rows[0].source_ref["slack_trigger"] == context["slack_trigger"]
+    assert rows[0].idempotency_key.startswith(_DERIVED_PREFIX)
 
 
-async def test_api_router_still_accepts_an_evidence_free_handoff():
-    session = _LaunchHandoffSession()
-
-    result = await launch_handoffs_router.create_launch_handoff(
-        LaunchHandoffCreateRequest(
-            title="Human-authored sparse handoff",
-            instructions="The human will add details after launch.",
-        ),
-        db=session,
-        user={"id": _OWNER_ID, "org_id": _ORG_ID},
+async def test_api_router_does_not_opt_into_rollbar_identity(session):
+    payload = LaunchHandoffCreateRequest(
+        title="Human-authored sparse handoff",
+        instructions="The human will add details after launch.",
+        source_ref=_rollbar_source(),
     )
 
-    assert result["handoff"]["context_parts"] == []
-    assert result["handoff"]["acceptance_criteria"] == []
-    assert len(session.rows) == 1
+    for _ in range(2):
+        result = await launch_handoffs_router.create_launch_handoff(
+            payload,
+            db=session,
+            user={"id": _OWNER_ID, "org_id": _ORG_ID},
+        )
+        assert result["handoff"]["context_parts"] == []
+        assert result["handoff"]["acceptance_criteria"] == []
+
+    rows = list((await session.scalars(select(LaunchHandoff))).all())
+    assert [row.idempotency_key for row in rows] == [None, None]

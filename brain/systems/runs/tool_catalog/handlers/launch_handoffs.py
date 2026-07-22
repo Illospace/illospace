@@ -93,7 +93,7 @@ async def _handle_create_launch_handoff(
     }
     try:
         async with UnitOfWork() as uow:
-            row = await launch_handoffs.create_launch_handoff(
+            row, created = await launch_handoffs.create_launch_handoff_with_status(
                 uow.session,
                 launch_handoffs.LaunchHandoffCreateInput(
                     org_id=org_id,
@@ -111,11 +111,20 @@ async def _handle_create_launch_handoff(
                     idempotency_key=idempotency_key,
                     metadata=handoff_metadata,
                 ),
+                derive_rollbar_idempotency=True,
             )
             payload = launch_handoffs.serialize_launch_handoff(row)
     except launch_handoffs.LaunchHandoffError as exc:
         return json.dumps({"error": str(exc)})
-    return json.dumps({"ok": True, "handoff": payload, "launch_url": payload["launch_url"]}, default=str)
+    return json.dumps(
+        {
+            "ok": True,
+            "reused": not created,
+            "handoff": payload,
+            "launch_url": payload["launch_url"],
+        },
+        default=str,
+    )
 
 
 __all__ = ["_handle_create_launch_handoff"]
