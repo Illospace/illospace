@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from brain.systems.runs.direct_loop.loop_control import LoopTermination
+
 
 @dataclass
 class _TokenAccumulator:
@@ -42,6 +44,7 @@ class AgentResult:
     tool_calls: list[str] = field(default_factory=list)
     worker_results: list = field(default_factory=list)
     error: str | None = None
+    termination: LoopTermination | None = None
     post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = ()
 
 
@@ -54,6 +57,7 @@ def make_result(
     tool_calls: list[str],
     error: str | None = None,
     worker_results: list | None = None,
+    termination: LoopTermination | None = None,
     post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = (),
 ) -> AgentResult:
     """Construct an AgentResult with common runtime fields."""
@@ -69,6 +73,7 @@ def make_result(
         duration_sec=int(time.time() - start_time),
         tool_calls=tool_calls,
         error=error,
+        termination=termination,
         worker_results=worker_results or [],
         post_completion_tasks=post_completion_tasks,
     )

@@ -322,6 +322,7 @@ class TestRuntimeExtractionContracts:
 
     def test_agent_loop_state_tracks_loop_mutables(self):
         from brain.systems.runs.direct_loop.gates import GateState
+        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
         from brain.systems.runs.direct_loop.result import TokenAccumulator
         from brain.systems.runs.direct_loop.state import AgentLoopState
 
@@ -333,6 +334,8 @@ class TestRuntimeExtractionContracts:
         assert state.messages == [{"role": "user", "content": "hi"}]
         assert isinstance(state.gates, GateState)
         assert isinstance(state.tokens, TokenAccumulator)
+        assert isinstance(state.loop_control, LoopControlPolicy)
+        assert state.loop_control.termination is None
         assert state.recent_calls == ["read_file:{}"]
         assert state.tool_calls_made == ["read_file"]
         assert state.operation_type == "worker"

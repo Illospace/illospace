@@ -674,6 +674,7 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
             "- ![Dispatcher diagram](/static/uploads/thread-assets/idea/dispatcher.png)",
         ]
     )
+    parent_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
 
     def add(obj):
         added.append(obj)
@@ -698,6 +699,7 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
     session.add.side_effect = add
     session.flush = AsyncMock(side_effect=flush)
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
+    monkeypatch.setattr(idea_tools, "_require_idea_for_actor", AsyncMock(return_value=SimpleNamespace(id=parent_id)))
 
     async def serialize_idea(idea_arg, session_arg):
         return {"id": str(idea_arg.id), "status": idea_arg.status}
@@ -716,7 +718,7 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
                 description="Inspect vault and AWS credential handoff path.",
                 thread_message=seed_markdown,
                 status="needs_input",
-                parent_id="parent-idea",
+                parent_id=parent_id,
                 origin_ref="parent-idea",
             )
         )
@@ -746,7 +748,9 @@ async def test_manage_idea_create_can_handoff_owner(monkeypatch):
 
     session = MagicMock()
     added = []
-    target_user = SimpleNamespace(id="target-user", org_id="org-1", name="JB")
+    parent_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+    target_user_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1"
+    target_user = SimpleNamespace(id=target_user_id, org_id="org-1", name="JB")
 
     def add(obj):
         added.append(obj)
@@ -773,6 +777,7 @@ async def test_manage_idea_create_can_handoff_owner(monkeypatch):
     session.scalar = AsyncMock(return_value=target_user)
     session.execute = AsyncMock(return_value=SimpleNamespace(one_or_none=lambda: None))
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
+    monkeypatch.setattr(idea_tools, "_require_idea_for_actor", AsyncMock(return_value=SimpleNamespace(id=parent_id)))
     monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
 
     async def serialize_idea(idea_arg, session_arg):
@@ -786,20 +791,20 @@ async def test_manage_idea_create_can_handoff_owner(monkeypatch):
                 action="create",
                 title="JB follow-up",
                 thread_message="Please take this follow-up.",
-                parent_id="parent-idea",
-                user_id="target-user",
+                parent_id=parent_id,
+                user_id=target_user_id,
             )
         )
 
     idea_rows = [obj for obj in added if obj.__class__.__name__ == "Idea"]
     thread_rows = [obj for obj in added if obj.__class__.__name__ == "IdeaThread"]
     assert payload["created"] is True
-    assert payload["idea"]["user_id"] == "target-user"
-    assert idea_rows[0].user_id == "target-user"
+    assert payload["idea"]["user_id"] == target_user_id
+    assert idea_rows[0].user_id == target_user_id
     assert thread_rows[0].role == "illo"
     assert thread_rows[0].user_id is None
     assert thread_rows[0].metadata_["requested_by_user_id"] == "user-1"
-    assert thread_rows[0].metadata_["owner_user_id"] == "target-user"
+    assert thread_rows[0].metadata_["owner_user_id"] == target_user_id
 
 
 async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch):
@@ -809,6 +814,7 @@ async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monke
     session = MagicMock()
     added = []
     admitted = []
+    parent_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
 
     def add(obj):
         added.append(obj)
@@ -825,7 +831,7 @@ async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monke
         assert idea.status == "emerged"
         assert seed_content == "Do the theme color work."
         assert actor_user_id == "user-1"
-        assert parent_id == "parent-idea"
+        assert parent_id == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
         assert origin_ref == "parent-idea"
         assert thread_message_id == 43
         idea.status = "working"
@@ -845,6 +851,7 @@ async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monke
     session.add.side_effect = add
     session.flush = AsyncMock(side_effect=flush)
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
+    monkeypatch.setattr(idea_tools, "_require_idea_for_actor", AsyncMock(return_value=SimpleNamespace(id=parent_id)))
     monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
     monkeypatch.setattr(idea_tools, "_admit_created_idea_run", admit)
 
@@ -867,7 +874,7 @@ async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monke
                 title="Fix streaming color",
                 description="Do the theme color work.",
                 status="queued",
-                parent_id="parent-idea",
+                parent_id=parent_id,
                 origin_ref="parent-idea",
             )
         )

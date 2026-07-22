@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from brain.systems.runs.direct_loop.gates import GateState
+from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
 from brain.systems.runs.direct_loop.result import TokenAccumulator
 
 
@@ -18,6 +19,7 @@ class AgentLoopState:
     tokens: TokenAccumulator = field(default_factory=TokenAccumulator)
     recent_calls: list[str] = field(default_factory=list)
     tool_calls_made: list[str] = field(default_factory=list)
+    loop_control: LoopControlPolicy = field(default_factory=LoopControlPolicy)
     provider: Any | None = None
     provider_name: str | None = None
     operation_type: str | None = None

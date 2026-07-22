@@ -58,6 +58,56 @@ _MAX_PARALLEL_BATCH_OPERATIONS = int(os.environ.get("AGENT_PARALLEL_BATCH_MAX_OP
 _MAX_PARALLEL_BATCH_WORKERS = int(os.environ.get("AGENT_PARALLEL_BATCH_MAX_WORKERS", "6"))
 _ACTION_MANIFEST_TOOL_NAMES = action_manifest_tool_names()
 
+_EMPTY_OPTIONAL_IDENTIFIER_VALUES = {
+    "",
+    "none",
+    "null",
+    "00000000-0000-0000-0000-000000000000",
+}
+
+
+class ToolValidationError(ValueError):
+    """Actionable caller-input error that is safe to return to the model."""
+
+
+def normalize_optional_identifier(value: Any) -> str | None:
+    """Normalize model-emitted empty sentinels at a tool boundary."""
+
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if normalized.lower() in _EMPTY_OPTIONAL_IDENTIFIER_VALUES:
+        return None
+    return normalized
+
+
+def normalize_optional_uuid(
+    value: Any,
+    *,
+    field_name: str,
+    error_message: str | None = None,
+) -> str | None:
+    """Return a canonical optional UUID without allowing empty binds to reach SQL."""
+
+    normalized = normalize_optional_identifier(value)
+    if normalized is None:
+        return None
+    try:
+        return str(uuid.UUID(normalized))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ToolValidationError(
+            error_message or f"{field_name} must be a valid id or omitted"
+        ) from exc
+
+
+def tool_error_payload(exc: Exception) -> dict[str, str]:
+    """Build the shared typed error shape consumed by the run loop."""
+
+    return {
+        "error": str(exc),
+        "error_class": type(exc).__name__,
+    }
+
 _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
     "manage_cycle": {
         "list": {"required": [], "optional": [], "effect": "read scheduled cycles"},
