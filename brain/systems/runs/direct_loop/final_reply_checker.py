@@ -68,6 +68,23 @@ _PRODUCT_SURFACE_NAV_RE = re.compile(
     r"\b(open|go to|navigate to|click|choose|approve|redirect|select|configure)\b",
     re.IGNORECASE,
 )
+_REQUESTED_WORK_ARTIFACT_RE = re.compile(
+    r"(?:\bgithub\s+(?:issue|ticket)\b|"
+    r"\b(?:create|file|open|assign|make|raise|submit|add)\b.{0,40}\b(?:issue|ticket)\b)",
+    re.IGNORECASE,
+)
+_CUSTOMER_REPORT_RE = re.compile(
+    r"\b(customer|client|support|complaint|email|credits?|profile\s+id|user\s+report)\b",
+    re.IGNORECASE,
+)
+_ARTIFACT_FAILURE_ACK_RE = re.compile(
+    r"\b(could not|couldn't|cannot|can't|unable|failed|not created|not opened|blocked)\b",
+    re.IGNORECASE,
+)
+_ARTIFACT_BLOCKER_RE = re.compile(
+    r"\b(no_write_token|token|credential|permission|forbidden|unavailable|403|404|not found|rate limit|timeout|validation)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -245,6 +262,71 @@ def _ungrounded_product_surface_issue(
     )
 
 
+def _recent_tool_result_entries(execution_context: str | None, tool_name: str) -> tuple[str, ...]:
+    """Return compact recent-result lines for one tool, when still in evidence."""
+
+    matches: list[str] = []
+    expected = str(tool_name or "").strip().lower()
+    for line in str(execution_context or "").splitlines():
+        normalized = _normalize_grounding_text(line)
+        if "recent tool result" in normalized and expected in normalized:
+            matches.append(normalized)
+    return tuple(matches)
+
+
+def _recent_tool_result_entry(execution_context: str | None, tool_name: str) -> str | None:
+    entries = _recent_tool_result_entries(execution_context, tool_name)
+    return entries[-1] if entries else None
+
+
+def _tool_result_failed(entry: str | None) -> bool:
+    if not entry:
+        return False
+    return bool(re.search(r"[\"']?is_error[\"']?\s*:\s*true\b", entry))
+
+
+def _tool_result_succeeded(entry: str | None) -> bool:
+    if not entry:
+        return False
+    return bool(re.search(r"[\"']?is_error[\"']?\s*:\s*false\b", entry))
+
+
+def _customer_bug_missing_tracker_mirror(
+    user_request: str,
+    execution_context: str | None,
+) -> bool:
+    request = str(user_request or "")
+    if not (_CUSTOMER_REPORT_RE.search(request) and _REQUESTED_WORK_ARTIFACT_RE.search(request)):
+        return False
+    github_entry = _recent_tool_result_entry(execution_context, "create_github_issue")
+    if not _tool_result_succeeded(github_entry):
+        return False
+    domain_entries = _recent_tool_result_entries(execution_context, "manage_domain")
+    return not any(
+        _tool_result_succeeded(entry)
+        and "create_record" in entry
+        and bool(re.search(r'domain_id\\?"\s*:\s*1\b', entry))
+        for entry in domain_entries
+    )
+
+
+def _requested_artifact_failure_omitted(
+    user_request: str,
+    candidate_output: str,
+    execution_context: str | None,
+) -> bool:
+    if not _REQUESTED_WORK_ARTIFACT_RE.search(str(user_request or "")):
+        return False
+    github_entry = _recent_tool_result_entry(execution_context, "create_github_issue")
+    if not _tool_result_failed(github_entry):
+        return False
+    candidate = str(candidate_output or "")
+    names_artifact = bool(re.search(r"\bgithub\s+(?:issue|ticket)\b", candidate, re.IGNORECASE))
+    names_failure = bool(_ARTIFACT_FAILURE_ACK_RE.search(candidate))
+    names_blocker = bool(_ARTIFACT_BLOCKER_RE.search(candidate))
+    return not (names_artifact and names_failure and names_blocker)
+
+
 def _token_resolution_verdict(
     provider,
     llm,
@@ -328,6 +410,37 @@ def review_candidate_final_reply(
                 "Answer only with setup/product surfaces supported by current tool results or source context.",
             ),
             raw_output="deterministic_product_surface_grounding",
+        ).to_dict()
+
+    if _customer_bug_missing_tracker_mirror(user_request, execution_context):
+        return FinalReplyReview(
+            status="continue",
+            approved=False,
+            rationale=(
+                "The customer-bug GitHub issue succeeded, but execution evidence has no successful "
+                "linked tracker-record mirror."
+            ),
+            missing_requirements=(
+                "Create the linked record in an existing tracker (Domain 1 by default); do not create a Domain.",
+            ),
+            raw_output="deterministic_customer_bug_mirror_contract",
+            override="artifact_contract",
+        ).to_dict()
+
+    if _requested_artifact_failure_omitted(user_request, candidate_output, execution_context):
+        return FinalReplyReview(
+            status="continue",
+            approved=False,
+            rationale=(
+                "The requested GitHub artifact failed, but the reply does not explicitly name both "
+                "the GitHub issue and its concrete blocker."
+            ),
+            missing_requirements=(
+                "Say that the requested GitHub issue was not created and name the exact blocker; "
+                "describe any tracker record only as retention or handoff.",
+            ),
+            raw_output="deterministic_requested_artifact_contract",
+            override="artifact_contract",
         ).to_dict()
 
     checker_model = normalize_model(model) if model else None

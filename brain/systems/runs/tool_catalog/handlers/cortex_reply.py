@@ -126,12 +126,11 @@ def _build_final_reply_check_context() -> str:
             compact = json.dumps(
                 {
                     "tool_name": tool_result.get("tool_name"),
-                    "args_preview": tool_result.get("args_preview"),
                     "is_error": tool_result.get("is_error"),
+                    "args_preview": tool_result.get("args_preview"),
                     "result_preview": result_preview,
                 },
                 default=str,
-                sort_keys=True,
             )
         except Exception:
             compact = str(tool_result)
@@ -212,9 +211,21 @@ def _handle_cortex_reply(content: str) -> dict:
         user_id=getattr(_agent_context, "user_id", None),
         session_id=getattr(_agent_context, "session_id", None),
     )
-    # The checker is advisory: its verdict is surfaced as a non-blocking warning so
-    # the model can decide for itself whether to continue or reply again. It no longer
-    # vetoes a reply the model considers final.
+    if review.get("override") == "artifact_contract":
+        return {
+            "blocked": True,
+            "error": "Final reply violates the requested-artifact contract.",
+            "checker_status": review["status"],
+            "checker_reason": review.get("rationale"),
+            "missing_requirements": review.get("missing_requirements") or [],
+            "instruction": (
+                "Continue the required artifact work, or replace the reply with the requested "
+                "artifact name and its concrete blocker. Do not report a substitute artifact as success."
+            ),
+        }
+
+    # Other checker verdicts are advisory: surface them as a non-blocking warning
+    # so the model can decide whether to continue or reply again.
 
     run_id = getattr(getattr(_agent_context, "run", None), "run_id", None)
     if run_id:

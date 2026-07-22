@@ -51,6 +51,20 @@ class DomainError(ValueError):
     """Base exception for user-facing domain validation errors."""
 
 
+class DomainFieldTypeError(DomainError):
+    """Typed validation error for an unsupported Domain field type."""
+
+    code = "invalid_field_type"
+
+    def __init__(self, field_type: Any):
+        self.field_type = str(field_type or "").strip().lower()
+        self.allowed_values = tuple(sorted(SUPPORTED_FIELD_TYPES))
+        super().__init__(
+            f"Unsupported field_type {self.field_type!r}; use one of: "
+            f"{', '.join(self.allowed_values)}"
+        )
+
+
 class DomainNotFound(LookupError):
     """Raised when a requested domain row is not visible in the caller org."""
 
@@ -1333,9 +1347,7 @@ def _normalize_slug(value: str) -> str:
 def _normalize_field_type(value: Any) -> str:
     field_type = str(value or "").strip().lower()
     if field_type not in SUPPORTED_FIELD_TYPES:
-        raise DomainError(
-            f"field_type must be one of: {', '.join(sorted(SUPPORTED_FIELD_TYPES))}"
-        )
+        raise DomainFieldTypeError(field_type)
     return field_type
 
 

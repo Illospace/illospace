@@ -16,6 +16,20 @@ from brain.systems.runs.tool_catalog.handlers.github import _handle_create_githu
 _H = "brain.systems.runs.tool_catalog.handlers.github"
 
 
+def test_customer_bug_contract_is_in_run_visible_github_tool_guidance():
+    from brain.systems.runs.tool_catalog.definitions.github import GITHUB_TOOLS
+
+    definition = next(tool for tool in GITHUB_TOOLS if tool["name"] == "create_github_issue")
+    guidance = definition["description"]
+
+    assert "Customer-reported bug filing is a two-part contract" in guidance
+    assert "GitHub issue in the owning repo as the durable artifact" in guidance
+    assert "linked mirror in an existing workspace tracker" in guidance
+    assert "Never create a Domain while filing" in guidance
+    assert "customer quote, concrete impact, and source origin_ref" in guidance
+    assert "final reply must name the GitHub issue and the exact blocker" in guidance
+
+
 def _vault_patches(*, bound_env: dict, secrets: list, get_secret=None):
     """Patch the three Vault seams the handler resolves tokens through."""
     return (

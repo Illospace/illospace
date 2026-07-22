@@ -1247,6 +1247,90 @@ async def test_manage_domain_round_trips_a_chantier_record(session, monkeypatch)
     assert queried["records"][0]["id"] == created["id"]
 
 
+async def test_manage_domain_create_is_a_proposal_without_explicit_schema_confirmation(
+    session,
+    monkeypatch,
+):
+    from brain.platform.db.repositories import unit_of_work
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
+
+    class UnexpectedUnitOfWork:
+        def __init__(self, *args, **kwargs):
+            pytest.fail("proposal-only create_domain must not open a write unit of work")
+
+    monkeypatch.setattr(unit_of_work, "UnitOfWork", UnexpectedUnitOfWork)
+
+    with bind_agent_context({"org_id": ORG_ID, "user_id": USER_ID}):
+        payload = json.loads(
+            await _handle_manage_domain(
+                action="create_domain",
+                name="Customer Support Tickets",
+                objects=[
+                    {
+                        "key": "ticket",
+                        "fields": [{"key": "title", "field_type": "text"}],
+                    }
+                ],
+            )
+        )
+
+    assert payload["status"] == "proposal"
+    assert payload["created"] is False
+    assert payload["requires_confirmation"] is True
+    assert payload["confirmation_parameter"] == "confirm_schema_change"
+    assert payload["proposal"]["name"] == "Customer Support Tickets"
+    assert "filing side effect" in payload["message"]
+    assert await AsyncDomainService(session).list_domains(ORG_ID) == []
+
+
+async def test_manage_domain_confirmed_create_preserves_authorized_path_and_typed_errors(
+    session,
+    monkeypatch,
+):
+    from brain.platform.db.repositories import unit_of_work
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
+
+    class SessionUnitOfWork:
+        def __init__(self, *args, **kwargs):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            if exc_type is None:
+                await session.flush()
+            return False
+
+    monkeypatch.setattr(unit_of_work, "UnitOfWork", SessionUnitOfWork)
+
+    with bind_agent_context({"org_id": ORG_ID, "user_id": USER_ID}):
+        created = json.loads(
+            await _handle_manage_domain(
+                action="create_domain",
+                name="Explicitly Requested CRM",
+                confirm_schema_change=True,
+            )
+        )
+        invalid = json.loads(
+            await _handle_manage_domain(
+                action="add_object",
+                domain_id=created["domain"]["id"],
+                object_key="contact",
+                fields=[{"key": "name", "field_type": "string"}],
+            )
+        )
+
+    assert created["domain"]["name"] == "Explicitly Requested CRM"
+    assert invalid["error_code"] == "invalid_field_type"
+    assert invalid["field"] == "field_type"
+    assert invalid["received"] == "string"
+    assert "text" in invalid["allowed_values"]
+    assert "Unsupported field_type 'string'" in invalid["error"]
+
+
 def test_merge_chantier_tool_is_registered_as_a_versioned_domain_write():
     from brain.systems.runs.tool_catalog.definitions.domain_inbound import DOMAIN_TOOLS
     from brain.systems.runs.tool_catalog.registry import get_tool_registration

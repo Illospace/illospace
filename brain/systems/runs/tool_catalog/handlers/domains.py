@@ -45,6 +45,7 @@ async def _handle_manage_domain(
     target_record_id: int | None = None,
     properties: dict | None = None,
     cursor: str | None = None,
+    confirm_schema_change: bool = False,
 ) -> str:
     action = str(action or "").strip().lower()
     if action == "help":
@@ -53,11 +54,43 @@ async def _handle_manage_domain(
         return _manage_tool_guide("manage_domain", operation or "schema")
 
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
-    from brain.systems.user_domains.service import AsyncDomainService, DomainError, DomainNotFound
+    from brain.systems.user_domains.service import (
+        AsyncDomainService,
+        DomainError,
+        DomainFieldTypeError,
+        DomainNotFound,
+    )
 
     org_id, user_id, run_id, idea_id = _domain_context()
     if not org_id:
         return json.dumps({"error": "manage_domain could not access this workspace context"})
+
+    if action == "create_domain" and confirm_schema_change is not True:
+        if not name:
+            return json.dumps({"error": "create_domain requires: name"})
+        return json.dumps(
+            {
+                "status": "proposal",
+                "created": False,
+                "proposal": {
+                    "action": "create_domain",
+                    "name": name,
+                    "slug": slug,
+                    "description": description,
+                    "objects": objects or [],
+                    "relations": relations or [],
+                },
+                "requires_confirmation": True,
+                "confirmation_parameter": "confirm_schema_change",
+                "message": (
+                    "No Domain was created. Creating a Domain is a workspace schema change, not a "
+                    "filing side effect. Present this proposal to the user; set confirm_schema_change=true "
+                    "only when the current request explicitly authorizes the new Domain. For filing or "
+                    "intake, use a suitable existing Domain (the workspace's default tracker when applicable)."
+                ),
+            },
+            default=str,
+        )
 
     try:
         async with UnitOfWork() as uow:
@@ -322,6 +355,16 @@ async def _handle_manage_domain(
                 )
 
             return json.dumps({"error": f"Unknown action: {action}"})
+    except DomainFieldTypeError as exc:
+        return json.dumps(
+            {
+                "error": str(exc),
+                "error_code": exc.code,
+                "field": "field_type",
+                "received": exc.field_type,
+                "allowed_values": list(exc.allowed_values),
+            }
+        )
     except (DomainError, DomainNotFound) as exc:
         return json.dumps({"error": str(exc)})
     except Exception as exc:

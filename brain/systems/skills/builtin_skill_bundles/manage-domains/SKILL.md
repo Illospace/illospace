@@ -23,18 +23,24 @@ on the Domain.
 
 1. Start with `manage_domain(action="list")` to see whether a relevant domain exists.
 2. Infer the smallest useful schema from the user's nouns and workflow.
-3. Create object types, typed fields, and relations only when the workflow needs them.
-4. Query before updating, and use expected versions when editing known records.
-5. If the user also wants a visible UI, create or update the Domain first, then bind a workspace app to it.
-6. Prefer additive migrations and reversible changes when the data model may
+3. Treat a new Domain as a schema change. Set `confirm_schema_change=true` only
+   when the current user request explicitly asks for or approves a new Domain.
+   A filing or intake request is not authorization: propose the schema and use
+   a suitable existing/default Domain meanwhile.
+4. Create object types, typed fields, and relations only when the workflow needs them.
+5. Query before updating, and use expected versions when editing known records.
+6. If the user also wants a visible UI, create or update the Domain first, then bind a workspace app to it.
+7. Prefer additive migrations and reversible changes when the data model may
    evolve.
-7. Tell the user which Domain was used, what changed, what remains uncertain,
+8. Tell the user which Domain was used, what changed, what remains uncertain,
    and which app or workflow can now reuse the data.
 
 ## Output Contract
 
 Return Domain name, object types, records changed, versions or conflict status,
-and any follow-up schema decision the user should know about.
+and any follow-up schema decision the user should know about. If creation was
+only proposed, say explicitly that no Domain was created and name the existing
+Domain used for any immediate filing.
 
 ## Failure Modes
 

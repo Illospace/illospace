@@ -20,8 +20,11 @@ DOMAIN_TOOLS = [
             "object types, typed records, relations, and audit events. This is the action/exact-object "
             "tool for creating trackers, adding fields, recording or updating items, linking records, "
             "or deleting/archiving Domains and records. For broad awareness questions about existing "
-            "workspace records, prefer read_workspace_records first. Use action='help' or action='schema' with "
-            "operation to inspect domain operations before mutating."
+            "workspace records, prefer read_workspace_records first. Creating a Domain is a schema change: "
+            "action='create_domain' returns a proposal unless confirm_schema_change=true, which is allowed "
+            "only when the current user request explicitly authorizes a new Domain. Never confirm Domain "
+            "creation merely to file or intake a record; use a suitable existing/default tracker instead. "
+            "Use action='help' or action='schema' with operation to inspect domain operations before mutating."
         ),
         "input_schema": {
             "type": "object",
@@ -130,6 +133,14 @@ DOMAIN_TOOLS = [
                 "source_record_id": {"type": "integer"},
                 "target_record_id": {"type": "integer"},
                 "properties": {"type": "object", "description": "Optional relation properties."},
+                "confirm_schema_change": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Required to execute create_domain. Set true only when the current user request "
+                        "explicitly asks for or approves a new Domain; filing/intake is never authorization."
+                    ),
+                },
             },
             "required": ["action"],
         },

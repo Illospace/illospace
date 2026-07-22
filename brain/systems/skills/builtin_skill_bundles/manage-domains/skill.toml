@@ -1,7 +1,7 @@
 schema_version = 1
 name = "manage-domains"
 display_name = "Manage Domains"
-version = "1.0.0"
+version = "1.1.0"
 description = "Create, evolve, query, and maintain org-wide Domains for durable structured records, typed fields, relations, and history."
 license = "Apache-2.0"
 source = "illo-core"

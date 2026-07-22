@@ -53,7 +53,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.9.0"
+    assert bundle.manifest.version == "1.10.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -236,6 +236,41 @@ def test_uwear_triage_skill_distinguishes_internal_tracker_from_real_github_issu
     assert "Never describe an internal tracker record as a GitHub issue" in playbook
     # The graceful-degradation branch must be spelled out, not just the happy path.
     assert "no_write_token" in playbook
+
+
+def test_uwear_customer_bug_filing_has_one_declared_destination_and_complete_evidence():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    filing = _uwear_triage_asset(bundle, "references/creating-work-items.md")
+    support = _uwear_triage_asset(bundle, "references/customer-support.md")
+    filing_flat = " ".join(filing.split())
+    support_flat = " ".join(support.split())
+
+    for expected in (
+        "Customer-reported bugs have one declared destination",
+        "real GitHub issue in the owning repo",
+        "Domain `1` is its linked tracker mirror, never a substitute",
+        "customer's own words",
+        "credit loss",
+        "Slack `origin_ref`",
+        "explicit assignee request",
+        "Never create a Domain during filing",
+        "the requested GitHub issue was not created",
+        "name the exact blocker",
+    ):
+        assert expected in filing_flat
+
+    for expected in (
+        "real GitHub issue in the owning repo",
+        "credit-loss or other concrete impact",
+        "Slack `origin_ref`",
+        "verified GitHub identity",
+        "create a linked tracker record",
+        "Never create a Domain as part of filing",
+    ):
+        assert expected in support_flat
 
 
 def test_uwear_triage_skill_keeps_slack_formatting_contract():

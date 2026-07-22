@@ -144,7 +144,12 @@ GITHUB_TOOLS = [
             "write-capable token can reach the repo. If no write-capable token can reach a "
             "(private) repo, this returns an error carrying no_write_token so the triage flow can "
             "ask for clarification or fall back to an internal tracker record + handoff. Accepts "
-            "owner/name, GitHub URL, or git remote repo values. For a chantier parent mirror, use "
+            "owner/name, GitHub URL, or git remote repo values. Customer-reported bug filing is a "
+            "two-part contract: create the GitHub issue in the owning repo as the durable artifact, "
+            "then create a linked mirror in an existing workspace tracker. Never create a Domain while "
+            "filing. Preserve the customer quote, concrete impact, and source origin_ref in the issue "
+            "body. If this tool fails, the final reply must name the GitHub issue and the exact blocker; "
+            "a tracker record is retention/handoff, never a silent substitute. For a chantier parent mirror, use "
             "the title '[Chantier] <title>' and a body that states the goal as 'Done means …', the "
             "chantier slug, and key references. Do not add a hand-maintained child checklist: "
             "native GitHub sub-issues are the progress surface."
@@ -164,7 +169,9 @@ GITHUB_TOOLS = [
                     "type": "string",
                     "description": (
                         "Optional Markdown issue body. Prefix AI-authored triage issues with a "
-                        "clear AI-generated disclaimer. A chantier parent body carries its "
+                        "clear AI-generated disclaimer. For a customer-reported bug, include the "
+                        "customer quote, concrete impact (including credit loss), and Slack origin_ref. "
+                        "A chantier parent body carries its "
                         "'Done means …' goal, chantier slug, and key refs, without duplicating "
                         "native sub-issues as a Markdown checklist."
                     ),
@@ -177,7 +184,10 @@ GITHUB_TOOLS = [
                 "assignees": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional GitHub login handles to assign.",
+                    "description": (
+                        "Optional GitHub login handles to assign. Honor an explicit assignment request "
+                        "using the person's verified GitHub identity."
+                    ),
                 },
                 "token_secret_key": {
                     "type": "string",
