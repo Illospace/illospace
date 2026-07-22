@@ -23,6 +23,7 @@ from brain.platform.db.repositories.reconstructive_memory import (
 from brain.systems.reconstructive_memory.ingestion import ingest_memory_source
 
 CURATION_CREATED_BY = "agent_curation"
+MEMORY_CURATOR_SOURCE_KIND = "memory_curator"
 SUPERSEDED_BY_EDGE = "superseded_by"
 
 
@@ -239,6 +240,69 @@ async def archive_memories(
     }
 
 
+async def archive_memory_by_policy(
+    session: AsyncSession,
+    *,
+    node: MemoryNode,
+    rule: str,
+    policy_version: str,
+    run_id: int | str,
+    reason: str,
+) -> dict[str, Any]:
+    """Soft-archive one selected node with complete curator audit evidence."""
+
+    if node.archived_at is not None:
+        raise ValueError(f"Memory node {node.id} is already archived")
+    normalized_rule = _normalize_audit_field(rule, field="rule")
+    normalized_policy_version = _normalize_audit_field(
+        policy_version,
+        field="policy_version",
+    )
+    normalized_reason = _normalize_reason(reason)
+    audit_text = (
+        f"Rule: {normalized_rule}. Policy version: {normalized_policy_version}. "
+        f"Target node: {node.id}. Run ID: {run_id}. Reason: {normalized_reason}"
+    )
+    curation_source, spans = await MemorySourceRepository(session).create_with_spans(
+        source_kind=MEMORY_CURATOR_SOURCE_KIND,
+        source_ref=f"nightly-memory-maintenance:{run_id}:archive:{node.id}",
+        raw_content=audit_text,
+        spans=[
+            SourceSpanDraft(
+                text=audit_text,
+                locator={
+                    "kind": "memory_curation",
+                    "action": "archive",
+                    "rule": normalized_rule,
+                    "policy_version": normalized_policy_version,
+                    "target_node": node.id,
+                    "run_id": str(run_id),
+                },
+            )
+        ],
+        org_id=node.org_id,
+        user_id=node.user_id,
+        visibility=node.visibility,
+        structured_payload={
+            "action": "archive",
+            "rule": normalized_rule,
+            "policy_version": normalized_policy_version,
+            "target_node": node.id,
+            "run_id": str(run_id),
+            "reason": normalized_reason,
+            "created_by": MEMORY_CURATOR_SOURCE_KIND,
+        },
+        authority_principal=MEMORY_CURATOR_SOURCE_KIND,
+        sensitivity=node.sensitivity,
+    )
+    await ReconstructiveMemoryCompatibilityRepository(session).archive_many([node.id])
+    return {
+        "node_id": node.id,
+        "curation_source_id": curation_source.id,
+        "curation_span_id": spans[0].id,
+    }
+
+
 async def _visible_nodes_exact(
     session: AsyncSession,
     node_ids: Sequence[int],
@@ -311,4 +375,11 @@ def _normalize_reason(value: str) -> str:
     normalized = " ".join(str(value or "").split()).strip()
     if len(normalized) < 3:
         raise ValueError("reason must contain at least 3 characters")
+    return normalized
+
+
+def _normalize_audit_field(value: str, *, field: str) -> str:
+    normalized = " ".join(str(value or "").split()).strip()
+    if not normalized:
+        raise ValueError(f"{field} is required")
     return normalized

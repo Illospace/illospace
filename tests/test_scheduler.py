@@ -502,8 +502,13 @@ async def test_scheduler_cutover_materializes_and_persists_split_nightly_steps(s
     assert len(created) == 1
     assert created[0].status == "recorded"
     step_plan = build_scheduler_step_plan(job)
-    assert len(step_plan) == 14
+    assert len(step_plan) == 15
     assert "skill_quality" not in {step["step_key"] for step in step_plan}
+    assert [step["step_key"] for step in step_plan[:3]] == [
+        "nightly_wrapper",
+        "memory_consolidation",
+        "nightly_memory_maintenance",
+    ]
     phase_steps = [step for step in step_plan if step["kind"] == "phase"]
     assert phase_steps[0]["payload"]["night_budget"]["work_type"] == "memory_conflict_resolution"
     assert {step["payload"]["night_budget"]["work_type"] for step in phase_steps} >= {
@@ -567,10 +572,69 @@ async def test_nightly_heuristic_review_wrappers_await_and_report_counts(monkeyp
     assert program_command == command
     assert scheduler_executor._nightly_wrapper_commands(
         date(2026, 4, 21), split_steps=False
-    )[4] == command
+    )[5] == command
     assert scheduler_executor._nightly_step_commands(
         "heuristic_review", date(2026, 4, 21)
     ) == [command]
+
+
+async def test_split_nightly_scheduler_reaches_and_settles_memory_maintenance(session):
+    job = _make_scheduler_job(
+        owner_mode="scheduler",
+        default_payload={"name": "Nightly Sleep", "scheduler_split_steps": True},
+    )
+    session.add(job)
+    await session.flush()
+    run = (
+        await async_materialize_due_runs(
+            session,
+            now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
+            allowed_owner_modes=("scheduler",),
+        )
+    )[0]
+    commands: list[list[str]] = []
+
+    def runner(command, *, cwd=None):
+        commands.append(list(command))
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    settled = await async_run_scheduler_run(
+        session,
+        run.id,
+        owner_id="memory-maintenance-test",
+        runner=runner,
+        now=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
+    )
+    steps = list(
+        (
+            await session.scalars(
+                select(SchedulerRunStep)
+                .where(SchedulerRunStep.run_id == run.id)
+                .order_by(SchedulerRunStep.sequence_no)
+            )
+        ).all()
+    )
+    step_by_key = {step.step_key: step for step in steps}
+    command_modules = [
+        command[2]
+        for command in commands
+        if len(command) >= 3 and command[:2] == ["python3", "-m"]
+    ]
+
+    assert settled.status == RUN_STATUS_SETTLED_SUCCESS
+    assert step_by_key["nightly_memory_maintenance"].status == RUN_STATUS_SETTLED_SUCCESS
+    assert step_by_key["nightly_memory_maintenance"].sequence_no == (
+        step_by_key["memory_consolidation"].sequence_no + 1
+    )
+    assert command_modules.index("brain.jobs.pipelines.nightly_memory_maintenance") == (
+        command_modules.index("brain.jobs.pipelines.consolidate") + 1
+    )
+    maintenance_command = next(
+        command
+        for command in commands
+        if "brain.jobs.pipelines.nightly_memory_maintenance" in command
+    )
+    assert maintenance_command[-3:] == ["--date", "2026-04-21", "--apply"]
 
 
 async def test_scheduler_lease_claim_and_reclaim(session):

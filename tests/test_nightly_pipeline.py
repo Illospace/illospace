@@ -343,6 +343,7 @@ class TestNightlySchedulerOwnership:
 
         expected_steps = {
             "memory_consolidation",
+            "nightly_memory_maintenance",
             "skill_evolution",
             "reflection",
             "dream",
@@ -354,6 +355,10 @@ class TestNightlySchedulerOwnership:
             "daily_blog",
         }
         assert expected_steps.issubset(set(NIGHTLY_SLEEP_STEP_KEYS))
+        assert NIGHTLY_SLEEP_STEP_KEYS[:2] == (
+            "memory_consolidation",
+            "nightly_memory_maintenance",
+        )
 
 
 # ---------------------------------------------------------------------------
