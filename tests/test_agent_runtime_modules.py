@@ -414,9 +414,14 @@ def test_run_agent_uses_thread_handoff_but_persists_raw_archive(monkeypatch):
 
 def test_final_reply_checker_runtime_returns_dict_compatible_review():
     from brain.systems.runs.direct_loop.final_reply_checker import (
+        FinalReplyEnforcement,
         FinalReplyReview,
         review_candidate_final_reply,
         review_final_reply_once,
+    )
+    from brain.systems.runs.direct_loop.final_reply_evidence import (
+        FinalReplyEvidence,
+        ToolResultEvidence,
     )
 
     response = SimpleNamespace(content=[SimpleNamespace(type="text", text='{"status":"resolved","rationale":"done","missing_requirements":[]}')])
@@ -454,6 +459,7 @@ def test_final_reply_checker_runtime_returns_dict_compatible_review():
         "rationale": "done",
         "missing_requirements": [],
         "raw_output": '{"status":"resolved","rationale":"done","missing_requirements":[]}',
+        "enforcement": FinalReplyEnforcement.ADVISORY,
     }
     assert "strict_contract" in requests[0].messages[0]["content"]
     assert "Complete every planned phase" in requests[0].messages[0]["content"]
@@ -466,6 +472,7 @@ def test_final_reply_checker_runtime_returns_dict_compatible_review():
         "rationale": "needs key",
         "missing_requirements": ["API key"],
         "raw_output": "raw",
+        "enforcement": FinalReplyEnforcement.ADVISORY,
     }
 
     ctx = SimpleNamespace()
@@ -499,6 +506,46 @@ def test_final_reply_checker_runtime_returns_dict_compatible_review():
     )
     assert third is not first
     assert calls == ["More soon", "More soon"]
+
+    issue_failed = FinalReplyEvidence(tool_results=(ToolResultEvidence.capture(
+        tool_name="create_github_issue",
+        arguments={"repo": "owner/repo"},
+        is_error=False,
+        result={"error": "no token"},
+    ),))
+    issue_succeeded = FinalReplyEvidence(tool_results=(ToolResultEvidence.capture(
+        tool_name="create_github_issue",
+        arguments={"repo": "owner/repo"},
+        is_error=False,
+        result={"number": 421},
+    ),))
+    fourth = review_final_reply_once(
+        user_request="Finish",
+        candidate_output="More soon",
+        execution_context="New evidence context",
+        evidence=issue_failed,
+        agent_context=ctx,
+        review_candidate=reviewer,
+    )
+    fifth = review_final_reply_once(
+        user_request="Finish",
+        candidate_output="More soon",
+        execution_context="New evidence context",
+        evidence=issue_failed,
+        agent_context=ctx,
+        review_candidate=reviewer,
+    )
+    sixth = review_final_reply_once(
+        user_request="Finish",
+        candidate_output="More soon",
+        execution_context="New evidence context",
+        evidence=issue_succeeded,
+        agent_context=ctx,
+        review_candidate=reviewer,
+    )
+    assert fifth is fourth
+    assert sixth is not fourth
+    assert calls == ["More soon", "More soon", "More soon", "More soon"]
 
 
 def test_final_reply_helpers_parse_json_and_cache_review():

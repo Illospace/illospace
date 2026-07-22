@@ -17,6 +17,7 @@ from brain.platform.async_io import (
     mark_side_effect_started,
 )
 from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
+from brain.systems.runs.direct_loop.final_reply_evidence import ToolResultEvidence
 from brain.systems.runs.tool_catalog.registry import (
     action_policy_for_tool,
     get_tool_registration,
@@ -30,8 +31,6 @@ _DEFAULT_TOOL_TIMEOUT_SECONDS = 180.0
 _DEFAULT_TOOL_TIMEOUT_GRACE_SECONDS = 5.0
 _DEFAULT_TOOL_TIMEOUT_MAX_SECONDS = 900.0
 _RECENT_TOOL_RESULT_LIMIT = 8
-_RECENT_TOOL_RESULT_PREVIEW_CHARS = 1200
-_RECENT_TOOL_ARGS_PREVIEW_CHARS = 400
 
 
 @dataclass(frozen=True)
@@ -51,6 +50,7 @@ class ResolvedToolCall:
     result_text: str
     is_error: bool = False
     result_content: Any | None = None
+    result_value: Any | None = None
 
 
 def _env_float(name: str, default: float) -> float:
@@ -121,6 +121,7 @@ def _timeout_result(request: PendingToolCall, timeout_seconds: float) -> Resolve
             "try a narrower or faster tool call if needed, or explain the blocker to the user."
         ),
         is_error=True,
+        result_value={"error": "tool_timeout", "timeout_seconds": timeout_seconds},
     )
 
 
@@ -189,23 +190,21 @@ def _record_agent_tool_result(agent_context, resolved: ResolvedToolCall, result_
         tool_log.append(resolved.tool_name)
         setattr(agent_context, "tool_calls_log", tool_log)
 
-        try:
-            args_preview = json.dumps(resolved.tool_input, sort_keys=True, default=str)
-        except Exception:
-            args_preview = str(resolved.tool_input)
-
         recent = getattr(agent_context, "recent_tool_results", None)
         if not isinstance(recent, list):
             recent = []
-        recent.append({
-            "tool_name": resolved.tool_name,
-            "args_preview": _truncate_middle_text(args_preview, _RECENT_TOOL_ARGS_PREVIEW_CHARS),
-            "is_error": bool(resolved.is_error),
-            "result_preview": _truncate_middle_text(
-                str(result_text or ""),
-                _RECENT_TOOL_RESULT_PREVIEW_CHARS,
-            ),
-        })
+        evidence_result = resolved.result_value
+        evidence_arguments = resolved.tool_input
+        if resolved.tool_name == "brain_vault":
+            evidence_arguments = {"redacted": True}
+        if resolved.tool_name == "brain_vault" or evidence_result is None:
+            evidence_result = result_text
+        recent.append(ToolResultEvidence.capture(
+            tool_name=resolved.tool_name,
+            arguments=evidence_arguments,
+            is_error=resolved.is_error,
+            result=evidence_result,
+        ))
         setattr(agent_context, "recent_tool_results", recent[-_RECENT_TOOL_RESULT_LIMIT:])
     except Exception:
         logger.debug("Failed to record recent tool result for final-reply context", exc_info=True)
@@ -323,6 +322,7 @@ async def _async_resolve_tool_call_once(
             result_text=result_text,
             is_error=is_error,
             result_content=model_content,
+            result_value=result,
         )
     except Exception as exc:
         logger.warning("Tool %s failed: %s", request.tool_name, exc)
@@ -332,6 +332,7 @@ async def _async_resolve_tool_call_once(
             tool_input=request.tool_input,
             result_text=f"Error: {exc}",
             is_error=True,
+            result_value={"error": str(exc)},
         )
 
 
@@ -456,6 +457,7 @@ def _resolve_tool_call_sync(
             result_text=result_text,
             is_error=is_error,
             result_content=model_content,
+            result_value=result,
         )
     except Exception as exc:
         logger.warning("Tool %s failed: %s", request.tool_name, exc)
@@ -465,6 +467,7 @@ def _resolve_tool_call_sync(
             tool_input=request.tool_input,
             result_text=f"Error: {exc}",
             is_error=True,
+            result_value={"error": str(exc)},
         )
 
 

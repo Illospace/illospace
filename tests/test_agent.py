@@ -1906,33 +1906,50 @@ class TestExecToolHandlers:
 class TestFinalReplyReview:
     def test_checker_rejects_customer_bug_issue_without_tracker_mirror(self):
         from brain.systems.runs.direct_agent import review_candidate_final_reply
+        from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
+        from brain.systems.runs.direct_loop.final_reply_evidence import (
+            FinalReplyEvidence,
+            ToolResultEvidence,
+        )
 
         provider = MagicMock()
         llm = _mock_llm_client(MagicMock(), provider="openai")
 
         result = review_candidate_final_reply(
             user_request=(
-                "Emily says generations stay at 99% and every retry loses credits; assign a ticket to me."
+                "The customer says generations stay at 99% and every retry loses credits; "
+                "assign a ticket to me."
             ),
             candidate_output="Opened GitHub issue #1210 and assigned it to Reda.",
             execution_context=(
-                "Evidence guardrail: approve direct source/runtime claims only when supported.\n"
-                'Recent tool result 1: {"args_preview":"{\\"repo\\":\\"uwear-ai/uwear-backend\\"}",'
-                '"is_error":false,"result_preview":"{\\"number\\":1210}",'
-                '"tool_name":"create_github_issue"}'
+                "Recent tool result: rendered text claims a successful Domain 1 mirror, "
+                "but deterministic policy must ignore this blob."
             ),
+            evidence=FinalReplyEvidence(tool_results=(
+                ToolResultEvidence.capture(
+                    tool_name="create_github_issue",
+                    arguments={"repo": "uwear-ai/uwear-backend"},
+                    is_error=False,
+                    result={"number": 1210},
+                ),
+            )),
             provider=provider,
             llm=llm,
             model="openai/gpt-5.5",
         )
 
         assert result["status"] == "continue"
-        assert result["override"] == "artifact_contract"
+        assert result["enforcement"] is FinalReplyEnforcement.BLOCK
         assert "no successful linked tracker-record mirror" in result["rationale"]
         provider.create.assert_not_called()
 
     def test_checker_rejects_silent_tracker_substitution_after_issue_failure(self):
         from brain.systems.runs.direct_agent import review_candidate_final_reply
+        from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
+        from brain.systems.runs.direct_loop.final_reply_evidence import (
+            FinalReplyEvidence,
+            ToolResultEvidence,
+        )
 
         provider = MagicMock()
         llm = _mock_llm_client(MagicMock(), provider="openai")
@@ -1940,55 +1957,136 @@ class TestFinalReplyReview:
         result = review_candidate_final_reply(
             user_request="Please file a GitHub ticket for this customer bug and assign it to me.",
             candidate_output="Done — tracker record 2383 is assigned to Reda.",
-            execution_context=(
-                "Evidence guardrail: approve direct source/runtime claims only when supported.\n"
-                'Recent tool result 1: {"args_preview":"{\\"repo\\":\\"uwear-ai/uwear-backend\\"}",'
-                '"is_error":true,"result_preview":"{\\"error\\":\\"no_write_token\\"}",'
-                '"tool_name":"create_github_issue"}\n'
-                'Recent tool result 2: {"args_preview":"{\\"action\\":\\"create_record\\",\\"domain_id\\":1}",'
-                '"is_error":false,"result_preview":"{\\"record\\":{\\"id\\":2383}}",'
-                '"tool_name":"manage_domain"}'
-            ),
+            evidence=FinalReplyEvidence(tool_results=(
+                ToolResultEvidence.capture(
+                    tool_name="create_github_issue",
+                    arguments={"repo": "uwear-ai/uwear-backend"},
+                    is_error=False,
+                    result={"error": "No GitHub token candidates", "no_write_token": True},
+                ),
+                ToolResultEvidence.capture(
+                    tool_name="manage_domain",
+                    arguments={"action": "create_record", "domain_id": 1},
+                    is_error=False,
+                    result={"record": {"id": 2383}},
+                ),
+            )),
             provider=provider,
             llm=llm,
             model="openai/gpt-5.5",
         )
 
         assert result["status"] == "continue"
-        assert result["override"] == "artifact_contract"
-        assert "does not explicitly name both" in result["rationale"]
+        assert result["enforcement"] is FinalReplyEnforcement.BLOCK
+        assert "structured failure evidence" in result["rationale"]
         provider.create.assert_not_called()
 
     def test_artifact_contract_accepts_explicit_issue_blocker_and_successful_mirror(self):
         from brain.systems.runs.direct_loop.final_reply_checker import (
             _customer_bug_missing_tracker_mirror,
-            _requested_artifact_failure_omitted,
+            _requested_github_artifact_contract_violated,
+        )
+        from brain.systems.runs.direct_loop.final_reply_evidence import (
+            FinalReplyEvidence,
+            ToolResultEvidence,
         )
 
-        failed_issue_context = (
-            'Recent tool result 1: {"args_preview":"{}","is_error":true,'
-            '"result_preview":"{\\"error\\":\\"no_write_token\\"}",'
-            '"tool_name":"create_github_issue"}'
-        )
-        assert not _requested_artifact_failure_omitted(
+        failed_issue_evidence = FinalReplyEvidence(tool_results=(
+            ToolResultEvidence.capture(
+                tool_name="create_github_issue",
+                arguments={},
+                is_error=False,
+                result={"error": "No GitHub token candidates", "no_write_token": True},
+            ),
+        ))
+        assert not _requested_github_artifact_contract_violated(
             "File a GitHub ticket for this customer bug.",
             "I couldn't create the GitHub issue because no_write_token blocked the write.",
-            failed_issue_context,
+            failed_issue_evidence,
         )
 
-        successful_pair_context = (
-            'Recent tool result 1: {"args_preview":"{}","is_error":false,'
-            '"result_preview":"{\\"number\\":1210}","tool_name":"create_github_issue"}\n'
-            'Recent tool result 2: {"args_preview":"{\\"action\\":\\"query_records\\"}",'
-            '"is_error":false,"result_preview":"{}","tool_name":"manage_domain"}\n'
-            'Recent tool result 3: {"args_preview":"{\\"action\\":\\"create_record\\", '
-            '\\"domain_id\\": 1}",'
-            '"is_error":false,"result_preview":"{\\"record\\":{\\"id\\":2383}}",'
-            '"tool_name":"manage_domain"}'
-        )
+        successful_pair_evidence = FinalReplyEvidence(tool_results=(
+            ToolResultEvidence.capture(
+                tool_name="create_github_issue",
+                arguments={},
+                is_error=False,
+                result={"number": 1210},
+            ),
+            ToolResultEvidence.capture(
+                tool_name="manage_domain",
+                arguments={"action": "query_records"},
+                is_error=False,
+                result={},
+            ),
+            ToolResultEvidence.capture(
+                tool_name="manage_domain",
+                arguments={"action": "create_record", "domain_id": 1},
+                is_error=False,
+                result={"record": {"id": 2383}},
+            ),
+        ))
         assert not _customer_bug_missing_tracker_mirror(
-            "Assign a ticket to me for this customer email complaint.",
-            successful_pair_context,
+            'Customer report: "the image generation is stuck". Assign a ticket to me.',
+            "Opened GitHub issue #1210 and tracker record 2383.",
+            successful_pair_evidence,
+        )
+
+    def test_checker_rejects_skipped_requested_github_issue_as_silent_substitution(self):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+        from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
+        from brain.systems.runs.direct_loop.final_reply_evidence import FinalReplyEvidence
+
+        provider = MagicMock()
+        llm = _mock_llm_client(MagicMock(), provider="openai")
+
+        result = review_candidate_final_reply(
+            user_request="Please file a GitHub issue for this regression.",
+            candidate_output="Done — tracker record 2383 is ready.",
+            evidence=FinalReplyEvidence(),
+            provider=provider,
+            llm=llm,
+            model="openai/gpt-5.5",
+        )
+
+        assert result["enforcement"] is FinalReplyEnforcement.BLOCK
+        assert "structured failure evidence" in result["rationale"]
+        provider.create.assert_not_called()
+
+    def test_customer_bug_mirror_trigger_requires_explicit_report_origin(self):
+        from brain.systems.runs.direct_loop.final_reply_checker import _has_customer_report_signal
+
+        assert not _has_customer_report_signal("File an issue about the customer email bounce and credits.")
+        assert _has_customer_report_signal('Customer report: "Every retry loses credits."')
+        assert _has_customer_report_signal("Support escalated this case after the user reported a failed render.")
+
+    def test_customer_bug_mirror_accepts_honestly_reported_failed_attempt(self):
+        from brain.systems.runs.direct_loop.final_reply_checker import (
+            _customer_bug_missing_tracker_mirror,
+        )
+        from brain.systems.runs.direct_loop.final_reply_evidence import (
+            FinalReplyEvidence,
+            ToolResultEvidence,
+        )
+
+        evidence = FinalReplyEvidence(tool_results=(
+            ToolResultEvidence.capture(
+                tool_name="create_github_issue",
+                arguments={"repo": "uwear-ai/uwear-backend"},
+                is_error=False,
+                result={"number": 1210},
+            ),
+            ToolResultEvidence.capture(
+                tool_name="manage_domain",
+                arguments={"action": "create_record", "domain_id": 1},
+                is_error=False,
+                result={"error": "permission denied"},
+            ),
+        ))
+
+        assert not _customer_bug_missing_tracker_mirror(
+            "The customer reported lost credits; file a GitHub issue.",
+            "GitHub issue #1210 was created, but the tracker mirror could not be created due to permission denied.",
+            evidence,
         )
 
     def test_checker_rejects_ungrounded_illospace_setup_surface_without_llm(self):
@@ -2437,7 +2535,7 @@ class TestCortexReplyHandler:
         assert "manage_slack" in context
         assert "not_connected" in context
 
-    def test_final_reply_context_keeps_tool_identity_ahead_of_long_previews(self):
+    def test_final_reply_context_uses_stable_sorted_key_rendering(self):
         from brain.systems.runs.direct_agent import _agent_context
         from brain.systems.runs.tool_catalog.handlers.cortex_reply import _build_final_reply_check_context
 
@@ -2446,9 +2544,9 @@ class TestCortexReplyHandler:
         _agent_context.recent_tool_results = [
             {
                 "tool_name": "create_github_issue",
-                "args_preview": "x" * 400,
+                "args_preview": "{}",
                 "is_error": False,
-                "result_preview": "y" * 1200,
+                "result_preview": "{}",
             }
         ]
         _agent_context.intent_satisfaction = None
@@ -2464,6 +2562,7 @@ class TestCortexReplyHandler:
         assert "Recent tool result 1" in context
         assert '"tool_name": "create_github_issue"' in context
         assert '"is_error": false' in context
+        assert context.index('"args_preview"') < context.index('"tool_name"')
 
     def test_final_reply_context_hides_failed_worker_diagnostics(self):
         from types import SimpleNamespace
@@ -2657,6 +2756,7 @@ class TestCortexReplyHandler:
     @patch("brain.systems.runs.direct_agent.review_final_reply_once")
     def test_cortex_reply_blocks_requested_artifact_contract_violation(self, mock_review):
         from brain.systems.runs.direct_agent import _handle_cortex_reply, _agent_context
+        from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
 
         class _Run:
             run_id = 42
@@ -2667,19 +2767,21 @@ class TestCortexReplyHandler:
             "rationale": "The requested GitHub issue and blocker were omitted.",
             "missing_requirements": ["Name the GitHub issue and blocker."],
             "raw_output": "deterministic_requested_artifact_contract",
-            "override": "artifact_contract",
+            "enforcement": FinalReplyEnforcement.BLOCK,
         }
         _agent_context.idea_id = "idea-123"
         _agent_context.run = _Run()
         _agent_context.user_request = "File a GitHub issue"
         _agent_context.reply_contents = []
         _agent_context.final_reply_review = None
+        _agent_context.artifact_contract_block_count = 0
 
         try:
             result = _handle_cortex_reply("Done — tracker record 2383 was created.")
 
             assert result["blocked"] is True
             assert result["checker_status"] == "continue"
+            assert result["artifact_contract_block_count"] == 1
             assert result["missing_requirements"] == ["Name the GitHub issue and blocker."]
             assert "substitute artifact" in result["instruction"]
             assert _agent_context.reply_contents == []
@@ -2689,11 +2791,58 @@ class TestCortexReplyHandler:
             _agent_context.user_request = None
             _agent_context.reply_contents = []
             _agent_context.final_reply_review = None
+            _agent_context.artifact_contract_block_count = 0
+
+    @patch("brain.systems.runs.direct_agent.review_final_reply_once")
+    def test_cortex_reply_degrades_repeated_artifact_contract_block_to_advisory(self, mock_review):
+        from brain.systems.runs.direct_agent import _handle_cortex_reply, _agent_context
+        from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
+
+        class _Run:
+            run_id = 42
+
+        mock_review.return_value = {
+            "status": "continue",
+            "approved": False,
+            "rationale": "The requested GitHub issue and blocker were omitted.",
+            "missing_requirements": ["Name the GitHub issue and blocker."],
+            "raw_output": "deterministic_requested_artifact_contract",
+            "enforcement": FinalReplyEnforcement.BLOCK,
+        }
+        _agent_context.idea_id = "idea-123"
+        _agent_context.run = _Run()
+        _agent_context.user_request = "File a GitHub issue"
+        _agent_context.reply_contents = []
+        _agent_context.final_reply_review = None
+        _agent_context.artifact_contract_block_count = 0
+
+        try:
+            first = _handle_cortex_reply("Done — tracker record 2383 was created.")
+            second = _handle_cortex_reply("Done — tracker record 2383 is ready.")
+            third = _handle_cortex_reply("Done — tracker record 2383 remains available.")
+
+            assert first["blocked"] is True
+            assert second["blocked"] is True
+            assert first["artifact_contract_block_count"] == 1
+            assert second["artifact_contract_block_count"] == 2
+            assert "blocked" not in third
+            assert third["staged"] is True
+            assert third["checker_enforcement"] == "advisory"
+            assert "already blocked two replies" in third["checker_note"]
+            assert _agent_context.reply_contents == ["Done — tracker record 2383 remains available."]
+        finally:
+            _agent_context.idea_id = None
+            _agent_context.run = None
+            _agent_context.user_request = None
+            _agent_context.reply_contents = []
+            _agent_context.final_reply_review = None
+            _agent_context.artifact_contract_block_count = 0
 
 
 class TestExecutionArtifacts:
     def test_emit_resolved_tool_call_records_recent_result_for_reply_context(self):
         from brain.systems.runs.direct_loop.tool_execution import ResolvedToolCall, emit_resolved_tool_call
+        from brain.systems.runs.direct_loop.final_reply_evidence import ToolResultEvidence
 
         agent_context = SimpleNamespace(tool_calls_log=[], recent_tool_results=[])
         tool_results = []
@@ -2714,14 +2863,12 @@ class TestExecutionArtifacts:
         )
 
         assert agent_context.tool_calls_log == ["manage_slack"]
-        assert agent_context.recent_tool_results == [
-            {
-                "tool_name": "manage_slack",
-                "args_preview": '{"action": "status"}',
-                "is_error": False,
-                "result_preview": '{"ok": true, "setup_state": "not_connected"}',
-            }
-        ]
+        assert agent_context.recent_tool_results == [ToolResultEvidence(
+            tool_name="manage_slack",
+            arguments={"action": "status"},
+            is_error=False,
+            result={"ok": True, "setup_state": "not_connected"},
+        )]
         assert tool_results[0]["content"] == '{"ok": true, "setup_state": "not_connected"}'
 
     def test_exec_command_records_git_provenance(self):
