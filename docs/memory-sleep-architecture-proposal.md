@@ -127,7 +127,9 @@ This distinction resolves the audit confusion:
 - **Coherent:** consolidation does not create derived memories merely to make counters nonzero.
 - **Drift:** `consolidation_runs` remains the public evidence of “sleep,” while its only memory phase is an operator heartbeat and the graph grows without scheduled stewardship.
 
-The code settles intent for the 0/0 row. What it cannot settle is whether product leadership intended “never synthesize any source-backed summary” or merely “do not synthesize without evidence.” To settle that narrower product choice, inspect the #230 design/PR discussion and ADRs (none are encoded next to the implementation), and ask the owners whether a derived assertion with complete span lineage counts as source-backed. The recommendation below assumes it does.
+The code settles intent for the 0/0 row. What it could not settle is whether product leadership intended “never synthesize any source-backed summary” or merely “do not synthesize without evidence” — no ADR is encoded next to the implementation, so this needed an owner.
+
+**Settled by the owner (2026-07-22): a derived assertion with complete span lineage *does* count as source-backed.** The stance is therefore “do not synthesize **without evidence**,” not “never synthesize,” and the recommendation below rests on a decision rather than an assumption. The condition attached to that yes makes the invariant stated above binding rather than advisory: a derived assertion is admissible only if it carries **complete span lineage and a declared epistemic status**, enforced at write time rather than asserted in review. A derived row that cannot name its spans is not source-backed and must not be written — otherwise “derived assertion” becomes the hole through which the untraceable semantic blobs of the pre-#230 flat model re-enter, which is precisely what the original stance existed to prevent.
 
 **Action from section 2:** rename the product concept mentally before changing code: today's phase is a **consolidation-run recorder**, not consolidation. Preserve the source-backed invariant, then add graph-native stewardship as a separately measurable phase.
 
