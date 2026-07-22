@@ -303,7 +303,7 @@ async def async_scheduler_daemon_tick(
     resume: bool = True,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Run one always-on scheduler tick using native async database operations."""
+    """Run one scheduler tick and return only events produced by this tick."""
     now = now or _utc_now()
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
@@ -318,7 +318,6 @@ async def async_scheduler_daemon_tick(
         resume=resume,
         now=now,
     )
-    snapshot = await async_scheduler_health_snapshot(session, owner_mode=owner_mode, now=now)
     await session.flush()
     return {
         "ok": True,
@@ -326,5 +325,4 @@ async def async_scheduler_daemon_tick(
         "reclaimed": len(reclaimed),
         "reclaimed_run_ids": [run.id for run in reclaimed],
         "drain": drain,
-        "snapshot": snapshot,
     }

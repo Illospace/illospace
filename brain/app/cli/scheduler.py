@@ -32,7 +32,10 @@ from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.runtime import make_lease_owner
 
 
-def _emit(payload: dict) -> None:
+def _emit(payload: dict, *, compact: bool = False) -> None:
+    if compact:
+        print(json.dumps(payload, separators=(",", ":"), default=str))
+        return
     print(json.dumps(payload, indent=2, default=str))
 
 
@@ -221,7 +224,7 @@ async def cmd_daemon(args: argparse.Namespace) -> int:
                     now=_now_from_args(args),
                 )
             tick += 1
-            _emit({"tick": tick, **result})
+            _emit({"tick": tick, **result}, compact=True)
             if args.once:
                 return 0
             await asyncio.sleep(max(1, args.poll_interval_seconds))

@@ -282,7 +282,6 @@ async def test_scheduler_drain_control_surface(client, mock_session_factory):
             "reclaimed": 0,
             "reclaimed_run_ids": [],
             "drain": {"ok": True, "executed": 1, "results": []},
-            "snapshot": {"health": {"status": "healthy", "reasons": []}},
         })) as mock_tick:
             resp = await client.post(
                 "/api/system/scheduler/drain",
@@ -294,6 +293,7 @@ async def test_scheduler_drain_control_surface(client, mock_session_factory):
     assert resp.status_code == 200
     data = resp.json()
     assert data["drain"]["executed"] == 1
+    assert "snapshot" not in data
     mock_tick.assert_awaited_once()
 
 
