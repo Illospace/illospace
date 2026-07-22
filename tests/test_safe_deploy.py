@@ -4,7 +4,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES
+from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
 
 
 def _shell_function_body(content: str, name: str) -> str:
@@ -108,7 +108,8 @@ def test_ops_deploy_drains_worker_instead_of_restarting_active_runs():
     service = (Path(__file__).resolve().parents[1] / "ops" / "cortex-worker.service").read_text()
     assert service.count("ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1") == 1
     assert "systemctl --user kill --kill-who=main --signal=TERM cortex-worker" in content
-    assert "active AgentRun(s); signaling drain instead of restart" in content
+    assert "AgentRun(s); signaling drain instead of restart; affected run ids:" in content
+    assert "Worker pre-swap check:" in content
 
 
 def test_ops_deploy_leaves_embedder_running_when_agent_runs_are_active():
@@ -363,7 +364,7 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     combined = upgrade + runtime_lib
 
     assert 'source "$SCRIPT_DIR/compose-runtime-lib.sh"' in upgrade
-    assert "active_agent_run_count" in runtime_lib
+    assert "nonterminal_agent_run_details" in runtime_lib
     assert "status IN" in runtime_lib
     assert "non_worker_services" in upgrade
     assert "api scheduler web updater" in upgrade
@@ -382,8 +383,9 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     assert "compose up -d --force-recreate --no-deps worker" in runtime_lib
     assert "compose up -d --force-recreate --remove-orphans" in upgrade
     assert "replace_idle_worker" in combined
-    assert "ILLO_COMPOSE_IDLE_WORKER_STOP_TIMEOUT_SECONDS" in runtime_lib
-    assert "no active AgentRuns" in runtime_lib
+    assert "no interactive AgentRuns" in runtime_lib
+    assert "refusing to kill it" in runtime_lib
+    assert "FORCED WORKER SWAP: killing old worker; affected run ids:" in runtime_lib
     assert "ILLO_COMPOSE_BUILD_NO_CACHE" in upgrade
     assert "ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_FILE" in upgrade
 
@@ -407,7 +409,27 @@ def test_compose_runtime_service_restart_supports_one_many_or_all_services():
     assert "restart_runtime_worker_service" in runtime_lib
     assert "active_agent_run_count" in runtime_lib
     assert "started handoff worker" in runtime_lib
-    assert "avoid interrupting active AgentRuns" in runtime_lib
+    assert "refusing to kill it" in runtime_lib
+
+
+def test_compose_pre_swap_check_reports_nonterminal_run_ids():
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    script = f'''
+source "{runtime_lib}"
+compose() {{
+  printf '2327:paused\\n2330:running\\n2331:queued\\n'
+}}
+details="$(nonterminal_agent_run_details)"
+report_nonterminal_agent_runs "$details"
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == (
+        "Worker pre-swap check: 3 interactive run(s) in flight "
+        "(run ids: 2327,2330,2331; id/status: 2327:paused,2330:running,2331:queued)."
+    )
 
 
 def test_safe_deploy_active_run_guards_match_canonical_active_statuses():
@@ -417,9 +439,10 @@ def test_safe_deploy_active_run_guards_match_canonical_active_statuses():
     ops_deploy = (root / "ops" / "deploy.sh").read_text()
     runtime_lib = (root / "deploy" / "scripts" / "compose-runtime-lib.sh").read_text()
 
-    for status in ACTIVE_RUN_STATUS_VALUES:
+    for status in OPEN_RUN_STATUS_VALUES:
         assert repr(status) in upgrade + runtime_lib
+    assert repr("queued") in upgrade + runtime_lib
     assert "ACTIVE_RUN_STATUS_VALUES" in launcher
-    assert "ACTIVE_RUN_STATUS_VALUES" in ops_deploy
+    assert "OPEN_RUN_STATUS_VALUES" in ops_deploy
     assert '("starting", "running", "verifying")' not in launcher
     assert '("starting", "running", "verifying")' not in ops_deploy

@@ -869,6 +869,84 @@ class AsyncAgentRunStore:
         )
         return run
 
+    async def interrupt_and_requeue(
+        self,
+        run_id: int,
+        *,
+        reason: str = "worker_shutdown",
+        interrupted_at: datetime | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> tuple[AgentRun, bool]:
+        """Fence an abandoned execution attempt and return it to the queue.
+
+        ``interrupted`` is intentionally an audited event/metadata state rather
+        than a durable row status: claimers already consume ``queued`` rows, so
+        recovery remains atomic and requires no intermediate-state sweeper.
+        """
+
+        row = await self._locked_run(run_id)
+        current = coerce_run_status(row.status, default=RunStatus.FAILED)
+        if current not in {
+            RunStatus.STARTING,
+            RunStatus.RUNNING,
+            RunStatus.VERIFYING,
+        }:
+            return to_domain(row), False
+
+        interrupted_at = interrupted_at or datetime.now(timezone.utc)
+        if interrupted_at.tzinfo is None:
+            interrupted_at = interrupted_at.replace(tzinfo=timezone.utc)
+        metadata = dict(row.metadata_ or {})
+        previous_count = _coerce_int(metadata.get("interruption_count"), default=0)
+        interruption = {
+            **dict(details or {}),
+            "reason": str(reason or "worker_shutdown"),
+            "interrupted_at": interrupted_at.isoformat(),
+            "from_status": current.value,
+            "execution_attempt": int(row.execution_attempt or 0),
+            "requeued": True,
+        }
+        metadata["interruption"] = interruption
+        metadata["interruption_count"] = previous_count + 1
+        metadata.pop("failure", None)
+
+        row.status = RunStatus.QUEUED.value
+        row.execution_token = None
+        row.paused_at = None
+        row.updated_at = interrupted_at
+        row.metadata_ = metadata
+        await self.session.flush()
+        await self.append_event(
+            run_event(
+                int(row.id),
+                "run.interrupted",
+                interruption,
+                root_run_id=row.root_run_id,
+                producer="worker_shutdown",
+            )
+        )
+        await self.append_event(
+            status_changed_event(
+                int(row.id),
+                from_status=current.value,
+                to_status=RunStatus.QUEUED.value,
+                root_run_id=row.root_run_id,
+                reason=str(reason or "worker_shutdown"),
+            )
+        )
+        await self.append_event(
+            run_event(
+                int(row.id),
+                "run.requeued",
+                interruption,
+                root_run_id=row.root_run_id,
+                producer="worker_shutdown",
+            )
+        )
+        if self.auto_commit:
+            await self.session.commit()
+        return to_domain(await self.refresh_run(run_id)), True
+
     async def set_status_with_result(
         self,
         run_id: int,
