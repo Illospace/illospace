@@ -13,6 +13,11 @@ from brain.platform.async_io import async_http_client
 # Split before the API boundary so a receiver-side limit cannot discard the lede.
 SLACK_MESSAGE_TEXT_CHARS = 4000
 
+_SLACK_SECTION_HEADER_RE = re.compile(r"(?m)^\*[^*\n]+\*[ \t]*(?=\n|$)")
+_SLACK_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
+_SLACK_BULLET_RE = re.compile(r"(?m)^•[ \t]+")
+_SLACK_ENTITY_RE = re.compile(r"<[^>\n]+>")
+
 
 class SlackConfigurationError(RuntimeError):
     """Raised when the self-hosted Slack connector is not configured."""
@@ -69,13 +74,113 @@ class SlackDeliveryError(SlackApiError):
         }
 
 
-def _message_text_chunks(text: str) -> list[str]:
-    if not text:
-        return [text]
-    return [
-        text[start : start + SLACK_MESSAGE_TEXT_CHARS]
-        for start in range(0, len(text), SLACK_MESSAGE_TEXT_CHARS)
+def _protected_slack_spans(text: str) -> list[tuple[int, int]]:
+    spans = [(match.start(), match.end()) for match in _SLACK_ENTITY_RE.finditer(text)]
+    fence_start: int | None = None
+    for match in re.finditer(r"```", text):
+        if fence_start is None:
+            fence_start = match.start()
+        else:
+            spans.append((fence_start, match.end()))
+            fence_start = None
+    if fence_start is not None:
+        spans.append((fence_start, len(text)))
+    return sorted(spans)
+
+
+def _is_safe_boundary(position: int, protected_spans: list[tuple[int, int]]) -> bool:
+    return not any(start < position < end for start, end in protected_spans)
+
+
+def _last_safe_boundary(
+    positions: list[int],
+    *,
+    limit: int,
+    protected_spans: list[tuple[int, int]],
+) -> int | None:
+    candidates = [
+        position
+        for position in positions
+        if 0 < position <= limit and _is_safe_boundary(position, protected_spans)
     ]
+    return max(candidates, default=None)
+
+
+def _preferred_split_offset(text: str, limit: int) -> int:
+    protected_spans = _protected_slack_spans(text)
+    section_boundaries = [
+        match.start() for match in _SLACK_SECTION_HEADER_RE.finditer(text) if match.start()
+    ]
+    section_boundaries.extend(
+        match.end()
+        for match in _SLACK_BLANK_LINE_RE.finditer(text)
+        if text[: match.start()].strip()
+    )
+    bullet_boundaries = [
+        match.start() for match in _SLACK_BULLET_RE.finditer(text) if match.start()
+    ]
+    line_boundaries = [match.end() for match in re.finditer(r"\n", text)]
+
+    for positions in (section_boundaries, bullet_boundaries, line_boundaries):
+        boundary = _last_safe_boundary(
+            positions,
+            limit=limit,
+            protected_spans=protected_spans,
+        )
+        if boundary is not None:
+            return boundary
+
+    hard_boundary = min(limit, len(text))
+    for start, end in protected_spans:
+        if start < hard_boundary < end:
+            # A normal Slack entity or fenced block fits in a message and can
+            # move whole to the next chunk. If the protected construct alone
+            # exceeds the available budget, keeping it whole is the only way
+            # not to corrupt its Slack rendering.
+            return start if start else end
+    return hard_boundary
+
+
+def _continuation_marker_reserve(text: str) -> int:
+    # A message cannot produce more chunks than it has characters. Reserving
+    # that digit width keeps every finalized chunk within the caller's limit
+    # without a count-and-resplit loop at powers of ten.
+    widest_index = "9" * len(str(max(2, len(text))))
+    first = f"\n\n({widest_index}/{widest_index}) ↓ continued"
+    continuation = f"({widest_index}/{widest_index}) continuation\n\n"
+    return max(len(first), len(continuation))
+
+
+def split_slack_message(text: str, limit: int) -> list[str]:
+    """Split Slack text at structural boundaries and label continuations."""
+
+    submitted_text = str(text)
+    if limit <= 0:
+        raise ValueError("Slack message limit must be positive")
+    if len(submitted_text) <= limit:
+        return [submitted_text]
+
+    content_limit = limit - _continuation_marker_reserve(submitted_text)
+    if content_limit <= 0:
+        raise ValueError("Slack message limit is too small for continuation markers")
+
+    parts: list[str] = []
+    remaining = submitted_text
+    while len(remaining) > content_limit:
+        split_at = _preferred_split_offset(remaining, content_limit)
+        if split_at <= 0:
+            split_at = content_limit
+        parts.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    parts.append(remaining)
+
+    total = len(parts)
+    chunks = [f"{parts[0]}\n\n(1/{total}) ↓ continued"]
+    chunks.extend(
+        f"({index}/{total}) continuation\n\n{part}"
+        for index, part in enumerate(parts[1:], start=2)
+    )
+    return chunks
 
 
 def _stored_message_text(response: dict[str, Any]) -> str | None:
@@ -191,15 +296,14 @@ class SlackWebClient:
         thread_ts: str | None = None,
     ) -> dict[str, Any]:
         submitted_text = str(text)
-        chunks = _message_text_chunks(submitted_text)
+        chunks = split_slack_message(submitted_text, SLACK_MESSAGE_TEXT_CHARS)
         responses: list[dict[str, Any]] = []
         stored_chunks: list[str] = []
-        continuation_thread_ts = thread_ts
 
         for index, chunk in enumerate(chunks):
             payload: dict[str, Any] = {"channel": channel, "text": chunk}
-            if continuation_thread_ts:
-                payload["thread_ts"] = continuation_thread_ts
+            if thread_ts:
+                payload["thread_ts"] = thread_ts
             try:
                 response = await self._post("chat.postMessage", payload)
             except Exception as exc:
@@ -242,18 +346,6 @@ class SlackWebClient:
                         f"({len(chunk)} chars/{len(chunk.encode('utf-8'))} bytes): {reason}."
                     ),
                 )
-
-            if index == 0 and len(chunks) > 1 and not continuation_thread_ts:
-                continuation_thread_ts = _posted_message_ts(response)
-                if not continuation_thread_ts:
-                    raise SlackDeliveryError(
-                        "slack_message_delivery_unverified",
-                        submitted_text=submitted_text,
-                        posted_text="".join(stored_chunks),
-                        chunk_count=len(responses),
-                        truncated=None,
-                        detail="Slack returned ok without a message timestamp for threaded continuations.",
-                    )
 
         posted_text = "".join(stored_chunks)
         result = dict(responses[0])
