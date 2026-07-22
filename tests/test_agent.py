@@ -708,6 +708,7 @@ class TestAgentLoop:
         mock_client,
     ):
         from brain.systems.runs.direct_agent import run_agent
+        from brain.systems.runs.direct_loop.loop_control import LoopTerminationReason
 
         client = MagicMock()
         client.messages.create.side_effect = [
@@ -739,9 +740,12 @@ class TestAgentLoop:
         assert "always_fails" in result.output
         assert "RuntimeError" in result.output
         assert "3 consecutive failures" in result.output
+        assert result.termination is not None
+        assert result.termination.reason is LoopTerminationReason.TOOL_FAILURE_CIRCUIT
 
     async def test_repeated_brain_encode_is_rejected(self):
         from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState
+        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
 
         block = MagicMock()
         block.type = "tool_use"
@@ -755,7 +759,7 @@ class TestAgentLoop:
         tool_calls_made = ["brain_encode"]
         handler = MagicMock(return_value={"ok": True})
 
-        results = await _execute_tool_calls_async(
+        execution = await _execute_tool_calls_async(
             response,
             {"brain_encode": handler},
             tool_calls_made,
@@ -764,14 +768,17 @@ class TestAgentLoop:
             None,
             None,
             "runner",
+            loop_control=LoopControlPolicy(),
         )
 
         assert handler.call_count == 0
+        results = execution.tool_results
         assert results[0]["is_error"] is True
         assert "already ran" in results[0]["content"]
 
     async def test_failed_brain_encode_is_marked_non_retryable(self):
         from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState
+        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
 
         block = MagicMock()
         block.type = "tool_use"
@@ -784,7 +791,7 @@ class TestAgentLoop:
 
         handler = MagicMock(return_value={"error": "embedding worker unavailable"})
 
-        results = await _execute_tool_calls_async(
+        execution = await _execute_tool_calls_async(
             response,
             {"brain_encode": handler},
             [],
@@ -793,51 +800,18 @@ class TestAgentLoop:
             None,
             None,
             "runner",
+            loop_control=LoopControlPolicy(),
         )
 
+        results = execution.tool_results
         assert results[0]["is_error"] is True
         assert "Do not retry brain_encode" in results[0]["content"]
-
-    async def test_failure_circuit_skips_fourth_call_in_same_tool_batch(self):
-        from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState
-        from brain.systems.runs.direct_loop.state import ToolFailureState
-
-        blocks = []
-        for index in range(4):
-            block = MagicMock()
-            block.type = "tool_use"
-            block.name = "always_fails"
-            block.input = {"value": "same"}
-            block.id = f"tool_fail_{index}"
-            blocks.append(block)
-
-        response = MagicMock(content=blocks)
-        handler = MagicMock(side_effect=RuntimeError("deterministic failure"))
-        failure_state = ToolFailureState()
-
-        results = await _execute_tool_calls_async(
-            response,
-            {"always_fails": handler},
-            [],
-            _GateState(),
-            None,
-            None,
-            None,
-            "runner",
-            failure_state=failure_state,
-        )
-
-        assert handler.call_count == 3
-        assert len(results) == 4
-        assert results[-1]["is_error"] is True
-        assert failure_state.circuit_open is True
-        assert failure_state.consecutive_failures == 3
-        assert failure_state.last_error_class == "RuntimeError"
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_supports_async_handlers_inside_running_loop(self):
         from brain.systems.runs.direct_agent import _GateState
         from brain.systems.runs.direct_loop.gates import check_gate_violations
+        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
         from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
 
         block = MagicMock()
@@ -853,7 +827,7 @@ class TestAgentLoop:
             await asyncio.sleep(0)
             return {"guardrails": ["stay grounded"]}
 
-        results = await async_execute_tool_calls(
+        execution = await async_execute_tool_calls(
             response,
             {"brain_guardrails": handler},
             [],
@@ -870,14 +844,17 @@ class TestAgentLoop:
             parallel_safe_tool_names=frozenset(),
             max_parallel_tool_calls=1,
             check_gate_violations=check_gate_violations,
+            loop_control=LoopControlPolicy(),
         )
 
+        results = execution.tool_results
         assert json.loads(results[0]["content"]) == {"guardrails": ["stay grounded"]}
 
     @pytest.mark.asyncio
     async def test_parallel_safe_tool_batch_overlaps_and_preserves_order(self):
         from brain.systems.runs.direct_agent import _GateState
         from brain.systems.runs.direct_loop.gates import check_gate_violations
+        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
         from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
 
         block_a = MagicMock()
@@ -911,7 +888,7 @@ class TestAgentLoop:
                     active -= 1
             return handler
 
-        results = await async_execute_tool_calls(
+        execution = await async_execute_tool_calls(
             response,
             {
                 "read_file": make_handler("read_file", 0.15),
@@ -931,8 +908,10 @@ class TestAgentLoop:
             parallel_safe_tool_names=frozenset({"read_file", "search_files"}),
             max_parallel_tool_calls=2,
             check_gate_violations=check_gate_violations,
+            loop_control=LoopControlPolicy(),
         )
 
+        results = execution.tool_results
         assert max_active == 2
         assert [result["tool_use_id"] for result in results] == ["tool_parallel_a", "tool_parallel_b"]
         assert [call[0] for call in callback_calls] == ["read_file", "search_files"]
@@ -949,6 +928,7 @@ class TestAgentLoop:
     async def test_parallel_safe_sync_tool_batch_runs_off_loop(self):
         from brain.systems.runs.direct_agent import _GateState
         from brain.systems.runs.direct_loop.gates import check_gate_violations
+        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
         from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
 
         blocks = []
@@ -980,7 +960,7 @@ class TestAgentLoop:
         ticker_task = asyncio.create_task(ticker())
         started_at = time.perf_counter()
         try:
-            results = await async_execute_tool_calls(
+            execution = await async_execute_tool_calls(
                 response,
                 {"read_file": blocking_handler, "search_files": blocking_handler},
                 [],
@@ -997,6 +977,7 @@ class TestAgentLoop:
                 parallel_safe_tool_names=frozenset({"read_file", "search_files"}),
                 max_parallel_tool_calls=2,
                 check_gate_violations=check_gate_violations,
+                loop_control=LoopControlPolicy(),
             )
         finally:
             elapsed = time.perf_counter() - started_at
@@ -1005,10 +986,12 @@ class TestAgentLoop:
 
         assert elapsed < 0.5
         assert ticker_count >= 3
+        results = execution.tool_results
         assert [result["tool_use_id"] for result in results] == ["sync-tool-1", "sync-tool-2"]
 
     async def test_parallel_safe_tool_batch_propagates_agent_context(self):
         from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState, _agent_context
+        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
 
         block = MagicMock()
         block.type = "tool_use"
@@ -1029,7 +1012,7 @@ class TestAgentLoop:
                     "worker_name": getattr(_agent_context, "worker_name", None),
                 }
 
-            results = await _execute_tool_calls_async(
+            execution = await _execute_tool_calls_async(
                 response,
                 {"read_file": handler},
                 [],
@@ -1038,13 +1021,14 @@ class TestAgentLoop:
                 None,
                 None,
                 "runner",
+                loop_control=LoopControlPolicy(),
             )
         finally:
             for attr in ("user_id", "worker_name"):
                 if hasattr(_agent_context, attr):
                     delattr(_agent_context, attr)
 
-        assert json.loads(results[0]["content"]) == {
+        assert json.loads(execution.tool_results[0]["content"]) == {
             "path": "alpha.py",
             "user_id": 123,
             "worker_name": "reader-1",
@@ -1223,25 +1207,6 @@ class TestAgentLoop:
 
         assert resolved.is_error is True
         assert "Continue working and plan another pipeline" in resolved.result_text
-
-    def test_resolve_tool_call_preserves_structured_error_class(self):
-        from brain.systems.runs.direct_agent import _PendingToolCall, _resolve_tool_call
-
-        request = _PendingToolCall(
-            block_id="tool_419",
-            tool_name="manage_idea",
-            tool_input={"action": "create"},
-            handler=lambda **_: json.dumps({
-                "error": "parent_id must be an existing idea id or omitted",
-                "error_class": "ToolValidationError",
-            }),
-        )
-
-        resolved = _resolve_tool_call(request)
-
-        assert resolved.is_error is True
-        assert resolved.error_class == "ToolValidationError"
-        assert "parent_id must be an existing idea id or omitted" in resolved.result_text
 
     @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))

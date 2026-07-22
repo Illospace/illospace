@@ -17,6 +17,7 @@ from brain.platform.async_io import (
     mark_side_effect_started,
 )
 from brain.systems.runs.actions import result_failure_summary
+from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy, LoopTermination
 from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
 from brain.systems.runs.tool_catalog.registry import (
     action_policy_for_tool,
@@ -53,6 +54,14 @@ class ResolvedToolCall:
     is_error: bool = False
     error_class: str | None = None
     result_content: Any | None = None
+
+
+@dataclass(frozen=True)
+class ToolExecutionResult:
+    """Provider-facing results plus the loop policy's typed stop decision."""
+
+    tool_results: list[dict]
+    termination: LoopTermination | None
 
 
 def _env_float(name: str, default: float) -> float:
@@ -138,18 +147,6 @@ def _structured_error_class(result: Any) -> str | None:
         return None
     value = payload.get("error_class")
     return str(value).strip() if value else None
-
-
-def _parallel_same_tool_limit(failure_state: Any, tool_name: str) -> int | None:
-    """Bound speculative duplicate calls without disabling normal parallelism."""
-
-    if failure_state is None:
-        return None
-    threshold = max(1, int(getattr(failure_state, "threshold", 3) or 3))
-    if getattr(failure_state, "consecutive_tool_name", None) != tool_name:
-        return threshold
-    consecutive = max(0, int(getattr(failure_state, "consecutive_failures", 0) or 0))
-    return max(1, threshold - consecutive)
 
 
 def _must_finish_before_reporting(request: PendingToolCall) -> bool:
@@ -250,22 +247,6 @@ def _failed_tool_result(request: PendingToolCall, exc: Exception) -> ResolvedToo
         is_error=True,
         error_class=error_class,
     )
-
-
-def _append_open_circuit_result(
-    tool_results: list[dict],
-    block: Any,
-    failure_state: Any,
-) -> bool:
-    if failure_state is None or not failure_state.circuit_open:
-        return False
-    tool_results.append({
-        "type": "tool_result",
-        "tool_use_id": block.id,
-        "content": failure_state.final_answer(),
-        "is_error": True,
-    })
-    return True
 
 
 def _record_agent_tool_result(agent_context, resolved: ResolvedToolCall, result_text: str) -> None:
@@ -538,7 +519,6 @@ def emit_resolved_tool_call(
     tool_call_source: str,
     *,
     agent_context=None,
-    failure_state=None,
 ) -> str:
     """Append tool_result content and record side effects in block order."""
     tool_results.append({
@@ -550,8 +530,6 @@ def emit_resolved_tool_call(
     callback_result_text = resolved.result_text
     if resolved.tool_name == "brain_vault":
         callback_result_text = "[secret redacted]"
-    if failure_state is not None:
-        failure_state.record(resolved)
     _record_agent_tool_result(agent_context, resolved, callback_result_text)
     if on_tool_call:
         on_tool_call(resolved.tool_name, resolved.tool_input, callback_result_text)
@@ -567,7 +545,6 @@ async def async_emit_resolved_tool_call(
     tool_call_source: str,
     *,
     agent_context=None,
-    failure_state=None,
 ) -> None:
     """Append a tool result and persist its trace through the async event log."""
     callback_result_text = emit_resolved_tool_call(
@@ -578,7 +555,6 @@ async def async_emit_resolved_tool_call(
         None,
         tool_call_source,
         agent_context=agent_context,
-        failure_state=failure_state,
     )
     if run_id and idea_id:
         from brain.systems.runs.events import async_record_tool_call
@@ -595,73 +571,46 @@ async def async_emit_resolved_tool_call(
 
 def execute_parallel_tool_batch(
     pending: list[PendingToolCall],
-    tool_results: list[dict],
-    on_tool_call,
-    run_id,
-    idea_id,
-    tool_call_source: str,
     *,
     agent_context,
-    max_parallel_tool_calls: int,
-    failure_state=None,
-) -> None:
+) -> list[ResolvedToolCall]:
     """Run independent tool calls from sync runtime code while preserving output order."""
     if not pending:
-        return
+        return []
 
     threadlocal_context = _snapshot_threadlocal_context(agent_context)
-    for request in pending:
-        emit_resolved_tool_call(
-            resolve_tool_call(
-                request,
-                agent_context=agent_context,
-                threadlocal_context=threadlocal_context,
-            ),
-            tool_results,
-            on_tool_call,
-            run_id,
-            idea_id,
-            tool_call_source,
+    return [
+        resolve_tool_call(
+            request,
             agent_context=agent_context,
-            failure_state=failure_state,
+            threadlocal_context=threadlocal_context,
         )
+        for request in pending
+    ]
 
 
 async def async_execute_parallel_tool_batch(
     pending: list[PendingToolCall],
-    tool_results: list[dict],
-    on_tool_call,
-    run_id,
-    idea_id,
-    tool_call_source: str,
     *,
     agent_context,
     max_parallel_tool_calls: int,
-    failure_state=None,
-) -> None:
-    """Run async-capable independent tool calls concurrently while preserving output order."""
+) -> list[ResolvedToolCall]:
+    """Resolve independent calls concurrently while preserving provider order."""
     if not pending:
-        return
+        return []
 
     threadlocal_context = _snapshot_threadlocal_context(agent_context)
     if max_parallel_tool_calls <= 1:
-        for request in pending:
-            await async_emit_resolved_tool_call(
-                await async_resolve_tool_call(
-                    request,
-                    agent_context=agent_context,
-                    threadlocal_context=threadlocal_context,
-                ),
-                tool_results,
-                on_tool_call,
-                run_id,
-                idea_id,
-                tool_call_source,
+        return [
+            await async_resolve_tool_call(
+                request,
                 agent_context=agent_context,
-                failure_state=failure_state,
+                threadlocal_context=threadlocal_context,
             )
-        return
+            for request in pending
+        ]
 
+    resolved_calls: list[ResolvedToolCall] = []
     parallelism = max(1, min(max_parallel_tool_calls, len(pending)))
     for start in range(0, len(pending), parallelism):
         chunk = pending[start:start + parallelism]
@@ -678,22 +627,12 @@ async def async_execute_parallel_tool_batch(
         try:
             for request, task in tasks:
                 try:
-                    resolved = await task
+                    resolved_calls.append(await task)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     logger.warning("Tool %s failed: %s", request.tool_name, exc)
-                    resolved = _failed_tool_result(request, exc)
-                await async_emit_resolved_tool_call(
-                    resolved,
-                    tool_results,
-                    on_tool_call,
-                    run_id,
-                    idea_id,
-                    tool_call_source,
-                    agent_context=agent_context,
-                    failure_state=failure_state,
-                )
+                    resolved_calls.append(_failed_tool_result(request, exc))
         finally:
             for _, task in tasks:
                 if not task.done():
@@ -706,6 +645,8 @@ async def async_execute_parallel_tool_batch(
                 pass
             except Exception:
                 pass
+
+    return resolved_calls
 
 
 def execute_tool_calls(
@@ -726,8 +667,8 @@ def execute_tool_calls(
     parallel_safe_tool_names: frozenset[str],
     max_parallel_tool_calls: int,
     check_gate_violations: Callable,
-    failure_state=None,
-) -> list[dict]:
+    loop_control: LoopControlPolicy,
+) -> ToolExecutionResult:
     """Execute all tool calls from a provider response."""
     try:
         asyncio.get_running_loop()
@@ -739,23 +680,33 @@ def execute_tool_calls(
     tool_results: list[dict] = []
     pending_parallel: list[PendingToolCall] = []
     threadlocal_context = _snapshot_threadlocal_context(agent_context)
+    termination = loop_control.termination
 
-    def flush_parallel_batch() -> None:
-        nonlocal pending_parallel
-        if not pending_parallel:
-            return
-        execute_parallel_tool_batch(
-            pending_parallel,
+    def consume_resolved(resolved: ResolvedToolCall) -> None:
+        nonlocal termination
+        if termination is None:
+            termination = loop_control.observe_tool_result(resolved)
+        emit_resolved_tool_call(
+            resolved,
             tool_results,
             on_tool_call,
             run_id,
             idea_id,
             tool_call_source,
             agent_context=agent_context,
-            max_parallel_tool_calls=max_parallel_tool_calls,
-            failure_state=failure_state,
+        )
+
+    def flush_parallel_batch() -> None:
+        nonlocal pending_parallel
+        if not pending_parallel:
+            return
+        resolved_calls = execute_parallel_tool_batch(
+            pending_parallel,
+            agent_context=agent_context,
         )
         pending_parallel = []
+        for resolved in resolved_calls:
+            consume_resolved(resolved)
 
     for block in response.content:
         if not (hasattr(block, "type") and block.type == "tool_use"):
@@ -765,7 +716,8 @@ def execute_tool_calls(
         tool_input = block.input
         tool_calls_made.append(tool_name)
 
-        if _append_open_circuit_result(tool_results, block, failure_state):
+        if termination is not None:
+            tool_results.append(termination.skipped_tool_result(block.id))
             continue
 
         if tool_name == "brain_encode" and tool_calls_made.count("brain_encode") > 1:
@@ -816,35 +768,30 @@ def execute_tool_calls(
         )
 
         if tool_name in parallel_safe_tool_names:
-            same_tool_limit = _parallel_same_tool_limit(failure_state, tool_name)
+            same_tool_limit = loop_control.parallel_same_tool_limit(tool_name)
             same_tool_pending = sum(
                 request.tool_name == tool_name for request in pending_parallel
             )
-            if same_tool_limit is not None and same_tool_pending >= same_tool_limit:
+            if same_tool_pending >= same_tool_limit:
                 flush_parallel_batch()
-                if _append_open_circuit_result(tool_results, block, failure_state):
+                if termination is not None:
+                    tool_results.append(termination.skipped_tool_result(block.id))
                     continue
             pending_parallel.append(request)
             continue
 
         flush_parallel_batch()
-        emit_resolved_tool_call(
-            resolve_tool_call(
-                request,
-                agent_context=agent_context,
-                threadlocal_context=threadlocal_context,
-            ),
-            tool_results,
-            on_tool_call,
-            run_id,
-            idea_id,
-            tool_call_source,
+        if termination is not None:
+            tool_results.append(termination.skipped_tool_result(block.id))
+            continue
+        consume_resolved(resolve_tool_call(
+            request,
             agent_context=agent_context,
-            failure_state=failure_state,
-        )
+            threadlocal_context=threadlocal_context,
+        ))
 
     flush_parallel_batch()
-    return tool_results
+    return ToolExecutionResult(tool_results=tool_results, termination=termination)
 
 
 async def async_execute_tool_calls(
@@ -865,29 +812,40 @@ async def async_execute_tool_calls(
     parallel_safe_tool_names: frozenset[str],
     max_parallel_tool_calls: int,
     check_gate_violations: Callable,
-    failure_state=None,
-) -> list[dict]:
+    loop_control: LoopControlPolicy,
+) -> ToolExecutionResult:
     """Execute all tool calls from async runtime code."""
     tool_results: list[dict] = []
     pending_parallel: list[PendingToolCall] = []
     threadlocal_context = _snapshot_threadlocal_context(agent_context)
+    termination = loop_control.termination
 
-    async def flush_parallel_batch() -> None:
-        nonlocal pending_parallel
-        if not pending_parallel:
-            return
-        await async_execute_parallel_tool_batch(
-            pending_parallel,
+    async def consume_resolved(resolved: ResolvedToolCall) -> None:
+        nonlocal termination
+        if termination is None:
+            termination = loop_control.observe_tool_result(resolved)
+        await async_emit_resolved_tool_call(
+            resolved,
             tool_results,
             on_tool_call,
             run_id,
             idea_id,
             tool_call_source,
             agent_context=agent_context,
+        )
+
+    async def flush_parallel_batch() -> None:
+        nonlocal pending_parallel
+        if not pending_parallel:
+            return
+        resolved_calls = await async_execute_parallel_tool_batch(
+            pending_parallel,
+            agent_context=agent_context,
             max_parallel_tool_calls=max_parallel_tool_calls,
-            failure_state=failure_state,
         )
         pending_parallel = []
+        for resolved in resolved_calls:
+            await consume_resolved(resolved)
 
     for block in response.content:
         if not (hasattr(block, "type") and block.type == "tool_use"):
@@ -897,7 +855,8 @@ async def async_execute_tool_calls(
         tool_input = block.input
         tool_calls_made.append(tool_name)
 
-        if _append_open_circuit_result(tool_results, block, failure_state):
+        if termination is not None:
+            tool_results.append(termination.skipped_tool_result(block.id))
             continue
 
         if tool_name == "brain_encode" and tool_calls_made.count("brain_encode") > 1:
@@ -948,32 +907,27 @@ async def async_execute_tool_calls(
         )
 
         if tool_name in parallel_safe_tool_names:
-            same_tool_limit = _parallel_same_tool_limit(failure_state, tool_name)
+            same_tool_limit = loop_control.parallel_same_tool_limit(tool_name)
             same_tool_pending = sum(
                 request.tool_name == tool_name for request in pending_parallel
             )
-            if same_tool_limit is not None and same_tool_pending >= same_tool_limit:
+            if same_tool_pending >= same_tool_limit:
                 await flush_parallel_batch()
-                if _append_open_circuit_result(tool_results, block, failure_state):
+                if termination is not None:
+                    tool_results.append(termination.skipped_tool_result(block.id))
                     continue
             pending_parallel.append(request)
             continue
 
         await flush_parallel_batch()
-        await async_emit_resolved_tool_call(
-            await async_resolve_tool_call(
-                request,
-                agent_context=agent_context,
-                threadlocal_context=threadlocal_context,
-            ),
-            tool_results,
-            on_tool_call,
-            run_id,
-            idea_id,
-            tool_call_source,
+        if termination is not None:
+            tool_results.append(termination.skipped_tool_result(block.id))
+            continue
+        await consume_resolved(await async_resolve_tool_call(
+            request,
             agent_context=agent_context,
-            failure_state=failure_state,
-        )
+            threadlocal_context=threadlocal_context,
+        ))
 
     await flush_parallel_batch()
-    return tool_results
+    return ToolExecutionResult(tool_results=tool_results, termination=termination)

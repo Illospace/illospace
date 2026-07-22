@@ -60,8 +60,11 @@ from brain.systems.runs.direct_loop.gates import (
     check_gate_violations as _runtime_check_gate_violations,
 )
 from brain.systems.runs.direct_loop.loop_control import (
+    LoopControlPolicy,
+    LoopTermination,
     _detect_stuck_loop,
     _inject_nudges,
+    resolve_loop_output,
 )
 from brain.systems.runs.direct_loop.request import (
     apply_anthropic_cache_breakpoint as _runtime_apply_anthropic_cache_breakpoint,
@@ -110,6 +113,7 @@ from brain.systems.runs.direct_loop.telemetry import (
 from brain.systems.runs.direct_loop.tool_execution import (
     PendingToolCall as _PendingToolCall,
     ResolvedToolCall as _ResolvedToolCall,
+    ToolExecutionResult as _ToolExecutionResult,
     async_execute_tool_calls as _runtime_async_execute_tool_calls,
     resolve_tool_call as _runtime_resolve_tool_call,
 )
@@ -1112,6 +1116,7 @@ def _make_result(
     output: str, success: bool, session_id: str, tokens: _TokenAccumulator,
     start_time: float, tool_calls: list[str], error: str | None = None,
     worker_results: list | None = None,
+    termination: LoopTermination | None = None,
     post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = (),
 ) -> AgentResult:
     """Construct an AgentResult with common fields."""
@@ -1124,6 +1129,7 @@ def _make_result(
         tool_calls,
         error=error,
         worker_results=worker_results,
+        termination=termination,
         post_completion_tasks=post_completion_tasks,
     )
 
@@ -1195,8 +1201,8 @@ async def _execute_tool_calls_async(
     on_tool_call, run_id, idea_id, tool_call_source: str,
     *,
     max_parallel_tool_calls: int = _MAX_PARALLEL_TOOL_CALLS,
-    failure_state=None,
-) -> list[dict]:
+    loop_control: LoopControlPolicy,
+) -> _ToolExecutionResult:
     """Execute all tool calls from async runtime code."""
     return await _runtime_async_execute_tool_calls(
         response,
@@ -1215,7 +1221,7 @@ async def _execute_tool_calls_async(
         parallel_safe_tool_names=_PARALLEL_SAFE_TOOL_NAMES,
         max_parallel_tool_calls=max(1, int(max_parallel_tool_calls)),
         check_gate_violations=_runtime_check_gate_violations,
-        failure_state=failure_state,
+        loop_control=loop_control,
     )
 
 
@@ -1514,7 +1520,7 @@ async def run_agent_async(
 
         # Agent loop
         turn = 0
-        circuit_breaker_output: str | None = None
+        termination: LoopTermination | None = None
 
         for turn in range(max_turns):
             if await _cancel_event_is_set_async(cancel_event):
@@ -1858,34 +1864,38 @@ async def run_agent_async(
                 ]
                 state.recent_calls.extend(_turn_fingerprints)
 
-                if _detect_stuck_loop(state.recent_calls, session_id, state.messages):
+                termination = state.loop_control.detect_stuck_loop(
+                    state.recent_calls,
+                    session_id,
+                    state.messages,
+                )
+                if termination is not None:
                     break
 
                 # Execute tool calls
-                tool_results = await _execute_tool_calls_async(
+                execution = await _execute_tool_calls_async(
                     response, tool_handlers, state.tool_calls_made, state.gates,
                     on_tool_call, run_id, idea_id,
                     tool_call_source,
                     max_parallel_tool_calls=max_parallel_tool_calls,
-                    failure_state=state.tool_failures,
+                    loop_control=state.loop_control,
                 )
+                termination = execution.termination
 
                 _append_message_with_archive(
                     state.messages,
-                    {"role": "user", "content": tool_results},
+                    {"role": "user", "content": execution.tool_results},
                     raw_archive_messages,
                 )
 
-                if state.tool_failures.circuit_open:
-                    circuit_breaker_output = state.tool_failures.final_answer()
-                    _append_message_with_archive(
-                        state.messages,
-                        {
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": circuit_breaker_output}],
-                        },
-                        raw_archive_messages,
-                    )
+                if termination is not None:
+                    termination_message = termination.transcript_message()
+                    if termination_message is not None:
+                        _append_message_with_archive(
+                            state.messages,
+                            termination_message,
+                            raw_archive_messages,
+                        )
                     break
 
                 # Durable reminder (e.g. `cd` non-persistence), sent as its own
@@ -1915,14 +1925,16 @@ async def run_agent_async(
                 break
 
         # Post-loop: harvest, save, return
-        output = circuit_breaker_output or _extract_text(state.messages)
         staged_reply_contents = [
             str(content or "").strip()
             for content in list(getattr(_agent_context, "reply_contents", []) or [])
             if str(content or "").strip()
         ]
-        if staged_reply_contents and circuit_breaker_output is None:
-            output = staged_reply_contents[-1]
+        output = resolve_loop_output(
+            termination,
+            _extract_text(state.messages),
+            staged_reply_contents,
+        )
         raw_persist_source = raw_archive_messages if raw_archive_messages is not None else state.messages
         persistable_messages = _messages_without_inline_attachment_binary(
             _sanitize_tool_pairs(copy.deepcopy(raw_persist_source), session_id)
@@ -1985,6 +1997,7 @@ async def run_agent_async(
             state.tokens,
             start_time,
             state.tool_calls_made,
+            termination=termination,
             post_completion_tasks=post_completion_tasks,
         )
 
