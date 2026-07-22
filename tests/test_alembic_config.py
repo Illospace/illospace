@@ -117,6 +117,25 @@ def _literal_create_table_names(calls: list[ast.Call]) -> list[str]:
     return names
 
 
+def _literal_add_column_names(calls: list[ast.Call]) -> list[tuple[str, str]]:
+    names: list[tuple[str, str]] = []
+    for call in calls:
+        if _call_name(call.func) != "op.add_column" or len(call.args) < 2:
+            continue
+        table_arg, column_arg = call.args[:2]
+        if not (
+            isinstance(table_arg, ast.Constant)
+            and isinstance(table_arg.value, str)
+            and isinstance(column_arg, ast.Call)
+            and column_arg.args
+            and isinstance(column_arg.args[0], ast.Constant)
+            and isinstance(column_arg.args[0].value, str)
+        ):
+            continue
+        names.append((table_arg.value, column_arg.args[0].value))
+    return names
+
+
 def _normalized_sql(sql: str) -> str:
     return re.sub(r"\s+", " ", sql).strip().upper()
 
@@ -292,6 +311,41 @@ def test_post_baseline_model_table_migrations_guard_fresh_baseline_replay():
     assert violations == [], (
         "Post-baseline migrations that create model-owned tables must guard fresh "
         f"baseline replay because Base.metadata.create_all already created them: {violations}"
+    )
+
+
+def test_post_baseline_model_column_migrations_guard_fresh_baseline_replay():
+    """Fresh installs already have current model columns after the baseline."""
+    from brain.platform.db.base import Base
+    import brain.platform.db.models  # noqa: F401
+
+    model_columns = {
+        table_name: set(table.c.keys())
+        for table_name, table in Base.metadata.tables.items()
+    }
+    violations: list[str] = []
+    for path in _material_schema_migration_files():
+        if path.name == PUBLIC_BASELINE:
+            continue
+        module = ast.parse(path.read_text(), filename=str(path))
+        added_model_columns = [
+            (table_name, column_name)
+            for table_name, column_name in _literal_add_column_names(
+                _function_body_calls(module, "upgrade")
+            )
+            if column_name in model_columns.get(table_name, set())
+        ]
+        if not added_model_columns:
+            continue
+
+        content = path.read_text()
+        if "get_columns" not in content:
+            violations.append(f"{path.name}: {added_model_columns}")
+
+    assert violations == [], (
+        "Post-baseline migrations that add model-owned columns must guard fresh "
+        "baseline replay because Base.metadata.create_all already added them: "
+        f"{violations}"
     )
 
 
