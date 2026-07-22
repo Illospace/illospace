@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.launch_handoff import LaunchHandoff
@@ -442,24 +442,68 @@ async def create_launch_handoff_with_status(
     clean_target_tool = (_clean_optional_string(handoff_input.target_tool) or TARGET_CODEX).lower()
     clean_source_ref = _json_dict(handoff_input.source_ref)
     clean_metadata = _json_dict(handoff_input.metadata)
-    clean_idempotency_key = _clean_optional_string(handoff_input.idempotency_key) or (
-        derive_launch_handoff_idempotency_key(
+    explicit_idempotency_key = _clean_optional_string(handoff_input.idempotency_key)
+    derived_idempotency_key = None
+    if explicit_idempotency_key is None:
+        derived_idempotency_key = derive_launch_handoff_idempotency_key(
             clean_source_ref,
             created_by_user_id=handoff_input.created_by_user_id,
             metadata=clean_metadata,
         )
-    )
-    if clean_idempotency_key:
+    clean_idempotency_key = explicit_idempotency_key or derived_idempotency_key
+
+    existing = None
+    if explicit_idempotency_key:
+        # A caller-supplied key promises this is the exact same request, so
+        # preserve strict idempotency across every status and expiry state.
         existing = await session.scalar(
             select(LaunchHandoff).where(
                 LaunchHandoff.org_id == clean_org_id,
-                LaunchHandoff.idempotency_key == clean_idempotency_key,
+                LaunchHandoff.idempotency_key == explicit_idempotency_key,
             )
         )
-        if existing is not None:
-            existing.metadata_ = _refire_metadata(existing.metadata_)
-            await session.flush()
-            return existing, False
+    elif derived_idempotency_key:
+        # A derived key only infers that tracked work is the same. Reuse it
+        # while the handoff is still actionable; completed or expired work
+        # must not suppress a legitimate recurrence.
+        now = datetime.now(timezone.utc)
+        existing = await session.scalar(
+            select(LaunchHandoff)
+            .where(
+                LaunchHandoff.org_id == clean_org_id,
+                LaunchHandoff.idempotency_key == derived_idempotency_key,
+                LaunchHandoff.status == "open",
+                or_(
+                    LaunchHandoff.expires_at.is_(None),
+                    LaunchHandoff.expires_at > now,
+                ),
+            )
+            .order_by(LaunchHandoff.created_at.desc(), LaunchHandoff.id.desc())
+            .limit(1)
+        )
+
+        if existing is None:
+            # The schema's strict (org_id, idempotency_key) uniqueness still
+            # applies. Retire the key from its non-actionable holder so the
+            # new live occurrence can carry the stable derived key. This is
+            # key lifecycle maintenance, not an idempotency reuse.
+            stale_key_holder = await session.scalar(
+                select(LaunchHandoff)
+                .where(
+                    LaunchHandoff.org_id == clean_org_id,
+                    LaunchHandoff.idempotency_key == derived_idempotency_key,
+                )
+                .order_by(LaunchHandoff.created_at.desc(), LaunchHandoff.id.desc())
+                .limit(1)
+            )
+            if stale_key_holder is not None:
+                stale_key_holder.idempotency_key = None
+                await session.flush()
+
+    if existing is not None:
+        existing.metadata_ = _refire_metadata(existing.metadata_)
+        await session.flush()
+        return existing, False
 
     row = LaunchHandoff(
         org_id=clean_org_id,

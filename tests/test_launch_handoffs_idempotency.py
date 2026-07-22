@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
 
 from brain.app.api.routers import launch_handoffs as launch_handoffs_router
 from brain.app.api.schemas.launch_handoffs import LaunchHandoffCreateRequest
+from brain.platform.db.models.launch_handoff import LaunchHandoff
 from brain.systems.launch_handoffs import (
     LaunchHandoffCreateInput,
     create_launch_handoff_with_status,
@@ -31,14 +33,31 @@ class _LaunchHandoffSession:
 
     async def scalar(self, statement):
         values = {str(value) for value in statement.compile().params.values()}
-        return next(
-            (
+        rows = [
+            row
+            for row in self.rows
+            if str(row.org_id) in values and str(row.idempotency_key) in values
+        ]
+        sql = str(statement)
+        if "launch_handoffs.status =" in sql:
+            rows = [row for row in rows if row.status == "open"]
+        if "launch_handoffs.expires_at IS NULL" in sql:
+            now = next(
+                value
+                for value in statement.compile().params.values()
+                if isinstance(value, datetime)
+            )
+            rows = [
                 row
-                for row in self.rows
-                if str(row.org_id) in values and str(row.idempotency_key) in values
-            ),
-            None,
-        )
+                for row in rows
+                if row.expires_at is None or row.expires_at > now
+            ]
+        if "launch_handoffs.created_at DESC" in sql:
+            rows.sort(
+                key=lambda row: (row.created_at, str(row.id)),
+                reverse=True,
+            )
+        return rows[0] if rows else None
 
     def add(self, row) -> None:
         if not row.id:
@@ -113,6 +132,7 @@ async def test_existing_open_handoff_reports_an_idempotency_hit():
     row, created = await create_launch_handoff_with_status(
         session, _payload(source_ref=source_ref)
     )
+    row.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
     replayed, replay_created = await create_launch_handoff_with_status(
         session, _payload(source_ref=source_ref)
     )
@@ -122,6 +142,113 @@ async def test_existing_open_handoff_reports_an_idempotency_hit():
     assert created is True
     assert replay_created is False
     assert len(session.rows) == 1
+
+
+async def test_launched_derived_handoff_does_not_suppress_a_new_mint():
+    session = _LaunchHandoffSession()
+    source_ref = {"external_id": "github:Illospace/illospace:issue:409"}
+    launched, _ = await create_launch_handoff_with_status(
+        session, _payload(source_ref=source_ref)
+    )
+    launched.status = "launched"
+    original_refire_count = launched.metadata_.get("refire_count")
+
+    replacement, created = await create_launch_handoff_with_status(
+        session, _payload(source_ref=source_ref)
+    )
+
+    assert created is True
+    assert replacement is not launched
+    assert replacement.status == "open"
+    assert launched.status == "launched"
+    assert launched.metadata_.get("refire_count") == original_refire_count
+    assert len(session.rows) == 2
+
+
+async def test_expired_derived_handoff_does_not_suppress_a_new_mint():
+    session = _LaunchHandoffSession()
+    source_ref = {"external_id": "rollbar:Uwear-API#2206"}
+    expired, _ = await create_launch_handoff_with_status(
+        session, _payload(source_ref=source_ref)
+    )
+    expired.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    original_refire_count = expired.metadata_.get("refire_count")
+
+    replacement, created = await create_launch_handoff_with_status(
+        session, _payload(source_ref=source_ref)
+    )
+
+    assert created is True
+    assert replacement is not expired
+    assert expired.metadata_.get("refire_count") == original_refire_count
+    assert len(session.rows) == 2
+
+
+async def test_derived_key_reuses_the_most_recent_actionable_handoff():
+    session = _LaunchHandoffSession()
+    source_ref = {"external_id": "tracked-item-with-duplicate-open-rows"}
+    derived_key = derive_launch_handoff_idempotency_key(
+        source_ref,
+        created_by_user_id=_OWNER_ID,
+    )
+    assert derived_key is not None
+    older = LaunchHandoff(
+        id="handoff-older",
+        org_id=_ORG_ID,
+        created_by_user_id=_OWNER_ID,
+        source_ref=source_ref,
+        title="Older open handoff",
+        instructions="Older instructions",
+        idempotency_key=derived_key,
+        status="open",
+        expires_at=None,
+        metadata_={},
+    )
+    older.created_at = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    newer = LaunchHandoff(
+        id="handoff-newer",
+        org_id=_ORG_ID,
+        created_by_user_id=_OWNER_ID,
+        source_ref=source_ref,
+        title="Newer open handoff",
+        instructions="Newer instructions",
+        idempotency_key=derived_key,
+        status="open",
+        expires_at=None,
+        metadata_={},
+    )
+    newer.created_at = datetime(2026, 7, 21, tzinfo=timezone.utc)
+    session.rows.extend([older, newer])
+
+    reused, created = await create_launch_handoff_with_status(
+        session, _payload(source_ref=source_ref)
+    )
+
+    assert created is False
+    assert reused is newer
+    assert newer.metadata_["refire_count"] == 1
+    assert older.metadata_ == {}
+
+
+async def test_stale_row_releases_derived_key_before_real_database_insert(
+    async_sqlite_session_factory,
+):
+    session = await async_sqlite_session_factory([LaunchHandoff.__table__])
+    source_ref = {"external_id": "tracked-item-recurrence"}
+    launched, _ = await create_launch_handoff_with_status(
+        session, _payload(source_ref=source_ref)
+    )
+    launched.status = "launched"
+    await session.flush()
+    derived_key = launched.idempotency_key
+
+    replacement, created = await create_launch_handoff_with_status(
+        session, _payload(source_ref=source_ref)
+    )
+
+    assert created is True
+    assert replacement.idempotency_key == derived_key
+    assert launched.idempotency_key is None
 
 
 async def test_repeated_hits_bump_occurrence_metadata_without_overwriting_the_handoff():
@@ -181,6 +308,27 @@ async def test_explicit_idempotency_key_takes_precedence_over_tracked_identity()
     assert first_created is True
     assert second is first
     assert second_created is False
+    assert len(session.rows) == 1
+
+
+async def test_explicit_key_still_dedupes_against_a_launched_handoff():
+    session = _LaunchHandoffSession()
+    explicit_key = "caller:strict-request-key"
+    launched, _ = await create_launch_handoff_with_status(
+        session,
+        _payload(source_ref={}, idempotency_key=explicit_key),
+    )
+    launched.status = "launched"
+
+    replayed, created = await create_launch_handoff_with_status(
+        session,
+        _payload(source_ref={}, idempotency_key=explicit_key),
+    )
+
+    assert created is False
+    assert replayed is launched
+    assert replayed.status == "launched"
+    assert replayed.metadata_["refire_count"] == 1
     assert len(session.rows) == 1
 
 
