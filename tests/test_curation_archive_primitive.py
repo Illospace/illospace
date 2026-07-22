@@ -12,6 +12,35 @@ import brain.systems.reconstructive_memory.curation as curation
 pytestmark = pytest.mark.asyncio
 
 
+def _record_archive_repository_calls(monkeypatch, *, source_id, span_id):
+    calls: list[tuple[str, object]] = []
+    source = SimpleNamespace(id=source_id)
+    spans = [SimpleNamespace(id=span_id)]
+
+    class SourceRepository:
+        def __init__(self, session):
+            pass
+
+        async def create_with_spans(self, **kwargs):
+            calls.append(("create_with_spans", kwargs))
+            return source, spans
+
+    class CompatibilityRepository:
+        def __init__(self, session):
+            pass
+
+        async def archive_many(self, node_ids):
+            calls.append(("archive_many", node_ids))
+
+    monkeypatch.setattr(curation, "MemorySourceRepository", SourceRepository)
+    monkeypatch.setattr(
+        curation,
+        "ReconstructiveMemoryCompatibilityRepository",
+        CompatibilityRepository,
+    )
+    return calls
+
+
 async def test_user_archive_supplies_its_existing_audit_contract(monkeypatch):
     visible_nodes = [
         SimpleNamespace(visibility="org"),
@@ -22,13 +51,16 @@ async def test_user_archive_supplies_its_existing_audit_contract(monkeypatch):
         "_visible_nodes_exact",
         AsyncMock(return_value=visible_nodes),
     )
-    archive_with_curation = AsyncMock(
-        return_value=(SimpleNamespace(id=41), [SimpleNamespace(id=42)])
+    monkeypatch.setattr(curation.uuid, "uuid4", lambda: "evidence-uuid")
+    calls = _record_archive_repository_calls(
+        monkeypatch,
+        source_id=41,
+        span_id=42,
     )
-    monkeypatch.setattr(curation, "_archive_with_curation", archive_with_curation)
 
+    session = SimpleNamespace()
     result = await curation.archive_memories(
-        SimpleNamespace(),
+        session,
         node_ids=[7, 7, 9],
         reason="  Obsolete   duplicate memory. ",
         user_id="user:test",
@@ -36,28 +68,35 @@ async def test_user_archive_supplies_its_existing_audit_contract(monkeypatch):
         run_id=123,
     )
 
-    context = archive_with_curation.await_args.kwargs["context"]
-    assert context.node_ids == [7, 9]
-    assert context.source_kind == curation.CURATION_CREATED_BY
-    assert context.source_ref.startswith("123:archive:")
-    assert context.raw_content == "Obsolete duplicate memory."
-    assert context.span_drafts[0].text == context.raw_content
-    assert context.span_drafts[0].locator == {
-        "kind": "curation_reason",
-        "action": "archive",
-    }
-    assert context.structured_payload == {
-        "action": "archive",
-        "reason": "Obsolete duplicate memory.",
-        "created_by": curation.CURATION_CREATED_BY,
-        "run_id": "123",
-        "node_ids": [7, 9],
-    }
-    assert context.user_id == "user:test"
-    assert context.org_id == "org:test"
-    assert context.authority_principal == "user:test"
-    assert context.visibility == "private"
-    assert context.sensitivity == "low"
+    assert calls == [
+        (
+            "create_with_spans",
+            {
+                "source_kind": curation.CURATION_CREATED_BY,
+                "source_ref": "123:archive:evidence-uuid",
+                "raw_content": "Obsolete duplicate memory.",
+                "spans": [
+                    curation.SourceSpanDraft(
+                        text="Obsolete duplicate memory.",
+                        locator={"kind": "curation_reason", "action": "archive"},
+                    )
+                ],
+                "org_id": "org:test",
+                "user_id": "user:test",
+                "visibility": "private",
+                "structured_payload": {
+                    "action": "archive",
+                    "reason": "Obsolete duplicate memory.",
+                    "created_by": curation.CURATION_CREATED_BY,
+                    "run_id": "123",
+                    "node_ids": [7, 9],
+                },
+                "authority_principal": "user:test",
+                "sensitivity": "low",
+            },
+        ),
+        ("archive_many", [7, 9]),
+    ]
     assert result == {
         "memory_system": "reconstructive",
         "action": "archive",
@@ -70,10 +109,11 @@ async def test_user_archive_supplies_its_existing_audit_contract(monkeypatch):
 
 
 async def test_policy_archive_supplies_its_existing_audit_contract(monkeypatch):
-    archive_with_curation = AsyncMock(
-        return_value=(SimpleNamespace(id=51), [SimpleNamespace(id=52)])
+    calls = _record_archive_repository_calls(
+        monkeypatch,
+        source_id=51,
+        span_id=52,
     )
-    monkeypatch.setattr(curation, "_archive_with_curation", archive_with_curation)
     node = SimpleNamespace(
         id=17,
         archived_at=None,
@@ -92,37 +132,48 @@ async def test_policy_archive_supplies_its_existing_audit_contract(monkeypatch):
         reason="  Expired   by policy. ",
     )
 
-    context = archive_with_curation.await_args.kwargs["context"]
-    assert context.node_ids == [17]
-    assert context.source_kind == curation.MEMORY_CURATOR_SOURCE_KIND
-    assert context.source_ref == "nightly-memory-maintenance:456:archive:17"
-    assert context.raw_content == (
+    audit_text = (
         "Rule: expired transient fact. Policy version: v1. Target node: 17. "
         "Run ID: 456. Reason: Expired by policy."
     )
-    assert context.span_drafts[0].text == context.raw_content
-    assert context.span_drafts[0].locator == {
-        "kind": "memory_curation",
-        "action": "archive",
-        "rule": "expired transient fact",
-        "policy_version": "v1",
-        "target_node": 17,
-        "run_id": "456",
-    }
-    assert context.structured_payload == {
-        "action": "archive",
-        "rule": "expired transient fact",
-        "policy_version": "v1",
-        "target_node": 17,
-        "run_id": "456",
-        "reason": "Expired by policy.",
-        "created_by": curation.MEMORY_CURATOR_SOURCE_KIND,
-    }
-    assert context.user_id == "user:test"
-    assert context.org_id == "org:test"
-    assert context.authority_principal == curation.MEMORY_CURATOR_SOURCE_KIND
-    assert context.visibility == "team"
-    assert context.sensitivity == "high"
+    assert calls == [
+        (
+            "create_with_spans",
+            {
+                "source_kind": curation.MEMORY_CURATOR_SOURCE_KIND,
+                "source_ref": "nightly-memory-maintenance:456:archive:17",
+                "raw_content": audit_text,
+                "spans": [
+                    curation.SourceSpanDraft(
+                        text=audit_text,
+                        locator={
+                            "kind": "memory_curation",
+                            "action": "archive",
+                            "rule": "expired transient fact",
+                            "policy_version": "v1",
+                            "target_node": 17,
+                            "run_id": "456",
+                        },
+                    )
+                ],
+                "org_id": "org:test",
+                "user_id": "user:test",
+                "visibility": "team",
+                "structured_payload": {
+                    "action": "archive",
+                    "rule": "expired transient fact",
+                    "policy_version": "v1",
+                    "target_node": 17,
+                    "run_id": "456",
+                    "reason": "Expired by policy.",
+                    "created_by": curation.MEMORY_CURATOR_SOURCE_KIND,
+                },
+                "authority_principal": curation.MEMORY_CURATOR_SOURCE_KIND,
+                "sensitivity": "high",
+            },
+        ),
+        ("archive_many", [17]),
+    ]
     assert result == {
         "node_id": 17,
         "curation_source_id": 51,
@@ -130,67 +181,154 @@ async def test_policy_archive_supplies_its_existing_audit_contract(monkeypatch):
     }
 
 
-async def test_archive_primitive_records_evidence_before_soft_archive(monkeypatch):
-    calls: list[tuple[str, object]] = []
-    source = SimpleNamespace(id=61)
-    spans = [SimpleNamespace(id=62)]
-
-    class SourceRepository:
-        def __init__(self, session):
-            calls.append(("source_repository", session))
-
-        async def create_with_spans(self, **kwargs):
-            calls.append(("create_with_spans", kwargs))
-            return source, spans
-
-    class CompatibilityRepository:
-        def __init__(self, session):
-            calls.append(("compatibility_repository", session))
-
-        async def archive_many(self, node_ids):
-            calls.append(("archive_many", node_ids))
-
-    monkeypatch.setattr(curation, "MemorySourceRepository", SourceRepository)
+async def test_link_persists_the_shared_agent_curation_evidence_contract(monkeypatch):
     monkeypatch.setattr(
         curation,
-        "ReconstructiveMemoryCompatibilityRepository",
-        CompatibilityRepository,
+        "_visible_nodes_exact",
+        AsyncMock(
+            return_value=[
+                SimpleNamespace(visibility="org"),
+                SimpleNamespace(visibility="team"),
+            ]
+        ),
     )
-    session = SimpleNamespace()
-    context = curation._ArchiveAuditContext(
-        node_ids=[23],
-        source_kind="audit-kind",
-        source_ref="audit-ref",
-        raw_content="audit text",
-        span_drafts=[],
-        structured_payload={"action": "archive"},
+    monkeypatch.setattr(curation.uuid, "uuid4", lambda: "link-uuid")
+    source_repository = SimpleNamespace(
+        create_with_spans=AsyncMock(
+            return_value=(SimpleNamespace(id=61), [SimpleNamespace(id=62)])
+        )
+    )
+    edge_repository = SimpleNamespace(
+        upsert_edge=AsyncMock(
+            return_value=SimpleNamespace(id=63, created_by=curation.CURATION_CREATED_BY)
+        )
+    )
+    monkeypatch.setattr(
+        curation,
+        "MemorySourceRepository",
+        lambda session: source_repository,
+    )
+    monkeypatch.setattr(
+        curation,
+        "MemoryEdgeRepository",
+        lambda session: edge_repository,
+    )
+
+    await curation.link_memories(
+        SimpleNamespace(),
+        source_node_id=7,
+        target_node_id=9,
+        relationship=" supports guidance ",
+        reason="  Same   verified guidance. ",
         user_id="user:test",
         org_id="org:test",
-        authority_principal="actor:test",
-        visibility="org",
-        sensitivity="low",
+        run_id=234,
     )
 
-    result = await curation._archive_with_curation(session, context=context)
+    source_repository.create_with_spans.assert_awaited_once_with(
+        source_kind=curation.CURATION_CREATED_BY,
+        source_ref="234:link:link-uuid",
+        raw_content="Same verified guidance.",
+        spans=[
+            curation.SourceSpanDraft(
+                text="Same verified guidance.",
+                locator={"kind": "curation_reason", "action": "link"},
+            )
+        ],
+        org_id="org:test",
+        user_id="user:test",
+        visibility="team",
+        structured_payload={
+            "action": "link",
+            "reason": "Same verified guidance.",
+            "created_by": curation.CURATION_CREATED_BY,
+            "run_id": "234",
+            "source_node": 7,
+            "target_node": 9,
+            "relationship": "supports_guidance",
+        },
+        authority_principal="user:test",
+    )
 
-    assert result == (source, spans)
-    assert calls == [
-        ("source_repository", session),
-        (
-            "create_with_spans",
-            {
-                "source_kind": "audit-kind",
-                "source_ref": "audit-ref",
-                "raw_content": "audit text",
-                "spans": [],
-                "org_id": "org:test",
-                "user_id": "user:test",
-                "visibility": "org",
-                "structured_payload": {"action": "archive"},
-                "authority_principal": "actor:test",
-                "sensitivity": "low",
-            },
+
+async def test_supersede_persists_the_shared_agent_curation_evidence_contract(monkeypatch):
+    old_node = SimpleNamespace(visibility="org")
+    monkeypatch.setattr(
+        curation,
+        "_visible_nodes_exact",
+        AsyncMock(
+            side_effect=[
+                [old_node],
+                [old_node, SimpleNamespace(visibility="private")],
+            ]
         ),
-        ("compatibility_repository", session),
-        ("archive_many", [23]),
-    ]
+    )
+    monkeypatch.setattr(curation.uuid, "uuid4", lambda: "supersede-uuid")
+    source_repository = SimpleNamespace(
+        create_with_spans=AsyncMock(
+            return_value=(SimpleNamespace(id=71), [SimpleNamespace(id=72)])
+        )
+    )
+    node_repository = SimpleNamespace(mark_superseded=AsyncMock())
+    assertion_repository = SimpleNamespace(mark_superseded_for_node=AsyncMock())
+    edge_repository = SimpleNamespace(
+        upsert_edge=AsyncMock(
+            return_value=SimpleNamespace(id=73, created_by=curation.CURATION_CREATED_BY)
+        )
+    )
+    monkeypatch.setattr(
+        curation,
+        "MemorySourceRepository",
+        lambda session: source_repository,
+    )
+    monkeypatch.setattr(
+        curation,
+        "MemoryNodeRepository",
+        lambda session: node_repository,
+    )
+    monkeypatch.setattr(
+        curation,
+        "MemoryAssertionRepository",
+        lambda session: assertion_repository,
+    )
+    monkeypatch.setattr(
+        curation,
+        "MemoryEdgeRepository",
+        lambda session: edge_repository,
+    )
+    session = SimpleNamespace()
+    session.scalar = AsyncMock(return_value=None)
+
+    await curation.supersede_memory(
+        session,
+        old_node_id=23,
+        new_node_id=29,
+        reason="  Replaced   by verified guidance. ",
+        user_id="user:test",
+        org_id="org:test",
+        run_id=None,
+    )
+
+    source_repository.create_with_spans.assert_awaited_once_with(
+        source_kind=curation.CURATION_CREATED_BY,
+        source_ref="direct:supersede:supersede-uuid",
+        raw_content="Replaced by verified guidance.",
+        spans=[
+            curation.SourceSpanDraft(
+                text="Replaced by verified guidance.",
+                locator={"kind": "curation_reason", "action": "supersede"},
+            )
+        ],
+        org_id="org:test",
+        user_id="user:test",
+        visibility="private",
+        structured_payload={
+            "action": "supersede",
+            "reason": "Replaced by verified guidance.",
+            "created_by": curation.CURATION_CREATED_BY,
+            "run_id": None,
+            "old_node": 23,
+            "new_node": 29,
+        },
+        authority_principal="user:test",
+    )

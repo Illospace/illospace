@@ -234,26 +234,21 @@ async def archive_memories(
         org_id=org_id,
     )
     normalized_reason = _normalize_reason(reason)
+    source_ref, span_drafts, structured_payload = _build_agent_curation_evidence(
+        action="archive",
+        reason=normalized_reason,
+        run_id=run_id,
+        payload={"node_ids": unique_ids},
+    )
     curation_source, _ = await _archive_with_curation(
         session,
         context=_ArchiveAuditContext(
             node_ids=unique_ids,
             source_kind=CURATION_CREATED_BY,
-            source_ref=f"{run_id or 'direct'}:archive:{uuid.uuid4()}",
+            source_ref=source_ref,
             raw_content=normalized_reason,
-            span_drafts=[
-                SourceSpanDraft(
-                    text=normalized_reason,
-                    locator={"kind": "curation_reason", "action": "archive"},
-                )
-            ],
-            structured_payload={
-                "action": "archive",
-                "reason": normalized_reason,
-                "created_by": CURATION_CREATED_BY,
-                "run_id": str(run_id) if run_id is not None else None,
-                "node_ids": unique_ids,
-            },
+            span_drafts=span_drafts,
+            structured_payload=structured_payload,
             user_id=user_id,
             org_id=org_id,
             authority_principal=user_id,
@@ -381,6 +376,31 @@ async def _archive_with_curation(
     return curation_source, spans
 
 
+def _build_agent_curation_evidence(
+    *,
+    action: str,
+    reason: str,
+    run_id: int | str | None,
+    payload: dict[str, Any],
+) -> tuple[str, list[SourceSpanDraft], dict[str, Any]]:
+    return (
+        f"{run_id or 'direct'}:{action}:{uuid.uuid4()}",
+        [
+            SourceSpanDraft(
+                text=reason,
+                locator={"kind": "curation_reason", "action": action},
+            )
+        ],
+        {
+            "action": action,
+            "reason": reason,
+            "created_by": CURATION_CREATED_BY,
+            "run_id": str(run_id) if run_id is not None else None,
+            **payload,
+        },
+    )
+
+
 async def _record_curation_source(
     session: AsyncSession,
     *,
@@ -392,21 +412,21 @@ async def _record_curation_source(
     visibility: str,
     run_id: int | str | None,
 ):
+    source_ref, spans, structured_payload = _build_agent_curation_evidence(
+        action=action,
+        reason=reason,
+        run_id=run_id,
+        payload=payload,
+    )
     return await MemorySourceRepository(session).create_with_spans(
         source_kind=CURATION_CREATED_BY,
-        source_ref=f"{run_id or 'direct'}:{action}:{uuid.uuid4()}",
+        source_ref=source_ref,
         raw_content=reason,
-        spans=[SourceSpanDraft(text=reason, locator={"kind": "curation_reason", "action": action})],
+        spans=spans,
         org_id=org_id,
         user_id=user_id,
         visibility=visibility,
-        structured_payload={
-            "action": action,
-            "reason": reason,
-            "created_by": CURATION_CREATED_BY,
-            "run_id": str(run_id) if run_id is not None else None,
-            **payload,
-        },
+        structured_payload=structured_payload,
         authority_principal=user_id,
     )
 
