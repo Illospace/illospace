@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any
+from typing import Any, Literal, NamedTuple
 
 from brain.platform.async_io import async_http_client
 
@@ -17,6 +17,12 @@ _SLACK_SECTION_HEADER_RE = re.compile(r"(?m)^\*[^*\n]+\*[ \t]*(?=\n|$)")
 _SLACK_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
 _SLACK_BULLET_RE = re.compile(r"(?m)^•[ \t]+")
 _SLACK_ENTITY_RE = re.compile(r"<[^>\n]+>")
+
+
+class _ProtectedSlackSpan(NamedTuple):
+    kind: Literal["entity", "fenced_block"]
+    start: int
+    end: int
 
 
 class SlackConfigurationError(RuntimeError):
@@ -74,29 +80,32 @@ class SlackDeliveryError(SlackApiError):
         }
 
 
-def _protected_slack_spans(text: str) -> list[tuple[int, int]]:
-    spans = [(match.start(), match.end()) for match in _SLACK_ENTITY_RE.finditer(text)]
+def _protected_slack_spans(text: str) -> list[_ProtectedSlackSpan]:
+    spans = [
+        _ProtectedSlackSpan("entity", match.start(), match.end())
+        for match in _SLACK_ENTITY_RE.finditer(text)
+    ]
     fence_start: int | None = None
     for match in re.finditer(r"```", text):
         if fence_start is None:
             fence_start = match.start()
         else:
-            spans.append((fence_start, match.end()))
+            spans.append(_ProtectedSlackSpan("fenced_block", fence_start, match.end()))
             fence_start = None
     if fence_start is not None:
-        spans.append((fence_start, len(text)))
-    return sorted(spans)
+        spans.append(_ProtectedSlackSpan("fenced_block", fence_start, len(text)))
+    return sorted(spans, key=lambda span: (span.start, span.end))
 
 
-def _is_safe_boundary(position: int, protected_spans: list[tuple[int, int]]) -> bool:
-    return not any(start < position < end for start, end in protected_spans)
+def _is_safe_boundary(position: int, protected_spans: list[_ProtectedSlackSpan]) -> bool:
+    return not any(span.start < position < span.end for span in protected_spans)
 
 
 def _last_safe_boundary(
     positions: list[int],
     *,
     limit: int,
-    protected_spans: list[tuple[int, int]],
+    protected_spans: list[_ProtectedSlackSpan],
 ) -> int | None:
     candidates = [
         position
@@ -104,6 +113,25 @@ def _last_safe_boundary(
         if 0 < position <= limit and _is_safe_boundary(position, protected_spans)
     ]
     return max(candidates, default=None)
+
+
+def _oversized_protected_span_split_offset(
+    span: _ProtectedSlackSpan,
+    *,
+    hard_boundary: int,
+) -> int:
+    """Apply the explicit overflow policy for a construct larger than one chunk."""
+
+    assert span.start == 0 < hard_boundary < span.end
+    if span.kind == "entity":
+        # A Slack entity cannot legitimately exceed the available text budget.
+        # Treat malformed input as ordinary text rather than breaking the limit.
+        return hard_boundary
+    if span.kind == "fenced_block":
+        # Synthetic close/re-open fences would make the concatenated content
+        # differ from the submission. Preserve it byte-for-byte at the hard cut.
+        return hard_boundary
+    raise AssertionError(f"Unknown protected Slack span kind: {span.kind}")
 
 
 def _preferred_split_offset(text: str, limit: int) -> int:
@@ -131,24 +159,30 @@ def _preferred_split_offset(text: str, limit: int) -> int:
             return boundary
 
     hard_boundary = min(limit, len(text))
-    for start, end in protected_spans:
-        if start < hard_boundary < end:
-            # A normal Slack entity or fenced block fits in a message and can
-            # move whole to the next chunk. If the protected construct alone
-            # exceeds the available budget, keeping it whole is the only way
-            # not to corrupt its Slack rendering.
-            return start if start else end
+    for span in protected_spans:
+        if span.start < hard_boundary < span.end:
+            if span.start:
+                return span.start
+            return _oversized_protected_span_split_offset(
+                span,
+                hard_boundary=hard_boundary,
+            )
     return hard_boundary
 
 
-def _continuation_marker_reserve(text: str) -> int:
-    # A message cannot produce more chunks than it has characters. Reserving
-    # that digit width keeps every finalized chunk within the caller's limit
-    # without a count-and-resplit loop at powers of ten.
-    widest_index = "9" * len(str(max(2, len(text))))
-    first = f"\n\n({widest_index}/{widest_index}) ↓ continued"
-    continuation = f"({widest_index}/{widest_index}) continuation\n\n"
-    return max(len(first), len(continuation))
+def _continuation_marker(index: int, total: int) -> str:
+    assert total >= 2
+    assert 1 <= index <= total
+    if index == 1:
+        return f"\n\n(1/{total}) ↓ continued"
+    return f"({index}/{total}) continuation\n\n"
+
+
+def _continuation_marker_reserve(chunk_count: int) -> int:
+    return max(
+        len(_continuation_marker(1, chunk_count)),
+        len(_continuation_marker(chunk_count, chunk_count)),
+    )
 
 
 def split_slack_message(text: str, limit: int) -> list[str]:
@@ -160,26 +194,33 @@ def split_slack_message(text: str, limit: int) -> list[str]:
     if len(submitted_text) <= limit:
         return [submitted_text]
 
-    content_limit = limit - _continuation_marker_reserve(submitted_text)
-    if content_limit <= 0:
-        raise ValueError("Slack message limit is too small for continuation markers")
+    assumed_chunk_count = 2
+    while True:
+        marker_reserve = _continuation_marker_reserve(assumed_chunk_count)
+        content_limit = limit - marker_reserve
+        if content_limit <= 0:
+            raise ValueError("Slack message limit is too small for continuation markers")
 
-    parts: list[str] = []
-    remaining = submitted_text
-    while len(remaining) > content_limit:
-        split_at = _preferred_split_offset(remaining, content_limit)
-        if split_at <= 0:
-            split_at = content_limit
-        parts.append(remaining[:split_at])
-        remaining = remaining[split_at:]
-    parts.append(remaining)
+        parts: list[str] = []
+        remaining = submitted_text
+        while len(remaining) > content_limit:
+            split_at = _preferred_split_offset(remaining, content_limit)
+            assert 1 <= split_at <= content_limit
+            parts.append(remaining[:split_at])
+            remaining = remaining[split_at:]
+        parts.append(remaining)
 
-    total = len(parts)
-    chunks = [f"{parts[0]}\n\n(1/{total}) ↓ continued"]
+        total = len(parts)
+        if _continuation_marker_reserve(total) == marker_reserve:
+            break
+        assumed_chunk_count = total
+
+    chunks = [f"{parts[0]}{_continuation_marker(1, total)}"]
     chunks.extend(
-        f"({index}/{total}) continuation\n\n{part}"
+        f"{_continuation_marker(index, total)}{part}"
         for index, part in enumerate(parts[1:], start=2)
     )
+    assert all(len(chunk) <= limit for chunk in chunks)
     return chunks
 
 

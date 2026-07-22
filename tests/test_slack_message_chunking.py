@@ -141,6 +141,35 @@ def test_split_slack_message_hard_cuts_only_as_a_lossless_last_resort():
     assert "".join(_unmarked_parts(chunks)) == body
 
 
+@pytest.mark.parametrize("limit", [32, 47, 80])
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("```\n" + ("fenced-content\n" * 20) + "```", id="giant-fence"),
+        pytest.param("<@" + ("U" * 240) + "|oversized-mention>", id="giant-entity"),
+        pytest.param("x" * 257, id="no-whitespace"),
+    ],
+)
+def test_split_slack_message_is_bounded_and_lossless_for_adversarial_input(
+    body: str,
+    limit: int,
+):
+    chunks = split_slack_message(body, limit)
+
+    assert all(len(chunk) <= limit for chunk in chunks)
+    assert "".join(_unmarked_parts(chunks)) == body
+
+
+def test_split_slack_message_sizes_markers_from_the_stable_chunk_count():
+    body = "x" * 1000
+
+    chunks = split_slack_message(body, 26)
+
+    assert len(chunks) >= 100
+    assert all(len(chunk) <= 26 for chunk in chunks)
+    assert "".join(_unmarked_parts(chunks)) == body
+
+
 @pytest.mark.asyncio
 async def test_post_message_keeps_oversized_channel_digest_in_channel():
     client = _RecordingSlackClient()
