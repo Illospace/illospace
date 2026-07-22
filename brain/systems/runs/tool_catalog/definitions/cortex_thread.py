@@ -474,6 +474,8 @@ CHAT_TOOLS = [
             "users. To make Illo watch a channel's every message (acknowledging each with a 👀 reaction and "
             "triaging automated alerts or user-reported issues into tickets), use action='monitor_channel' "
             "with the channel_id; action='unmonitor_channel' to stop; action='list_monitored' to review. The "
+            "read-only action='open_alert_surges' returns material provider-alert incidents that are still "
+            "inside their rolling window, for scheduled digest ordering. The "
             "bot must be a member of the channel and the Slack app needs the channels:history and "
             "reactions:write scopes."
         ),
@@ -491,6 +493,7 @@ CHAT_TOOLS = [
                         "list_monitored",
                         "monitor_channel",
                         "unmonitor_channel",
+                        "open_alert_surges",
                     ],
                     "description": "Slack management action.",
                 },

@@ -3,6 +3,15 @@
   "default_severity": "high",
   "throttle_minutes": 30,
   "abnormal_volume_threshold": 20,
+  "surge": {
+    "message_threshold": 8,
+    "window_minutes": 30,
+    "milestone_threshold": 100,
+    "new_signature_threshold": 2,
+    "material_channel": "#4_software",
+    "owner": "Uwear engineering on-call",
+    "next_action": "Confirm production impact, assign an incident owner, and coordinate mitigation in this channel."
+  },
   "rules": [
     {
       "id": "seedream_fal_422_typed_content_policy",

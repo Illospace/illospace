@@ -101,17 +101,20 @@ DEGRADED posts do not advance it.
 
 Write the visible digest in this order:
 
-1. Scope line with exact item and active-chantier counts.
-2. One section per active chantier with material movement. Each section names
+1. When `manage_slack(action="open_alert_surges")` returned an incident at
+   run start, a lead incident section naming its subsystem, window,
+   signatures, owner, and next action.
+2. Scope line with exact item and active-chantier counts.
+3. One section per active chantier with material movement. Each section names
    the chantier state, one line of progress toward the `Done means ...` goal,
    what moved since the last digest, next step, blockers (or `none`), and all
    next-action owners represented by that chantier.
-3. One-line `Quiet chantiers` roll-up listing every other active chantier.
-4. `Loose items` for tickets that belong to no chantier. Never force-group
+4. One-line `Quiet chantiers` roll-up listing every other active chantier.
+5. `Loose items` for tickets that belong to no chantier. Never force-group
    them. Keep the existing state, owner, blocker, and next-action evidence.
-5. Optional `Unclaimed pool` and `Cleanup — safe to close` sections when
+6. Optional `Unclaimed pool` and `Cleanup — safe to close` sections when
    non-empty.
-6. A mandatory `Per-person recap` footer with Reda, Axel, and JB, every time.
+7. A mandatory `Per-person recap` footer with Reda, Axel, and JB, every time.
    Each line gives that person's top next action across chantier and loose
    work. If empty, repeat the core contract's exact evidence checks: exact
    tracker `assignee`, GitHub issues assigned to the person's handle, PRs they

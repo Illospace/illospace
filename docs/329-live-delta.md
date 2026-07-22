@@ -27,9 +27,9 @@ The activation command installs or verifies these mirrors:
 | slug | bundled source | characters | bytes | SHA-256 |
 |---|---|---:|---:|---|
 | `uwear-engineering-triage-customer-support` | `references/customer-support.md` | `2599` | `2609` | `ccd9e6ded301f69fb493e6557c0f17312f05fdf8c8eba90f734101e73ebc9be8` |
-| `uwear-engineering-triage-creating-work-items` | `references/creating-work-items.md` | `2576` | `2592` | `05acf69d6e473b64579eb84ace2bb995b923dc14c7887afe3cebde0f890b6c18` |
+| `uwear-engineering-triage-creating-work-items` | `references/creating-work-items.md` | `2858` | `2872` | `d027c689ed08caa5fba348c96a41706326fbc35752707c64a55583ae19a59d5e` |
 | `uwear-engineering-triage-backlog-maintenance` | `references/backlog-maintenance.md` | `2554` | `2558` | `1c2bc475b50a974f0b5efb5a41375c059cb13839e4b70c95d113f42faabe0abc` |
-| `uwear-engineering-triage-chantier-operations` | `references/chantier-operations.md` | `11557` | `11565` | `61e78f92198db86916c5ebe753244fb862cb529a7295ec5a89df4d962efa9751` |
+| `uwear-engineering-triage-chantier-operations` | `references/chantier-operations.md` | `14526` | `14536` | `e0a589a6627eba13930354b17899bc7d0b90b1c98a60196b34c855be101dc822` |
 | `uwear-engineering-triage-memory` | `references/memory.md` | `4872` | `4898` | `fd42aad5b3af22c28982f3a49fb49d11606587ca0d7adb16cf37a63d8a0df503` |
 
 Expected memory mirror fingerprint:
@@ -41,9 +41,9 @@ Expected memory mirror fingerprint:
 Core record `1155`, slug `uwear-engineering-triage`, must become the exact
 mirror of `SKILL.md`:
 
-- characters: `33945` (must remain `< 34000`);
-- bytes: `34077`; and
-- SHA-256: `2d634b8caad5dcd172de8cba6b56d04bbab3806ff1429b9aebc5cb3301809fa6`.
+- characters: `33956` (must remain `< 34000`);
+- bytes: `34088`; and
+- SHA-256: `ac7dd770341d9597133fde60de24e43979f796b6c0cf3a35a516eb481f9bf983`.
 
 ## Safety and idempotency
 
