@@ -726,11 +726,69 @@ async def test_scheduler_daemon_tick_executes_due_scheduler_job(session):
     assert result["ok"] is True
     assert result["reclaimed"] == 0
     assert result["drain"]["executed"] == 1
-    assert result["snapshot"]["health"]["status"] == "healthy"
+    assert "snapshot" not in result
     run = await session.scalar(select(SchedulerRun).where(SchedulerRun.job_id == job.id))
     assert run is not None
     assert run.status == "settled_success"
     assert run.finished_at is not None
+
+
+async def test_scheduler_daemon_tick_emits_new_failure_once_without_historical_snapshot(session):
+    job = _make_scheduler_job(
+        job_key="scheduler_tick_failure",
+        family="scheduler_tick_failure",
+        program_key="scheduler_tick_failure",
+        handler_kind="command",
+        handler_ref=(
+            'python3 -c "import sys; '
+            "sys.stderr.write('NEW_FAILURE_418'); sys.exit(1)\""
+        ),
+        default_payload={"name": "Scheduler Tick Failure"},
+        retry_policy={"max_attempts": 1, "backoff_seconds": 0},
+        next_run_at=datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc),
+    )
+    session.add(job)
+    await session.flush()
+
+    first_tick = await async_scheduler_daemon_tick(
+        session,
+        now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
+    )
+
+    assert first_tick["drain"]["executed"] == 1
+    assert len(first_tick["drain"]["results"]) == 1
+    failure = first_tick["drain"]["results"][0]
+    assert failure["status"] == "settled_failure"
+    assert "NEW_FAILURE_418" in failure["error_text"]
+    new_failure_text = failure["error_text"]
+
+    run = await session.get(SchedulerRun, failure["run_id"])
+    assert run is not None
+    historical_traceback = "Traceback: historical failure\n" * 10_000
+    run.error_text = historical_traceback
+    await session.flush()
+
+    second_tick = await async_scheduler_daemon_tick(
+        session,
+        now=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
+    )
+    third_tick = await async_scheduler_daemon_tick(
+        session,
+        now=datetime(2026, 4, 21, 3, 3, tzinfo=timezone.utc),
+    )
+
+    assert second_tick["drain"] == {"ok": True, "executed": 0, "results": []}
+    assert third_tick["drain"] == {"ok": True, "executed": 0, "results": []}
+    assert "snapshot" not in second_tick
+    assert new_failure_text not in json.dumps([second_tick, third_tick])
+    assert historical_traceback not in json.dumps(second_tick)
+    assert len(json.dumps(second_tick, separators=(",", ":"))) < 250
+
+    snapshot = await async_scheduler_health_snapshot(
+        session,
+        now=datetime(2026, 4, 21, 3, 3, tzinfo=timezone.utc),
+    )
+    assert snapshot["runs"][0]["error_text"] == historical_traceback
 
 
 async def test_scheduler_job_controls_pause_resume_cutover_and_load_shed(session):
