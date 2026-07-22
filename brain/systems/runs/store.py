@@ -34,7 +34,13 @@ from brain.systems.runs.domain import (
 )
 from brain.systems.runs.events import run_event, status_changed_event
 from brain.systems.runs.ids import trace_id_for_run_id
-from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status, ensure_run_transition
+from brain.systems.runs.status import (
+    RunStatus,
+    RunTransitionError,
+    TERMINAL_RUN_STATUSES,
+    coerce_run_status,
+    ensure_run_transition,
+)
 from brain.systems.runs.steering import SteeringMessage
 from brain.platform.db.models.agent_run import (
     AgentRunArtifactRow,
@@ -886,11 +892,15 @@ class AsyncAgentRunStore:
 
         row = await self._locked_run(run_id)
         current = coerce_run_status(row.status, default=RunStatus.FAILED)
-        if current not in {
-            RunStatus.STARTING,
-            RunStatus.RUNNING,
-            RunStatus.VERIFYING,
-        }:
+        try:
+            current, target = ensure_run_transition(
+                current,
+                RunStatus.QUEUED,
+                allow_interrupted_requeue=True,
+            )
+        except RunTransitionError:
+            return to_domain(row), False
+        if current == target:
             return to_domain(row), False
 
         interrupted_at = interrupted_at or datetime.now(timezone.utc)
@@ -910,42 +920,47 @@ class AsyncAgentRunStore:
         metadata["interruption_count"] = previous_count + 1
         metadata.pop("failure", None)
 
-        row.status = RunStatus.QUEUED.value
-        row.execution_token = None
-        row.paused_at = None
-        row.updated_at = interrupted_at
-        row.metadata_ = metadata
-        await self.session.flush()
-        await self.append_event(
-            run_event(
+        auto_commit = self.auto_commit
+        self.auto_commit = False
+        try:
+            transitioned_run, changed = await self.set_status_with_result(
                 int(row.id),
-                "run.interrupted",
-                interruption,
-                root_run_id=row.root_run_id,
-                producer="worker_shutdown",
+                target,
+                reason=interruption["reason"],
+                transitioned_at=interrupted_at,
+                metadata_update=metadata,
+                allow_interrupted_requeue=True,
+                expected_updated_at=row.updated_at,
+                expected_execution_token=row.execution_token,
+                expected_execution_attempt=int(row.execution_attempt or 0),
+                before_status_events=(
+                    run_event(
+                        int(row.id),
+                        "run.interrupted",
+                        interruption,
+                        root_run_id=row.root_run_id,
+                        producer="worker_shutdown",
+                    ),
+                ),
+                after_status_events=(
+                    run_event(
+                        int(row.id),
+                        "run.requeued",
+                        interruption,
+                        root_run_id=row.root_run_id,
+                        producer="worker_shutdown",
+                    ),
+                ),
             )
-        )
-        await self.append_event(
-            status_changed_event(
-                int(row.id),
-                from_status=current.value,
-                to_status=RunStatus.QUEUED.value,
-                root_run_id=row.root_run_id,
-                reason=str(reason or "worker_shutdown"),
-            )
-        )
-        await self.append_event(
-            run_event(
-                int(row.id),
-                "run.requeued",
-                interruption,
-                root_run_id=row.root_run_id,
-                producer="worker_shutdown",
-            )
-        )
-        if self.auto_commit:
-            await self.session.commit()
-        return to_domain(await self.refresh_run(run_id)), True
+            if auto_commit:
+                await self.session.commit()
+            return transitioned_run, changed
+        except BaseException:
+            if auto_commit:
+                await self.session.rollback()
+            raise
+        finally:
+            self.auto_commit = auto_commit
 
     async def set_status_with_result(
         self,
@@ -958,6 +973,11 @@ class AsyncAgentRunStore:
         expected_execution_token: str | None | object = _UNSET,
         expected_execution_attempt: int | object = _UNSET,
         rollback_on_conflict: bool = True,
+        transitioned_at: datetime | None = None,
+        metadata_update: dict[str, Any] | None = None,
+        allow_interrupted_requeue: bool = False,
+        before_status_events: tuple[AgentRunEvent, ...] = (),
+        after_status_events: tuple[AgentRunEvent, ...] = (),
     ) -> tuple[AgentRun, bool]:
         if execution_claim is not None and execution_claim.lost.is_set():
             raise ExecutionClaimLost(
@@ -976,12 +996,18 @@ class AsyncAgentRunStore:
             )
         if persisted_status in TERMINAL_RUN_STATUSES:
             return to_domain(row), False
-        current, target = ensure_run_transition(row.status, status)
+        current, target = ensure_run_transition(
+            row.status,
+            status,
+            allow_interrupted_requeue=allow_interrupted_requeue,
+        )
         if current == target:
             if execution_claim is not None:
                 await self.assert_execution_claim(execution_claim)
             return to_domain(row), False
-        now = datetime.now(timezone.utc)
+        now = transitioned_at or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
         values: dict[str, Any] = {
             "status": target.value,
             "updated_at": now,
@@ -996,8 +1022,12 @@ class AsyncAgentRunStore:
             values["failed_at"] = now
         elif target == RunStatus.CANCELED:
             values["canceled_at"] = now
-        if target in TERMINAL_RUN_STATUSES or target == RunStatus.PAUSED:
+        if target == RunStatus.QUEUED:
+            values["paused_at"] = None
+        if target in TERMINAL_RUN_STATUSES or target in {RunStatus.PAUSED, RunStatus.QUEUED}:
             values["execution_token"] = None
+        if metadata_update is not None:
+            values["metadata_"] = dict(metadata_update)
 
         predicates = [
             AgentRunRow.id == int(run_id),
@@ -1031,6 +1061,8 @@ class AsyncAgentRunStore:
                 )
             return to_domain(await self.refresh_run(run_id)), False
 
+        for event in before_status_events:
+            await self.append_event(event)
         await self.append_event(
             status_changed_event(
                 int(run_id),
@@ -1040,6 +1072,8 @@ class AsyncAgentRunStore:
                 reason=reason,
             )
         )
+        for event in after_status_events:
+            await self.append_event(event)
         row = await self.refresh_run(run_id)
         if target in TERMINAL_RUN_STATUSES:
             await _reconcile_inbound_triage_run_if_needed(self.session, row)

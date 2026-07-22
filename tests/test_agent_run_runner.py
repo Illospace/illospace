@@ -129,11 +129,11 @@ def test_stop_runner_waits_for_in_flight_runs():
 
     runner.stop_runner()
     assert runner.runner_in_flight_count() == 0
-    runner._increment_in_flight_runs()
+    runner._increment_in_flight_runs(2329)
 
     def finish_run():
         time.sleep(0.2)
-        runner._decrement_in_flight_runs()
+        runner._decrement_in_flight_runs(2329)
 
     finisher = threading.Thread(target=finish_run)
     finisher.start()
@@ -146,6 +146,20 @@ def test_stop_runner_waits_for_in_flight_runs():
         assert 0.15 <= elapsed < 2
     finally:
         finisher.join(timeout=1)
+        runner._stop_event.clear()
+
+
+def test_in_flight_count_is_derived_from_unique_run_ids():
+    from brain.systems.runs.cortex import runner
+
+    runner.stop_runner()
+    runner._increment_in_flight_runs(2328)
+    runner._increment_in_flight_runs(2328)
+    try:
+        assert runner.runner_in_flight_ids() == (2328,)
+        assert runner.runner_in_flight_count() == 1
+    finally:
+        runner._decrement_in_flight_runs(2328)
         runner._stop_event.clear()
 
 

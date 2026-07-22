@@ -73,7 +73,6 @@ def _run_cancel_token(run_id: int):
 _stop_event = threading.Event()
 _runner_lock = threading.Lock()
 _runner_in_flight_lock = threading.Lock()
-_in_flight_runs = 0
 _in_flight_run_ids: set[int] = set()
 _runner_supervisor_thread: threading.Thread | None = None
 _runner_slots: list[tuple[asyncio.Task[None], asyncio.Event]] = []
@@ -133,25 +132,19 @@ def _active_runner_count() -> int:
         return sum(1 for task, stop_event in _runner_slots if not task.done() and not stop_event.is_set())
 
 
-def _increment_in_flight_runs(run_id: int | None = None) -> None:
-    global _in_flight_runs
+def _increment_in_flight_runs(run_id: int) -> None:
     with _runner_in_flight_lock:
-        _in_flight_runs += 1
-        if run_id is not None:
-            _in_flight_run_ids.add(int(run_id))
+        _in_flight_run_ids.add(int(run_id))
 
 
-def _decrement_in_flight_runs(run_id: int | None = None) -> None:
-    global _in_flight_runs
+def _decrement_in_flight_runs(run_id: int) -> None:
     with _runner_in_flight_lock:
-        _in_flight_runs -= 1
-        if run_id is not None:
-            _in_flight_run_ids.discard(int(run_id))
+        _in_flight_run_ids.discard(int(run_id))
 
 
 def runner_in_flight_count() -> int:
     with _runner_in_flight_lock:
-        return _in_flight_runs
+        return len(_in_flight_run_ids)
 
 
 def runner_in_flight_ids() -> tuple[int, ...]:
