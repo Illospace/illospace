@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -26,6 +27,37 @@ _URL_CANDIDATE_RE = re.compile(
     re.IGNORECASE,
 )
 _TRAILING_PUNCTUATION = ".,;:!?"
+_DERIVED_IDEMPOTENCY_KEY_PREFIX = "derived:launch-handoff:v1:"
+_ROLLBAR_ITEM_URL_RE = re.compile(
+    r"https?://app\.rollbar\.com/[^\s|>]+/item/"
+    r"(?P<project>[^/\s|>]+)/(?P<item>\d+)",
+    re.IGNORECASE,
+)
+_GITHUB_ISSUE_URL_RE = re.compile(
+    r"https?://github\.com/(?P<repo>[^/\s|>]+/[^/\s|>]+)/"
+    r"(?P<kind>issues|pull)/(?P<number>\d+)",
+    re.IGNORECASE,
+)
+_TRACKED_IDENTITY_FIELDS = (
+    "external_id",
+    "rollbar_item",
+    "rollbar_item_id",
+    "tracked_item_id",
+    "tracked_issue_id",
+    "issue_ref",
+)
+_TRACKED_ITEM_CONTAINERS = (
+    "tracked_item",
+    "tracked_issue",
+    "tracker_record",
+    "issue",
+)
+_OWNER_IDENTITY_FIELDS = (
+    "owner_user_id",
+    "assignee_user_id",
+    "assignee_id",
+    "assignee",
+)
 
 
 class LaunchHandoffError(ValueError):
@@ -90,6 +122,178 @@ def _uuid_or_none(value: Any) -> str | None:
         return str(uuid.UUID(text))
     except ValueError:
         return None
+
+
+def _identity_text(value: Any) -> str | None:
+    if isinstance(value, bool) or value is None or isinstance(value, (dict, list, tuple, set)):
+        return None
+    return _clean_optional_string(value)
+
+
+def _rollbar_identity_from_url(value: Any) -> str | None:
+    text = _identity_text(value)
+    if not text:
+        return None
+    rollbar_match = _ROLLBAR_ITEM_URL_RE.search(text)
+    if rollbar_match:
+        return (
+            f"rollbar:{rollbar_match.group('project')}#{rollbar_match.group('item')}"
+        ).casefold()
+    return None
+
+
+def _identity_from_url(value: Any) -> str | None:
+    rollbar_identity = _rollbar_identity_from_url(value)
+    if rollbar_identity:
+        return rollbar_identity
+    text = _identity_text(value)
+    if not text:
+        return None
+    github_match = _GITHUB_ISSUE_URL_RE.search(text)
+    if github_match:
+        kind = "pull" if github_match.group("kind").casefold() == "pull" else "issue"
+        return (
+            f"github:{github_match.group('repo')}:{kind}:{github_match.group('number')}"
+        ).casefold()
+    return None
+
+
+def _field_identity(field_name: str, value: Any) -> str | None:
+    from_url = _identity_from_url(value)
+    if from_url:
+        return from_url
+    text = _identity_text(value)
+    if not text:
+        return None
+    if field_name in {"rollbar_item", "rollbar_item_id"}:
+        return f"rollbar:{text}".casefold()
+    return f"{field_name}:{text}".casefold()
+
+
+def _identity_from_tracked_container(
+    value: Any,
+    *,
+    allow_generic_id: bool = True,
+    depth: int = 0,
+) -> str | None:
+    if depth > 6:
+        return None
+    if not isinstance(value, dict):
+        return None
+
+    for field_name in _TRACKED_IDENTITY_FIELDS:
+        identity = _field_identity(field_name, value.get(field_name))
+        if identity:
+            return identity
+
+    repo = _identity_text(value.get("repo") or value.get("repository"))
+    issue_number = _identity_text(value.get("issue_number") or value.get("number"))
+    if repo and issue_number:
+        return f"github:{repo}:issue:{issue_number}".casefold()
+
+    if allow_generic_id:
+        for field_name in ("id", "key", "ref", "url"):
+            identity = _field_identity("tracked_item", value.get(field_name))
+            if identity:
+                return identity
+
+    for nested in value.values():
+        if isinstance(nested, dict):
+            identity = _identity_from_tracked_container(
+                nested,
+                allow_generic_id=allow_generic_id,
+                depth=depth + 1,
+            )
+            if identity:
+                return identity
+    return None
+
+
+def _identity_url_in_source_ref(value: Any, *, depth: int = 0) -> str | None:
+    if depth > 8:
+        return None
+    identity = _rollbar_identity_from_url(value)
+    if identity:
+        return identity
+    if isinstance(value, dict):
+        nested_values = value.values()
+    elif isinstance(value, (list, tuple)):
+        nested_values = value
+    else:
+        return None
+    for nested in nested_values:
+        identity = _identity_url_in_source_ref(nested, depth=depth + 1)
+        if identity:
+            return identity
+    return None
+
+
+def _tracked_item_identity(source_ref: dict[str, Any]) -> str | None:
+    for field_name in _TRACKED_IDENTITY_FIELDS:
+        identity = _field_identity(field_name, source_ref.get(field_name))
+        if identity:
+            return identity
+    for field_name in _TRACKED_ITEM_CONTAINERS:
+        if field_name not in source_ref:
+            continue
+        container = source_ref[field_name]
+        if isinstance(container, dict):
+            identity = _identity_from_tracked_container(container)
+        else:
+            text = _identity_text(container)
+            identity = f"{field_name}:{text}".casefold() if text else None
+        if identity:
+            return identity
+    record = source_ref.get("record")
+    if isinstance(record, dict):
+        identity = _identity_from_tracked_container(record, allow_generic_id=False)
+        if identity:
+            return identity
+    return _identity_url_in_source_ref(source_ref)
+
+
+def _owner_identity(
+    source_ref: dict[str, Any],
+    metadata: dict[str, Any],
+    created_by_user_id: Any,
+) -> str:
+    for container in (metadata, source_ref):
+        for field_name in _OWNER_IDENTITY_FIELDS:
+            value = container.get(field_name)
+            if isinstance(value, dict):
+                value = value.get("id") or value.get("user_id") or value.get("name")
+            text = _identity_text(value)
+            if text:
+                return text.casefold()
+    return (_identity_text(created_by_user_id) or "unassigned").casefold()
+
+
+def derive_launch_handoff_idempotency_key(
+    source_ref: dict[str, Any] | None,
+    *,
+    created_by_user_id: Any = None,
+    metadata: dict[str, Any] | None = None,
+) -> str | None:
+    """Derive a namespaced key from a tracked item and its intended owner."""
+    clean_source_ref = _json_dict(source_ref)
+    identity = _tracked_item_identity(clean_source_ref)
+    if not identity:
+        return None
+    owner = _owner_identity(clean_source_ref, _json_dict(metadata), created_by_user_id)
+    digest = sha256(f"{identity}\0{owner}".encode("utf-8")).hexdigest()
+    return f"{_DERIVED_IDEMPOTENCY_KEY_PREFIX}{digest}"
+
+
+def _refire_metadata(metadata: Any) -> dict[str, Any]:
+    updated = _json_dict(metadata)
+    raw_count = updated.get("refire_count", 0)
+    try:
+        current_count = int(raw_count)
+    except (TypeError, ValueError):
+        current_count = 0
+    updated["refire_count"] = max(0, current_count) + 1
+    updated["last_refire_at"] = datetime.now(timezone.utc).isoformat()
+    return updated
 
 
 def parse_member_agent_targets(raw: str | None) -> dict[str, str]:
@@ -225,6 +429,10 @@ async def create_launch_handoff_with_status(
 ) -> tuple[LaunchHandoff, bool]:
     """Create a handoff, or return the existing row on an idempotency hit.
 
+    Missing keys are derived only from a stable tracked-item identity plus the
+    intended owner. A reused row records the refire in metadata without
+    replacing its original handoff contents.
+
     The boolean is the caller's noise gate: a REUSED row (``False``) means
     the packet already went out — mint must post nothing to Slack.
     """
@@ -232,7 +440,15 @@ async def create_launch_handoff_with_status(
     clean_title = _required_string(handoff_input.title, "title")
     clean_instructions = _required_string(handoff_input.instructions, "instructions")
     clean_target_tool = (_clean_optional_string(handoff_input.target_tool) or TARGET_CODEX).lower()
-    clean_idempotency_key = _clean_optional_string(handoff_input.idempotency_key)
+    clean_source_ref = _json_dict(handoff_input.source_ref)
+    clean_metadata = _json_dict(handoff_input.metadata)
+    clean_idempotency_key = _clean_optional_string(handoff_input.idempotency_key) or (
+        derive_launch_handoff_idempotency_key(
+            clean_source_ref,
+            created_by_user_id=handoff_input.created_by_user_id,
+            metadata=clean_metadata,
+        )
+    )
     if clean_idempotency_key:
         existing = await session.scalar(
             select(LaunchHandoff).where(
@@ -241,13 +457,15 @@ async def create_launch_handoff_with_status(
             )
         )
         if existing is not None:
+            existing.metadata_ = _refire_metadata(existing.metadata_)
+            await session.flush()
             return existing, False
 
     row = LaunchHandoff(
         org_id=clean_org_id,
         created_by_user_id=_uuid_or_none(handoff_input.created_by_user_id),
         source_surface=_clean_optional_string(handoff_input.source_surface) or "illo",
-        source_ref=_json_dict(handoff_input.source_ref),
+        source_ref=clean_source_ref,
         target_tool=clean_target_tool,
         title=clean_title,
         summary=_clean_optional_string(handoff_input.summary),
@@ -257,7 +475,7 @@ async def create_launch_handoff_with_status(
         repo_origin_url=_clean_optional_string(handoff_input.repo_origin_url),
         branch_hint=_clean_optional_string(handoff_input.branch_hint),
         idempotency_key=clean_idempotency_key,
-        metadata_=_json_dict(handoff_input.metadata),
+        metadata_=clean_metadata,
     )
     session.add(row)
     await session.flush()
