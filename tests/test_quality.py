@@ -4,12 +4,10 @@ import sys
 import os
 from unittest.mock import patch
 
-import numpy as np
 from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
 from brain.systems.quality.checks import check_content_quality, cap_salience
-from brain.systems.memory.embeddings import vec_to_pg
 
 _HAS_DB = bool(os.environ.get("TEST_DB_URL"))
 
@@ -83,19 +81,12 @@ class TestSalienceCap:
 
 @pytest.mark.skipif(not _HAS_DB, reason="TEST_DB_URL not set — requires live database")
 class TestDeduplication:
-    """Test near-duplicate detection at write time (requires live DB)."""
+    """Test normalized exact-duplicate detection at write time (requires live DB)."""
 
     ORG_ID = "50000000-0000-0000-0000-000000000001"
     USER_ID = "60000000-0000-0000-0000-000000000001"
     OTHER_ORG_ID = "50000000-0000-0000-0000-000000000002"
     OTHER_USER_ID = "60000000-0000-0000-0000-000000000002"
-
-    def _embedding(self, index: int = 0):
-        from brain.kernel.config import MEMORY_SEMANTIC_EMBEDDING_DIM
-
-        vec = np.zeros(MEMORY_SEMANTIC_EMBEDDING_DIM, dtype=np.float32)
-        vec[index] = 1.0
-        return vec
 
     async def _ensure_principal(self, db_session, *, org_id: str, user_id: str, slug: str, email: str) -> None:
         await db_session.execute(text("""
@@ -114,7 +105,6 @@ class TestDeduplication:
         db_session,
         *,
         content: str,
-        embedding,
         user_id: str,
         org_id: str,
         visibility: str = "private",
@@ -156,16 +146,14 @@ class TestDeduplication:
             email="quality-test-other@example.com",
         )
         content = "A scoped duplicate memory should only match visible tenant memories."
-        embedding = self._embedding(0)
         memory_id = await self._insert_memory(
             db_session,
             content=content,
-            embedding=embedding,
             user_id=self.USER_ID,
             org_id=self.ORG_ID,
         )
         await db_session.flush()
-        return {"id": memory_id, "content": content, "embedding": embedding}
+        return {"id": memory_id, "content": content}
 
     async def test_exact_duplicate_detected(self, scoped_memory, unit_of_work_for_session):
         """An exact copy of an existing memory should be flagged as duplicate."""
@@ -173,7 +161,6 @@ class TestDeduplication:
         with patch("brain.systems.quality.checks.UnitOfWork", unit_of_work_for_session):
             is_dupe, details = await check_duplicate(
                 scoped_memory["content"],
-                embedding=scoped_memory["embedding"],
                 user_id=self.USER_ID,
                 org_id=self.ORG_ID,
             )
@@ -188,7 +175,6 @@ class TestDeduplication:
             is_dupe, details = await check_duplicate(
                 "This is a completely unique test memory about quantum flamingos "
                 "dancing on the surface of Mars during a solar eclipse in the year 3042.",
-                embedding=self._embedding(1),
                 user_id=self.USER_ID,
                 org_id=self.ORG_ID,
             )
@@ -198,11 +184,9 @@ class TestDeduplication:
         """An identical hidden memory in another org should not block this tenant."""
         from brain.systems.quality.checks import check_duplicate
 
-        same_embedding = self._embedding(2)
         await self._insert_memory(
             db_session,
             content="Same vector in another tenant should stay isolated.",
-            embedding=same_embedding,
             user_id=self.OTHER_USER_ID,
             org_id=self.OTHER_ORG_ID,
             visibility="org",
@@ -212,17 +196,15 @@ class TestDeduplication:
         with patch("brain.systems.quality.checks.UnitOfWork", unit_of_work_for_session):
             is_dupe, _details = await check_duplicate(
                 "Same vector in another tenant should stay isolated.",
-                embedding=same_embedding,
                 user_id=self.USER_ID,
                 org_id=None,
             )
         assert not is_dupe
 
     async def test_validate_memory_rejects_duplicate(self, scoped_memory, unit_of_work_for_session):
-        """Full validation pipeline should reject near-duplicates."""
+        """Full validation pipeline should reject a normalized exact duplicate."""
         from brain.systems.quality.checks import validate_memory
-        with patch("brain.systems.quality.checks.UnitOfWork", unit_of_work_for_session), \
-             patch("brain.systems.quality.checks.embed_document", return_value=scoped_memory["embedding"]):
+        with patch("brain.systems.quality.checks.UnitOfWork", unit_of_work_for_session):
             accepted, reason, details = await validate_memory(
                 scoped_memory["content"],
                 user_id=self.USER_ID,
