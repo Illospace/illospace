@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 import logging
-from typing import Any
+from typing import Any, Sequence
 
 from sqlalchemy import select
 
@@ -52,6 +52,20 @@ class ProviderAlertIngestResult:
     surge: ProviderAlertSurgeSnapshot | None
     material_posted: bool = False
     material_post_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderAlertSurgeDecision:
+    """Pure rolling-window evaluation for one service's occurrences."""
+
+    trigger_reason: str | None
+    window_cutoff: datetime
+    window_started_at: datetime | None
+    window_ended_at: datetime
+    message_count: int
+    signatures: tuple[dict[str, str], ...]
+    external_ids: tuple[str, ...]
+    subsystem: str | None
 
 
 def _utcnow(now: datetime | None = None) -> datetime:
@@ -147,43 +161,204 @@ def _surge_query(
 
 
 def _window_signature_data(
-    occurrences: list[ProviderAlertOccurrence],
-) -> tuple[list[dict[str, str]], list[str]]:
+    occurrences: Sequence[ProviderAlertOccurrence],
+) -> tuple[tuple[dict[str, str], ...], tuple[str, ...]]:
     signatures: dict[str, str] = {}
     external_ids: set[str] = set()
     for occurrence in occurrences:
         signatures.setdefault(occurrence.signature, occurrence.signature_title)
         external_ids.add(occurrence.external_id)
     return (
-        [
+        tuple(
             {"signature": signature, "title": title}
             for signature, title in sorted(signatures.items(), key=lambda item: item[1])
-        ],
-        sorted(external_ids),
+        ),
+        tuple(sorted(external_ids)),
     )
 
 
-def _trigger_reason(
-    occurrences: list[ProviderAlertOccurrence],
-    *,
-    alert: ProviderAlertIngest,
+def _surge_window_cutoff(
     policy: ProviderAlertSurgePolicy,
-) -> str | None:
-    if len(occurrences) >= policy.message_threshold:
-        return "message_volume"
-    if (
-        alert.occurrence_milestone is not None
-        and alert.occurrence_milestone >= policy.milestone_threshold
+    now: datetime,
+) -> datetime:
+    return _utcnow(now) - timedelta(minutes=policy.window_minutes)
+
+
+def evaluate_provider_alert_surge(
+    occurrences: Sequence[ProviderAlertOccurrence],
+    policy: ProviderAlertSurgePolicy,
+    now: datetime,
+) -> ProviderAlertSurgeDecision:
+    """Evaluate surge rules without a session or any other I/O."""
+
+    current_time = _utcnow(now)
+    window_cutoff = _surge_window_cutoff(policy, current_time)
+    window_occurrences = sorted(
+        (
+            occurrence
+            for occurrence in occurrences
+            if window_cutoff <= _utcnow(occurrence.occurred_at) <= current_time
+        ),
+        key=lambda occurrence: (
+            _utcnow(occurrence.occurred_at),
+            int(occurrence.id or 0),
+        ),
+    )
+    signatures, external_ids = _window_signature_data(window_occurrences)
+    if not window_occurrences:
+        return ProviderAlertSurgeDecision(
+            trigger_reason=None,
+            window_cutoff=window_cutoff,
+            window_started_at=None,
+            window_ended_at=current_time,
+            message_count=0,
+            signatures=signatures,
+            external_ids=external_ids,
+            subsystem=None,
+        )
+
+    latest = window_occurrences[-1]
+    reason: str | None = None
+    if len(window_occurrences) >= policy.message_threshold:
+        reason = "message_volume"
+    elif (
+        latest.occurrence_milestone is not None
+        and latest.occurrence_milestone >= policy.milestone_threshold
     ):
-        return "occurrence_milestone"
+        reason = "occurrence_milestone"
     new_signatures = {
         occurrence.signature
-        for occurrence in occurrences
-        if occurrence.subsystem == alert.subsystem and occurrence.is_new_signature
+        for occurrence in window_occurrences
+        if occurrence.subsystem == latest.subsystem and occurrence.is_new_signature
     }
-    if len(new_signatures) >= policy.new_signature_threshold:
-        return "distinct_new_signatures"
-    return None
+    if reason is None and len(new_signatures) >= policy.new_signature_threshold:
+        reason = "distinct_new_signatures"
+    return ProviderAlertSurgeDecision(
+        trigger_reason=reason,
+        window_cutoff=window_cutoff,
+        window_started_at=_utcnow(window_occurrences[0].occurred_at),
+        window_ended_at=current_time,
+        message_count=len(window_occurrences),
+        signatures=signatures,
+        external_ids=external_ids,
+        subsystem=(latest.service if reason == "message_volume" else latest.subsystem),
+    )
+
+
+class ProviderAlertSurgeTransitions:
+    """The single owner of mutations to a provider-alert surge row."""
+
+    @staticmethod
+    def open(
+        row: ProviderAlertSurge | None,
+        *,
+        org_id: str,
+        channel_id: str,
+        service: str,
+        decision: ProviderAlertSurgeDecision,
+        policy: ProviderAlertSurgePolicy,
+        now: datetime,
+    ) -> ProviderAlertSurge:
+        if decision.trigger_reason is None or decision.window_started_at is None:
+            raise ValueError("a surge can only open from a triggered decision")
+        if row is None:
+            return ProviderAlertSurge(
+                org_id=org_id,
+                source_channel_id=channel_id,
+                service=service,
+                subsystem=str(decision.subsystem or service),
+                window_started_at=decision.window_started_at,
+                opened_at=now,
+                last_seen_at=now,
+                trigger_reason=decision.trigger_reason,
+                message_count=decision.message_count,
+                signatures_json=json.dumps(decision.signatures, sort_keys=True),
+                external_ids_json=json.dumps(decision.external_ids),
+                owner=policy.owner,
+                next_action=policy.next_action,
+                material_channel=policy.material_channel,
+            )
+        row.subsystem = str(decision.subsystem or service)
+        row.window_started_at = decision.window_started_at
+        row.opened_at = now
+        row.last_seen_at = now
+        row.trigger_reason = decision.trigger_reason
+        row.message_count = decision.message_count
+        row.signatures_json = json.dumps(decision.signatures, sort_keys=True)
+        row.external_ids_json = json.dumps(decision.external_ids)
+        row.owner = policy.owner
+        row.next_action = policy.next_action
+        row.material_channel = policy.material_channel
+        row.material_message_ts = None
+        row.material_post_claimed_at = None
+        row.material_posted_at = None
+        return row
+
+    @staticmethod
+    def update(
+        row: ProviderAlertSurge,
+        *,
+        decision: ProviderAlertSurgeDecision,
+        now: datetime,
+    ) -> None:
+        row.last_seen_at = now
+        row.message_count = decision.message_count
+        row.signatures_json = json.dumps(decision.signatures, sort_keys=True)
+        row.external_ids_json = json.dumps(decision.external_ids)
+
+    @staticmethod
+    def claim(row: ProviderAlertSurge, *, claimed_at: datetime) -> bool:
+        if row.material_posted_at is not None or row.material_post_claimed_at is not None:
+            return False
+        row.material_post_claimed_at = claimed_at
+        return True
+
+    @staticmethod
+    def reclaim(
+        row: ProviderAlertSurge,
+        *,
+        claimed_at: datetime,
+        claim_ttl_seconds: int,
+    ) -> bool:
+        prior_claim = row.material_post_claimed_at
+        if row.material_posted_at is not None or prior_claim is None:
+            return False
+        claim_expired_at = _utcnow(prior_claim) + timedelta(seconds=claim_ttl_seconds)
+        if claim_expired_at > claimed_at:
+            return False
+        row.material_post_claimed_at = claimed_at
+        return True
+
+    @staticmethod
+    def mark_posted(
+        row: ProviderAlertSurge,
+        *,
+        material_channel: str,
+        message_ts: str | None,
+        posted_at: datetime,
+    ) -> None:
+        if row.material_posted_at is not None:
+            return
+        row.material_channel = material_channel
+        row.material_message_ts = message_ts
+        row.material_posted_at = posted_at
+
+    @staticmethod
+    def release_claim(
+        row: ProviderAlertSurge,
+        *,
+        expected_claimed_at: datetime | None,
+    ) -> bool:
+        current_claim = row.material_post_claimed_at
+        if (
+            row.material_posted_at is not None
+            or current_claim is None
+            or expected_claimed_at is None
+            or _utcnow(current_claim) != _utcnow(expected_claimed_at)
+        ):
+            return False
+        row.material_post_claimed_at = None
+        return True
 
 
 async def _existing_occurrence(
@@ -251,7 +426,6 @@ async def record_provider_alert_occurrence(
     session.add(occurrence)
     await session.flush()
 
-    window_start = current_time - timedelta(minutes=surge_policy.window_minutes)
     occurrences = list(
         (
             await session.scalars(
@@ -260,7 +434,8 @@ async def record_provider_alert_occurrence(
                     ProviderAlertOccurrence.org_id == org_id,
                     ProviderAlertOccurrence.channel_id == channel_id,
                     ProviderAlertOccurrence.service == alert.service,
-                    ProviderAlertOccurrence.occurred_at >= window_start,
+                    ProviderAlertOccurrence.occurred_at
+                    >= _surge_window_cutoff(surge_policy, current_time),
                     ProviderAlertOccurrence.occurred_at <= current_time,
                 )
                 .order_by(
@@ -270,10 +445,10 @@ async def record_provider_alert_occurrence(
             )
         ).all()
     )
-    reason = _trigger_reason(
+    decision = evaluate_provider_alert_surge(
         occurrences,
-        alert=alert,
-        policy=surge_policy,
+        surge_policy,
+        current_time,
     )
     row = await session.scalar(
         _surge_query(
@@ -282,59 +457,40 @@ async def record_provider_alert_occurrence(
             alert=alert,
         ).with_for_update()
     )
+    is_new_row = row is None
     active = bool(
-        row is not None and _utcnow(row.last_seen_at) >= window_start
+        row is not None and _utcnow(row.last_seen_at) >= decision.window_cutoff
     )
-    if not active and reason is None:
+    if not active and decision.trigger_reason is None:
         return None, False
 
-    signatures, external_ids = _window_signature_data(occurrences)
-    surge_subsystem = (
-        alert.service if reason == "message_volume" else alert.subsystem
-    )
-    if row is None:
-        row = ProviderAlertSurge(
-            org_id=org_id,
-            source_channel_id=channel_id,
-            service=alert.service,
-            subsystem=surge_subsystem,
-            window_started_at=_utcnow(occurrences[0].occurred_at),
-            opened_at=current_time,
-            last_seen_at=current_time,
-            trigger_reason=str(reason),
-            message_count=len(occurrences),
-            signatures_json=json.dumps(signatures, sort_keys=True),
-            external_ids_json=json.dumps(external_ids),
-            owner=surge_policy.owner,
-            next_action=surge_policy.next_action,
-            material_channel=surge_policy.material_channel,
+    if active:
+        assert row is not None
+        ProviderAlertSurgeTransitions.update(
+            row,
+            decision=decision,
+            now=current_time,
         )
-        session.add(row)
-    elif active:
-        row.last_seen_at = current_time
-        row.message_count = len(occurrences)
-        row.signatures_json = json.dumps(signatures, sort_keys=True)
-        row.external_ids_json = json.dumps(external_ids)
     else:
-        row.subsystem = surge_subsystem
-        row.window_started_at = _utcnow(occurrences[0].occurred_at)
-        row.opened_at = current_time
-        row.last_seen_at = current_time
-        row.trigger_reason = str(reason)
-        row.message_count = len(occurrences)
-        row.signatures_json = json.dumps(signatures, sort_keys=True)
-        row.external_ids_json = json.dumps(external_ids)
-        row.owner = surge_policy.owner
-        row.next_action = surge_policy.next_action
-        row.material_channel = surge_policy.material_channel
-        row.material_message_ts = None
-        row.material_post_claimed_at = None
-        row.material_posted_at = None
-    should_post = (
-        row.material_posted_at is None and row.material_post_claimed_at is None
+        row = ProviderAlertSurgeTransitions.open(
+            row,
+            org_id=org_id,
+            channel_id=channel_id,
+            service=alert.service,
+            decision=decision,
+            policy=surge_policy,
+            now=current_time,
+        )
+        if is_new_row:
+            session.add(row)
+    should_post = ProviderAlertSurgeTransitions.claim(
+        row,
+        claimed_at=current_time,
+    ) or ProviderAlertSurgeTransitions.reclaim(
+        row,
+        claimed_at=current_time,
+        claim_ttl_seconds=surge_policy.claim_ttl_seconds,
     )
-    if should_post:
-        row.material_post_claimed_at = current_time
     await session.flush()
     return _snapshot(row), should_post
 
@@ -421,7 +577,7 @@ async def _post_material_surge(
     return material_channel, _posted_message_ts(response)
 
 
-async def _record_material_surge_posted(
+async def _mark_material_surge_posted(
     session: Any,
     *,
     surge: ProviderAlertSurgeSnapshot,
@@ -436,9 +592,32 @@ async def _record_material_surge_posted(
     )
     if row is None:
         return surge
-    row.material_channel = material_channel
-    row.material_message_ts = message_ts
-    row.material_posted_at = _utcnow(posted_at)
+    ProviderAlertSurgeTransitions.mark_posted(
+        row,
+        material_channel=material_channel,
+        message_ts=message_ts,
+        posted_at=_utcnow(posted_at),
+    )
+    await session.flush()
+    return _snapshot(row)
+
+
+async def _release_material_surge_claim(
+    session: Any,
+    *,
+    surge: ProviderAlertSurgeSnapshot,
+) -> ProviderAlertSurgeSnapshot:
+    row = await session.scalar(
+        select(ProviderAlertSurge)
+        .where(ProviderAlertSurge.id == surge.id)
+        .with_for_update()
+    )
+    if row is None:
+        return surge
+    ProviderAlertSurgeTransitions.release_claim(
+        row,
+        expected_claimed_at=surge.material_post_claimed_at,
+    )
     await session.flush()
     return _snapshot(row)
 
@@ -476,25 +655,40 @@ async def handle_provider_alert_ingest(
             client,
             surge,
         )
-        surge = await _record_material_surge_posted(
+    except Exception as exc:
+        logger.exception("provider alert surge material post failed")
+        error = str(exc)
+        try:
+            surge = await _release_material_surge_claim(session, surge=surge)
+        except Exception as release_exc:
+            logger.exception("provider alert surge claim release failed")
+            error = f"{error}; claim release failed: {release_exc}"
+        return ProviderAlertIngestResult(
+            alert=alert,
+            surge=surge,
+            material_post_error=error,
+        )
+    try:
+        surge = await _mark_material_surge_posted(
             session,
             surge=surge,
             material_channel=material_channel,
             message_ts=posted_message_ts,
             posted_at=occurred_at,
         )
+    except Exception as exc:
+        logger.exception("provider alert surge post finalization failed")
         return ProviderAlertIngestResult(
             alert=alert,
             surge=surge,
             material_posted=True,
-        )
-    except Exception as exc:
-        logger.exception("provider alert surge material post failed")
-        return ProviderAlertIngestResult(
-            alert=alert,
-            surge=surge,
             material_post_error=str(exc),
         )
+    return ProviderAlertIngestResult(
+        alert=alert,
+        surge=surge,
+        material_posted=True,
+    )
 
 
 async def handle_provider_alert_ingest_durable(
@@ -506,7 +700,7 @@ async def handle_provider_alert_ingest_durable(
     text: str,
     occurred_at: datetime | None = None,
 ) -> ProviderAlertIngestResult | None:
-    """Commit the one-post claim before Slack delivery and run admission."""
+    """Commit a retryable post lease before Slack delivery and run admission."""
 
     alert = classify_provider_alert_ingest(text)
     if alert is None:
@@ -532,15 +726,25 @@ async def handle_provider_alert_ingest_durable(
         )
     except Exception as exc:
         logger.exception("provider alert surge material post failed")
+        error = str(exc)
+        try:
+            async with UnitOfWork() as uow:
+                surge = await _release_material_surge_claim(
+                    uow.session,
+                    surge=surge,
+                )
+        except Exception as release_exc:
+            logger.exception("provider alert surge claim release failed")
+            error = f"{error}; claim release failed: {release_exc}"
         return ProviderAlertIngestResult(
             alert=alert,
             surge=surge,
-            material_post_error=str(exc),
+            material_post_error=error,
         )
 
     try:
         async with UnitOfWork() as uow:
-            surge = await _record_material_surge_posted(
+            surge = await _mark_material_surge_posted(
                 uow.session,
                 surge=surge,
                 material_channel=material_channel,
@@ -548,8 +752,7 @@ async def handle_provider_alert_ingest_durable(
                 posted_at=occurred_at,
             )
     except Exception as exc:
-        # The committed claim remains authoritative if Slack accepted the post
-        # but finalization failed, preventing a redelivery duplicate.
+        # Slack accepted the post, so do not release the claim as if delivery failed.
         logger.exception("provider alert surge post finalization failed")
         return ProviderAlertIngestResult(
             alert=alert,
@@ -575,7 +778,7 @@ async def list_open_provider_alert_surges(
 
     current_time = _utcnow(now)
     surge_policy = policy or provider_alert_surge_policy()
-    cutoff = current_time - timedelta(minutes=surge_policy.window_minutes)
+    cutoff = _surge_window_cutoff(surge_policy, current_time)
     rows = list(
         (
             await session.scalars(
@@ -597,7 +800,10 @@ async def list_open_provider_alert_surges(
 
 __all__ = [
     "ProviderAlertIngestResult",
+    "ProviderAlertSurgeDecision",
     "ProviderAlertSurgeSnapshot",
+    "ProviderAlertSurgeTransitions",
+    "evaluate_provider_alert_surge",
     "handle_provider_alert_ingest",
     "handle_provider_alert_ingest_durable",
     "list_open_provider_alert_surges",

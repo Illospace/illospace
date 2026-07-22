@@ -113,6 +113,42 @@ def test_severity_map_is_reloaded_from_durable_config_every_run(tmp_path, monkey
     assert second.policy_source == str(policy_path.resolve())
 
 
+@pytest.mark.parametrize(
+    "invalid_surge",
+    [None, {"message_threshold": "invalid"}],
+    ids=["missing", "malformed"],
+)
+def test_invalid_surge_config_does_not_disable_authoritative_severity_gate(
+    tmp_path,
+    invalid_surge,
+):
+    from brain.platform.provider_alerts import (
+        DEFAULT_PROVIDER_ALERT_POLICY_PATH,
+        ProviderAlertPolicyError,
+        classify_provider_alert_body,
+        provider_alert_surge_policy,
+    )
+
+    policy_path = tmp_path / "provider-alert-severity.json"
+    policy = json.loads(DEFAULT_PROVIDER_ALERT_POLICY_PATH.read_text(encoding="utf-8"))
+    if invalid_surge is None:
+        policy.pop("surge")
+    else:
+        policy["surge"] = invalid_surge
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    decision = classify_provider_alert_body(
+        SEEDREAM_NSFW_ALERT,
+        policy_path=policy_path,
+    )
+
+    assert decision is not None
+    assert decision.severity == "low"
+    assert decision.classification == "content_policy"
+    with pytest.raises(ProviderAlertPolicyError, match="surge"):
+        provider_alert_surge_policy(policy_path)
+
+
 def test_provider_alert_gate_has_no_memory_consolidation_dependency():
     import brain.platform.provider_alerts as classifier
     import brain.systems.slack.provider_alert_gate as ledger_gate

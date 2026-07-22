@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -54,6 +55,18 @@ class _SlackClient:
             "messages": self.threads.get(kwargs["thread_ts"], []),
             "response_metadata": {"next_cursor": ""},
         }
+
+
+class _FailOnceSlackClient(_SlackClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.post_attempts = 0
+
+    async def post_message(self, **kwargs: Any) -> dict[str, Any]:
+        self.post_attempts += 1
+        if self.post_attempts == 1:
+            raise RuntimeError("temporary Slack delivery failure")
+        return await super().post_message(**kwargs)
 
 
 @pytest.fixture
@@ -160,6 +173,135 @@ async def test_replay_posts_exactly_one_material_incident_by_eighth_alert(surge_
     assert "Subsystem: Uwear-API" in client.posts[0]["text"]
     assert "Owner: Uwear engineering on-call" in client.posts[0]["text"]
     assert "Next action:" in client.posts[0]["text"]
+
+
+def test_rule_evaluator_is_pure_and_owns_window_and_signature_decisions():
+    from brain.platform.provider_alerts import provider_alert_surge_policy
+    from brain.systems.slack.provider_alert_surge import evaluate_provider_alert_surge
+
+    policy = replace(provider_alert_surge_policy(), message_threshold=3)
+    occurrences = [
+        SimpleNamespace(
+            id=1,
+            occurred_at=OUTAGE_START - timedelta(minutes=31),
+            service="Uwear-API",
+            subsystem="garment-generation",
+            external_id="Uwear-API#old",
+            signature="old",
+            signature_title="Old timeout",
+            occurrence_milestone=None,
+            is_new_signature=True,
+        ),
+        *(
+            SimpleNamespace(
+                id=index + 2,
+                occurred_at=OUTAGE_START + timedelta(minutes=index),
+                service="Uwear-API",
+                subsystem="garment-generation",
+                external_id=f"Uwear-API#{index}",
+                signature=f"signature-{index % 2}",
+                signature_title=f"Timeout {index % 2}",
+                occurrence_milestone=None,
+                is_new_signature=index < 2,
+            )
+            for index in range(3)
+        ),
+    ]
+
+    decision = evaluate_provider_alert_surge(
+        occurrences,
+        policy,
+        OUTAGE_START + timedelta(minutes=2),
+    )
+
+    assert decision.trigger_reason == "message_volume"
+    assert decision.window_started_at == OUTAGE_START
+    assert decision.window_ended_at == OUTAGE_START + timedelta(minutes=2)
+    assert decision.message_count == 3
+    assert decision.subsystem == "Uwear-API"
+    assert decision.signatures == (
+        {"signature": "signature-0", "title": "Timeout 0"},
+        {"signature": "signature-1", "title": "Timeout 1"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_delivery_releases_claim_and_next_alert_retries_once(surge_store):
+    from brain.systems.slack.provider_alert_surge import (
+        handle_provider_alert_ingest_durable,
+    )
+
+    client = _FailOnceSlackClient()
+    results = []
+    for index, marker in enumerate(("100th error", "101st error", "102nd error")):
+        results.append(
+            await handle_provider_alert_ingest_durable(
+                client,
+                org_id=ORG_ID,
+                channel_id=ALERTS_CHANNEL_ID,
+                message_ts=f"178464050{index}.000000",
+                text=_rollbar_alert(2278, marker, "TimeoutError: generation timed out"),
+                occurred_at=OUTAGE_START + timedelta(minutes=index),
+            )
+        )
+
+    assert results[0] is not None
+    assert results[0].material_post_error == "temporary Slack delivery failure"
+    assert results[0].surge is not None
+    assert results[0].surge.material_post_claimed_at is None
+    assert results[1] is not None and results[1].material_posted is True
+    assert results[2] is not None and results[2].material_posted is False
+    assert client.post_attempts == 2
+    assert len(client.posts) == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_undelivered_claim_is_reclaimed(surge_store):
+    from brain.platform.provider_alerts import (
+        classify_provider_alert_ingest,
+        provider_alert_surge_policy,
+    )
+    from brain.systems.slack.provider_alert_surge import (
+        handle_provider_alert_ingest_durable,
+        record_provider_alert_occurrence,
+    )
+
+    policy = provider_alert_surge_policy()
+    alert = classify_provider_alert_ingest(
+        _rollbar_alert(2278, "100th error", "TimeoutError: generation timed out")
+    )
+    assert alert is not None
+    async with surge_store() as session:
+        claimed, should_post = await record_provider_alert_occurrence(
+            session,
+            org_id=ORG_ID,
+            channel_id=ALERTS_CHANNEL_ID,
+            message_ts="1784640600.000000",
+            alert=alert,
+            occurred_at=OUTAGE_START,
+            policy=policy,
+        )
+        await session.commit()
+
+    assert should_post is True
+    assert claimed is not None
+    assert claimed.material_post_claimed_at == OUTAGE_START
+
+    client = _SlackClient()
+    reclaimed_at = OUTAGE_START + timedelta(seconds=policy.claim_ttl_seconds + 1)
+    result = await handle_provider_alert_ingest_durable(
+        client,
+        org_id=ORG_ID,
+        channel_id=ALERTS_CHANNEL_ID,
+        message_ts="1784640601.000000",
+        text=_rollbar_alert(2278, "2nd error", "TimeoutError: generation timed out"),
+        occurred_at=reclaimed_at,
+    )
+
+    assert result is not None and result.material_posted is True
+    assert result.surge is not None
+    assert result.surge.material_post_claimed_at == reclaimed_at
+    assert len(client.posts) == 1
 
 
 @pytest.mark.asyncio
@@ -482,7 +624,22 @@ def test_surge_thresholds_are_loaded_from_named_config():
     assert policy.window_minutes == 30
     assert policy.milestone_threshold == 100
     assert policy.new_signature_threshold == 2
+    assert policy.claim_ttl_seconds == 180
     assert policy.material_channel == "#4_software"
+
+
+def test_surge_claim_ttl_uses_small_default_when_omitted(tmp_path):
+    from brain.platform.provider_alerts import (
+        DEFAULT_PROVIDER_ALERT_POLICY_PATH,
+        provider_alert_surge_policy,
+    )
+
+    policy_path = tmp_path / "provider-alert-severity.json"
+    payload = json.loads(DEFAULT_PROVIDER_ALERT_POLICY_PATH.read_text(encoding="utf-8"))
+    payload["surge"].pop("claim_ttl_seconds")
+    policy_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert provider_alert_surge_policy(policy_path).claim_ttl_seconds == 180
 
 
 @pytest.mark.asyncio

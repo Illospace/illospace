@@ -21,6 +21,7 @@ from brain.kernel import config
 
 PROVIDER_ALERT_POLICY_ENV = "ILLO_PROVIDER_ALERT_POLICY_PATH"
 PROVIDER_ALERT_MATERIAL_CHANNEL_ENV = "ILLO_PROVIDER_ALERT_MATERIAL_CHANNEL"
+DEFAULT_PROVIDER_ALERT_SURGE_CLAIM_TTL_SECONDS = 180
 DEFAULT_PROVIDER_ALERT_POLICY_PATH = (
     Path(config.BRAIN_DIR) / "deploy" / "compose" / "provider-alert-severity.json"
 )
@@ -110,6 +111,7 @@ class ProviderAlertSurgePolicy:
     material_channel: str
     owner: str
     next_action: str
+    claim_ttl_seconds: int = DEFAULT_PROVIDER_ALERT_SURGE_CLAIM_TTL_SECONDS
 
 
 @dataclass(frozen=True)
@@ -147,8 +149,10 @@ def _policy_path(path: str | Path | None = None) -> Path:
     return Path(configured) if configured else DEFAULT_PROVIDER_ALERT_POLICY_PATH
 
 
-def load_provider_alert_policy(path: str | Path | None = None) -> dict[str, Any]:
-    """Read and validate the source-controlled severity map without caching it."""
+def _load_provider_alert_policy_document(
+    path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Read the shared policy document without coupling subsection validation."""
 
     source = _policy_path(path)
     try:
@@ -159,6 +163,14 @@ def load_provider_alert_policy(path: str | Path | None = None) -> dict[str, Any]
         ) from exc
     if not isinstance(payload, dict):
         raise ProviderAlertPolicyError("provider alert policy must be a JSON object")
+    payload["_source"] = str(source.resolve())
+    return payload
+
+
+def load_provider_alert_policy(path: str | Path | None = None) -> dict[str, Any]:
+    """Read and validate only the source-controlled severity map."""
+
+    payload = _load_provider_alert_policy_document(path)
     rules = payload.get("rules")
     if payload.get("version") != 1 or not isinstance(rules, list) or not rules:
         raise ProviderAlertPolicyError("provider alert policy requires version=1 and rules")
@@ -210,29 +222,6 @@ def load_provider_alert_policy(path: str | Path | None = None) -> dict[str, Any]
         raise ProviderAlertPolicyError(
             f"provider alert escalation_signals contain an invalid pattern: {exc}"
         ) from exc
-    surge = payload.get("surge")
-    if not isinstance(surge, dict):
-        raise ProviderAlertPolicyError("provider alert policy requires a surge object")
-    for key in (
-        "message_threshold",
-        "window_minutes",
-        "milestone_threshold",
-        "new_signature_threshold",
-    ):
-        try:
-            value = int(surge.get(key))
-        except (TypeError, ValueError) as exc:
-            raise ProviderAlertPolicyError(
-                f"provider alert surge {key} must be an integer"
-            ) from exc
-        if value <= 0:
-            raise ProviderAlertPolicyError(
-                f"provider alert surge {key} must be positive"
-            )
-    for key in ("material_channel", "owner", "next_action"):
-        if not str(surge.get(key) or "").strip():
-            raise ProviderAlertPolicyError(f"provider alert surge {key} is required")
-    payload["_source"] = str(source.resolve())
     return payload
 
 
@@ -241,12 +230,51 @@ def provider_alert_surge_policy(
 ) -> ProviderAlertSurgePolicy:
     """Load the named surge thresholds and material-incident destination."""
 
-    surge = load_provider_alert_policy(path)["surge"]
+    payload = _load_provider_alert_policy_document(path)
+    surge = payload.get("surge")
+    if not isinstance(surge, dict):
+        raise ProviderAlertPolicyError("provider alert policy requires a surge object")
+    integer_values: dict[str, int] = {}
+    for key in (
+        "message_threshold",
+        "window_minutes",
+        "milestone_threshold",
+        "new_signature_threshold",
+    ):
+        try:
+            integer_values[key] = int(surge.get(key))
+        except (TypeError, ValueError) as exc:
+            raise ProviderAlertPolicyError(
+                f"provider alert surge {key} must be an integer"
+            ) from exc
+        if integer_values[key] <= 0:
+            raise ProviderAlertPolicyError(
+                f"provider alert surge {key} must be positive"
+            )
+    try:
+        integer_values["claim_ttl_seconds"] = int(
+            surge.get(
+                "claim_ttl_seconds",
+                DEFAULT_PROVIDER_ALERT_SURGE_CLAIM_TTL_SECONDS,
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise ProviderAlertPolicyError(
+            "provider alert surge claim_ttl_seconds must be an integer"
+        ) from exc
+    if integer_values["claim_ttl_seconds"] <= 0:
+        raise ProviderAlertPolicyError(
+            "provider alert surge claim_ttl_seconds must be positive"
+        )
+    for key in ("material_channel", "owner", "next_action"):
+        if not str(surge.get(key) or "").strip():
+            raise ProviderAlertPolicyError(f"provider alert surge {key} is required")
     return ProviderAlertSurgePolicy(
-        message_threshold=int(surge["message_threshold"]),
-        window_minutes=int(surge["window_minutes"]),
-        milestone_threshold=int(surge["milestone_threshold"]),
-        new_signature_threshold=int(surge["new_signature_threshold"]),
+        message_threshold=integer_values["message_threshold"],
+        window_minutes=integer_values["window_minutes"],
+        milestone_threshold=integer_values["milestone_threshold"],
+        new_signature_threshold=integer_values["new_signature_threshold"],
+        claim_ttl_seconds=integer_values["claim_ttl_seconds"],
         material_channel=(
             str(os.getenv(PROVIDER_ALERT_MATERIAL_CHANNEL_ENV) or "").strip()
             or str(surge["material_channel"]).strip()
@@ -557,6 +585,7 @@ def classify_provider_alert_body(
 __all__ = [
     "AlertSignature",
     "DEFAULT_PROVIDER_ALERT_POLICY_PATH",
+    "DEFAULT_PROVIDER_ALERT_SURGE_CLAIM_TTL_SECONDS",
     "PROVIDER_ALERT_MATERIAL_CHANNEL_ENV",
     "PROVIDER_ALERT_POLICY_ENV",
     "ProviderAlertDecision",
