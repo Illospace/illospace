@@ -698,6 +698,48 @@ class TestAgentLoop:
         assert result.tokens_input == 1000
         assert result.tokens_output == 200
 
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
+    @patch("brain.systems.runs.direct_agent._save_session")
+    def test_identical_tool_failures_open_circuit_after_three_attempts(
+        self,
+        mock_save,
+        mock_load,
+        mock_client,
+    ):
+        from brain.systems.runs.direct_agent import run_agent
+
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            self._make_response(
+                text=None,
+                stop_reason="tool_use",
+                tool_use={"name": "always_fails", "input": {"value": "same"}},
+            )
+            for _ in range(10)
+        ]
+        mock_client.return_value = _mock_llm_client(client)
+        handler = MagicMock(side_effect=RuntimeError("deterministic failure"))
+
+        result = run_agent(
+            message="Use the deterministic tool",
+            tools=[{
+                "name": "always_fails",
+                "description": "Always fails for this regression test.",
+                "input_schema": {"type": "object", "properties": {}},
+            }],
+            tool_handlers={"always_fails": handler},
+            persist_session=False,
+            max_turns=20,
+        )
+
+        assert result.success is True
+        assert handler.call_count == 3
+        assert client.messages.create.call_count == 3
+        assert "always_fails" in result.output
+        assert "RuntimeError" in result.output
+        assert "3 consecutive failures" in result.output
+
     async def test_repeated_brain_encode_is_rejected(self):
         from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState
 
@@ -755,6 +797,42 @@ class TestAgentLoop:
 
         assert results[0]["is_error"] is True
         assert "Do not retry brain_encode" in results[0]["content"]
+
+    async def test_failure_circuit_skips_fourth_call_in_same_tool_batch(self):
+        from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState
+        from brain.systems.runs.direct_loop.state import ToolFailureState
+
+        blocks = []
+        for index in range(4):
+            block = MagicMock()
+            block.type = "tool_use"
+            block.name = "always_fails"
+            block.input = {"value": "same"}
+            block.id = f"tool_fail_{index}"
+            blocks.append(block)
+
+        response = MagicMock(content=blocks)
+        handler = MagicMock(side_effect=RuntimeError("deterministic failure"))
+        failure_state = ToolFailureState()
+
+        results = await _execute_tool_calls_async(
+            response,
+            {"always_fails": handler},
+            [],
+            _GateState(),
+            None,
+            None,
+            None,
+            "runner",
+            failure_state=failure_state,
+        )
+
+        assert handler.call_count == 3
+        assert len(results) == 4
+        assert results[-1]["is_error"] is True
+        assert failure_state.circuit_open is True
+        assert failure_state.consecutive_failures == 3
+        assert failure_state.last_error_class == "RuntimeError"
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_supports_async_handlers_inside_running_loop(self):
@@ -1145,6 +1223,25 @@ class TestAgentLoop:
 
         assert resolved.is_error is True
         assert "Continue working and plan another pipeline" in resolved.result_text
+
+    def test_resolve_tool_call_preserves_structured_error_class(self):
+        from brain.systems.runs.direct_agent import _PendingToolCall, _resolve_tool_call
+
+        request = _PendingToolCall(
+            block_id="tool_419",
+            tool_name="manage_idea",
+            tool_input={"action": "create"},
+            handler=lambda **_: json.dumps({
+                "error": "parent_id must be an existing idea id or omitted",
+                "error_class": "ToolValidationError",
+            }),
+        )
+
+        resolved = _resolve_tool_call(request)
+
+        assert resolved.is_error is True
+        assert resolved.error_class == "ToolValidationError"
+        assert "parent_id must be an existing idea id or omitted" in resolved.result_text
 
     @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))

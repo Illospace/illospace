@@ -16,6 +16,7 @@ from brain.platform.async_io import (
     invoke_maybe_async,
     mark_side_effect_started,
 )
+from brain.systems.runs.actions import result_failure_summary
 from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
 from brain.systems.runs.tool_catalog.registry import (
     action_policy_for_tool,
@@ -50,6 +51,7 @@ class ResolvedToolCall:
     tool_input: dict
     result_text: str
     is_error: bool = False
+    error_class: str | None = None
     result_content: Any | None = None
 
 
@@ -121,7 +123,33 @@ def _timeout_result(request: PendingToolCall, timeout_seconds: float) -> Resolve
             "try a narrower or faster tool call if needed, or explain the blocker to the user."
         ),
         is_error=True,
+        error_class="ToolTimeoutError",
     )
+
+
+def _structured_error_class(result: Any) -> str | None:
+    payload = result
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("error_class")
+    return str(value).strip() if value else None
+
+
+def _parallel_same_tool_limit(failure_state: Any, tool_name: str) -> int | None:
+    """Bound speculative duplicate calls without disabling normal parallelism."""
+
+    if failure_state is None:
+        return None
+    threshold = max(1, int(getattr(failure_state, "threshold", 3) or 3))
+    if getattr(failure_state, "consecutive_tool_name", None) != tool_name:
+        return threshold
+    consecutive = max(0, int(getattr(failure_state, "consecutive_failures", 0) or 0))
+    return max(1, threshold - consecutive)
 
 
 def _must_finish_before_reporting(request: PendingToolCall) -> bool:
@@ -179,6 +207,67 @@ def _extract_model_visible_tool_content(result: Any) -> tuple[Any, Any | None]:
     return cleaned, model_content
 
 
+def _resolved_tool_result(request: PendingToolCall, result: Any) -> ResolvedToolCall:
+    result, model_content = _extract_model_visible_tool_content(result)
+    result_text = json.dumps(result, default=str)
+    failure_summary = result_failure_summary(result)
+    is_error = failure_summary is not None
+    error_class = _structured_error_class(result) if is_error else None
+    if is_error and not error_class:
+        error_class = "ToolError"
+
+    if request.tool_name == "brain_encode" and failure_summary:
+        result_text += (
+            "\n\n[System: brain_encode failed. Do not retry brain_encode in this run. "
+            "Move on and end your turn unless another required tool remains.]"
+        )
+    elif request.tool_name == "cortex_reply" and isinstance(result, dict) and (
+        result.get("blocked") or result.get("error")
+    ):
+        if result.get("instruction"):
+            result_text += f"\n\n[System: {result['instruction']}]"
+    elif request.result_nudge:
+        result_text += request.result_nudge
+
+    return ResolvedToolCall(
+        block_id=request.block_id,
+        tool_name=request.tool_name,
+        tool_input=request.tool_input,
+        result_text=truncate_tool_result_text(request.tool_name, result_text),
+        is_error=is_error,
+        error_class=error_class,
+        result_content=model_content,
+    )
+
+
+def _failed_tool_result(request: PendingToolCall, exc: Exception) -> ResolvedToolCall:
+    error_class = type(exc).__name__
+    return ResolvedToolCall(
+        block_id=request.block_id,
+        tool_name=request.tool_name,
+        tool_input=request.tool_input,
+        result_text=f"Error [{error_class}]: {exc}",
+        is_error=True,
+        error_class=error_class,
+    )
+
+
+def _append_open_circuit_result(
+    tool_results: list[dict],
+    block: Any,
+    failure_state: Any,
+) -> bool:
+    if failure_state is None or not failure_state.circuit_open:
+        return False
+    tool_results.append({
+        "type": "tool_result",
+        "tool_use_id": block.id,
+        "content": failure_state.final_answer(),
+        "is_error": True,
+    })
+    return True
+
+
 def _record_agent_tool_result(agent_context, resolved: ResolvedToolCall, result_text: str) -> None:
     if agent_context is None:
         return
@@ -197,7 +286,7 @@ def _record_agent_tool_result(agent_context, resolved: ResolvedToolCall, result_
         recent = getattr(agent_context, "recent_tool_results", None)
         if not isinstance(recent, list):
             recent = []
-        recent.append({
+        recent_result = {
             "tool_name": resolved.tool_name,
             "args_preview": _truncate_middle_text(args_preview, _RECENT_TOOL_ARGS_PREVIEW_CHARS),
             "is_error": bool(resolved.is_error),
@@ -205,7 +294,10 @@ def _record_agent_tool_result(agent_context, resolved: ResolvedToolCall, result_
                 str(result_text or ""),
                 _RECENT_TOOL_RESULT_PREVIEW_CHARS,
             ),
-        })
+        }
+        if resolved.error_class:
+            recent_result["error_class"] = resolved.error_class
+        recent.append(recent_result)
         setattr(agent_context, "recent_tool_results", recent[-_RECENT_TOOL_RESULT_LIMIT:])
     except Exception:
         logger.debug("Failed to record recent tool result for final-reply context", exc_info=True)
@@ -298,41 +390,10 @@ async def _async_resolve_tool_call_once(
             agent_context=agent_context,
             threadlocal_context=threadlocal_context,
         )
-        result, model_content = _extract_model_visible_tool_content(result)
-        result_text = json.dumps(result, default=str)
-        is_error = False
-        if request.tool_name == "brain_encode" and isinstance(result, dict) and result.get("error"):
-            result_text += (
-                "\n\n[System: brain_encode failed. Do not retry brain_encode in this run. "
-                "Move on and end your turn unless another required tool remains.]"
-            )
-            is_error = True
-        elif request.tool_name == "cortex_reply" and isinstance(result, dict) and (
-            result.get("blocked") or result.get("error")
-        ):
-            if result.get("instruction"):
-                result_text += f"\n\n[System: {result['instruction']}]"
-            is_error = True
-        elif request.result_nudge:
-            result_text += request.result_nudge
-        result_text = truncate_tool_result_text(request.tool_name, result_text)
-        return ResolvedToolCall(
-            block_id=request.block_id,
-            tool_name=request.tool_name,
-            tool_input=request.tool_input,
-            result_text=result_text,
-            is_error=is_error,
-            result_content=model_content,
-        )
+        return _resolved_tool_result(request, result)
     except Exception as exc:
         logger.warning("Tool %s failed: %s", request.tool_name, exc)
-        return ResolvedToolCall(
-            block_id=request.block_id,
-            tool_name=request.tool_name,
-            tool_input=request.tool_input,
-            result_text=f"Error: {exc}",
-            is_error=True,
-        )
+        return _failed_tool_result(request, exc)
 
 
 async def async_resolve_tool_call(
@@ -431,41 +492,10 @@ def _resolve_tool_call_sync(
             agent_context=agent_context,
             threadlocal_context=threadlocal_context,
         )
-        result, model_content = _extract_model_visible_tool_content(result)
-        result_text = json.dumps(result, default=str)
-        is_error = False
-        if request.tool_name == "brain_encode" and isinstance(result, dict) and result.get("error"):
-            result_text += (
-                "\n\n[System: brain_encode failed. Do not retry brain_encode in this run. "
-                "Move on and end your turn unless another required tool remains.]"
-            )
-            is_error = True
-        elif request.tool_name == "cortex_reply" and isinstance(result, dict) and (
-            result.get("blocked") or result.get("error")
-        ):
-            if result.get("instruction"):
-                result_text += f"\n\n[System: {result['instruction']}]"
-            is_error = True
-        elif request.result_nudge:
-            result_text += request.result_nudge
-        result_text = truncate_tool_result_text(request.tool_name, result_text)
-        return ResolvedToolCall(
-            block_id=request.block_id,
-            tool_name=request.tool_name,
-            tool_input=request.tool_input,
-            result_text=result_text,
-            is_error=is_error,
-            result_content=model_content,
-        )
+        return _resolved_tool_result(request, result)
     except Exception as exc:
         logger.warning("Tool %s failed: %s", request.tool_name, exc)
-        return ResolvedToolCall(
-            block_id=request.block_id,
-            tool_name=request.tool_name,
-            tool_input=request.tool_input,
-            result_text=f"Error: {exc}",
-            is_error=True,
-        )
+        return _failed_tool_result(request, exc)
 
 
 def resolve_tool_call(
@@ -508,6 +538,7 @@ def emit_resolved_tool_call(
     tool_call_source: str,
     *,
     agent_context=None,
+    failure_state=None,
 ) -> str:
     """Append tool_result content and record side effects in block order."""
     tool_results.append({
@@ -519,6 +550,8 @@ def emit_resolved_tool_call(
     callback_result_text = resolved.result_text
     if resolved.tool_name == "brain_vault":
         callback_result_text = "[secret redacted]"
+    if failure_state is not None:
+        failure_state.record(resolved)
     _record_agent_tool_result(agent_context, resolved, callback_result_text)
     if on_tool_call:
         on_tool_call(resolved.tool_name, resolved.tool_input, callback_result_text)
@@ -534,6 +567,7 @@ async def async_emit_resolved_tool_call(
     tool_call_source: str,
     *,
     agent_context=None,
+    failure_state=None,
 ) -> None:
     """Append a tool result and persist its trace through the async event log."""
     callback_result_text = emit_resolved_tool_call(
@@ -544,6 +578,7 @@ async def async_emit_resolved_tool_call(
         None,
         tool_call_source,
         agent_context=agent_context,
+        failure_state=failure_state,
     )
     if run_id and idea_id:
         from brain.systems.runs.events import async_record_tool_call
@@ -568,6 +603,7 @@ def execute_parallel_tool_batch(
     *,
     agent_context,
     max_parallel_tool_calls: int,
+    failure_state=None,
 ) -> None:
     """Run independent tool calls from sync runtime code while preserving output order."""
     if not pending:
@@ -587,6 +623,7 @@ def execute_parallel_tool_batch(
             idea_id,
             tool_call_source,
             agent_context=agent_context,
+            failure_state=failure_state,
         )
 
 
@@ -600,6 +637,7 @@ async def async_execute_parallel_tool_batch(
     *,
     agent_context,
     max_parallel_tool_calls: int,
+    failure_state=None,
 ) -> None:
     """Run async-capable independent tool calls concurrently while preserving output order."""
     if not pending:
@@ -620,6 +658,7 @@ async def async_execute_parallel_tool_batch(
                 idea_id,
                 tool_call_source,
                 agent_context=agent_context,
+                failure_state=failure_state,
             )
         return
 
@@ -644,13 +683,7 @@ async def async_execute_parallel_tool_batch(
                     raise
                 except Exception as exc:
                     logger.warning("Tool %s failed: %s", request.tool_name, exc)
-                    resolved = ResolvedToolCall(
-                        block_id=request.block_id,
-                        tool_name=request.tool_name,
-                        tool_input=request.tool_input,
-                        result_text=f"Error: {exc}",
-                        is_error=True,
-                    )
+                    resolved = _failed_tool_result(request, exc)
                 await async_emit_resolved_tool_call(
                     resolved,
                     tool_results,
@@ -659,6 +692,7 @@ async def async_execute_parallel_tool_batch(
                     idea_id,
                     tool_call_source,
                     agent_context=agent_context,
+                    failure_state=failure_state,
                 )
         finally:
             for _, task in tasks:
@@ -692,6 +726,7 @@ def execute_tool_calls(
     parallel_safe_tool_names: frozenset[str],
     max_parallel_tool_calls: int,
     check_gate_violations: Callable,
+    failure_state=None,
 ) -> list[dict]:
     """Execute all tool calls from a provider response."""
     try:
@@ -718,6 +753,7 @@ def execute_tool_calls(
             tool_call_source,
             agent_context=agent_context,
             max_parallel_tool_calls=max_parallel_tool_calls,
+            failure_state=failure_state,
         )
         pending_parallel = []
 
@@ -728,6 +764,9 @@ def execute_tool_calls(
         tool_name = block.name
         tool_input = block.input
         tool_calls_made.append(tool_name)
+
+        if _append_open_circuit_result(tool_results, block, failure_state):
+            continue
 
         if tool_name == "brain_encode" and tool_calls_made.count("brain_encode") > 1:
             flush_parallel_batch()
@@ -777,6 +816,14 @@ def execute_tool_calls(
         )
 
         if tool_name in parallel_safe_tool_names:
+            same_tool_limit = _parallel_same_tool_limit(failure_state, tool_name)
+            same_tool_pending = sum(
+                request.tool_name == tool_name for request in pending_parallel
+            )
+            if same_tool_limit is not None and same_tool_pending >= same_tool_limit:
+                flush_parallel_batch()
+                if _append_open_circuit_result(tool_results, block, failure_state):
+                    continue
             pending_parallel.append(request)
             continue
 
@@ -793,6 +840,7 @@ def execute_tool_calls(
             idea_id,
             tool_call_source,
             agent_context=agent_context,
+            failure_state=failure_state,
         )
 
     flush_parallel_batch()
@@ -817,6 +865,7 @@ async def async_execute_tool_calls(
     parallel_safe_tool_names: frozenset[str],
     max_parallel_tool_calls: int,
     check_gate_violations: Callable,
+    failure_state=None,
 ) -> list[dict]:
     """Execute all tool calls from async runtime code."""
     tool_results: list[dict] = []
@@ -836,6 +885,7 @@ async def async_execute_tool_calls(
             tool_call_source,
             agent_context=agent_context,
             max_parallel_tool_calls=max_parallel_tool_calls,
+            failure_state=failure_state,
         )
         pending_parallel = []
 
@@ -846,6 +896,9 @@ async def async_execute_tool_calls(
         tool_name = block.name
         tool_input = block.input
         tool_calls_made.append(tool_name)
+
+        if _append_open_circuit_result(tool_results, block, failure_state):
+            continue
 
         if tool_name == "brain_encode" and tool_calls_made.count("brain_encode") > 1:
             await flush_parallel_batch()
@@ -895,6 +948,14 @@ async def async_execute_tool_calls(
         )
 
         if tool_name in parallel_safe_tool_names:
+            same_tool_limit = _parallel_same_tool_limit(failure_state, tool_name)
+            same_tool_pending = sum(
+                request.tool_name == tool_name for request in pending_parallel
+            )
+            if same_tool_limit is not None and same_tool_pending >= same_tool_limit:
+                await flush_parallel_batch()
+                if _append_open_circuit_result(tool_results, block, failure_state):
+                    continue
             pending_parallel.append(request)
             continue
 
@@ -911,6 +972,7 @@ async def async_execute_tool_calls(
             idea_id,
             tool_call_source,
             agent_context=agent_context,
+            failure_state=failure_state,
         )
 
     await flush_parallel_batch()

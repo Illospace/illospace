@@ -674,6 +674,7 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
             "- ![Dispatcher diagram](/static/uploads/thread-assets/idea/dispatcher.png)",
         ]
     )
+    parent_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
 
     def add(obj):
         added.append(obj)
@@ -698,6 +699,7 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
     session.add.side_effect = add
     session.flush = AsyncMock(side_effect=flush)
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
+    monkeypatch.setattr(idea_tools, "_require_idea_for_actor", AsyncMock(return_value=SimpleNamespace(id=parent_id)))
 
     async def serialize_idea(idea_arg, session_arg):
         return {"id": str(idea_arg.id), "status": idea_arg.status}
@@ -716,7 +718,7 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
                 description="Inspect vault and AWS credential handoff path.",
                 thread_message=seed_markdown,
                 status="needs_input",
-                parent_id="parent-idea",
+                parent_id=parent_id,
                 origin_ref="parent-idea",
             )
         )
@@ -740,13 +742,175 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
     assert published == [("idea_created", {"idea_id": "idea-created", "title": "Check vault state"})]
 
 
+@pytest.mark.parametrize(
+    "parent_id",
+    [None, "", "   ", "null", "none", "00000000-0000-0000-0000-000000000000"],
+)
+async def test_manage_idea_create_normalizes_emptyish_parent_id_to_null(monkeypatch, parent_id):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
+
+    session = MagicMock()
+    added = []
+
+    def add(obj):
+        added.append(obj)
+
+    async def flush():
+        for obj in added:
+            if obj.__class__.__name__ == "Idea" and getattr(obj, "id", None) is None:
+                obj.id = "idea-created"
+
+    class FakeUnitOfWork:
+        def __init__(self):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    session.add.side_effect = add
+    session.flush = AsyncMock(side_effect=flush)
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
+    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
+    monkeypatch.setattr(idea_tools, "_seed_created_idea_thread", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        idea_tools,
+        "_serialize_idea",
+        AsyncMock(return_value={"id": "idea-created", "parent_id": None}),
+    )
+
+    with bind_agent_context({"org_id": "org-1", "user_id": "user-1"}):
+        payload = json.loads(
+            await idea_tools._handle_manage_idea(
+                action="create",
+                title="Replay run 2327 input",
+                parent_id=parent_id,
+                origin_ref=" null ",
+                orbit_anchor_id="00000000-0000-0000-0000-000000000000",
+            )
+        )
+
+    idea_rows = [obj for obj in added if obj.__class__.__name__ == "Idea"]
+    assert payload["created"] is True
+    assert len(idea_rows) == 1
+    assert idea_rows[0].parent_id is None
+    assert idea_rows[0].origin_ref is None
+
+
+@pytest.mark.parametrize(
+    "parent_id",
+    [None, "", "00000000-0000-0000-0000-000000000000"],
+)
+async def test_manage_idea_create_persists_emptyish_parent_as_null(
+    monkeypatch,
+    async_sqlite_session_factory,
+    sqlite_postgres_ddl_patch,
+    parent_id,
+):
+    del sqlite_postgres_ddl_patch
+
+    from brain.platform.db.models.idea import Idea
+    from brain.platform.db.models.org import Org, User
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
+
+    org_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+    user_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1"
+    session = await async_sqlite_session_factory(
+        [Org.__table__, User.__table__, Idea.__table__]
+    )
+    session.add(Org(id=org_id, name="Issue 419 Org", slug=f"issue-419-{parent_id or 'omitted'}"))
+    session.add(User(id=user_id, org_id=org_id, name="Issue 419 User", email=f"{uuid.uuid4()}@test.com"))
+    await session.flush()
+
+    class SessionUnitOfWork:
+        async def __aenter__(self):
+            self.session = session
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            if exc_type is None:
+                await session.flush()
+            return False
+
+    async def serialize_idea(idea, _session):
+        return {"id": str(idea.id), "parent_id": idea.parent_id}
+
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", SessionUnitOfWork)
+    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
+    monkeypatch.setattr(idea_tools, "_seed_created_idea_thread", AsyncMock(return_value=None))
+    monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
+
+    with bind_agent_context({"org_id": org_id, "user_id": user_id}):
+        payload = json.loads(
+            await idea_tools._handle_manage_idea(
+                action="create",
+                title="Persist normalized parent",
+                parent_id=parent_id,
+            )
+        )
+
+    session.expire_all()
+    persisted = await session.get(Idea, payload["idea"]["id"])
+    assert persisted is not None
+    assert persisted.parent_id is None
+
+
+async def test_manage_idea_create_rejects_missing_parent_before_insert(monkeypatch):
+    from fastapi import HTTPException
+
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
+
+    missing_parent_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    session = MagicMock()
+
+    class FakeUnitOfWork:
+        def __init__(self):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    async def missing_parent(_session, idea_id, _actor):
+        assert idea_id == missing_parent_id
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
+    monkeypatch.setattr(idea_tools, "_require_idea_for_actor", missing_parent)
+
+    with bind_agent_context({"org_id": "org-1", "user_id": "user-1"}):
+        payload = json.loads(
+            await idea_tools._handle_manage_idea(
+                action="create",
+                title="Child of missing idea",
+                parent_id=missing_parent_id,
+            )
+        )
+
+    assert payload == {
+        "error": "parent_id must be an existing idea id or omitted",
+        "error_class": "ToolValidationError",
+    }
+    session.add.assert_not_called()
+    session.flush.assert_not_called()
+
+
 async def test_manage_idea_create_can_handoff_owner(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
 
     session = MagicMock()
     added = []
-    target_user = SimpleNamespace(id="target-user", org_id="org-1", name="JB")
+    parent_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+    target_user_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1"
+    target_user = SimpleNamespace(id=target_user_id, org_id="org-1", name="JB")
 
     def add(obj):
         added.append(obj)
@@ -773,6 +937,7 @@ async def test_manage_idea_create_can_handoff_owner(monkeypatch):
     session.scalar = AsyncMock(return_value=target_user)
     session.execute = AsyncMock(return_value=SimpleNamespace(one_or_none=lambda: None))
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
+    monkeypatch.setattr(idea_tools, "_require_idea_for_actor", AsyncMock(return_value=SimpleNamespace(id=parent_id)))
     monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
 
     async def serialize_idea(idea_arg, session_arg):
@@ -786,20 +951,20 @@ async def test_manage_idea_create_can_handoff_owner(monkeypatch):
                 action="create",
                 title="JB follow-up",
                 thread_message="Please take this follow-up.",
-                parent_id="parent-idea",
-                user_id="target-user",
+                parent_id=parent_id,
+                user_id=target_user_id,
             )
         )
 
     idea_rows = [obj for obj in added if obj.__class__.__name__ == "Idea"]
     thread_rows = [obj for obj in added if obj.__class__.__name__ == "IdeaThread"]
     assert payload["created"] is True
-    assert payload["idea"]["user_id"] == "target-user"
-    assert idea_rows[0].user_id == "target-user"
+    assert payload["idea"]["user_id"] == target_user_id
+    assert idea_rows[0].user_id == target_user_id
     assert thread_rows[0].role == "illo"
     assert thread_rows[0].user_id is None
     assert thread_rows[0].metadata_["requested_by_user_id"] == "user-1"
-    assert thread_rows[0].metadata_["owner_user_id"] == "target-user"
+    assert thread_rows[0].metadata_["owner_user_id"] == target_user_id
 
 
 async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch):
@@ -809,6 +974,7 @@ async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monke
     session = MagicMock()
     added = []
     admitted = []
+    parent_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
 
     def add(obj):
         added.append(obj)
@@ -825,7 +991,7 @@ async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monke
         assert idea.status == "emerged"
         assert seed_content == "Do the theme color work."
         assert actor_user_id == "user-1"
-        assert parent_id == "parent-idea"
+        assert parent_id == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
         assert origin_ref == "parent-idea"
         assert thread_message_id == 43
         idea.status = "working"
@@ -845,6 +1011,7 @@ async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monke
     session.add.side_effect = add
     session.flush = AsyncMock(side_effect=flush)
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
+    monkeypatch.setattr(idea_tools, "_require_idea_for_actor", AsyncMock(return_value=SimpleNamespace(id=parent_id)))
     monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
     monkeypatch.setattr(idea_tools, "_admit_created_idea_run", admit)
 
@@ -867,7 +1034,7 @@ async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monke
                 title="Fix streaming color",
                 description="Do the theme color work.",
                 status="queued",
-                parent_id="parent-idea",
+                parent_id=parent_id,
                 origin_ref="parent-idea",
             )
         )

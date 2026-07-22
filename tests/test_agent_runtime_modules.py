@@ -748,6 +748,62 @@ def test_async_tool_execution_keeps_parallel_tool_contexts_isolated():
     assert parent_shared == []
 
 
+def test_async_parallel_tool_failures_do_not_start_a_fourth_attempt():
+    from brain.systems.runs.direct_loop.gates import GateState, check_gate_violations
+    from brain.systems.runs.direct_loop.state import ToolFailureState
+    from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
+
+    attempts = []
+
+    async def handler(value):
+        attempts.append(value)
+        await asyncio.sleep(0)
+        raise RuntimeError("deterministic failure")
+
+    async def run():
+        response = SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="tool_use",
+                    id=f"call-{index}",
+                    name="read_file",
+                    input={"value": "same"},
+                )
+                for index in range(4)
+            ]
+        )
+        failure_state = ToolFailureState()
+        results = await async_execute_tool_calls(
+            response,
+            {"read_file": handler},
+            [],
+            GateState(brain=True),
+            None,
+            None,
+            None,
+            "test",
+            agent_context=SimpleNamespace(),
+            brain_tool_names=frozenset(),
+            gated_tool_names=frozenset(),
+            research_tool_names=frozenset(),
+            research_budget=6,
+            parallel_safe_tool_names=frozenset({"read_file"}),
+            max_parallel_tool_calls=4,
+            check_gate_violations=check_gate_violations,
+            failure_state=failure_state,
+        )
+        return results, failure_state
+
+    results, failure_state = asyncio.run(run())
+
+    assert len(attempts) == 3
+    assert len(results) == 4
+    assert all(result["is_error"] is True for result in results)
+    assert failure_state.circuit_open is True
+    assert failure_state.consecutive_failures == 3
+    assert failure_state.last_error_class == "RuntimeError"
+
+
 
 
 def test_retry_runtime_streams_when_live_callbacks_are_present():

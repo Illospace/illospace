@@ -1195,6 +1195,7 @@ async def _execute_tool_calls_async(
     on_tool_call, run_id, idea_id, tool_call_source: str,
     *,
     max_parallel_tool_calls: int = _MAX_PARALLEL_TOOL_CALLS,
+    failure_state=None,
 ) -> list[dict]:
     """Execute all tool calls from async runtime code."""
     return await _runtime_async_execute_tool_calls(
@@ -1214,6 +1215,7 @@ async def _execute_tool_calls_async(
         parallel_safe_tool_names=_PARALLEL_SAFE_TOOL_NAMES,
         max_parallel_tool_calls=max(1, int(max_parallel_tool_calls)),
         check_gate_violations=_runtime_check_gate_violations,
+        failure_state=failure_state,
     )
 
 
@@ -1512,6 +1514,7 @@ async def run_agent_async(
 
         # Agent loop
         turn = 0
+        circuit_breaker_output: str | None = None
 
         for turn in range(max_turns):
             if await _cancel_event_is_set_async(cancel_event):
@@ -1864,6 +1867,7 @@ async def run_agent_async(
                     on_tool_call, run_id, idea_id,
                     tool_call_source,
                     max_parallel_tool_calls=max_parallel_tool_calls,
+                    failure_state=state.tool_failures,
                 )
 
                 _append_message_with_archive(
@@ -1871,6 +1875,18 @@ async def run_agent_async(
                     {"role": "user", "content": tool_results},
                     raw_archive_messages,
                 )
+
+                if state.tool_failures.circuit_open:
+                    circuit_breaker_output = state.tool_failures.final_answer()
+                    _append_message_with_archive(
+                        state.messages,
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": circuit_breaker_output}],
+                        },
+                        raw_archive_messages,
+                    )
+                    break
 
                 # Durable reminder (e.g. `cd` non-persistence), sent as its own
                 # message AFTER tool_results — never spliced into tool output.
@@ -1899,13 +1915,13 @@ async def run_agent_async(
                 break
 
         # Post-loop: harvest, save, return
-        output = _extract_text(state.messages)
+        output = circuit_breaker_output or _extract_text(state.messages)
         staged_reply_contents = [
             str(content or "").strip()
             for content in list(getattr(_agent_context, "reply_contents", []) or [])
             if str(content or "").strip()
         ]
-        if staged_reply_contents:
+        if staged_reply_contents and circuit_breaker_output is None:
             output = staged_reply_contents[-1]
         raw_persist_source = raw_archive_messages if raw_archive_messages is not None else state.messages
         persistable_messages = _messages_without_inline_attachment_binary(
