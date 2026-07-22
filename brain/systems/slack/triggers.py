@@ -310,7 +310,8 @@ def slack_channel_monitor_message(
         "citing the issue number and URL so the team knows it was captured. Only if the ask is "
         "too vague to act on, or it duplicates an existing open issue, comment on the existing "
         "issue or stay silent instead.",
-        "- An alert that matches an EXISTING ticket or issue (same Rollbar id/error signature): "
+        "- An alert that matches an EXISTING ticket or issue (same tracked error signature; a "
+        "Rollbar item id alone is not enough when the title names a different failure mode): "
         "do NOT refile and do NOT blindly skip — follow the triage skill's Deploy-State Ladder: "
         "note occurrences while unfixed; a fix merged to staging but not promoted is expected "
         "noise (annotate, no owner re-ping, even if the ticket was closed early); a fix deployed "
@@ -333,11 +334,45 @@ def slack_channel_monitor_message(
         "origin in the structured alert_slack_channel and alert_slack_thread_ts fields when the "
         "schema exposes them, so future sweeps can re-read human resolution replies.",
         "",
-        f"Channel: {channel_id}" + (f" ({channel_name})" if channel_name else ""),
-        f"Team: {slack_trigger_payload.get('team_id')}",
-        f"Message ts: {slack_trigger_payload.get('message_ts')}",
-        f"Author (Slack id): {author}",
     ]
+    provider_alert = payload.get("provider_alert")
+    if isinstance(provider_alert, Mapping):
+        lines.extend(
+            [
+                "Deterministic provider-alert identity (use this for ticket dedup):",
+                f"- Service/subsystem: {provider_alert.get('service')} / {provider_alert.get('subsystem')}",
+                f"- External id: {provider_alert.get('external_id')}",
+                f"- Tracked signature: {provider_alert.get('tracked_signature')}",
+                f"- Signature title: {provider_alert.get('signature_title')}",
+            ]
+        )
+        if provider_alert.get("is_new_error"):
+            lines.append(
+                "- Rollbar marked this `New error:`. Dedup only against a ticket whose tracked "
+                "signature matches; otherwise file it or add an explicit new-signature entry to "
+                "the parent issue."
+            )
+        if provider_alert.get("surge_open"):
+            if provider_alert.get("material_posted"):
+                lines.append(
+                    "- The ingest gate already posted the ONE consolidated material incident to "
+                    "the software channel. Do not post another consolidated incident; continue "
+                    "only the normal per-alert annotation/ticket action."
+                )
+            elif provider_alert.get("material_post_error"):
+                lines.append(
+                    "- A material surge is open, but its consolidated Slack post failed: "
+                    f"{provider_alert.get('material_post_error')}. Surface that delivery failure."
+                )
+        lines.append("")
+    lines.extend(
+        [
+            f"Channel: {channel_id}" + (f" ({channel_name})" if channel_name else ""),
+            f"Team: {slack_trigger_payload.get('team_id')}",
+            f"Message ts: {slack_trigger_payload.get('message_ts')}",
+            f"Author (Slack id): {author}",
+        ]
+    )
     if slack_trigger_payload.get("permalink"):
         lines.append(f"Permalink: {slack_trigger_payload.get('permalink')}")
     lines.extend(["", f"Message text: {text}"])

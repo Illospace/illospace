@@ -20,6 +20,8 @@ from brain.kernel import config
 
 
 PROVIDER_ALERT_POLICY_ENV = "ILLO_PROVIDER_ALERT_POLICY_PATH"
+PROVIDER_ALERT_MATERIAL_CHANNEL_ENV = "ILLO_PROVIDER_ALERT_MATERIAL_CHANNEL"
+DEFAULT_PROVIDER_ALERT_SURGE_CLAIM_TTL_SECONDS = 180
 DEFAULT_PROVIDER_ALERT_POLICY_PATH = (
     Path(config.BRAIN_DIR) / "deploy" / "compose" / "provider-alert-severity.json"
 )
@@ -44,10 +46,72 @@ _VOLATILE_SIGNATURE_PARTS = (
     re.compile(r"\b(?:occurrences?|count|total)\s*[:=]?\s*\d+\b", re.IGNORECASE),
     re.compile(r"\bstill ongoing,?\s*\+\d+\s+since last\b", re.IGNORECASE),
 )
+_ROLLBAR_ITEM_RE = re.compile(
+    r"https?://app\.rollbar\.com/[^\s|>]+/item/"
+    r"(?P<project>[^/\s|>]+)/(?P<item>\d+)"
+    r"(?:[^|>]*\|(?P<label>[^>]*))?",
+    re.IGNORECASE,
+)
+_ROLLBAR_MILESTONE_RE = re.compile(
+    r"\b(?P<count>\d+)(?:st|nd|rd|th)\s+(?:error|occurrence)\s*:\s*",
+    re.IGNORECASE,
+)
+_ROLLBAR_NEW_ITEM_RE = re.compile(
+    r"\bnew\s+(?P<kind>item|error)\b\s*:?\s*",
+    re.IGNORECASE,
+)
+_ROLLBAR_ITEM_PREFIX_RE = re.compile(r"^\s*#?\d+\s*")
+_SUBSYSTEM_RE = re.compile(
+    r"(?im)^\s*subsystem\s*[:=]\s*(?P<subsystem>[^\n|>]{1,120})"
+)
 
 
 class ProviderAlertPolicyError(RuntimeError):
     """The durable alert policy could not be loaded or validated."""
+
+
+@dataclass(frozen=True, slots=True)
+class AlertSignature:
+    """Structured identity and occurrence information from a Rollbar alert."""
+
+    project: str
+    item_number: int
+    title: str
+    occurrence_milestone: int | None = None
+    is_new_error: bool = False
+
+    @property
+    def signature(self) -> str:
+        return f"{self.project}#{self.item_number}"
+
+    @property
+    def milestone(self) -> int | None:
+        return self.occurrence_milestone
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderAlertIngest:
+    """Normalized identity used for durable alert-ingest surge accounting."""
+
+    service: str
+    subsystem: str
+    external_id: str
+    signature: str
+    signature_title: str
+    occurrence_milestone: int | None
+    is_new_error: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderAlertSurgePolicy:
+    message_threshold: int
+    window_minutes: int
+    milestone_threshold: int
+    new_signature_threshold: int
+    material_channel: str
+    owner: str
+    next_action: str
+    claim_ttl_seconds: int = DEFAULT_PROVIDER_ALERT_SURGE_CLAIM_TTL_SECONDS
 
 
 @dataclass(frozen=True)
@@ -57,6 +121,9 @@ class ProviderAlertEvidence:
     error_type: str | None
     typed_reason: str | None
     occurrence_count: int | None
+    external_id: str | None
+    signature_title: str | None
+    is_new_error: bool
 
 
 @dataclass(frozen=True)
@@ -82,8 +149,10 @@ def _policy_path(path: str | Path | None = None) -> Path:
     return Path(configured) if configured else DEFAULT_PROVIDER_ALERT_POLICY_PATH
 
 
-def load_provider_alert_policy(path: str | Path | None = None) -> dict[str, Any]:
-    """Read and validate the source-controlled severity map without caching it."""
+def _load_provider_alert_policy_document(
+    path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Read the shared policy document without coupling subsection validation."""
 
     source = _policy_path(path)
     try:
@@ -94,6 +163,14 @@ def load_provider_alert_policy(path: str | Path | None = None) -> dict[str, Any]
         ) from exc
     if not isinstance(payload, dict):
         raise ProviderAlertPolicyError("provider alert policy must be a JSON object")
+    payload["_source"] = str(source.resolve())
+    return payload
+
+
+def load_provider_alert_policy(path: str | Path | None = None) -> dict[str, Any]:
+    """Read and validate only the source-controlled severity map."""
+
+    payload = _load_provider_alert_policy_document(path)
     rules = payload.get("rules")
     if payload.get("version") != 1 or not isinstance(rules, list) or not rules:
         raise ProviderAlertPolicyError("provider alert policy requires version=1 and rules")
@@ -145,8 +222,138 @@ def load_provider_alert_policy(path: str | Path | None = None) -> dict[str, Any]
         raise ProviderAlertPolicyError(
             f"provider alert escalation_signals contain an invalid pattern: {exc}"
         ) from exc
-    payload["_source"] = str(source.resolve())
     return payload
+
+
+def provider_alert_surge_policy(
+    path: str | Path | None = None,
+) -> ProviderAlertSurgePolicy:
+    """Load the named surge thresholds and material-incident destination."""
+
+    payload = _load_provider_alert_policy_document(path)
+    surge = payload.get("surge")
+    if not isinstance(surge, dict):
+        raise ProviderAlertPolicyError("provider alert policy requires a surge object")
+    integer_values: dict[str, int] = {}
+    for key in (
+        "message_threshold",
+        "window_minutes",
+        "milestone_threshold",
+        "new_signature_threshold",
+    ):
+        try:
+            integer_values[key] = int(surge.get(key))
+        except (TypeError, ValueError) as exc:
+            raise ProviderAlertPolicyError(
+                f"provider alert surge {key} must be an integer"
+            ) from exc
+        if integer_values[key] <= 0:
+            raise ProviderAlertPolicyError(
+                f"provider alert surge {key} must be positive"
+            )
+    try:
+        integer_values["claim_ttl_seconds"] = int(
+            surge.get(
+                "claim_ttl_seconds",
+                DEFAULT_PROVIDER_ALERT_SURGE_CLAIM_TTL_SECONDS,
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise ProviderAlertPolicyError(
+            "provider alert surge claim_ttl_seconds must be an integer"
+        ) from exc
+    if integer_values["claim_ttl_seconds"] <= 0:
+        raise ProviderAlertPolicyError(
+            "provider alert surge claim_ttl_seconds must be positive"
+        )
+    for key in ("material_channel", "owner", "next_action"):
+        if not str(surge.get(key) or "").strip():
+            raise ProviderAlertPolicyError(f"provider alert surge {key} is required")
+    return ProviderAlertSurgePolicy(
+        message_threshold=integer_values["message_threshold"],
+        window_minutes=integer_values["window_minutes"],
+        milestone_threshold=integer_values["milestone_threshold"],
+        new_signature_threshold=integer_values["new_signature_threshold"],
+        claim_ttl_seconds=integer_values["claim_ttl_seconds"],
+        material_channel=(
+            str(os.getenv(PROVIDER_ALERT_MATERIAL_CHANNEL_ENV) or "").strip()
+            or str(surge["material_channel"]).strip()
+        ),
+        owner=str(surge["owner"]).strip(),
+        next_action=str(surge["next_action"]).strip(),
+    )
+
+
+def parse_rollbar_alert(text: str | None) -> AlertSignature | None:
+    """Parse a Rollbar Slack fallback into stable item and title identity."""
+
+    if not text:
+        return None
+    match = _ROLLBAR_ITEM_RE.search(str(text))
+    if not match:
+        return None
+
+    label = (match.group("label") or "").strip()
+    label = _ROLLBAR_ITEM_PREFIX_RE.sub("", label, count=1)
+    milestone_match = _ROLLBAR_MILESTONE_RE.search(label)
+    new_item_match = _ROLLBAR_NEW_ITEM_RE.search(label)
+    if milestone_match:
+        title = label[milestone_match.end() :]
+    elif new_item_match:
+        title = label[new_item_match.end() :]
+    else:
+        title = label
+    return AlertSignature(
+        project=match.group("project"),
+        item_number=int(match.group("item")),
+        title=title.strip().rstrip("> "),
+        occurrence_milestone=(
+            int(milestone_match.group("count")) if milestone_match else None
+        ),
+        is_new_error=(
+            bool(new_item_match)
+            and str(new_item_match.group("kind") or "").casefold() == "error"
+        ),
+    )
+
+
+def _tracked_title_signature(service: str, title: str, external_id: str) -> str:
+    canonical_title = title
+    for pattern in _VOLATILE_SIGNATURE_PARTS:
+        canonical_title = pattern.sub("<volatile>", canonical_title)
+    canonical_title = " ".join(canonical_title.casefold().split())
+    identity = {
+        "service": _token(service),
+        "title": canonical_title or _token(external_id),
+    }
+    return sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def classify_provider_alert_ingest(body: str) -> ProviderAlertIngest | None:
+    """Classify one incoming Rollbar message for signature-aware surge tracking."""
+
+    parsed = parse_rollbar_alert(body)
+    if parsed is None:
+        return None
+    subsystem_match = _SUBSYSTEM_RE.search(str(body or ""))
+    subsystem = (
+        " ".join(subsystem_match.group("subsystem").split())
+        if subsystem_match
+        else parsed.project
+    )
+    return ProviderAlertIngest(
+        service=parsed.project,
+        subsystem=subsystem,
+        external_id=parsed.signature,
+        signature=_tracked_title_signature(
+            parsed.project,
+            parsed.title,
+            parsed.signature,
+        ),
+        signature_title=parsed.title,
+        occurrence_milestone=parsed.milestone,
+        is_new_error=parsed.is_new_error,
+    )
 
 
 def _configured_values(policy: Mapping[str, Any], key: str) -> set[str]:
@@ -196,6 +403,7 @@ def _typed_reason(body: str, configured_reasons: set[str]) -> str | None:
 
 
 def _provider_alert_evidence(body: str, policy: Mapping[str, Any]) -> ProviderAlertEvidence:
+    rollbar = parse_rollbar_alert(body)
     normalized_body = _token(body)
     providers = tuple(
         sorted(
@@ -237,7 +445,16 @@ def _provider_alert_evidence(body: str, policy: Mapping[str, Any]) -> ProviderAl
             body,
             _configured_values(policy, "typed_reasons"),
         ),
-        occurrence_count=int(count_match.group(1)) if count_match else None,
+        occurrence_count=(
+            int(count_match.group(1))
+            if count_match
+            else rollbar.occurrence_milestone
+            if rollbar
+            else None
+        ),
+        external_id=rollbar.signature if rollbar else None,
+        signature_title=rollbar.title if rollbar else None,
+        is_new_error=bool(rollbar and rollbar.is_new_error),
     )
 
 
@@ -280,6 +497,13 @@ def _escalation_reason(
 
 
 def _signature(body: str, evidence: ProviderAlertEvidence, classification: str) -> str:
+    if evidence.external_id and evidence.signature_title:
+        service = evidence.external_id.split("#", 1)[0]
+        return _tracked_title_signature(
+            service,
+            evidence.signature_title,
+            evidence.external_id,
+        )
     canonical_body = _ALERT_HEADER.sub("ALERT-SEVERITY", body)
     for pattern in _VOLATILE_SIGNATURE_PARTS:
         canonical_body = pattern.sub("<volatile>", canonical_body)
@@ -359,11 +583,19 @@ def classify_provider_alert_body(
 
 
 __all__ = [
+    "AlertSignature",
     "DEFAULT_PROVIDER_ALERT_POLICY_PATH",
+    "DEFAULT_PROVIDER_ALERT_SURGE_CLAIM_TTL_SECONDS",
+    "PROVIDER_ALERT_MATERIAL_CHANNEL_ENV",
     "PROVIDER_ALERT_POLICY_ENV",
     "ProviderAlertDecision",
     "ProviderAlertEvidence",
+    "ProviderAlertIngest",
     "ProviderAlertPolicyError",
+    "ProviderAlertSurgePolicy",
+    "classify_provider_alert_ingest",
     "classify_provider_alert_body",
     "load_provider_alert_policy",
+    "parse_rollbar_alert",
+    "provider_alert_surge_policy",
 ]

@@ -19,9 +19,13 @@ Decide as follows:
 
 - **One problem = one issue — check before filing.** Before calling
   `create_github_issue`, search open AND closed GitHub issues and Domain 1
-  tracker records for the same error signature, Rollbar id (prefer the
-  structured `rollbar_item` field — an exact `rollbar_item`/signature match
-  has no recency cutoff), endpoint, profile id, or root cause. If a match
+  tracker records for the same tracked error signature, Rollbar id (prefer
+  the structured `rollbar_item` field), endpoint, profile id, or root cause.
+  A Rollbar `New error:` title with a different tracked signature is a
+  different failure mode even when a related parent issue exists: file it or
+  add an explicit new-signature entry to that parent; never silently absorb
+  it based only on item id or similar timeout vocabulary. An exact tracked
+  signature match has no recency cutoff. If a match
   exists — even if closed or `Done` — do NOT file a new issue and do NOT
   blindly skip: follow the **Deploy-State Ladder** in the core operating doc
   (record `1155`). Never split one error/Rollbar alert into multiple issues.

@@ -1677,6 +1677,7 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
         "list_monitored",
         "monitor_channel",
         "unmonitor_channel",
+        "open_alert_surges",
     ]
     assert {"display_name", "communication_preferences"} <= set(properties)
     assert properties["communication_preferences"]["properties"]["humour"]["enum"] == [

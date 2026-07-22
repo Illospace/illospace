@@ -847,6 +847,24 @@ async def _handle_manage_slack(
                 default=str,
             )
 
+        if normalized_action == "open_alert_surges":
+            from brain.systems.slack.provider_alert_surge import (
+                list_open_provider_alert_surges,
+            )
+
+            surges = await list_open_provider_alert_surges(
+                uow.session,
+                org_id=org_id,
+            )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "open_alert_surges": surges,
+                    "count": len(surges),
+                },
+                default=str,
+            )
+
         connection, error = await _slack_connection_for_tool(
             uow.session,
             org_id=org_id,
@@ -978,7 +996,7 @@ async def _handle_manage_slack(
             "error": (
                 "manage_slack action must be status, list_channels, list_mappings, "
                 "link_identity, unlink_identity, list_monitored, monitor_channel, "
-                "or unmonitor_channel"
+                "unmonitor_channel, or open_alert_surges"
             )
         }
     )
