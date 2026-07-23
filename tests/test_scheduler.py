@@ -8,6 +8,7 @@ import re
 import uuid
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import func, select
@@ -43,6 +44,7 @@ from brain.app.scheduler.programs import (
     build_scheduler_step_plan,
     get_step_specs,
     nightly_heuristic_review_command,
+    nightly_meta_evolution_command,
 )
 from brain.app.scheduler.runtime import (
     RUN_STATUS_EXPIRED,
@@ -52,6 +54,7 @@ from brain.app.scheduler.runtime import (
     async_ensure_run_steps,
     async_reclaim_expired_leases,
     async_update_run_step,
+    scheduler_failure_signature,
 )
 from brain.platform.db.models.scheduler import SchedulerJob, SchedulerLease, SchedulerRun, SchedulerRunStep
 
@@ -531,7 +534,7 @@ async def test_scheduler_cutover_materializes_and_persists_split_nightly_steps(s
     assert len(created) == 1
     assert created[0].status == "recorded"
     step_plan = build_scheduler_step_plan(job)
-    assert len(step_plan) == 15
+    assert len(step_plan) == 16
     assert "skill_quality" not in {step["step_key"] for step in step_plan}
     assert [step["step_key"] for step in step_plan[:3]] == [
         "nightly_wrapper",
@@ -604,6 +607,59 @@ async def test_nightly_heuristic_review_wrappers_await_and_report_counts(monkeyp
     )[5] == command
     assert scheduler_executor._nightly_step_commands(
         "heuristic_review", date(2026, 4, 21)
+    ) == [command]
+
+
+async def test_nightly_meta_evolution_wrapper_awaits_and_reports_stats(monkeypatch, capsys):
+    from brain.systems.feedback import meta_evolution
+
+    awaited = False
+
+    async def fake_run_meta_evolution():
+        nonlocal awaited
+        awaited = True
+        return {
+            "insights_total": 3,
+            "regressions": 1,
+            "adjustments": {"heuristic_prune_threshold": {"new": 0.15}},
+        }
+
+    monkeypatch.setattr(
+        meta_evolution,
+        "run_meta_evolution",
+        fake_run_meta_evolution,
+    )
+    command = nightly_meta_evolution_command()
+    namespace = {}
+
+    await asyncio.to_thread(exec, command[2], namespace)
+
+    assert awaited is True
+    assert namespace["stats"] == {
+        "insights_total": 3,
+        "regressions": 1,
+        "adjustments": {"heuristic_prune_threshold": {"new": 0.15}},
+    }
+    assert not asyncio.iscoroutine(namespace["stats"])
+    assert capsys.readouterr().out.strip() == (
+        "Insights: 3, Regressions: 1, Adjustments: 1"
+    )
+
+    job = _make_scheduler_job()
+    run = SimpleNamespace(
+        scheduled_for=datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc)
+    )
+    program_command = next(
+        step.command
+        for step in get_step_specs(job, run)
+        if step.step_key == "meta_evolution"
+    )
+    assert program_command == command
+    assert scheduler_executor._nightly_wrapper_commands(
+        date(2026, 4, 21), split_steps=False
+    )[6] == command
+    assert scheduler_executor._nightly_step_commands(
+        "meta_evolution", date(2026, 4, 21)
     ) == [command]
 
 
@@ -723,6 +779,63 @@ async def test_split_nightly_scheduler_reaches_and_settles_memory_maintenance(se
         if "brain.jobs.pipelines.nightly_memory_maintenance" in command
     )
     assert maintenance_command[-3:] == ["--date", "2026-04-21", "--apply"]
+
+
+async def test_split_nightly_scheduler_runs_memory_health_after_meta_evolution(session):
+    job = _make_scheduler_job(
+        owner_mode="scheduler",
+        default_payload={
+            "name": "Nightly Sleep",
+            "scheduler_split_steps": True,
+            "night_budget_allowed_steps": ["meta_evolution", "memory_health"],
+        },
+    )
+    session.add(job)
+    await session.flush()
+    run = (
+        await async_materialize_due_runs(
+            session,
+            now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
+            allowed_owner_modes=("scheduler",),
+        )
+    )[0]
+    commands: list[list[str]] = []
+
+    def runner(command, *, cwd=None, env=None, timeout_seconds=None):
+        commands.append(list(command))
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    settled = await async_run_scheduler_run(
+        session,
+        run.id,
+        owner_id="memory-health-test",
+        runner=runner,
+        now=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
+    )
+    steps = list(
+        (
+            await session.scalars(
+                select(SchedulerRunStep)
+                .where(SchedulerRunStep.run_id == run.id)
+                .order_by(SchedulerRunStep.sequence_no)
+            )
+        ).all()
+    )
+    step_by_key = {step.step_key: step for step in steps}
+
+    assert settled.status == RUN_STATUS_SETTLED_SUCCESS
+    assert step_by_key["meta_evolution"].status == RUN_STATUS_SETTLED_SUCCESS
+    assert step_by_key["memory_health"].status == RUN_STATUS_SETTLED_SUCCESS
+    assert step_by_key["memory_health"].sequence_no == (
+        step_by_key["meta_evolution"].sequence_no + 1
+    )
+    assert commands[-1] == [
+        "python3",
+        "-m",
+        "brain.jobs.pipelines.nightly_memory_health",
+        "--date",
+        "2026-04-21",
+    ]
 
 
 async def test_scheduler_lease_claim_and_reclaim(session):
@@ -1147,9 +1260,78 @@ async def test_scheduler_step_crash_is_persisted_in_snapshot_without_log_storm(s
     assert "Scheduler step crashed" not in caplog.text
 
 
+async def test_failure_signature_normalizes_volatile_runtime_identity():
+    first = """scheduler_step:meta_evolution
+Traceback (most recent call last):
+  File \"<string>\", line 1, in <module>
+RuntimeError: worker=<Worker object at 0x7f12ab90> coroutine=<coroutine object run at 0x7f12bc10> task=Task-12 request_id=0f6f39da-37cd-4d8a-9fb7-818beed63aa1 pid=417 at 2026-07-23T03:00:01Z
+"""
+    second = """scheduler_step:meta_evolution
+Traceback (most recent call last):
+  File \"<string>\", line 1, in <module>
+RuntimeError: worker=<Worker object at 0x8e23cd01> coroutine=<coroutine object run at 0x8e23de20> task=Task-98 request_id=9a0247bb-6b0a-4c34-bd9d-d684781aba2c pid=991 at 2026-07-24T03:00:09Z
+"""
+
+    assert scheduler_failure_signature(first) == scheduler_failure_signature(second)
+
+
+async def test_scheduler_failure_alert_uses_vault_first_slack_client(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class FakeSlackClient:
+        async def conversations_list(self, **kwargs):
+            calls["list_kwargs"] = kwargs
+            return {"channels": [{"id": "C_ALERTS", "name": "alerts"}]}
+
+        async def post_message(self, *, channel, text):
+            calls["post"] = {"channel": channel, "text": text}
+            return {"ok": True, "message": {"text": text}}
+
+    async def fake_client_from_runtime(*, requested_by, reason):
+        calls["runtime"] = {"requested_by": requested_by, "reason": reason}
+        return FakeSlackClient()
+
+    monkeypatch.setenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "#alerts")
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
+    monkeypatch.setattr(
+        scheduler_executor,
+        "slack_web_client_from_runtime",
+        fake_client_from_runtime,
+    )
+
+    await scheduler_executor.async_deliver_scheduler_failure_alert(
+        job_key="nightly_sleep",
+        run_id=42,
+        consecutive_failure_count=3,
+        error_text="RuntimeError: failed\nvolatile traceback details",
+    )
+
+    assert calls["runtime"] == {
+        "requested_by": "scheduler_failure_alert",
+        "reason": "Deliver a repeated scheduler job failure alert to the team.",
+    }
+    assert calls["post"] == {
+        "channel": "C_ALERTS",
+        "text": (
+            "Scheduler job repeated failure\n"
+            "Job key: nightly_sleep\n"
+            "Consecutive failures: 3\n"
+            "Error: RuntimeError: failed\n"
+            "Job: <https://illo.example.com/api/system/scheduler"
+            "?job_key=nightly_sleep&run_id=42|open scheduler state>"
+        ),
+    }
+
+
 async def test_repeated_heuristic_review_failure_emits_one_durable_alert(session, caplog, monkeypatch):
     monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "3")
     caplog.set_level(logging.ERROR, logger="brain.app.scheduler.executor")
+    slack_sender = AsyncMock()
+    monkeypatch.setattr(
+        scheduler_executor,
+        "async_deliver_scheduler_failure_alert",
+        slack_sender,
+    )
     job = _make_scheduler_job(
         retry_policy={"max_attempts": 5, "backoff_seconds": 0},
         default_payload={
@@ -1201,6 +1383,12 @@ async def test_repeated_heuristic_review_failure_emits_one_durable_alert(session
     assert alert_timestamps[:2] == [None, None]
     assert alert_timestamps[2] is not None
     assert alert_timestamps[3] == alert_timestamps[2]
+    slack_sender.assert_awaited_once_with(
+        job_key="nightly_sleep",
+        run_id=run.id,
+        consecutive_failure_count=3,
+        error_text=failure_text,
+    )
     assert snapshot["alerts"] == [
         {
             "type": "repeated_scheduler_job_failure",
