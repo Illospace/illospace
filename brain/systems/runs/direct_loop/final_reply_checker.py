@@ -7,8 +7,10 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Callable
 
+from brain.systems.chantiers import DEFAULT_TRACKER_DOMAIN_ID
 from brain.platform.integrations.llm import resolve_llm_client
 from brain.platform.integrations.providers import get_provider
 from brain.systems.sessions.harvest import _extract_text
@@ -22,20 +24,13 @@ from brain.systems.runs.direct_loop.final_reply import (
     cached_final_reply_review,
     parse_checker_payload,
 )
+from brain.systems.runs.direct_loop.final_reply_evidence import FinalReplyEvidence, ToolResultEvidence
 from brain.systems.runs.direct_loop.request import build_api_request, normalize_model_name
 from brain.systems.sessions import _content_to_dicts
 
 logger = logging.getLogger("agent")
 
 _RESOLVED_STATUSES = {"resolved", "blocked_on_user"}
-_PRODUCT_SURFACE_EVIDENCE_MARKERS = (
-    "recent tool result",
-    "artifact",
-    "worker",
-    "evidence",
-    "source",
-    "runtime",
-)
 _PRODUCT_SURFACE_TERMS = (
     "settings",
     "integrations",
@@ -68,6 +63,53 @@ _PRODUCT_SURFACE_NAV_RE = re.compile(
     r"\b(open|go to|navigate to|click|choose|approve|redirect|select|configure)\b",
     re.IGNORECASE,
 )
+_REQUESTED_WORK_ARTIFACT_RE = re.compile(
+    r"(?:\bgithub\s+(?:issue|ticket)\b|"
+    r"\b(?:create|file|open|assign|make|raise|submit|add)\b.{0,40}\b(?:issue|ticket)\b)",
+    re.IGNORECASE,
+)
+_REQUESTED_GITHUB_ARTIFACT_RE = re.compile(
+    r"(?:\bgithub\s+(?:issue|ticket)\b|"
+    r"\b(?:issue|ticket)\b.{0,20}\b(?:on|in)\s+github\b)",
+    re.IGNORECASE,
+)
+_CUSTOMER_REPORT_ORIGIN_RE = re.compile(
+    r"(?:"
+    r"\b(?:customer|client|user)\s+(?:reported|reports|said|says|wrote|writes|complained|emailed|contacted)\b|"
+    r"\b(?:reported|received|forwarded|escalated)\s+(?:by|from|through|via)\s+(?:a\s+|the\s+)?"
+    r"(?:customer|client|user|support|customer\s+success)\b|"
+    r"\b(?:support|customer\s+success)\s+(?:reported|reports|said|says|escalated|ticket|case|thread|message)\b"
+    r")",
+    re.IGNORECASE,
+)
+_QUOTED_CUSTOMER_REPORT_RE = re.compile(
+    r"\b(?:customer|client|user|support)(?:\s+(?:report|quote|message|email|complaint))?"
+    r"\s*[:\-]\s*[\"'“‘]",
+    re.IGNORECASE,
+)
+_ARTIFACT_FAILURE_ACK_RE = re.compile(
+    r"\b(could not|couldn't|cannot|can't|unable|failed|not created|not opened|"
+    r"wasn't created|was not created|didn't create|did not create|blocked)\b",
+    re.IGNORECASE,
+)
+_ARTIFACT_BLOCKER_RE = re.compile(
+    r"\b(no_write_token|token|credential|permission|forbidden|unavailable|403|404|not found|"
+    r"rate limit|timeout|validation)\b|"
+    r"\b(?:because|due to|blocked by|requires?|missing)\b\s+\S+",
+    re.IGNORECASE,
+)
+_GITHUB_ARTIFACT_RE = re.compile(r"\bgithub\s+(?:issue|ticket)\b", re.IGNORECASE)
+_TRACKER_ARTIFACT_RE = re.compile(
+    r"\b(?:tracker\s+(?:record|mirror)|linked\s+(?:tracker\s+)?record|domain\s+record)\b",
+    re.IGNORECASE,
+)
+
+
+class FinalReplyEnforcement(str, Enum):
+    """Whether a review is advisory or may temporarily block a reply."""
+
+    ADVISORY = "advisory"
+    BLOCK = "block"
 
 
 @dataclass(frozen=True)
@@ -79,7 +121,7 @@ class FinalReplyReview:
     rationale: str
     missing_requirements: tuple[str, ...] = ()
     raw_output: str = ""
-    override: str | None = None
+    enforcement: FinalReplyEnforcement = FinalReplyEnforcement.ADVISORY
     confidence: float | None = None
     intent_type: str | None = None
     completion_mode: str | None = None
@@ -111,9 +153,8 @@ class FinalReplyReview:
             "rationale": self.rationale,
             "missing_requirements": list(self.missing_requirements),
             "raw_output": self.raw_output,
+            "enforcement": self.enforcement,
         }
-        if self.override:
-            payload["override"] = self.override
         if self.confidence is not None:
             payload["confidence"] = self.confidence
         if self.intent_type:
@@ -180,11 +221,13 @@ def _review_scope(
     *,
     user_request: str,
     execution_context: str | None,
+    evidence: FinalReplyEvidence | None,
     intent_profile: dict | None,
 ) -> dict[str, Any]:
     return {
         "user_request": " ".join((user_request or "").split())[:1200],
         "execution_context": " ".join((execution_context or "").split())[:2500],
+        "evidence": evidence.cache_fingerprint() if evidence is not None else "",
         "intent_profile": intent_profile or {},
     }
 
@@ -196,21 +239,14 @@ def _normalize_grounding_text(text: str | None) -> str:
     return normalized
 
 
-def _supported_by_execution_evidence(candidate: str, execution_context: str | None) -> bool:
-    evidence = _normalize_grounding_text(execution_context)
-    if not evidence:
-        return False
-    if not any(marker in evidence for marker in _PRODUCT_SURFACE_EVIDENCE_MARKERS):
-        return False
+def _supported_by_execution_evidence(candidate: str, evidence: FinalReplyEvidence) -> bool:
     mentioned_terms = [term for term in _PRODUCT_SURFACE_TERMS if term in candidate]
-    if not mentioned_terms:
-        return False
-    return all(term in evidence for term in mentioned_terms)
+    return evidence.supports_terms(mentioned_terms)
 
 
 def _ungrounded_product_surface_issue(
     candidate_output: str,
-    execution_context: str | None,
+    evidence: FinalReplyEvidence,
 ) -> str | None:
     """Detect invented product UI/setup surfaces before the LLM checker can bless them."""
 
@@ -237,12 +273,80 @@ def _ungrounded_product_surface_issue(
         marker in candidate for marker in ("deployment/admin", "admin/integration screen")
     ):
         return None
-    if _supported_by_execution_evidence(candidate, execution_context):
+    if _supported_by_execution_evidence(candidate, evidence):
         return None
     return (
         "The candidate asserts an Illospace UI/setup/deployment surface that is not present "
         "in this run's execution evidence."
     )
+
+
+def _has_customer_report_signal(user_request: str) -> bool:
+    request = str(user_request or "")
+    return bool(
+        _CUSTOMER_REPORT_ORIGIN_RE.search(request)
+        or _QUOTED_CUSTOMER_REPORT_RE.search(request)
+    )
+
+
+def _default_tracker_create_attempt(result: ToolResultEvidence) -> bool:
+    if result.tool_name != "manage_domain":
+        return False
+    arguments = result.arguments
+    try:
+        domain_id = int(arguments.get("domain_id"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(arguments.get("action") or "").strip() == "create_record"
+        and domain_id == DEFAULT_TRACKER_DOMAIN_ID
+    )
+
+
+def _reply_names_failed_artifact(candidate_output: str, artifact_re: re.Pattern[str]) -> bool:
+    candidate = str(candidate_output or "")
+    return bool(
+        artifact_re.search(candidate)
+        and _ARTIFACT_FAILURE_ACK_RE.search(candidate)
+        and _ARTIFACT_BLOCKER_RE.search(candidate)
+    )
+
+
+def _customer_bug_missing_tracker_mirror(
+    user_request: str,
+    candidate_output: str,
+    evidence: FinalReplyEvidence,
+) -> bool:
+    request = str(user_request or "")
+    if not (_has_customer_report_signal(request) and _REQUESTED_WORK_ARTIFACT_RE.search(request)):
+        return False
+    github_results = evidence.results_for("create_github_issue")
+    if not github_results or not github_results[-1].succeeded:
+        return False
+    mirror_attempts = tuple(item for item in evidence.tool_results if _default_tracker_create_attempt(item))
+    if any(item.succeeded for item in mirror_attempts):
+        return False
+    if any(item.failed for item in mirror_attempts) and _reply_names_failed_artifact(
+        candidate_output,
+        _TRACKER_ARTIFACT_RE,
+    ):
+        return False
+    return True
+
+
+def _requested_github_artifact_contract_violated(
+    user_request: str,
+    candidate_output: str,
+    evidence: FinalReplyEvidence,
+) -> bool:
+    if not _REQUESTED_GITHUB_ARTIFACT_RE.search(str(user_request or "")):
+        return False
+    github_results = evidence.results_for("create_github_issue")
+    if not github_results:
+        return True
+    if github_results[-1].succeeded:
+        return False
+    return not _reply_names_failed_artifact(candidate_output, _GITHUB_ARTIFACT_RE)
 
 
 def _token_resolution_verdict(
@@ -304,6 +408,7 @@ def review_candidate_final_reply(
     user_request: str,
     candidate_output: str,
     execution_context: str | None = None,
+    evidence: FinalReplyEvidence | None = None,
     intent_profile: dict | None = None,
     user_id: str | None = None,
     provider=None,
@@ -318,7 +423,8 @@ def review_candidate_final_reply(
 ) -> dict:
     """Run the final-reply checker and return a dict-compatible review payload."""
 
-    grounding_issue = _ungrounded_product_surface_issue(candidate_output, execution_context)
+    structured_evidence = evidence or FinalReplyEvidence()
+    grounding_issue = _ungrounded_product_surface_issue(candidate_output, structured_evidence)
     if grounding_issue:
         return FinalReplyReview(
             status="continue",
@@ -328,6 +434,42 @@ def review_candidate_final_reply(
                 "Answer only with setup/product surfaces supported by current tool results or source context.",
             ),
             raw_output="deterministic_product_surface_grounding",
+        ).to_dict()
+
+    if _customer_bug_missing_tracker_mirror(user_request, candidate_output, structured_evidence):
+        return FinalReplyReview(
+            status="continue",
+            approved=False,
+            rationale=(
+                "The customer-bug GitHub issue succeeded, but execution evidence has no successful "
+                "linked tracker-record mirror."
+            ),
+            missing_requirements=(
+                f"Create the linked record in the default tracker (Domain {DEFAULT_TRACKER_DOMAIN_ID}); "
+                "do not create a Domain.",
+            ),
+            raw_output="deterministic_customer_bug_mirror_contract",
+            enforcement=FinalReplyEnforcement.BLOCK,
+        ).to_dict()
+
+    if _requested_github_artifact_contract_violated(
+        user_request,
+        candidate_output,
+        structured_evidence,
+    ):
+        return FinalReplyReview(
+            status="continue",
+            approved=False,
+            rationale=(
+                "The requested GitHub artifact was not successfully created, but the reply does not "
+                "have structured failure evidence plus an explicit GitHub-issue blocker."
+            ),
+            missing_requirements=(
+                "Say that the requested GitHub issue was not created and name the exact blocker; "
+                "describe any tracker record only as retention or handoff.",
+            ),
+            raw_output="deterministic_requested_artifact_contract",
+            enforcement=FinalReplyEnforcement.BLOCK,
         ).to_dict()
 
     checker_model = normalize_model(model) if model else None
@@ -426,6 +568,7 @@ def review_final_reply_once(
     user_request: str,
     candidate_output: str,
     execution_context: str | None = None,
+    evidence: FinalReplyEvidence | None = None,
     intent_profile: dict | None = None,
     user_id: str | None = None,
     provider=None,
@@ -440,6 +583,7 @@ def review_final_reply_once(
     scope = _review_scope(
         user_request=user_request,
         execution_context=execution_context,
+        evidence=evidence,
         intent_profile=intent_profile,
     )
     if agent_context is not None:
@@ -452,6 +596,7 @@ def review_final_reply_once(
         user_request=user_request,
         candidate_output=candidate_output,
         execution_context=execution_context,
+        evidence=evidence,
         intent_profile=intent_profile,
         user_id=user_id,
         provider=provider,

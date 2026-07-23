@@ -55,6 +55,7 @@ from brain.systems.runs.direct_loop.final_reply_checker import (
     review_candidate_final_reply as _runtime_review_candidate_final_reply,
     review_final_reply_once as _runtime_review_final_reply_once,
 )
+from brain.systems.runs.direct_loop.final_reply_evidence import FinalReplyEvidence
 from brain.systems.runs.direct_loop.gates import (
     GateState as _GateState,
     check_gate_violations as _runtime_check_gate_violations,
@@ -310,6 +311,7 @@ def review_candidate_final_reply(
     user_request: str,
     candidate_output: str,
     execution_context: str | None = None,
+    evidence: FinalReplyEvidence | None = None,
     intent_profile: dict | None = None,
     user_id: str | None = None,
     provider=None,
@@ -322,6 +324,7 @@ def review_candidate_final_reply(
         user_request=user_request,
         candidate_output=candidate_output,
         execution_context=execution_context,
+        evidence=evidence,
         intent_profile=intent_profile,
         user_id=user_id,
         provider=provider,
@@ -340,6 +343,7 @@ def review_final_reply_once(
     user_request: str,
     candidate_output: str,
     execution_context: str | None = None,
+    evidence: FinalReplyEvidence | None = None,
     intent_profile: dict | None = None,
     user_id: str | None = None,
     provider=None,
@@ -352,6 +356,7 @@ def review_final_reply_once(
         user_request=user_request,
         candidate_output=candidate_output,
         execution_context=execution_context,
+        evidence=evidence,
         intent_profile=intent_profile,
         user_id=user_id,
         provider=provider,
@@ -1351,6 +1356,7 @@ async def run_agent_async(
         "tool_calls_log": [],
         "recent_tool_results": [],
         "final_reply_review": None,
+        "artifact_contract_block_count": 0,
     }
     if workspace_root:
         context_attrs["workspace_root"] = workspace_root

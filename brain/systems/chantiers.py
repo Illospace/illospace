@@ -19,6 +19,7 @@ from brain.systems.user_domains.service import (
 )
 
 
+DEFAULT_TRACKER_DOMAIN_ID = 1
 TRACKER_DOMAIN_SLUG = "github-ticket-tracker"
 CHANTIER_OBJECT_KEY = "chantier"
 ACTIVE_CHANTIER_STATES = frozenset({"exploring", "building", "shipping", "verifying"})
@@ -480,6 +481,7 @@ def latest_source_movement(
 __all__ = [
     "ACTIVE_CHANTIER_STATES",
     "CHANTIER_OBJECT_KEY",
+    "DEFAULT_TRACKER_DOMAIN_ID",
     "MISSING_NEXT_STEP",
     "TRACKER_DOMAIN_SLUG",
     "ChantierMatch",

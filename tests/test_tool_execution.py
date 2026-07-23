@@ -15,6 +15,7 @@ from brain.systems.runs.direct_loop.tool_execution import (
     ResolvedToolCall,
     async_execute_parallel_tool_batch,
     async_execute_tool_calls,
+    async_resolve_tool_call,
     execute_parallel_tool_batch,
     execute_tool_calls,
     resolve_tool_call,
@@ -281,3 +282,47 @@ def test_resolve_tool_call_preserves_structured_error_class():
     assert resolved.is_error is True
     assert resolved.error_class == "ToolValidationError"
     assert "parent_id must be an existing idea id or omitted" in resolved.result_text
+
+
+async def test_resolved_failures_preserve_error_class_and_result_value(monkeypatch):
+    handler_failure = {
+        "error": "invalid tool input",
+        "error_class": "ToolValidationError",
+    }
+    returned_failure = resolve_tool_call(PendingToolCall(
+        block_id="handler-failure",
+        tool_name="manage_idea",
+        tool_input={},
+        handler=lambda: handler_failure,
+    ))
+
+    def raise_failure():
+        raise ValueError("handler raised")
+
+    raised_failure = resolve_tool_call(PendingToolCall(
+        block_id="raised-failure",
+        tool_name="read_file",
+        tool_input={},
+        handler=raise_failure,
+    ))
+
+    async def never_finishes():
+        await asyncio.Event().wait()
+
+    monkeypatch.setenv("AGENT_TOOL_TIMEOUT_SECONDS", "0.001")
+    timeout_failure = await async_resolve_tool_call(PendingToolCall(
+        block_id="timeout-failure",
+        tool_name="read_file",
+        tool_input={},
+        handler=never_finishes,
+    ))
+
+    assert returned_failure.error_class == "ToolValidationError"
+    assert returned_failure.result_value == handler_failure
+    assert raised_failure.error_class == "ValueError"
+    assert raised_failure.result_value == {"error": "handler raised"}
+    assert timeout_failure.error_class == "ToolTimeoutError"
+    assert timeout_failure.result_value == {
+        "error": "tool_timeout",
+        "timeout_seconds": 0.001,
+    }

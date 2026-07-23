@@ -147,8 +147,10 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         "list": {"required": [], "optional": ["include_archived"], "effect": "read available domains"},
         "create_domain": {
             "required": ["name"],
-            "optional": ["slug", "description", "objects", "relations"],
-            "effect": "create a shared custom database",
+            "optional": ["slug", "description", "objects", "relations", "confirm_schema_change"],
+            "effect": (
+                "propose a shared custom database; create it only with explicit schema-change confirmation"
+            ),
         },
         "schema": {"required": ["domain_id"], "optional": ["include_archived"], "effect": "read a domain schema"},
         "remove_domain": {"required": ["domain_id"], "optional": ["mode"], "effect": "archive or delete a domain"},

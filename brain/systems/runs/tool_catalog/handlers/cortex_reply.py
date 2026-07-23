@@ -7,7 +7,17 @@ import json
 
 from brain.systems.runs.tool_catalog.handlers.common import *
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
+from brain.systems.runs.direct_loop.final_reply_checker import (
+    FinalReplyEnforcement,
+)
+from brain.systems.runs.direct_loop.final_reply_evidence import (
+    FinalReplyEvidence,
+    ToolResultEvidence,
+)
 from brain.systems.runs.failures import failure_category_for_error, public_run_failure
+
+
+_MAX_ARTIFACT_CONTRACT_BLOCKS = 2
 
 
 def _safe_failure_message(diagnostic: object) -> str:
@@ -33,7 +43,9 @@ def _normalize_reply_whitespace(content: str) -> str:
     return "```".join(normalized_parts).strip()
 
 
-def _build_final_reply_check_context() -> str:
+def _build_final_reply_check_context(
+    evidence: FinalReplyEvidence | None = None,
+) -> str:
     """Summarize recent execution evidence for the final-reply checker."""
     run = getattr(_agent_context, "run", None)
     execution_artifacts = list(getattr(_agent_context, "execution_artifacts", []) or [])
@@ -52,12 +64,12 @@ def _build_final_reply_check_context() -> str:
         )
         for idx, worker_result in enumerate(worker_results[-4:], 1):
             status = "success" if worker_result.success else "failed"
-            evidence = worker_result.evidence if isinstance(worker_result.evidence, dict) else {}
-            unresolved = evidence.get("unresolved_uncertainty") or []
+            worker_evidence = worker_result.evidence if isinstance(worker_result.evidence, dict) else {}
+            unresolved = worker_evidence.get("unresolved_uncertainty") or []
             evidence_counts = {
-                "files": len(evidence.get("files") or []),
-                "commands": len(evidence.get("commands") or []),
-                "artifacts": len(evidence.get("artifacts") or []),
+                "files": len(worker_evidence.get("files") or []),
+                "commands": len(worker_evidence.get("commands") or []),
+                "artifacts": len(worker_evidence.get("artifacts") or []),
                 "uncertainty": len(unresolved),
             }
             if worker_result.success:
@@ -115,19 +127,40 @@ def _build_final_reply_check_context() -> str:
             compact = str(artifact)
         lines.append(f"Artifact {idx}: {compact[:350]}")
 
-    recent_tool_results = list(getattr(_agent_context, "recent_tool_results", []) or [])
+    recent_tool_results = list(
+        evidence.tool_results
+        if evidence is not None
+        else (getattr(_agent_context, "recent_tool_results", []) or [])
+    )
     for idx, tool_result in enumerate(recent_tool_results[-5:], 1):
-        if not isinstance(tool_result, dict):
+        if isinstance(tool_result, ToolResultEvidence):
+            try:
+                args_preview = json.dumps(tool_result.arguments, sort_keys=True, default=str)
+            except Exception:
+                args_preview = str(tool_result.arguments)
+            try:
+                result_preview = json.dumps(tool_result.result, sort_keys=True, default=str)
+            except Exception:
+                result_preview = str(tool_result.result)
+            is_error = tool_result.failed
+        elif isinstance(tool_result, dict):
+            args_preview = tool_result.get("args_preview")
+            result_preview = tool_result.get("result_preview")
+            is_error = bool(tool_result.get("is_error"))
+        else:
             continue
-        result_preview = tool_result.get("result_preview")
-        if tool_result.get("is_error"):
+        if is_error:
             result_preview = _safe_failure_message(result_preview)
         try:
             compact = json.dumps(
                 {
-                    "tool_name": tool_result.get("tool_name"),
-                    "args_preview": tool_result.get("args_preview"),
-                    "is_error": tool_result.get("is_error"),
+                    "tool_name": (
+                        tool_result.tool_name
+                        if isinstance(tool_result, ToolResultEvidence)
+                        else tool_result.get("tool_name")
+                    ),
+                    "args_preview": str(args_preview or "")[:400],
+                    "is_error": is_error,
                     "result_preview": result_preview,
                 },
                 default=str,
@@ -162,8 +195,11 @@ def _stage_cortex_reply(content: str, *, run_id: int | None, review: dict) -> di
     checker_note = review.get("rationale")
     if checker_note:
         result["checker_note"] = checker_note
-    if review.get("override"):
-        result["checker_override"] = review["override"]
+    result["checker_enforcement"] = str(
+        review.get("enforcement", FinalReplyEnforcement.ADVISORY).value
+        if isinstance(review.get("enforcement"), FinalReplyEnforcement)
+        else review.get("enforcement", FinalReplyEnforcement.ADVISORY.value)
+    )
     if reply_count > 1:
         result["note"] = (
             f"This is staged reply #{reply_count} in this run. "
@@ -203,18 +239,51 @@ def _handle_cortex_reply(content: str) -> dict:
         or getattr(getattr(_agent_context, "run", None), "user_task", None)
         or ""
     )
-    execution_context = _build_final_reply_check_context()
+    evidence = FinalReplyEvidence.from_agent_context(_agent_context)
+    execution_context = _build_final_reply_check_context(evidence)
     review = review_final_reply_once(
         user_request=user_request,
         candidate_output=proposed_reply,
         execution_context=execution_context,
+        evidence=evidence,
         intent_profile=getattr(_agent_context, "intent_satisfaction", None),
         user_id=getattr(_agent_context, "user_id", None),
         session_id=getattr(_agent_context, "session_id", None),
     )
-    # The checker is advisory: its verdict is surfaced as a non-blocking warning so
-    # the model can decide for itself whether to continue or reply again. It no longer
-    # vetoes a reply the model considers final.
+    try:
+        enforcement = FinalReplyEnforcement(
+            review.get("enforcement", FinalReplyEnforcement.ADVISORY)
+        )
+    except (TypeError, ValueError):
+        enforcement = FinalReplyEnforcement.ADVISORY
+    if enforcement is FinalReplyEnforcement.BLOCK:
+        block_count = int(getattr(_agent_context, "artifact_contract_block_count", 0) or 0)
+        if block_count < _MAX_ARTIFACT_CONTRACT_BLOCKS:
+            block_count += 1
+            _agent_context.artifact_contract_block_count = block_count
+            return {
+                "blocked": True,
+                "error": "Final reply violates the requested-artifact contract.",
+                "checker_status": review["status"],
+                "checker_reason": review.get("rationale"),
+                "missing_requirements": review.get("missing_requirements") or [],
+                "artifact_contract_block_count": block_count,
+                "instruction": (
+                    "Continue the required artifact work, or replace the reply with the requested "
+                    "artifact name and its concrete blocker. Do not report a substitute artifact as success."
+                ),
+            }
+
+        review = dict(review)
+        review["enforcement"] = FinalReplyEnforcement.ADVISORY
+        review["rationale"] = (
+            f"{str(review.get('rationale') or '').strip()} "
+            "The artifact-contract check already blocked two replies in this run, so this verdict "
+            "is now advisory and cannot keep the run alive."
+        ).strip()
+
+    # Other checker verdicts are advisory: surface them as a non-blocking warning
+    # so the model can decide whether to continue or reply again.
 
     run_id = getattr(getattr(_agent_context, "run", None), "run_id", None)
     if run_id:
@@ -235,8 +304,10 @@ def _handle_cortex_reply(content: str) -> dict:
         checker_note = review.get("rationale")
         if checker_note:
             result["checker_note"] = checker_note
-        if review.get("override"):
-            result["checker_override"] = review["override"]
+        enforcement = review.get("enforcement", FinalReplyEnforcement.ADVISORY)
+        result["checker_enforcement"] = (
+            enforcement.value if isinstance(enforcement, FinalReplyEnforcement) else str(enforcement)
+        )
         if reply_count > 1:
             result["note"] = (
                 f"This is reply #{reply_count} in this run. "
