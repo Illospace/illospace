@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from enum import Enum
 from typing import TypedDict
 
@@ -29,34 +28,6 @@ UPSTREAM_FAILED_RUN_MESSAGE = "I hit a temporary upstream problem — please ret
 VERIFICATION_FAILED_RUN_MESSAGE = "I couldn't safely verify the result — please retry."
 CANCELED_RUN_MESSAGE = "That run was canceled before it finished."
 EXPIRED_RUN_MESSAGE = "That run timed out before it finished — please retry."
-
-
-def interrupted_run_message(
-    run_id: int,
-    *,
-    interrupted_at: datetime | str | None = None,
-    requeued: bool,
-) -> str:
-    """Return the public status update for a worker-interrupted run."""
-
-    occurred_at = interrupted_at
-    if isinstance(occurred_at, str):
-        try:
-            occurred_at = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
-        except ValueError:
-            occurred_at = None
-    if not isinstance(occurred_at, datetime):
-        occurred_at = datetime.now(timezone.utc)
-    if occurred_at.tzinfo is None:
-        occurred_at = occurred_at.replace(tzinfo=timezone.utc)
-    time_label = occurred_at.astimezone(timezone.utc).strftime("%H:%M UTC")
-    prefix = f"I was interrupted by a system restart at {time_label} (run {int(run_id)})"
-    if requeued:
-        return f"{prefix}; I've re-queued it and will reply here when it finishes."
-    return (
-        f"{prefix}; I could not re-queue it. Work completed before the interruption "
-        "was preserved, but the run did not finish."
-    )
 
 
 def coerce_failure_category(value: RunFailureCategory | str | None) -> RunFailureCategory:
@@ -126,7 +97,6 @@ __all__ = [
     "CANCELED_RUN_MESSAGE",
     "DEFAULT_FAILED_RUN_MESSAGE",
     "EXPIRED_RUN_MESSAGE",
-    "interrupted_run_message",
     "PublicRunFailure",
     "RunFailureCategory",
     "UPSTREAM_FAILED_RUN_MESSAGE",

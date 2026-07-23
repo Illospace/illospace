@@ -1394,6 +1394,7 @@ async def test_stale_active_run_reaper_interrupts_requeues_and_retries_abandoned
         patch("brain.systems.runs.cortex.runner.UnitOfWork", return_value=_SessionUoW(session)),
         patch("brain.systems.runs.cortex.runner.publish_safe"),
         patch("brain.systems.runs.cortex.runner._settle_idea_for_terminal_root_run_async", return_value=None),
+        patch("brain.systems.runs.cortex.runner.notify_run_interruption", return_value=None),
     ):
         count = await runner.reap_stale_active_runs(now=now, stale_after_seconds=120)
 

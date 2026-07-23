@@ -100,22 +100,25 @@ fi
 
 compose up -d postgres
 compose run --rm migrate
-NONTERMINAL_RUNS="$(nonterminal_agent_run_details)"
-if [ "$NONTERMINAL_RUNS" = "unknown" ]; then
-  echo "Cannot safely swap worker because non-terminal AgentRun ids are unknown." >&2
-  exit 1
-fi
-if [ -z "$NONTERMINAL_RUNS" ]; then
-  mapfile -t runtime_services < <(all_runtime_services)
-  compose up -d --force-recreate --remove-orphans "${runtime_services[@]}"
-  replace_idle_worker
-else
-  report_nonterminal_agent_runs "$NONTERMINAL_RUNS"
-  echo "Updating API, scheduler, and web while preserving active worker AgentRuns."
-  mapfile -t services < <(non_worker_services)
-  compose up -d --force-recreate --no-deps "${services[@]}"
-  update_worker_after_drain "$NONTERMINAL_RUNS" reported
-fi
+WORKER_SWAP_SNAPSHOT="$(worker_swap_snapshot)"
+case "$(worker_swap_snapshot_decision "$WORKER_SWAP_SNAPSHOT")" in
+  replace)
+    mapfile -t runtime_services < <(all_runtime_services)
+    compose up -d --force-recreate --remove-orphans "${runtime_services[@]}"
+    replace_idle_worker
+    ;;
+  drain)
+    echo "$(worker_swap_snapshot_report "$WORKER_SWAP_SNAPSHOT")."
+    echo "Updating API, scheduler, and web while preserving active worker AgentRuns."
+    mapfile -t services < <(non_worker_services)
+    compose up -d --force-recreate --no-deps "${services[@]}"
+    update_worker_after_drain "$WORKER_SWAP_SNAPSHOT" reported
+    ;;
+  *)
+    echo "Cannot safely swap worker because non-terminal AgentRun ids are unknown." >&2
+    exit 1
+    ;;
+esac
 
 "$SCRIPT_DIR/doctor.sh"
 schedule_updater_refresh_after_self_update

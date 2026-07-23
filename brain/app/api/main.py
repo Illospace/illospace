@@ -245,8 +245,24 @@ async def lifespan(app):
             try:
                 from brain.systems.runs.cortex import stop_runner
                 from brain.systems.cycles import stop_cycle_scheduler
+                from brain.systems.runs.interruption import interrupt_and_requeue_run_ids
+
                 stop_cycle_scheduler()
-                stop_runner()
+                drain_result = stop_runner()
+                if drain_result.timed_out_run_ids:
+                    interruptions = await interrupt_and_requeue_run_ids(
+                        drain_result.timed_out_run_ids,
+                        reason="worker_shutdown_drain_timeout",
+                    )
+                    if interruptions:
+                        logger.warning(
+                            "runner_shutdown_interrupted_requeued",
+                            run_ids=[
+                                interruption.run_id
+                                for interruption in interruptions
+                            ],
+                            mode="inline",
+                        )
             except Exception as e:
                 logger.warning("run_worker_stop_failed", error=str(e), mode="inline")
 

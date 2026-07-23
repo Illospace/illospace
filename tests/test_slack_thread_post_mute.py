@@ -216,6 +216,7 @@ def test_french_stand_down_directed_at_illo_mutes_thread():
 
 @pytest.mark.asyncio
 async def test_terminal_slack_settlement_also_suppresses_muted_thread(monkeypatch):
+    from brain.systems.runs import slack_delivery
     from brain.systems.runs.cortex import runner
 
     client = _SlackClient(
@@ -249,8 +250,8 @@ async def test_terminal_slack_settlement_also_suppresses_muted_thread(monkeypatc
 
     monkeypatch.setattr(runner, "_latest_final_answer_artifact", latest_final_answer)
     monkeypatch.setattr(runner, "_slack_visible_action_already_recorded", visible_action)
-    monkeypatch.setattr(runner, "_slack_client_for_run", slack_client)
-    monkeypatch.setattr(runner, "_record_slack_thread_mute", record_mute)
+    monkeypatch.setattr(slack_delivery, "slack_client_for_run", slack_client)
+    monkeypatch.setattr(slack_delivery, "record_slack_thread_mute", record_mute)
 
     result = await runner._settle_slack_origin_run_async(object(), run)
 

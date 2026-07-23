@@ -163,25 +163,22 @@ def test_in_flight_count_is_derived_from_unique_run_ids():
         runner._stop_event.clear()
 
 
-def test_stop_runner_requeues_named_runs_when_shutdown_drain_times_out(monkeypatch, caplog):
+def test_stop_runner_returns_named_runs_without_recovery_side_effects(monkeypatch, caplog):
     from brain.systems.runs.cortex import runner
 
     runner.stop_runner()
-    requeue_calls: list[tuple[tuple[int, ...], str]] = []
-
-    def interrupt(run_ids, *, reason):
-        requeue_calls.append((run_ids, reason))
-        return run_ids
-
-    monkeypatch.setattr(runner, "_interrupt_in_flight_runs", interrupt)
+    monkeypatch.setattr(
+        runner,
+        "_unit_of_work_factory",
+        lambda: (_ for _ in ()).throw(AssertionError("stop_runner must not open the database")),
+    )
     caplog.set_level(logging.WARNING, logger=runner.__name__)
     runner._increment_in_flight_runs(2330)
     try:
-        runner.stop_runner(drain_timeout_seconds=0)
+        result = runner.stop_runner(drain_timeout_seconds=0)
 
-        assert requeue_calls == [((2330,), "worker_shutdown_drain_timeout")]
+        assert result == runner.DrainResult(timed_out_run_ids=(2330,))
         assert "affected run ids: [2330]" in caplog.text
-        assert "interrupted and requeued run ids: [2330]" in caplog.text
     finally:
         runner._decrement_in_flight_runs(2330)
         runner._stop_event.clear()

@@ -5,9 +5,21 @@ ROOT="${ROOT:-$(cd "$COMPOSE_RUNTIME_LIB_DIR/../.." && pwd)}"
 COMPOSE_FILE="${COMPOSE_FILE:-$ROOT/deploy/compose/docker-compose.yml}"
 ENV_FILE="${ENV_FILE:-${ILLO_COMPOSE_ENV_FILE:-$ROOT/deploy/compose/.env}}"
 RUNTIME_SERVICE_CATALOG="${RUNTIME_SERVICE_CATALOG:-$ROOT/deploy/compose/runtime-services.json}"
+WORKER_SWAP_PYTHON_BIN="${WORKER_SWAP_PYTHON_BIN:-python3}"
+
+source "$COMPOSE_RUNTIME_LIB_DIR/worker-swap-lib.sh"
 
 compose() {
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+worker_swap_snapshot_acquire() {
+  local rows
+  rows="$(
+    worker_swap_contract sql \
+      | compose exec -T postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At' 2>/dev/null
+  )" || return 1
+  printf '%s\n' "$rows" | worker_swap_contract from-rows
 }
 
 runtime_service_ids() {
@@ -68,54 +80,6 @@ expand_runtime_services() {
   printf '%s\n' "${expanded_services[@]}"
 }
 
-nonterminal_agent_run_details() {
-  local details
-  if details="$(compose exec -T postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -AtF: -c "
-SELECT id, status FROM agent_runs
-WHERE status IN ('\''queued'\'', '\''starting'\'', '\''running'\'', '\''paused'\'', '\''verifying'\'')
-ORDER BY id;
-"' 2>/dev/null | paste -sd, - | tr -d '[:space:]')"; then
-    if [ -z "$details" ] || [[ "$details" =~ ^[0-9]+:(queued|starting|running|paused|verifying)(,[0-9]+:(queued|starting|running|paused|verifying))*$ ]]; then
-      printf '%s\n' "$details"
-      return 0
-    fi
-  fi
-  printf 'unknown\n'
-}
-
-agent_run_count_from_details() {
-  local details="$1"
-  if [ -z "$details" ]; then
-    printf '0\n'
-    return 0
-  fi
-  if [ "$details" = "unknown" ]; then
-    printf 'unknown\n'
-    return 0
-  fi
-  awk -F, '{print NF}' <<< "$details"
-}
-
-agent_run_ids_from_details() {
-  local details="$1"
-  [ -n "$details" ] && [ "$details" != "unknown" ] || return 0
-  printf '%s\n' "$details" | sed -E 's/:[^,]+//g'
-}
-
-active_agent_run_count() {
-  local details
-  details="$(nonterminal_agent_run_details)"
-  agent_run_count_from_details "$details"
-}
-
-report_nonterminal_agent_runs() {
-  local details="$1"
-  local count ids
-  count="$(agent_run_count_from_details "$details")"
-  ids="$(agent_run_ids_from_details "$details")"
-  echo "Worker pre-swap check: $count interactive run(s) in flight (run ids: $ids; id/status: $details)."
-}
-
 worker_container_id() {
   compose ps -q worker 2>/dev/null || true
 }
@@ -136,10 +100,11 @@ start_worker_handoff() {
 }
 
 record_worker_drain_timeout() {
-  local details="${1:-unknown}"
-  local ids
+  local snapshot="$1"
+  local details ids
   [ -n "${COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_FILE:-}" ] || return 0
-  ids="$(agent_run_ids_from_details "$details")"
+  details="$(worker_swap_snapshot_details "$snapshot")"
+  ids="$(worker_swap_snapshot_run_ids "$snapshot")"
   mkdir -p "$(dirname "$COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_FILE")" 2>/dev/null || true
   printf '{"status":"worker_draining","updated_at":"%s","affected_run_ids":"%s","affected_runs":"%s"}\n' \
     "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$ids" "$details" \
@@ -154,19 +119,21 @@ wait_for_worker_exit() {
   local wait_iterations=0
   local consecutive_zero_checks=0
   local hint_printed=0
-  local active_runs affected_runs affected_ids elapsed
+  local active_runs affected_runs affected_ids elapsed snapshot
   while container_running "$id"; do
     if [ "$SECONDS" -ge "$deadline" ]; then
-      affected_runs="$(nonterminal_agent_run_details)"
-      affected_ids="$(agent_run_ids_from_details "$affected_runs")"
+      snapshot="$(worker_swap_snapshot)"
+      affected_runs="$(worker_swap_snapshot_details "$snapshot")"
+      affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
       echo "Worker did not drain within ${wait_seconds}s; refusing to kill it. Affected run ids: ${affected_ids:-unknown} (id/status: $affected_runs)." >&2
-      record_worker_drain_timeout "$affected_runs"
+      record_worker_drain_timeout "$snapshot"
       return 1
     fi
     sleep 5
     wait_iterations=$((wait_iterations + 1))
     if [ $((wait_iterations % 6)) -eq 0 ] && container_running "$id"; then
-      active_runs="$(active_agent_run_count)"
+      snapshot="$(worker_swap_snapshot)"
+      active_runs="$(worker_swap_snapshot_count "$snapshot")"
       if [ "$active_runs" = "0" ]; then
         consecutive_zero_checks=$((consecutive_zero_checks + 1))
         if [ "$consecutive_zero_checks" -ge 2 ] && [ "$hint_printed" = "0" ]; then
@@ -183,14 +150,15 @@ wait_for_worker_exit() {
 }
 
 update_worker_after_drain() {
-  local run_details="$1"
+  local snapshot="$1"
   local already_reported="${2:-}"
-  local active_runs affected_ids worker_id handoff_id
-  active_runs="$(agent_run_count_from_details "$run_details")"
-  affected_ids="$(agent_run_ids_from_details "$run_details")"
+  local active_runs affected_ids worker_id handoff_id run_details
+  active_runs="$(worker_swap_snapshot_count "$snapshot")"
+  affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
+  run_details="$(worker_swap_snapshot_details "$snapshot")"
   worker_id="$(worker_container_id)"
   if [ "$already_reported" != "reported" ]; then
-    report_nonterminal_agent_runs "$run_details"
+    echo "$(worker_swap_snapshot_report "$snapshot")."
   fi
 
   if [ -z "$worker_id" ]; then
@@ -209,16 +177,17 @@ update_worker_after_drain() {
     if [ "${ILLO_COMPOSE_FORCE_WORKER_SWAP:-0}" != "1" ]; then
       return 1
     fi
-    run_details="$(nonterminal_agent_run_details)"
-    affected_ids="$(agent_run_ids_from_details "$run_details")"
+    snapshot="$(worker_swap_snapshot)"
+    run_details="$(worker_swap_snapshot_details "$snapshot")"
+    affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
     echo "FORCED WORKER SWAP: killing old worker; affected run ids: ${affected_ids:-unknown} (id/status: $run_details)." >&2
     docker update --restart=no "$worker_id" >/dev/null 2>&1 || true
     docker kill "$worker_id" >/dev/null 2>&1 || true
   fi
   compose up -d --force-recreate --no-deps worker
   if [ -n "$handoff_id" ]; then
-    run_details="$(nonterminal_agent_run_details)"
-    affected_ids="$(agent_run_ids_from_details "$run_details")"
+    snapshot="$(worker_swap_snapshot)"
+    affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
     echo "Worker: regular worker is restarted; draining handoff worker $handoff_id. Open run ids at handoff shutdown: ${affected_ids:-none}."
     docker kill -s TERM "$handoff_id" >/dev/null 2>&1 || true
     (
@@ -229,7 +198,7 @@ update_worker_after_drain() {
 }
 
 replace_idle_worker() {
-  local run_details affected_ids worker_id
+  local action affected_ids run_details snapshot worker_id
   worker_id="$(worker_container_id)"
 
   if [ -z "$worker_id" ]; then
@@ -238,13 +207,15 @@ replace_idle_worker() {
     return 0
   fi
 
-  run_details="$(nonterminal_agent_run_details)"
-  if [ "$run_details" = "unknown" ]; then
+  snapshot="$(worker_swap_snapshot)"
+  action="$(worker_swap_snapshot_decision "$snapshot")"
+  if [ "$action" = "unknown" ]; then
     echo "Cannot safely replace worker because the non-terminal AgentRun ids are unknown." >&2
     return 1
   fi
-  if [ -n "$run_details" ]; then
-    affected_ids="$(agent_run_ids_from_details "$run_details")"
+  if [ "$action" = "drain" ]; then
+    run_details="$(worker_swap_snapshot_details "$snapshot")"
+    affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
     echo "Worker replacement blocked: interactive runs appeared after the pre-swap check. Affected run ids: $affected_ids (id/status: $run_details)." >&2
     return 1
   fi
@@ -260,17 +231,17 @@ replace_idle_worker() {
 }
 
 restart_runtime_worker_service() {
-  local run_details
-  run_details="$(nonterminal_agent_run_details)"
-  if [ "$run_details" = "unknown" ]; then
-    echo "Cannot safely restart worker because non-terminal AgentRun ids are unknown." >&2
-    return 1
-  fi
-  if [ -z "$run_details" ]; then
-    replace_idle_worker
-  else
-    update_worker_after_drain "$run_details"
-  fi
+  local action snapshot
+  snapshot="$(worker_swap_snapshot)"
+  action="$(worker_swap_snapshot_decision "$snapshot")"
+  case "$action" in
+    replace) replace_idle_worker ;;
+    drain) update_worker_after_drain "$snapshot" ;;
+    *)
+      echo "Cannot safely restart worker because non-terminal AgentRun ids are unknown." >&2
+      return 1
+      ;;
+  esac
 }
 
 restart_runtime_service() {

@@ -266,6 +266,12 @@ launcher_python_bin() {
   fi
 }
 
+source "$ROOT/deploy/scripts/worker-swap-lib.sh"
+
+worker_swap_python_bin() {
+  launcher_python_bin
+}
+
 production_env_file_path() {
   if [ -n "${ILLO_PRODUCTION_ENV_FILE:-}" ]; then
     case "$ILLO_PRODUCTION_ENV_FILE" in
@@ -546,23 +552,27 @@ systemd_user_ready() {
 restart_or_drain_production_worker() {
   run_logged_timeout 10 systemctl --user enable cortex-worker.service >/dev/null 2>&1 || return 1
 
-  local active_runs affected_ids run_details
-  run_details="$(nonterminal_agent_run_details || echo unknown)"
-  if [ "$run_details" = "unknown" ]; then
-    warn "Could not list non-terminal AgentRuns; refusing to restart cortex-worker"
-    return 1
-  fi
-  if [ -z "$run_details" ]; then
-    run_logged_timeout 15 systemctl --user restart cortex-worker.service >/dev/null 2>&1
-    dim "cortex-worker restarted for this checkout"
-    return $?
-  fi
-
-  active_runs="$(awk -F, '{print NF}' <<< "$run_details")"
-  affected_ids="$(printf '%s\n' "$run_details" | sed -E 's/:[^,]+//g')"
-  warn "Worker pre-swap check: $active_runs interactive run(s) in flight (run ids: $affected_ids; id/status: $run_details)"
-  warn "$active_runs AgentRun(s) active; draining cortex-worker instead of restarting it; affected run ids: $affected_ids"
-  run_logged_timeout 10 systemctl --user kill --kill-who=main --signal=TERM cortex-worker.service >/dev/null 2>&1 || true
+  local action active_runs affected_ids snapshot
+  snapshot="$(worker_swap_snapshot)"
+  action="$(worker_swap_snapshot_decision "$snapshot")"
+  case "$action" in
+    replace)
+      run_logged_timeout 15 systemctl --user restart cortex-worker.service >/dev/null 2>&1
+      dim "cortex-worker restarted for this checkout"
+      return $?
+      ;;
+    drain)
+      active_runs="$(worker_swap_snapshot_count "$snapshot")"
+      affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
+      warn "$(worker_swap_snapshot_report "$snapshot")"
+      warn "$active_runs AgentRun(s) active; draining cortex-worker instead of restarting it; affected run ids: $affected_ids"
+      run_logged_timeout 10 systemctl --user kill --kill-who=main --signal=TERM cortex-worker.service >/dev/null 2>&1 || true
+      ;;
+    *)
+      warn "Could not list non-terminal AgentRuns; refusing to restart cortex-worker"
+      return 1
+      ;;
+  esac
 }
 
 ensure_production_user_services() {
@@ -688,58 +698,6 @@ stop_conflicting_services() {
       launch_log "user service not installed or unavailable: $svc"
     fi
   done
-}
-
-active_agent_run_count() {
-  "$ROOT/venv/bin/python3" - <<'PY' 2>/dev/null
-import asyncio
-
-from sqlalchemy import func, select
-
-from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
-from brain.platform.db.models.agent_run import AgentRunRow
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-
-async def main() -> None:
-    async with UnitOfWork() as uow:
-        count = await uow.session.scalar(
-            select(func.count())
-            .select_from(AgentRunRow)
-            .where(AgentRunRow.status.in_(OPEN_RUN_STATUS_VALUES))
-        )
-    print(int(count or 0))
-
-
-asyncio.run(main())
-PY
-}
-
-nonterminal_agent_run_details() {
-  "$ROOT/venv/bin/python3" - <<'PY' 2>/dev/null
-import asyncio
-
-from sqlalchemy import select
-
-from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
-from brain.platform.db.models.agent_run import AgentRunRow
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-
-async def main() -> None:
-    async with UnitOfWork() as uow:
-        rows = (
-            await uow.session.execute(
-                select(AgentRunRow.id, AgentRunRow.status)
-                .where(AgentRunRow.status.in_(OPEN_RUN_STATUS_VALUES))
-                .order_by(AgentRunRow.id.asc())
-            )
-        ).all()
-    print(",".join(f"{run_id}:{status}" for run_id, status in rows))
-
-
-asyncio.run(main())
-PY
 }
 
 api_owned_active_run_count() {
@@ -2030,8 +1988,9 @@ run_prod() {
   sync_frontend_dependencies
 
   log_phase "production: prepare GPU/runtime environment"
-  local active_runs_for_runtime
-  active_runs_for_runtime="$(active_agent_run_count || echo unknown)"
+  local active_runs_for_runtime worker_swap_runtime_snapshot
+  worker_swap_runtime_snapshot="$(worker_swap_snapshot)"
+  active_runs_for_runtime="$(worker_swap_snapshot_count "$worker_swap_runtime_snapshot")"
   if [ "$active_runs_for_runtime" = "0" ]; then
     offload_ollama_models
   else

@@ -1,4 +1,5 @@
 import signal
+from datetime import datetime, timezone
 
 import pytest
 from unittest.mock import patch
@@ -154,7 +155,7 @@ def test_worker_exits_when_cycle_scheduler_heartbeat_is_stale(monkeypatch, caplo
     monkeypatch.setattr(worker, "runner_health_snapshot", lambda: {"runner_running": True})
     monkeypatch.setattr(worker, "QueueStallMonitor", lambda **_kwargs: QueueStallMonitorStub())
     monkeypatch.setattr(worker, "seconds_since_last_cycle_tick", lambda: 301.0)
-    monkeypatch.setattr(worker, "stop_runner", lambda **_kwargs: None)
+    monkeypatch.setattr(worker, "stop_runner", lambda **_kwargs: worker.DrainResult())
     monkeypatch.setattr(worker, "stop_cycle_scheduler", lambda: None)
     monkeypatch.setattr(worker.logging, "shutdown", lambda: None)
     monkeypatch.setattr(worker, "_terminate_process", terminate_calls.append)
@@ -177,7 +178,11 @@ def test_worker_term_path_calls_terminate_process_with_zero(monkeypatch):
     monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: True)
     monkeypatch.setattr(worker, "start_cycle_scheduler", lambda: None)
     monkeypatch.setattr(worker, "start_runner", lambda: None)
-    monkeypatch.setattr(worker, "stop_runner", lambda **_kwargs: calls.append("stop_runner"))
+    monkeypatch.setattr(
+        worker,
+        "stop_runner",
+        lambda **_kwargs: calls.append("stop_runner") or worker.DrainResult(),
+    )
     monkeypatch.setattr(worker, "stop_cycle_scheduler", lambda: calls.append("stop_cycle_scheduler"))
     monkeypatch.setattr(worker.logging, "shutdown", lambda: calls.append("logging.shutdown"))
     monkeypatch.setattr(worker, "_terminate_process", lambda code: calls.append(("terminate", code)))
@@ -190,6 +195,34 @@ def test_worker_term_path_calls_terminate_process_with_zero(monkeypatch):
         "logging.shutdown",
         ("terminate", 0),
     ]
+
+
+def test_worker_entry_point_recovers_timed_out_runs(monkeypatch, caplog):
+    from brain.systems.cortex import worker
+    from brain.systems.runs.interruption import RunInterruption
+
+    calls = []
+    occurred_at = datetime(2026, 7, 22, 17, 55, tzinfo=timezone.utc)
+
+    async def interrupt(run_ids, *, reason):
+        calls.append((run_ids, reason))
+        return (
+            RunInterruption(
+                run_id=2330,
+                reason=reason,
+                interrupted_at=occurred_at,
+                requeued=True,
+            ),
+        )
+
+    monkeypatch.setattr(worker, "interrupt_and_requeue_run_ids", interrupt)
+
+    worker._recover_timed_out_runs(
+        worker.DrainResult(timed_out_run_ids=(2330,))
+    )
+
+    assert calls == [((2330,), "worker_shutdown_drain_timeout")]
+    assert "interrupted and requeued run ids: [2330]" in caplog.text
 
 
 def test_signal_handler_requests_runner_stop(monkeypatch):

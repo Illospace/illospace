@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ from types import SimpleNamespace
 import tempfile
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from typing import Any
 import uuid
 
 from sqlalchemy import func, select
@@ -26,9 +27,19 @@ from brain.systems.runs.events import activity_event, run_event
 from brain.systems.runs.failures import (
     coerce_failure_category,
     failure_category_for_error,
-    interrupted_run_message,
     public_run_failure,
     safe_terminal_run_message,
+)
+from brain.systems.runs.interruption import (
+    RunInterruption,
+    interrupt_and_requeue_run,
+    notify_run_interruption,
+)
+from brain.systems.runs.slack_delivery import (
+    SLACK_SURFACE as _SLACK_SURFACE,
+    is_slack_origin as _run_is_slack_origin,
+    post_slack_run_message as _post_slack_run_message_async,
+    run_is_headless as _run_is_headless,
 )
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.store import AsyncAgentRunStore
@@ -47,9 +58,6 @@ from brain.systems.cortex.project_context.materializer import (
 from brain.systems.cortex.thought_lifecycle import TerminalRunSettlementCommand, settle_terminal_run
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaThread, ThreadDiscussionComment
-
-if TYPE_CHECKING:
-    from brain.systems.slack.thread_mute import ThreadPostMute
 
 logger = logging.getLogger(__name__)
 UnitOfWork = None
@@ -88,6 +96,13 @@ _last_queued_watchdog_monotonic = 0.0
 _queued_watchdog_tasks: set[asyncio.Task[int]] = set()
 
 _PROCESS_ACTIVE_STATUS_VALUES = PROCESSING_RUN_STATUS_VALUES
+
+
+@dataclass(frozen=True, slots=True)
+class DrainResult:
+    """Runner lifecycle result; recovery belongs to the owning entry point."""
+
+    timed_out_run_ids: tuple[int, ...] = ()
 
 
 def _coerce_float(value: Any, *, default: float, minimum: float) -> float:
@@ -283,13 +298,6 @@ def _run_context_maps(run: AgentRunRow):
     for container in (_run_target_ref(run), _run_metadata(run)):
         if container:
             yield container
-
-
-def _run_is_headless(run: AgentRunRow) -> bool:
-    for container in _run_context_maps(run):
-        if bool(container.get("headless")):
-            return True
-    return False
 
 
 def _run_is_thread_discussion_conversation(run: AgentRunRow) -> bool:
@@ -508,27 +516,6 @@ def _run_discussion_trigger(run: AgentRunRow) -> dict[str, Any]:
     return {}
 
 
-def _run_slack_trigger(run: AgentRunRow) -> dict[str, Any]:
-    for container in _run_context_maps(run):
-        trigger = container.get("slack_trigger")
-        if isinstance(trigger, dict):
-            return dict(trigger)
-    return {}
-
-
-def _run_is_slack_origin(run: AgentRunRow) -> bool:
-    if _run_slack_trigger(run):
-        return True
-    for container in _run_context_maps(run):
-        if container.get("originating_surface") == _SLACK_SURFACE:
-            return True
-        if container.get("source_surface") == _SLACK_SURFACE:
-            return True
-        if container.get("final_answer_target_surface") == _SLACK_SURFACE:
-            return True
-    return False
-
-
 def _run_discussion_thread_id(run: AgentRunRow) -> str:
     trigger = _run_discussion_trigger(run)
     response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
@@ -693,165 +680,6 @@ async def _slack_visible_action_already_recorded(
         if tool_name in _SLACK_VISIBLE_ACTION_TOOLS:
             return True
     return False
-
-
-def _slack_response_target(run: AgentRunRow) -> dict[str, Any]:
-    trigger = _run_slack_trigger(run)
-    response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
-    channel_id = str(response_target.get("channel_id") or trigger.get("channel_id") or "").strip()
-    thread_ts = response_target.get("thread_ts")
-    if thread_ts is not None:
-        thread_ts = str(thread_ts or "").strip() or None
-    trigger_channel_type = str(trigger.get("channel_type") or "").strip()
-    trigger_message_ts = str(trigger.get("message_ts") or "").strip()
-    if trigger_channel_type == "im":
-        thread_ts = None
-    elif not response_target.get("thread_ts") and thread_ts == trigger_message_ts:
-        thread_ts = None
-    return {
-        "channel_id": channel_id,
-        "thread_ts": thread_ts,
-        "trigger": trigger,
-    }
-
-
-async def _slack_client_for_run(run: AgentRunRow):
-    from brain.systems.slack.client import SlackWebClient
-    from brain.systems.vault.runtime_secrets import RuntimeSecretContext, read_runtime_secret
-
-    token = await read_runtime_secret(
-        "SLACK_BOT_TOKEN",
-        context=RuntimeSecretContext(
-            actor_user_id=str(getattr(run, "user_id", "") or "").strip() or None,
-            org_id=str(getattr(run, "org_id", "") or "").strip() or None,
-            run_id=int(run.id),
-            idea_id=str(getattr(run, "thread_id", "") or "").strip() or None,
-        ),
-        reason="Report a completed Slack-origin Illo run back to Slack.",
-        requested_by="slack_run_settlement",
-        access="service",
-        allow_env_fallback=True,
-    )
-    return SlackWebClient(token)
-
-
-async def _clear_slack_processing_status(client: Any, trigger: dict[str, Any]) -> None:
-    set_status = getattr(client, "set_assistant_status", None)
-    if not callable(set_status):
-        return
-    channel_id = str(trigger.get("channel_id") or "").strip()
-    thread_ts = str(trigger.get("thread_ts") or trigger.get("message_ts") or "").strip()
-    if not channel_id or not thread_ts:
-        return
-    with suppress(Exception):
-        await set_status(channel_id=channel_id, thread_ts=thread_ts, status="")
-
-
-async def _record_slack_thread_mute(
-    session,
-    *,
-    run: AgentRunRow,
-    mute: ThreadPostMute,
-    channel_id: str,
-    thread_ts: str,
-) -> None:
-    await AsyncAgentRunStore(session).append_event(
-        run_event(
-            int(run.id),
-            "run.slack_post_suppressed",
-            {
-                "reason": "thread_post_muted",
-                "ledger_line": mute.ledger_line,
-                "muted_by": mute.user,
-                "muted_at": mute.ts,
-                "channel_id": channel_id,
-                "thread_ts": thread_ts,
-            },
-            root_run_id=run.root_run_id,
-        )
-    )
-
-
-async def _post_slack_run_message_async(
-    session,
-    *,
-    run: AgentRunRow,
-    text: str,
-    artifact_id: int | None = None,
-) -> dict[str, Any] | None:
-    target = _slack_response_target(run)
-    channel_id = target["channel_id"]
-    if not channel_id:
-        return None
-    try:
-        client = await _slack_client_for_run(run)
-        if target["thread_ts"]:
-            from brain.systems.slack.thread_mute import read_thread_post_mute
-
-            mute = await read_thread_post_mute(
-                client,
-                channel_id=channel_id,
-                thread_ts=target["thread_ts"],
-                illo_user_id=str(target["trigger"].get("bot_user_id") or "").strip() or None,
-            )
-            if mute is not None:
-                await _clear_slack_processing_status(client, target["trigger"])
-                await _record_slack_thread_mute(
-                    session,
-                    run=run,
-                    mute=mute,
-                    channel_id=channel_id,
-                    thread_ts=target["thread_ts"],
-                )
-                return {
-                    "surface": _SLACK_SURFACE,
-                    "run_id": int(run.id),
-                    "artifact_id": artifact_id,
-                    "channel_id": channel_id,
-                    "thread_ts": target["thread_ts"],
-                    "suppressed": True,
-                    "ledger_line": mute.ledger_line,
-                }
-        response = await client.post_message(
-            channel=channel_id,
-            text=text,
-            thread_ts=target["thread_ts"],
-        )
-        await _clear_slack_processing_status(client, target["trigger"])
-    except Exception as exc:
-        logger.info("slack_run_message_failed: %s", exc, extra={"run_id": int(run.id)})
-        return None
-    return {
-        "surface": _SLACK_SURFACE,
-        "run_id": int(run.id),
-        "artifact_id": artifact_id,
-        "channel_id": channel_id,
-        "thread_ts": target["thread_ts"],
-        "slack": response,
-    }
-
-
-async def _settle_slack_interrupted_run_async(
-    session,
-    run: AgentRunRow,
-    *,
-    interrupted_at: datetime | str | None,
-    requeued: bool,
-) -> dict[str, Any] | None:
-    if not _run_is_slack_origin(run):
-        return None
-    if _run_is_headless(run) and run.parent_run_id is not None:
-        return None
-    message = interrupted_run_message(
-        int(run.id),
-        interrupted_at=interrupted_at,
-        requeued=requeued,
-    )
-    return await _post_slack_run_message_async(
-        session,
-        run=run,
-        text=message,
-    )
 
 
 async def _settle_slack_origin_run_async(
@@ -1283,63 +1111,6 @@ def _run_liveness_at(
     return max(live) if live else None
 
 
-async def _notify_interrupted_run_async(run_id: int) -> dict[str, Any] | None:
-    async with _unit_of_work_factory()() as uow:
-        run = await uow.session.get(AgentRunRow, int(run_id))
-        if run is None:
-            return None
-        metadata = _run_metadata(run)
-        interruption = metadata.get("interruption")
-        interruption = dict(interruption) if isinstance(interruption, dict) else {}
-        return await _settle_slack_interrupted_run_async(
-            uow.session,
-            run,
-            interrupted_at=interruption.get("interrupted_at"),
-            requeued=bool(interruption.get("requeued")),
-        )
-
-
-async def interrupt_and_requeue_run_ids(
-    run_ids: list[int] | tuple[int, ...],
-    *,
-    reason: str,
-    interrupted_at: datetime | None = None,
-) -> tuple[int, ...]:
-    """Durably fence worker-owned attempts, requeue them, and notify Slack."""
-
-    interrupted_at = interrupted_at or datetime.now(timezone.utc)
-    changed_ids: list[int] = []
-    async with _unit_of_work_factory()() as uow:
-        store = AsyncAgentRunStore(uow.session)
-        for run_id in sorted({int(value) for value in run_ids}):
-            _run, changed = await store.interrupt_and_requeue(
-                run_id,
-                reason=reason,
-                interrupted_at=interrupted_at,
-            )
-            if changed:
-                changed_ids.append(run_id)
-
-    for run_id in changed_ids:
-        await _notify_interrupted_run_async(run_id)
-    return tuple(changed_ids)
-
-
-def _interrupt_in_flight_runs(
-    run_ids: tuple[int, ...],
-    *,
-    reason: str,
-) -> tuple[int, ...]:
-    if not run_ids:
-        return ()
-    return asyncio.run(
-        interrupt_and_requeue_run_ids(
-            run_ids,
-            reason=reason,
-        )
-    )
-
-
 async def _reap_stale_candidate(
     session,
     store: AsyncAgentRunStore,
@@ -1348,7 +1119,7 @@ async def _reap_stale_candidate(
     root_run_id: int,
     cutoff: datetime,
     stale_after_seconds: float,
-) -> tuple[bool, int | None]:
+) -> tuple[bool, RunInterruption | None]:
     candidate_tx = await session.begin_nested()
     try:
         locked = await store.lock_run_liveness(int(row.id), root_run_id)
@@ -1385,16 +1156,17 @@ async def _reap_stale_candidate(
             "last_liveness_at": last_liveness_at.isoformat() if last_liveness_at else None,
             "last_run_update_at": row.updated_at.isoformat() if row.updated_at else None,
         }
-        _requeued_run, changed = await store.interrupt_and_requeue(
+        interruption = await interrupt_and_requeue_run(
+            store,
             int(row.id),
             reason="runner_heartbeat_stale",
             details=payload,
         )
-        if not changed:
+        if interruption is None:
             await candidate_tx.rollback()
             return False, None
         await candidate_tx.commit()
-        return True, int(row.id)
+        return True, interruption
     except BaseException:
         if candidate_tx.is_active:
             await candidate_tx.rollback()
@@ -1410,7 +1182,7 @@ async def reap_stale_active_runs(
     now = now or datetime.now(timezone.utc)
     stale_after_seconds = stale_after_seconds if stale_after_seconds is not None else _stale_run_seconds()
     cutoff = now - timedelta(seconds=float(stale_after_seconds))
-    interrupted_run_ids: list[int] = []
+    interruptions: list[RunInterruption] = []
     reaped = 0
 
     async with _unit_of_work_factory()() as uow:
@@ -1439,7 +1211,7 @@ async def reap_stale_active_runs(
             )
             if last_liveness_at is not None and last_liveness_at > cutoff:
                 continue
-            candidate_reaped, interrupted_run_id = await _reap_stale_candidate(
+            candidate_reaped, interruption = await _reap_stale_candidate(
                 uow.session,
                 store,
                 row,
@@ -1449,18 +1221,18 @@ async def reap_stale_active_runs(
             )
             if not candidate_reaped:
                 continue
-            if interrupted_run_id is not None:
-                interrupted_run_ids.append(interrupted_run_id)
+            if interruption is not None:
+                interruptions.append(interruption)
             reaped += 1
 
-    for run_id in interrupted_run_ids:
-        await _notify_interrupted_run_async(run_id)
+    for interruption in interruptions:
+        await notify_run_interruption(interruption)
     if reaped:
         logger.warning(
             "agent_run_stale_interrupted_requeued",
             extra={
                 "count": reaped,
-                "run_ids": interrupted_run_ids,
+                "run_ids": [interruption.run_id for interruption in interruptions],
                 "stale_after_seconds": stale_after_seconds,
             },
         )
@@ -1901,7 +1673,7 @@ def _runner_teardown_timeout_seconds() -> float:
     )
 
 
-def stop_runner(*, drain_timeout_seconds: float | None = 2.0) -> None:
+def stop_runner(*, drain_timeout_seconds: float | None = 2.0) -> DrainResult:
     global _runner_supervisor_thread
     request_runner_stop()
     timed_out_run_ids: tuple[int, ...] = ()
@@ -1940,23 +1712,7 @@ def stop_runner(*, drain_timeout_seconds: float | None = 2.0) -> None:
     elif _runner_supervisor_thread is supervisor_thread:
         _runner_supervisor_thread = None
 
-    if timed_out_run_ids:
-        try:
-            requeued_run_ids = _interrupt_in_flight_runs(
-                timed_out_run_ids,
-                reason="worker_shutdown_drain_timeout",
-            )
-        except Exception:
-            logger.exception(
-                "runner shutdown could not requeue affected run ids: %s",
-                list(timed_out_run_ids),
-            )
-        else:
-            if requeued_run_ids:
-                logger.warning(
-                    "runner shutdown interrupted and requeued run ids: %s",
-                    list(requeued_run_ids),
-                )
+    return DrainResult(timed_out_run_ids=timed_out_run_ids)
 
 
 async def queue_status_async(*, consumer_running: bool | None = None, org_id: str | None = None) -> dict[str, Any]:
@@ -1983,6 +1739,7 @@ def queue_status(*, consumer_running: bool | None = None, org_id: str | None = N
 
 
 __all__ = [
+    "DrainResult",
     "queue_status",
     "queue_status_async",
     "reap_stale_active_runs",

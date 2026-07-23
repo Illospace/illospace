@@ -5,6 +5,12 @@ import subprocess
 from pathlib import Path
 
 from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
+from brain.contracts.worker_swap import (
+    WorkerSwapDecision,
+    parse_worker_swap_snapshot,
+    worker_swap_rows_sql,
+    worker_swap_snapshot,
+)
 
 
 def _shell_function_body(content: str, name: str) -> str:
@@ -99,8 +105,12 @@ def test_docker_build_context_excludes_local_brain_env():
 def test_ops_deploy_drains_worker_instead_of_restarting_active_runs():
     deploy_path = Path(__file__).resolve().parents[1] / "ops" / "deploy.sh"
     content = deploy_path.read_text()
+    worker_swap_lib = (
+        Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "worker-swap-lib.sh"
+    ).read_text()
 
-    assert "active_agent_run_count" in content
+    assert 'source "$ROOT/deploy/scripts/worker-swap-lib.sh"' in content
+    assert "worker_swap_snapshot" in content
     assert "restart_or_drain_worker" in content
     assert "start_worker_handoff" in content
     assert "monitor_worker_handoff" in content
@@ -109,7 +119,8 @@ def test_ops_deploy_drains_worker_instead_of_restarting_active_runs():
     assert service.count("ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1") == 1
     assert "systemctl --user kill --kill-who=main --signal=TERM cortex-worker" in content
     assert "AgentRun(s); signaling drain instead of restart; affected run ids:" in content
-    assert "Worker pre-swap check:" in content
+    assert "worker_swap_snapshot_report" in content
+    assert "worker_swap_snapshot_report" in worker_swap_lib
 
 
 def test_ops_deploy_leaves_embedder_running_when_agent_runs_are_active():
@@ -214,17 +225,17 @@ def test_illo_refuses_to_kill_api_owned_agent_runs_without_force():
     assert "Refusing to kill API pid(s)" in content
 
 
-def test_illo_agent_run_count_helpers_use_async_unit_of_work():
+def test_illo_api_owned_run_count_helper_uses_async_unit_of_work():
     illo_path = Path(__file__).resolve().parents[1] / "illo"
     content = illo_path.read_text()
 
-    for helper in ("active_agent_run_count", "api_owned_active_run_count"):
-        body = _shell_function_body(content, helper)
-        assert "import asyncio" in body
-        assert "async with UnitOfWork()" in body
-        assert "await uow.session" in body
-        assert "asyncio.run(main())" in body
-        assert "with UnitOfWork()" not in body.replace("async with UnitOfWork()", "")
+    body = _shell_function_body(content, "api_owned_active_run_count")
+    assert "import asyncio" in body
+    assert "async with UnitOfWork()" in body
+    assert "await uow.session" in body
+    assert "asyncio.run(main())" in body
+    assert "with UnitOfWork()" not in body.replace("async with UnitOfWork()", "")
+    assert 'source "$ROOT/deploy/scripts/worker-swap-lib.sh"' in content
 
 
 def test_illo_refuses_to_kill_unknown_port_processes_without_force():
@@ -364,8 +375,8 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     combined = upgrade + runtime_lib
 
     assert 'source "$SCRIPT_DIR/compose-runtime-lib.sh"' in upgrade
-    assert "nonterminal_agent_run_details" in runtime_lib
-    assert "status IN" in runtime_lib
+    assert 'source "$COMPOSE_RUNTIME_LIB_DIR/worker-swap-lib.sh"' in runtime_lib
+    assert "worker_swap_snapshot_acquire" in runtime_lib
     assert "non_worker_services" in upgrade
     assert "api scheduler web updater" in upgrade
     assert "ILLO_COMPOSE_SKIP_UPDATER_RESTART" in upgrade
@@ -407,7 +418,7 @@ def test_compose_runtime_service_restart_supports_one_many_or_all_services():
     assert "runtime-services.json" in runtime_lib
     assert "compose up -d --force-recreate --no-deps" in runtime_lib
     assert "restart_runtime_worker_service" in runtime_lib
-    assert "active_agent_run_count" in runtime_lib
+    assert "worker_swap_snapshot" in runtime_lib
     assert "started handoff worker" in runtime_lib
     assert "refusing to kill it" in runtime_lib
 
@@ -417,10 +428,10 @@ def test_compose_pre_swap_check_reports_nonterminal_run_ids():
     script = f'''
 source "{runtime_lib}"
 compose() {{
-  printf '2327:paused\\n2330:running\\n2331:queued\\n'
+  printf '[{{"id":2327,"status":"paused"}},{{"id":2330,"status":"running"}},{{"id":2331,"status":"queued"}}]\\n'
 }}
-details="$(nonterminal_agent_run_details)"
-report_nonterminal_agent_runs "$details"
+snapshot="$(worker_swap_snapshot)"
+echo "$(worker_swap_snapshot_report "$snapshot")."
 '''
 
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
@@ -432,17 +443,53 @@ report_nonterminal_agent_runs "$details"
     )
 
 
-def test_safe_deploy_active_run_guards_match_canonical_active_statuses():
-    root = Path(__file__).resolve().parents[1]
-    upgrade = (root / "deploy" / "scripts" / "upgrade.sh").read_text()
-    launcher = (root / "illo").read_text()
-    ops_deploy = (root / "ops" / "deploy.sh").read_text()
-    runtime_lib = (root / "deploy" / "scripts" / "compose-runtime-lib.sh").read_text()
+def test_worker_swap_snapshot_derives_decision_and_presentation_from_canonical_policy():
+    snapshot = worker_swap_snapshot(
+        [
+            (2331, "queued"),
+            (2327, "paused"),
+            (2330, "running"),
+        ]
+    )
+    parsed = parse_worker_swap_snapshot(snapshot.as_json())
 
+    assert parsed.decision is WorkerSwapDecision.DRAIN
+    assert parsed.count == 3
+    assert parsed.run_ids == (2327, 2330, 2331)
+    assert parsed.details == "2327:paused,2330:running,2331:queued"
     for status in OPEN_RUN_STATUS_VALUES:
-        assert repr(status) in upgrade + runtime_lib
-    assert repr("queued") in upgrade + runtime_lib
-    assert "ACTIVE_RUN_STATUS_VALUES" in launcher
-    assert "OPEN_RUN_STATUS_VALUES" in ops_deploy
-    assert '("starting", "running", "verifying")' not in launcher
-    assert '("starting", "running", "verifying")' not in ops_deploy
+        assert repr(status) in worker_swap_rows_sql()
+
+
+def test_safe_deploy_scripts_cannot_restate_worker_swap_status_policy():
+    root = Path(__file__).resolve().parents[1]
+    consumers = [
+        root / "illo",
+        root / "ops" / "deploy.sh",
+        root / "deploy" / "scripts" / "compose-runtime-lib.sh",
+        root / "deploy" / "scripts" / "upgrade.sh",
+        root / "deploy" / "scripts" / "runtime-services.sh",
+        root / "deploy" / "scripts" / "worker-swap-lib.sh",
+    ]
+    forbidden = (
+        "OPEN_RUN_STATUS_VALUES",
+        "SELECT id, status FROM agent_runs",
+        "nonterminal_agent_run_details",
+        "active_agent_run_count",
+    )
+
+    for path in consumers:
+        content = path.read_text()
+        for copied_policy_shape in forbidden:
+            assert copied_policy_shape not in content, (
+                f"{path.relative_to(root)} restates the worker-swap policy via "
+                f"{copied_policy_shape!r}"
+            )
+        for status in OPEN_RUN_STATUS_VALUES:
+            assert repr(status) not in content
+            assert f'"{status}"' not in content
+
+    contract = (root / "brain" / "contracts" / "worker_swap.py").read_text()
+    native_adapter = (root / "brain" / "app" / "cli" / "worker_swap_snapshot.py").read_text()
+    assert "OPEN_RUN_STATUS_VALUES" in contract
+    assert "OPEN_RUN_STATUS_VALUES" in native_adapter
