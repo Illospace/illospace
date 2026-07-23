@@ -153,8 +153,8 @@ async def test_manage_idea_create_rejects_missing_parent_before_insert(
     from fastapi import HTTPException
 
     from brain.systems.runs.execution_context import bind_agent_context
-    from brain.systems.runs.direct_loop.tool_execution import classify_tool_result
     from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
+    from brain.systems.runs.tool_outcomes import ToolHandlerResult
 
     missing_parent_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
@@ -170,12 +170,13 @@ async def test_manage_idea_create_rejects_missing_parent_before_insert(
             title="Child of missing idea",
             parent_id=missing_parent_id,
         )
-    payload = json.loads(result)
+    assert isinstance(result, ToolHandlerResult)
+    payload = json.loads(result.value)
 
     assert payload == {
         "error": "parent_id must be an existing idea id or omitted",
     }
-    failure = classify_tool_result(result).failure
+    failure = result.outcome.failure
     assert failure is not None
     assert failure.message == payload["error"]
     assert failure.category == "ToolValidationError"
@@ -187,8 +188,8 @@ async def test_manage_idea_rejects_bogus_uuid_with_typed_validation_error(
     fake_manage_idea_uow,
 ):
     from brain.systems.runs.execution_context import bind_agent_context
-    from brain.systems.runs.direct_loop.tool_execution import classify_tool_result
     from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
+    from brain.systems.runs.tool_outcomes import ToolHandlerResult
 
     with bind_agent_context({"org_id": "org-1", "user_id": "user-1"}):
         result = await idea_tools._handle_manage_idea(
@@ -197,10 +198,11 @@ async def test_manage_idea_rejects_bogus_uuid_with_typed_validation_error(
             parent_id="not-a-uuid",
         )
 
-    assert json.loads(result) == {
+    assert isinstance(result, ToolHandlerResult)
+    assert json.loads(result.value) == {
         "error": "parent_id must be an existing idea id or omitted",
     }
-    failure = classify_tool_result(result).failure
+    failure = result.outcome.failure
     assert failure is not None
     assert failure.category == "ToolValidationError"
     fake_manage_idea_uow.session.add.assert_not_called()

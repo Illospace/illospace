@@ -3167,7 +3167,7 @@ async def test_direct_loop_returns_timeout_as_tool_error(monkeypatch):
 
     resolved = await async_resolve_tool_call(PendingToolCall("tool-1", "slow_tool", {}, slow_handler))
 
-    assert resolved.is_error is True
+    assert resolved.outcome.failure is not None
     assert "slow_tool" in resolved.result_text
     assert "timed out" in resolved.result_text
 
@@ -3197,7 +3197,7 @@ async def test_direct_loop_cancels_production_async_adapter_at_timeout(monkeypat
         PendingToolCall("tool-1", "manage_cycle", {"action": "list"}, handler)
     )
 
-    assert resolved.is_error is True
+    assert resolved.outcome.failure is not None
     assert "timed out" in resolved.result_text
     assert canceled.is_set()
 
@@ -3223,7 +3223,7 @@ async def test_direct_loop_detects_unmarked_sync_adapter_returning_coroutine(mon
         PendingToolCall("tool-1", "unregistered_read", {}, unmarked_adapter)
     )
 
-    assert resolved.is_error is True
+    assert resolved.outcome.failure is not None
     assert "timed out" in resolved.result_text
     assert canceled.is_set()
 
@@ -3527,7 +3527,7 @@ async def test_direct_loop_watchdog_tracks_public_blocking_helper(monkeypatch):
     )
     elapsed = time.monotonic() - started_at
 
-    assert resolved.is_error is True
+    assert resolved.outcome.failure is not None
     assert "timed out" in resolved.result_text
     assert elapsed < 0.08
     assert not finished.is_set()
@@ -3571,7 +3571,7 @@ async def test_direct_loop_waits_for_sync_action_before_reporting_outcome(monkey
         PendingToolCall("tool-1", "manage_cycle", {"action": "create"}, wrapped)
     )
 
-    assert resolved.is_error is False
+    assert resolved.outcome.failure is None
     assert json.loads(resolved.result_text) == {"ok": True}
     assert completed.is_set()
     assert len(records) == 1
@@ -3606,7 +3606,7 @@ async def test_direct_loop_waits_for_async_mutation_before_reporting_outcome(mon
         PendingToolCall("tool-1", "manage_cycle", {"action": "create"}, wrapped)
     )
 
-    assert resolved.is_error is False
+    assert resolved.outcome.failure is None
     assert json.loads(resolved.result_text) == {"ok": True}
     assert completions == [{"manifest_id": 1, "outcome_status": "succeeded", "outcome_error": None}]
 

@@ -16,9 +16,9 @@ from brain.systems.cortex.thought_lifecycle import (
     post_thread_message,
     transition_thought_status,
 )
-from brain.systems.runs.direct_loop.state import ClassifiedToolResult, ToolOutcome
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.systems.runs.tool_catalog.handlers.common import *
+from brain.systems.runs.tool_outcomes import ToolHandlerResult, ToolOutcome
 
 
 _EMPTY_MANAGE_IDEA_IDENTIFIERS = {
@@ -89,14 +89,14 @@ def _tool_failure_result(
     *,
     message: str | None = None,
     details: Mapping[str, Any] | None = None,
-) -> ClassifiedToolResult:
+) -> ToolHandlerResult:
     """Adapt a manage_idea exception to JSON plus internal typed failure identity."""
 
     failure_message = message if message is not None else str(exc)
     payload = {"error": failure_message, **dict(details or {})}
-    return ClassifiedToolResult(
-        json.dumps(payload),
-        ToolOutcome.failed(
+    return ToolHandlerResult(
+        value=json.dumps(payload),
+        outcome=ToolOutcome.failed(
             message=failure_message,
             category=type(exc).__name__,
         ),
@@ -591,7 +591,7 @@ async def _handle_manage_idea(
     search: str | None = None,
     include_archived: bool = False,
     limit: int | None = 20,
-) -> str:
+) -> str | ToolHandlerResult:
     normalized_action = str(action or "").strip().lower()
     if normalized_action in {"help", "schema"}:
         return _manage_tool_guide("manage_idea", operation)

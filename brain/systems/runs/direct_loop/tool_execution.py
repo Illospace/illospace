@@ -18,16 +18,17 @@ from brain.platform.async_io import (
 )
 from brain.systems.runs.actions import result_failure_summary
 from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy, LoopTermination
-from brain.systems.runs.direct_loop.state import (
-    ClassifiedToolResult,
-    ToolOutcome,
-)
 from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
 from brain.systems.runs.direct_loop.final_reply_evidence import ToolResultEvidence
 from brain.systems.runs.tool_catalog.registry import (
     action_policy_for_tool,
     get_tool_registration,
     output_budget_chars_for_tool,
+)
+from brain.systems.runs.tool_outcomes import (
+    DEFAULT_TOOL_FAILURE_CATEGORY,
+    ToolHandlerResult,
+    ToolOutcome,
 )
 
 logger = logging.getLogger("agent")
@@ -57,15 +58,6 @@ class ResolvedToolCall:
     outcome: ToolOutcome = field(default_factory=ToolOutcome)
     result_content: Any | None = None
     result_value: Any | None = None
-
-    @property
-    def is_error(self) -> bool:
-        return self.outcome.is_failure
-
-    @property
-    def error_class(self) -> str | None:
-        failure = self.outcome.failure
-        return failure.category if failure is not None else None
 
 
 @dataclass(frozen=True)
@@ -155,12 +147,15 @@ def _timeout_result(request: PendingToolCall, timeout_seconds: float) -> Resolve
 def classify_tool_result(result: object) -> ToolOutcome:
     """Classify one handler result without exposing failure identity in JSON."""
 
-    if isinstance(result, ClassifiedToolResult):
+    if isinstance(result, ToolHandlerResult):
         return result.outcome
     failure_message = result_failure_summary(result)
     if failure_message is None:
         return ToolOutcome()
-    return ToolOutcome.failed(message=failure_message, category="ToolError")
+    return ToolOutcome.failed(
+        message=failure_message,
+        category=DEFAULT_TOOL_FAILURE_CATEGORY,
+    )
 
 
 def _must_finish_before_reporting(request: PendingToolCall) -> bool:
@@ -219,9 +214,11 @@ def _extract_model_visible_tool_content(result: Any) -> tuple[Any, Any | None]:
 
 
 def _resolved_tool_result(request: PendingToolCall, result: Any) -> ResolvedToolCall:
+    outcome = classify_tool_result(result)
+    if isinstance(result, ToolHandlerResult):
+        result = result.value
     result, model_content = _extract_model_visible_tool_content(result)
     result_text = json.dumps(result, default=str)
-    outcome = classify_tool_result(result)
     failure = outcome.failure
 
     if request.tool_name == "brain_encode" and failure is not None:
@@ -282,7 +279,7 @@ def _record_agent_tool_result(agent_context, resolved: ResolvedToolCall, result_
         recent.append(ToolResultEvidence.capture(
             tool_name=resolved.tool_name,
             arguments=evidence_arguments,
-            is_error=resolved.is_error,
+            is_error=resolved.outcome.failure is not None,
             result=evidence_result,
         ))
         setattr(agent_context, "recent_tool_results", recent[-_RECENT_TOOL_RESULT_LIMIT:])
@@ -531,7 +528,7 @@ def emit_resolved_tool_call(
         "type": "tool_result",
         "tool_use_id": resolved.block_id,
         "content": resolved.result_content if resolved.result_content is not None else resolved.result_text,
-        **({"is_error": True} if resolved.is_error else {}),
+        **({"is_error": True} if resolved.outcome.failure is not None else {}),
     })
     callback_result_text = resolved.result_text
     if resolved.tool_name == "brain_vault":
