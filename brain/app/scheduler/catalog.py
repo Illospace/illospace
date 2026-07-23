@@ -80,6 +80,30 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
         "timeout_seconds": 7200,
         "retry_policy": {"max_attempts": 2, "backoff_seconds": 0},
     },
+    {
+        "job_key": "uwear_aws_health_scan",
+        "family": "uwear_aws_health_scan",
+        "program_key": "uwear_aws_health_scan",
+        "handler_kind": CATALOG_HANDLER_KIND,
+        "handler_ref": "brain.app.scheduler.programs:uwear_aws_health_scan",
+        "cron_expr": "30 * * * *",
+        "timezone": "UTC",
+        "default_payload": {
+            "name": "Uwear AWS Health Scan",
+            "description": "Hourly read-only AWS production health scan",
+        },
+        "task_contract": {
+            "memory_scope": {"visibility": "system"},
+            "allowed_actions": ["scheduler.run"],
+            "output_channel": "scheduler",
+            "success_criteria": ["AWS health scan agent run completes successfully"],
+        },
+        "priority": 90,
+        "max_concurrency": 1,
+        "timeout_seconds": 900,
+        "retry_policy": {"max_attempts": 2, "backoff_seconds": 0},
+        "misfire_policy": "skip",
+    },
 )
 
 
@@ -361,7 +385,7 @@ async def async_sync_scheduler_catalog(
             handler_ref=str(definition["handler_ref"]),
             cron_expr=str(definition["cron_expr"]),
             owner_mode=owner_mode,
-            timezone_name=timezone_name,
+            timezone_name=str(definition.get("timezone") or timezone_name),
             default_payload=dict(definition.get("default_payload") or {}),
             task_contract=dict(definition.get("task_contract") or {}),
             priority=int(definition.get("priority") or 100),
