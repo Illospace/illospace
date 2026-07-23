@@ -7,6 +7,8 @@ from enum import Enum
 import logging
 from typing import TYPE_CHECKING
 
+from brain.systems.runs.tool_outcomes import DEFAULT_TOOL_FAILURE_CATEGORY
+
 if TYPE_CHECKING:
     from brain.systems.runs.direct_loop.tool_execution import ResolvedToolCall
 
@@ -91,13 +93,14 @@ class LoopControlPolicy:
 
         if self.termination is not None:
             return self.termination
-        if not resolved.is_error:
+        failure = resolved.outcome.failure
+        if failure is None:
             self.consecutive_failures = 0
             self.consecutive_tool_name = None
             return None
 
         tool_name = resolved.tool_name or "unknown_tool"
-        error_class = resolved.error_class or "ToolError"
+        error_class = failure.category or DEFAULT_TOOL_FAILURE_CATEGORY
         if (
             tool_name == self.consecutive_tool_name
             and error_class == self.last_error_class
@@ -116,7 +119,7 @@ class LoopControlPolicy:
 
     def _failure_circuit_termination(self) -> LoopTermination:
         tool_name = self.consecutive_tool_name or "unknown_tool"
-        error_class = self.last_error_class or "ToolError"
+        error_class = self.last_error_class or DEFAULT_TOOL_FAILURE_CATEGORY
         detail = (self.last_error_message or "No error detail was returned.").strip()
         if len(detail) > 500:
             detail = f"{detail[:497]}..."

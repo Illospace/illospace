@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from fastapi import HTTPException
@@ -16,6 +18,89 @@ from brain.systems.cortex.thought_lifecycle import (
 )
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.systems.runs.tool_catalog.handlers.common import *
+from brain.systems.runs.tool_outcomes import ToolHandlerResult, ToolOutcome
+
+
+_EMPTY_MANAGE_IDEA_IDENTIFIERS = {
+    "",
+    "none",
+    "null",
+    "00000000-0000-0000-0000-000000000000",
+}
+
+
+class ToolValidationError(ValueError):
+    """Actionable manage_idea input error that is safe to return to the model."""
+
+
+@dataclass(frozen=True)
+class _ManageIdeaIdentifiers:
+    parent_id: str | None
+    user_id: str | None
+    orbit_anchor_id: str | None
+    origin_ref: str | None
+
+
+def _parse_manage_idea_identifiers(
+    *,
+    parent_id: Any,
+    user_id: Any,
+    orbit_anchor_id: Any,
+    origin_ref: Any,
+) -> _ManageIdeaIdentifiers:
+    """Normalize and validate optional identifiers at the manage_idea boundary."""
+
+    def optional_identifier(value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if normalized.lower() in _EMPTY_MANAGE_IDEA_IDENTIFIERS:
+            return None
+        return normalized
+
+    def optional_uuid(value: Any, *, error_message: str) -> str | None:
+        normalized = optional_identifier(value)
+        if normalized is None:
+            return None
+        try:
+            return str(uuid.UUID(normalized))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ToolValidationError(error_message) from exc
+
+    return _ManageIdeaIdentifiers(
+        parent_id=optional_uuid(
+            parent_id,
+            error_message="parent_id must be an existing idea id or omitted",
+        ),
+        user_id=optional_uuid(
+            user_id,
+            error_message="user_id must be an existing user id or omitted",
+        ),
+        orbit_anchor_id=optional_uuid(
+            orbit_anchor_id,
+            error_message="orbit_anchor_id must be an existing user or pin id or omitted",
+        ),
+        origin_ref=optional_identifier(origin_ref),
+    )
+
+
+def _tool_failure_result(
+    exc: Exception,
+    *,
+    message: str | None = None,
+    details: Mapping[str, Any] | None = None,
+) -> ToolHandlerResult:
+    """Adapt a manage_idea exception to JSON plus internal typed failure identity."""
+
+    failure_message = message if message is not None else str(exc)
+    payload = {"error": failure_message, **dict(details or {})}
+    return ToolHandlerResult(
+        value=json.dumps(payload),
+        outcome=ToolOutcome.failed(
+            message=failure_message,
+            category=type(exc).__name__,
+        ),
+    )
 
 
 def _idea_tool_context() -> tuple[str | None, str | None, str | None]:
@@ -506,7 +591,7 @@ async def _handle_manage_idea(
     search: str | None = None,
     include_archived: bool = False,
     limit: int | None = 20,
-) -> str:
+) -> str | ToolHandlerResult:
     normalized_action = str(action or "").strip().lower()
     if normalized_action in {"help", "schema"}:
         return _manage_tool_guide("manage_idea", operation)
@@ -521,22 +606,16 @@ async def _handle_manage_idea(
     event: tuple[str, dict[str, Any]] | None = None
 
     try:
-        parent_id = normalize_optional_uuid(
-            parent_id,
-            field_name="parent_id",
-            error_message="parent_id must be an existing idea id or omitted",
+        identifiers = _parse_manage_idea_identifiers(
+            parent_id=parent_id,
+            user_id=user_id,
+            orbit_anchor_id=orbit_anchor_id,
+            origin_ref=origin_ref,
         )
-        user_id = normalize_optional_uuid(
-            user_id,
-            field_name="user_id",
-            error_message="user_id must be an existing user id or omitted",
-        )
-        orbit_anchor_id = normalize_optional_uuid(
-            orbit_anchor_id,
-            field_name="orbit_anchor_id",
-            error_message="orbit_anchor_id must be an existing user or pin id or omitted",
-        )
-        origin_ref = normalize_optional_identifier(origin_ref)
+        parent_id = identifiers.parent_id
+        user_id = identifiers.user_id
+        orbit_anchor_id = identifiers.orbit_anchor_id
+        origin_ref = identifiers.origin_ref
 
         async with UnitOfWork() as uow:
             if normalized_action == "list":
@@ -754,16 +833,16 @@ async def _handle_manage_idea(
             publish_safe(event[0], event[1])
         return json.dumps(result, default=str)
     except ToolValidationError as exc:
-        return json.dumps(tool_error_payload(exc))
+        return _tool_failure_result(exc)
     except HTTPException as exc:
-        return json.dumps({
-            **tool_error_payload(exc),
-            "error": str(exc.detail),
-            "status_code": exc.status_code,
-        })
+        return _tool_failure_result(
+            exc,
+            message=str(exc.detail),
+            details={"status_code": exc.status_code},
+        )
     except Exception as exc:
         logger.exception("manage_idea failed: %s", exc)
-        return json.dumps(tool_error_payload(exc))
+        return _tool_failure_result(exc)
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

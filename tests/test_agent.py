@@ -1205,7 +1205,7 @@ class TestAgentLoop:
 
         resolved = _resolve_tool_call(request)
 
-        assert resolved.is_error is True
+        assert resolved.outcome.failure is not None
         assert "Continue working and plan another pipeline" in resolved.result_text
 
     @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")

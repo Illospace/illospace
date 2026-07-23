@@ -3,6 +3,7 @@
 import asyncio
 import json
 import threading
+from dataclasses import asdict
 from types import SimpleNamespace
 
 from brain.systems.runs.direct_loop.gates import GateState, check_gate_violations
@@ -10,12 +11,19 @@ from brain.systems.runs.direct_loop.loop_control import (
     LoopControlPolicy,
     LoopTerminationReason,
 )
+from brain.systems.runs.tool_outcomes import (
+    DEFAULT_TOOL_FAILURE_CATEGORY,
+    ToolHandlerResult,
+    ToolFailure,
+    ToolOutcome,
+)
 from brain.systems.runs.direct_loop.tool_execution import (
     PendingToolCall,
     ResolvedToolCall,
     async_execute_parallel_tool_batch,
     async_execute_tool_calls,
     async_resolve_tool_call,
+    classify_tool_result,
     execute_parallel_tool_batch,
     execute_tool_calls,
     resolve_tool_call,
@@ -266,29 +274,104 @@ async def test_failure_policy_stops_parallel_batch_before_fourth_attempt():
     assert execution.termination.consecutive_failures == 3
 
 
-def test_resolve_tool_call_preserves_structured_error_class():
+def test_failure_policy_stops_typed_result_before_fourth_attempt():
+    attempts = []
+    handler_result = ToolHandlerResult(
+        value=json.dumps({"error": "invalid tool input"}),
+        outcome=ToolOutcome.failed(
+            message="invalid tool input",
+            category="ToolValidationError",
+        ),
+    )
+
+    def handler():
+        attempts.append("attempt")
+        return handler_result
+
+    execution = _execute_sync(
+        _response(*[
+            (f"call-{index}", "manage_idea", {})
+            for index in range(4)
+        ]),
+        {"manage_idea": handler},
+    )
+
+    assert len(attempts) == 3
+    assert execution.termination is not None
+    assert execution.termination.reason is LoopTerminationReason.TOOL_FAILURE_CIRCUIT
+    assert execution.termination.error_class == "ToolValidationError"
+    assert execution.termination.consecutive_failures == 3
+
+
+def test_classifier_ignores_legacy_payload_category():
+    outcome = classify_tool_result({
+        "error": "invalid tool input",
+        "error_class": "UndocumentedPayloadCategory",
+    })
+
+    assert outcome.failure == ToolFailure(
+        message="invalid tool input",
+        category=DEFAULT_TOOL_FAILURE_CATEGORY,
+    )
+
+
+def test_tool_handler_result_keeps_outcome_in_identity_and_serialization():
+    value = json.dumps({"error": "invalid tool input"})
+    failure = ToolHandlerResult(
+        value=value,
+        outcome=ToolOutcome.failed(
+            message="invalid tool input",
+            category="ToolValidationError",
+        ),
+    )
+    success = ToolHandlerResult(value=value, outcome=ToolOutcome())
+
+    assert failure != success
+    assert len({failure, success}) == 2
+    assert asdict(failure) == {
+        "value": value,
+        "outcome": {
+            "failure": {
+                "message": "invalid tool input",
+                "category": "ToolValidationError",
+            },
+        },
+    }
+
+
+def test_resolve_tool_call_preserves_typed_failure_outcome():
+    handler_result = ToolHandlerResult(
+        value=json.dumps({"error": "parent_id must be an existing idea id or omitted"}),
+        outcome=ToolOutcome.failed(
+            message="parent_id must be an existing idea id or omitted",
+            category="ToolValidationError",
+        ),
+    )
     request = PendingToolCall(
         block_id="tool_419",
         tool_name="manage_idea",
         tool_input={"action": "create"},
-        handler=lambda **_: json.dumps({
-            "error": "parent_id must be an existing idea id or omitted",
-            "error_class": "ToolValidationError",
-        }),
+        handler=lambda **_: handler_result,
     )
 
     resolved = resolve_tool_call(request)
 
-    assert resolved.is_error is True
-    assert resolved.error_class == "ToolValidationError"
+    assert resolved.outcome == handler_result.outcome
+    assert resolved.outcome.failure is not None
+    assert resolved.outcome.failure.category == "ToolValidationError"
+    assert resolved.result_value == handler_result.value
+    assert resolved.result_text == json.dumps(handler_result.value)
     assert "parent_id must be an existing idea id or omitted" in resolved.result_text
 
 
 async def test_resolved_failures_preserve_error_class_and_result_value(monkeypatch):
-    handler_failure = {
-        "error": "invalid tool input",
-        "error_class": "ToolValidationError",
-    }
+    handler_failure = ToolHandlerResult(
+        value=json.dumps({"error": "invalid tool input"}),
+        outcome=ToolOutcome.failed(
+            message="invalid tool input",
+            category="ToolValidationError",
+        ),
+    )
     returned_failure = resolve_tool_call(PendingToolCall(
         block_id="handler-failure",
         tool_name="manage_idea",
@@ -317,11 +400,14 @@ async def test_resolved_failures_preserve_error_class_and_result_value(monkeypat
         handler=never_finishes,
     ))
 
-    assert returned_failure.error_class == "ToolValidationError"
-    assert returned_failure.result_value == handler_failure
-    assert raised_failure.error_class == "ValueError"
+    assert returned_failure.outcome.failure is not None
+    assert returned_failure.outcome.failure.category == "ToolValidationError"
+    assert returned_failure.result_value == handler_failure.value
+    assert raised_failure.outcome.failure is not None
+    assert raised_failure.outcome.failure.category == "ValueError"
     assert raised_failure.result_value == {"error": "handler raised"}
-    assert timeout_failure.error_class == "ToolTimeoutError"
+    assert timeout_failure.outcome.failure is not None
+    assert timeout_failure.outcome.failure.category == "ToolTimeoutError"
     assert timeout_failure.result_value == {
         "error": "tool_timeout",
         "timeout_seconds": 0.001,
