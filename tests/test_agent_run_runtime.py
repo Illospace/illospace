@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from brain.systems.runs import slack_delivery
+
 
 class _AwaitableValue:
     def __init__(self, value):
@@ -4560,7 +4562,7 @@ async def test_runner_reports_slack_origin_final_answer_back_to_slack(monkeypatc
         assert run_arg is run
         return FakeSlackClient()
 
-    monkeypatch.setattr(runner, "_slack_client_for_run", fake_client_for_run)
+    monkeypatch.setattr(slack_delivery, "slack_client_for_run", fake_client_for_run)
 
     result = await runner._settle_slack_origin_run_async(FakeSession(), run)
 
@@ -4588,7 +4590,7 @@ async def test_runner_reports_slack_origin_final_answer_back_to_slack(monkeypatc
 
 
 async def test_runner_reports_interruption_run_id_and_requeue_status_to_slack(monkeypatch):
-    from brain.systems.runs.cortex import runner
+    from brain.systems.runs import interruption
     from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
 
     run = SimpleNamespace(
@@ -4623,13 +4625,30 @@ async def test_runner_reports_interruption_run_id_and_requeue_status_to_slack(mo
         assert run_arg is run
         return FakeSlackClient()
 
-    monkeypatch.setattr(runner, "_slack_client_for_run", fake_client_for_run)
+    monkeypatch.setattr(slack_delivery, "slack_client_for_run", fake_client_for_run)
 
-    result = await runner._settle_slack_interrupted_run_async(
-        object(),
-        run,
-        interrupted_at=datetime(2026, 7, 22, 17, 55, tzinfo=timezone.utc),
-        requeued=True,
+    class FakeSession:
+        async def get(self, _model, run_id):
+            assert run_id == 2330
+            return run
+
+    class FakeUnitOfWork:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc_info):
+            return None
+
+    monkeypatch.setattr(interruption, "UnitOfWork", FakeUnitOfWork)
+    result = await interruption.notify_run_interruption(
+        interruption.RunInterruption(
+            run_id=2330,
+            reason="worker_shutdown_drain_timeout",
+            interrupted_at=datetime(2026, 7, 22, 17, 55, tzinfo=timezone.utc),
+            requeued=True,
+        )
     )
 
     assert result["surface"] == "slack"
@@ -4696,7 +4715,7 @@ async def test_runner_does_not_override_model_authored_slack_reply(monkeypatch):
     async def fail_client_for_run(_run):
         raise AssertionError("Slack client should not be requested after post_slack_reply")
 
-    monkeypatch.setattr(runner, "_slack_client_for_run", fail_client_for_run)
+    monkeypatch.setattr(slack_delivery, "slack_client_for_run", fail_client_for_run)
 
     assert await runner._settle_slack_origin_run_async(FakeSession(), run) is None
 
@@ -4754,7 +4773,7 @@ async def test_runner_does_not_post_text_after_model_authored_slack_reaction(mon
     async def fail_client_for_run(_run):
         raise AssertionError("Slack client should not post text after a successful reaction")
 
-    monkeypatch.setattr(runner, "_slack_client_for_run", fail_client_for_run)
+    monkeypatch.setattr(slack_delivery, "slack_client_for_run", fail_client_for_run)
 
     assert await runner._settle_slack_origin_run_async(FakeSession(), run) is None
 
@@ -4847,7 +4866,7 @@ async def test_runner_reports_non_headless_slack_child_final_answer_back_to_slac
         assert run_arg is run
         return FakeSlackClient()
 
-    monkeypatch.setattr(runner, "_slack_client_for_run", fake_client_for_run)
+    monkeypatch.setattr(slack_delivery, "slack_client_for_run", fake_client_for_run)
 
     result = await runner._settle_terminal_root_run_async(FakeSession(), 79)
 
@@ -4925,7 +4944,7 @@ async def test_runner_replaces_failed_run_artifact_with_typed_safe_message(monke
         assert run_arg is run
         return FakeSlackClient()
 
-    monkeypatch.setattr(runner, "_slack_client_for_run", fake_client_for_run)
+    monkeypatch.setattr(slack_delivery, "slack_client_for_run", fake_client_for_run)
 
     session = FakeSession()
     result = await runner._settle_slack_origin_run_async(session, run)
@@ -4966,7 +4985,7 @@ async def test_runner_keeps_headless_slack_child_silent(monkeypatch):
     async def fail_client_for_run(_run):
         raise AssertionError("Headless child should not request a Slack client")
 
-    monkeypatch.setattr(runner, "_slack_client_for_run", fail_client_for_run)
+    monkeypatch.setattr(slack_delivery, "slack_client_for_run", fail_client_for_run)
 
     assert await runner._settle_slack_origin_run_async(object(), run) is None
 
@@ -5041,7 +5060,7 @@ async def test_runner_posts_typed_failure_for_headless_slack_monitor(monkeypatch
         assert run_arg is run
         return FakeSlackClient()
 
-    monkeypatch.setattr(runner, "_slack_client_for_run", fake_client_for_run)
+    monkeypatch.setattr(slack_delivery, "slack_client_for_run", fake_client_for_run)
 
     session = FakeSession()
     result = await runner._settle_slack_origin_run_async(session, run)

@@ -6,7 +6,13 @@ from typing import Any
 
 from brain.systems.runs.events import run_event
 from brain.systems.runs.skill_commands import iter_slash_skill_commands, parse_slash_skill_names
-from brain.systems.runs.cortex.runner import queue_status, queue_status_async, start_runner, stop_runner
+from brain.systems.runs.cortex.runner import (
+    DrainResult,
+    queue_status,
+    queue_status_async,
+    start_runner,
+    stop_runner,
+)
 
 UnitOfWork = None
 
@@ -125,6 +131,7 @@ supersede_runs_for_idea = async_cancel_runs_for_idea
 
 
 __all__ = [
+    "DrainResult",
     "_get_adaptation_history",
     "_parse_skill_mentions",
     "_parse_skill_override",

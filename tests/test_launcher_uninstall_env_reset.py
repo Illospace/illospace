@@ -26,6 +26,18 @@ def _write_launcher_functions(tmp_path: Path) -> Path:
 
     functions_file = tmp_path / "illo-functions.sh"
     functions_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # The launcher sources the canonical worker-swap policy from
+    # $ROOT/deploy/scripts/worker-swap-lib.sh, and $ROOT resolves to tmp_path when
+    # these extracted functions are sourced. Mirror the real dependency here rather
+    # than making the launcher's `source` conditional: a missing canonical lib must
+    # stay a hard failure, because degrading it silently would strip the status
+    # policy from the deploy drain guard.
+    lib_relpath = Path("deploy") / "scripts" / "worker-swap-lib.sh"
+    staged_lib = tmp_path / lib_relpath
+    staged_lib.parent.mkdir(parents=True, exist_ok=True)
+    staged_lib.write_text((ROOT / lib_relpath).read_text(encoding="utf-8"), encoding="utf-8")
+
     return functions_file
 
 

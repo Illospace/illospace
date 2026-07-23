@@ -6,6 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 PYTHON_BIN="$ROOT/venv/bin/python3"
+WORKER_SWAP_PYTHON_BIN="$PYTHON_BIN"
+
+source "$ROOT/deploy/scripts/worker-swap-lib.sh"
 
 runtime_env_file_path() {
   if [ -n "${ILLO_RUNTIME_ENV_FILE:-}" ]; then
@@ -285,16 +288,18 @@ stop_legacy_docker_app_containers() {
     illospace-worker-1
     illospace-scheduler-1
   )
-  local affected_ids run_details running
+  local action affected_ids run_details running snapshot
   running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
   if printf '%s\n' "$running" | grep -qx illospace-worker-1; then
-    run_details="$(nonterminal_agent_run_details || echo unknown)"
-    if [ "$run_details" = "unknown" ]; then
+    snapshot="$(worker_swap_snapshot)"
+    action="$(worker_swap_snapshot_decision "$snapshot")"
+    if [ "$action" = "unknown" ]; then
       echo "Refusing to stop legacy Docker worker because non-terminal AgentRun ids are unknown." >&2
       return 1
     fi
-    if [ -n "$run_details" ]; then
-      affected_ids="$(printf '%s\n' "$run_details" | sed -E 's/:[^,]+//g')"
+    if [ "$action" = "drain" ]; then
+      run_details="$(worker_swap_snapshot_details "$snapshot")"
+      affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
       echo "Refusing to stop legacy Docker worker with interactive runs in flight. Affected run ids: $affected_ids (id/status: $run_details)." >&2
       return 1
     fi
@@ -328,54 +333,6 @@ dest.write_text(text, encoding="utf-8")
 PY
 }
 
-active_agent_run_count() {
-  "$PYTHON_BIN" - <<'PY'
-import asyncio
-
-from sqlalchemy import func, select
-
-from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
-from brain.platform.db.models.agent_run import AgentRunRow
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-async def main() -> None:
-    async with UnitOfWork() as uow:
-        count = await uow.session.scalar(
-            select(func.count())
-            .select_from(AgentRunRow)
-            .where(AgentRunRow.status.in_(OPEN_RUN_STATUS_VALUES))
-        )
-    print(int(count or 0))
-
-asyncio.run(main())
-PY
-}
-
-nonterminal_agent_run_details() {
-  "$PYTHON_BIN" - <<'PY'
-import asyncio
-
-from sqlalchemy import select
-
-from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
-from brain.platform.db.models.agent_run import AgentRunRow
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-async def main() -> None:
-    async with UnitOfWork() as uow:
-        rows = (
-            await uow.session.execute(
-                select(AgentRunRow.id, AgentRunRow.status)
-                .where(AgentRunRow.status.in_(OPEN_RUN_STATUS_VALUES))
-                .order_by(AgentRunRow.id.asc())
-            )
-        ).all()
-    print(",".join(f"{run_id}:{status}" for run_id, status in rows))
-
-asyncio.run(main())
-PY
-}
-
 restart_or_drain_worker() {
   if ! have_user_service cortex-worker; then
     echo "Worker:    missing user service (expected cortex-worker)"
@@ -383,29 +340,32 @@ restart_or_drain_worker() {
   fi
 
   systemctl --user enable cortex-worker
-  local active_runs affected_ids run_details
-  run_details="$(nonterminal_agent_run_details || echo unknown)"
-  if [ "$run_details" = "unknown" ]; then
-    echo "Worker:    refusing restart because non-terminal AgentRun ids are unknown" >&2
-    return 1
-  fi
-  if [ -z "$run_details" ]; then
-    systemctl --user restart cortex-worker
-    echo "Worker:    restarted (no interactive AgentRuns)"
-    return 0
-  fi
-
-  active_runs="$(awk -F, '{print NF}' <<< "$run_details")"
-  affected_ids="$(printf '%s\n' "$run_details" | sed -E 's/:[^,]+//g')"
-  echo "Worker pre-swap check: $active_runs interactive run(s) in flight (run ids: $affected_ids; id/status: $run_details)."
-  echo "Worker:    $active_runs interactive AgentRun(s); signaling drain instead of restart; affected run ids: $affected_ids"
-  echo "           It will stop claiming new runs and restart on the new version after active runs finish."
-  local old_pid handoff_pid
-  old_pid="$(worker_service_main_pid)"
-  handoff_pid="$(start_worker_handoff)"
-  echo "Worker:    started temporary handoff worker $handoff_pid for new AgentRuns"
-  systemctl --user kill --kill-who=main --signal=TERM cortex-worker || true
-  monitor_worker_handoff "$old_pid" "$handoff_pid"
+  local action active_runs affected_ids handoff_pid old_pid snapshot
+  snapshot="$(worker_swap_snapshot)"
+  action="$(worker_swap_snapshot_decision "$snapshot")"
+  case "$action" in
+    replace)
+      systemctl --user restart cortex-worker
+      echo "Worker:    restarted (no interactive AgentRuns)"
+      return 0
+      ;;
+    drain)
+      active_runs="$(worker_swap_snapshot_count "$snapshot")"
+      affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
+      echo "$(worker_swap_snapshot_report "$snapshot")."
+      echo "Worker:    $active_runs interactive AgentRun(s); signaling drain instead of restart; affected run ids: $affected_ids"
+      echo "           It will stop claiming new runs and restart on the new version after active runs finish."
+      old_pid="$(worker_service_main_pid)"
+      handoff_pid="$(start_worker_handoff)"
+      echo "Worker:    started temporary handoff worker $handoff_pid for new AgentRuns"
+      systemctl --user kill --kill-who=main --signal=TERM cortex-worker || true
+      monitor_worker_handoff "$old_pid" "$handoff_pid"
+      ;;
+    *)
+      echo "Worker:    refusing restart because non-terminal AgentRun ids are unknown" >&2
+      return 1
+      ;;
+  esac
 }
 
 should_run_local_embedder() {
@@ -524,7 +484,8 @@ disable_user_service_if_present illo-dashboard
 stop_legacy_docker_app_containers
 
 echo "=== Restarting services ==="
-ACTIVE_RUNS="$(active_agent_run_count)"
+WORKER_SWAP_RUNTIME_SNAPSHOT="$(worker_swap_snapshot)"
+ACTIVE_RUNS="$(worker_swap_snapshot_count "$WORKER_SWAP_RUNTIME_SNAPSHOT")"
 EMBED_SERVICE=""
 if ! should_run_local_embedder; then
   echo "Embedder:  skipped (EMBEDDING_BACKEND=${EMBEDDING_BACKEND:-api})"

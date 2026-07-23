@@ -11,11 +11,13 @@ import time
 
 from brain.systems.runs.cortex.queue_health import QueueStallMonitor, queued_backlog_health_snapshot_async
 from brain.systems.runs.cortex.runner import (
+    DrainResult,
     request_runner_stop,
     runner_health_snapshot,
     start_runner,
     stop_runner,
 )
+from brain.systems.runs.interruption import interrupt_and_requeue_run_ids
 from brain.systems.cycles import (
     seconds_since_last_cycle_tick,
     start_cycle_scheduler,
@@ -122,6 +124,31 @@ def _cycle_scheduler_enabled() -> bool:
     return enabled in {"1", "true", "yes", "on"}
 
 
+def _recover_timed_out_runs(drain_result: DrainResult) -> None:
+    run_ids = drain_result.timed_out_run_ids
+    if not run_ids:
+        return
+    try:
+        interruptions = asyncio.run(
+            interrupt_and_requeue_run_ids(
+                run_ids,
+                reason="worker_shutdown_drain_timeout",
+            )
+        )
+    except Exception:
+        logger.exception(
+            "runner shutdown could not requeue affected run ids: %s",
+            list(run_ids),
+        )
+        return
+    requeued_run_ids = [interruption.run_id for interruption in interruptions]
+    if requeued_run_ids:
+        logger.warning(
+            "runner shutdown interrupted and requeued run ids: %s",
+            requeued_run_ids,
+        )
+
+
 def main() -> None:
     exit_code = 0
     cycle_scheduler_enabled = False
@@ -191,7 +218,10 @@ def main() -> None:
         exit_code = 1
         raise
     finally:
-        stop_runner(drain_timeout_seconds=_shutdown_drain_timeout_seconds())
+        drain_result = stop_runner(
+            drain_timeout_seconds=_shutdown_drain_timeout_seconds()
+        )
+        _recover_timed_out_runs(drain_result)
         if cycle_scheduler_enabled:
             stop_cycle_scheduler()
         logger.info("agent-run worker stopped")

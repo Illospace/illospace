@@ -198,14 +198,56 @@ def test_inline_runner_env_can_disable_launcher_dispatcher(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_lifespan_can_start_inline_runner_when_enabled():
+    from brain.systems.runs.cortex import DrainResult
+
     with patch("brain.app.api.main._should_start_inline_runner", return_value=True):
         with patch("brain.systems.cortex.events.set_publisher") as mock_set_publisher:
             with patch("brain.systems.runs.cortex.start_runner") as mock_start_runner:
                 with patch("brain.systems.cycles.start_cycle_scheduler"), patch(
                     "brain.systems.cycles.stop_cycle_scheduler",
-                ), patch("brain.systems.runs.cortex.stop_runner"):
+                ), patch(
+                    "brain.systems.runs.cortex.stop_runner",
+                    return_value=DrainResult(),
+                ):
                     async with api_main.lifespan(app):
                         pass
 
     mock_set_publisher.assert_called_once()
     mock_start_runner.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_recovers_inline_runs_that_time_out_during_drain():
+    from datetime import datetime, timezone
+
+    from brain.systems.runs.cortex import DrainResult
+    from brain.systems.runs.interruption import RunInterruption
+
+    recovered = (
+        RunInterruption(
+            run_id=2330,
+            reason="worker_shutdown_drain_timeout",
+            interrupted_at=datetime(2026, 7, 22, 17, 55, tzinfo=timezone.utc),
+            requeued=True,
+        ),
+    )
+    recover = AsyncMock(return_value=recovered)
+    with patch("brain.app.api.main._should_start_inline_runner", return_value=True):
+        with patch("brain.systems.cortex.events.set_publisher"):
+            with patch("brain.systems.runs.cortex.start_runner"):
+                with patch("brain.systems.cycles.start_cycle_scheduler"), patch(
+                    "brain.systems.cycles.stop_cycle_scheduler",
+                ), patch(
+                    "brain.systems.runs.cortex.stop_runner",
+                    return_value=DrainResult(timed_out_run_ids=(2330,)),
+                ), patch(
+                    "brain.systems.runs.interruption.interrupt_and_requeue_run_ids",
+                    new=recover,
+                ):
+                    async with api_main.lifespan(app):
+                        pass
+
+    recover.assert_awaited_once_with(
+        (2330,),
+        reason="worker_shutdown_drain_timeout",
+    )
