@@ -50,6 +50,13 @@ jobs:
               - "frontend/**"
               - ".github/workflows/brain-ci.yml"
             db:
+              # Run the Postgres DB suite whenever backend code or tests change,
+              # not only on DB-infra edits — otherwise the requires_db-marked
+              # coverage (chat routes, cross-channel recall, notifications, etc.)
+              # never runs on ordinary backend PRs. Narrow this back if Postgres
+              # CI cost becomes a concern.
+              - "brain/**"
+              - "tests/**"
               - "brain/platform/db/**"
               - "tests/test_schema_contract.py"
               - "tests/test_db_*.py"
@@ -96,49 +103,6 @@ jobs:
         run: >-
           python3 -m pytest tests/
           -m "not requires_db and not requires_browser and not live_provider"
-          --ignore=tests/test_agency.py
-          --ignore=tests/test_agency_api.py
-          --ignore=tests/test_chat_api_routes.py
-          --ignore=tests/test_chat_websocket.py
-          --ignore=tests/test_cortex_palette.py
-          --ignore=tests/test_cycles_service.py
-          --ignore=tests/test_multiplayer_cortex.py
-          --ignore=tests/test_notifications_api.py
-          --ignore=tests/test_theme_and_workspace_app_design_contracts.py
-          -q
-
-  backend-review:
-    name: Backend review-fix suites
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.backend == 'true'
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: "pip"
-
-      - name: Install dependencies
-        run: python3 -m pip install -r requirements.txt pytest pytest-asyncio
-
-      - name: Run focused review-fix suites
-        run: >-
-          python3 -m pytest
-          tests/test_api_ws.py
-          tests/test_ws_manager.py
-          tests/test_run_events.py
-          tests/test_api_main.py
-          tests/test_browser_sessions.py
-          tests/test_ws_auth.py
-          tests/test_scheduler.py
-          tests/test_alembic_config.py
-          tests/test_tool_policy.py
-          tests/test_agent_run_runtime.py
           -q
 
   frontend:
@@ -175,7 +139,7 @@ jobs:
         run: npm run build
 
   db-contract:
-    name: DB migration contract
+    name: Backend DB suite
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.db == 'true'
@@ -220,8 +184,8 @@ jobs:
       - name: Run database migrations
         run: python3 -m alembic upgrade head
 
-      - name: Run schema contract tests
-        run: python3 -m pytest tests/test_schema_contract.py -v --tb=short
+      - name: Run database test suite
+        run: python3 -m pytest tests/ -m requires_db -v --tb=short
 
   ci-result:
     name: CI result
@@ -229,7 +193,6 @@ jobs:
     needs:
       - changes
       - backend-fast
-      - backend-review
       - frontend
       - db-contract
     if: always()
@@ -240,7 +203,6 @@ jobs:
           for result in \
             "${{ needs.changes.result }}" \
             "${{ needs.backend-fast.result }}" \
-            "${{ needs.backend-review.result }}" \
             "${{ needs.frontend.result }}" \
             "${{ needs.db-contract.result }}"
           do

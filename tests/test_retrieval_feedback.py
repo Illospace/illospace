@@ -13,11 +13,6 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from sqlalchemy import text
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("TEST_DB_URL"),
-    reason="TEST_DB_URL not set — run via scripts/test-with-db.sh",
-)
-
 from brain.systems.memory.retrieval_feedback import (
     analyze_missed_memories,
     apply_retrieval_feedback,
@@ -80,6 +75,7 @@ async def _ensure_retrieval_log(db_session, memory_id, query="test query"):
     return row["id"]
 
 
+@pytest.mark.requires_db
 class TestApplyRetrievalFeedback:
     async def test_hit_boosts_salience(self, db_session, scoped_principal, unit_of_work_for_session):
         mid = await _ensure_test_memory(db_session, "hit test", salience=5.0)
@@ -151,6 +147,7 @@ class TestApplyRetrievalFeedback:
         assert row["feedback"] == "miss"
 
 
+@pytest.mark.requires_db
 class TestAnalyzeMissedMemories:
     async def test_identifies_consistently_missed(self, db_session, scoped_principal, unit_of_work_for_session):
         mid = await _ensure_test_memory(db_session, "always missed", salience=5.0)
