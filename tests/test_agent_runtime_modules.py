@@ -552,6 +552,7 @@ def test_final_reply_evidence_reads_status_and_tool_failure_state_from_agent_con
         ToolResultEvidence,
     )
     from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+    from brain.systems.runs.status import RunStatus
 
     loop_control = LoopControlPolicy(failure_threshold=3)
     loop_control.consecutive_failures = 3
@@ -595,7 +596,12 @@ def test_final_reply_evidence_reads_status_and_tool_failure_state_from_agent_con
     assert evidence.status_question is not None
     assert evidence.status_question.originating_run is not None
     assert evidence.status_question.originating_run.run_id == 2327
+    assert evidence.status_question.originating_run.status is RunStatus.RUNNING
     assert evidence.status_question.has_live_sibling is True
+    assert (
+        evidence.status_question.live_sibling_runs[0].status
+        is RunStatus.RUNNING
+    )
     assert evidence.tool_failure_state is not None
     assert evidence.tool_failure_state.threshold_reached is True
     assert evidence.tool_failure_state.tool_name == "manage_idea"

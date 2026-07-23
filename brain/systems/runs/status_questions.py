@@ -9,6 +9,11 @@ from typing import Any, Mapping
 from sqlalchemy import select
 
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunRow
+from brain.systems.runs.status import (
+    OPEN_RUN_STATUSES,
+    RunStatus,
+    coerce_run_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +37,6 @@ _ASSIGNMENT_RE = re.compile(
     r"\b(?:assign(?:ed|ment)?|owner|assignee)\b",
     re.IGNORECASE,
 )
-_LIVE_SIBLING_STATUSES = frozenset({"queued", "starting", "running", "paused"})
 
 
 def is_status_question(message: str | None) -> bool:
@@ -116,29 +120,39 @@ async def build_status_question_context(
             "deliverables": [],
         }
 
+    rows_with_status = [
+        (
+            row,
+            coerce_run_status(
+                getattr(row, "status", None),
+                default=RunStatus.FAILED,
+            ),
+        )
+        for row in rows
+    ]
     live_runs = [
         {
             "run_id": int(row.id),
-            "status": str(row.status),
+            "status": status,
         }
-        for row in rows
-        if str(getattr(row, "status", "") or "").strip().lower()
-        in _LIVE_SIBLING_STATUSES
+        for row, status in rows_with_status
+        if status in OPEN_RUN_STATUSES
     ]
-    origin = next(
+    origin_with_status = next(
         (
-            row
-            for row in rows
+            (row, status)
+            for row, status in rows_with_status
             if not is_status_question(getattr(row, "input_message", None))
         ),
         None,
     )
     origin_payload: dict[str, Any] | None = None
-    if origin is not None:
+    if origin_with_status is not None:
+        origin, origin_status = origin_with_status
         final_output = await _latest_final_output(session, int(origin.id))
         origin_payload = {
             "run_id": int(origin.id),
-            "status": str(origin.status),
+            "status": origin_status,
             "request": str(origin.input_message or ""),
             "final_output": final_output or None,
         }

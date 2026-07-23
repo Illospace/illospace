@@ -24,8 +24,13 @@ from brain.systems.runs.direct_loop.final_reply import (
     cached_final_reply_review,
     parse_checker_payload,
 )
-from brain.systems.runs.direct_loop.final_reply_evidence import FinalReplyEvidence, ToolResultEvidence
+from brain.systems.runs.direct_loop.final_reply_evidence import (
+    DEFAULT_TOOL_FAILURE_THRESHOLD,
+    FinalReplyEvidence,
+    ToolResultEvidence,
+)
 from brain.systems.runs.direct_loop.request import build_api_request, normalize_model_name
+from brain.systems.runs.status import RunStatus
 from brain.systems.sessions import _content_to_dicts
 
 logger = logging.getLogger("agent")
@@ -122,6 +127,11 @@ _FAILURE_ACK_RE = re.compile(
 _GITHUB_REF_RE = re.compile(
     r"(?:https?://github\.com/[^\s)]+/(?:issues|pull)/(?P<url_number>\d+)|"
     r"\bgithub\s+(?:issue|ticket)\s+#?(?P<label_number>\d+)\b)",
+    re.IGNORECASE,
+)
+_TICKET_REF_RE = re.compile(
+    r"\b(?:ticket|issue)(?:\s+(?:ref(?:erence)?|id))?\s*#?"
+    r"(?P<ref>[A-Za-z][A-Za-z0-9_-]*-\d+|\d+)\b",
     re.IGNORECASE,
 )
 _RECORD_WORD_RE = re.compile(r"\b(?:record|domain|tracker)\b", re.IGNORECASE)
@@ -440,7 +450,7 @@ def _tool_failure_success_issue(
         return None
     state = evidence.tool_failure_state
     failure_count = max(
-        3,
+        DEFAULT_TOOL_FAILURE_THRESHOLD,
         int(getattr(state, "consecutive_failures", 0) or 0),
         int(getattr(state, "total_failures", 0) or 0),
         sum(1 for item in evidence.tool_results if item.failed),
@@ -456,6 +466,15 @@ def _github_refs(value: str) -> tuple[str, ...]:
     refs: list[str] = []
     for match in _GITHUB_REF_RE.finditer(str(value or "")):
         ref = match.group("url_number") or match.group("label_number")
+        if ref and ref not in refs:
+            refs.append(ref)
+    return tuple(refs)
+
+
+def _ticket_refs(value: str) -> tuple[str, ...]:
+    refs: list[str] = []
+    for match in _TICKET_REF_RE.finditer(str(value or "")):
+        ref = match.group("ref")
         if ref and ref not in refs:
             refs.append(ref)
     return tuple(refs)
@@ -586,7 +605,7 @@ def _status_question_contract_issue(
 
     source_output = (
         str(origin.final_output or "")
-        if origin.status == "completed"
+        if origin.status == RunStatus.COMPLETED
         else ""
     )
     github_refs = list(_github_refs(source_output))
@@ -601,6 +620,23 @@ def _status_question_contract_issue(
             number = result.result.get("number") or result.result.get("issue_number")
             if number not in (None, "") and str(number) not in github_refs:
                 github_refs.append(str(number))
+    ticket_refs = list(_ticket_refs(source_output))
+    for result in evidence.tool_results:
+        if not result.succeeded:
+            continue
+        for ref in _mapping_values_for_keys(
+            result.result,
+            frozenset(
+                {
+                    "issue_id",
+                    "issue_number",
+                    "ticket_id",
+                    "ticket_number",
+                }
+            ),
+        ):
+            if ref not in ticket_refs:
+                ticket_refs.append(ref)
 
     for deliverable in status.deliverables:
         if deliverable.kind == "github_issue":
@@ -658,8 +694,60 @@ def _status_question_contract_issue(
                         "The originating ask includes ticket assignment, but no verified "
                         "assignment exists; the reply must state that it is unresolved."
                     )
+        elif deliverable.kind == "ticket":
+            if ticket_refs:
+                if claims_complete and not any(
+                    ref in candidate for ref in ticket_refs
+                ):
+                    return (
+                        "The completed status claim omits the verified ticket ref "
+                        f"({ticket_refs[0]})."
+                    )
+            else:
+                if claims_complete:
+                    return (
+                        f"The {deliverable.label} has no verified ref; the reply cannot "
+                        "report the request as done."
+                    )
+                if not (
+                    deliverable.label.lower() in candidate.lower()
+                    and _UNRESOLVED_RE.search(candidate)
+                ):
+                    return (
+                        f"The {deliverable.label} has no verified ref; the reply must "
+                        "state that it is unresolved."
+                    )
+        elif deliverable.kind == "request":
+            if not source_output:
+                if claims_complete:
+                    return (
+                        "The originating request has no verified final outcome; the reply "
+                        "cannot report it as done."
+                    )
+                if not (
+                    _STATUS_IN_PROGRESS_RE.search(candidate)
+                    or _UNRESOLVED_RE.search(candidate)
+                ):
+                    return (
+                        "The originating request has no verified final outcome; the reply "
+                        "must state that it is unresolved or in progress."
+                    )
+        else:
+            if claims_complete:
+                return (
+                    f"The {deliverable.label} has no verified resolution for deliverable "
+                    f"kind {deliverable.kind!r}; the reply cannot report the request as done."
+                )
+            if not (
+                deliverable.label.lower() in candidate.lower()
+                and _UNRESOLVED_RE.search(candidate)
+            ):
+                return (
+                    f"The {deliverable.label} has no verified resolution for deliverable "
+                    f"kind {deliverable.kind!r}; the reply must state that it is unresolved."
+                )
 
-    if claims_complete and origin.status != "completed":
+    if claims_complete and origin.status != RunStatus.COMPLETED:
         return (
             f"Originating run {origin.run_id} is {origin.status}, not completed; "
             "the status reply cannot assert completion."

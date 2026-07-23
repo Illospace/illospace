@@ -1989,6 +1989,13 @@ class TestFinalReplyReview:
             StatusQuestionEvidence,
             ToolResultEvidence,
         )
+        from brain.systems.runs.status import (
+            OPEN_RUN_STATUSES,
+            RunStatus,
+            coerce_run_status,
+        )
+
+        run_status = coerce_run_status(status, default=RunStatus.FAILED)
 
         return FinalReplyEvidence(
             tool_results=(
@@ -2014,7 +2021,7 @@ class TestFinalReplyReview:
                     "lookup_status": "verified",
                     "originating_run": {
                         "run_id": 2327,
-                        "status": status,
+                        "status": run_status,
                         "request": (
                             "we may have a bug, email from a customer, "
                             "assign ticket to me"
@@ -2022,8 +2029,8 @@ class TestFinalReplyReview:
                         "final_output": final_output,
                     },
                     "live_sibling_runs": (
-                        [{"run_id": 2327, "status": status}]
-                        if status in {"queued", "starting", "running", "paused"}
+                        [{"run_id": 2327, "status": run_status}]
+                        if run_status in OPEN_RUN_STATUSES
                         else []
                     ),
                     "deliverables": [
@@ -2040,7 +2047,10 @@ class TestFinalReplyReview:
             ),
         )
 
-    @pytest.mark.parametrize("status", ["queued", "starting", "running", "paused"])
+    @pytest.mark.parametrize(
+        "status",
+        ["queued", "starting", "running", "paused", "verifying"],
+    )
     def test_status_question_rejects_done_while_originating_run_is_live(self, status):
         from brain.systems.runs.direct_agent import review_candidate_final_reply
         from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
@@ -2063,6 +2073,58 @@ class TestFinalReplyReview:
         assert "run 2327" in result["rationale"]
         assert status in result["rationale"]
         assert "in progress" in " ".join(result["missing_requirements"]).lower()
+        provider.create.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("kind", "label"),
+        [
+            ("ticket", "ticket"),
+            ("future_kind", "future deliverable"),
+        ],
+    )
+    def test_status_question_rejects_done_for_deliverable_without_verified_ref(
+        self,
+        kind,
+        label,
+    ):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+        from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
+        from brain.systems.runs.direct_loop.final_reply_evidence import (
+            FinalReplyEvidence,
+            StatusQuestionEvidence,
+        )
+
+        evidence = FinalReplyEvidence(
+            status_question=StatusQuestionEvidence.from_mapping(
+                {
+                    "thread_id": "thread-1",
+                    "lookup_status": "verified",
+                    "originating_run": {
+                        "run_id": 2327,
+                        "status": "completed",
+                        "request": f"create the {label}",
+                        "final_output": f"Worked on the {label}.",
+                    },
+                    "live_sibling_runs": [],
+                    "deliverables": [{"kind": kind, "label": label}],
+                }
+            )
+        )
+        provider = MagicMock()
+
+        result = review_candidate_final_reply(
+            user_request="was it done?",
+            candidate_output=f"Yes — done. The {label} was completed.",
+            evidence=evidence,
+            provider=provider,
+            llm=_mock_llm_client(MagicMock(), provider="openai"),
+            model="openai/gpt-5.5",
+        )
+
+        assert result["status"] == "continue"
+        assert result["enforcement"] is FinalReplyEnforcement.BLOCK
+        assert label in result["rationale"]
+        assert "verified" in result["rationale"]
         provider.create.assert_not_called()
 
     def test_1744_replay_names_partial_record_and_missing_github_ticket(self):

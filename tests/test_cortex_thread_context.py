@@ -148,6 +148,7 @@ async def test_work_intake_attaches_prior_visible_context_without_current_messag
 
 
 async def test_status_question_context_tracks_live_then_completed_originating_run(session):
+    from brain.systems.runs.status import RunStatus
     from brain.systems.runs.status_questions import build_status_question_context
 
     started_at = datetime(2026, 7, 22, 17, 37, 24, tzinfo=timezone.utc)
@@ -158,7 +159,7 @@ async def test_status_question_context_tracks_live_then_completed_originating_ru
         thread_id=IDEA_ID,
         profile="fast",
         recipe="fast",
-        status="running",
+        status="verifying",
         input_message="we may have a bug, email from a customer, assign ticket to me",
         target_ref={},
         workspace_ref={},
@@ -179,8 +180,10 @@ async def test_status_question_context_tracks_live_then_completed_originating_ru
 
     assert live_context is not None
     assert live_context["originating_run"]["run_id"] == 2327
-    assert live_context["originating_run"]["status"] == "running"
-    assert live_context["live_sibling_runs"] == [{"run_id": 2327, "status": "running"}]
+    assert live_context["originating_run"]["status"] is RunStatus.VERIFYING
+    assert live_context["live_sibling_runs"] == [
+        {"run_id": 2327, "status": RunStatus.VERIFYING}
+    ]
     assert [item["kind"] for item in live_context["deliverables"]] == [
         "github_issue",
         "assignment",

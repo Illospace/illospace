@@ -7,6 +7,11 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from brain.systems.runs.status import RunStatus, coerce_run_status
+
+
+DEFAULT_TOOL_FAILURE_THRESHOLD = 3
+
 
 def _structured_value(value: Any) -> Any:
     """Decode a handler's original JSON result without consulting prompt text."""
@@ -100,7 +105,7 @@ class ToolResultEvidence:
 class ToolFailureStateEvidence:
     """Read-only projection of the direct loop's tool-failure circuit state."""
 
-    failure_threshold: int = 3
+    failure_threshold: int = DEFAULT_TOOL_FAILURE_THRESHOLD
     consecutive_failures: int = 0
     total_failures: int = 0
     tool_name: str | None = None
@@ -115,7 +120,7 @@ class ToolFailureStateEvidence:
             return cls(
                 failure_threshold=_coerce_positive_int(
                     value.get("failure_threshold"),
-                    default=3,
+                    default=DEFAULT_TOOL_FAILURE_THRESHOLD,
                 ),
                 consecutive_failures=_coerce_nonnegative_int(
                     value.get("consecutive_failures")
@@ -154,7 +159,7 @@ class ToolFailureStateEvidence:
         return cls(
             failure_threshold=_coerce_positive_int(
                 getattr(value, "failure_threshold", None),
-                default=3,
+                default=DEFAULT_TOOL_FAILURE_THRESHOLD,
             ),
             consecutive_failures=_coerce_nonnegative_int(
                 getattr(value, "consecutive_failures", None)
@@ -194,7 +199,7 @@ class StatusRunEvidence:
     """One prior same-thread run relevant to a status question."""
 
     run_id: int | None = None
-    status: str = ""
+    status: RunStatus = RunStatus.FAILED
     request: str = ""
     final_output: str | None = None
 
@@ -202,7 +207,10 @@ class StatusRunEvidence:
     def from_mapping(cls, value: Mapping[str, Any]) -> "StatusRunEvidence":
         return cls(
             run_id=_coerce_optional_int(value.get("run_id")),
-            status=str(value.get("status") or "").strip().lower(),
+            status=coerce_run_status(
+                value.get("status"),
+                default=RunStatus.FAILED,
+            ),
             request=str(value.get("request") or ""),
             final_output=(
                 str(value.get("final_output")).strip()
@@ -405,7 +413,10 @@ class FinalReplyEvidence:
             and self.tool_failure_state.threshold_reached
         ):
             return True
-        return sum(1 for item in self.tool_results if item.failed) >= 3
+        return (
+            sum(1 for item in self.tool_results if item.failed)
+            >= DEFAULT_TOOL_FAILURE_THRESHOLD
+        )
 
     def cache_fingerprint(self) -> str:
         payload = {
@@ -489,7 +500,7 @@ def _tool_failure_state_from_context(
             return state
 
     failures = [item for item in tool_results if item.failed]
-    if len(failures) < 3:
+    if len(failures) < DEFAULT_TOOL_FAILURE_THRESHOLD:
         return None
     names = {item.tool_name for item in failures if item.tool_name}
     last_result = failures[-1].result
@@ -499,7 +510,7 @@ def _tool_failure_state_from_context(
         else None
     )
     return ToolFailureStateEvidence(
-        failure_threshold=3,
+        failure_threshold=DEFAULT_TOOL_FAILURE_THRESHOLD,
         consecutive_failures=len(failures) if len(names) == 1 else 0,
         total_failures=len(failures),
         tool_name=next(iter(names)) if len(names) == 1 else None,
@@ -509,6 +520,7 @@ def _tool_failure_state_from_context(
 
 
 __all__ = [
+    "DEFAULT_TOOL_FAILURE_THRESHOLD",
     "FinalReplyEvidence",
     "StatusDeliverableEvidence",
     "StatusQuestionEvidence",
