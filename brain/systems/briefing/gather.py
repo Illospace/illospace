@@ -41,18 +41,19 @@ from __future__ import annotations
 import re
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from sqlalchemy import select
 
+from brain.kernel.common.coercion import coerce_datetime
 from brain.systems.briefing.core import DossierBudget, SourcePiece
+from brain.systems.chantiers import latest_source_movement
 
 # Conservative same-job reference pattern: explicit owner/repo#N only.
 _GITHUB_REF_RE = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)\b")
 _MAX_GITHUB_REFS = 4
 _MAX_CHANTIER_MEMBER_RECORDS = 100
-_CHANTIER_STALE_AFTER = timedelta(days=3)
 _SLACK_PAGE_CAP = 50
 _SLACK_MAX_PAGES = 3
 # The ONLY team-visible surface (ingress envelope vocabulary). Everything
@@ -106,27 +107,6 @@ def _text(value: Any) -> str:
 
 def _data(record: Any) -> dict[str, Any]:
     return dict(getattr(record, "data", None) or {})
-
-
-def _timestamp(value: Any) -> datetime | None:
-    """Parse the mixed naive/aware timestamp shapes carried by Domain data."""
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        raw = _text(value)
-        if not raw:
-            return None
-        try:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _no_autoflush(session: Any):
@@ -276,7 +256,7 @@ def slack_provenance(event: Any) -> dict[str, Any] | None:
 
 
 def _record_piece(record: Any) -> SourcePiece | None:
-    data = dict(getattr(record, "data", None) or {})
+    data = _data(record)
     if not data:
         return None
     title = (
@@ -321,80 +301,6 @@ def _tracker_state(record: Any) -> str:
     return _text(data.get("status") or data.get("state")) or "unavailable"
 
 
-def _source_movement_timestamps(record: Any) -> list[datetime]:
-    data = _data(record)
-    return [
-        timestamp
-        for timestamp in (_timestamp(data.get("updated_at")), _timestamp(data.get("created_at")))
-        if timestamp is not None
-    ]
-
-
-def _chantier_last_movement(
-    chantier: Any,
-    *,
-    members_by_external_id: dict[str, Any],
-) -> tuple[datetime | None, str]:
-    """Return the newest already-loaded source movement and its confidence.
-
-    The chantier source timestamps and the source timestamps on batch-loaded
-    GitHub tracker members are real movement signals. The typed-ref contract
-    carries no timestamps for docs/Slack/URLs, and reading those artifacts
-    here would introduce forbidden network fan-out.
-    """
-    source_timestamps = _source_movement_timestamps(chantier)
-    for item in _chantier_refs(chantier):
-        if item["source"] != "github":
-            continue
-        member = members_by_external_id.get(item["ref"])
-        if member is not None:
-            source_timestamps.extend(_source_movement_timestamps(member))
-    if source_timestamps:
-        return max(source_timestamps), "source"
-
-    # Legacy rows may predate source timestamps. Row creation is immutable and
-    # therefore safer than the mutable row mtime; updated_at is an explicit,
-    # visibly uncertain last resort only.
-    created_at = _timestamp(getattr(chantier, "created_at", None))
-    if created_at is not None:
-        return created_at, "row_created"
-    updated_at = _timestamp(getattr(chantier, "updated_at", None))
-    if updated_at is not None:
-        return updated_at, "row_updated"
-    return None, "missing"
-
-
-def _chantier_movement_text(
-    movement_at: datetime | None,
-    *,
-    confidence: str,
-    now: datetime,
-) -> str:
-    if movement_at is None:
-        return "movement: unknown; no source or tracker timestamp is available"
-
-    movement_date = movement_at.date().isoformat()
-    if confidence == "source":
-        if now - movement_at > _CHANTIER_STALE_AFTER:
-            return (
-                f"movement: stale (>3 days); no source movement since {movement_date}; "
-                "tracker row writes do not count"
-            )
-        return (
-            f"movement: recent (within 3 days); last source movement {movement_date}; "
-            "tracker row writes do not count"
-        )
-    if confidence == "row_created":
-        return (
-            "movement: unknown; source timestamps missing; "
-            f"tracker creation {movement_date} is the best available fallback"
-        )
-    return (
-        "movement: unknown; source timestamps missing; "
-        f"tracker row timestamp {movement_date} is used only as a last resort"
-    )
-
-
 def _chantier_piece(
     chantier: Any,
     *,
@@ -409,11 +315,29 @@ def _chantier_piece(
     ``omitted_chars`` markers and floors as every other source.
     """
     data = _data(chantier)
-    movement_at, movement_confidence = _chantier_last_movement(
+    movement_at = latest_source_movement(
         chantier,
         members_by_external_id=members_by_external_id,
     )
-    now = _timestamp(_utc_now()) or datetime.now(timezone.utc)
+    movement_observation = (
+        f"last source movement: {movement_at.date().isoformat()}"
+        if movement_at is not None
+        else "last source movement: unknown"
+    )
+    if movement_at is None:
+        row_written_at = coerce_datetime(
+            getattr(chantier, "updated_at", None),
+            utc=True,
+        ) or coerce_datetime(getattr(chantier, "created_at", None), utc=True)
+        if row_written_at is not None:
+            movement_observation += (
+                f"; tracker row last written {row_written_at.date().isoformat()}"
+            )
+    if member_lookup_capped:
+        movement_observation += (
+            f"; source movement observation partial: {member_lookup_capped} "
+            "additional member records not gathered (cap)"
+        )
     sibling_bits: list[str] = []
     artifact_bits: list[str] = []
     for item in _chantier_refs(chantier):
@@ -434,11 +358,7 @@ def _chantier_piece(
         sibling_bits.append(f"{member_lookup_capped} additional member states not gathered (cap)")
 
     body_bits = [
-        _chantier_movement_text(
-            movement_at,
-            confidence=movement_confidence,
-            now=now,
-        ),
+        movement_observation,
         f"goal: {_text(data.get('goal')) or 'not recorded'}",
         f"state: {_text(data.get('state')) or 'not recorded'}",
         f"kind: {_text(data.get('kind')) or 'not recorded'}",
@@ -473,7 +393,7 @@ async def _chantier_pieces_for_record(
     is one batch DB read for all sibling external ids across all matching
     chantiers — deliberately no GitHub fan-out inside packet minting.
     """
-    subject_data = dict(getattr(record, "data", None) or {})
+    subject_data = _data(record)
     subject_external_id = _text(subject_data.get("external_id"))
     if not subject_external_id:
         return []
@@ -542,7 +462,7 @@ async def _chantier_pieces_for_record(
                 )
             ).scalars().all()
         for member in members:
-            external_id = _text((dict(getattr(member, "data", None) or {})).get("external_id"))
+            external_id = _text(_data(member).get("external_id"))
             if external_id and external_id not in members_by_external_id:
                 members_by_external_id[external_id] = member
 
@@ -621,7 +541,7 @@ def _github_refs(idea: Any, record: Any, event: Any) -> tuple[list[tuple[str, in
         add(hints.get("repo"), hints.get("number"))
 
     # (b) Canonical tracker identity via the existing normalizers.
-    data = dict(getattr(record, "data", None) or {}) if record is not None else {}
+    data = _data(record)
     if data:
         from brain.systems.user_domains.service import (
             _github_pr_key_from_url,
@@ -667,7 +587,7 @@ def _checks_summary(checks: Any) -> str:
 
 
 def _deploy_piece(record: Any) -> SourcePiece | None:
-    data = dict(getattr(record, "data", None) or {}) if record is not None else {}
+    data = _data(record)
     state = _text(data.get("deploy_state"))
     if not state:
         return None
@@ -707,7 +627,7 @@ async def _related_tracker_records(
     for row in rows:
         if exclude_id is not None and getattr(row, "id", None) == exclude_id:
             continue
-        row_repo = _text(dict(getattr(row, "data", None) or {}).get("repo")).lower().rstrip("/")
+        row_repo = _text(_data(row).get("repo")).lower().rstrip("/")
         if not row_repo or any(row_repo.endswith(name) for name in repo_names):
             related.append(row)
     return related

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 import re
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.kernel.common.coercion import coerce_datetime
 from brain.platform.db.models.domain import DomainRecord
 from brain.systems.user_domains.service import (
     AsyncDomainService,
@@ -439,6 +441,42 @@ async def merge_chantier_records(
     )
 
 
+def latest_source_movement(
+    chantier: Any,
+    *,
+    members_by_external_id: Mapping[str, Any],
+) -> datetime | None:
+    """Return the newest source timestamp among a chantier and its loaded members."""
+
+    chantier_data = _data(chantier)
+    timestamps = [
+        timestamp
+        for timestamp in (
+            coerce_datetime(chantier_data.get("updated_at"), utc=True),
+            coerce_datetime(chantier_data.get("created_at"), utc=True),
+        )
+        if timestamp is not None
+    ]
+    refs = chantier_data.get("refs")
+    if isinstance(refs, (list, tuple)):
+        for item in refs:
+            if not isinstance(item, Mapping):
+                continue
+            if _text(item.get("source")).casefold() != "github":
+                continue
+            member = members_by_external_id.get(_text(item.get("ref")))
+            member_data = _data(member)
+            timestamps.extend(
+                timestamp
+                for timestamp in (
+                    coerce_datetime(member_data.get("updated_at"), utc=True),
+                    coerce_datetime(member_data.get("created_at"), utc=True),
+                )
+                if timestamp is not None
+            )
+    return max(timestamps, default=None)
+
+
 __all__ = [
     "ACTIVE_CHANTIER_STATES",
     "CHANTIER_OBJECT_KEY",
@@ -451,6 +489,7 @@ __all__ = [
     "is_active_chantier",
     "is_placeholder_chantier",
     "is_superseded_chantier",
+    "latest_source_movement",
     "list_all_chantier_records",
     "match_active_chantier",
     "merge_chantier_records",
