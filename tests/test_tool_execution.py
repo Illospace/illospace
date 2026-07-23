@@ -10,12 +10,18 @@ from brain.systems.runs.direct_loop.loop_control import (
     LoopControlPolicy,
     LoopTerminationReason,
 )
+from brain.systems.runs.direct_loop.state import (
+    ClassifiedToolResult,
+    ToolFailure,
+    ToolOutcome,
+)
 from brain.systems.runs.direct_loop.tool_execution import (
     PendingToolCall,
     ResolvedToolCall,
     async_execute_parallel_tool_batch,
     async_execute_tool_calls,
     async_resolve_tool_call,
+    classify_tool_result,
     execute_parallel_tool_batch,
     execute_tool_calls,
     resolve_tool_call,
@@ -266,29 +272,78 @@ async def test_failure_policy_stops_parallel_batch_before_fourth_attempt():
     assert execution.termination.consecutive_failures == 3
 
 
-def test_resolve_tool_call_preserves_structured_error_class():
+def test_failure_policy_stops_typed_result_before_fourth_attempt():
+    attempts = []
+    handler_result = ClassifiedToolResult(
+        json.dumps({"error": "invalid tool input"}),
+        ToolOutcome.failed(
+            message="invalid tool input",
+            category="ToolValidationError",
+        ),
+    )
+
+    def handler():
+        attempts.append("attempt")
+        return handler_result
+
+    execution = _execute_sync(
+        _response(*[
+            (f"call-{index}", "manage_idea", {})
+            for index in range(4)
+        ]),
+        {"manage_idea": handler},
+    )
+
+    assert len(attempts) == 3
+    assert execution.termination is not None
+    assert execution.termination.reason is LoopTerminationReason.TOOL_FAILURE_CIRCUIT
+    assert execution.termination.error_class == "ToolValidationError"
+    assert execution.termination.consecutive_failures == 3
+
+
+def test_classifier_ignores_legacy_payload_category():
+    outcome = classify_tool_result({
+        "error": "invalid tool input",
+        "error_class": "UndocumentedPayloadCategory",
+    })
+
+    assert outcome.failure == ToolFailure(
+        message="invalid tool input",
+        category="ToolError",
+    )
+
+
+def test_resolve_tool_call_preserves_typed_failure_outcome():
+    handler_result = ClassifiedToolResult(
+        json.dumps({"error": "parent_id must be an existing idea id or omitted"}),
+        ToolOutcome.failed(
+            message="parent_id must be an existing idea id or omitted",
+            category="ToolValidationError",
+        ),
+    )
     request = PendingToolCall(
         block_id="tool_419",
         tool_name="manage_idea",
         tool_input={"action": "create"},
-        handler=lambda **_: json.dumps({
-            "error": "parent_id must be an existing idea id or omitted",
-            "error_class": "ToolValidationError",
-        }),
+        handler=lambda **_: handler_result,
     )
 
     resolved = resolve_tool_call(request)
 
     assert resolved.is_error is True
+    assert resolved.outcome == handler_result.outcome
     assert resolved.error_class == "ToolValidationError"
     assert "parent_id must be an existing idea id or omitted" in resolved.result_text
 
 
 async def test_resolved_failures_preserve_error_class_and_result_value(monkeypatch):
-    handler_failure = {
-        "error": "invalid tool input",
-        "error_class": "ToolValidationError",
-    }
+    handler_failure = ClassifiedToolResult(
+        json.dumps({"error": "invalid tool input"}),
+        ToolOutcome.failed(
+            message="invalid tool input",
+            category="ToolValidationError",
+        ),
+    )
     returned_failure = resolve_tool_call(PendingToolCall(
         block_id="handler-failure",
         tool_name="manage_idea",

@@ -10,6 +10,40 @@ from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
 from brain.systems.runs.direct_loop.result import TokenAccumulator
 
 
+@dataclass(frozen=True)
+class ToolFailure:
+    """Stable failure identity shared by tool handlers and loop policy."""
+
+    message: str
+    category: str
+
+
+@dataclass(frozen=True)
+class ToolOutcome:
+    """Typed answer to whether a tool result failed and how."""
+
+    failure: ToolFailure | None = None
+
+    @classmethod
+    def failed(cls, *, message: str, category: str) -> ToolOutcome:
+        return cls(failure=ToolFailure(message=message, category=category))
+
+    @property
+    def is_failure(self) -> bool:
+        return self.failure is not None
+
+
+class ClassifiedToolResult(str):
+    """String-compatible handler result carrying an internal typed outcome."""
+
+    outcome: ToolOutcome
+
+    def __new__(cls, value: str, outcome: ToolOutcome) -> ClassifiedToolResult:
+        instance = super().__new__(cls, value)
+        instance.outcome = outcome
+        return instance
+
+
 @dataclass
 class AgentLoopState:
     """State that evolves across provider turns in the agent loop."""

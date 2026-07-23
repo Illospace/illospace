@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import inspect
 import json
 import logging
@@ -18,6 +18,10 @@ from brain.platform.async_io import (
 )
 from brain.systems.runs.actions import result_failure_summary
 from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy, LoopTermination
+from brain.systems.runs.direct_loop.state import (
+    ClassifiedToolResult,
+    ToolOutcome,
+)
 from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
 from brain.systems.runs.direct_loop.final_reply_evidence import ToolResultEvidence
 from brain.systems.runs.tool_catalog.registry import (
@@ -50,10 +54,18 @@ class ResolvedToolCall:
     tool_name: str
     tool_input: dict
     result_text: str
-    is_error: bool = False
-    error_class: str | None = None
+    outcome: ToolOutcome = field(default_factory=ToolOutcome)
     result_content: Any | None = None
     result_value: Any | None = None
+
+    @property
+    def is_error(self) -> bool:
+        return self.outcome.is_failure
+
+    @property
+    def error_class(self) -> str | None:
+        failure = self.outcome.failure
+        return failure.category if failure is not None else None
 
 
 @dataclass(frozen=True)
@@ -122,32 +134,33 @@ def _format_timeout(seconds: float) -> str:
 
 def _timeout_result(request: PendingToolCall, timeout_seconds: float) -> ResolvedToolCall:
     timeout_text = _format_timeout(timeout_seconds)
+    result_text = (
+        f"Tool {request.tool_name!r} timed out after {timeout_text}. "
+        "The runtime stopped waiting for this tool call. Treat it as failed, "
+        "try a narrower or faster tool call if needed, or explain the blocker to the user."
+    )
     return ResolvedToolCall(
         block_id=request.block_id,
         tool_name=request.tool_name,
         tool_input=request.tool_input,
-        result_text=(
-            f"Tool {request.tool_name!r} timed out after {timeout_text}. "
-            "The runtime stopped waiting for this tool call. Treat it as failed, "
-            "try a narrower or faster tool call if needed, or explain the blocker to the user."
+        result_text=result_text,
+        outcome=ToolOutcome.failed(
+            message=result_text,
+            category="ToolTimeoutError",
         ),
-        is_error=True,
         result_value={"error": "tool_timeout", "timeout_seconds": timeout_seconds},
-        error_class="ToolTimeoutError",
     )
 
 
-def _structured_error_class(result: Any) -> str | None:
-    payload = result
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except (TypeError, ValueError):
-            return None
-    if not isinstance(payload, dict):
-        return None
-    value = payload.get("error_class")
-    return str(value).strip() if value else None
+def classify_tool_result(result: object) -> ToolOutcome:
+    """Classify one handler result without exposing failure identity in JSON."""
+
+    if isinstance(result, ClassifiedToolResult):
+        return result.outcome
+    failure_message = result_failure_summary(result)
+    if failure_message is None:
+        return ToolOutcome()
+    return ToolOutcome.failed(message=failure_message, category="ToolError")
 
 
 def _must_finish_before_reporting(request: PendingToolCall) -> bool:
@@ -208,13 +221,10 @@ def _extract_model_visible_tool_content(result: Any) -> tuple[Any, Any | None]:
 def _resolved_tool_result(request: PendingToolCall, result: Any) -> ResolvedToolCall:
     result, model_content = _extract_model_visible_tool_content(result)
     result_text = json.dumps(result, default=str)
-    failure_summary = result_failure_summary(result)
-    is_error = failure_summary is not None
-    error_class = _structured_error_class(result) if is_error else None
-    if is_error and not error_class:
-        error_class = "ToolError"
+    outcome = classify_tool_result(result)
+    failure = outcome.failure
 
-    if request.tool_name == "brain_encode" and failure_summary:
+    if request.tool_name == "brain_encode" and failure is not None:
         result_text += (
             "\n\n[System: brain_encode failed. Do not retry brain_encode in this run. "
             "Move on and end your turn unless another required tool remains.]"
@@ -232,8 +242,7 @@ def _resolved_tool_result(request: PendingToolCall, result: Any) -> ResolvedTool
         tool_name=request.tool_name,
         tool_input=request.tool_input,
         result_text=truncate_tool_result_text(request.tool_name, result_text),
-        is_error=is_error,
-        error_class=error_class,
+        outcome=outcome,
         result_content=model_content,
         result_value=result,
     )
@@ -246,8 +255,7 @@ def _failed_tool_result(request: PendingToolCall, exc: Exception) -> ResolvedToo
         tool_name=request.tool_name,
         tool_input=request.tool_input,
         result_text=f"Error [{error_class}]: {exc}",
-        is_error=True,
-        error_class=error_class,
+        outcome=ToolOutcome.failed(message=str(exc), category=error_class),
         result_value={"error": str(exc)},
     )
 
