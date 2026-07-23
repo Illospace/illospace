@@ -1296,11 +1296,17 @@ async def test_postgres_merged_main_envelope_flips_record_and_emits_domain_event
             }
         ],
     )
-    from brain.systems.deploy_state_sweep import ensure_deploy_state_fields
+    from brain.systems.deploy_state_sweep import (
+        DEPLOY_STATE_FIELD_DEFINITIONS,
+        ensure_deploy_state_fields,
+    )
 
     first_fields = await ensure_deploy_state_fields(db_session, org_id=ORG_ID)
     second_fields = await ensure_deploy_state_fields(db_session, org_id=ORG_ID)
-    assert first_fields["fields_added"] == 10
+    # The canonical set is currently ten lifecycle fields plus five
+    # alert-resolution provenance fields. This fresh object starts with none of
+    # them, so the first pass installs the full set and the second is idempotent.
+    assert first_fields["fields_added"] == len(DEPLOY_STATE_FIELD_DEFINITIONS)
     assert second_fields["fields_added"] == 0
     record = await domain_service.create_record(
         ORG_ID,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
@@ -25,6 +26,21 @@ from brain.systems.reconstructive_memory.ingestion import ingest_memory_source
 CURATION_CREATED_BY = "agent_curation"
 MEMORY_CURATOR_SOURCE_KIND = "memory_curator"
 SUPERSEDED_BY_EDGE = "superseded_by"
+
+
+@dataclass(frozen=True)
+class _ArchiveAuditContext:
+    node_ids: list[int]
+    source_kind: str
+    source_ref: str
+    raw_content: str
+    span_drafts: list[SourceSpanDraft]
+    structured_payload: dict[str, Any]
+    user_id: str | None
+    org_id: str | None
+    authority_principal: str
+    visibility: str
+    sensitivity: str
 
 
 async def link_memories(
@@ -218,17 +234,28 @@ async def archive_memories(
         org_id=org_id,
     )
     normalized_reason = _normalize_reason(reason)
-    curation_source, _ = await _record_curation_source(
-        session,
+    source_ref, span_drafts, structured_payload = _build_agent_curation_evidence(
         action="archive",
         reason=normalized_reason,
-        payload={"node_ids": unique_ids},
-        user_id=user_id,
-        org_id=org_id,
-        visibility=_curation_visibility(nodes),
         run_id=run_id,
+        payload={"node_ids": unique_ids},
     )
-    await ReconstructiveMemoryCompatibilityRepository(session).archive_many(unique_ids)
+    curation_source, _ = await _archive_with_curation(
+        session,
+        context=_ArchiveAuditContext(
+            node_ids=unique_ids,
+            source_kind=CURATION_CREATED_BY,
+            source_ref=source_ref,
+            raw_content=normalized_reason,
+            span_drafts=span_drafts,
+            structured_payload=structured_payload,
+            user_id=user_id,
+            org_id=org_id,
+            authority_principal=user_id,
+            visibility=_curation_visibility(nodes),
+            sensitivity="low",
+        ),
+    )
     return {
         "memory_system": "reconstructive",
         "action": "archive",
@@ -263,39 +290,42 @@ async def archive_memory_by_policy(
         f"Rule: {normalized_rule}. Policy version: {normalized_policy_version}. "
         f"Target node: {node.id}. Run ID: {run_id}. Reason: {normalized_reason}"
     )
-    curation_source, spans = await MemorySourceRepository(session).create_with_spans(
-        source_kind=MEMORY_CURATOR_SOURCE_KIND,
-        source_ref=f"nightly-memory-maintenance:{run_id}:archive:{node.id}",
-        raw_content=audit_text,
-        spans=[
-            SourceSpanDraft(
-                text=audit_text,
-                locator={
-                    "kind": "memory_curation",
-                    "action": "archive",
-                    "rule": normalized_rule,
-                    "policy_version": normalized_policy_version,
-                    "target_node": node.id,
-                    "run_id": str(run_id),
-                },
-            )
-        ],
-        org_id=node.org_id,
-        user_id=node.user_id,
-        visibility=node.visibility,
-        structured_payload={
-            "action": "archive",
-            "rule": normalized_rule,
-            "policy_version": normalized_policy_version,
-            "target_node": node.id,
-            "run_id": str(run_id),
-            "reason": normalized_reason,
-            "created_by": MEMORY_CURATOR_SOURCE_KIND,
-        },
-        authority_principal=MEMORY_CURATOR_SOURCE_KIND,
-        sensitivity=node.sensitivity,
+    curation_source, spans = await _archive_with_curation(
+        session,
+        context=_ArchiveAuditContext(
+            node_ids=[node.id],
+            source_kind=MEMORY_CURATOR_SOURCE_KIND,
+            source_ref=f"nightly-memory-maintenance:{run_id}:archive:{node.id}",
+            raw_content=audit_text,
+            span_drafts=[
+                SourceSpanDraft(
+                    text=audit_text,
+                    locator={
+                        "kind": "memory_curation",
+                        "action": "archive",
+                        "rule": normalized_rule,
+                        "policy_version": normalized_policy_version,
+                        "target_node": node.id,
+                        "run_id": str(run_id),
+                    },
+                )
+            ],
+            structured_payload={
+                "action": "archive",
+                "rule": normalized_rule,
+                "policy_version": normalized_policy_version,
+                "target_node": node.id,
+                "run_id": str(run_id),
+                "reason": normalized_reason,
+                "created_by": MEMORY_CURATOR_SOURCE_KIND,
+            },
+            user_id=node.user_id,
+            org_id=node.org_id,
+            authority_principal=MEMORY_CURATOR_SOURCE_KIND,
+            visibility=node.visibility,
+            sensitivity=node.sensitivity,
+        ),
     )
-    await ReconstructiveMemoryCompatibilityRepository(session).archive_many([node.id])
     return {
         "node_id": node.id,
         "curation_source_id": curation_source.id,
@@ -323,6 +353,54 @@ async def _visible_nodes_exact(
     return nodes
 
 
+async def _archive_with_curation(
+    session: AsyncSession,
+    *,
+    context: _ArchiveAuditContext,
+):
+    curation_source, spans = await MemorySourceRepository(session).create_with_spans(
+        source_kind=context.source_kind,
+        source_ref=context.source_ref,
+        raw_content=context.raw_content,
+        spans=context.span_drafts,
+        org_id=context.org_id,
+        user_id=context.user_id,
+        visibility=context.visibility,
+        structured_payload=context.structured_payload,
+        authority_principal=context.authority_principal,
+        sensitivity=context.sensitivity,
+    )
+    await ReconstructiveMemoryCompatibilityRepository(session).archive_many(
+        context.node_ids
+    )
+    return curation_source, spans
+
+
+def _build_agent_curation_evidence(
+    *,
+    action: str,
+    reason: str,
+    run_id: int | str | None,
+    payload: dict[str, Any],
+) -> tuple[str, list[SourceSpanDraft], dict[str, Any]]:
+    return (
+        f"{run_id or 'direct'}:{action}:{uuid.uuid4()}",
+        [
+            SourceSpanDraft(
+                text=reason,
+                locator={"kind": "curation_reason", "action": action},
+            )
+        ],
+        {
+            "action": action,
+            "reason": reason,
+            "created_by": CURATION_CREATED_BY,
+            "run_id": str(run_id) if run_id is not None else None,
+            **payload,
+        },
+    )
+
+
 async def _record_curation_source(
     session: AsyncSession,
     *,
@@ -334,21 +412,21 @@ async def _record_curation_source(
     visibility: str,
     run_id: int | str | None,
 ):
+    source_ref, spans, structured_payload = _build_agent_curation_evidence(
+        action=action,
+        reason=reason,
+        run_id=run_id,
+        payload=payload,
+    )
     return await MemorySourceRepository(session).create_with_spans(
         source_kind=CURATION_CREATED_BY,
-        source_ref=f"{run_id or 'direct'}:{action}:{uuid.uuid4()}",
+        source_ref=source_ref,
         raw_content=reason,
-        spans=[SourceSpanDraft(text=reason, locator={"kind": "curation_reason", "action": action})],
+        spans=spans,
         org_id=org_id,
         user_id=user_id,
         visibility=visibility,
-        structured_payload={
-            "action": action,
-            "reason": reason,
-            "created_by": CURATION_CREATED_BY,
-            "run_id": str(run_id) if run_id is not None else None,
-            **payload,
-        },
+        structured_payload=structured_payload,
         authority_principal=user_id,
     )
 

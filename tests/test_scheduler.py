@@ -37,6 +37,9 @@ from brain.app.scheduler.executor import (
 )
 from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.programs import (
+    NIGHTLY_SLEEP_STEP_BUDGET_HINTS,
+    NIGHTLY_SLEEP_STEP_KEYS,
+    NIGHTLY_STEP_REGISTRY,
     build_scheduler_step_plan,
     get_step_specs,
     nightly_heuristic_review_command,
@@ -576,6 +579,65 @@ async def test_nightly_heuristic_review_wrappers_await_and_report_counts(monkeyp
     assert scheduler_executor._nightly_step_commands(
         "heuristic_review", date(2026, 4, 21)
     ) == [command]
+
+
+async def test_nightly_registry_generates_every_command_representation():
+    target_date = date(2026, 4, 21)
+    scheduled_definitions = tuple(
+        definition
+        for definition in NIGHTLY_STEP_REGISTRY
+        if definition.runs_in_executor
+    )
+
+    assert NIGHTLY_SLEEP_STEP_KEYS == tuple(
+        definition.step_key for definition in scheduled_definitions
+    )
+    assert NIGHTLY_SLEEP_STEP_BUDGET_HINTS == {
+        definition.step_key: definition.budget_hint
+        for definition in scheduled_definitions
+    }
+
+    per_key_commands = [
+        scheduler_executor._nightly_step_commands(step_key, target_date)
+        for step_key in NIGHTLY_SLEEP_STEP_KEYS
+    ]
+    assert all(
+        NIGHTLY_SLEEP_STEP_BUDGET_HINTS[step_key]
+        for step_key in NIGHTLY_SLEEP_STEP_KEYS
+    )
+    assert all(per_key_commands)
+    assert scheduler_executor._nightly_wrapper_commands(
+        target_date,
+        split_steps=False,
+    ) == [command for commands in per_key_commands for command in commands]
+
+    job = _make_scheduler_job()
+    run = SimpleNamespace(
+        scheduled_for=datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc)
+    )
+    expected_program_steps = [
+        (
+            program_step.step_key,
+            command,
+            program_step.description or definition.description,
+        )
+        for definition in NIGHTLY_STEP_REGISTRY
+        for program_step, command in zip(
+            definition.program_steps,
+            definition.commands_for(target_date),
+            strict=True,
+        )
+    ]
+    assert [
+        (step.step_key, step.command, step.description)
+        for step in get_step_specs(job, run)
+    ] == expected_program_steps
+
+    assert [
+        definition.step_key
+        for definition in NIGHTLY_STEP_REGISTRY
+        if not definition.runs_in_executor
+    ] == ["context_policy_eval"]
 
 
 async def test_split_nightly_scheduler_reaches_and_settles_memory_maintenance(session):

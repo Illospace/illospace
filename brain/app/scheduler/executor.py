@@ -33,7 +33,8 @@ from brain.app.scheduler.programs import (
     NIGHTLY_SLEEP_STEP_KEYS,
     WRAPPER_STEP_KEY,
     build_scheduler_step_plan,
-    nightly_heuristic_review_command,
+    nightly_commands,
+    nightly_commands_for_step,
 )
 from brain.app.scheduler.runtime import (
     LEASE_TTL_SECONDS,
@@ -250,72 +251,11 @@ def _nightly_wrapper_commands(target_date: date, *, split_steps: bool) -> list[l
             )
         ]
 
-    return [
-        ["python3", "-m", "brain.jobs.pipelines.consolidate", "--phase", "all"],
-        [
-            "python3",
-            "-m",
-            "brain.jobs.pipelines.nightly_memory_maintenance",
-            "--date",
-            target_date.isoformat(),
-            "--apply",
-        ],
-        ["python3", "-m", "brain.app.cli.skills", "evolve"],
-        ["python3", "-m", "brain.app.cli.meta_learn", "cross-pollinate"],
-        ["python3", "-m", "brain.app.cli.meta_learn", "evolve"],
-        nightly_heuristic_review_command(),
-        _python_one_liner(
-            "from brain.systems.feedback.meta_evolution import run_meta_evolution; "
-            "stats = run_meta_evolution(); "
-            "print(f'Insights: {stats[\"insights_total\"]}, Regressions: {stats[\"regressions\"]}, Adjustments: {len(stats[\"adjustments\"])}')"
-        ),
-        ["python3", "-m", "brain.jobs.pipelines.nightly_reflect", "--date", target_date.isoformat()],
-        ["python3", "-m", "brain.jobs.pipelines.nightly_dream", "--date", target_date.isoformat()],
-        ["python3", "-m", "brain.jobs.pipelines.consolidate", "--phase", "index"],
-        ["python3", "-m", "brain.jobs.pipelines.sync_brain_to_files"],
-        ["python3", "-m", "brain.jobs.pipelines.project_draft_cleanup"],
-        ["python3", "-m", "brain.jobs.pipelines.nightly_assess", "--date", target_date.isoformat()],
-        ["python3", "-m", "brain.jobs.pipelines.nightly_implement", "--date", target_date.isoformat()],
-        ["python3", str(Path("content") / "blog" / "generate_blog.py"), "--date", target_date.isoformat()],
-    ]
+    return nightly_commands(target_date)
 
 
 def _nightly_step_commands(step_key: str, target_date: date) -> list[list[str]]:
-    mapping: dict[str, list[list[str]]] = {
-        "memory_consolidation": [["python3", "-m", "brain.jobs.pipelines.consolidate", "--phase", "all"]],
-        "nightly_memory_maintenance": [[
-            "python3",
-            "-m",
-            "brain.jobs.pipelines.nightly_memory_maintenance",
-            "--date",
-            target_date.isoformat(),
-            "--apply",
-        ]],
-        "skill_evolution": [["python3", "-m", "brain.app.cli.skills", "evolve"]],
-        "meta_learning": [
-            ["python3", "-m", "brain.app.cli.meta_learn", "cross-pollinate"],
-            ["python3", "-m", "brain.app.cli.meta_learn", "evolve"],
-        ],
-        "heuristic_review": [
-            nightly_heuristic_review_command(),
-        ],
-        "meta_evolution": [
-            _python_one_liner(
-                "from brain.systems.feedback.meta_evolution import run_meta_evolution; "
-                "stats = run_meta_evolution(); "
-                "print(f'Insights: {stats[\"insights_total\"]}, Regressions: {stats[\"regressions\"]}, Adjustments: {len(stats[\"adjustments\"])}')"
-            ),
-        ],
-        "reflection": [["python3", "-m", "brain.jobs.pipelines.nightly_reflect", "--date", target_date.isoformat()]],
-        "dream": [["python3", "-m", "brain.jobs.pipelines.nightly_dream", "--date", target_date.isoformat()]],
-        "wake_up_index": [["python3", "-m", "brain.jobs.pipelines.consolidate", "--phase", "index"]],
-        "file_sync": [["python3", "-m", "brain.jobs.pipelines.sync_brain_to_files"]],
-        "project_draft_cleanup": [["python3", "-m", "brain.jobs.pipelines.project_draft_cleanup"]],
-        "experiment_assessment": [["python3", "-m", "brain.jobs.pipelines.nightly_assess", "--date", target_date.isoformat()]],
-        "self_improvement": [["python3", "-m", "brain.jobs.pipelines.nightly_implement", "--date", target_date.isoformat()]],
-        "daily_blog": [["python3", str(Path("content") / "blog" / "generate_blog.py"), "--date", target_date.isoformat()]],
-    }
-    return mapping.get(step_key, [])
+    return nightly_commands_for_step(step_key, target_date)
 
 
 def _command_to_argv(command: Any) -> list[str]:

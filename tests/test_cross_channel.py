@@ -1,9 +1,10 @@
 """Tests for cross-channel session recall at wake.
 
-Uses rollback_db fixture — all writes are rolled back after each test.
+Uses the transactional db_session fixture — all writes are rolled back after each test.
 Zero test data leaks to production DB.
 """
 
+import hashlib
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -16,7 +17,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("TEST_DB_URL"),
-    reason="TEST_DB_URL not set — run via scripts/test-with-db.sh",
+    reason="TEST_DB_URL not set — run via ops/test-with-db.sh",
 )
 
 from brain.app.cli.session_hooks import get_cross_channel_context
@@ -25,10 +26,12 @@ ORG_ID = "10000000-0000-0000-0000-000000000001"
 USER_ID = "20000000-0000-0000-0000-000000000001"
 OTHER_ORG_ID = "10000000-0000-0000-0000-000000000002"
 OTHER_USER_ID = "20000000-0000-0000-0000-000000000002"
+OTHER_ORG_USER_ID = "20000000-0000-0000-0000-000000000003"
+
 
 @pytest.fixture
 async def seed_memories(db_session, unit_of_work_for_session):
-    """Insert test memories with source_session inside a rolled-back transaction."""
+    """Insert source-backed memories inside a rolled-back transaction."""
     now = datetime.now(timezone.utc)
     test_ids = []
 
@@ -54,6 +57,42 @@ async def seed_memories(db_session, unit_of_work_for_session):
         visibility: str = "private",
         salience: float = 7,
     ) -> int:
+        source_ref = f"run:cross-channel-test;session:{source_session}"
+        source_digest = hashlib.sha256(
+            f"{source_ref}:{content}".encode("utf-8")
+        ).hexdigest()
+        source_result = await db_session.execute(text("""
+            INSERT INTO memory_sources (
+                org_id, user_id, visibility, source_kind, source_ref,
+                content_digest, raw_content, observed_at
+            )
+            VALUES (
+                :org_id, :user_id, :visibility, 'session', :source_ref,
+                :content_digest, :content, :created_at
+            )
+            RETURNING id
+        """), {
+            "org_id": org_id,
+            "user_id": user_id,
+            "visibility": visibility,
+            "source_ref": source_ref,
+            "content_digest": source_digest,
+            "content": content,
+            "created_at": created_at,
+        })
+        source_id = source_result.scalar_one()
+
+        span_result = await db_session.execute(text("""
+            INSERT INTO memory_spans (source_id, text, content_digest)
+            VALUES (:source_id, :content, :content_digest)
+            RETURNING id
+        """), {
+            "source_id": source_id,
+            "content": content,
+            "content_digest": source_digest,
+        })
+        source_span_id = span_result.scalar_one()
+
         result = await db_session.execute(text("""
             INSERT INTO memory_nodes (
                 node_kind, content_kind, canonical_label, text, normalized_key,
@@ -66,19 +105,39 @@ async def seed_memories(db_session, unit_of_work_for_session):
             RETURNING id
         """), {
             "content": content,
-            "normalized_key": f"{source_session}:{content}".lower(),
+            "normalized_key": f"{source_ref}:{content}".lower(),
             "confidence": salience / 10.0,
-            "source_session": source_session,
             "created_at": created_at,
             "user_id": user_id,
             "org_id": org_id,
             "visibility": visibility,
         })
-        row = result.mappings().first()
-        return row["id"]
+        memory_id = result.scalar_one()
+
+        await db_session.execute(text("""
+            INSERT INTO memory_assertions (
+                node_id, claim_text, confidence, truth_status, source_span_ids
+            )
+            VALUES (
+                :node_id, :content, :confidence, 'active',
+                jsonb_build_array(CAST(:source_span_id AS INTEGER))
+            )
+        """), {
+            "node_id": memory_id,
+            "content": content,
+            "confidence": salience / 10.0,
+            "source_span_id": source_span_id,
+        })
+        return memory_id
 
     await ensure_principal(ORG_ID, USER_ID, "cross-channel", "cross-channel@example.com")
-    await ensure_principal(OTHER_ORG_ID, OTHER_USER_ID, "cross-channel-other", "cross-channel-other@example.com")
+    await ensure_principal(ORG_ID, OTHER_USER_ID, "cross-channel-user", "cross-channel-user@example.com")
+    await ensure_principal(
+        OTHER_ORG_ID,
+        OTHER_ORG_USER_ID,
+        "cross-channel-other",
+        "cross-channel-other@example.com",
+    )
 
     test_ids.append(await insert_memory(
         "discussed deployment strategy",
@@ -116,7 +175,7 @@ async def seed_memories(db_session, unit_of_work_for_session):
         "other org shared work",
         "discord:channel:other-org",
         now - timedelta(hours=1),
-        user_id=OTHER_USER_ID,
+        user_id=OTHER_ORG_USER_ID,
         org_id=OTHER_ORG_ID,
         visibility="org",
         salience=9,
@@ -181,3 +240,14 @@ class TestGetCrossChannelContext:
         contents = [r["content"] for r in results]
         assert "other user's private work" not in contents
         assert "other org shared work" not in contents
+
+        global_results = await get_cross_channel_context(
+            "telegram:direct:999",
+            hours=24,
+            user_id=USER_ID,
+            org_id=ORG_ID,
+            allow_global=True,
+        )
+        global_contents = [r["content"] for r in global_results]
+        assert "other user's private work" in global_contents
+        assert "other org shared work" in global_contents
