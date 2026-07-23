@@ -581,6 +581,59 @@ async def test_nightly_heuristic_review_wrappers_await_and_report_counts(monkeyp
     ) == [command]
 
 
+async def test_nightly_meta_evolution_wrapper_awaits_and_reports_stats(monkeypatch, capsys):
+    from brain.systems.feedback import meta_evolution
+
+    awaited = False
+
+    async def fake_run_meta_evolution():
+        nonlocal awaited
+        awaited = True
+        return {
+            "insights_total": 3,
+            "regressions": 1,
+            "adjustments": {"heuristic_prune_threshold": {"new": 0.15}},
+        }
+
+    monkeypatch.setattr(
+        meta_evolution,
+        "run_meta_evolution",
+        fake_run_meta_evolution,
+    )
+    command = scheduler_executor._nightly_step_commands(
+        "meta_evolution",
+        date(2026, 4, 21),
+    )[0]
+    namespace = {}
+
+    await asyncio.to_thread(exec, command[2], namespace)
+
+    assert awaited is True
+    assert namespace["stats"] == {
+        "insights_total": 3,
+        "regressions": 1,
+        "adjustments": {"heuristic_prune_threshold": {"new": 0.15}},
+    }
+    assert not asyncio.iscoroutine(namespace["stats"])
+    assert capsys.readouterr().out.strip() == (
+        "Insights: 3, Regressions: 1, Adjustments: 1"
+    )
+
+    job = _make_scheduler_job()
+    run = SimpleNamespace(
+        scheduled_for=datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc)
+    )
+    program_command = next(
+        step.command
+        for step in get_step_specs(job, run)
+        if step.step_key == "meta_evolution"
+    )
+    assert program_command == command
+    assert scheduler_executor._nightly_wrapper_commands(
+        date(2026, 4, 21), split_steps=False
+    )[6] == command
+
+
 async def test_nightly_registry_generates_every_command_representation():
     target_date = date(2026, 4, 21)
     scheduled_definitions = tuple(
@@ -1150,6 +1203,7 @@ async def test_repeated_heuristic_review_failure_emits_one_durable_alert(session
         return SimpleNamespace(returncode=1, stdout="", stderr=failure_text)
 
     alert_timestamps = []
+    alert_edges = []
     for minute in range(2, 6):
         failed = await async_run_scheduler_run(
             session,
@@ -1160,6 +1214,9 @@ async def test_repeated_heuristic_review_failure_emits_one_durable_alert(session
         )
         await session.refresh(job)
         alert_timestamps.append(job.failure_alerted_at)
+        alert_edges.append(
+            failed.result_summary["failure_guard"]["alert_emitted"]
+        )
         assert failed.status == "retryable"
 
     alerts = [record for record in caplog.records if record.getMessage().startswith("Scheduler job repeated failure alert")]
@@ -1175,6 +1232,7 @@ async def test_repeated_heuristic_review_failure_emits_one_durable_alert(session
     assert alert_timestamps[:2] == [None, None]
     assert alert_timestamps[2] is not None
     assert alert_timestamps[3] == alert_timestamps[2]
+    assert alert_edges == [False, False, True, False]
     assert snapshot["alerts"] == [
         {
             "type": "repeated_scheduler_job_failure",

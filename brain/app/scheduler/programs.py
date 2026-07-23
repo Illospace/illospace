@@ -29,6 +29,18 @@ def nightly_heuristic_review_command() -> list[str]:
     )
 
 
+def nightly_meta_evolution_command() -> list[str]:
+    """Run async meta-evolution from a synchronous scheduler process."""
+    return _python_one_liner(
+        "import asyncio; "
+        "from brain.systems.feedback.meta_evolution import run_meta_evolution; "
+        "stats = asyncio.run(run_meta_evolution()); "
+        "print(f'Insights: {stats[\"insights_total\"]}, "
+        "Regressions: {stats[\"regressions\"]}, "
+        "Adjustments: {len(stats[\"adjustments\"])}')"
+    )
+
+
 @dataclass(frozen=True)
 class StepSpec:
     step_key: str
@@ -134,13 +146,7 @@ NIGHTLY_STEP_REGISTRY: tuple[NightlyStepDefinition, ...] = (
     ),
     NightlyStepDefinition(
         step_key="meta_evolution",
-        command_factory=lambda _target_date: (
-            _python_one_liner(
-                "from brain.systems.feedback.meta_evolution import run_meta_evolution; "
-                "stats = run_meta_evolution(); "
-                "print(f'Insights: {stats[\"insights_total\"]}, Regressions: {stats[\"regressions\"]}, Adjustments: {len(stats[\"adjustments\"])}')"
-            ),
-        ),
+        command_factory=lambda _target_date: (nightly_meta_evolution_command(),),
         description="Meta-evolution",
         budget_hint={
             "work_type": "context_policy_eval",
