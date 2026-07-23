@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from brain.systems.runs.skill_commands import parse_slash_skill_names
+from brain.systems.runs.status_questions import format_status_question_context
 
 PROMPT_REFERENCE_CHAR_LIMIT = 12_000
 PROMPT_SCALAR_CHAR_LIMIT = 1_200
@@ -192,6 +193,7 @@ class RunContext:
     skills: list[str] = field(default_factory=list)
     handoff: dict[str, Any] = field(default_factory=dict)
     request_source: dict[str, Any] = field(default_factory=dict)
+    status_question_context: dict[str, Any] = field(default_factory=dict)
     scheduled_result_contract: bool = False
 
     def prompt_context(self) -> str:
@@ -240,6 +242,9 @@ class RunContext:
             )
         if self.memory:
             parts.append("Memory:\n" + "\n".join(f"- {item}" for item in self.memory))
+        status_context = format_status_question_context(self.status_question_context)
+        if status_context:
+            parts.append(status_context)
         return "\n\n".join(parts)
 
 
@@ -262,6 +267,11 @@ class RunContextLoader:
             workspace_ref=dict(workspace_ref or {}),
             thread_context=dict(thread_context) if isinstance(thread_context, dict) else {},
             request_source=_request_source_from_metadata(metadata),
+            status_question_context=(
+                dict(metadata.get("status_question_context") or {})
+                if isinstance(metadata.get("status_question_context"), dict)
+                else {}
+            ),
             skills=_skill_names_from_metadata(metadata, message),
             scheduled_result_contract=has_scheduled_result_contract(metadata),
         )

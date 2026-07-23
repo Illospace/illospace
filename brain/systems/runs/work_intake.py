@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,6 +14,7 @@ from brain.systems.cortex.project_context.resolution import resolve_effective_pr
 from brain.systems.cortex.thread_context import async_build_agent_visible_thread_context
 from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
+from brain.systems.runs.status_questions import build_status_question_context
 from brain.systems.runs.store import AsyncAgentRunStore
 
 _VALID_EFFORT_LEVELS = {"none", "low", "medium", "high", "xhigh"}
@@ -598,6 +599,28 @@ def _build_inbound_submission_request(
 
 
 async def build_agent_run_request(
+    session: Any,
+    event: WorkIntakeEvent,
+) -> AgentRunRequest:
+    request = await _build_agent_run_request(session, event)
+    status_context = await build_status_question_context(
+        session,
+        thread_id=request.thread_id,
+        org_id=request.org_id,
+        message=request.message,
+    )
+    if status_context is None:
+        return request
+    return replace(
+        request,
+        metadata={
+            **request.metadata,
+            "status_question_context": status_context,
+        },
+    )
+
+
+async def _build_agent_run_request(
     session: Any,
     event: WorkIntakeEvent,
 ) -> AgentRunRequest:

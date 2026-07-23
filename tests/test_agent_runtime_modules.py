@@ -546,6 +546,67 @@ def test_final_reply_checker_runtime_returns_dict_compatible_review():
     assert calls == ["More soon", "More soon", "More soon", "More soon"]
 
 
+def test_final_reply_evidence_reads_status_and_tool_failure_state_from_agent_context():
+    from brain.systems.runs.direct_loop.final_reply_evidence import (
+        FinalReplyEvidence,
+        ToolResultEvidence,
+    )
+    from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+    from brain.systems.runs.status import RunStatus
+
+    loop_control = LoopControlPolicy(failure_threshold=3)
+    loop_control.consecutive_failures = 3
+    loop_control.total_failures = 3
+    loop_control.consecutive_tool_name = "manage_idea"
+    loop_control.last_error_class = "ToolValidationError"
+    context = SimpleNamespace(
+        recent_tool_results=[
+            ToolResultEvidence.capture(
+                tool_name="manage_idea",
+                arguments={"action": "create"},
+                is_error=True,
+                result={"error": "invalid parent", "error_class": "ToolValidationError"},
+            )
+        ],
+        execution_artifacts=[],
+        run=SimpleNamespace(worker_results=[]),
+        loop_control=loop_control,
+        execution_metadata={
+            "execution_provenance": {
+                "status_question_context": {
+                    "thread_id": "thread-1",
+                    "lookup_status": "verified",
+                    "originating_run": {
+                        "run_id": 2327,
+                        "status": "running",
+                        "request": "assign ticket to me",
+                    },
+                    "live_sibling_runs": [{"run_id": 2327, "status": "running"}],
+                    "deliverables": [
+                        {"kind": "github_issue", "label": "GitHub ticket"},
+                        {"kind": "assignment", "label": "ticket assignment"},
+                    ],
+                }
+            }
+        },
+    )
+
+    evidence = FinalReplyEvidence.from_agent_context(context)
+
+    assert evidence.status_question is not None
+    assert evidence.status_question.originating_run is not None
+    assert evidence.status_question.originating_run.run_id == 2327
+    assert evidence.status_question.originating_run.status is RunStatus.RUNNING
+    assert evidence.status_question.has_live_sibling is True
+    assert (
+        evidence.status_question.live_sibling_runs[0].status
+        is RunStatus.RUNNING
+    )
+    assert evidence.tool_failure_state is not None
+    assert evidence.tool_failure_state.threshold_reached is True
+    assert evidence.tool_failure_state.tool_name == "manage_idea"
+
+
 def test_final_reply_helpers_parse_json_and_cache_review():
     from brain.systems.runs.direct_loop.final_reply import (
         cache_final_reply_review,
