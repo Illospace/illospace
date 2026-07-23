@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import brain.systems.briefing.gather as briefing_gather
 from brain.systems.briefing import DossierBudget, assemble_dossier, gather_pieces
 from brain.systems.briefing.compose import compose_packet
 from brain.systems.briefing.gather import DefaultSlackReader, SlackThreadRead
@@ -223,6 +224,47 @@ def _flat_pr(title="Restore backfill", body="adds regression test", total=None, 
     if checks is not None:
         payload["checks"] = checks
     return payload
+
+
+def _movement_chantier(
+    *,
+    data_updated_at,
+    row_updated_at,
+    refs=(),
+    created_at=None,
+    row_created_at=None,
+):
+    data = {
+        "slug": "shopify-app-sunset",
+        "title": "Shopify app sunset",
+        "goal": "Done means the legacy app is retired.",
+        "kind": "sunset",
+        "state": "exploring",
+        "owner": "Reda",
+        "refs": list(refs),
+        "next_step": "Wait for the owner to reply lock.",
+        "updated_at": data_updated_at,
+    }
+    if created_at is not None:
+        data["created_at"] = created_at
+    return SimpleNamespace(
+        id=1995,
+        org_id=_ORG,
+        domain_id=1,
+        object_key="chantier",
+        title="Shopify app sunset",
+        data=data,
+        created_at=row_created_at,
+        updated_at=row_updated_at,
+    )
+
+
+def _movement_piece(chantier, *, members=None):
+    return briefing_gather._chantier_piece(
+        chantier,
+        subject_external_id="github:Illospace/illospace:issue:437",
+        members_by_external_id=members or {},
+    )
 
 
 async def test_happy_path_gathers_all_sources_read_only():
@@ -466,6 +508,141 @@ async def test_related_tracker_records_are_gathered_and_self_excluded():
     assert refs.count("domain_record:1238") == 1  # self not duplicated
 
 
+def test_chantier_surface_states_staleness_from_source_movement_not_row_mtime(monkeypatch):
+    monkeypatch.setattr(
+        briefing_gather,
+        "_utc_now",
+        lambda: datetime(2026, 7, 23, 12, 10, tzinfo=timezone.utc),
+    )
+    chantier = _movement_chantier(
+        data_updated_at="2026-07-17T19:10:01Z",
+        row_updated_at=datetime(2026, 7, 22, 13, 13, 59, tzinfo=timezone.utc),
+    )
+
+    piece = _movement_piece(chantier)
+
+    assert piece.ts == datetime(2026, 7, 17, 19, 10, 1, tzinfo=timezone.utc)
+    assert (
+        "movement: stale (>3 days); no source movement since 2026-07-17; "
+        "tracker row writes do not count"
+    ) in piece.body
+    assert "2026-07-22" not in piece.body
+
+    dossier = assemble_dossier(
+        [piece],
+        job_ref="domain_record:1995",
+        budget=DossierBudget(),
+    )
+    packet = compose_packet(dossier, org_id=_ORG, ask="Escalate stalled chantiers")
+    chantier_line = next(
+        line for line in packet.human_brief.splitlines() if line.startswith("*Chantier:*")
+    )
+    assert "movement: stale (>3 days)" in chantier_line
+    assert "no source movement since 2026-07-17" in chantier_line
+
+
+def test_bookkeeping_only_row_update_does_not_change_chantier_staleness(monkeypatch):
+    monkeypatch.setattr(
+        briefing_gather,
+        "_utc_now",
+        lambda: datetime(2026, 7, 23, 12, 10, tzinfo=timezone.utc),
+    )
+    before_refresh = _movement_chantier(
+        data_updated_at="2026-07-17T19:10:01Z",
+        row_updated_at=datetime(2026, 7, 22, 13, 13, 59, tzinfo=timezone.utc),
+    )
+    after_refresh = _movement_chantier(
+        data_updated_at="2026-07-17T19:10:01Z",
+        row_updated_at=datetime(2026, 7, 23, 11, 59, tzinfo=timezone.utc),
+    )
+
+    assert _movement_piece(after_refresh) == _movement_piece(before_refresh)
+
+
+def test_each_available_source_movement_signal_resets_chantier_staleness(monkeypatch):
+    monkeypatch.setattr(
+        briefing_gather,
+        "_utc_now",
+        lambda: datetime(2026, 7, 23, 12, 10, tzinfo=timezone.utc),
+    )
+    old_source_time = "2026-07-17T19:10:01Z"
+    row_refresh_time = datetime(2026, 7, 23, 11, 59, tzinfo=timezone.utc)
+
+    chantier_update = _movement_chantier(
+        data_updated_at="2026-07-22T09:00:00Z",
+        row_updated_at=row_refresh_time,
+    )
+    from_chantier = _movement_piece(chantier_update)
+    assert from_chantier.ts == datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc)
+    assert (
+        "movement: recent (within 3 days); last source movement 2026-07-22"
+        in from_chantier.body
+    )
+
+    new_ref = "github:Illospace/illospace:issue:438"
+    chantier_with_new_ref = _movement_chantier(
+        data_updated_at=old_source_time,
+        row_updated_at=row_refresh_time,
+        refs=[{"source": "github", "ref": new_ref, "title": "Fresh member"}],
+    )
+    linked_member = SimpleNamespace(
+        data={
+            "external_id": new_ref,
+            # Deliberately naive: comparison must normalize mixed timestamp shapes.
+            "updated_at": datetime(2026, 7, 22, 10, 30),
+        }
+    )
+    from_new_ref = _movement_piece(
+        chantier_with_new_ref,
+        members={new_ref: linked_member},
+    )
+    assert from_new_ref.ts == datetime(2026, 7, 22, 10, 30, tzinfo=timezone.utc)
+    assert (
+        "movement: recent (within 3 days); last source movement 2026-07-22"
+        in from_new_ref.body
+    )
+
+
+def test_missing_source_updated_at_uses_created_then_explicit_row_fallback(monkeypatch):
+    monkeypatch.setattr(
+        briefing_gather,
+        "_utc_now",
+        lambda: datetime(2026, 7, 23, 12, 10, tzinfo=timezone.utc),
+    )
+    with_source_creation = _movement_chantier(
+        data_updated_at=" ",
+        created_at="2026-07-16T08:00:00Z",
+        row_updated_at=datetime(2026, 7, 22, 13, 0, tzinfo=timezone.utc),
+    )
+    from_creation = _movement_piece(with_source_creation)
+    assert from_creation.ts == datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc)
+    assert "movement: stale (>3 days); no source movement since 2026-07-16" in from_creation.body
+
+    row_creation_only = _movement_chantier(
+        data_updated_at=None,
+        row_created_at=datetime(2026, 7, 15, 7, 0),
+        row_updated_at=datetime(2026, 7, 22, 13, 0, tzinfo=timezone.utc),
+    )
+    from_row_creation = _movement_piece(row_creation_only)
+    assert from_row_creation.ts == datetime(2026, 7, 15, 7, 0, tzinfo=timezone.utc)
+    assert (
+        "movement: unknown; source timestamps missing; "
+        "tracker creation 2026-07-15 is the best available fallback"
+    ) in from_row_creation.body
+
+    row_only = _movement_chantier(
+        data_updated_at=None,
+        row_updated_at=datetime(2026, 7, 22, 13, 0),
+    )
+    from_row = _movement_piece(row_only)
+    assert from_row.ts == datetime(2026, 7, 22, 13, 0, tzinfo=timezone.utc)
+    assert (
+        "movement: unknown; source timestamps missing; "
+        "tracker row timestamp 2026-07-22 is used only as a last resort"
+    ) in from_row.body
+    assert "movement: recent" not in from_row.body
+
+
 async def test_item_in_chantier_gathers_goal_sibling_states_and_artifact_refs():
     subject_external_id = "github:Illospace/illospace:issue:330"
     subject = SimpleNamespace(
@@ -548,8 +725,12 @@ async def test_item_in_chantier_gathers_goal_sibling_states_and_artifact_refs():
     chantier_pieces = [piece for piece in result.pieces if piece.source == "chantier"]
     assert len(chantier_pieces) == 1
     body = chantier_pieces[0].body
+    assert "movement: unknown; source timestamps missing" in body
     assert "goal: Done means no work arrives cold at an item boundary." in body
     assert "state: building" in body
+    assert "kind: feature" in body
+    assert "owner: Reda" in body
+    assert "next_step: Ship chantier context in handoff packets." in body
     assert "Chantier record contract (github:Illospace/illospace:issue:327, state: Done)" in body
     assert "Chantier-aware check-ins (github:Illospace/illospace:issue:331, state: Todo)" in body
     assert "PRD (doc: specs/chantier.md)" in body

@@ -41,7 +41,7 @@ from __future__ import annotations
 import re
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 from sqlalchemy import select
@@ -52,6 +52,7 @@ from brain.systems.briefing.core import DossierBudget, SourcePiece
 _GITHUB_REF_RE = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)\b")
 _MAX_GITHUB_REFS = 4
 _MAX_CHANTIER_MEMBER_RECORDS = 100
+_CHANTIER_STALE_AFTER = timedelta(days=3)
 _SLACK_PAGE_CAP = 50
 _SLACK_MAX_PAGES = 3
 # The ONLY team-visible surface (ingress envelope vocabulary). Everything
@@ -101,6 +102,31 @@ def _ts_from_slack(ts: Any) -> datetime | None:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _data(record: Any) -> dict[str, Any]:
+    return dict(getattr(record, "data", None) or {})
+
+
+def _timestamp(value: Any) -> datetime | None:
+    """Parse the mixed naive/aware timestamp shapes carried by Domain data."""
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = _text(value)
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _no_autoflush(session: Any):
@@ -275,7 +301,7 @@ def _record_piece(record: Any) -> SourcePiece | None:
 
 def _chantier_refs(record: Any) -> list[dict[str, str]]:
     """Return the typed-ref contract, defensively normalized for rendering."""
-    refs = (dict(getattr(record, "data", None) or {})).get("refs") or []
+    refs = _data(record).get("refs") or []
     if not isinstance(refs, list):
         return []
     normalized: list[dict[str, str]] = []
@@ -291,8 +317,82 @@ def _chantier_refs(record: Any) -> list[dict[str, str]]:
 
 
 def _tracker_state(record: Any) -> str:
-    data = dict(getattr(record, "data", None) or {})
+    data = _data(record)
     return _text(data.get("status") or data.get("state")) or "unavailable"
+
+
+def _source_movement_timestamps(record: Any) -> list[datetime]:
+    data = _data(record)
+    return [
+        timestamp
+        for timestamp in (_timestamp(data.get("updated_at")), _timestamp(data.get("created_at")))
+        if timestamp is not None
+    ]
+
+
+def _chantier_last_movement(
+    chantier: Any,
+    *,
+    members_by_external_id: dict[str, Any],
+) -> tuple[datetime | None, str]:
+    """Return the newest already-loaded source movement and its confidence.
+
+    The chantier source timestamps and the source timestamps on batch-loaded
+    GitHub tracker members are real movement signals. The typed-ref contract
+    carries no timestamps for docs/Slack/URLs, and reading those artifacts
+    here would introduce forbidden network fan-out.
+    """
+    source_timestamps = _source_movement_timestamps(chantier)
+    for item in _chantier_refs(chantier):
+        if item["source"] != "github":
+            continue
+        member = members_by_external_id.get(item["ref"])
+        if member is not None:
+            source_timestamps.extend(_source_movement_timestamps(member))
+    if source_timestamps:
+        return max(source_timestamps), "source"
+
+    # Legacy rows may predate source timestamps. Row creation is immutable and
+    # therefore safer than the mutable row mtime; updated_at is an explicit,
+    # visibly uncertain last resort only.
+    created_at = _timestamp(getattr(chantier, "created_at", None))
+    if created_at is not None:
+        return created_at, "row_created"
+    updated_at = _timestamp(getattr(chantier, "updated_at", None))
+    if updated_at is not None:
+        return updated_at, "row_updated"
+    return None, "missing"
+
+
+def _chantier_movement_text(
+    movement_at: datetime | None,
+    *,
+    confidence: str,
+    now: datetime,
+) -> str:
+    if movement_at is None:
+        return "movement: unknown; no source or tracker timestamp is available"
+
+    movement_date = movement_at.date().isoformat()
+    if confidence == "source":
+        if now - movement_at > _CHANTIER_STALE_AFTER:
+            return (
+                f"movement: stale (>3 days); no source movement since {movement_date}; "
+                "tracker row writes do not count"
+            )
+        return (
+            f"movement: recent (within 3 days); last source movement {movement_date}; "
+            "tracker row writes do not count"
+        )
+    if confidence == "row_created":
+        return (
+            "movement: unknown; source timestamps missing; "
+            f"tracker creation {movement_date} is the best available fallback"
+        )
+    return (
+        "movement: unknown; source timestamps missing; "
+        f"tracker row timestamp {movement_date} is used only as a last resort"
+    )
 
 
 def _chantier_piece(
@@ -308,7 +408,12 @@ def _chantier_piece(
     section cut, so oversized goal context receives the same cumulative
     ``omitted_chars`` markers and floors as every other source.
     """
-    data = dict(getattr(chantier, "data", None) or {})
+    data = _data(chantier)
+    movement_at, movement_confidence = _chantier_last_movement(
+        chantier,
+        members_by_external_id=members_by_external_id,
+    )
+    now = _timestamp(_utc_now()) or datetime.now(timezone.utc)
     sibling_bits: list[str] = []
     artifact_bits: list[str] = []
     for item in _chantier_refs(chantier):
@@ -329,6 +434,11 @@ def _chantier_piece(
         sibling_bits.append(f"{member_lookup_capped} additional member states not gathered (cap)")
 
     body_bits = [
+        _chantier_movement_text(
+            movement_at,
+            confidence=movement_confidence,
+            now=now,
+        ),
         f"goal: {_text(data.get('goal')) or 'not recorded'}",
         f"state: {_text(data.get('state')) or 'not recorded'}",
         f"kind: {_text(data.get('kind')) or 'not recorded'}",
@@ -349,7 +459,7 @@ def _chantier_piece(
         ref=f"{JOB_REF_RECORD_PREFIX}{getattr(chantier, 'id', '')}",
         title=title,
         body="; ".join(body_bits),
-        ts=getattr(chantier, "updated_at", None),
+        ts=movement_at,
         weight=10,
     )
 
