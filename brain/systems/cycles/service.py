@@ -22,6 +22,7 @@ from brain.systems.cycles.common import (
     SCHEDULED_DIGEST_RUN_KIND,
     THREAD_OUTPUT_TARGET_TYPE,
     canonical_execution_mode,
+    cycle_run_launch_context,
     json_dict,
     short_identifier,
     validate_nonempty_trimmed,
@@ -170,6 +171,40 @@ async def _async_maybe_harvest_alert_resolution(session, cycle: Cycle, run: Cycl
     context_snapshot["alert_resolution_harvest"] = summary
     run.context_snapshot = context_snapshot
     return summary
+
+
+async def _async_attach_open_ask_stragglers(
+    session,
+    cycle: Cycle,
+    run: CycleRun,
+) -> list[dict]:
+    """Put overdue human asks directly into the next coordinator digest."""
+
+    launch_context = cycle_run_launch_context(run)
+    if (
+        cycle.name != _UWEAR_COORDINATOR_CYCLE_NAME
+        or launch_context.get("origin") != SCHEDULED_CYCLE_ORIGIN
+        or launch_context.get("run_kind") != SCHEDULED_DIGEST_RUN_KIND
+    ):
+        return []
+    from brain.systems.runs.open_asks import list_open_ask_stragglers
+
+    try:
+        stragglers = await list_open_ask_stragglers(
+            session,
+            org_id=str(cycle.org_id),
+            now=run.scheduled_for,
+        )
+    except Exception as exc:  # noqa: BLE001 - digest still launches with a loud evidence gap
+        logger.exception("coordinator open-ask ledger read failed safely")
+        context_snapshot = dict(run.context_snapshot or {})
+        context_snapshot["open_ask_ledger_error"] = str(exc)
+        run.context_snapshot = context_snapshot
+        return []
+    context_snapshot = dict(run.context_snapshot or {})
+    context_snapshot["open_ask_stragglers"] = stragglers
+    run.context_snapshot = context_snapshot
+    return stragglers
 
 
 async def _async_append_cycle_thread_message(
@@ -470,6 +505,7 @@ async def async_execute_cycle_run(run_id: int) -> None:
 
         run.idea_id = idea.id
         await _async_prepare_cycle_run_memory_snapshot(uow.session, cycle, run)
+        await _async_attach_open_ask_stragglers(uow.session, cycle, run)
         append_cycle_run_output_target_snapshot(
             run,
             target_type=THREAD_OUTPUT_TARGET_TYPE,

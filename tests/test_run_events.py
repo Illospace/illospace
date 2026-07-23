@@ -203,8 +203,16 @@ def test_failed_run_replay_replaces_legacy_text_completed_diagnostic():
 @pytest.mark.parametrize(
     ("event_type", "status", "expected_message"),
     [
-        ("run.canceled", "canceled", "That run was canceled before it finished."),
-        ("run.expired", "expired", "That run timed out before it finished — please retry."),
+        (
+            "run.canceled",
+            "canceled",
+            "That run was canceled before it finished, but the ask is still open — I will come back.",
+        ),
+        (
+            "run.expired",
+            "expired",
+            "That run timed out before it finished, but the ask is still open — I will come back.",
+        ),
     ],
 )
 def test_non_success_terminal_replay_replaces_raw_reason(event_type, status, expected_message):

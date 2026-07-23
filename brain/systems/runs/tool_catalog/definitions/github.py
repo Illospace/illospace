@@ -148,7 +148,9 @@ GITHUB_TOOLS = [
             "two-part contract: create the GitHub issue in the owning repo as the durable artifact, "
             "then create a linked mirror in an existing workspace tracker. Never create a Domain while "
             "filing. Preserve the customer quote, concrete impact, and source origin_ref in the issue "
-            "body. If this tool fails, the final reply must name the GitHub issue and the exact blocker; "
+            "body and the structured origin_ref input. A successful result with origin_ask contains "
+            "the originating request, requester, and mechanism; carry that context in every Slack "
+            "announcement. If this tool fails, the final reply must name the GitHub issue and the exact blocker; "
             "a tracker record is retention/handoff, never a silent substitute. For a chantier parent mirror, use "
             "the title '[Chantier] <title>' and a body that states the goal as 'Done means …', the "
             "chantier slug, and key references. Do not add a hand-maintained child checklist: "
@@ -187,6 +189,14 @@ GITHUB_TOOLS = [
                     "description": (
                         "Optional GitHub login handles to assign. Honor an explicit assignment request "
                         "using the person's verified GitHub identity."
+                    ),
+                },
+                "origin_ref": {
+                    "type": "string",
+                    "description": (
+                        "Optional source reference, especially the canonical Slack "
+                        "origin_ref. When it matches an open human ask, Illo replies "
+                        "with the issue in that originating thread after delivery succeeds."
                     ),
                 },
                 "token_secret_key": {

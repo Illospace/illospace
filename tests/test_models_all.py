@@ -66,6 +66,7 @@ EXPECTED_TABLES = {
     "narrative_sessions",
     "notification_events",
     "object_references",
+    "open_asks",
     "org_api_keys",
     "orgs",
     "project_narratives",

@@ -2959,7 +2959,8 @@ class TestCortexReplyHandler:
             _agent_context.intent_satisfaction = None
 
         assert raw_error not in context
-        assert "temporary problem" in context
+        assert "still open" in context
+        assert "I will come back" in context
 
     def test_cortex_reply_whitespace_normalizer_collapses_punctuation_lines(self):
         from brain.systems.runs.tool_catalog.handlers.cortex_reply import _normalize_reply_whitespace

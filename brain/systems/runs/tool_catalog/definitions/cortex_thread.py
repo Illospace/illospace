@@ -304,7 +304,9 @@ CHAT_TOOLS = [
             "Post an Illo-authored reply into Slack. Use this when a run was "
             "triggered by a Slack mention or DM and the visible answer belongs "
             "back in Slack. Defaults to the originating Slack channel, existing "
-            "thread, or DM; top-level mentions and DMs are not threaded."
+            "thread, or DM; top-level mentions and DMs are not threaded. A confirmed "
+            "public answer closes the matching open-ask obligation only when answers_open_ask "
+            "is true. Keep it false for a clarification question or progress-only update."
         ),
         "input_schema": {
             "type": "object",
@@ -349,6 +351,15 @@ CHAT_TOOLS = [
                 "image_alt": {
                     "type": "string",
                     "description": "Optional alt text for image_data, used by Slack for screen readers.",
+                },
+                "answers_open_ask": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether this delivered message fully answers the originating "
+                        "human ask. Use false for clarifying questions and progress-only "
+                        "updates. Defaults to false; set true only for a complete answer."
+                    ),
+                    "default": False,
                 },
             },
         },
