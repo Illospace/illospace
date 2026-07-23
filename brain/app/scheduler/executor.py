@@ -11,6 +11,7 @@ from datetime import date, datetime, timezone
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable, Sequence
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from brain.kernel.common.time import ensure_utc
@@ -26,6 +27,8 @@ from brain.platform.db.models.scheduler import (
     SchedulerRun,
     SchedulerRunStep,
 )
+from brain.systems.cortex.thread_links import public_app_base_url
+from brain.systems.slack.client import slack_web_client_from_runtime
 from brain.app.scheduler.catalog import normalize_owner_mode
 from brain.app.scheduler.contracts import validate_scheduler_run_contract
 from brain.app.scheduler.planner import async_materialize_due_runs
@@ -380,6 +383,72 @@ def _retryable_failure_summary(
     return RUN_STATUS_SETTLED_FAILURE, retry_summary
 
 
+async def _resolve_scheduler_alert_channel(client: Any, configured: str) -> str:
+    channel = str(configured or "").strip()
+    if not channel.startswith("#"):
+        return channel
+
+    target_name = channel.removeprefix("#")
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    while True:
+        response = await client.conversations_list(
+            types="public_channel,private_channel",
+            limit=200,
+            cursor=cursor,
+            exclude_archived=True,
+        )
+        for candidate in response.get("channels") or []:
+            if not isinstance(candidate, dict):
+                continue
+            if str(candidate.get("name") or "") == target_name:
+                return str(candidate.get("id") or channel)
+        metadata = response.get("response_metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        next_cursor = str(metadata.get("next_cursor") or "").strip()
+        if not next_cursor or next_cursor in seen_cursors:
+            return channel
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+
+async def async_deliver_scheduler_failure_alert(
+    *,
+    job_key: str,
+    run_id: int,
+    consecutive_failure_count: int,
+    error_text: str,
+) -> None:
+    """Post one scheduler failure-threshold edge through Illo's Slack client."""
+    client = await slack_web_client_from_runtime(
+        requested_by="scheduler_failure_alert",
+        reason="Deliver a repeated scheduler job failure alert to the team.",
+    )
+    configured_channel = (
+        os.getenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "").strip()
+        or "#alerts"
+    )
+    channel = await _resolve_scheduler_alert_channel(client, configured_channel)
+    first_error_line = next(
+        (line.strip() for line in str(error_text or "").splitlines() if line.strip()),
+        "Unknown scheduler failure",
+    )
+    job_url = (
+        f"{public_app_base_url()}/api/system/scheduler"
+        f"?job_key={quote(job_key, safe='')}&run_id={run_id}"
+    )
+    await client.post_message(
+        channel=channel,
+        text=(
+            "Scheduler job repeated failure\n"
+            f"Job key: {job_key}\n"
+            f"Consecutive failures: {consecutive_failure_count}\n"
+            f"Error: {first_error_line}\n"
+            f"Job: <{job_url}|open scheduler state>"
+        ),
+    )
+
+
 async def _async_apply_failure_guard(
     session: AsyncSession,
     job: SchedulerJob,
@@ -410,6 +479,20 @@ async def _async_apply_failure_guard(
             guard["failure_signature"],
             error_text,
         )
+        try:
+            await async_deliver_scheduler_failure_alert(
+                job_key=job.job_key,
+                run_id=run.id,
+                consecutive_failure_count=guard["consecutive_failures"],
+                error_text=error_text,
+            )
+        except Exception:
+            logger.exception(
+                "Scheduler job repeated failure Slack delivery failed: "
+                "job_key=%s run_id=%s",
+                job.job_key,
+                run.id,
+            )
     await session.flush()
 
 

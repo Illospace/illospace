@@ -29,6 +29,18 @@ def nightly_heuristic_review_command() -> list[str]:
     )
 
 
+def nightly_meta_evolution_command() -> list[str]:
+    """Run async meta-evolution from a synchronous scheduler process."""
+    return _python_one_liner(
+        "import asyncio; "
+        "from brain.systems.feedback.meta_evolution import run_meta_evolution; "
+        "stats = asyncio.run(run_meta_evolution()); "
+        "print(f'Insights: {stats[\"insights_total\"]}, "
+        "Regressions: {stats[\"regressions\"]}, "
+        "Adjustments: {len(stats[\"adjustments\"])}')"
+    )
+
+
 @dataclass(frozen=True)
 class StepSpec:
     step_key: str
@@ -134,19 +146,31 @@ NIGHTLY_STEP_REGISTRY: tuple[NightlyStepDefinition, ...] = (
     ),
     NightlyStepDefinition(
         step_key="meta_evolution",
-        command_factory=lambda _target_date: (
-            _python_one_liner(
-                "from brain.systems.feedback.meta_evolution import run_meta_evolution; "
-                "stats = run_meta_evolution(); "
-                "print(f'Insights: {stats[\"insights_total\"]}, Regressions: {stats[\"regressions\"]}, Adjustments: {len(stats[\"adjustments\"])}')"
-            ),
-        ),
+        command_factory=lambda _target_date: (nightly_meta_evolution_command(),),
         description="Meta-evolution",
         budget_hint={
             "work_type": "context_policy_eval",
             "estimated_tokens": 8_000,
         },
         program_steps=(NightlyProgramStep("meta_evolution"),),
+    ),
+    NightlyStepDefinition(
+        step_key="memory_health",
+        command_factory=lambda target_date: (
+            (
+                "python3",
+                "-m",
+                "brain.jobs.pipelines.nightly_memory_health",
+                "--date",
+                target_date.isoformat(),
+            ),
+        ),
+        description="Reconstructive memory health inventory",
+        budget_hint={
+            "work_type": "memory_conflict_resolution",
+            "estimated_tokens": 500,
+        },
+        program_steps=(NightlyProgramStep("memory_health"),),
     ),
     # Issue #424: this StepSpec existed only in the test-only get_step_specs() path
     # and has never been reachable from the production scheduler executor. Keep it
