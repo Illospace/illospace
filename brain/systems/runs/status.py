@@ -50,11 +50,42 @@ assert PROCESSING_RUN_STATUS_VALUES == tuple(
 assert RUN_FAILED_STATUS_VALUE == RunStatus.FAILED.value
 
 ALLOWED_RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
-    RunStatus.QUEUED: frozenset({RunStatus.STARTING, RunStatus.CANCELED, RunStatus.EXPIRED, RunStatus.FAILED}),
-    RunStatus.STARTING: frozenset({RunStatus.RUNNING, RunStatus.FAILED, RunStatus.CANCELED, RunStatus.EXPIRED}),
-    RunStatus.RUNNING: frozenset({RunStatus.PAUSED, RunStatus.VERIFYING, RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELED, RunStatus.EXPIRED}),
-    RunStatus.PAUSED: frozenset({RunStatus.RUNNING, RunStatus.FAILED, RunStatus.CANCELED, RunStatus.EXPIRED}),
-    RunStatus.VERIFYING: frozenset({RunStatus.RUNNING, RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELED, RunStatus.EXPIRED}),
+    RunStatus.QUEUED: frozenset({
+        RunStatus.STARTING,
+        RunStatus.CANCELED,
+        RunStatus.EXPIRED,
+        RunStatus.FAILED,
+    }),
+    RunStatus.STARTING: frozenset({
+        RunStatus.QUEUED,
+        RunStatus.RUNNING,
+        RunStatus.FAILED,
+        RunStatus.CANCELED,
+        RunStatus.EXPIRED,
+    }),
+    RunStatus.RUNNING: frozenset({
+        RunStatus.QUEUED,
+        RunStatus.PAUSED,
+        RunStatus.VERIFYING,
+        RunStatus.COMPLETED,
+        RunStatus.FAILED,
+        RunStatus.CANCELED,
+        RunStatus.EXPIRED,
+    }),
+    RunStatus.PAUSED: frozenset({
+        RunStatus.RUNNING,
+        RunStatus.FAILED,
+        RunStatus.CANCELED,
+        RunStatus.EXPIRED,
+    }),
+    RunStatus.VERIFYING: frozenset({
+        RunStatus.QUEUED,
+        RunStatus.RUNNING,
+        RunStatus.COMPLETED,
+        RunStatus.FAILED,
+        RunStatus.CANCELED,
+        RunStatus.EXPIRED,
+    }),
     RunStatus.COMPLETED: frozenset(),
     RunStatus.FAILED: frozenset(),
     RunStatus.CANCELED: frozenset(),
@@ -76,13 +107,26 @@ def coerce_run_status(value: str | RunStatus | None, *, default: RunStatus = Run
     return default
 
 
-def ensure_run_transition(from_status: str | RunStatus | None, to_status: str | RunStatus) -> tuple[RunStatus, RunStatus]:
+def ensure_run_transition(
+    from_status: str | RunStatus | None,
+    to_status: str | RunStatus,
+    *,
+    allow_interrupted_requeue: bool = False,
+) -> tuple[RunStatus, RunStatus]:
     current = coerce_run_status(from_status)
     target = coerce_run_status(to_status)
     if target == current:
         return current, target
     if target not in ALLOWED_RUN_TRANSITIONS[current]:
         raise RunTransitionError(f"Invalid run transition {current.value!r} -> {target.value!r}")
+    if (
+        current in PROCESSING_RUN_STATUSES
+        and target == RunStatus.QUEUED
+        and not allow_interrupted_requeue
+    ):
+        raise RunTransitionError(
+            f"Invalid run transition {current.value!r} -> {target.value!r} outside interrupted requeue"
+        )
     return current, target
 
 

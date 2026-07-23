@@ -18,7 +18,12 @@ from sqlalchemy.schema import CreateTable
 
 from brain.systems.runs.domain import AgentRunRequest as _AgentRunRequest, RunRecipe
 from brain.systems.runs.engine import AsyncAgentRunEngine, RunRecipeResult, RunRuntime, StaticAnswerRecipe
-from brain.systems.runs.status import RunStatus
+from brain.systems.runs.status import (
+    ALLOWED_RUN_TRANSITIONS,
+    RunStatus,
+    RunTransitionError,
+    ensure_run_transition,
+)
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 
@@ -71,6 +76,21 @@ class _SessionUoW:
         if exc_type is None:
             await self.session.flush()
         return False
+
+
+@pytest.mark.parametrize(
+    "from_status",
+    (RunStatus.STARTING, RunStatus.RUNNING, RunStatus.VERIFYING),
+)
+def test_interrupted_requeue_transition_is_declared_but_scoped(from_status: RunStatus):
+    assert RunStatus.QUEUED in ALLOWED_RUN_TRANSITIONS[from_status]
+    assert ensure_run_transition(
+        from_status,
+        RunStatus.QUEUED,
+        allow_interrupted_requeue=True,
+    ) == (from_status, RunStatus.QUEUED)
+    with pytest.raises(RunTransitionError, match="outside interrupted requeue"):
+        ensure_run_transition(from_status, RunStatus.QUEUED)
 
 
 async def test_restart_resume_skips_completed_steps_from_persisted_cursor(session_factory):
@@ -1344,7 +1364,7 @@ async def test_cancel_runs_for_idea_records_run_canceled_event(session_factory):
     assert events.count("run.canceled") == 1
 
 
-async def test_stale_active_run_reaper_fails_abandoned_runs(session_factory):
+async def test_stale_active_run_reaper_interrupts_requeues_and_retries_abandoned_runs(session_factory):
     from brain.systems.runs.cortex import runner
 
     session = session_factory()
@@ -1358,21 +1378,20 @@ async def test_stale_active_run_reaper_fails_abandoned_runs(session_factory):
     assert row is not None
     row.created_at = old
     row.started_at = old
+    row.paused_at = old
     row.updated_at = old
     row.execution_token = "abandoned-owner"
     row.execution_attempt = 3
-    row.metadata_ = {"runner_heartbeat": {"at": old.isoformat(), "reason": "runner_running"}}
+    row.metadata_ = {
+        "failure": {"category": "runner_failed"},
+        "runner_heartbeat": {"at": old.isoformat(), "reason": "runner_running"},
+    }
     for event in (await session.scalars(select(AgentRunEventRow).where(AgentRunEventRow.run_id == run.id))).all():
         event.created_at = old
     await session.commit()
 
-    live_events: list[tuple[str, dict]] = []
     with (
         patch("brain.systems.runs.cortex.runner.UnitOfWork", return_value=_SessionUoW(session)),
-        patch(
-            "brain.systems.runs.cortex.runner.publish_live_safe",
-            lambda event, payload: live_events.append((event, payload)),
-        ),
         patch("brain.systems.runs.cortex.runner.publish_safe"),
         patch("brain.systems.runs.cortex.runner._settle_idea_for_terminal_root_run_async", return_value=None),
     ):
@@ -1381,19 +1400,43 @@ async def test_stale_active_run_reaper_fails_abandoned_runs(session_factory):
     row = await session.get(AgentRunRow, run.id)
     assert count == 1
     assert row is not None
-    assert row.status == RunStatus.FAILED.value
+    assert row.status == RunStatus.QUEUED.value
     assert row.execution_token is None
-    failed_events = [
+    assert row.paused_at is None
+    assert "failure" not in row.metadata_
+    candidate_events = (await session.scalars(
+        select(AgentRunEventRow).where(
+            AgentRunEventRow.run_id == run.id,
+            AgentRunEventRow.event_type.in_(
+                ("run.interrupted", "run.status_changed", "run.requeued", "run.failed")
+            ),
+        )
+        .order_by(AgentRunEventRow.sequence_no.asc())
+    )).all()
+    interruption_events = [
         event
-        for event in (await session.scalars(
-            select(AgentRunEventRow)
-            .where(AgentRunEventRow.run_id == run.id, AgentRunEventRow.event_type == "run.failed")
-            .order_by(AgentRunEventRow.sequence_no.asc())
-        )).all()
+        for event in candidate_events
+        if event.event_type != "run.status_changed"
+        or event.payload.get("to_status") == RunStatus.QUEUED.value
     ]
-    assert len(failed_events) == 1
-    assert failed_events[0].payload["reason"] == "runner_heartbeat_stale"
-    assert live_events and live_events[-1][0] == "run_completed"
+    assert [event.event_type for event in interruption_events] == [
+        "run.interrupted",
+        "run.status_changed",
+        "run.requeued",
+    ]
+    assert interruption_events[0].payload["reason"] == "runner_heartbeat_stale"
+    assert interruption_events[0].payload["requeued"] is True
+    assert interruption_events[1].payload == {
+        "from_status": RunStatus.RUNNING.value,
+        "to_status": RunStatus.QUEUED.value,
+        "reason": "runner_heartbeat_stale",
+    }
+    assert row.metadata_["interruption"]["from_status"] == RunStatus.RUNNING.value
+
+    retried = await AsyncAgentRunStore(session).claim_next()
+    assert retried is not None
+    assert retried.id == run.id
+    assert retried.status == RunStatus.STARTING
 
 
 async def test_stale_active_run_reaper_uses_recent_events_as_liveness(session_factory):

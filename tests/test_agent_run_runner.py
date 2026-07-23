@@ -129,11 +129,11 @@ def test_stop_runner_waits_for_in_flight_runs():
 
     runner.stop_runner()
     assert runner.runner_in_flight_count() == 0
-    runner._increment_in_flight_runs()
+    runner._increment_in_flight_runs(2329)
 
     def finish_run():
         time.sleep(0.2)
-        runner._decrement_in_flight_runs()
+        runner._decrement_in_flight_runs(2329)
 
     finisher = threading.Thread(target=finish_run)
     finisher.start()
@@ -146,6 +146,44 @@ def test_stop_runner_waits_for_in_flight_runs():
         assert 0.15 <= elapsed < 2
     finally:
         finisher.join(timeout=1)
+        runner._stop_event.clear()
+
+
+def test_in_flight_count_is_derived_from_unique_run_ids():
+    from brain.systems.runs.cortex import runner
+
+    runner.stop_runner()
+    runner._increment_in_flight_runs(2328)
+    runner._increment_in_flight_runs(2328)
+    try:
+        assert runner.runner_in_flight_ids() == (2328,)
+        assert runner.runner_in_flight_count() == 1
+    finally:
+        runner._decrement_in_flight_runs(2328)
+        runner._stop_event.clear()
+
+
+def test_stop_runner_requeues_named_runs_when_shutdown_drain_times_out(monkeypatch, caplog):
+    from brain.systems.runs.cortex import runner
+
+    runner.stop_runner()
+    requeue_calls: list[tuple[tuple[int, ...], str]] = []
+
+    def interrupt(run_ids, *, reason):
+        requeue_calls.append((run_ids, reason))
+        return run_ids
+
+    monkeypatch.setattr(runner, "_interrupt_in_flight_runs", interrupt)
+    caplog.set_level(logging.WARNING, logger=runner.__name__)
+    runner._increment_in_flight_runs(2330)
+    try:
+        runner.stop_runner(drain_timeout_seconds=0)
+
+        assert requeue_calls == [((2330,), "worker_shutdown_drain_timeout")]
+        assert "affected run ids: [2330]" in caplog.text
+        assert "interrupted and requeued run ids: [2330]" in caplog.text
+    finally:
+        runner._decrement_in_flight_runs(2330)
         runner._stop_event.clear()
 
 
@@ -198,10 +236,12 @@ async def test_run_queued_once_tracks_claims_before_uow_exit(monkeypatch):
     try:
         await asyncio.wait_for(uow_exit_started.wait(), timeout=1)
         assert runner.runner_in_flight_count() == 1
+        assert runner.runner_in_flight_ids() == (42,)
 
         release_uow_exit.set()
         assert await asyncio.wait_for(task, timeout=1) == 1
         assert runner.runner_in_flight_count() == 0
+        assert runner.runner_in_flight_ids() == ()
     finally:
         release_uow_exit.set()
         if not task.done():

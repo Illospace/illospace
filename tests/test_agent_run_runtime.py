@@ -4587,6 +4587,65 @@ async def test_runner_reports_slack_origin_final_answer_back_to_slack(monkeypatc
     ]
 
 
+async def test_runner_reports_interruption_run_id_and_requeue_status_to_slack(monkeypatch):
+    from brain.systems.runs.cortex import runner
+    from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
+
+    run = SimpleNamespace(
+        id=2330,
+        parent_run_id=None,
+        thread_id="slack:T789:C456:1716900000.000100",
+        status="queued",
+        org_id="org-1",
+        user_id="user-1",
+        target_ref={
+            "kind": "slack_message",
+            "slack_trigger": {
+                "channel_id": "C456",
+                "channel_type": "channel",
+                "message_ts": "1716900000.000100",
+                "response_target": {"channel_id": "C456", "thread_ts": None},
+            },
+        },
+        metadata_={"final_answer_target_surface": "slack"},
+    )
+    calls = []
+
+    class FakeSlackClient:
+        async def post_message(self, **kwargs):
+            calls.append(kwargs)
+            return {"ok": True, "channel": kwargs["channel"], "ts": "1716900400.000500"}
+
+        async def set_assistant_status(self, **_kwargs):
+            return {"ok": True}
+
+    async def fake_client_for_run(run_arg):
+        assert run_arg is run
+        return FakeSlackClient()
+
+    monkeypatch.setattr(runner, "_slack_client_for_run", fake_client_for_run)
+
+    result = await runner._settle_slack_interrupted_run_async(
+        object(),
+        run,
+        interrupted_at=datetime(2026, 7, 22, 17, 55, tzinfo=timezone.utc),
+        requeued=True,
+    )
+
+    assert result["surface"] == "slack"
+    assert calls == [
+        {
+            "channel": "C456",
+            "text": (
+                "I was interrupted by a system restart at 17:55 UTC (run 2330); "
+                "I've re-queued it and will reply here when it finishes."
+            ),
+            "thread_ts": None,
+        }
+    ]
+    assert DEFAULT_FAILED_RUN_MESSAGE not in calls[0]["text"]
+
+
 async def test_runner_does_not_override_model_authored_slack_reply(monkeypatch):
     from brain.systems.runs.cortex import runner
 

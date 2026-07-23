@@ -26,6 +26,7 @@ from brain.systems.runs.events import activity_event, run_event
 from brain.systems.runs.failures import (
     coerce_failure_category,
     failure_category_for_error,
+    interrupted_run_message,
     public_run_failure,
     safe_terminal_run_message,
 )
@@ -72,7 +73,7 @@ def _run_cancel_token(run_id: int):
 _stop_event = threading.Event()
 _runner_lock = threading.Lock()
 _runner_in_flight_lock = threading.Lock()
-_in_flight_runs = 0
+_in_flight_run_ids: set[int] = set()
 _runner_supervisor_thread: threading.Thread | None = None
 _runner_slots: list[tuple[asyncio.Task[None], asyncio.Event]] = []
 _runner_thread_index = 0
@@ -131,21 +132,24 @@ def _active_runner_count() -> int:
         return sum(1 for task, stop_event in _runner_slots if not task.done() and not stop_event.is_set())
 
 
-def _increment_in_flight_runs() -> None:
-    global _in_flight_runs
+def _increment_in_flight_runs(run_id: int) -> None:
     with _runner_in_flight_lock:
-        _in_flight_runs += 1
+        _in_flight_run_ids.add(int(run_id))
 
 
-def _decrement_in_flight_runs() -> None:
-    global _in_flight_runs
+def _decrement_in_flight_runs(run_id: int) -> None:
     with _runner_in_flight_lock:
-        _in_flight_runs -= 1
+        _in_flight_run_ids.discard(int(run_id))
 
 
 def runner_in_flight_count() -> int:
     with _runner_in_flight_lock:
-        return _in_flight_runs
+        return len(_in_flight_run_ids)
+
+
+def runner_in_flight_ids() -> tuple[int, ...]:
+    with _runner_in_flight_lock:
+        return tuple(sorted(_in_flight_run_ids))
 
 
 def runner_health_snapshot() -> dict[str, int | bool]:
@@ -768,32 +772,13 @@ async def _record_slack_thread_mute(
     )
 
 
-async def _settle_slack_origin_run_async(
+async def _post_slack_run_message_async(
     session,
+    *,
     run: AgentRunRow,
+    text: str,
+    artifact_id: int | None = None,
 ) -> dict[str, Any] | None:
-    if not _run_is_slack_origin(run):
-        return None
-    if _run_is_headless(run) and run.parent_run_id is not None:
-        return None
-    run_status = coerce_run_status(getattr(run, "status", None), default=RunStatus.QUEUED)
-    if run_status not in TERMINAL_RUN_STATUSES:
-        return None
-    artifact_id = None
-    if run_status == RunStatus.COMPLETED:
-        final_answer, artifact_id = await _latest_final_answer_artifact(session, run=run)
-        if not final_answer or _run_is_headless(run):
-            return None
-        if await _slack_visible_action_already_recorded(session, run=run):
-            return None
-    else:
-        category = coerce_failure_category(
-            await _terminal_run_failure_category(session, run=run)
-        )
-        final_answer = safe_terminal_run_message(run_status, category)
-        if not final_answer:
-            return None
-
     target = _slack_response_target(run)
     channel_id = target["channel_id"]
     if not channel_id:
@@ -829,12 +814,12 @@ async def _settle_slack_origin_run_async(
                 }
         response = await client.post_message(
             channel=channel_id,
-            text=final_answer,
+            text=text,
             thread_ts=target["thread_ts"],
         )
         await _clear_slack_processing_status(client, target["trigger"])
     except Exception as exc:
-        logger.info("slack_final_answer_settlement_failed: %s", exc, extra={"run_id": int(run.id)})
+        logger.info("slack_run_message_failed: %s", exc, extra={"run_id": int(run.id)})
         return None
     return {
         "surface": _SLACK_SURFACE,
@@ -844,6 +829,63 @@ async def _settle_slack_origin_run_async(
         "thread_ts": target["thread_ts"],
         "slack": response,
     }
+
+
+async def _settle_slack_interrupted_run_async(
+    session,
+    run: AgentRunRow,
+    *,
+    interrupted_at: datetime | str | None,
+    requeued: bool,
+) -> dict[str, Any] | None:
+    if not _run_is_slack_origin(run):
+        return None
+    if _run_is_headless(run) and run.parent_run_id is not None:
+        return None
+    message = interrupted_run_message(
+        int(run.id),
+        interrupted_at=interrupted_at,
+        requeued=requeued,
+    )
+    return await _post_slack_run_message_async(
+        session,
+        run=run,
+        text=message,
+    )
+
+
+async def _settle_slack_origin_run_async(
+    session,
+    run: AgentRunRow,
+) -> dict[str, Any] | None:
+    if not _run_is_slack_origin(run):
+        return None
+    if _run_is_headless(run) and run.parent_run_id is not None:
+        return None
+    run_status = coerce_run_status(getattr(run, "status", None), default=RunStatus.QUEUED)
+    if run_status not in TERMINAL_RUN_STATUSES:
+        return None
+    artifact_id = None
+    if run_status == RunStatus.COMPLETED:
+        final_answer, artifact_id = await _latest_final_answer_artifact(session, run=run)
+        if not final_answer or _run_is_headless(run):
+            return None
+        if await _slack_visible_action_already_recorded(session, run=run):
+            return None
+    else:
+        category = coerce_failure_category(
+            await _terminal_run_failure_category(session, run=run)
+        )
+        final_answer = safe_terminal_run_message(run_status, category)
+        if not final_answer:
+            return None
+
+    return await _post_slack_run_message_async(
+        session,
+        run=run,
+        text=final_answer,
+        artifact_id=artifact_id,
+    )
 
 
 async def _settle_terminal_root_run_async(session, run_id: int) -> dict[str, Any] | None:
@@ -1241,6 +1283,63 @@ def _run_liveness_at(
     return max(live) if live else None
 
 
+async def _notify_interrupted_run_async(run_id: int) -> dict[str, Any] | None:
+    async with _unit_of_work_factory()() as uow:
+        run = await uow.session.get(AgentRunRow, int(run_id))
+        if run is None:
+            return None
+        metadata = _run_metadata(run)
+        interruption = metadata.get("interruption")
+        interruption = dict(interruption) if isinstance(interruption, dict) else {}
+        return await _settle_slack_interrupted_run_async(
+            uow.session,
+            run,
+            interrupted_at=interruption.get("interrupted_at"),
+            requeued=bool(interruption.get("requeued")),
+        )
+
+
+async def interrupt_and_requeue_run_ids(
+    run_ids: list[int] | tuple[int, ...],
+    *,
+    reason: str,
+    interrupted_at: datetime | None = None,
+) -> tuple[int, ...]:
+    """Durably fence worker-owned attempts, requeue them, and notify Slack."""
+
+    interrupted_at = interrupted_at or datetime.now(timezone.utc)
+    changed_ids: list[int] = []
+    async with _unit_of_work_factory()() as uow:
+        store = AsyncAgentRunStore(uow.session)
+        for run_id in sorted({int(value) for value in run_ids}):
+            _run, changed = await store.interrupt_and_requeue(
+                run_id,
+                reason=reason,
+                interrupted_at=interrupted_at,
+            )
+            if changed:
+                changed_ids.append(run_id)
+
+    for run_id in changed_ids:
+        await _notify_interrupted_run_async(run_id)
+    return tuple(changed_ids)
+
+
+def _interrupt_in_flight_runs(
+    run_ids: tuple[int, ...],
+    *,
+    reason: str,
+) -> tuple[int, ...]:
+    if not run_ids:
+        return ()
+    return asyncio.run(
+        interrupt_and_requeue_run_ids(
+            run_ids,
+            reason=reason,
+        )
+    )
+
+
 async def _reap_stale_candidate(
     session,
     store: AsyncAgentRunStore,
@@ -1249,7 +1348,7 @@ async def _reap_stale_candidate(
     root_run_id: int,
     cutoff: datetime,
     stale_after_seconds: float,
-) -> tuple[bool, dict[str, Any] | None]:
+) -> tuple[bool, int | None]:
     candidate_tx = await session.begin_nested()
     try:
         locked = await store.lock_run_liveness(int(row.id), root_run_id)
@@ -1279,7 +1378,6 @@ async def _reap_stale_candidate(
         heartbeat = metadata.get("runner_heartbeat")
         heartbeat = dict(heartbeat) if isinstance(heartbeat, dict) else {}
         payload = {
-            "error": "runner heartbeat stale",
             "reason": "runner_heartbeat_stale",
             "stale_after_seconds": int(stale_after_seconds),
             "last_heartbeat_at": heartbeat.get("at"),
@@ -1287,28 +1385,16 @@ async def _reap_stale_candidate(
             "last_liveness_at": last_liveness_at.isoformat() if last_liveness_at else None,
             "last_run_update_at": row.updated_at.isoformat() if row.updated_at else None,
         }
-        _failed_run, changed = await store.set_status_with_result(
+        _requeued_run, changed = await store.interrupt_and_requeue(
             int(row.id),
-            RunStatus.FAILED,
             reason="runner_heartbeat_stale",
-            expected_updated_at=row.updated_at,
-            expected_execution_token=row.execution_token,
-            expected_execution_attempt=int(row.execution_attempt or 0),
-            rollback_on_conflict=False,
+            details=payload,
         )
         if not changed:
             await candidate_tx.rollback()
             return False, None
-        event = run_event(int(row.id), "run.failed", payload, root_run_id=row.root_run_id)
-        event_row = await store.append_event(event)
-        await _project_live_event_async(
-            session,
-            event.event_type,
-            _event_stream_payload(event, event_row, row),
-        )
-        status_payload = await _settle_terminal_root_run_async(session, int(row.id))
         await candidate_tx.commit()
-        return True, status_payload
+        return True, int(row.id)
     except BaseException:
         if candidate_tx.is_active:
             await candidate_tx.rollback()
@@ -1324,7 +1410,7 @@ async def reap_stale_active_runs(
     now = now or datetime.now(timezone.utc)
     stale_after_seconds = stale_after_seconds if stale_after_seconds is not None else _stale_run_seconds()
     cutoff = now - timedelta(seconds=float(stale_after_seconds))
-    status_payloads: list[dict[str, Any]] = []
+    interrupted_run_ids: list[int] = []
     reaped = 0
 
     async with _unit_of_work_factory()() as uow:
@@ -1353,7 +1439,7 @@ async def reap_stale_active_runs(
             )
             if last_liveness_at is not None and last_liveness_at > cutoff:
                 continue
-            candidate_reaped, status_payload = await _reap_stale_candidate(
+            candidate_reaped, interrupted_run_id = await _reap_stale_candidate(
                 uow.session,
                 store,
                 row,
@@ -1363,14 +1449,21 @@ async def reap_stale_active_runs(
             )
             if not candidate_reaped:
                 continue
-            if status_payload:
-                status_payloads.append(status_payload)
+            if interrupted_run_id is not None:
+                interrupted_run_ids.append(interrupted_run_id)
             reaped += 1
 
-    for payload in status_payloads:
-        publish_safe("status_change", payload)
+    for run_id in interrupted_run_ids:
+        await _notify_interrupted_run_async(run_id)
     if reaped:
-        logger.warning("agent_run_stale_reaped", extra={"count": reaped, "stale_after_seconds": stale_after_seconds})
+        logger.warning(
+            "agent_run_stale_interrupted_requeued",
+            extra={
+                "count": reaped,
+                "run_ids": interrupted_run_ids,
+                "stale_after_seconds": stale_after_seconds,
+            },
+        )
     return reaped
 
 
@@ -1629,7 +1722,7 @@ async def _run_queued_once_async(*, limit: int = 1) -> int:
         async with _unit_of_work_factory()() as uow:
             ids = await AsyncAgentRunStore(uow.session).claim_next_run_ids(limit=limit)
             for _run_id in ids:
-                _increment_in_flight_runs()
+                _increment_in_flight_runs(int(_run_id))
                 remaining_in_flight += 1
 
         for run_id in ids:
@@ -1637,11 +1730,12 @@ async def _run_queued_once_async(*, limit: int = 1) -> int:
                 if await _process_claimed_run_async(int(run_id)):
                     processed += 1
             finally:
-                _decrement_in_flight_runs()
+                _decrement_in_flight_runs(int(run_id))
                 remaining_in_flight -= 1
     finally:
-        for _ in range(remaining_in_flight):
-            _decrement_in_flight_runs()
+        if remaining_in_flight:
+            for run_id in ids[-remaining_in_flight:]:
+                _decrement_in_flight_runs(int(run_id))
     return processed
 
 
@@ -1810,6 +1904,7 @@ def _runner_teardown_timeout_seconds() -> float:
 def stop_runner(*, drain_timeout_seconds: float | None = 2.0) -> None:
     global _runner_supervisor_thread
     request_runner_stop()
+    timed_out_run_ids: tuple[int, ...] = ()
 
     deadline = None
     if drain_timeout_seconds is not None:
@@ -1821,9 +1916,11 @@ def stop_runner(*, drain_timeout_seconds: float | None = 2.0) -> None:
             if remaining <= 0:
                 in_flight_runs = runner_in_flight_count()
                 if in_flight_runs > 0:
+                    timed_out_run_ids = runner_in_flight_ids()
                     logger.warning(
-                        "runner drain timed out with %s in-flight run(s); proceeding to teardown",
+                        "runner drain timed out with %s in-flight run(s); affected run ids: %s",
                         in_flight_runs,
+                        list(timed_out_run_ids) or "unknown",
                     )
                 break
             time.sleep(min(0.2, remaining))
@@ -1842,6 +1939,24 @@ def stop_runner(*, drain_timeout_seconds: float | None = 2.0) -> None:
         )
     elif _runner_supervisor_thread is supervisor_thread:
         _runner_supervisor_thread = None
+
+    if timed_out_run_ids:
+        try:
+            requeued_run_ids = _interrupt_in_flight_runs(
+                timed_out_run_ids,
+                reason="worker_shutdown_drain_timeout",
+            )
+        except Exception:
+            logger.exception(
+                "runner shutdown could not requeue affected run ids: %s",
+                list(timed_out_run_ids),
+            )
+        else:
+            if requeued_run_ids:
+                logger.warning(
+                    "runner shutdown interrupted and requeued run ids: %s",
+                    list(requeued_run_ids),
+                )
 
 
 async def queue_status_async(*, consumer_running: bool | None = None, org_id: str | None = None) -> dict[str, Any]:
@@ -1874,6 +1989,7 @@ __all__ = [
     "request_runner_stop",
     "runner_health_snapshot",
     "runner_in_flight_count",
+    "runner_in_flight_ids",
     "run_queued_once",
     "start_runner",
     "stop_runner",
