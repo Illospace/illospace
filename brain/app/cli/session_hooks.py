@@ -9,12 +9,22 @@ import os
 import sys
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select, text
+from sqlalchemy import exists, func, or_, select, text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
 from brain.app.cli.memory import add_memory
-from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
+from brain.platform.db.models.reconstructive_memory import (
+    MemoryAssertionNode,
+    MemoryEdgeNode,
+    MemoryNode,
+    MemorySource,
+    MemorySpan,
+)
+from brain.platform.db.repositories.memory_visibility import (
+    MemoryVisibilityContext,
+    memory_visibility_predicate,
+)
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.memory.retrieval_feedback import apply_retrieval_feedback
 from brain.systems.reconstructive_memory.controller import reconstruct_memory
@@ -37,20 +47,45 @@ async def get_cross_channel_context(
     org_id: str | None = None,
     allow_global: bool = False,
 ) -> list[dict]:
-    del current_session, allow_global
     cutoff = datetime.now() - timedelta(hours=hours)
+    visibility_context = MemoryVisibilityContext(
+        user_id=user_id,
+        org_id=org_id,
+        allow_global=allow_global,
+    )
     async with UnitOfWork() as uow:
         stmt = (
             select(MemoryNode)
             .where(MemoryNode.archived_at.is_(None))
             .where(MemoryNode.created_at >= cutoff)
+            .where(memory_visibility_predicate(MemoryNode, visibility_context))
             .order_by(MemoryNode.confidence.desc(), MemoryNode.created_at.desc())
             .limit(limit)
         )
-        if org_id:
-            stmt = stmt.where(MemoryNode.org_id == org_id)
-        elif user_id:
-            stmt = stmt.where(MemoryNode.user_id == user_id)
+        if current_session:
+            session_source_ref = f"session:{current_session}"
+            sourced_from_current_session = (
+                select(MemoryAssertionNode.id)
+                .join(
+                    MemorySpan,
+                    MemoryAssertionNode.source_span_ids.op("@>")(
+                        func.jsonb_build_array(MemorySpan.id)
+                    ),
+                )
+                .join(MemorySource, MemorySource.id == MemorySpan.source_id)
+                .where(MemoryAssertionNode.node_id == MemoryNode.id)
+                .where(
+                    or_(
+                        MemorySource.source_ref == current_session,
+                        MemorySource.source_ref == session_source_ref,
+                        MemorySource.source_ref.endswith(
+                            f";{session_source_ref}",
+                            autoescape=True,
+                        ),
+                    )
+                )
+            )
+            stmt = stmt.where(~exists(sourced_from_current_session))
         rows = (await uow.session.scalars(stmt)).all()
     return [
         {
