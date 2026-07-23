@@ -142,7 +142,10 @@ async def async_materialize_due_runs(
         if policy not in {"record", "skip", "catch_up"}:
             policy = "record"
 
-        if policy == "skip":
+        # "skip" drops MISSED windows; it must not drop the window that is firing
+        # now, or a skip job never materialises a run at all.
+        current_minute = now.replace(second=0, microsecond=0)
+        if policy == "skip" and scheduled_for < current_minute:
             job.next_run_at = next_run_after(job.cron_expr, job.timezone, now)
             continue
 
