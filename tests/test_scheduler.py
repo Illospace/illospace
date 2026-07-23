@@ -380,6 +380,26 @@ async def test_due_run_materialization_skip_misfire_drops_backlog(session):
     assert job.next_run_at.isoformat().startswith("2026-04-24T03:00:00")
 
 
+async def test_due_run_materialization_skip_runs_current_cron_minute(session):
+    """A skip job must still run the window that is firing right now."""
+    job = _make_scheduler_job(
+        misfire_policy="skip",
+        next_run_at=datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc),
+    )
+    session.add(job)
+    await session.flush()
+
+    created = await async_materialize_due_runs(
+        session,
+        now=datetime(2026, 4, 21, 3, 0, 30, tzinfo=timezone.utc),
+    )
+    await session.refresh(job)
+
+    assert len(created) == 1
+    assert created[0].scheduled_for.isoformat().startswith("2026-04-21T03:00:00")
+    assert job.next_run_at.isoformat().startswith("2026-04-22T03:00:00")
+
+
 async def test_due_run_materialization_catch_up_records_missed_fires(session):
     job = _make_scheduler_job(
         misfire_policy="catch_up",
