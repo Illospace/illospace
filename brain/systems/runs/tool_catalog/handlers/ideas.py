@@ -402,6 +402,23 @@ async def _validated_create_owner_id(
     return owner_id
 
 
+async def _validated_parent_idea_id(
+    *,
+    session,
+    parent_id: str | None,
+    actor: dict[str, Any],
+) -> str | None:
+    if parent_id is None:
+        return None
+    try:
+        await _require_idea_for_actor(session, parent_id, actor)
+    except HTTPException as exc:
+        raise ToolValidationError(
+            "parent_id must be an existing idea id or omitted"
+        ) from exc
+    return parent_id
+
+
 async def _apply_idea_updates(
     idea,
     *,
@@ -504,6 +521,23 @@ async def _handle_manage_idea(
     event: tuple[str, dict[str, Any]] | None = None
 
     try:
+        parent_id = normalize_optional_uuid(
+            parent_id,
+            field_name="parent_id",
+            error_message="parent_id must be an existing idea id or omitted",
+        )
+        user_id = normalize_optional_uuid(
+            user_id,
+            field_name="user_id",
+            error_message="user_id must be an existing user id or omitted",
+        )
+        orbit_anchor_id = normalize_optional_uuid(
+            orbit_anchor_id,
+            field_name="orbit_anchor_id",
+            error_message="orbit_anchor_id must be an existing user or pin id or omitted",
+        )
+        origin_ref = normalize_optional_identifier(origin_ref)
+
         async with UnitOfWork() as uow:
             if normalized_action == "list":
                 ideas = await _list_ideas(
@@ -529,6 +563,11 @@ async def _handle_manage_idea(
                 if should_start_run is None:
                     should_start_run = requested_status in RUN_ADMISSION_CREATE_STATUSES
                 initial_status = "emerged" if should_start_run or requested_status in RUN_ADMISSION_CREATE_STATUSES else requested_status
+                parent_id = await _validated_parent_idea_id(
+                    session=uow.session,
+                    parent_id=parent_id,
+                    actor=actor,
+                )
                 owner_user_id = await _validated_create_owner_id(
                     session=uow.session,
                     requested_owner_id=user_id,
@@ -714,11 +753,17 @@ async def _handle_manage_idea(
         if event is not None:
             publish_safe(event[0], event[1])
         return json.dumps(result, default=str)
+    except ToolValidationError as exc:
+        return json.dumps(tool_error_payload(exc))
     except HTTPException as exc:
-        return json.dumps({"error": exc.detail, "status_code": exc.status_code})
+        return json.dumps({
+            **tool_error_payload(exc),
+            "error": str(exc.detail),
+            "status_code": exc.status_code,
+        })
     except Exception as exc:
         logger.exception("manage_idea failed: %s", exc)
-        return json.dumps({"error": str(exc)})
+        return json.dumps(tool_error_payload(exc))
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
