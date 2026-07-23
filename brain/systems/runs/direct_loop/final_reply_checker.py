@@ -103,6 +103,38 @@ _TRACKER_ARTIFACT_RE = re.compile(
     r"\b(?:tracker\s+(?:record|mirror)|linked\s+(?:tracker\s+)?record|domain\s+record)\b",
     re.IGNORECASE,
 )
+_STATUS_IN_PROGRESS_RE = re.compile(
+    r"\b(?:in progress|still (?:running|working|underway|ongoing)|"
+    r"not (?:done|complete|completed|finished)|not done yet)\b",
+    re.IGNORECASE,
+)
+_UNRESOLVED_RE = re.compile(
+    r"\b(?:unresolved|outstanding|pending|missing|not (?:created|opened|filed|done)|"
+    r"has not been (?:created|opened|filed|done)|hasn't been (?:created|opened|filed|done)|"
+    r"still (?:needed|missing|outstanding|pending))\b",
+    re.IGNORECASE,
+)
+_FAILURE_ACK_RE = re.compile(
+    r"\b(?:fail(?:ed|ing|ure)?|error|could not|couldn't|unable|stopped retrying|"
+    r"timed out|timeout|blocked)\b",
+    re.IGNORECASE,
+)
+_GITHUB_REF_RE = re.compile(
+    r"(?:https?://github\.com/[^\s)]+/(?:issues|pull)/(?P<url_number>\d+)|"
+    r"\bgithub\s+(?:issue|ticket)\s+#?(?P<label_number>\d+)\b)",
+    re.IGNORECASE,
+)
+_RECORD_WORD_RE = re.compile(r"\b(?:record|domain|tracker)\b", re.IGNORECASE)
+_ASSIGNED_RE = re.compile(r"\b(?:assign(?:ed|ment)?|assignee)\b", re.IGNORECASE)
+_SUCCESS_ACTION_RE = re.compile(
+    r"\b(?:created|opened|filed|logged|assigned|completed|succeeded|successful)\b",
+    re.IGNORECASE,
+)
+_NEGATION_TAIL_RE = re.compile(
+    r"(?:\bnot\b|\bnever\b|\bno\b|\bcould not\b|\bcouldn't\b|\bfailed to\b|"
+    r"\bhas not been\b|\bhasn't been\b|\bwas not\b|\bwasn't\b)\s*$",
+    re.IGNORECASE,
+)
 
 
 class FinalReplyEnforcement(str, Enum):
@@ -349,6 +381,297 @@ def _requested_github_artifact_contract_violated(
     return not _reply_names_failed_artifact(candidate_output, _GITHUB_ARTIFACT_RE)
 
 
+def _claims_request_complete(candidate_output: str) -> bool:
+    """Detect a top-level completion claim without treating partial progress as done."""
+
+    candidate = " ".join(str(candidate_output or "").split())
+    if re.match(r"^(?:yes\b|done\b)", candidate, re.IGNORECASE):
+        return True
+    completion_re = re.compile(
+        r"\b(?:(?:it|that|this|the\s+(?:request|work|task)|everything|all\s+of\s+it)\s+"
+        r"(?:is|was|has been)\s+)?(?:done|complete|completed|finished)\b",
+        re.IGNORECASE,
+    )
+    for match in completion_re.finditer(candidate):
+        prefix = candidate[max(0, match.start() - 24):match.start()]
+        if not _NEGATION_TAIL_RE.search(prefix):
+            return True
+    return False
+
+
+def _asserts_success(candidate_output: str) -> bool:
+    if _claims_request_complete(candidate_output):
+        return True
+    candidate = str(candidate_output or "")
+    for match in _SUCCESS_ACTION_RE.finditer(candidate):
+        prefix = candidate[max(0, match.start() - 32):match.start()]
+        if not _NEGATION_TAIL_RE.search(prefix):
+            return True
+    return False
+
+
+def _reply_names_tool_failures(
+    candidate_output: str,
+    evidence: FinalReplyEvidence,
+) -> bool:
+    candidate = str(candidate_output or "").lower()
+    if not _FAILURE_ACK_RE.search(candidate):
+        return False
+    for tool_name in evidence.failed_tool_names:
+        variants = {
+            tool_name.lower(),
+            tool_name.lower().replace("_", " "),
+            tool_name.lower().replace("-", " "),
+        }
+        if not any(variant and variant in candidate for variant in variants):
+            return False
+    return True
+
+
+def _tool_failure_success_issue(
+    candidate_output: str,
+    evidence: FinalReplyEvidence,
+) -> str | None:
+    if not evidence.failure_threshold_reached:
+        return None
+    if not _asserts_success(candidate_output):
+        return None
+    if _reply_names_tool_failures(candidate_output, evidence):
+        return None
+    state = evidence.tool_failure_state
+    failure_count = max(
+        3,
+        int(getattr(state, "consecutive_failures", 0) or 0),
+        int(getattr(state, "total_failures", 0) or 0),
+        sum(1 for item in evidence.tool_results if item.failed),
+    )
+    tools = ", ".join(f"`{name}`" for name in evidence.failed_tool_names) or "the failing tool"
+    return (
+        f"The run reached the tool-failure threshold after {failure_count} failures involving "
+        f"{tools}, but the candidate asserts success without naming those failures."
+    )
+
+
+def _github_refs(value: str) -> tuple[str, ...]:
+    refs: list[str] = []
+    for match in _GITHUB_REF_RE.finditer(str(value or "")):
+        ref = match.group("url_number") or match.group("label_number")
+        if ref and ref not in refs:
+            refs.append(ref)
+    return tuple(refs)
+
+
+def _record_ids(value: Any, *, in_record: bool = False) -> tuple[str, ...]:
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = str(key or "").strip().lower()
+            nested_record = in_record or normalized_key in {
+                "record",
+                "records",
+                "domain_record",
+                "tracker_record",
+            }
+            if normalized_key in {"record_id", "domain_record_id", "tracker_record_id"}:
+                candidate = str(item or "").strip()
+                if candidate and candidate not in found:
+                    found.append(candidate)
+            elif normalized_key == "id" and in_record:
+                candidate = str(item or "").strip()
+                if candidate and candidate not in found:
+                    found.append(candidate)
+            for candidate in _record_ids(item, in_record=nested_record):
+                if candidate not in found:
+                    found.append(candidate)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            for candidate in _record_ids(item, in_record=in_record):
+                if candidate not in found:
+                    found.append(candidate)
+    return tuple(found)
+
+
+def _successful_record_ids(evidence: FinalReplyEvidence) -> tuple[str, ...]:
+    found: list[str] = []
+    for item in evidence.tool_results:
+        if not item.succeeded:
+            continue
+        for record_id in _record_ids(item.result):
+            if record_id not in found:
+                found.append(record_id)
+    return tuple(found)
+
+
+def _mapping_values_for_keys(value: Any, keys: frozenset[str]) -> tuple[str, ...]:
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key or "").strip().lower() in keys:
+                candidate = str(item or "").strip()
+                if candidate and candidate not in found:
+                    found.append(candidate)
+            for candidate in _mapping_values_for_keys(item, keys):
+                if candidate not in found:
+                    found.append(candidate)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            for candidate in _mapping_values_for_keys(item, keys):
+                if candidate not in found:
+                    found.append(candidate)
+    return tuple(found)
+
+
+def _successful_assignees(evidence: FinalReplyEvidence) -> tuple[str, ...]:
+    found: list[str] = []
+    for item in evidence.tool_results:
+        if not item.succeeded:
+            continue
+        for assignee in _mapping_values_for_keys(
+            item.result,
+            frozenset({"assignee", "assigned_to", "assignee_name"}),
+        ):
+            if assignee not in found:
+                found.append(assignee)
+    return tuple(found)
+
+
+def _status_question_contract_issue(
+    candidate_output: str,
+    evidence: FinalReplyEvidence,
+) -> str | None:
+    status = evidence.status_question
+    if status is None:
+        return None
+    candidate = str(candidate_output or "")
+    claims_complete = _claims_request_complete(candidate)
+    origin = status.originating_run
+
+    if status.lookup_status != "verified":
+        if claims_complete:
+            return (
+                "The same-thread run lookup did not verify an originating outcome, so the "
+                "status reply cannot assert completion."
+            )
+        return None
+    if origin is None:
+        if claims_complete:
+            return (
+                "No originating run outcome was found on this thread, so the status reply "
+                "cannot assert completion from an incidental artifact."
+            )
+        return None
+
+    if status.has_live_sibling:
+        live = status.live_sibling_runs[0]
+        if claims_complete:
+            return (
+                f"Sibling run {live.run_id} is still {live.status}; the status reply must say "
+                "the request is in progress and cannot say yes/done."
+            )
+        if not _STATUS_IN_PROGRESS_RE.search(candidate):
+            return (
+                f"Sibling run {live.run_id} is still {live.status}, but the reply does not "
+                "explicitly say the request is in progress."
+            )
+
+    record_ids = _successful_record_ids(evidence)
+    if status.has_live_sibling and record_ids:
+        names_a_record = bool(_RECORD_WORD_RE.search(candidate))
+        names_known_ref = any(record_id in candidate for record_id in record_ids)
+        if not (names_a_record and names_known_ref):
+            return (
+                "The reply omits the concrete partial record already present in execution "
+                f"evidence (record {record_ids[0]})."
+            )
+
+    source_output = (
+        str(origin.final_output or "")
+        if origin.status == "completed"
+        else ""
+    )
+    github_refs = list(_github_refs(source_output))
+    for result in evidence.results_for("create_github_issue"):
+        if not result.succeeded:
+            continue
+        result_refs = _github_refs(_compact_json(result.result, limit=5000))
+        for ref in result_refs:
+            if ref not in github_refs:
+                github_refs.append(ref)
+        if isinstance(result.result, dict):
+            number = result.result.get("number") or result.result.get("issue_number")
+            if number not in (None, "") and str(number) not in github_refs:
+                github_refs.append(str(number))
+
+    for deliverable in status.deliverables:
+        if deliverable.kind == "github_issue":
+            if github_refs:
+                if claims_complete and not any(ref in candidate for ref in github_refs):
+                    return (
+                        "The completed status claim omits the verified GitHub issue ref "
+                        f"({github_refs[0]})."
+                    )
+            else:
+                if claims_complete:
+                    return (
+                        "The originating ask requires a GitHub ticket, but no verified "
+                        "GitHub ref exists; the reply cannot report the request as done."
+                    )
+                if not (
+                    _GITHUB_ARTIFACT_RE.search(candidate)
+                    and _UNRESOLVED_RE.search(candidate)
+                ):
+                    return (
+                        "The originating ask requires a GitHub ticket, but no verified GitHub "
+                        "ref exists; the reply must name that ticket as unresolved."
+                    )
+        elif deliverable.kind == "assignment":
+            assignees = list(_successful_assignees(evidence))
+            if source_output and _ASSIGNED_RE.search(source_output):
+                source_assignees = re.findall(
+                    r"\bassigned(?:\s+it)?\s+to\s+@?([\w.-]+)",
+                    source_output,
+                    re.IGNORECASE,
+                )
+                for assignee in source_assignees:
+                    if assignee not in assignees:
+                        assignees.append(assignee)
+            if assignees:
+                if not (
+                    _ASSIGNED_RE.search(candidate)
+                    and any(assignee.lower() in candidate.lower() for assignee in assignees)
+                ):
+                    return (
+                        "The reply omits the verified ticket assignment "
+                        f"to {assignees[0]}."
+                    )
+            else:
+                if claims_complete:
+                    return (
+                        "The originating ask includes ticket assignment, but no verified "
+                        "assignment exists; the reply cannot report the request as done."
+                    )
+                if not (
+                    _ASSIGNED_RE.search(candidate)
+                    and _UNRESOLVED_RE.search(candidate)
+                ):
+                    return (
+                        "The originating ask includes ticket assignment, but no verified "
+                        "assignment exists; the reply must state that it is unresolved."
+                    )
+
+    if claims_complete and origin.status != "completed":
+        return (
+            f"Originating run {origin.run_id} is {origin.status}, not completed; "
+            "the status reply cannot assert completion."
+        )
+    if claims_complete and not source_output:
+        return (
+            f"Originating run {origin.run_id} has no verified final outcome with refs, "
+            "so the status reply cannot assert completion."
+        )
+    return None
+
+
 def _token_resolution_verdict(
     provider,
     llm,
@@ -424,6 +747,40 @@ def review_candidate_final_reply(
     """Run the final-reply checker and return a dict-compatible review payload."""
 
     structured_evidence = evidence or FinalReplyEvidence()
+    tool_failure_issue = _tool_failure_success_issue(
+        candidate_output,
+        structured_evidence,
+    )
+    if tool_failure_issue:
+        return FinalReplyReview(
+            status="continue",
+            approved=False,
+            rationale=tool_failure_issue,
+            missing_requirements=(
+                "Name the failing tool(s), the repeated failures, and the incomplete "
+                "tool-dependent work before ending the run.",
+            ),
+            raw_output="deterministic_tool_failure_honesty_contract",
+            enforcement=FinalReplyEnforcement.BLOCK,
+        ).to_dict()
+
+    status_question_issue = _status_question_contract_issue(
+        candidate_output,
+        structured_evidence,
+    )
+    if status_question_issue:
+        return FinalReplyReview(
+            status="continue",
+            approved=False,
+            rationale=status_question_issue,
+            missing_requirements=(
+                "Report a live sibling as in progress; enumerate every originating "
+                "deliverable with its verified ref or unresolved state.",
+            ),
+            raw_output="deterministic_status_question_contract",
+            enforcement=FinalReplyEnforcement.BLOCK,
+        ).to_dict()
+
     grounding_issue = _ungrounded_product_surface_issue(candidate_output, structured_evidence)
     if grounding_issue:
         return FinalReplyReview(

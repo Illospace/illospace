@@ -97,12 +97,224 @@ class ToolResultEvidence:
 
 
 @dataclass(frozen=True)
+class ToolFailureStateEvidence:
+    """Read-only projection of the direct loop's tool-failure circuit state."""
+
+    failure_threshold: int = 3
+    consecutive_failures: int = 0
+    total_failures: int = 0
+    tool_name: str | None = None
+    error_class: str | None = None
+    termination_reason: str | None = None
+
+    @classmethod
+    def from_value(cls, value: Any) -> "ToolFailureStateEvidence | None":
+        if value is None:
+            return None
+        if isinstance(value, Mapping):
+            return cls(
+                failure_threshold=_coerce_positive_int(
+                    value.get("failure_threshold"),
+                    default=3,
+                ),
+                consecutive_failures=_coerce_nonnegative_int(
+                    value.get("consecutive_failures")
+                ),
+                total_failures=_coerce_nonnegative_int(value.get("total_failures")),
+                tool_name=(
+                    str(value.get("tool_name")).strip()
+                    if value.get("tool_name")
+                    else None
+                ),
+                error_class=(
+                    str(value.get("error_class")).strip()
+                    if value.get("error_class")
+                    else None
+                ),
+                termination_reason=(
+                    str(value.get("termination_reason") or value.get("reason")).strip()
+                    if value.get("termination_reason") or value.get("reason")
+                    else None
+                ),
+            )
+        termination = getattr(value, "termination", None)
+        if termination is None and getattr(value, "reason", None) is not None:
+            termination = value
+        termination_reason = getattr(termination, "reason", None)
+        if hasattr(termination_reason, "value"):
+            termination_reason = termination_reason.value
+        tool_name = (
+            getattr(termination, "tool_name", None)
+            or getattr(value, "consecutive_tool_name", None)
+        )
+        error_class = (
+            getattr(termination, "error_class", None)
+            or getattr(value, "last_error_class", None)
+        )
+        return cls(
+            failure_threshold=_coerce_positive_int(
+                getattr(value, "failure_threshold", None),
+                default=3,
+            ),
+            consecutive_failures=_coerce_nonnegative_int(
+                getattr(value, "consecutive_failures", None)
+            ),
+            total_failures=_coerce_nonnegative_int(
+                getattr(value, "total_failures", None)
+            ),
+            tool_name=str(tool_name).strip() if tool_name else None,
+            error_class=str(error_class).strip() if error_class else None,
+            termination_reason=(
+                str(termination_reason).strip() if termination_reason else None
+            ),
+        )
+
+    @property
+    def threshold_reached(self) -> bool:
+        threshold = max(1, int(self.failure_threshold))
+        return bool(
+            self.termination_reason == "tool_failure_circuit"
+            or self.consecutive_failures >= threshold
+            or self.total_failures >= threshold
+        )
+
+    def cache_payload(self) -> dict[str, Any]:
+        return {
+            "failure_threshold": self.failure_threshold,
+            "consecutive_failures": self.consecutive_failures,
+            "total_failures": self.total_failures,
+            "tool_name": self.tool_name,
+            "error_class": self.error_class,
+            "termination_reason": self.termination_reason,
+        }
+
+
+@dataclass(frozen=True)
+class StatusRunEvidence:
+    """One prior same-thread run relevant to a status question."""
+
+    run_id: int | None = None
+    status: str = ""
+    request: str = ""
+    final_output: str | None = None
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "StatusRunEvidence":
+        return cls(
+            run_id=_coerce_optional_int(value.get("run_id")),
+            status=str(value.get("status") or "").strip().lower(),
+            request=str(value.get("request") or ""),
+            final_output=(
+                str(value.get("final_output")).strip()
+                if value.get("final_output")
+                else None
+            ),
+        )
+
+    def cache_payload(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "status": self.status,
+            "request": self.request,
+            "final_output": self.final_output,
+        }
+
+
+@dataclass(frozen=True)
+class StatusDeliverableEvidence:
+    """A deliverable that a status reply must account for individually."""
+
+    kind: str
+    label: str
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, Any],
+    ) -> "StatusDeliverableEvidence | None":
+        kind = str(value.get("kind") or "").strip().lower()
+        label = str(value.get("label") or kind).strip()
+        return cls(kind=kind, label=label) if kind and label else None
+
+    def cache_payload(self) -> dict[str, str]:
+        return {"kind": self.kind, "label": self.label}
+
+
+@dataclass(frozen=True)
+class StatusQuestionEvidence:
+    """Typed snapshot of the originating and live same-thread runs."""
+
+    thread_id: str = ""
+    lookup_status: str = ""
+    lookup_error: str | None = None
+    originating_run: StatusRunEvidence | None = None
+    live_sibling_runs: tuple[StatusRunEvidence, ...] = ()
+    deliverables: tuple[StatusDeliverableEvidence, ...] = ()
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "StatusQuestionEvidence":
+        origin = value.get("originating_run")
+        live_runs = tuple(
+            StatusRunEvidence.from_mapping(item)
+            for item in list(value.get("live_sibling_runs") or [])
+            if isinstance(item, Mapping)
+        )
+        deliverables: list[StatusDeliverableEvidence] = []
+        for item in list(value.get("deliverables") or []):
+            if not isinstance(item, Mapping):
+                continue
+            deliverable = StatusDeliverableEvidence.from_mapping(item)
+            if deliverable is not None:
+                deliverables.append(deliverable)
+        return cls(
+            thread_id=str(value.get("thread_id") or "").strip(),
+            lookup_status=str(value.get("lookup_status") or "").strip().lower(),
+            lookup_error=(
+                str(value.get("lookup_error")).strip()
+                if value.get("lookup_error")
+                else None
+            ),
+            originating_run=(
+                StatusRunEvidence.from_mapping(origin)
+                if isinstance(origin, Mapping)
+                else None
+            ),
+            live_sibling_runs=live_runs,
+            deliverables=tuple(deliverables),
+        )
+
+    @property
+    def has_live_sibling(self) -> bool:
+        return bool(self.live_sibling_runs)
+
+    def cache_payload(self) -> dict[str, Any]:
+        return {
+            "thread_id": self.thread_id,
+            "lookup_status": self.lookup_status,
+            "lookup_error": self.lookup_error,
+            "originating_run": (
+                self.originating_run.cache_payload()
+                if self.originating_run is not None
+                else None
+            ),
+            "live_sibling_runs": [
+                item.cache_payload() for item in self.live_sibling_runs
+            ],
+            "deliverables": [
+                item.cache_payload() for item in self.deliverables
+            ],
+        }
+
+
+@dataclass(frozen=True)
 class FinalReplyEvidence:
     """Typed evidence boundary shared by deterministic final-reply policies."""
 
     tool_results: tuple[ToolResultEvidence, ...] = ()
     execution_artifacts: tuple[Mapping[str, Any], ...] = ()
     worker_results: tuple[Mapping[str, Any], ...] = ()
+    status_question: StatusQuestionEvidence | None = None
+    tool_failure_state: ToolFailureStateEvidence | None = None
 
     @classmethod
     def from_agent_context(cls, agent_context: Any) -> "FinalReplyEvidence":
@@ -129,10 +341,14 @@ class FinalReplyEvidence:
                     "evidence": getattr(item, "evidence", None),
                 }
             )
+        status_question = _status_question_evidence_from_context(agent_context)
+        failure_state = _tool_failure_state_from_context(agent_context, tool_results)
         return cls(
             tool_results=tuple(tool_results),
             execution_artifacts=artifacts,
             worker_results=tuple(workers),
+            status_question=status_question,
+            tool_failure_state=failure_state,
         )
 
     def results_for(self, tool_name: str) -> tuple[ToolResultEvidence, ...]:
@@ -165,14 +381,138 @@ class FinalReplyEvidence:
         ).lower()
         return all(term in text for term in terms)
 
+    @property
+    def failed_tool_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        state_name = (
+            self.tool_failure_state.tool_name
+            if self.tool_failure_state is not None
+            else None
+        )
+        for name in [
+            state_name,
+            *(item.tool_name for item in self.tool_results if item.failed),
+        ]:
+            clean_name = str(name or "").strip()
+            if clean_name and clean_name not in names:
+                names.append(clean_name)
+        return tuple(names)
+
+    @property
+    def failure_threshold_reached(self) -> bool:
+        if (
+            self.tool_failure_state is not None
+            and self.tool_failure_state.threshold_reached
+        ):
+            return True
+        return sum(1 for item in self.tool_results if item.failed) >= 3
+
     def cache_fingerprint(self) -> str:
         payload = {
             "tool_results": [item.cache_payload() for item in self.tool_results],
             "execution_artifacts": self.execution_artifacts,
             "worker_results": self.worker_results,
+            "status_question": (
+                self.status_question.cache_payload()
+                if self.status_question is not None
+                else None
+            ),
+            "tool_failure_state": (
+                self.tool_failure_state.cache_payload()
+                if self.tool_failure_state is not None
+                else None
+            ),
         }
         serialized = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-__all__ = ["FinalReplyEvidence", "ToolResultEvidence"]
+def _coerce_optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _coerce_positive_int(value: Any, *, default: int) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return max(1, int(default))
+
+
+def _find_status_question_mapping(value: Any, *, depth: int = 0) -> Mapping[str, Any] | None:
+    if not isinstance(value, Mapping) or depth > 3:
+        return None
+    direct = value.get("status_question_context")
+    if isinstance(direct, Mapping):
+        return direct
+    for key in ("execution_provenance", "metadata", "request_metadata"):
+        nested = value.get(key)
+        found = _find_status_question_mapping(nested, depth=depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
+def _status_question_evidence_from_context(agent_context: Any) -> StatusQuestionEvidence | None:
+    execution_metadata = getattr(agent_context, "execution_metadata", None)
+    mapping = _find_status_question_mapping(execution_metadata)
+    if mapping is None:
+        mapping = _find_status_question_mapping(getattr(agent_context, "metadata", None))
+    return StatusQuestionEvidence.from_mapping(mapping) if mapping is not None else None
+
+
+def _tool_failure_state_from_context(
+    agent_context: Any,
+    tool_results: list[ToolResultEvidence],
+) -> ToolFailureStateEvidence | None:
+    candidates = [
+        getattr(agent_context, "loop_control", None),
+        getattr(getattr(agent_context, "state", None), "loop_control", None),
+        getattr(getattr(agent_context, "run", None), "loop_control", None),
+        getattr(agent_context, "termination", None),
+        getattr(getattr(agent_context, "run", None), "termination", None),
+    ]
+    for candidate in candidates:
+        state = ToolFailureStateEvidence.from_value(candidate)
+        if state is not None:
+            return state
+
+    failures = [item for item in tool_results if item.failed]
+    if len(failures) < 3:
+        return None
+    names = {item.tool_name for item in failures if item.tool_name}
+    last_result = failures[-1].result
+    error_class = (
+        str(last_result.get("error_class")).strip()
+        if isinstance(last_result, Mapping) and last_result.get("error_class")
+        else None
+    )
+    return ToolFailureStateEvidence(
+        failure_threshold=3,
+        consecutive_failures=len(failures) if len(names) == 1 else 0,
+        total_failures=len(failures),
+        tool_name=next(iter(names)) if len(names) == 1 else None,
+        error_class=error_class,
+        termination_reason=None,
+    )
+
+
+__all__ = [
+    "FinalReplyEvidence",
+    "StatusDeliverableEvidence",
+    "StatusQuestionEvidence",
+    "StatusRunEvidence",
+    "ToolFailureStateEvidence",
+    "ToolResultEvidence",
+]

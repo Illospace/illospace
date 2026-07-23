@@ -1966,6 +1966,197 @@ class TestExecToolHandlers:
 
 
 class TestFinalReplyReview:
+    @staticmethod
+    def _resolved_checker_provider():
+        provider = MagicMock()
+        response = MagicMock()
+        response.content = [
+            SimpleNamespace(
+                type="text",
+                text=(
+                    '{"status":"resolved","rationale":"Status is fully and honestly reported.",'
+                    '"missing_requirements":[]}'
+                ),
+            )
+        ]
+        provider.create.return_value = response
+        return provider
+
+    @staticmethod
+    def _incident_status_evidence(*, status: str, final_output: str | None = None):
+        from brain.systems.runs.direct_loop.final_reply_evidence import (
+            FinalReplyEvidence,
+            StatusQuestionEvidence,
+            ToolResultEvidence,
+        )
+
+        return FinalReplyEvidence(
+            tool_results=(
+                ToolResultEvidence.capture(
+                    tool_name="read_team_activity",
+                    arguments={"query": "customer ticket"},
+                    is_error=False,
+                    result={
+                        "records": [
+                            {
+                                "id": 2383,
+                                "domain": "Customer Support Tickets",
+                                "assignee": "Reda",
+                                "status": "triaging",
+                            }
+                        ]
+                    },
+                ),
+            ),
+            status_question=StatusQuestionEvidence.from_mapping(
+                {
+                    "thread_id": "slack:T_ALERTS:C_ALERTS:1784741844.000100",
+                    "lookup_status": "verified",
+                    "originating_run": {
+                        "run_id": 2327,
+                        "status": status,
+                        "request": (
+                            "we may have a bug, email from a customer, "
+                            "assign ticket to me"
+                        ),
+                        "final_output": final_output,
+                    },
+                    "live_sibling_runs": (
+                        [{"run_id": 2327, "status": status}]
+                        if status in {"queued", "starting", "running", "paused"}
+                        else []
+                    ),
+                    "deliverables": [
+                        {
+                            "kind": "github_issue",
+                            "label": "GitHub ticket",
+                        },
+                        {
+                            "kind": "assignment",
+                            "label": "ticket assignment",
+                        },
+                    ],
+                }
+            ),
+        )
+
+    @pytest.mark.parametrize("status", ["queued", "starting", "running", "paused"])
+    def test_status_question_rejects_done_while_originating_run_is_live(self, status):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+        from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
+
+        provider = MagicMock()
+        result = review_candidate_final_reply(
+            user_request="was it done?",
+            candidate_output=(
+                "Yes — done. It is logged in Customer Support Tickets as #2383, "
+                "assigned to Reda."
+            ),
+            evidence=self._incident_status_evidence(status=status),
+            provider=provider,
+            llm=_mock_llm_client(MagicMock(), provider="openai"),
+            model="openai/gpt-5.5",
+        )
+
+        assert result["status"] == "continue"
+        assert result["enforcement"] is FinalReplyEnforcement.BLOCK
+        assert "run 2327" in result["rationale"]
+        assert status in result["rationale"]
+        assert "in progress" in " ".join(result["missing_requirements"]).lower()
+        provider.create.assert_not_called()
+
+    def test_1744_replay_names_partial_record_and_missing_github_ticket(self):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+
+        provider = self._resolved_checker_provider()
+        result = review_candidate_final_reply(
+            user_request="was it done?",
+            candidate_output=(
+                "It is still in progress. Customer Support record #2383 exists and is "
+                "assigned to Reda, but the GitHub ticket has not been created and remains unresolved."
+            ),
+            evidence=self._incident_status_evidence(status="running"),
+            provider=provider,
+            llm=_mock_llm_client(MagicMock(), provider="openai"),
+            model="openai/gpt-5.5",
+        )
+
+        assert result["status"] == "resolved"
+        assert result["approved"] is True
+        provider.create.assert_called_once()
+
+    def test_three_failed_tool_calls_block_success_claim_without_failure_names(self):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+        from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
+        from brain.systems.runs.direct_loop.final_reply_evidence import (
+            FinalReplyEvidence,
+            ToolFailureStateEvidence,
+            ToolResultEvidence,
+        )
+
+        failures = tuple(
+            ToolResultEvidence.capture(
+                tool_name="manage_idea",
+                arguments={"action": "create"},
+                is_error=True,
+                result={"error": "parent_id validation failed"},
+            )
+            for _ in range(3)
+        )
+        evidence = FinalReplyEvidence(
+            tool_results=failures,
+            tool_failure_state=ToolFailureStateEvidence(
+                failure_threshold=3,
+                consecutive_failures=3,
+                total_failures=3,
+                tool_name="manage_idea",
+                error_class="ToolValidationError",
+                termination_reason="tool_failure_circuit",
+            ),
+        )
+        provider = MagicMock()
+
+        result = review_candidate_final_reply(
+            user_request="Assign a ticket to me.",
+            candidate_output="Yes — done. The ticket is logged and assigned.",
+            evidence=evidence,
+            provider=provider,
+            llm=_mock_llm_client(MagicMock(), provider="openai"),
+            model="openai/gpt-5.5",
+        )
+
+        assert result["status"] == "continue"
+        assert result["enforcement"] is FinalReplyEnforcement.BLOCK
+        assert "manage_idea" in result["rationale"]
+        assert "3" in result["rationale"]
+        provider.create.assert_not_called()
+
+    def test_status_question_allows_done_after_originating_run_completed_with_refs(self):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+
+        provider = self._resolved_checker_provider()
+        result = review_candidate_final_reply(
+            user_request="was it done?",
+            candidate_output=(
+                "Done — GitHub issue #1210 was created and assigned to Reda; "
+                "the linked Customer Support record is #2383."
+            ),
+            evidence=self._incident_status_evidence(
+                status="completed",
+                final_output=(
+                    "Created GitHub issue #1210, assigned it to Reda, and linked "
+                    "Customer Support record #2383."
+                ),
+            ),
+            provider=provider,
+            llm=_mock_llm_client(MagicMock(), provider="openai"),
+            model="openai/gpt-5.5",
+        )
+
+        assert result["status"] == "resolved"
+        assert result["approved"] is True
+        provider.create.assert_called_once()
+
     def test_checker_rejects_customer_bug_issue_without_tracker_mirror(self):
         from brain.systems.runs.direct_agent import review_candidate_final_reply
         from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement

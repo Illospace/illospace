@@ -147,6 +147,138 @@ async def test_work_intake_attaches_prior_visible_context_without_current_messag
     assert "fantastic I added it" not in thread_context["formatted"]
 
 
+async def test_status_question_context_tracks_live_then_completed_originating_run(session):
+    from brain.systems.runs.status_questions import build_status_question_context
+
+    started_at = datetime(2026, 7, 22, 17, 37, 24, tzinfo=timezone.utc)
+    origin = AgentRunRow(
+        id=2327,
+        org_id=ORG_ID,
+        user_id=USER_ID,
+        thread_id=IDEA_ID,
+        profile="fast",
+        recipe="fast",
+        status="running",
+        input_message="we may have a bug, email from a customer, assign ticket to me",
+        target_ref={},
+        workspace_ref={},
+        model_policy={},
+        metadata_={},
+        created_at=started_at,
+        started_at=started_at,
+    )
+    session.add(origin)
+    await session.flush()
+
+    live_context = await build_status_question_context(
+        session,
+        thread_id=IDEA_ID,
+        org_id=ORG_ID,
+        message="was it done?",
+    )
+
+    assert live_context is not None
+    assert live_context["originating_run"]["run_id"] == 2327
+    assert live_context["originating_run"]["status"] == "running"
+    assert live_context["live_sibling_runs"] == [{"run_id": 2327, "status": "running"}]
+    assert [item["kind"] for item in live_context["deliverables"]] == [
+        "github_issue",
+        "assignment",
+    ]
+
+    origin.status = "completed"
+    origin.completed_at = started_at + timedelta(minutes=18)
+    session.add(
+        AgentRunArtifactRow(
+            run_id=2327,
+            root_run_id=2327,
+            artifact_type="final_answer",
+            text=(
+                "Created GitHub issue #1210, assigned it to Reda, and linked "
+                "Customer Support record #2383."
+            ),
+            payload={},
+            visibility="public",
+            created_at=origin.completed_at,
+        )
+    )
+    await session.flush()
+
+    completed_context = await build_status_question_context(
+        session,
+        thread_id=IDEA_ID,
+        org_id=ORG_ID,
+        message="was it done?",
+    )
+
+    assert completed_context is not None
+    assert completed_context["originating_run"]["status"] == "completed"
+    assert completed_context["live_sibling_runs"] == []
+    assert "GitHub issue #1210" in completed_context["originating_run"]["final_output"]
+    assert "#2383" in completed_context["originating_run"]["final_output"]
+
+
+async def test_slack_work_intake_attaches_same_thread_status_context(session):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    thread_ts = "1784741844.000100"
+    slack_thread_id = f"slack:T_ALERTS:C_ALERTS:{thread_ts}"
+    session.add(
+        AgentRunRow(
+            id=2328,
+            org_id=ORG_ID,
+            user_id=USER_ID,
+            thread_id=slack_thread_id,
+            profile="fast",
+            recipe="fast",
+            status="running",
+            input_message=(
+                "we may have a bug, email from a customer, assign ticket to me"
+            ),
+            target_ref={},
+            workspace_ref={},
+            model_policy={},
+            metadata_={},
+            created_at=datetime(2026, 7, 22, 17, 37, 24, tzinfo=timezone.utc),
+        )
+    )
+    await session.flush()
+
+    request = await build_agent_run_request(
+        session,
+        WorkIntakeEvent(
+            source="slack",
+            event_type="slack.message",
+            org_id=ORG_ID,
+            actor={"id": USER_ID, "org_id": ORG_ID, "internal": False},
+            target={
+                "kind": "slack_message",
+                "team_id": "T_ALERTS",
+                "channel_id": "C_ALERTS",
+                "thread_ts": thread_ts,
+            },
+            payload={
+                "message": "was it done?",
+                "metadata": {
+                    "slack_trigger": {
+                        "team_id": "T_ALERTS",
+                        "channel_id": "C_ALERTS",
+                        "thread_ts": thread_ts,
+                    }
+                },
+            },
+        ),
+    )
+
+    status_context = request.metadata["status_question_context"]
+    assert request.thread_id == slack_thread_id
+    assert status_context["originating_run"]["run_id"] == 2328
+    assert status_context["originating_run"]["status"] == "running"
+    assert status_context["live_sibling_runs"] == [
+        {"run_id": 2328, "status": "running"}
+    ]
+
+
 def test_run_context_prompt_includes_thread_context():
     from brain.systems.runs.context import RunContextLoader
 
@@ -163,6 +295,39 @@ def test_run_context_prompt_includes_thread_context():
     prompt_context = context.prompt_context()
     assert "Thread so far, before the current user message:" in prompt_context
     assert "Illo: earlier answer" in prompt_context
+
+
+def test_run_context_prompt_marks_live_status_work_as_in_progress():
+    from brain.systems.runs.context import RunContextLoader
+
+    context = RunContextLoader().load(
+        thread_id="idea-1",
+        message="was it done?",
+        metadata={
+            "status_question_context": {
+                "thread_id": "idea-1",
+                "lookup_status": "verified",
+                "originating_run": {
+                    "run_id": 2327,
+                    "status": "running",
+                    "request": "assign ticket to me",
+                },
+                "live_sibling_runs": [{"run_id": 2327, "status": "running"}],
+                "deliverables": [
+                    {"kind": "github_issue", "label": "GitHub ticket"},
+                    {"kind": "assignment", "label": "ticket assignment"},
+                ],
+            }
+        },
+    )
+
+    prompt_context = context.prompt_context()
+
+    assert "Authoritative status-check evidence" in prompt_context
+    assert "run 2327 is running" in prompt_context
+    assert "must report the request as in progress" in prompt_context
+    assert "GitHub ticket" in prompt_context
+    assert "ticket assignment" in prompt_context
 
 
 def test_run_context_prompt_compacts_large_project_context_references():
