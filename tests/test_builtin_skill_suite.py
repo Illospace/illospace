@@ -6,6 +6,7 @@ from collections.abc import Mapping
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 
@@ -263,14 +264,54 @@ def test_uwear_customer_bug_filing_has_one_declared_destination_and_complete_evi
         assert expected in filing_flat
 
     for expected in (
-        "real GitHub issue in the owning repo",
-        "credit-loss or other concrete impact",
-        "Slack `origin_ref`",
-        "verified GitHub identity",
-        "create a linked tracker record",
-        "Never create a Domain as part of filing",
+        "[customer-bug filing policy](creating-work-items.md#customer-bug-filing-policy)",
+        "`uwear-ai/uwear-backend`",
+        "payload evidence + hypothesis",
+        "after the hypothesis is formed",
+        "resulting artifact references",
     ):
         assert expected in support_flat
+
+
+def test_uwear_customer_bug_filing_policy_is_not_repeated_by_consumers():
+    from brain.systems.runs.tool_catalog.definitions.github import GITHUB_TOOLS
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    filing = _uwear_triage_asset(bundle, "references/creating-work-items.md")
+    support = _uwear_triage_asset(bundle, "references/customer-support.md")
+    github_definition = next(
+        tool for tool in GITHUB_TOOLS if tool["name"] == "create_github_issue"
+    )
+    checker = (
+        Path(__file__).parents[1]
+        / "brain/systems/runs/direct_loop/final_reply_checker.py"
+    ).read_text()
+    canonical_reference = "creating-work-items.md#customer-bug-filing-policy"
+
+    assert "### Customer-bug filing policy" in filing
+    assert canonical_reference in support
+    assert canonical_reference in checker
+
+    dependent_surfaces = {
+        "customer-support playbook": support,
+        "GitHub primitive": json.dumps(github_definition),
+        "final-reply checker": checker,
+    }
+    duplicated_policy_patterns = (
+        r"customer(?:'s)? (?:own words|quote)",
+        r"credit[- ]loss",
+        r"Slack [`]?origin_ref",
+        r"create (?:a )?linked (?:tracker|mirror)",
+        r"(?:never|do not) create a Domain (?:while|during|as part of) filing",
+        r"linked tracker-record mirror",
+    )
+    for surface_name, content in dependent_surfaces.items():
+        for pattern in duplicated_policy_patterns:
+            assert not re.search(pattern, content, re.IGNORECASE), (
+                f"{surface_name} restates canonical filing policy: {pattern}"
+            )
 
 
 def test_uwear_triage_skill_keeps_slack_formatting_contract():
