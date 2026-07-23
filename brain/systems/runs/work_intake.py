@@ -972,8 +972,32 @@ async def admit_work(
 ) -> WorkIntakeResult:
     try:
         request = await build_agent_run_request(session, event)
-        run = await AsyncAgentRunStore(session).create_run(request)
-        await _mark_cortex_working_if_possible(session, request=request, run_id=int(run.id))
+        from brain.systems.runs.open_asks import (
+            annotate_request_with_open_ask,
+            record_open_ask,
+        )
+
+        request, open_ask_context = annotate_request_with_open_ask(request)
+
+        async def _admit_and_record():
+            run = await AsyncAgentRunStore(session).create_run(request)
+            await record_open_ask(
+                session,
+                context=open_ask_context,
+                run_id=int(run.id),
+            )
+            await _mark_cortex_working_if_possible(
+                session,
+                request=request,
+                run_id=int(run.id),
+            )
+            return run
+
+        if open_ask_context is not None and hasattr(session, "begin_nested"):
+            async with session.begin_nested():
+                run = await _admit_and_record()
+        else:
+            run = await _admit_and_record()
         return WorkIntakeResult(ok=True, run_id=int(run.id))
     except Exception as exc:
         return WorkIntakeResult(ok=False, skipped_reason=str(exc))

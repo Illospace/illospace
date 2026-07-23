@@ -750,6 +750,46 @@ async def _handle_manage_idea(
                 else:
                     return json.dumps({"error": f"Unknown action: {action}"})
 
+        if normalized_action == "create" and origin_ref:
+            from brain.systems.runs.slack_delivery import (
+                OpenAskArtifact,
+                deliver_open_ask_artifact_reply,
+            )
+
+            serialized_idea = (
+                result.get("idea") if isinstance(result.get("idea"), dict) else {}
+            )
+            idea_id_value = str(serialized_idea.get("id") or "").strip()
+            artifact_delivery = await deliver_open_ask_artifact_reply(
+                origin_ref=origin_ref,
+                artifact=OpenAskArtifact(
+                    kind="Illospace record",
+                    reference=(
+                        f"Thread {idea_id_value}"
+                        if idea_id_value
+                        else "created record"
+                    ),
+                    title=str(serialized_idea.get("title") or title or "").strip()
+                    or None,
+                    url=str(serialized_idea.get("thread_url") or "").strip() or None,
+                ),
+                answering_run_id=_current_tool_run_id(),
+            )
+            if artifact_delivery is not None:
+                result["origin_ask_delivery"] = artifact_delivery
+                delivered = [
+                    item
+                    for item in artifact_delivery.get("origin_asks", [])
+                    if isinstance(item, dict) and item.get("delivered")
+                ]
+                if delivered:
+                    result["origin_ask"] = {
+                        "requester": delivered[0].get("requester"),
+                        "request": delivered[0].get("ask"),
+                        "mechanism": delivered[0].get("mechanism"),
+                        "announcement": delivered[0].get("announcement"),
+                    }
+
         if event is not None:
             publish_safe(event[0], event[1])
         return json.dumps(result, default=str)

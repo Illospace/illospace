@@ -27,6 +27,7 @@ def test_customer_bug_contract_is_in_run_visible_github_tool_guidance():
     assert "linked mirror in an existing workspace tracker" in guidance
     assert "Never create a Domain while filing" in guidance
     assert "customer quote, concrete impact, and source origin_ref" in guidance
+    assert "originating request, requester, and mechanism" in guidance
     assert "final reply must name the GitHub issue and the exact blocker" in guidance
 
 
@@ -68,6 +69,73 @@ async def test_create_github_issue_happy_path_opens_real_issue():
     assert create.await_args.kwargs["labels"] == ["bug"]
     assert create.await_args.kwargs["assignees"] == ["reda"]
     assert create.await_args.kwargs["token"] == "write-token"
+
+
+@pytest.mark.asyncio
+async def test_create_github_issue_origin_ref_replies_back_with_announcement_context():
+    created = {
+        "repo": "uwear-ai/uwear-backend",
+        "issue": {
+            "type": "issue",
+            "number": 1221,
+            "title": "Terminalize rejected generations",
+            "html_url": "https://github.com/uwear-ai/uwear-backend/issues/1221",
+        },
+    }
+    delivery = {
+        "matched": 1,
+        "delivered": 1,
+        "origin_asks": [
+            {
+                "delivered": True,
+                "requester": "Reda",
+                "ask": "and the github ticket?",
+                "mechanism": {
+                    "kind": "GitHub issue",
+                    "reference": "uwear-ai/uwear-backend#1221",
+                },
+                "announcement": "Open ask answered for Reda",
+            }
+        ],
+    }
+    p1, p2, p3 = _vault_patches(
+        bound_env={"GITHUB_TOKEN": "write-token"},
+        secrets=[],
+    )
+    with bind_agent_context(
+        {"user_id": "u", "org_id": "o", "run_id": 77}
+    ), p1, p2, p3, patch(
+        f"{_H}.async_create_repo_issue",
+        new=AsyncMock(return_value=created),
+    ) as create, patch(
+        "brain.systems.runs.slack_delivery.deliver_open_ask_artifact_reply",
+        new=AsyncMock(return_value=delivery),
+    ) as reply_back:
+        result = await _handle_create_github_issue(
+            repo="uwear-ai/uwear-backend",
+            title="Terminalize rejected generations",
+            body="Customer generations disappear at 99%.",
+            origin_ref="slack:T789:CALERTS:1784741786.046759",
+        )
+
+    payload = json.loads(result)
+    assert payload["origin_ref"] == "slack:T789:CALERTS:1784741786.046759"
+    assert payload["origin_ask"] == {
+        "requester": "Reda",
+        "request": "and the github ticket?",
+        "mechanism": {
+            "kind": "GitHub issue",
+            "reference": "uwear-ai/uwear-backend#1221",
+        },
+        "announcement": "Open ask answered for Reda",
+    }
+    assert (
+        "Origin ref: `slack:T789:CALERTS:1784741786.046759`"
+        in create.await_args.kwargs["body"]
+    )
+    reply_back.assert_awaited_once()
+    assert reply_back.await_args.kwargs["origin_ref"] == payload["origin_ref"]
+    assert reply_back.await_args.kwargs["answering_run_id"] == 77
 
 
 @pytest.mark.asyncio

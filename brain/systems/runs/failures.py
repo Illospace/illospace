@@ -23,11 +23,19 @@ class PublicRunFailure(TypedDict):
     message: str
 
 
-DEFAULT_FAILED_RUN_MESSAGE = "I hit a temporary problem while working on that — please retry."
-UPSTREAM_FAILED_RUN_MESSAGE = "I hit a temporary upstream problem — please retry."
-VERIFICATION_FAILED_RUN_MESSAGE = "I couldn't safely verify the result — please retry."
-CANCELED_RUN_MESSAGE = "That run was canceled before it finished."
-EXPIRED_RUN_MESSAGE = "That run timed out before it finished — please retry."
+DEFAULT_FAILED_RUN_MESSAGE = "I failed on this and it is still open — I will come back."
+UPSTREAM_FAILED_RUN_MESSAGE = (
+    "I hit a temporary upstream problem on this and it is still open — I will come back."
+)
+VERIFICATION_FAILED_RUN_MESSAGE = (
+    "I couldn't safely verify this and it is still open — I will come back."
+)
+CANCELED_RUN_MESSAGE = (
+    "That run was canceled before it finished, but the ask is still open — I will come back."
+)
+EXPIRED_RUN_MESSAGE = (
+    "That run timed out before it finished, but the ask is still open — I will come back."
+)
 
 
 def coerce_failure_category(value: RunFailureCategory | str | None) -> RunFailureCategory:

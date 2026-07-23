@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
+import re
 from typing import Any
 
 from brain.kernel.common.pagination import InvalidPageToken
@@ -54,6 +55,56 @@ from brain.systems.vault import (
 def _clean(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+_SLACK_ORIGIN_REF_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])(slack:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[0-9.]+)"
+)
+
+
+def _origin_ref_from_body(body: str | None) -> str | None:
+    match = _SLACK_ORIGIN_REF_PATTERN.search(str(body or ""))
+    return match.group(1) if match else None
+
+
+def _origin_ref_from_context() -> str | None:
+    containers: list[Any] = [
+        getattr(_agent_context, "execution_metadata", None),
+        getattr(_agent_context, "target_ref", None),
+    ]
+    run = getattr(_agent_context, "run", None)
+    containers.extend(
+        (
+            getattr(run, "target_ref", None),
+            getattr(run, "metadata_", None),
+            getattr(run, "metadata", None),
+        )
+    )
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        origin_ref = _clean(container.get("origin_ref"))
+        if origin_ref:
+            return origin_ref
+    return None
+
+
+def _current_tool_run_id() -> int | None:
+    raw = getattr(_agent_context, "run_id", None)
+    if raw in (None, ""):
+        raw = getattr(getattr(_agent_context, "run", None), "id", None)
+    try:
+        return int(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _body_with_origin_ref(body: str | None, origin_ref: str | None) -> str | None:
+    cleaned = _clean(body)
+    if not origin_ref or origin_ref in str(cleaned or ""):
+        return cleaned
+    suffix = f"Origin ref: `{origin_ref}`"
+    return f"{cleaned}\n\n{suffix}" if cleaned else suffix
 
 
 def _string_list(value: Any) -> list[str]:
@@ -551,6 +602,7 @@ async def _handle_create_github_issue(
     labels: list[str] | str | None = None,
     assignees: list[str] | str | None = None,
     token_secret_key: str | None = None,
+    origin_ref: str | None = None,
 ) -> str:
     """Open a REAL GitHub issue in the target repository.
 
@@ -567,6 +619,12 @@ async def _handle_create_github_issue(
     clean_title = _clean(title)
     if not clean_title:
         return json.dumps({"error": "create_github_issue requires a non-empty title"})
+    resolved_origin_ref = (
+        _clean(origin_ref)
+        or _origin_ref_from_body(body)
+        or _origin_ref_from_context()
+    )
+    issue_body = _body_with_origin_ref(body, resolved_origin_ref)
 
     candidates = await _github_token_candidates(
         repo_slug=repo_slug,
@@ -593,7 +651,7 @@ async def _handle_create_github_issue(
             payload = await async_create_repo_issue(
                 repo_slug,
                 title=clean_title,
-                body=_clean(body),
+                body=issue_body,
                 labels=_string_list(labels),
                 assignees=_string_list(assignees),
                 token=candidate["token"],
@@ -619,6 +677,45 @@ async def _handle_create_github_issue(
         payload["token_key_name"] = candidate.get("key_name")
         if last_error is not None:
             payload["fallback_from_status_code"] = last_error.status_code
+        if resolved_origin_ref:
+            from brain.systems.runs.slack_delivery import (
+                OpenAskArtifact,
+                deliver_open_ask_artifact_reply,
+            )
+
+            issue = payload.get("issue")
+            issue = issue if isinstance(issue, dict) else {}
+            issue_number = issue.get("number")
+            issue_url = _clean(issue.get("html_url") or issue.get("url"))
+            artifact_delivery = await deliver_open_ask_artifact_reply(
+                origin_ref=resolved_origin_ref,
+                artifact=OpenAskArtifact(
+                    kind="GitHub issue",
+                    reference=(
+                        f"{repo_slug}#{issue_number}"
+                        if issue_number is not None
+                        else repo_slug
+                    ),
+                    title=_clean(issue.get("title")) or clean_title,
+                    url=issue_url,
+                ),
+                answering_run_id=_current_tool_run_id(),
+            )
+            payload["origin_ref"] = resolved_origin_ref
+            if artifact_delivery is not None:
+                payload["origin_ask_delivery"] = artifact_delivery
+                delivered = [
+                    item
+                    for item in artifact_delivery.get("origin_asks", [])
+                    if isinstance(item, dict) and item.get("delivered")
+                ]
+                if delivered:
+                    payload["origin_ask"] = {
+                        "requester": delivered[0].get("requester"),
+                        "request": delivered[0].get("ask"),
+                        "mechanism": delivered[0].get("mechanism"),
+                        "announcement": delivered[0].get("announcement"),
+                    }
         return json.dumps(payload, default=str)
 
     if last_error is not None:

@@ -4,6 +4,7 @@ import base64
 from pathlib import Path
 import json
 import re
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
@@ -14,6 +15,7 @@ from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.domain import Domain, DomainObjectType, DomainRecord
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundEventRow
+from brain.platform.db.models.open_ask import OpenAsk
 from brain.platform.db.models.org import Org, User
 
 
@@ -64,6 +66,7 @@ async def session(async_sqlite_session_factory):
             ExternalAgentConnectionRow.__table__,
             AgentRunRow.__table__,
             AgentRunEventRow.__table__,
+            OpenAsk.__table__,
             InboundEventRow.__table__,
             InboundDecisionReceiptRow.__table__,
         ]
@@ -753,6 +756,68 @@ async def test_post_slack_reply_tool_posts_to_triggering_thread(monkeypatch):
             "thread_ts": "1716900000.000100",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
+
+    class _SlackClient:
+        async def post_message(self, **kwargs):
+            return {
+                "ok": True,
+                "ts": "1716900200.000300",
+                "channel": kwargs["channel"],
+            }
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        AsyncMock(return_value=_SlackClient()),
+    )
+    recorder = AsyncMock(return_value=1)
+    monkeypatch.setattr(
+        "brain.systems.runs.slack_delivery.record_origin_run_answer_delivery",
+        recorder,
+    )
+    context = {
+        "run_id": 9,
+        "execution_metadata": {
+            "run_id": 9,
+            "open_ask": {
+                "origin_ref": "slack:T789:C456:1716900000.000100",
+            },
+        },
+        "slack_trigger": {
+            "response_target": {
+                "channel_id": "C456",
+                "thread_ts": "1716900000.000100",
+                "visibility": "public",
+            }
+        },
+    }
+
+    with bind_agent_context(context):
+        answer = json.loads(
+            await _handle_post_slack_reply(
+                body="Issue #1221 is filed.",
+                answers_open_ask=True,
+            )
+        )
+    assert answer["answered_open_asks"] == 1
+    recorder.assert_awaited_once()
+    assert recorder.await_args.kwargs["origin_run_id"] == 9
+
+    recorder.reset_mock()
+    with bind_agent_context(context):
+        clarification = json.loads(
+            await _handle_post_slack_reply(
+                body="Which repository should own this?",
+                answers_open_ask=False,
+            )
+        )
+    assert clarification["answered_open_asks"] == 0
+    recorder.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1648,7 +1713,13 @@ def test_slack_tools_are_available_on_normal_illo_tool_surface():
     } <= names
     slack_reply = next(tool for tool in CHAT_TOOLS if tool["name"] == "post_slack_reply")
     properties = slack_reply["input_schema"]["properties"]
-    assert {"image_data", "image_filename", "image_title", "image_alt"} <= set(properties)
+    assert {
+        "image_data",
+        "image_filename",
+        "image_title",
+        "image_alt",
+        "answers_open_ask",
+    } <= set(properties)
     assert "data:image/png;base64" in properties["image_data"]["description"]
     for keyword in ("anyOf", "oneOf", "allOf", "not", "enum"):
         assert keyword not in slack_reply["input_schema"]

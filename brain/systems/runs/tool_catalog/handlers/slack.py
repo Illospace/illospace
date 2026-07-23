@@ -367,9 +367,11 @@ async def _handle_post_slack_reply(
     image_filename: str | None = None,
     image_title: str | None = None,
     image_alt: str | None = None,
+    answers_open_ask: bool = False,
 ) -> str:
     """Post an Illo-authored reply to the originating Slack surface."""
 
+    answers_open_ask = _coerce_bool(answers_open_ask, default=False)
     submitted_text = str(body or "")
     text = submitted_text
     try:
@@ -522,6 +524,28 @@ async def _handle_post_slack_reply(
 
     submitted_chars = int(response.get("submitted_chars", len(text)))
     posted_chars = int(response.get("posted_chars", submitted_chars))
+    answered_open_asks = 0
+    execution_metadata = _execution_metadata()
+    open_ask_context = execution_metadata.get("open_ask")
+    if answers_open_ask and isinstance(open_ask_context, dict):
+        from brain.systems.runs.slack_delivery import (
+            record_origin_run_answer_delivery,
+        )
+
+        run_id = execution_metadata.get("run_id") or getattr(
+            _agent_context,
+            "run_id",
+            None,
+        )
+        try:
+            run_id = int(run_id) if run_id not in (None, "") else None
+        except (TypeError, ValueError):
+            run_id = None
+        answered_open_asks = await record_origin_run_answer_delivery(
+            origin_run_id=run_id,
+            answer_text=text,
+            slack_response=response,
+        )
     return json.dumps(
         {
             "ok": True,
@@ -535,6 +559,8 @@ async def _handle_post_slack_reply(
             "posted_bytes": int(response.get("posted_bytes", len(text.encode("utf-8")))),
             "chunk_count": int(response.get("chunk_count", 1)),
             "truncated": bool(response.get("truncated", False)),
+            "answers_open_ask": bool(answers_open_ask),
+            "answered_open_asks": answered_open_asks,
             "slack": response,
         },
         default=str,
