@@ -23,7 +23,7 @@ from tests.test_chat_api_routes import (
 )
 
 
-pytestmark = pytest.mark.anyio
+pytestmark = pytest.mark.asyncio
 
 
 def _claims(user_id: str, org_id: str = "org-1") -> WsTokenClaims:
