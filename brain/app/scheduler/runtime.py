@@ -48,6 +48,26 @@ _OWNER_MODES = {
     OWNER_MODE_SCHEDULER,
 }
 
+_FAILURE_MEMORY_ADDRESS_RE = re.compile(r"\b0x[0-9a-f]+\b", re.IGNORECASE)
+_FAILURE_OBJECT_REPR_RE = re.compile(
+    r"<(?P<label>(?:(?:async_)?generator|coroutine) object [^<>\n]+?"
+    r"|[A-Za-z_][\w.]* object) at 0x[0-9a-f]+>",
+    re.IGNORECASE,
+)
+_FAILURE_TASK_ID_RE = re.compile(r"\bTask-\d+\b")
+_FAILURE_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+_FAILURE_TIMESTAMP_RE = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b"
+)
+_FAILURE_RUNTIME_ID_RE = re.compile(
+    r"\b(?P<label>pid|process_id|thread_id)(?P<separator>\s*[:=]\s*)\d+\b",
+    re.IGNORECASE,
+)
+
 
 def trace_id_for_run_id(run_id: int | str | None) -> str | None:
     try:
@@ -124,6 +144,32 @@ def scheduler_failure_alert_threshold() -> int:
     return max(1, configured)
 
 
+def normalize_scheduler_failure_identity(failure_identity: str) -> str:
+    """Remove volatile runtime tokens before identifying a failure streak."""
+    normalized = str(failure_identity or "").strip()
+    normalized = _FAILURE_OBJECT_REPR_RE.sub(
+        lambda match: f"<{match.group('label')}>",
+        normalized,
+    )
+    normalized = _FAILURE_MEMORY_ADDRESS_RE.sub("0x<address>", normalized)
+    normalized = _FAILURE_TASK_ID_RE.sub("Task-<id>", normalized)
+    normalized = _FAILURE_UUID_RE.sub("<uuid>", normalized)
+    normalized = _FAILURE_TIMESTAMP_RE.sub("<timestamp>", normalized)
+    normalized = _FAILURE_RUNTIME_ID_RE.sub(
+        lambda match: (
+            f"{match.group('label')}{match.group('separator')}<id>"
+        ),
+        normalized,
+    )
+    return "\n".join(line.rstrip() for line in normalized.splitlines())
+
+
+def scheduler_failure_signature(failure_identity: str) -> str:
+    """Return a stable digest for one normalized scheduler failure class."""
+    normalized = normalize_scheduler_failure_identity(failure_identity)
+    return sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def _scheduler_failure_guard_state(job: SchedulerJob) -> dict[str, Any]:
     return {
         "failure_signature": job.failure_signature,
@@ -153,7 +199,7 @@ async def async_record_scheduler_job_failure(
     if locked_job is None:
         raise ValueError(f"Scheduler job {job.id} not found")
 
-    signature = sha256(failure_identity.strip().encode("utf-8")).hexdigest()
+    signature = scheduler_failure_signature(failure_identity)
     if locked_job.failure_signature == signature:
         locked_job.consecutive_failure_count = int(
             locked_job.consecutive_failure_count or 0
