@@ -3,19 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
-
-import pytest
-
-pytest.skip(
-    "Legacy sync truth-maintenance DB helpers were removed; async review coverage remains.",
-    allow_module_level=True,
-)
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from brain.app.api.schemas.memories import MemoryRead
 from brain.systems.memory.truth_maintenance import (
     adjudicate_memory_pair,
-    apply_truth_adjudication,
+    async_record_memory_review,
     build_demotion_truth_fields,
     build_policy_truth_fields,
     build_truth_state,
@@ -23,11 +17,9 @@ from brain.systems.memory.truth_maintenance import (
     filter_truth_safe_memories,
     normalize_memory_claim_metadata,
     quarantine_filter_enabled,
-    record_contradiction,
-    record_memory_review,
-    resolve_contradiction,
     validate_truth_action_context,
 )
+from brain.systems.reconstructive_memory.curation import link_memories, supersede_memory
 
 
 def _sparse_memory():
@@ -99,43 +91,7 @@ def test_normalize_memory_claim_metadata_preserves_repo_evidence_fields():
     assert metadata["valid_until"] == datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc)
 
 
-def test_record_contradiction_writes_structured_payload():
-    session = MagicMock()
-    result = MagicMock()
-    result.mappings.return_value.first.return_value = {
-        "id": 42,
-        "left_memory_id": 3,
-        "right_memory_id": 9,
-        "detected_by": "graph.detect_contradictions",
-        "contradiction_type": "valence_conflict",
-        "evidence": '{"note":"test"}',
-        "severity": 0.8,
-        "status": "open",
-        "resolution_memory_id": None,
-        "created_at": datetime.now(timezone.utc),
-        "resolved_at": None,
-        "resolved_by": None,
-    }
-    session.execute.return_value = result
-
-    row = record_contradiction(
-        session,
-        left_memory_id=9,
-        right_memory_id=3,
-        contradiction_type="valence_conflict",
-        detected_by="graph.detect_contradictions",
-        evidence={"note": "test"},
-        severity=0.8,
-    )
-
-    assert row["id"] == 42
-    payload = session.execute.call_args.args[1]
-    assert payload["left_memory_id"] == 3
-    assert payload["right_memory_id"] == 9
-    assert "note" in payload["evidence"]
-
-
-def test_record_review_writes_structured_payload():
+async def test_async_record_review_writes_structured_payload():
     session = MagicMock()
     result = MagicMock()
     result.mappings.return_value.first.return_value = {
@@ -149,9 +105,9 @@ def test_record_review_writes_structured_payload():
         "evidence": '{"support_count": 3}',
         "created_at": datetime.now(timezone.utc),
     }
-    session.execute.return_value = result
+    session.execute = AsyncMock(return_value=result)
 
-    row = record_memory_review(
+    row = await async_record_memory_review(
         session,
         memory_id=5,
         action="promote",
@@ -164,6 +120,7 @@ def test_record_review_writes_structured_payload():
     )
 
     assert row["id"] == 11
+    session.execute.assert_awaited_once()
     payload = session.execute.call_args.args[1]
     assert payload["memory_id"] == 5
     assert payload["action"] == "promote"
@@ -294,39 +251,6 @@ def test_truth_state_marks_open_contradictions_as_unreviewed_active():
     assert state["is_policy_effective"] is False
 
 
-def test_resolve_contradiction_updates_resolution_payload():
-    session = MagicMock()
-    result = MagicMock()
-    result.mappings.return_value.first.return_value = {
-        "id": 42,
-        "left_memory_id": 3,
-        "right_memory_id": 9,
-        "detected_by": "graph.detect_contradictions",
-        "contradiction_type": "valence_conflict",
-        "evidence": '{"note":"resolved"}',
-        "severity": 0.8,
-        "status": "resolved",
-        "resolution_memory_id": 11,
-        "created_at": datetime.now(timezone.utc),
-        "resolved_at": datetime.now(timezone.utc),
-        "resolved_by": "user-1",
-    }
-    session.execute.return_value = result
-
-    row = resolve_contradiction(
-        session,
-        contradiction_id=42,
-        resolution_memory_id=11,
-        resolved_by="user-1",
-        evidence={"note": "resolved"},
-    )
-
-    assert row["status"] == "resolved"
-    payload = session.execute.call_args.args[1]
-    assert payload["contradiction_id"] == 42
-    assert payload["resolution_memory_id"] == 11
-
-
 def test_truth_safe_recall_filter_is_enabled_by_default(monkeypatch):
     monkeypatch.delenv("MEMORY_QUARANTINE_FILTER_ENABLED", raising=False)
 
@@ -362,102 +286,107 @@ def test_correction_adjudication_supersedes_old_memory():
     assert decision["is_high_confidence_conflict"] is True
 
 
-def test_high_confidence_correction_quarantines_old_memory():
+async def test_supersede_memory_marks_old_memory_and_writes_graph_edge():
     session = MagicMock()
-    record_result = MagicMock()
-    record_result.mappings.return_value.first.return_value = {
-        "id": 90,
-        "left_memory_id": 1,
-        "right_memory_id": 2,
-        "detected_by": "truth_maintenance.adjudication",
-        "contradiction_type": "semantic_supersession",
-        "evidence": "{}",
-        "severity": 0.91,
-        "status": "open",
-        "resolution_memory_id": None,
-        "created_at": datetime.now(timezone.utc),
-        "resolved_at": None,
-        "resolved_by": None,
-    }
-    review_result = MagicMock()
-    review_result.mappings.return_value.first.return_value = {
-        "id": 91,
-        "memory_id": 2,
-        "action": "quarantine",
-        "from_tier": "unknown",
-        "to_tier": "unknown",
-        "reviewer_id": "user-1",
-        "rationale": "superseded",
-        "evidence": "{}",
-        "created_at": datetime.now(timezone.utc),
-    }
-    session.execute.side_effect = [
-        record_result,
-        MagicMock(),
-        review_result,
-        MagicMock(),
-    ]
+    session.scalar = AsyncMock(return_value=None)
+    old_node = SimpleNamespace(id=2, visibility="private", content_kind="procedure", org_id=None)
+    new_node = SimpleNamespace(id=1, visibility="private", content_kind="procedure", org_id=None)
+    curation_source = SimpleNamespace(id=91)
+    evidence_span = SimpleNamespace(id=92)
 
-    with patch("brain.systems.memory.truth_maintenance._mark_memory_dependents_stale") as mock_stale:
-        result = apply_truth_adjudication(
-            session,
-            candidate_memory_id=1,
-            existing_memory_id=2,
-            adjudication={
-                "relation": "supersedes",
-                "action": "supersede_existing",
-                "confidence": 0.91,
-                "severity": 0.9,
-                "rationale": "superseded",
-                "evidence": ["Actually use pnpm instead of npm"],
-            },
-            candidate_confidence=0.91,
-            candidate_evidence={"quote": "Actually use pnpm instead of npm"},
-            reviewer_id="user-1",
-        )
-
-    assert result["action_taken"] == "superseded_existing"
-    mock_stale.assert_called_once_with(session, [2], "superseded")
-    sql_texts = [call.args[0].text for call in session.execute.call_args_list if hasattr(call.args[0], "text")]
-    assert any("superseded_by" in sql for sql in sql_texts)
-
-
-def test_low_confidence_contradiction_records_without_hiding():
-    session = MagicMock()
-    record_result = MagicMock()
-    record_result.mappings.return_value.first.return_value = {
-        "id": 95,
-        "left_memory_id": 1,
-        "right_memory_id": 2,
-        "detected_by": "truth_maintenance.adjudication",
-        "contradiction_type": "semantic_conflict",
-        "evidence": "{}",
-        "severity": 0.55,
-        "status": "needs_review",
-        "resolution_memory_id": None,
-        "created_at": datetime.now(timezone.utc),
-        "resolved_at": None,
-        "resolved_by": None,
-    }
-    session.execute.return_value = record_result
-
-    result = apply_truth_adjudication(
-        session,
-        candidate_memory_id=1,
-        existing_memory_id=2,
-        adjudication={
-            "relation": "contradicts",
-            "action": "needs_review",
-            "confidence": 0.55,
-            "severity": 0.55,
-            "rationale": "weak semantic conflict",
-            "evidence": ["weak"],
-        },
-        candidate_confidence=0.55,
-        candidate_evidence={"quote": "maybe not"},
+    node_repository = MagicMock()
+    node_repository.mark_superseded = AsyncMock()
+    assertion_repository = MagicMock()
+    assertion_repository.mark_superseded_for_node = AsyncMock()
+    edge_repository = MagicMock()
+    edge_repository.upsert_edge = AsyncMock(
+        return_value=SimpleNamespace(id=90, created_by="agent_curation")
     )
 
-    assert result["action_taken"] == "recorded_for_review"
-    assert session.execute.call_count == 1
-    payload = session.execute.call_args.args[1]
-    assert payload["status"] == "needs_review"
+    with (
+        patch(
+            "brain.systems.reconstructive_memory.curation._visible_nodes_exact",
+            new=AsyncMock(side_effect=[[old_node], [old_node, new_node]]),
+        ),
+        patch(
+            "brain.systems.reconstructive_memory.curation._record_curation_source",
+            new=AsyncMock(return_value=(curation_source, [evidence_span])),
+        ),
+        patch(
+            "brain.systems.reconstructive_memory.curation.MemoryNodeRepository",
+            return_value=node_repository,
+        ),
+        patch(
+            "brain.systems.reconstructive_memory.curation.MemoryAssertionRepository",
+            return_value=assertion_repository,
+        ),
+        patch(
+            "brain.systems.reconstructive_memory.curation.MemoryEdgeRepository",
+            return_value=edge_repository,
+        ),
+    ):
+        result = await supersede_memory(
+            session,
+            old_node_id=2,
+            new_node_id=1,
+            reason="The new memory corrects the previous package-manager guidance.",
+            user_id="user-1",
+            org_id=None,
+        )
+
+    assert result["action"] == "supersede"
+    assert result["old_node"] == 2
+    assert result["new_node"] == 1
+    node_repository.mark_superseded.assert_awaited_once_with(2)
+    assertion_repository.mark_superseded_for_node.assert_awaited_once_with(2)
+    edge_draft = edge_repository.upsert_edge.await_args.kwargs["draft"]
+    assert edge_draft.source_node_id == 2
+    assert edge_draft.target_node_id == 1
+    assert edge_draft.edge_kind == "superseded_by"
+    assert edge_draft.evidence_span_ids == (92,)
+
+
+async def test_contradiction_edge_links_memories_without_hiding():
+    session = MagicMock()
+    left_node = SimpleNamespace(id=1, visibility="private", truth_status="unknown")
+    right_node = SimpleNamespace(id=2, visibility="private", truth_status="unknown")
+    curation_source = SimpleNamespace(id=96)
+    evidence_span = SimpleNamespace(id=97)
+    edge_repository = MagicMock()
+    edge_repository.upsert_edge = AsyncMock(
+        return_value=SimpleNamespace(id=95, created_by="agent_curation")
+    )
+
+    with (
+        patch(
+            "brain.systems.reconstructive_memory.curation._visible_nodes_exact",
+            new=AsyncMock(return_value=[left_node, right_node]),
+        ),
+        patch(
+            "brain.systems.reconstructive_memory.curation._record_curation_source",
+            new=AsyncMock(return_value=(curation_source, [evidence_span])),
+        ),
+        patch(
+            "brain.systems.reconstructive_memory.curation.MemoryEdgeRepository",
+            return_value=edge_repository,
+        ),
+    ):
+        result = await link_memories(
+            session,
+            source_node_id=1,
+            target_node_id=2,
+            relationship="contradicts",
+            reason="The claims conflict and both remain visible pending review.",
+            user_id="user-1",
+            org_id=None,
+        )
+
+    assert result["action"] == "link"
+    assert result["relationship"] == "contradicts"
+    edge_draft = edge_repository.upsert_edge.await_args.kwargs["draft"]
+    assert edge_draft.source_node_id == 1
+    assert edge_draft.target_node_id == 2
+    assert edge_draft.edge_kind == "contradicts"
+    assert edge_draft.evidence_span_ids == (97,)
+    assert left_node.truth_status == "unknown"
+    assert right_node.truth_status == "unknown"
