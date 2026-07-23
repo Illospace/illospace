@@ -46,7 +46,9 @@ from typing import Any, Protocol
 
 from sqlalchemy import select
 
+from brain.kernel.common.coercion import coerce_datetime
 from brain.systems.briefing.core import DossierBudget, SourcePiece
+from brain.systems.chantiers import latest_source_movement
 
 # Conservative same-job reference pattern: explicit owner/repo#N only.
 _GITHUB_REF_RE = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)\b")
@@ -101,6 +103,10 @@ def _ts_from_slack(ts: Any) -> datetime | None:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _data(record: Any) -> dict[str, Any]:
+    return dict(getattr(record, "data", None) or {})
 
 
 def _no_autoflush(session: Any):
@@ -250,7 +256,7 @@ def slack_provenance(event: Any) -> dict[str, Any] | None:
 
 
 def _record_piece(record: Any) -> SourcePiece | None:
-    data = dict(getattr(record, "data", None) or {})
+    data = _data(record)
     if not data:
         return None
     title = (
@@ -275,7 +281,7 @@ def _record_piece(record: Any) -> SourcePiece | None:
 
 def _chantier_refs(record: Any) -> list[dict[str, str]]:
     """Return the typed-ref contract, defensively normalized for rendering."""
-    refs = (dict(getattr(record, "data", None) or {})).get("refs") or []
+    refs = _data(record).get("refs") or []
     if not isinstance(refs, list):
         return []
     normalized: list[dict[str, str]] = []
@@ -291,7 +297,7 @@ def _chantier_refs(record: Any) -> list[dict[str, str]]:
 
 
 def _tracker_state(record: Any) -> str:
-    data = dict(getattr(record, "data", None) or {})
+    data = _data(record)
     return _text(data.get("status") or data.get("state")) or "unavailable"
 
 
@@ -308,7 +314,30 @@ def _chantier_piece(
     section cut, so oversized goal context receives the same cumulative
     ``omitted_chars`` markers and floors as every other source.
     """
-    data = dict(getattr(chantier, "data", None) or {})
+    data = _data(chantier)
+    movement_at = latest_source_movement(
+        chantier,
+        members_by_external_id=members_by_external_id,
+    )
+    movement_observation = (
+        f"last source movement: {movement_at.date().isoformat()}"
+        if movement_at is not None
+        else "last source movement: unknown"
+    )
+    if movement_at is None:
+        row_written_at = coerce_datetime(
+            getattr(chantier, "updated_at", None),
+            utc=True,
+        ) or coerce_datetime(getattr(chantier, "created_at", None), utc=True)
+        if row_written_at is not None:
+            movement_observation += (
+                f"; tracker row last written {row_written_at.date().isoformat()}"
+            )
+    if member_lookup_capped:
+        movement_observation += (
+            f"; source movement observation partial: {member_lookup_capped} "
+            "additional member records not gathered (cap)"
+        )
     sibling_bits: list[str] = []
     artifact_bits: list[str] = []
     for item in _chantier_refs(chantier):
@@ -329,6 +358,7 @@ def _chantier_piece(
         sibling_bits.append(f"{member_lookup_capped} additional member states not gathered (cap)")
 
     body_bits = [
+        movement_observation,
         f"goal: {_text(data.get('goal')) or 'not recorded'}",
         f"state: {_text(data.get('state')) or 'not recorded'}",
         f"kind: {_text(data.get('kind')) or 'not recorded'}",
@@ -349,7 +379,7 @@ def _chantier_piece(
         ref=f"{JOB_REF_RECORD_PREFIX}{getattr(chantier, 'id', '')}",
         title=title,
         body="; ".join(body_bits),
-        ts=getattr(chantier, "updated_at", None),
+        ts=movement_at,
         weight=10,
     )
 
@@ -363,7 +393,7 @@ async def _chantier_pieces_for_record(
     is one batch DB read for all sibling external ids across all matching
     chantiers — deliberately no GitHub fan-out inside packet minting.
     """
-    subject_data = dict(getattr(record, "data", None) or {})
+    subject_data = _data(record)
     subject_external_id = _text(subject_data.get("external_id"))
     if not subject_external_id:
         return []
@@ -432,7 +462,7 @@ async def _chantier_pieces_for_record(
                 )
             ).scalars().all()
         for member in members:
-            external_id = _text((dict(getattr(member, "data", None) or {})).get("external_id"))
+            external_id = _text(_data(member).get("external_id"))
             if external_id and external_id not in members_by_external_id:
                 members_by_external_id[external_id] = member
 
@@ -511,7 +541,7 @@ def _github_refs(idea: Any, record: Any, event: Any) -> tuple[list[tuple[str, in
         add(hints.get("repo"), hints.get("number"))
 
     # (b) Canonical tracker identity via the existing normalizers.
-    data = dict(getattr(record, "data", None) or {}) if record is not None else {}
+    data = _data(record)
     if data:
         from brain.systems.user_domains.service import (
             _github_pr_key_from_url,
@@ -557,7 +587,7 @@ def _checks_summary(checks: Any) -> str:
 
 
 def _deploy_piece(record: Any) -> SourcePiece | None:
-    data = dict(getattr(record, "data", None) or {}) if record is not None else {}
+    data = _data(record)
     state = _text(data.get("deploy_state"))
     if not state:
         return None
@@ -597,7 +627,7 @@ async def _related_tracker_records(
     for row in rows:
         if exclude_id is not None and getattr(row, "id", None) == exclude_id:
             continue
-        row_repo = _text(dict(getattr(row, "data", None) or {}).get("repo")).lower().rstrip("/")
+        row_repo = _text(_data(row).get("repo")).lower().rstrip("/")
         if not row_repo or any(row_repo.endswith(name) for name in repo_names):
             related.append(row)
     return related
