@@ -270,10 +270,21 @@ class TestCachePolicy:
     def test_openai_cache_retention_matches_extended_cache_support(self):
         from brain.systems.runs.direct_agent import _get_openai_cache_retention
 
-        assert _get_openai_cache_retention("openai/gpt-5.5") == "24h"
         assert _get_openai_cache_retention("openai/gpt-5.4") == "24h"
         assert _get_openai_cache_retention("openai/gpt-4.1-mini") == "24h"
         assert _get_openai_cache_retention("openai/gpt-4o-mini") is None
+
+    def test_chatgpt_backend_models_do_not_request_cache_retention(self):
+        """The Codex backend 400s on prompt_cache_retention.
+
+        Asking anyway costs a wasted round trip on every single call and never
+        yields extended retention, so these models must not send it.
+        """
+        from brain.systems.runs.direct_agent import _get_openai_cache_retention
+
+        assert _get_openai_cache_retention("openai/gpt-5.5") is None
+        assert _get_openai_cache_retention("openai/gpt-5.6-sol") is None
+        assert _get_openai_cache_retention("gpt-5.6-sol") is None
 
     @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
