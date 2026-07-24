@@ -13,6 +13,8 @@ from brain.platform.integrations.providers import get_active_provider
 
 DEFAULT_RUNTIME_PROVIDER = "openai"
 DEFAULT_THINKING_TIER = "high"
+EFFORT_TIERS = ("none", "low", "medium", "high", "xhigh")
+EFFORT_TIER_SET = frozenset(EFFORT_TIERS)
 DEFAULT_PROVIDER_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-5.5",
@@ -43,13 +45,7 @@ PROVIDER_MODEL_OPTIONS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-THINKING_MAP = {
-    "none": "none",
-    "low": "low",
-    "medium": "medium",
-    "high": "high",
-    "xhigh": "xhigh",
-}
+THINKING_MAP = {tier: tier for tier in EFFORT_TIERS}
 
 OPENAI_MODEL_ALIASES = set(PROVIDER_MODEL_OPTIONS["openai"])
 

@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.org import Org, User
 from brain.platform.providers.model_policy import (
+    EFFORT_TIERS,
     PROVIDER_MODEL_OPTIONS,
     async_get_default_model,
     async_get_default_thinking,
@@ -27,12 +28,20 @@ OPENAI_MODEL_OPTIONS = [
     RuntimeOption(key="gpt-4.1-mini", label="GPT-4.1 Mini", description="Legacy lightweight fallback."),
 ]
 
+_THINKING_OPTION_DETAILS = {
+    "none": ("None", "No additional reasoning effort."),
+    "low": ("Low", "Faster responses with light reasoning."),
+    "medium": ("Medium", "Balanced reasoning effort."),
+    "high": ("High", "More reasoning for difficult work."),
+    "xhigh": ("Extra High", "Maximum supported reasoning effort."),
+}
 THINKING_OPTIONS = [
-    RuntimeOption(key="none", label="None", description="No additional reasoning effort."),
-    RuntimeOption(key="low", label="Low", description="Faster responses with light reasoning."),
-    RuntimeOption(key="medium", label="Medium", description="Balanced reasoning effort."),
-    RuntimeOption(key="high", label="High", description="More reasoning for difficult work."),
-    RuntimeOption(key="xhigh", label="Extra High", description="Maximum supported reasoning effort."),
+    RuntimeOption(
+        key=tier,
+        label=_THINKING_OPTION_DETAILS[tier][0],
+        description=_THINKING_OPTION_DETAILS[tier][1],
+    )
+    for tier in EFFORT_TIERS
 ]
 
 

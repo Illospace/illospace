@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import os
 from typing import Any
 
-from brain.platform.providers.model_policy import infer_provider_from_model
+from brain.platform.providers.model_policy import EFFORT_TIER_SET, infer_provider_from_model
 
 DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 
@@ -45,6 +45,7 @@ _REASONING_RESERVES = {
     "high": 16_384,
     "xhigh": 24_576,
 }
+assert frozenset(_REASONING_RESERVES) == EFFORT_TIER_SET
 
 
 @dataclass(frozen=True)
@@ -204,4 +205,3 @@ def resolve_model_context_budget(
         target_tokens=target,
         emergency_target_tokens=emergency_target,
     )
-

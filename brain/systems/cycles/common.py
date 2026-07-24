@@ -3,8 +3,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from brain.platform.providers.model_policy import (
+    EFFORT_TIER_SET,
+    PROVIDER_MODEL_OPTIONS,
+    normalize_model_name,
+)
+
 REUSABLE_THREAD_EXECUTION_MODE = "reuse_same_idea"
-VALID_THINKING_OVERRIDES = {"none", "low", "medium", "high", "xhigh"}
+VALID_THINKING_OVERRIDES = EFFORT_TIER_SET
 CYCLE_LEDGER_OUTPUT_TARGET_TYPE = "cycle_ledger"
 THREAD_OUTPUT_TARGET_TYPE = "thread"
 SCHEDULED_CYCLE_ORIGIN = "scheduled_cycle"
@@ -13,6 +19,12 @@ AGENT_TRIGGERED_CYCLE_ORIGIN = "agent_triggered_cycle"
 EXTERNAL_AGENT_TRIGGERED_CYCLE_ORIGIN = "external_agent_triggered_cycle"
 SCHEDULED_DIGEST_RUN_KIND = "scheduled_digest"
 OFF_SLOT_MATERIAL_ALERT_RUN_KIND = "off_slot_material_alert"
+
+_VALID_MODEL_OVERRIDES = frozenset(
+    f"{provider}/{model}"
+    for provider, models in PROVIDER_MODEL_OPTIONS.items()
+    for model in models
+)
 
 
 def validate_nonempty_trimmed(value: str, field_name: str) -> str:
@@ -35,6 +47,28 @@ def validate_thinking_override(value: str | None) -> str | None:
             f"thinking_override must be one of: {', '.join(sorted(VALID_THINKING_OVERRIDES))}"
         )
     return normalized
+
+
+def validate_model_override(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw or raw.lower() == "default":
+        return None
+
+    candidate = raw.replace(":", "/", 1)
+    if "/" not in candidate:
+        matches = [
+            f"{provider}/{candidate}"
+            for provider, models in PROVIDER_MODEL_OPTIONS.items()
+            if candidate in models
+        ]
+        candidate = matches[0] if len(matches) == 1 else candidate
+
+    if candidate not in _VALID_MODEL_OVERRIDES:
+        raise ValueError(
+            f"Unknown model_override {raw!r}. Valid options: "
+            f"{', '.join(sorted(_VALID_MODEL_OVERRIDES))}"
+        )
+    return normalize_model_name(candidate)
 
 
 def string_or_none(value) -> str | None:
