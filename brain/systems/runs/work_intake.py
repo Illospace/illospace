@@ -531,14 +531,14 @@ def _external_agent_headless_thread_id(target: dict[str, Any]) -> str:
     raise ValueError("External agent headless ask requires thread_id or connection/task ids")
 
 
-def _inbound_submission_thread_id(target: dict[str, Any]) -> str:
+def _inbound_signal_thread_id(target: dict[str, Any]) -> str:
     thread_id = str(target.get("thread_id") or "")
     if thread_id:
         return thread_id
     event_id = str(target.get("event_id") or "")
     if event_id:
         return f"inbound:{event_id}"
-    raise ValueError("Inbound submission requires event_id or thread_id")
+    raise ValueError("Inbound signal requires event_id or thread_id")
 
 
 def _build_external_agent_headless_request(
@@ -573,7 +573,7 @@ def _build_external_agent_headless_request(
     )
 
 
-def _build_inbound_submission_request(
+def _build_inbound_signal_request(
     event: WorkIntakeEvent,
     *,
     target: dict[str, Any],
@@ -587,7 +587,7 @@ def _build_inbound_submission_request(
     return AgentRunRequest(
         org_id=_event_org_id(event),
         user_id=_event_actor_user_id(event),
-        thread_id=_inbound_submission_thread_id(target),
+        thread_id=_inbound_signal_thread_id(target),
         message=message,
         profile=profile,
         recipe=recipe_for_profile(profile, metadata),
@@ -750,8 +750,8 @@ async def _build_agent_run_request(
             priority=priority,
         )
 
-    if target.get("kind") == "inbound_submission":
-        return _build_inbound_submission_request(
+    if target.get("kind") in {"app_report", "inbound_submission"}:
+        return _build_inbound_signal_request(
             event,
             target=target,
             metadata=metadata,
