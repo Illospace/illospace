@@ -38,8 +38,13 @@ jobs:
         with:
           filters: |
             backend:
+              # scripts/** is backend surface too: fast-suite tests read those
+              # files directly (the async-DB debt gate, scripts/verify.py), so a
+              # script-only change that breaks its own guard test would otherwise
+              # skip the suite that guards it and only fail once it reaches main.
               - "brain/**"
               - "tests/**"
+              - "scripts/**"
               - "requirements*.txt"
               - "requirements-gpu.txt"
               - "pyproject.toml"
