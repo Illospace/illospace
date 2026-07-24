@@ -267,6 +267,22 @@ def _chantier_object_definition() -> dict:
                 },
             },
             {
+                "key": "member_refs",
+                "field_type": "json",
+                "validation": {
+                    "type": "array",
+                    "items": {"type": "string", "min_length": 1},
+                },
+            },
+            {
+                "key": "blockers",
+                "field_type": "json",
+                "validation": {
+                    "type": "array",
+                    "items": {"type": "string", "min_length": 1},
+                },
+            },
+            {
                 "key": "parent_issue",
                 "field_type": "text",
                 "validation": {"pattern": f"^{github_issue_pattern}$"},
@@ -311,6 +327,11 @@ def _chantier_record_data() -> dict:
                 "ref": "brain/references/chantier-record-contract.md",
             },
         ],
+        "member_refs": [
+            "github:Illospace/illospace:issue:326",
+            "github:Illospace/illospace:issue:438",
+        ],
+        "blockers": ["Waiting for the schema migration to reach production."],
         "parent_issue": "github:Illospace/illospace:issue:326",
         "next_step": "Land the record contract and unblock member-ticket work.",
         "progress_note": "Schema implementation is in review.",
@@ -1245,6 +1266,247 @@ async def test_manage_domain_round_trips_a_chantier_record(session, monkeypatch)
     assert updated["data"]["state"] == "shipping"
     assert queried["returned"] == queried["total_matching"] == 1
     assert queried["records"][0]["id"] == created["id"]
+
+
+async def test_manage_domain_drops_unknown_update_fields_but_persists_valid_patch(
+    session,
+    monkeypatch,
+):
+    from brain.platform.db.repositories import unit_of_work
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
+
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[
+            {
+                "key": "ticket",
+                "fields": [
+                    {"key": "title", "field_type": "text", "required": True},
+                    {
+                        "key": "status",
+                        "field_type": "enum",
+                        "options": ["Todo", "In Progress", "Done"],
+                    },
+                    {
+                        "key": "priority",
+                        "field_type": "enum",
+                        "options": ["Low", "Medium", "High"],
+                    },
+                    {"key": "assignee", "field_type": "text"},
+                    {"key": "progress_note", "field_type": "long_text"},
+                ],
+            }
+        ],
+    )
+    record = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "ticket",
+        data={"title": "Repair schema-drift writes", "status": "Todo"},
+    )
+
+    class SessionUnitOfWork:
+        def __init__(self, *args, **kwargs):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            if exc_type is None:
+                await session.flush()
+            return False
+
+    monkeypatch.setattr(unit_of_work, "UnitOfWork", SessionUnitOfWork)
+
+    with bind_agent_context({"org_id": ORG_ID, "user_id": USER_ID}):
+        payload = json.loads(
+            await _handle_manage_domain(
+                action="update_record",
+                domain_id=domain.id,
+                record_id=record.id,
+                data_patch={
+                    "status": "In Progress",
+                    "assignee": "Reda",
+                    "progress_note": "Valid fields must survive the guessed field.",
+                    "priority": "Urgent",
+                    "next_action": "Invented near-miss field",
+                },
+                expected_version=1,
+            )
+        )
+
+    stored = await service.get_record(ORG_ID, domain.id, record.id)
+    assert payload["record"]["version"] == 2
+    assert stored.data["status"] == "In Progress"
+    assert stored.data["assignee"] == "Reda"
+    assert stored.data["progress_note"] == "Valid fields must survive the guessed field."
+    assert stored.data["priority"] is None
+    assert "next_action" not in stored.data
+    assert payload["warnings"] == [
+        {
+            "code": "unknown_fields_dropped",
+            "message": "Dropped unknown field(s): next_action",
+            "dropped_fields": ["next_action"],
+            "valid_fields": [
+                "title",
+                "status",
+                "priority",
+                "assignee",
+                "progress_note",
+            ],
+        },
+        {
+            "code": "invalid_enum_field_dropped",
+            "message": "Dropped field 'priority' with invalid option(s): Urgent",
+            "dropped_fields": ["priority"],
+            "invalid_options": ["Urgent"],
+            "valid_options": ["Low", "Medium", "High"],
+        },
+    ]
+
+
+async def test_manage_domain_unknown_field_error_lists_valid_fields_and_stays_hard_for_version(
+    session,
+    monkeypatch,
+):
+    from brain.platform.db.repositories import unit_of_work
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
+
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="Tasks",
+        objects=[
+            {
+                "key": "task",
+                "fields": [
+                    {"key": "title", "field_type": "text", "required": True},
+                    {"key": "status", "field_type": "text"},
+                ],
+            }
+        ],
+    )
+    record = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "task",
+        data={"title": "Keep structural checks hard"},
+    )
+
+    class SessionUnitOfWork:
+        def __init__(self, *args, **kwargs):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            if exc_type is None:
+                await session.flush()
+            return False
+
+    monkeypatch.setattr(unit_of_work, "UnitOfWork", SessionUnitOfWork)
+
+    with bind_agent_context({"org_id": ORG_ID, "user_id": USER_ID}):
+        unknown = json.loads(
+            await _handle_manage_domain(
+                action="update_record",
+                domain_id=domain.id,
+                record_id=record.id,
+                data_patch={"invented": "value"},
+            )
+        )
+        mismatch = json.loads(
+            await _handle_manage_domain(
+                action="update_record",
+                domain_id=domain.id,
+                record_id=record.id,
+                data_patch={"status": "Done"},
+                expected_version=99,
+            )
+        )
+
+    assert unknown["error_code"] == "unknown_fields"
+    assert unknown["unknown_fields"] == ["invented"]
+    assert unknown["valid_fields"] == ["title", "status"]
+    assert "Unknown field(s): invented" in unknown["error"]
+    assert mismatch == {"error": "Record version mismatch: expected 99, current 1"}
+    with pytest.raises(DomainError, match="version mismatch"):
+        await service.update_record(
+            ORG_ID,
+            domain.id,
+            record.id,
+            data_patch={"status": "Done", "invented": "value"},
+            expected_version=99,
+            allow_partial=True,
+        )
+    assert (await service.get_record(ORG_ID, domain.id, record.id)).version == 1
+
+
+async def test_ticket_labels_auto_extend_multi_enum_and_round_trip(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="GitHub Ticket Tracker",
+        slug="github-ticket-tracker",
+        objects=[
+            {
+                "key": "ticket",
+                "fields": [
+                    {"key": "title", "field_type": "text", "required": True},
+                    {
+                        "key": "labels",
+                        "field_type": "multi_enum",
+                        "options": [
+                            "bug",
+                            "feature",
+                            "enhancement",
+                            "documentation",
+                            "question",
+                            "good first issue",
+                            "help wanted",
+                        ],
+                    },
+                ],
+            }
+        ],
+    )
+
+    record = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "ticket",
+        data={
+            "title": "Exercise the real GitHub label vocabulary",
+            "labels": ["AWS", "backend", "ready-for-human"],
+        },
+    )
+    ticket = await service.get_object_type(domain.id, "ticket")
+    labels = next(
+        field
+        for field in await service.list_fields(ticket.id)
+        if field.key == "labels"
+    )
+
+    assert record.data["labels"] == ["AWS", "backend", "ready-for-human"]
+    assert labels.options == [
+        "bug",
+        "feature",
+        "enhancement",
+        "documentation",
+        "question",
+        "good first issue",
+        "help wanted",
+        "AWS",
+        "backend",
+        "ready-for-human",
+    ]
 
 
 async def test_manage_domain_create_is_a_proposal_without_explicit_schema_confirmation(

@@ -65,6 +65,48 @@ class DomainFieldTypeError(DomainError):
         )
 
 
+class DomainUnknownFieldsError(DomainError):
+    """Typed record error that exposes the schema keys available to retry."""
+
+    code = "unknown_fields"
+
+    def __init__(
+        self,
+        unknown_fields: Iterable[str],
+        valid_fields: Iterable[str],
+    ):
+        self.unknown_fields = tuple(sorted(str(key) for key in unknown_fields))
+        self.valid_fields = tuple(str(key) for key in valid_fields)
+        super().__init__(f"Unknown field(s): {', '.join(self.unknown_fields)}")
+
+
+class DomainEnumOptionError(DomainError):
+    """Typed record error for values outside an enum field's option set."""
+
+    def __init__(
+        self,
+        field_key: str,
+        invalid_options: Iterable[str],
+        valid_options: Iterable[str],
+        *,
+        multi_value: bool = False,
+    ):
+        self.field_key = field_key
+        self.invalid_options = tuple(str(option) for option in invalid_options)
+        self.valid_options = tuple(str(option) for option in valid_options)
+        if not multi_value:
+            message = (
+                f"Field '{field_key}' must be one of: "
+                f"{', '.join(self.valid_options)}"
+            )
+        else:
+            message = (
+                f"Field '{field_key}' has invalid option(s): "
+                f"{', '.join(self.invalid_options)}"
+            )
+        super().__init__(message)
+
+
 class DomainNotFound(LookupError):
     """Raised when a requested domain row is not visible in the caller org."""
 
@@ -78,7 +120,7 @@ def _validate_record_data(
     field_map = {field.key: field for field in fields}
     unknown = sorted(set(data) - set(field_map))
     if unknown:
-        raise DomainError(f"Unknown field(s): {', '.join(unknown)}")
+        raise DomainUnknownFieldsError(unknown, field_map)
 
     normalized: dict[str, Any] = {}
     for key, field in field_map.items():
@@ -579,6 +621,8 @@ class AsyncDomainService:
         run_id: int | None = None,
         idea_id: str | None = None,
         reason: str | None = None,
+        allow_partial: bool = False,
+        partial_warnings: list[dict[str, Any]] | None = None,
     ) -> DomainRecord:
         domain = await self.get_domain(org_id, domain_id)
         # Serialize create/upsert decisions for this object type. Without this
@@ -586,7 +630,14 @@ class AsyncDomainService:
         # uniqueness check before either inserts its PR record.
         obj = await self.get_object_type(domain.id, object_key, for_update=True)
         fields = await self.list_fields(obj.id)
-        natural_key = _tracker_pr_natural_key(fields, data)
+        prepared_data, warnings = await self.prepare_record_write(
+            fields,
+            data,
+            allow_partial=allow_partial,
+        )
+        if partial_warnings is not None:
+            partial_warnings.extend(warnings)
+        natural_key = _tracker_pr_natural_key(fields, prepared_data)
         if natural_key is not None:
             existing = await self._find_active_tracker_pr_records(
                 org_id,
@@ -600,7 +651,7 @@ class AsyncDomainService:
                     org_id,
                     domain.id,
                     existing,
-                    data=data,
+                    data=prepared_data,
                     title=title,
                     actor_id=actor_id,
                     actor_kind=actor_kind,
@@ -609,7 +660,8 @@ class AsyncDomainService:
                     reason=reason,
                 )
 
-        normalized = self.validate_record_data(fields, data)
+        normalized = self.validate_record_data(fields, prepared_data)
+        await self._extend_open_enum_options(fields, normalized)
         if domain.slug == "github-ticket-tracker" and obj.key == "chantier":
             # The tracker schema predates object-level constraints. Keep this
             # cross-field invariant at the shared persistence boundary so
@@ -745,6 +797,8 @@ class AsyncDomainService:
         run_id: int | None = None,
         idea_id: str | None = None,
         reason: str | None = None,
+        allow_partial: bool = False,
+        partial_warnings: list[dict[str, Any]] | None = None,
     ) -> DomainRecord:
         record = await self.get_record(org_id, domain_id, record_id)
         if expected_version is not None and record.version != expected_version:
@@ -753,11 +807,23 @@ class AsyncDomainService:
             )
         obj = await self.get_object_type_by_id(record.object_type_id)
         fields = await self.list_fields(obj.id)
+        prepared_patch, warnings = await self.prepare_record_write(
+            fields,
+            data_patch or {},
+            allow_partial=allow_partial,
+        )
+        if partial_warnings is not None:
+            partial_warnings.extend(warnings)
         before = await self.serialize_record(record)
-        _validate_immutable_field_updates(fields, record.data or {}, data_patch or {})
+        _validate_immutable_field_updates(
+            fields,
+            record.data or {},
+            prepared_patch,
+        )
         merged = dict(record.data or {})
-        merged.update(data_patch or {})
+        merged.update(prepared_patch)
         normalized = self.validate_record_data(fields, merged)
+        await self._extend_open_enum_options(fields, normalized)
         record.data = normalized
         record.version += 1
         record.updated_by_user_id = actor_id
@@ -781,7 +847,7 @@ class AsyncDomainService:
             idea_id=idea_id,
             before=before,
             after=await self.serialize_record(record),
-            patch=data_patch,
+            patch=prepared_patch,
             reason=reason,
         )
         await self.session.refresh(record)
@@ -1090,6 +1156,109 @@ class AsyncDomainService:
         data: dict[str, Any],
     ) -> dict[str, Any]:
         return _validate_record_data(fields, data)
+
+    async def prepare_record_write(
+        self,
+        fields: Iterable[DomainFieldDefinition],
+        data: dict[str, Any],
+        *,
+        allow_partial: bool = False,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Prepare a record payload while preserving structural validation.
+
+        Agent writes may drop unknown keys and invalid enum-valued fields when
+        another valid field remains to apply. The strict service default keeps
+        existing API callers unchanged. Multi-enum fields named ``labels`` are
+        open vocabularies backed by their persisted option list, so unseen
+        labels extend that list transactionally after record validation.
+        """
+
+        if not isinstance(data, dict):
+            raise DomainError("record data must be an object")
+        field_list = list(fields)
+        field_map = {field.key: field for field in field_list}
+        valid_fields = list(field_map)
+        unknown = sorted(set(data) - set(field_map))
+        prepared = {
+            key: value
+            for key, value in data.items()
+            if key in field_map
+        }
+        warnings: list[dict[str, Any]] = []
+        first_violation: DomainError | None = None
+
+        if unknown:
+            unknown_error = DomainUnknownFieldsError(unknown, valid_fields)
+            if not allow_partial:
+                raise unknown_error
+            first_violation = unknown_error
+            warnings.append(
+                {
+                    "code": "unknown_fields_dropped",
+                    "message": f"Dropped unknown field(s): {', '.join(unknown)}",
+                    "dropped_fields": unknown,
+                    "valid_fields": valid_fields,
+                }
+            )
+
+        for key in list(prepared):
+            value = prepared[key]
+            field = field_map[key]
+            if _is_empty(value):
+                continue
+            try:
+                _coerce_field_value(field, value)
+            except DomainEnumOptionError as exc:
+                if not allow_partial:
+                    raise
+                if first_violation is None:
+                    first_violation = exc
+                prepared.pop(key)
+                warnings.append(
+                    {
+                        "code": "invalid_enum_field_dropped",
+                        "message": (
+                            f"Dropped field '{key}' with invalid option(s): "
+                            f"{', '.join(exc.invalid_options)}"
+                        ),
+                        "dropped_fields": [key],
+                        "invalid_options": list(exc.invalid_options),
+                        "valid_options": list(exc.valid_options),
+                    }
+                )
+
+        if data and not prepared and first_violation is not None:
+            raise first_violation
+        return prepared, warnings
+
+    async def _extend_open_enum_options(
+        self,
+        fields: Iterable[DomainFieldDefinition],
+        normalized_data: Mapping[str, Any],
+    ) -> None:
+        for field in fields:
+            value = normalized_data.get(field.key)
+            if _is_open_vocabulary_field(field) and isinstance(value, list):
+                await self._extend_enum_options(field, value)
+
+    async def _extend_enum_options(
+        self,
+        field: DomainFieldDefinition,
+        requested_options: Iterable[Any],
+    ) -> None:
+        current = list(field.options or [])
+        seen = set(current)
+        unseen: list[str] = []
+        for option in requested_options:
+            clean_option = str(option).strip()
+            if not clean_option or clean_option in seen:
+                continue
+            seen.add(clean_option)
+            unseen.append(clean_option)
+        if not unseen:
+            return
+        field.options = [*current, *unseen]
+        await self.session.flush()
 
     async def serialize_domain_summary(self, domain: Domain) -> dict[str, Any]:
         objects = await self.list_objects(domain.id)
@@ -1434,6 +1603,18 @@ def _github_pr_key_from_url(value: Any) -> tuple[str, str] | None:
     return repo, pr_number
 
 
+def _is_open_vocabulary_field(field: DomainFieldDefinition) -> bool:
+    """A multi_enum whose option set is extended on write rather than enforced.
+
+    The tracker's ``labels`` field mirrors real GitHub labels, which overflow any
+    closed enum. Keeping the single ``labels`` special-case behind one predicate
+    is a deliberate stopgap: the durable fix is an ``open_vocabulary`` flag on the
+    field definition itself (see the schema-owned-semantics follow-up), but that
+    needs a field-definition schema change, so it is out of scope for this fix.
+    """
+    return field.key == "labels" and field.field_type == "multi_enum"
+
+
 def _coerce_field_value(field: DomainFieldDefinition, value: Any) -> Any:
     kind = field.field_type
     if kind in {"text", "long_text", "url", "email", "phone", "user_ref"}:
@@ -1469,7 +1650,11 @@ def _coerce_field_value(field: DomainFieldDefinition, value: Any) -> Any:
     if kind == "enum":
         text = str(value).strip()
         if text not in (field.options or []):
-            raise DomainError(f"Field '{field.key}' must be one of: {', '.join(field.options or [])}")
+            raise DomainEnumOptionError(
+                field.key,
+                [text],
+                field.options or [],
+            )
         return text
     if kind == "multi_enum":
         if not isinstance(value, list):
@@ -1477,8 +1662,13 @@ def _coerce_field_value(field: DomainFieldDefinition, value: Any) -> Any:
         options = set(field.options or [])
         normalized = [str(item).strip() for item in value]
         invalid = [item for item in normalized if item not in options]
-        if invalid:
-            raise DomainError(f"Field '{field.key}' has invalid option(s): {', '.join(invalid)}")
+        if invalid and not _is_open_vocabulary_field(field):
+            raise DomainEnumOptionError(
+                field.key,
+                invalid,
+                field.options or [],
+                multi_value=True,
+            )
         return normalized
     if kind == "record_ref":
         try:
