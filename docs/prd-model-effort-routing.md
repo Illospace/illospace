@@ -1,8 +1,8 @@
 # PRD: Model And Effort Routing Layer
 
-Status: draft for review; code + production audit complete 2026-07-24;
-adversarial cross-family review (Codex, xhigh) folded 2026-07-24; no
-implementation started
+Status: approved by Reda 2026-07-24 (decisions 1–4 resolved, see Decisions);
+code + production audit complete 2026-07-24; adversarial cross-family review
+(Codex, xhigh) folded 2026-07-24; Slice 1 in progress
 Date: 2026-07-24
 Owner: Reda
 Related docs:
@@ -480,8 +480,11 @@ feature gates. Suggested order; 1–3 are the core value.
 - Single canonical `EFFORT_TIERS` source in `model_policy.py` with the
   per-provider rendering table; importable sites import it; non-importable
   sites (tool JSON schemas, frontend) get a contract test asserting they match.
-- Admission rejects invalid model/effort values with an actionable error
-  instead of silently falling through (`metadata_choice` fix).
+- Invalid values stop passing silently: hard validation at the sources we own
+  (cycle write paths, the cycle-built `payload.model_policy`); the generic
+  metadata parser warn-logs invalid explicit values instead of silently
+  skipping to a lower-priority key (`metadata_choice`) — arbitrary chat
+  metadata must not start hard-failing admissions.
 - Tests: snapshot-sourced policy lands on the run; queued-run isolation from
   live cycle edits; absent overrides fall through to org defaults; invalid
   model rejected at write; vocabulary contract test.
@@ -586,23 +589,20 @@ runtime).
   visibility produces data).
 - Per-user entitlements, quotas, or spend enforcement.
 
-## Open Questions For Reda
+## Decisions (Reda, 2026-07-24)
 
-1. **Delete the deep machinery (Slice 5)?** Recommendation: yes, gated on the
-   join-primitive precondition. `deep` has two senders total, both
-   migratable; the run-graph orchestration is superseded by coordinator +
-   `spawn_worker` once the generic rejoin ships; blocking verification is
-   deep-only code. Cost: run-graph UI and DeepPlan machinery go away for good.
-2. **Coordinator tier: confirm `xhigh` for cycle 2?** Its override says
-   `xhigh`, which has never actually applied. Slice 1 makes it real —
-   confirm that's intended (it multiplies the coordinator's cost) or lower the
-   override to `high` before deploying Slice 1.
-3. **Composer defaults:** confirm the "workspace default" sentinel (Slice 4)
-   — browser runs inherit org defaults unless a human explicitly picks, and
-   the current ambient `xhigh` ends. Recommendation: yes.
-4. **Skill-tier scope (Slice 3):** wire `skills.thinking_tier` only for
-   skill-anchored headless runs (recommended, matches the AWS-scan pattern),
-   or also as a hint for interactive skill invocations?
-5. **Marketplace column:** drop `selected_reasoning_effort` via migration in
-   Slice 6, or leave dormant and delete code only?
-6. **Budget slice priority:** ship Slice 7 in this wave or defer?
+1. **Deep machinery: delete it** (Slice 5), gated on the coercion quiet
+   period and the generic join/continuation primitive shipping first.
+2. **Cycle 2 keeps `xhigh`.** Slice 1 makes the configured override real;
+   coordinator digest/triage is the judgment class the ladder assigns
+   `xhigh`. Burn becomes observable via Slice 7 later.
+3. **Composer gets the "workspace default" sentinel** (Slice 4): browser runs
+   omit model/effort keys and inherit org defaults unless a human explicitly
+   picks; one-time migration normalizes stored localStorage picks.
+4. **Skill tiers apply to skill-anchored headless runs only** (Slice 3),
+   matching the AWS-scan pattern. Interactive runs unaffected.
+5. **Marketplace column** (default, override anytime): drop
+   `selected_reasoning_effort` via migration in Slice 6, following the
+   `0021_remove_intelligence_tiers` precedent.
+6. **Budget slice** (default, override anytime): deferred until Slices 1–4
+   land; revisit with real routing in place so it measures the after-state.
