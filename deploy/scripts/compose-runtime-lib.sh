@@ -90,6 +90,29 @@ container_running() {
   [ "$(docker inspect --format '{{.State.Running}}' "$id" 2>/dev/null || echo false)" = "true" ]
 }
 
+assert_single_running_worker() {
+  local count=0 id running_ids running_ids_csv
+  if ! running_ids="$(compose ps --status running -q worker 2>/dev/null)"; then
+    echo "Worker invariant check failed: could not list running worker containers." >&2
+    echo "Recovery: inspect workers with: docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" ps --all worker" >&2
+    return 1
+  fi
+  while IFS= read -r id; do
+    [ -z "$id" ] || count=$((count + 1))
+  done <<< "$running_ids"
+  [ "$count" -eq 1 ] && return 0
+
+  running_ids_csv="${running_ids//$'\n'/,}"
+  echo "Worker invariant failed: expected exactly one running worker container, found $count (container ids: ${running_ids_csv:-none})." >&2
+  echo "Recovery: inspect workers with: docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" ps --all worker" >&2
+  if [ "$count" -eq 0 ]; then
+    echo "Recovery: start the regular worker with: docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" up -d --no-deps worker" >&2
+  else
+    echo "Recovery: keep the intended regular worker, stop and remove every extra worker container, then rerun the failed command." >&2
+  fi
+  return 1
+}
+
 start_worker_handoff() {
   compose run \
     -d \
@@ -149,6 +172,22 @@ wait_for_worker_exit() {
   done
 }
 
+remove_worker_handoff_after_drain_timeout() {
+  local handoff_id="$1"
+  local worker_id="$2"
+  echo "Worker: drain timed out; stopping and removing temporary handoff worker $handoff_id before returning." >&2
+  docker update --restart=no "$handoff_id" >/dev/null 2>&1 || true
+  docker kill "$handoff_id" >/dev/null 2>&1 || true
+  if ! docker rm -f "$handoff_id" >/dev/null 2>&1; then
+    if docker inspect "$handoff_id" >/dev/null 2>&1; then
+      echo "Worker: could not remove temporary handoff worker $handoff_id; multiple workers may still be running." >&2
+      return 1
+    fi
+  fi
+  echo "Worker: removed temporary handoff worker $handoff_id; original worker $worker_id is retained as the intended sole worker container." >&2
+  echo "Recovery: let the original worker finish its active AgentRuns, then rerun the failed worker restart or upgrade. New AgentRuns may remain queued until the original worker restarts." >&2
+}
+
 update_worker_after_drain() {
   local snapshot="$1"
   local already_reported="${2:-}"
@@ -175,6 +214,7 @@ update_worker_after_drain() {
   if ! wait_for_worker_exit "$worker_id"; then
     docker update --restart=unless-stopped "$worker_id" >/dev/null 2>&1 || true
     if [ "${ILLO_COMPOSE_FORCE_WORKER_SWAP:-0}" != "1" ]; then
+      remove_worker_handoff_after_drain_timeout "$handoff_id" "$worker_id" || true
       return 1
     fi
     snapshot="$(worker_swap_snapshot)"
@@ -190,11 +230,28 @@ update_worker_after_drain() {
     affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
     echo "Worker: regular worker is restarted; draining handoff worker $handoff_id. Open run ids at handoff shutdown: ${affected_ids:-none}."
     docker kill -s TERM "$handoff_id" >/dev/null 2>&1 || true
-    (
-      docker wait "$handoff_id" >/dev/null 2>&1 || true
-      docker rm "$handoff_id" >/dev/null 2>&1 || true
-    ) &
+    remove_worker_handoff_bounded "$handoff_id"
   fi
+}
+
+# Reap the temporary handoff worker without blocking the deploy indefinitely.
+# It runs with ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS=infinity, so a graceful
+# SIGTERM drain lasts as long as its longest in-flight AgentRun (observed at
+# 40-100 minutes). The regular worker is already up by this point, and runs
+# interrupted here are requeued by the stale-run reaper, so bound the wait and
+# then force removal rather than hanging the caller.
+remove_worker_handoff_bounded() {
+  local handoff_id="$1"
+  local wait_seconds="${COMPOSE_RUNTIME_HANDOFF_REAP_TIMEOUT_SECONDS:-120}"
+  local deadline=$((SECONDS + wait_seconds))
+  while container_running "$handoff_id"; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "Worker: handoff worker $handoff_id still draining after ${wait_seconds}s; forcing removal so exactly one worker remains. Its open AgentRuns are requeued by the stale-run reaper." >&2
+      break
+    fi
+    sleep 5
+  done
+  docker rm -f "$handoff_id" >/dev/null 2>&1 || true
 }
 
 replace_idle_worker() {
@@ -231,17 +288,19 @@ replace_idle_worker() {
 }
 
 restart_runtime_worker_service() {
-  local action snapshot
+  local action snapshot status=0
   snapshot="$(worker_swap_snapshot)"
   action="$(worker_swap_snapshot_decision "$snapshot")"
   case "$action" in
-    replace) replace_idle_worker ;;
-    drain) update_worker_after_drain "$snapshot" ;;
+    replace) replace_idle_worker || status=$? ;;
+    drain) update_worker_after_drain "$snapshot" || status=$? ;;
     *)
       echo "Cannot safely restart worker because non-terminal AgentRun ids are unknown." >&2
       return 1
       ;;
   esac
+  assert_single_running_worker || status=1
+  return "$status"
 }
 
 restart_runtime_service() {
