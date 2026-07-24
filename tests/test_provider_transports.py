@@ -391,3 +391,54 @@ def test_openai_response_tool_call_output_is_typed():
     assert unified.content[0].id == "call_123"
     assert unified.content[0].name == "brain_recall"
     assert unified.content[0].input == {"query": "typed"}
+
+
+def test_anthropic_transport_renders_canonical_xhigh_as_max():
+    from brain.platform.integrations.transports.anthropic import AnthropicMessagesTransport
+    from brain.platform.integrations.transports.base import LLMRequest
+
+    request = LLMRequest(
+        model="anthropic/claude-sonnet-4-6",
+        messages=[{"role": "user", "content": "hello"}],
+        reasoning_effort="xhigh",
+    )
+
+    kwargs = AnthropicMessagesTransport().build_kwargs(request)
+
+    assert kwargs["thinking"] == {"type": "adaptive"}
+    assert kwargs["output_config"] == {"effort": "max"}
+
+
+def test_anthropic_transport_omits_reasoning_for_none_tier():
+    from brain.platform.integrations.transports.anthropic import AnthropicMessagesTransport
+    from brain.platform.integrations.transports.base import LLMRequest
+
+    request = LLMRequest(
+        model="anthropic/claude-sonnet-4-6",
+        messages=[{"role": "user", "content": "hello"}],
+        reasoning_effort="none",
+    )
+
+    kwargs = AnthropicMessagesTransport().build_kwargs(request)
+
+    assert "thinking" not in kwargs
+    assert "output_config" not in kwargs
+
+
+def test_openai_transport_keeps_canonical_xhigh_and_omits_none():
+    from brain.platform.integrations.transports.base import LLMRequest
+    from brain.platform.integrations.transports.openai_responses import OpenAIResponsesTransport
+
+    ceiling = LLMRequest(
+        model="openai/gpt-5.6-sol",
+        messages=[{"role": "user", "content": "hello"}],
+        reasoning_effort="xhigh",
+    )
+    assert OpenAIResponsesTransport().build_kwargs(ceiling)["reasoning"]["effort"] == "xhigh"
+
+    silent = LLMRequest(
+        model="openai/gpt-5.6-sol",
+        messages=[{"role": "user", "content": "hello"}],
+        reasoning_effort="none",
+    )
+    assert "reasoning" not in OpenAIResponsesTransport().build_kwargs(silent)
