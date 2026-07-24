@@ -1509,6 +1509,22 @@ async def test_ticket_labels_auto_extend_multi_enum_and_round_trip(session):
     ]
 
 
+def test_create_domain_command_has_typed_request_and_result_contract():
+    from dataclasses import is_dataclass
+    from typing import get_type_hints
+
+    from brain.systems.runs.tool_catalog.handlers.domains import (
+        CreateDomainRequest,
+        CreateDomainResult,
+        _handle_create_domain,
+    )
+
+    assert is_dataclass(CreateDomainRequest)
+    hints = get_type_hints(_handle_create_domain)
+    assert hints["request"] is CreateDomainRequest
+    assert hints["return"] == CreateDomainResult
+
+
 async def test_manage_domain_create_is_a_proposal_without_explicit_schema_confirmation(
     session,
     monkeypatch,
@@ -1578,10 +1594,15 @@ async def test_manage_domain_confirmed_create_preserves_authorized_path_and_type
         )
         invalid = json.loads(
             await _handle_manage_domain(
-                action="add_object",
-                domain_id=created["domain"]["id"],
-                object_key="contact",
-                fields=[{"key": "name", "field_type": "string"}],
+                action="create_domain",
+                name="CRM With Invalid Field",
+                objects=[
+                    {
+                        "key": "contact",
+                        "fields": [{"key": "name", "field_type": "string"}],
+                    }
+                ],
+                confirm_schema_change=True,
             )
         )
 

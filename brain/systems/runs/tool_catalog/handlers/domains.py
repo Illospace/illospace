@@ -2,8 +2,54 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import TypeAlias, TypedDict
+
 from brain.kernel.common.pagination import next_offset_token, page_offset
 from brain.systems.runs.tool_catalog.handlers.common import *
+
+
+@dataclass(frozen=True, slots=True)
+class CreateDomainRequest:
+    """Inputs owned by the create-domain command."""
+
+    name: str | None
+    slug: str | None = None
+    description: str | None = None
+    objects: list[dict] | None = None
+    relations: list[dict] | None = None
+    confirm_schema_change: bool = False
+
+
+class CreateDomainProposal(TypedDict):
+    action: str
+    name: str
+    slug: str | None
+    description: str | None
+    objects: list[dict]
+    relations: list[dict]
+
+
+class CreateDomainProposalResult(TypedDict):
+    status: str
+    created: bool
+    proposal: CreateDomainProposal
+    requires_confirmation: bool
+    confirmation_parameter: str
+    message: str
+
+
+class CreateDomainCreatedResult(TypedDict):
+    domain: dict[str, object]
+
+
+class CreateDomainErrorResult(TypedDict):
+    error: str
+
+
+CreateDomainResult: TypeAlias = (
+    CreateDomainProposalResult | CreateDomainCreatedResult | CreateDomainErrorResult
+)
 
 
 def _domain_context() -> tuple[str | None, str | None, int | None, str | None]:
@@ -14,6 +60,57 @@ def _domain_context() -> tuple[str | None, str | None, int | None, str | None]:
     run_id = getattr(run, "run_id", None) or execution_metadata.get("run_id")
     idea_id = getattr(_agent_context, "idea_id", None) or execution_metadata.get("idea_id")
     return org_id, user_id, run_id, idea_id
+
+
+async def _handle_create_domain(
+    request: CreateDomainRequest,
+    *,
+    org_id: str,
+    actor_id: str | None,
+    actor_kind: str,
+) -> CreateDomainResult:
+    """Propose or execute one create-domain command."""
+
+    if not request.name:
+        return {"error": "create_domain requires: name"}
+    if request.confirm_schema_change is not True:
+        return {
+            "status": "proposal",
+            "created": False,
+            "proposal": {
+                "action": "create_domain",
+                "name": request.name,
+                "slug": request.slug,
+                "description": request.description,
+                "objects": request.objects or [],
+                "relations": request.relations or [],
+            },
+            "requires_confirmation": True,
+            "confirmation_parameter": "confirm_schema_change",
+            "message": (
+                "No Domain was created. Creating a Domain is a workspace schema change, not a "
+                "filing side effect. Present this proposal to the user; set confirm_schema_change=true "
+                "only when the current request explicitly authorizes the new Domain. For filing or "
+                "intake, use a suitable existing Domain (the workspace's default tracker when applicable)."
+            ),
+        }
+
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.systems.user_domains.service import AsyncDomainService
+
+    async with UnitOfWork() as uow:
+        service = AsyncDomainService(uow.session)
+        domain = await service.create_domain(
+            org_id,
+            name=request.name,
+            slug=request.slug,
+            description=request.description,
+            objects=request.objects or [],
+            relations=request.relations or [],
+            actor_id=actor_id,
+            actor_kind=actor_kind,
+        )
+        return {"domain": await service.serialize_domain_schema(domain)}
 
 
 async def _handle_manage_domain(
@@ -66,38 +163,28 @@ async def _handle_manage_domain(
     if not org_id:
         return json.dumps({"error": "manage_domain could not access this workspace context"})
 
-    if action == "create_domain" and confirm_schema_change is not True:
-        if not name:
-            return json.dumps({"error": "create_domain requires: name"})
-        return json.dumps(
-            {
-                "status": "proposal",
-                "created": False,
-                "proposal": {
-                    "action": "create_domain",
-                    "name": name,
-                    "slug": slug,
-                    "description": description,
-                    "objects": objects or [],
-                    "relations": relations or [],
-                },
-                "requires_confirmation": True,
-                "confirmation_parameter": "confirm_schema_change",
-                "message": (
-                    "No Domain was created. Creating a Domain is a workspace schema change, not a "
-                    "filing side effect. Present this proposal to the user; set confirm_schema_change=true "
-                    "only when the current request explicitly authorizes the new Domain. For filing or "
-                    "intake, use a suitable existing Domain (the workspace's default tracker when applicable)."
-                ),
-            },
-            default=str,
-        )
-
     try:
+        actor_id = str(user_id) if user_id else None
+        actor_kind = "human" if user_id else "agent"
+
+        if action == "create_domain":
+            result = await _handle_create_domain(
+                CreateDomainRequest(
+                    name=name,
+                    slug=slug,
+                    description=description,
+                    objects=objects,
+                    relations=relations,
+                    confirm_schema_change=confirm_schema_change,
+                ),
+                org_id=org_id,
+                actor_id=actor_id,
+                actor_kind=actor_kind,
+            )
+            return json.dumps(result, default=str)
+
         async with UnitOfWork() as uow:
             service = AsyncDomainService(uow.session)
-            actor_id = str(user_id) if user_id else None
-            actor_kind = "human" if user_id else "agent"
 
             if action == "list":
                 domains = [
@@ -105,21 +192,6 @@ async def _handle_manage_domain(
                     for domain in await service.list_domains(org_id, include_archived=include_archived)
                 ]
                 return json.dumps({"domains": domains}, default=str)
-
-            if action == "create_domain":
-                if not name:
-                    return json.dumps({"error": "create_domain requires: name"})
-                domain = await service.create_domain(
-                    org_id,
-                    name=name,
-                    slug=slug,
-                    description=description,
-                    objects=objects or [],
-                    relations=relations or [],
-                    actor_id=actor_id,
-                    actor_kind=actor_kind,
-                )
-                return json.dumps({"domain": await service.serialize_domain_schema(domain)}, default=str)
 
             if domain_id is None:
                 return json.dumps({"error": f"{action} requires: domain_id"})
