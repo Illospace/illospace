@@ -36,6 +36,10 @@ from brain.systems.sessions import _content_to_dicts
 logger = logging.getLogger("agent")
 
 _RESOLVED_STATUSES = {"resolved", "blocked_on_user"}
+_CUSTOMER_BUG_FILING_POLICY_REFERENCE = (
+    "brain/systems/skills/builtin_skill_bundles/uwear-engineering-triage/"
+    "references/creating-work-items.md#customer-bug-filing-policy"
+)
 _PRODUCT_SURFACE_TERMS = (
     "settings",
     "integrations",
@@ -886,12 +890,11 @@ def review_candidate_final_reply(
             status="continue",
             approved=False,
             rationale=(
-                "The customer-bug GitHub issue succeeded, but execution evidence has no successful "
-                "linked tracker-record mirror."
+                "Execution evidence does not satisfy the canonical customer-bug filing policy "
+                f"({_CUSTOMER_BUG_FILING_POLICY_REFERENCE})."
             ),
             missing_requirements=(
-                f"Create the linked record in the default tracker (Domain {DEFAULT_TRACKER_DOMAIN_ID}); "
-                "do not create a Domain.",
+                "Follow the canonical customer-bug filing policy before sending the final reply.",
             ),
             raw_output="deterministic_customer_bug_mirror_contract",
             enforcement=FinalReplyEnforcement.BLOCK,

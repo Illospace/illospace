@@ -15,7 +15,9 @@ Two different places can hold work, and they are NOT the same thing:
   private Illo database row — NOT a GitHub issue — and has no github.com URL
   unless one is filled in by hand.
 
-Decide as follows:
+Decide as follows.
+
+### Customer-bug filing policy
 
 - **Customer-reported bugs have one declared destination.** The durable artifact
   is a real GitHub issue in the owning repo; Domain `1` is its linked tracker
