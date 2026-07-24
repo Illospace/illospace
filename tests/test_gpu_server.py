@@ -1,8 +1,20 @@
 import os
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
+
+
+def _install_fake_torch(monkeypatch):
+    """Provide the tiny torch surface used by mocked worker request tests."""
+    class FakeOutOfMemoryError(RuntimeError):
+        pass
+
+    fake_torch = ModuleType("torch")
+    fake_torch.cuda = SimpleNamespace(OutOfMemoryError=FakeOutOfMemoryError)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
 
 class TestWorkerManifest:
@@ -346,11 +358,12 @@ class TestEmbeddingWorker:
         assert w.truncate_dim == 768
 
     @pytest.mark.asyncio
-    async def test_handle_request_document_mode(self):
+    async def test_handle_request_document_mode(self, monkeypatch):
         from brain.platform.gpu.workers.embedding import EmbeddingWorker
         from brain.platform.gpu.config import WorkerManifest
         import numpy as np
 
+        _install_fake_torch(monkeypatch)
         m = WorkerManifest(name="embedding", model_path="/tmp/model", vram_mb=5000)
         w = EmbeddingWorker(m)
 
@@ -368,11 +381,12 @@ class TestEmbeddingWorker:
         assert len(result["embeddings"]) == 2
 
     @pytest.mark.asyncio
-    async def test_handle_request_query_mode_adds_prefix(self):
+    async def test_handle_request_query_mode_adds_prefix(self, monkeypatch):
         from brain.platform.gpu.workers.embedding import EmbeddingWorker
         from brain.platform.gpu.config import WorkerManifest
         import numpy as np
 
+        _install_fake_torch(monkeypatch)
         m = WorkerManifest(name="embedding", model_path="/tmp/model", vram_mb=5000)
         w = EmbeddingWorker(m)
 
