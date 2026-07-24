@@ -1,14 +1,19 @@
-import pytest
-from unittest.mock import patch, MagicMock
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 
-def _make_worker():
-    from brain.platform.gpu.workers.llm import LLMWorker
+def _make_worker(monkeypatch):
+    from brain.platform.gpu.workers import llm as llm_worker
     from brain.platform.gpu.config import WorkerManifest
-    import torch
+
+    monkeypatch.setattr(
+        llm_worker,
+        "torch",
+        SimpleNamespace(no_grad=nullcontext),
+    )
 
     m = WorkerManifest(name="llm", model_path="Qwen/Qwen3.5-4B", vram_mb=3000)
-    w = LLMWorker(m)
+    w = llm_worker.LLMWorker(m)
 
     class FakeInputIds:
         shape = [1, 3]
@@ -29,7 +34,7 @@ def _make_worker():
 
     class FakeModel:
         def generate(self, **kw):
-            return torch.tensor([[1, 2, 3, 4, 5]])
+            return [[1, 2, 3, 4, 5]]
 
     w.tokenizer = FakeTokenizer()
     w.model = FakeModel()
@@ -44,8 +49,8 @@ class TestLLMWorker:
         w = LLMWorker(m)
         assert w.manifest.name == "llm"
 
-    async def test_handle_request_returns_text(self):
-        w = _make_worker()
+    async def test_handle_request_returns_text(self, monkeypatch):
+        w = _make_worker(monkeypatch)
         result = await w.handle_request({
             "prompt": "test prompt",
             "max_tokens": 100,
@@ -55,9 +60,9 @@ class TestLLMWorker:
         assert result["text"] == "generated text"
         assert "elapsed_ms" in result
 
-    async def test_think_false_strips_thinking_tags(self):
+    async def test_think_false_strips_thinking_tags(self, monkeypatch):
         """When think=False, <think>...</think> blocks are stripped from output."""
-        w = _make_worker()
+        w = _make_worker(monkeypatch)
         w.tokenizer._decode_text = "<think>internal reasoning here</think>Clean title output"
         result = await w.handle_request({
             "prompt": "generate a title",
@@ -68,9 +73,9 @@ class TestLLMWorker:
         assert result["text"] == "Clean title output"
         assert "<think>" not in result["text"]
 
-    async def test_think_true_preserves_thinking_tags(self):
+    async def test_think_true_preserves_thinking_tags(self, monkeypatch):
         """When think=True, thinking tags are preserved."""
-        w = _make_worker()
+        w = _make_worker(monkeypatch)
         w.tokenizer._decode_text = "<think>reasoning</think>Answer"
         result = await w.handle_request({
             "prompt": "test",
@@ -80,9 +85,9 @@ class TestLLMWorker:
         assert "<think>" in result["text"]
         assert "reasoning" in result["text"]
 
-    async def test_think_false_no_tags_passthrough(self):
+    async def test_think_false_no_tags_passthrough(self, monkeypatch):
         """When think=False but no tags present, output is unchanged."""
-        w = _make_worker()
+        w = _make_worker(monkeypatch)
         w.tokenizer._decode_text = "Just a clean response"
         result = await w.handle_request({
             "prompt": "test",
@@ -91,9 +96,9 @@ class TestLLMWorker:
         })
         assert result["text"] == "Just a clean response"
 
-    async def test_think_false_multiline_thinking(self):
+    async def test_think_false_multiline_thinking(self, monkeypatch):
         """Multiline thinking blocks are fully stripped."""
-        w = _make_worker()
+        w = _make_worker(monkeypatch)
         w.tokenizer._decode_text = "<think>\nline1\nline2\nline3\n</think>\nFinal answer"
         result = await w.handle_request({
             "prompt": "test",
@@ -102,7 +107,7 @@ class TestLLMWorker:
         })
         assert result["text"] == "Final answer"
 
-    async def test_empty_prompt_returns_error(self):
-        w = _make_worker()
+    async def test_empty_prompt_returns_error(self, monkeypatch):
+        w = _make_worker(monkeypatch)
         result = await w.handle_request({"prompt": ""})
         assert result == {"error": "prompt required"}
