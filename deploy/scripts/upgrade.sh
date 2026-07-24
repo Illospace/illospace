@@ -101,24 +101,29 @@ fi
 compose up -d postgres
 compose run --rm migrate
 WORKER_SWAP_SNAPSHOT="$(worker_swap_snapshot)"
+WORKER_RESTART_STATUS=0
 case "$(worker_swap_snapshot_decision "$WORKER_SWAP_SNAPSHOT")" in
   replace)
     mapfile -t runtime_services < <(all_runtime_services)
     compose up -d --force-recreate --remove-orphans "${runtime_services[@]}"
-    replace_idle_worker
+    replace_idle_worker || WORKER_RESTART_STATUS=$?
     ;;
   drain)
     echo "$(worker_swap_snapshot_report "$WORKER_SWAP_SNAPSHOT")."
     echo "Updating API, scheduler, and web while preserving active worker AgentRuns."
     mapfile -t services < <(non_worker_services)
     compose up -d --force-recreate --no-deps "${services[@]}"
-    update_worker_after_drain "$WORKER_SWAP_SNAPSHOT" reported
+    update_worker_after_drain "$WORKER_SWAP_SNAPSHOT" reported || WORKER_RESTART_STATUS=$?
     ;;
   *)
     echo "Cannot safely swap worker because non-terminal AgentRun ids are unknown." >&2
     exit 1
     ;;
 esac
+assert_single_running_worker || WORKER_RESTART_STATUS=1
+if [ "$WORKER_RESTART_STATUS" -ne 0 ]; then
+  exit "$WORKER_RESTART_STATUS"
+fi
 
 "$SCRIPT_DIR/doctor.sh"
 schedule_updater_refresh_after_self_update
