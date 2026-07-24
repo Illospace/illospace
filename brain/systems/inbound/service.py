@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 import os
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from typing import Any, Mapping, Sequence
@@ -27,6 +25,12 @@ from brain.platform.db.models.inbound import (
 )
 from brain.systems.external_agents import service as external_agents
 from brain.systems.cortex.thread_links import thread_link_payload
+from brain.systems.inbound.handlers import (
+    InboundCompletion,
+    InboundHandlerContext,
+    optional_text,
+    resolve_inbound_envelope_handler,
+)
 from brain.systems.inbound.status import (
     STATUS_FAILED,
     STATUS_PROCESSED,
@@ -48,10 +52,6 @@ ACTION_DOMAIN_PROJECTION_UPSERT = "domain_projection.upsert"
 ACTION_ILO_REQUIRED = "ilo_required"
 SUBMISSION_ENVELOPE_KIND = "submission"
 ACTION_ILLO_SUBMIT_QUEUED = "illo.submit_queued"
-SPECIAL_ENVELOPE_HANDLER_PATHS = {
-    "app_report": "brain.systems.app_report.inbound:process_app_report_envelope",
-    "slack_message": "brain.systems.slack.inbound:process_slack_message_envelope",
-}
 
 DOMAIN_PROJECTION_ACTIONS = frozenset(
     {ACTION_DOMAIN_PROJECTION_UPSERT, "domain_projection", "create_domain_record"}
@@ -68,17 +68,6 @@ MAX_TRIAGE_PAYLOAD_CHARS = 5000
 
 class InboundValidationError(ValueError):
     """Raised when an inbound envelope or configured projection is invalid."""
-
-
-@dataclass(frozen=True)
-class _ConnectionContext:
-    connection_id: str
-    org_id: str
-    owner_user_id: str | None
-    token_id: str | None
-    scopes: frozenset[str] | None
-    display_name: str | None
-    source_kind: str | None
 
 
 def utcnow() -> datetime:
@@ -113,7 +102,7 @@ async def create_source_policy(
         priority=int(priority),
         origin_patterns=[_nonempty(pattern, "origin pattern") for pattern in origin_patterns],
         envelope_kinds=[str(kind or "signal").strip() for kind in (envelope_kinds or ["signal"])],
-        instructions=_clean_optional(instructions),
+        instructions=optional_text(instructions),
         schema_config=dict(schema_config or {}),
         allowed_actions=[str(action).strip() for action in (allowed_actions or []) if str(action).strip()],
         auto_execute_actions=[
@@ -157,7 +146,7 @@ async def create_domain_projection(
         external_id_path=_nonempty(external_id_path, "external_id_path"),
         external_id_field=_nonempty(external_id_field, "external_id_field"),
         field_mapping={str(key): str(value) for key, value in dict(field_mapping).items()},
-        title_path=_clean_optional(title_path),
+        title_path=optional_text(title_path),
         upsert_mode=str(upsert_mode or "upsert"),
         validation_failure_status=str(validation_failure_status or STATUS_REVIEW_REQUIRED),
         metadata_=dict(metadata or {}),
@@ -437,9 +426,9 @@ async def match_source_policy(
 async def _resolve_connection_context(
     session: AsyncSession,
     connection: external_agents.AgentBridgePrincipal | ExternalAgentConnectionRow | Mapping[str, Any],
-) -> _ConnectionContext:
+) -> InboundHandlerContext:
     if isinstance(connection, external_agents.AgentBridgePrincipal):
-        return _ConnectionContext(
+        return InboundHandlerContext(
             connection_id=str(connection.connection_id),
             org_id=str(connection.org_id),
             owner_user_id=str(connection.owner_user_id),
@@ -450,7 +439,7 @@ async def _resolve_connection_context(
         )
 
     if isinstance(connection, ExternalAgentConnectionRow):
-        return _ConnectionContext(
+        return InboundHandlerContext(
             connection_id=str(connection.id),
             org_id=str(connection.org_id),
             owner_user_id=str(connection.owner_user_id),
@@ -463,9 +452,9 @@ async def _resolve_connection_context(
     data = dict(connection)
     connection_id = str(data.get("connection_id") or data.get("id") or "").strip()
     org_id = str(data.get("org_id") or "").strip()
-    owner_user_id = _clean_optional(data.get("owner_user_id") or data.get("authority_user_id"))
-    display_name = _clean_optional(data.get("display_name") or data.get("connection_display_name"))
-    source_kind = _clean_optional(data.get("agent_kind") or data.get("source_kind"))
+    owner_user_id = optional_text(data.get("owner_user_id") or data.get("authority_user_id"))
+    display_name = optional_text(data.get("display_name") or data.get("connection_display_name"))
+    source_kind = optional_text(data.get("agent_kind") or data.get("source_kind"))
     if connection_id and (not org_id or not owner_user_id or not display_name or not source_kind):
         row = await session.get(ExternalAgentConnectionRow, connection_id)
         if row is not None:
@@ -477,18 +466,18 @@ async def _resolve_connection_context(
         raise InboundValidationError("connection_id and org_id are required")
     raw_scopes = data.get("scopes")
     scopes = frozenset(str(scope) for scope in _as_list(raw_scopes)) if raw_scopes is not None else None
-    return _ConnectionContext(
+    return InboundHandlerContext(
         connection_id=connection_id,
         org_id=org_id,
         owner_user_id=owner_user_id,
-        token_id=_clean_optional(data.get("token_id")),
+        token_id=optional_text(data.get("token_id")),
         scopes=scopes,
         display_name=display_name,
         source_kind=source_kind,
     )
 
 
-def _require_signal_scope(context: _ConnectionContext) -> None:
+def _require_signal_scope(context: InboundHandlerContext) -> None:
     if context.scopes is None:
         return
     required = getattr(external_agents, "SCOPE_SIGNAL_SUBMIT", "signal:submit")
@@ -518,10 +507,10 @@ def _normalize_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:
         "kind": kind,
         "origin": origin,
         "payload": dict(payload),
-        "summary": _clean_optional(data.get("summary")),
+        "summary": optional_text(data.get("summary")),
         "hints": dict(hints),
-        "desired_outcome": _clean_optional(data.get("desired_outcome")),
-        "idempotency_key": _clean_optional(data.get("idempotency_key")),
+        "desired_outcome": optional_text(data.get("desired_outcome")),
+        "idempotency_key": optional_text(data.get("idempotency_key")),
     }
     if kind == SUBMISSION_ENVELOPE_KIND:
         normalized.update(_normalize_submission_fields(data, normalized["payload"]))
@@ -531,7 +520,7 @@ def _normalize_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_submission_fields(data: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
-    message = _clean_optional(data.get("message")) or _clean_optional(payload.get("message"))
+    message = optional_text(data.get("message")) or optional_text(payload.get("message"))
     source = data.get("source", payload.get("source", {}))
     constraints = data.get("constraints", payload.get("constraints", {}))
     correlation = data.get("correlation", payload.get("correlation", {}))
@@ -571,7 +560,7 @@ def _normalize_submission_fields(data: Mapping[str, Any], payload: Mapping[str, 
 
 async def _find_idempotent_event(
     session: AsyncSession,
-    context: _ConnectionContext,
+    context: InboundHandlerContext,
     idempotency_key: str | None,
 ) -> InboundEventRow | None:
     if not idempotency_key:
@@ -589,7 +578,7 @@ async def _find_idempotent_event(
 
 async def _store_inbound_event(
     session: AsyncSession,
-    context: _ConnectionContext,
+    context: InboundHandlerContext,
     event: InboundEventRow,
 ) -> tuple[InboundEventRow, bool]:
     try:
@@ -607,18 +596,37 @@ async def _store_inbound_event(
 async def _process_registered_envelope(
     session: AsyncSession,
     *,
-    context: _ConnectionContext,
+    context: InboundHandlerContext,
     event: InboundEventRow,
     normalized: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    handler_path = SPECIAL_ENVELOPE_HANDLER_PATHS.get(str(normalized.get("kind") or ""))
-    if handler_path is None:
+    handler = resolve_inbound_envelope_handler(str(normalized.get("kind") or ""))
+    if handler is None:
         return None
 
-    module_name, function_name = handler_path.split(":", 1)
-    module = importlib.import_module(module_name)
-    handler = getattr(module, function_name)
-    return await handler(session, context=context, event=event, normalized=normalized)
+    async def complete(completion: InboundCompletion) -> dict[str, Any]:
+        return await _complete_event(
+            session,
+            event,
+            policy=completion.policy,
+            status=completion.status,
+            action_type=completion.action_type,
+            action_result=completion.action_result,
+            confidence=completion.confidence,
+            error=completion.error,
+            target=completion.target,
+            tool_use=completion.tool_use,
+            reasoning_summary=completion.reasoning_summary,
+            reusable_pattern_candidate=completion.reusable_pattern_candidate,
+        )
+
+    return await handler(
+        session,
+        context=context,
+        event=event,
+        normalized=normalized,
+        complete=complete,
+    )
 
 
 async def _projection_for_policy(
@@ -640,7 +648,7 @@ async def _projection_for_policy(
 async def _apply_domain_projection(
     session: AsyncSession,
     *,
-    context: _ConnectionContext,
+    context: InboundHandlerContext,
     event: InboundEventRow,
     envelope: Mapping[str, Any],
     projection: InboundDomainProjectionRow,
@@ -767,7 +775,7 @@ async def _get_projection_key(
 async def _claim_projection_key(
     session: AsyncSession,
     *,
-    context: _ConnectionContext,
+    context: InboundHandlerContext,
     projection: InboundDomainProjectionRow,
     external_id: str,
     record_id: int | None = None,
@@ -887,7 +895,7 @@ async def _complete_event_with_illo_triage(
     session: AsyncSession,
     event: InboundEventRow,
     *,
-    context: _ConnectionContext,
+    context: InboundHandlerContext,
     normalized: Mapping[str, Any],
     policy: InboundSourcePolicyRow | None,
     status: str,
@@ -945,7 +953,7 @@ def _github_repo_from_origin(origin: "str | None") -> "str | None":
 async def _queue_illo_triage(
     session: AsyncSession,
     *,
-    context: _ConnectionContext,
+    context: InboundHandlerContext,
     event: InboundEventRow,
     normalized: Mapping[str, Any],
     policy: InboundSourcePolicyRow | None,
@@ -1098,7 +1106,7 @@ async def _queue_illo_triage(
 
 def _triage_thread_message(
     *,
-    context: _ConnectionContext,
+    context: InboundHandlerContext,
     event: InboundEventRow,
     normalized: Mapping[str, Any],
     policy: InboundSourcePolicyRow | None,
@@ -1141,7 +1149,7 @@ def _triage_thread_message(
 
 
 def _inbound_event_metadata(
-    context: _ConnectionContext,
+    context: InboundHandlerContext,
     event: InboundEventRow,
     normalized: Mapping[str, Any],
     policy: InboundSourcePolicyRow | None,
@@ -1182,7 +1190,7 @@ def _triage_tool_use(triage: Mapping[str, Any]) -> dict[str, Any]:
 async def _process_submission_envelope(
     session: AsyncSession,
     *,
-    context: _ConnectionContext,
+    context: InboundHandlerContext,
     event: InboundEventRow,
     normalized: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1222,7 +1230,7 @@ async def _process_submission_envelope(
 async def _queue_illo_submission(
     session: AsyncSession,
     *,
-    context: _ConnectionContext,
+    context: InboundHandlerContext,
     event: InboundEventRow,
     normalized: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1335,7 +1343,7 @@ def _submission_tool_use(handling: Mapping[str, Any]) -> dict[str, Any]:
 
 def _with_thread_links(outcome: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(outcome or {})
-    thread_id = _clean_optional(result.get("thread_id") or result.get("idea_id"))
+    thread_id = optional_text(result.get("thread_id") or result.get("idea_id"))
     if not thread_id:
         return result
     links = thread_link_payload(thread_id)
@@ -1414,7 +1422,7 @@ def _result_from_event(event: InboundEventRow, *, idempotent_replay: bool = Fals
     }
 
 
-def _source_actor(context: _ConnectionContext) -> dict[str, Any]:
+def _source_actor(context: InboundHandlerContext) -> dict[str, Any]:
     return {
         "type": "external_source_connection",
         "connection_id": context.connection_id,
@@ -1483,13 +1491,8 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
-def _clean_optional(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
-
-
 def _nonempty(value: Any, field_name: str) -> str:
-    text = _clean_optional(value)
+    text = optional_text(value)
     if text is None:
         raise InboundValidationError(f"{field_name} is required")
     return text
