@@ -46,6 +46,7 @@ class AgentResult:
     error: str | None = None
     termination: LoopTermination | None = None
     post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = ()
+    effective_routing: dict[str, Any] = field(default_factory=dict)
 
 
 def make_result(
@@ -59,6 +60,7 @@ def make_result(
     worker_results: list | None = None,
     termination: LoopTermination | None = None,
     post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = (),
+    effective_routing: dict[str, Any] | None = None,
 ) -> AgentResult:
     """Construct an AgentResult with common runtime fields."""
 
@@ -76,4 +78,5 @@ def make_result(
         termination=termination,
         worker_results=worker_results or [],
         post_completion_tasks=post_completion_tasks,
+        effective_routing=dict(effective_routing or {}),
     )

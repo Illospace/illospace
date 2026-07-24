@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from brain.platform.effort import EFFORT_TIERS
+
 
 WORKER_SPAWN_TOOLS = [
     {
@@ -12,7 +14,11 @@ WORKER_SPAWN_TOOLS = [
             "file/report an internal bug or blocker in the background. Set headless=true for "
             "background reporting or investigation that should not create visible thread content; "
             "leave headless=false when the delegated run should be able to report visible progress "
-            "or a final update back through the inherited originating surface."
+            "or a final update back through the inherited originating surface. Route primarily with "
+            "effort: xhigh for costly judgment, high for standard work, medium for clear execution, "
+            "and low for reflex work. Use the director/workhorse split: a high-effort coordinator "
+            "should fan out cheaper low/medium readers. Reserve model for a cross-provider verifier, "
+            "preferably using a bare provider such as model='anthropic' to select its default model."
         ),
         "input_schema": {
             "type": "object",
@@ -29,6 +35,15 @@ WORKER_SPAWN_TOOLS = [
                 "message": {
                     "type": "string",
                     "description": "Optional full instruction to run. Defaults to the objective.",
+                },
+                "effort": {
+                    "type": "string",
+                    "enum": list(EFFORT_TIERS),
+                    "description": "Optional canonical effort override for this child. Inherits the parent's effective effort when omitted.",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Exceptional cross-provider override: a provider-prefixed catalog id or a bare provider name selecting that provider's default model.",
                 },
                 "headless": {
                     "type": "boolean",

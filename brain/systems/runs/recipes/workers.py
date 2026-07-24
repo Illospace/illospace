@@ -20,6 +20,10 @@ from brain.systems.runs.recipes.shared import (
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.tools import AsyncRunToolExecutor, ToolRecord, ToolScope, wrap_tool_handlers
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
+from brain.systems.runs.routing_metadata import (
+    effective_routing_snapshot,
+    routing_metadata_with_effective,
+)
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 from brain.systems.runs.recipes.surface_guidance import response_surface_guidance
 
@@ -42,6 +46,29 @@ Rules:
 
 
 WorkerScope = WorkerAssignment
+
+
+def _result_routing(result: Any, *, model: str, effort: str) -> dict[str, Any]:
+    routing = getattr(result, "effective_routing", None)
+    if not isinstance(routing, dict) or not routing.get("model"):
+        return effective_routing_snapshot(model, effort)
+    return effective_routing_snapshot(
+        routing["model"],
+        routing.get("effort") or effort,
+        provider=routing.get("provider"),
+        auth_mode=routing.get("auth_mode"),
+    )
+
+
+async def _record_effective_routing(
+    runtime: RunRuntime,
+    effective: dict[str, Any],
+) -> None:
+    routing = routing_metadata_with_effective(
+        runtime.request.metadata,
+        effective,
+    )
+    await runtime.store.update_metadata(runtime.run.id, {"routing": routing})
 
 
 def _thread_attachment_context(runtime: RunRuntime) -> dict[str, Any] | None:
@@ -161,6 +188,7 @@ class WorkerRecipe(BaseRunRecipe):
                 else {},
             },
         )
+        effective_routing = effective_routing_snapshot(str(model), str(thinking))
         try:
             result = await invoke_direct_agent_async(spec)
         except Exception as exc:
@@ -172,6 +200,11 @@ class WorkerRecipe(BaseRunRecipe):
             output = ""
             post_completion_tasks = ()
         else:
+            effective_routing = _result_routing(
+                result,
+                model=str(model),
+                effort=str(thinking),
+            )
             output = str(getattr(result, "output", "") or "").strip()
             status = RunStatus.COMPLETED if getattr(result, "success", False) else RunStatus.FAILED
             error = None
@@ -183,6 +216,7 @@ class WorkerRecipe(BaseRunRecipe):
                 failure = public_run_failure(status, failure_category)
                 output = ""
             post_completion_tasks = tuple(getattr(result, "post_completion_tasks", ()) or ())
+        await _record_effective_routing(runtime, effective_routing)
         streamed_output = False
         if status == RunStatus.COMPLETED:
             for delta in pending_deltas:
@@ -199,6 +233,7 @@ class WorkerRecipe(BaseRunRecipe):
             tool_records=tool_records,
             root_run_id=runtime.run.root_run_id,
             failure=failure,
+            routing=effective_routing,
         )
         return RunRecipeResult(
             output=output,
@@ -276,6 +311,7 @@ def worker_result_artifact(
     tool_records: list[ToolRecord],
     root_run_id: int | None,
     failure: dict[str, str] | None = None,
+    routing: dict[str, Any] | None = None,
 ) -> AgentRunArtifact:
     payload = {
         "status": status.value,
@@ -290,6 +326,8 @@ def worker_result_artifact(
     }
     if failure:
         payload["failure"] = dict(failure)
+    if routing:
+        payload["routing"] = dict(routing)
     return AgentRunArtifact(
         run_id=run_id,
         root_run_id=root_run_id,

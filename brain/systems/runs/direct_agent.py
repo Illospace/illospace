@@ -120,6 +120,10 @@ from brain.systems.runs.direct_loop.tool_execution import (
     resolve_tool_call as _runtime_resolve_tool_call,
 )
 from brain.systems.runs.context import has_scheduled_result_contract
+from brain.systems.runs.routing_metadata import (
+    effective_routing_snapshot,
+    routing_metadata_with_effective,
+)
 from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
 from brain.systems import sessions as _session_store
@@ -194,6 +198,17 @@ def _normalize_model(model: str) -> str:
         if model.startswith(prefix):
             return model[len(prefix):]
     return model
+
+
+def _publish_effective_routing(
+    execution_metadata: dict[str, Any],
+    effective_routing: dict[str, Any],
+) -> None:
+    execution_metadata["routing"] = routing_metadata_with_effective(
+        execution_metadata,
+        effective_routing,
+    )
+    _agent_context.execution_metadata = execution_metadata
 
 
 _AUTO_OPENAI_AUTH_MODE = object()
@@ -1118,6 +1133,7 @@ def _make_result(
     worker_results: list | None = None,
     termination: LoopTermination | None = None,
     post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = (),
+    effective_routing: dict[str, Any] | None = None,
 ) -> AgentResult:
     """Construct an AgentResult with common fields."""
     return _runtime_make_result(
@@ -1131,6 +1147,7 @@ def _make_result(
         worker_results=worker_results,
         termination=termination,
         post_completion_tasks=post_completion_tasks,
+        effective_routing=effective_routing,
     )
 
 
@@ -1386,6 +1403,7 @@ async def run_agent_async(
         context_attrs["run_id"] = run_id
     _agent_agent_context = bind_agent_context(context_attrs)
     _agent_agent_context.__enter__()
+    effective_routing: dict[str, Any] = {}
 
     try:
         _agent_context.session_id = session_id
@@ -1417,6 +1435,7 @@ async def run_agent_async(
                 start_time,
                 state.tool_calls_made,
                 error="Cancelled by runner",
+                effective_routing=effective_routing,
             )
 
         model = await _resolve_model_async(
@@ -1460,6 +1479,13 @@ async def run_agent_async(
                 model,
             )
         state.provider_name = llm.provider
+        effective_routing = effective_routing_snapshot(
+            model,
+            thinking,
+            provider=state.provider_name,
+            auth_mode=getattr(llm, "auth_mode", None),
+        )
+        _publish_effective_routing(execution_metadata, effective_routing)
         owns_semantic_compactor = semantic_compactor is None
         owns_thread_handoff_compactor = thread_handoff_compactor is None
         if semantic_compactor is None:
@@ -1533,6 +1559,7 @@ async def run_agent_async(
                     start_time,
                     state.tool_calls_made,
                     error="Cancelled by runner",
+                    effective_routing=effective_routing,
                 )
 
             before_guidance_len = len(state.messages)
@@ -1645,6 +1672,16 @@ async def run_agent_async(
                         preferred_model = model
                         model = _normalize_model(fallback)
                         model_fallback_used = True
+                        effective_routing = effective_routing_snapshot(
+                            model,
+                            thinking,
+                            provider=state.provider_name,
+                            auth_mode=getattr(llm, "auth_mode", None),
+                        )
+                        _publish_effective_routing(
+                            execution_metadata,
+                            effective_routing,
+                        )
                         logger.warning(
                             "Agent %s turn %d: model unavailable; falling back %s -> %s",
                             session_id,
@@ -1757,6 +1794,7 @@ async def run_agent_async(
                     )
                     _call_start = time.time()
             if isinstance(response, AgentResult):
+                response.effective_routing = dict(effective_routing)
                 return response  # Cancellation during streaming
 
             _call_ms = int((time.time() - _call_start) * 1000)
@@ -2000,6 +2038,7 @@ async def run_agent_async(
             state.tool_calls_made,
             termination=termination,
             post_completion_tasks=post_completion_tasks,
+            effective_routing=effective_routing,
         )
 
     except Exception as e:
@@ -2024,9 +2063,19 @@ async def run_agent_async(
                 start_time,
                 state.tool_calls_made,
                 error=f"API error: {e}",
+                effective_routing=effective_routing,
             )
         logger.error("Agent %s: error: %s", session_id, e)
-        return _make_result("", False, session_id, state.tokens, start_time, state.tool_calls_made, error=str(e))
+        return _make_result(
+            "",
+            False,
+            session_id,
+            state.tokens,
+            start_time,
+            state.tool_calls_made,
+            error=str(e),
+            effective_routing=effective_routing,
+        )
 
     finally:
         try:

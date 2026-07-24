@@ -143,6 +143,35 @@ class TestProviderInference:
             assert mock_resolve.call_args.kwargs["provider"] == "openai"
             assert mock_resolve.call_args.kwargs["auth_mode"] == "chatgpt"
 
+    @pytest.mark.asyncio
+    async def test_cross_provider_worker_selects_anthropic_transport_without_openai_auth_mode(
+        self,
+        monkeypatch,
+    ):
+        from brain.platform.integrations.providers import AnthropicProvider
+        from brain.platform.integrations.transports.anthropic import AnthropicMessagesTransport
+        from brain.systems.runs.direct_agent import _init_llm_async
+
+        llm = _mock_llm_client(MagicMock(), provider="anthropic")
+        resolve = AsyncMock(return_value=llm)
+        monkeypatch.setattr(
+            "brain.systems.runs.direct_agent.async_resolve_llm_client",
+            resolve,
+        )
+
+        resolved, provider, _headers = await _init_llm_async(
+            "user-1",
+            "worker-session",
+            "anthropic/claude-sonnet-4-6",
+            org_id="org-1",
+        )
+
+        assert resolved is llm
+        assert resolve.await_args.kwargs["provider"] == "anthropic"
+        assert resolve.await_args.kwargs["auth_mode"] is None
+        assert isinstance(provider, AnthropicProvider)
+        assert isinstance(provider.transport, AnthropicMessagesTransport)
+
 
 @pytest.mark.asyncio
 async def test_agent_retries_gpt_5_6_on_gpt_5_5_when_account_lacks_entitlement(monkeypatch):
@@ -194,6 +223,12 @@ async def test_agent_retries_gpt_5_6_on_gpt_5_5_when_account_lacks_entitlement(m
     assert result.output == "Fallback succeeded"
     assert [request.model for request in requests] == ["gpt-5.6-sol", "gpt-5.5"]
     assert any("unavailable" in item and "gpt-5.5" in item for item in activity)
+    assert result.effective_routing == {
+        "model": "openai/gpt-5.5",
+        "effort": "xhigh",
+        "provider": "openai",
+        "auth_mode": "chatgpt",
+    }
 
 
 @pytest.mark.asyncio
@@ -243,6 +278,12 @@ async def test_agent_uses_shared_key_fallback_when_personal_codex_connection_is_
     assert result.success is True
     assert seen_models == ["gpt-5.5"]
     assert [call.kwargs["auth_mode"] for call in resolve.await_args_list] == ["chatgpt", None]
+    assert result.effective_routing == {
+        "model": "openai/gpt-5.5",
+        "effort": "xhigh",
+        "provider": "openai",
+        "auth_mode": "api_key",
+    }
 
 class TestLiveGuidance:
     async def test_append_live_guidance_adds_user_message(self):

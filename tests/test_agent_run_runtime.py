@@ -44,6 +44,7 @@ class _Store:
     def __init__(self):
         self.events = []
         self.artifacts = []
+        self.metadata_updates = []
         self.created_requests = []
         self.child_initial_statuses = []
         self.runs = {}
@@ -59,6 +60,10 @@ class _Store:
     def append_artifact(self, artifact):
         self.artifacts.append(artifact)
         return _AwaitableValue(artifact)
+
+    def update_metadata(self, run_id, patch):
+        self.metadata_updates.append((run_id, dict(patch)))
+        return _AwaitableValue(dict(patch))
 
     def create_run(self, request, *, initial_status=None):
         from brain.systems.runs.domain import AgentRun
@@ -1509,6 +1514,281 @@ def test_headless_worker_policy_uses_canonical_disabled_tools():
         "cortex_reply",
         "post_ai_timeline_message",
     }
+
+
+async def _captured_spawn_worker(
+    monkeypatch,
+    *,
+    parent_model_policy,
+    child_model_policy=None,
+    execution_metadata=None,
+    created_here=True,
+    **spawn_kwargs,
+):
+    from brain.systems.runs.domain import RunProfile, RunRecipe
+    from brain.systems.runs.execution_context import bind_agent_context
+    import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
+
+    parent = SimpleNamespace(
+        id=42,
+        org_id="org-1",
+        user_id="user-1",
+        root_run_id=42,
+        profile=RunProfile.FAST,
+        target_ref={"kind": "cortex_idea", "idea_id": "idea-1"},
+        workspace_ref={"workspace_root": "/tmp/work"},
+        model_policy=dict(parent_model_policy),
+    )
+    captured = {}
+    events = []
+
+    class _Uow:
+        session = object()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+    class _Store:
+        def __init__(self, session):
+            self.session = session
+
+        async def require_run(self, run_id):
+            assert run_id == parent.id
+            return parent
+
+        async def create_child_run_with_result(self, parent_arg, **kwargs):
+            assert parent_arg is parent
+            captured.update(kwargs)
+            actual_policy = (
+                dict(child_model_policy)
+                if child_model_policy is not None
+                else dict(kwargs["model_policy"])
+            )
+            return (
+                SimpleNamespace(
+                    id=99,
+                    root_run_id=42,
+                    recipe=RunRecipe.WORKER,
+                    model_policy=actual_policy,
+                    metadata=dict(kwargs["metadata"]),
+                ),
+                created_here,
+            )
+
+        async def append_event(self, event):
+            events.append(event)
+
+    monkeypatch.setattr(worker_handlers, "UnitOfWork", _Uow)
+    monkeypatch.setattr(worker_handlers, "AsyncAgentRunStore", _Store)
+
+    with bind_agent_context(
+        run=SimpleNamespace(id=parent.id),
+        execution_metadata=dict(execution_metadata or {}),
+    ):
+        payload = json.loads(
+            await worker_handlers._handle_spawn_worker(
+                objective="Inspect the routing contract.",
+                **spawn_kwargs,
+            )
+        )
+    return payload, captured, events
+
+
+async def test_spawn_worker_effort_override_merges_over_materialized_parent_policy(monkeypatch):
+    payload, captured, events = await _captured_spawn_worker(
+        monkeypatch,
+        parent_model_policy={
+            "model": "openai/gpt-5.6-sol",
+            "thinking": "xhigh",
+            "future_policy_key": "preserved",
+        },
+        effort="low",
+    )
+
+    assert captured["model_policy"] == {
+        "model": "openai/gpt-5.6-sol",
+        "thinking": "low",
+        "future_policy_key": "preserved",
+    }
+    requested = captured["metadata"]["routing"]["requested"]
+    assert requested["model"] == {
+        "value": "openai/gpt-5.6-sol",
+        "source": "parent_effective",
+    }
+    assert requested["effort"] == {
+        "value": "low",
+        "source": "spawn_worker.effort",
+    }
+    assert payload["model"] == "openai/gpt-5.6-sol"
+    assert payload["effort"] == "low"
+    assert payload["routing"]["provider"] == "openai"
+    assert payload["routing"]["auth_mode"] == "chatgpt"
+    assert events[0].payload["routing"]["effort"] == "low"
+
+
+async def test_spawn_worker_without_overrides_materializes_parent_effective_defaults(monkeypatch):
+    import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
+
+    async def default_model(session, **kwargs):
+        assert session is not None
+        assert kwargs == {
+            "include_provider_prefix": True,
+            "user_id": "user-1",
+            "org_id": "org-1",
+        }
+        return "openai/gpt-5.6-sol"
+
+    async def default_thinking(session, **kwargs):
+        assert session is not None
+        assert kwargs == {"user_id": "user-1", "org_id": "org-1"}
+        return "medium"
+
+    monkeypatch.setattr(worker_handlers, "async_get_default_model", default_model)
+    monkeypatch.setattr(worker_handlers, "async_get_default_thinking", default_thinking)
+
+    payload, captured, _events = await _captured_spawn_worker(
+        monkeypatch,
+        parent_model_policy={},
+    )
+
+    assert captured["model_policy"] == {
+        "model": "openai/gpt-5.6-sol",
+        "thinking": "medium",
+    }
+    assert captured["metadata"]["routing"]["requested"] == {
+        "model": {
+            "value": "openai/gpt-5.6-sol",
+            "source": "parent_effective",
+        },
+        "effort": {
+            "value": "medium",
+            "source": "parent_effective",
+        },
+    }
+    assert payload["model"] == "openai/gpt-5.6-sol"
+    assert payload["effort"] == "medium"
+
+
+async def test_spawn_worker_inherits_live_parent_route_after_parent_fallback(monkeypatch):
+    import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
+
+    async def unexpected_default(*_args, **_kwargs):
+        raise AssertionError("live parent effective routing should win over late defaults")
+
+    monkeypatch.setattr(worker_handlers, "async_get_default_model", unexpected_default)
+    monkeypatch.setattr(worker_handlers, "async_get_default_thinking", unexpected_default)
+
+    _payload, captured, _events = await _captured_spawn_worker(
+        monkeypatch,
+        parent_model_policy={},
+        execution_metadata={
+            "routing": {
+                "effective": {
+                    "model": "openai/gpt-5.5",
+                    "effort": "high",
+                    "provider": "openai",
+                    "auth_mode": "chatgpt",
+                }
+            }
+        },
+    )
+
+    assert captured["model_policy"] == {
+        "model": "openai/gpt-5.5",
+        "thinking": "high",
+    }
+
+
+async def test_spawn_worker_bare_provider_resolves_provider_default_and_transport(monkeypatch):
+    payload, captured, _events = await _captured_spawn_worker(
+        monkeypatch,
+        parent_model_policy={
+            "model": "openai/gpt-5.6-sol",
+            "thinking": "high",
+        },
+        model="anthropic",
+        effort="xhigh",
+    )
+
+    assert captured["model_policy"] == {
+        "model": "anthropic/claude-sonnet-4-6",
+        "thinking": "xhigh",
+    }
+    assert captured["metadata"]["routing"]["requested"]["model"] == {
+        "value": "anthropic/claude-sonnet-4-6",
+        "source": "spawn_worker.model",
+        "requested_value": "anthropic",
+    }
+    assert payload["model"] == "anthropic/claude-sonnet-4-6"
+    assert payload["effort"] == "xhigh"
+    assert payload["routing"] == {
+        "model": "anthropic/claude-sonnet-4-6",
+        "effort": "xhigh",
+        "provider": "anthropic",
+        "auth_mode": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("spawn_kwargs", "message"),
+    [
+        ({"effort": "ultra"}, "effort must be one of"),
+        ({"model": "gpt-5.6-sol"}, "model must be a provider name"),
+        (
+            {"model": "anthropic/not-a-real-model"},
+            "model for provider 'anthropic' must be one of",
+        ),
+    ],
+)
+async def test_spawn_worker_rejects_invalid_routing_before_creating_child(
+    monkeypatch,
+    spawn_kwargs,
+    message,
+):
+    import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
+
+    class _UnexpectedUow:
+        async def __aenter__(self):
+            raise AssertionError("invalid routing must be rejected before persistence")
+
+        async def __aexit__(self, *_):
+            return None
+
+    monkeypatch.setattr(worker_handlers, "UnitOfWork", _UnexpectedUow)
+
+    payload = json.loads(
+        await worker_handlers._handle_spawn_worker(
+            objective="Inspect the routing contract.",
+            **spawn_kwargs,
+        )
+    )
+
+    assert message in payload["error"]
+
+
+async def test_spawn_worker_deduplicated_result_echoes_existing_child_route(monkeypatch):
+    payload, _captured, events = await _captured_spawn_worker(
+        monkeypatch,
+        parent_model_policy={
+            "model": "openai/gpt-5.6-sol",
+            "thinking": "high",
+        },
+        child_model_policy={
+            "model": "anthropic/claude-sonnet-4-6",
+            "thinking": "medium",
+        },
+        created_here=False,
+        idempotency_key="stable-verifier",
+        effort="low",
+    )
+
+    assert payload["deduplicated"] is True
+    assert payload["model"] == "anthropic/claude-sonnet-4-6"
+    assert payload["effort"] == "medium"
+    assert events == []
 
 
 @pytest.mark.parametrize("created_here", [True, False])
@@ -3806,7 +4086,17 @@ async def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_
         read_result = await spec.tool_handlers["read_file"](path="README.md")
         assert read_result["content"] == "setup steps"
         await spec.on_stream_delta("Found setup steps")
-        return SimpleNamespace(output="README setup documented", success=True, error=None)
+        return SimpleNamespace(
+            output="README setup documented",
+            success=True,
+            error=None,
+            effective_routing={
+                "model": "anthropic/claude-sonnet-4-6",
+                "effort": "xhigh",
+                "provider": "anthropic",
+                "auth_mode": "api_key",
+            },
+        )
 
     monkeypatch.setattr("brain.systems.runs.recipes.workers.build_agent_tools", lambda role: [{"name": "read_file"}])
     monkeypatch.setattr(
@@ -3828,6 +4118,29 @@ async def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_
     assert worker_result.artifact_type == ArtifactType.WORKER_RESULT
     assert worker_result.payload["scope"]["allowed_files"] == ["README.md"]
     assert worker_result.payload["evidence"]["tool_names"] == ["read_file"]
+    assert runtime.store.metadata_updates == [
+        (
+            42,
+            {
+                "routing": {
+                    "model": "anthropic/claude-sonnet-4-6",
+                    "effort": "xhigh",
+                    "effective": {
+                        "model": "anthropic/claude-sonnet-4-6",
+                        "effort": "xhigh",
+                        "provider": "anthropic",
+                        "auth_mode": "api_key",
+                    },
+                }
+            },
+        )
+    ]
+    assert worker_result.payload["routing"] == {
+        "model": "anthropic/claude-sonnet-4-6",
+        "effort": "xhigh",
+        "provider": "anthropic",
+        "auth_mode": "api_key",
+    }
 
 
 async def test_worker_recipe_keeps_failed_provider_diagnostics_internal(monkeypatch):
