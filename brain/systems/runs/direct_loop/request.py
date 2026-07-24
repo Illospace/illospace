@@ -8,6 +8,7 @@ import re
 from hashlib import sha256
 
 from brain.platform.integrations.providers import LLMRequest
+from brain.platform.providers.model_policy import required_openai_auth_mode
 
 _PROMPT_CACHE_KEY_MAX_LEN = 64
 _PROMPT_CACHE_KEY_DIGEST_LEN = 24
@@ -160,9 +161,17 @@ def _prompt_cache_scope(session_id: str, persist_session: bool, operation_type: 
 
 
 def get_extended_prompt_cache_retention(model: str) -> str | None:
-    """Return an extended retention hint for OpenAI models that support it."""
+    """Return an extended retention hint for OpenAI models that support it.
+
+    The ChatGPT/Codex backend rejects `prompt_cache_retention` outright, so
+    models that route there must not ask for it: every such request 400s and is
+    retried without the parameter, paying a wasted round trip per call and
+    never getting extended retention anyway.
+    """
 
     normalized = normalize_model_name(model)
+    if required_openai_auth_mode(normalized) == "chatgpt":
+        return None
     supported_prefixes = (
         "gpt-5",
         "gpt-4.1",
