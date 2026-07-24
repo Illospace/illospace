@@ -8,13 +8,17 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.platform.effort import (
+    EFFORT_TIER_SET,
+    EFFORT_TIERS,
+    PROVIDER_EFFORT_RENDERINGS,
+    render_reasoning_effort,
+)
 from brain.platform.integrations.providers import get_active_provider
 
 
 DEFAULT_RUNTIME_PROVIDER = "openai"
 DEFAULT_THINKING_TIER = "high"
-EFFORT_TIERS = ("none", "low", "medium", "high", "xhigh")
-EFFORT_TIER_SET = frozenset(EFFORT_TIERS)
 DEFAULT_PROVIDER_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-5.6-sol",
@@ -44,8 +48,6 @@ PROVIDER_MODEL_OPTIONS: dict[str, tuple[str, ...]] = {
         "o3-mini",
     ),
 }
-
-THINKING_MAP = {tier: tier for tier in EFFORT_TIERS}
 
 OPENAI_MODEL_ALIASES = set(PROVIDER_MODEL_OPTIONS["openai"])
 
@@ -374,7 +376,7 @@ def _configured_default_model(config: dict[str, Any], provider: str) -> str | No
 
 def _configured_default_thinking(config: dict[str, Any]) -> str | None:
     value = str(config.get("default_thinking") or "").strip().lower()
-    return value if value in THINKING_MAP else None
+    return value if value in EFFORT_TIER_SET else None
 
 
 def get_default_model(
@@ -472,7 +474,7 @@ def resolve_skill_runtime(
         user_id=user_id,
         org_id=org_id,
     )
-    reasoning_effort = THINKING_MAP.get(thinking_tier, "medium")
+    reasoning_effort = thinking_tier if thinking_tier in EFFORT_TIER_SET else "medium"
 
     return SkillRuntimeConfig(
         provider=provider,
@@ -507,7 +509,7 @@ async def async_resolve_skill_runtime(
         user_id=user_id,
         org_id=org_id,
     )
-    reasoning_effort = THINKING_MAP.get(thinking_tier, "medium")
+    reasoning_effort = thinking_tier if thinking_tier in EFFORT_TIER_SET else "medium"
 
     return SkillRuntimeConfig(
         provider=provider,
@@ -530,7 +532,7 @@ def resolve_skill_routing_profile(
     thinking_tier = row.get("thinking_tier") or "medium"
     return SkillRoutingProfile(
         skill_name=skill_name,
-        reasoning_effort=THINKING_MAP.get(thinking_tier, "medium"),
+        reasoning_effort=thinking_tier if thinking_tier in EFFORT_TIER_SET else "medium",
         thinking_tier=thinking_tier,
     )
 
@@ -544,7 +546,7 @@ async def async_resolve_skill_routing_profile(
     thinking_tier = row.get("thinking_tier") or "medium"
     return SkillRoutingProfile(
         skill_name=skill_name,
-        reasoning_effort=THINKING_MAP.get(thinking_tier, "medium"),
+        reasoning_effort=thinking_tier if thinking_tier in EFFORT_TIER_SET else "medium",
         thinking_tier=thinking_tier,
     )
 

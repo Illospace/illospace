@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from brain.platform.effort import render_reasoning_effort
 from brain.platform.integrations.transports.base import (
     LLMRequest,
     Provider,
@@ -31,9 +32,10 @@ class AnthropicMessagesTransport:
             kwargs["system"] = request.system
         if request.tools:
             kwargs["tools"] = request.tools
-        if request.reasoning_effort and request.reasoning_effort != "none":
+        effort = render_reasoning_effort("anthropic", request.reasoning_effort)
+        if effort:
             kwargs["thinking"] = {"type": "adaptive"}
-            kwargs["output_config"] = {"effort": request.reasoning_effort}
+            kwargs["output_config"] = {"effort": effort}
         if request.extra_headers:
             kwargs["extra_headers"] = dict(request.extra_headers)
         return kwargs

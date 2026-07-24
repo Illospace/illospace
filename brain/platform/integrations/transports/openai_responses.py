@@ -8,6 +8,7 @@ import os
 import uuid
 from typing import Any
 
+from brain.platform.effort import render_reasoning_effort
 from brain.platform.integrations.openai_cache import normalize_openai_request_kwargs
 from brain.platform.integrations.transports.base import (
     ContentBlock,
@@ -595,8 +596,9 @@ class OpenAIResponsesTransport:
         if tools:
             openai_kwargs["tools"] = tools
 
-        if request.reasoning_effort and request.reasoning_effort != "none":
-            reasoning = {"effort": request.reasoning_effort}
+        effort = render_reasoning_effort("openai", request.reasoning_effort)
+        if effort:
+            reasoning = {"effort": effort}
             summary = self._reasoning_summary_setting()
             if summary:
                 reasoning["summary"] = summary
