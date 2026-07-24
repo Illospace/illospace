@@ -361,6 +361,44 @@ CHAT_TOOLS = [
                     ),
                     "default": False,
                 },
+                "exception_ping": {
+                    "type": "object",
+                    "description": (
+                        "Required for every Cycle-generated person-addressed maintenance "
+                        "ping or off-slot material alert. The code gate shares one "
+                        "60-minute per-teammate throttle across both Cycle run kinds and "
+                        "audits materiality. Include target_teammate_id (the Slack mention "
+                        "id), item_ref, change_types, and evidence-backed facts."
+                    ),
+                    "properties": {
+                        "target_teammate_id": {"type": "string"},
+                        "item_ref": {"type": "string"},
+                        "change_types": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "ownership_change",
+                                    "blocker_hit",
+                                    "blocker_clear",
+                                    "active_set_enter",
+                                    "active_set_leave",
+                                    "new_unassigned_high_severity",
+                                    "chantier_must_surface",
+                                    "ci_status_transition",
+                                    "auto_filed_alert_issue",
+                                ],
+                            },
+                        },
+                        "facts": {"type": "object"},
+                    },
+                    "required": [
+                        "target_teammate_id",
+                        "item_ref",
+                        "change_types",
+                        "facts",
+                    ],
+                },
             },
         },
     },

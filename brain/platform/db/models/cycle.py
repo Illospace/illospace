@@ -72,6 +72,9 @@ class Cycle(Base, TimestampMixin):
     degradation_state: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
     )
+    exception_ping_state: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
     deleted_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )

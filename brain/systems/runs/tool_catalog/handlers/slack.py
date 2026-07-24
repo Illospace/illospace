@@ -12,9 +12,16 @@ from brain.platform.provider_alerts import (
     ProviderAlertPolicyError,
     classify_provider_alert_body,
 )
+from brain.systems.cycles.exception_ping import (
+    cycle_exception_ping_context,
+    exception_ping_payload_required,
+    record_exception_ping_metadata_skip,
+    slack_mentioned_teammates,
+)
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _current_runtime_secret_context
 from brain.systems.slack.client import SlackApiError, SlackDeliveryError
+from brain.systems.slack.exception_ping_posting import post_exception_ping
 from brain.systems.slack.provider_alert_posting import post_provider_alert
 from brain.systems.slack.thread_mute import read_thread_post_mute
 from brain.systems.slack.uploads import slack_image_upload_from_data_url
@@ -368,6 +375,7 @@ async def _handle_post_slack_reply(
     image_title: str | None = None,
     image_alt: str | None = None,
     answers_open_ask: bool = False,
+    exception_ping: dict[str, Any] | None = None,
 ) -> str:
     """Post an Illo-authored reply to the originating Slack surface."""
 
@@ -428,6 +436,72 @@ async def _handle_post_slack_reply(
     if not target_channel:
         return json.dumps({"error": "post_slack_reply requires channel_id outside a Slack-triggered run"})
 
+    cycle_ping_context = cycle_exception_ping_context(_execution_metadata())
+    ping_payload = dict(exception_ping) if isinstance(exception_ping, dict) else None
+    if exception_ping is not None and ping_payload is None:
+        return json.dumps(
+            {
+                "ok": False,
+                "posted": False,
+                "error": "invalid_exception_ping",
+                "detail": "exception_ping must be an object",
+            }
+        )
+    if ping_payload is not None and cycle_ping_context is None:
+        return json.dumps(
+            {
+                "ok": False,
+                "posted": False,
+                "error": "invalid_exception_ping",
+                "detail": "exception_ping is only valid in a persisted Cycle run",
+            }
+        )
+    if (
+        ping_payload is None
+        and exception_ping_payload_required(
+            text,
+            cycle_context=cycle_ping_context,
+        )
+    ):
+        try:
+            await record_exception_ping_metadata_skip(
+                cycle_run_id=int(cycle_ping_context["cycle_run_id"]),
+                run_kind=str(cycle_ping_context["run_kind"]),
+            )
+        except Exception as exc:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "posted": False,
+                    "error": "exception_ping_ledger_unavailable",
+                    "detail": str(exc),
+                }
+            )
+        return json.dumps(
+            {
+                "ok": False,
+                "posted": False,
+                "suppressed": True,
+                "error": "exception_ping_metadata_required",
+                "ledger_line": "Slack skipped: exception_ping metadata required",
+            }
+        )
+    if ping_payload is not None:
+        mentioned = slack_mentioned_teammates(text)
+        target_teammate_id = str(
+            ping_payload.get("target_teammate_id") or ""
+        ).strip()
+        if mentioned and target_teammate_id not in mentioned:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "posted": False,
+                    "error": "exception_ping_target_mismatch",
+                    "mentioned_teammate_ids": list(mentioned),
+                    "target_teammate_id": target_teammate_id,
+                }
+            )
+
     try:
         client = await _slack_client_from_runtime()
         if target_thread_ts:
@@ -460,6 +534,38 @@ async def _handle_post_slack_reply(
                         "truncated": False,
                     }
                 )
+        if ping_payload is not None and cycle_ping_context is not None:
+            return await post_exception_ping(
+                cycle_run_id=int(cycle_ping_context["cycle_run_id"]),
+                run_kind=str(cycle_ping_context["run_kind"]),
+                payload=ping_payload,
+                channel_id=target_channel,
+                thread_ts=target_thread_ts,
+                visibility=target_visibility,
+                submitted_body=submitted_text,
+                body=text,
+                uploaded_image=image_upload is not None,
+                resolve_channel=partial(
+                    _resolve_post_channel,
+                    client,
+                    visibility=target_visibility,
+                ),
+                post=partial(
+                    _post_slack_content,
+                    client,
+                    text=text,
+                    thread_ts=target_thread_ts,
+                    visibility=target_visibility,
+                    user_id=user_id,
+                    trigger=trigger,
+                    image_upload=image_upload,
+                ),
+                clear_processing_status=partial(
+                    _clear_processing_status,
+                    client,
+                    trigger,
+                ),
+            )
         if alert_decision is not None:
             return await post_provider_alert(
                 client,
