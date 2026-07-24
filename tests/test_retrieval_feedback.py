@@ -7,6 +7,7 @@ Zero test data leaks to production DB.
 
 import sys
 import os
+from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
 
 import pytest
@@ -172,6 +173,32 @@ class TestAnalyzeMissedMemories:
             missed = await analyze_missed_memories(min_misses=3, days=30)
         missed_ids = [m["memory_id"] for m in missed]
         assert mid not in missed_ids
+
+
+class TestAnalyzeMissedMemoriesQuery:
+    async def test_binds_python_cutoff_without_interval_arithmetic(self):
+        now = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        result = MagicMock()
+        result.mappings.return_value.all.return_value = []
+        uow = MagicMock()
+        uow.__aenter__ = AsyncMock(return_value=uow)
+        uow.__aexit__ = AsyncMock(return_value=False)
+        uow.session.execute = AsyncMock(return_value=result)
+
+        with patch(
+            "brain.systems.memory.retrieval_feedback.UnitOfWork",
+            return_value=uow,
+        ), patch("brain.systems.memory.retrieval_feedback.datetime") as mock_datetime:
+            mock_datetime.now.return_value = now
+            await analyze_missed_memories(min_misses=3, days=30)
+
+        statement, params = uow.session.execute.await_args.args
+        assert "WHERE rl.timestamp >= :cutoff" in str(statement)
+        assert "INTERVAL" not in str(statement)
+        assert params == {
+            "cutoff": now - timedelta(days=30),
+            "min_misses": 3,
+        }
 
 
 class TestAttentionUsefulnessAttribution:

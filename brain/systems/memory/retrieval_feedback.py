@@ -18,6 +18,7 @@ Automatic feedback (memory-DAG):
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -192,6 +193,7 @@ async def analyze_missed_memories(*, cur=None, min_misses: int = 3, days: int = 
 
     Returns list of {memory_id, content, miss_count, hit_count, salience}.
     """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     async with UnitOfWork() as uow:
         result = await uow.session.execute(text("""
             SELECT rl.top_result_id as memory_id,
@@ -201,13 +203,13 @@ async def analyze_missed_memories(*, cur=None, min_misses: int = 3, days: int = 
                    COUNT(*) FILTER (WHERE rl.feedback = 'hit') as hit_count
             FROM retrieval_log rl
             JOIN memory_nodes m ON m.id = rl.top_result_id
-            WHERE rl.timestamp >= NOW() - INTERVAL '1 day' * :days
+            WHERE rl.timestamp >= :cutoff
               AND rl.top_result_id IS NOT NULL
               AND rl.feedback IS NOT NULL
             GROUP BY rl.top_result_id, COALESCE(m.text, m.canonical_label), m.confidence
             HAVING COUNT(*) FILTER (WHERE rl.feedback = 'miss') >= :min_misses
             ORDER BY miss_count DESC
-        """), {"days": days, "min_misses": min_misses})
+        """), {"cutoff": cutoff, "min_misses": min_misses})
         return [dict(r) for r in result.mappings().all()]
 
 

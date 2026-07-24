@@ -86,6 +86,30 @@ class TestGatherContext:
 class TestGatherContextRegressions:
     """Regression tests for known bugs in gather_context."""
 
+    async def test_previous_metrics_binds_python_date_cutoff(self, patch_reflect_uow):
+        """Regression: asyncpg cannot type an uncast date bind used with INTERVAL."""
+        target = date(2026, 7, 24)
+
+        with patch("brain.kernel.config.JOURNAL_DIR", "/nonexistent/journal"), \
+             patch(
+                 "brain.systems.memory.retrieval_feedback.analyze_missed_memories",
+                 new=AsyncMock(return_value=[]),
+             ):
+            from brain.jobs.pipelines.nightly_reflect import gather_context
+            await gather_context(target)
+
+        metrics_calls = [
+            execute_call
+            for execute_call in patch_reflect_uow.session.execute.call_args_list
+            if "FROM daily_metrics" in str(execute_call.args[0])
+        ]
+        assert len(metrics_calls) == 1
+
+        statement, params = metrics_calls[0].args
+        assert "WHERE metric_date >= :metrics_cutoff" in str(statement)
+        assert "INTERVAL" not in str(statement)
+        assert params == {"metrics_cutoff": date(2026, 7, 17)}
+
     def test_connection_uses_context_manager(self):
         """Regression: must use a UnitOfWork/db connection context manager."""
         import inspect

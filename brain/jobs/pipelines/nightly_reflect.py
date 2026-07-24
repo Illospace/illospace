@@ -20,7 +20,7 @@ import json
 import os
 import sys
 from collections import defaultdict
-from datetime import datetime, date
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import text
 
@@ -121,11 +121,12 @@ async def gather_context(target_date: date, org_id: str | None = None) -> dict:
         context["new_memories"] = [dict(r) for r in result.mappings().all()]
 
         # 8. Previous daily metrics (for comparison)
+        metrics_cutoff = target_date - timedelta(days=7)
         result = await uow.session.execute(text("""
             SELECT * FROM daily_metrics
-            WHERE metric_date >= :target_date - INTERVAL '7 days'
+            WHERE metric_date >= :metrics_cutoff
             ORDER BY metric_date DESC
-        """), {"target_date": target_date})
+        """), {"metrics_cutoff": metrics_cutoff})
         context["previous_metrics"] = [dict(r) for r in result.mappings().all()]
 
         # 9. Agent run activity.
