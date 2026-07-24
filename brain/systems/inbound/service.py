@@ -49,6 +49,7 @@ ACTION_ILO_REQUIRED = "ilo_required"
 SUBMISSION_ENVELOPE_KIND = "submission"
 ACTION_ILLO_SUBMIT_QUEUED = "illo.submit_queued"
 SPECIAL_ENVELOPE_HANDLER_PATHS = {
+    "app_report": "brain.systems.app_report.inbound:process_app_report_envelope",
     "slack_message": "brain.systems.slack.inbound:process_slack_message_envelope",
 }
 
