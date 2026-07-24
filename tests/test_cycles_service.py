@@ -537,6 +537,55 @@ def test_cycle_router_bad_request_returns_400():
     assert caught.value.detail == "Unknown timezone: Mars/Base"
 
 
+@pytest.mark.parametrize("raw_model", [None, "", "default", "DEFAULT"])
+def test_cycle_run_model_policy_treats_absent_and_default_models_as_org_fallback(
+    raw_model,
+):
+    cycle = Cycle()
+    cycle.model_override = "openai/gpt-5.5"
+    cycle.thinking_override = "high"
+    run = CycleRun()
+    run.context_snapshot = {
+        "revision": {
+            "model_override": raw_model,
+            "thinking_override": None,
+        }
+    }
+
+    assert service._cycle_run_model_policy(cycle, run) == {}
+
+
+def test_cycle_run_model_policy_uses_bound_revision_instead_of_live_cycle():
+    cycle = Cycle()
+    cycle.model_override = "anthropic/claude-opus-4-6"
+    cycle.thinking_override = "low"
+    run = CycleRun()
+    run.context_snapshot = {
+        "revision": {
+            "model_override": "gpt-5.4-mini",
+            "thinking_override": "xhigh",
+        }
+    }
+
+    assert service._cycle_run_model_policy(cycle, run) == {
+        "model": "openai/gpt-5.4-mini",
+        "thinking": "xhigh",
+    }
+
+
+def test_cycle_run_model_policy_falls_back_to_live_cycle_without_snapshot():
+    cycle = Cycle()
+    cycle.model_override = "openai/gpt-5.4-mini"
+    cycle.thinking_override = "low"
+    run = CycleRun()
+    run.context_snapshot = None
+
+    assert service._cycle_run_model_policy(cycle, run) == {
+        "model": "openai/gpt-5.4-mini",
+        "thinking": "low",
+    }
+
+
 def _cycle_for_serialization(*, schedule_expr: str, timezone_name: str) -> Cycle:
     now = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
     cycle = Cycle()
@@ -654,6 +703,55 @@ async def test_cycle_update_validation_failure_does_not_mutate_or_flush():
     assert cycle.timezone == "America/Toronto"
     assert cycle.schedule_expr == "0 9 * * *"
     assert db.flushed is False
+
+
+@pytest.mark.asyncio
+async def test_cycle_update_rejects_unknown_model_with_valid_options():
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="America/Toronto",
+    )
+    db = _RouterCycleSession(cycle)
+
+    with pytest.raises(cycles_router.HTTPException) as caught:
+        await cycles_router.update_cycle(
+            cycle.id,
+            cycles_router.CycleUpdate(model_override="openai/not-a-model"),
+            db=db,
+            user={"id": cycle.user_id, "org_id": None},
+        )
+
+    assert caught.value.status_code == 400
+    assert "Unknown model_override 'openai/not-a-model'" in caught.value.detail
+    assert "openai/gpt-5.4-mini" in caught.value.detail
+    assert cycle.model_override is None
+    assert db.flushed is False
+
+
+@pytest.mark.asyncio
+async def test_cycle_update_stores_canonical_model_and_clears_default():
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="America/Toronto",
+    )
+    db = _RouterCycleSession(cycle)
+
+    response = await cycles_router.update_cycle(
+        cycle.id,
+        cycles_router.CycleUpdate(model_override="gpt-5.4-mini"),
+        db=db,
+        user={"id": cycle.user_id, "org_id": None},
+    )
+    assert response["model_override"] == "openai/gpt-5.4-mini"
+
+    response = await cycles_router.update_cycle(
+        cycle.id,
+        cycles_router.CycleUpdate(model_override="DeFaUlT"),
+        db=db,
+        user={"id": cycle.user_id, "org_id": None},
+    )
+    assert response["model_override"] is None
+
 
 def test_serialize_cycle_does_not_raise_for_legacy_bad_timezone():
     cycle = _cycle_for_serialization(
@@ -1043,6 +1141,18 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
     monkeypatch.setattr(service, "admit_work", fake_admit)
     session = object()
 
+    cycle = Cycle()
+    cycle.model_override = "anthropic/claude-opus-4-6"
+    cycle.thinking_override = "low"
+    cycle_run = CycleRun()
+    cycle_run.context_snapshot = {
+        "revision": {
+            "model_override": "gpt-5.4-mini",
+            "thinking_override": "high",
+        }
+    }
+    model_policy = service._cycle_run_model_policy(cycle, cycle_run)
+
     run_id = await service._async_admit_cycle_run(
         session,
         idea_id="idea-1",
@@ -1051,6 +1161,7 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
         user_id="user-1",
         metadata={"source": "cycle", "cycle_run_id": 12},
         cycle_run_id=12,
+        model_policy=model_policy,
     )
 
     assert run_id == 77
@@ -1061,6 +1172,10 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
     assert event.target == {"kind": "cortex_idea", "idea_id": "idea-1"}
     assert event.payload["metadata"]["source"] == "cycle"
     assert event.payload["metadata"]["cycle_run_id"] == 12
+    assert event.payload["model_policy"] == {
+        "model": "openai/gpt-5.4-mini",
+        "thinking": "high",
+    }
     assert event.policy["producer"] == "cycle"
     assert event.policy["idempotency_key"] == "cycle_run:12"
     assert event.policy["run_event"] == "thread_reply"

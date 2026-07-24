@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from brain.platform.providers.model_policy import EFFORT_TIER_SET, normalize_model_name
 from brain.systems.cortex.events import publish
 from brain.systems.cortex.thought_lifecycle import ThreadMessageCommand, post_thread_message
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUSES, CYCLE_RUN_TERMINAL_STATUSES
@@ -128,6 +129,7 @@ async def _async_admit_cycle_run(
     user_id: str | None,
     metadata: dict | None,
     cycle_run_id: int,
+    model_policy: dict | None = None,
 ) -> int | None:
     result = await admit_work(
         session,
@@ -137,7 +139,11 @@ async def _async_admit_cycle_run(
             org_id=str((metadata or {}).get("org_id") or ""),
             actor={"id": user_id, "org_id": (metadata or {}).get("org_id")},
             target={"kind": "cortex_idea", "idea_id": idea_id},
-            payload={"message": message, "metadata": dict(metadata or {})},
+            payload={
+                "message": message,
+                "metadata": dict(metadata or {}),
+                "model_policy": dict(model_policy or {}),
+            },
             policy={
                 "priority": priority,
                 "producer": "cycle",
@@ -147,6 +153,32 @@ async def _async_admit_cycle_run(
         ),
     )
     return result.run_id if result.ok else None
+
+
+def _cycle_run_model_policy(cycle: Cycle, run: CycleRun) -> dict[str, str]:
+    context_snapshot = json_dict(getattr(run, "context_snapshot", None))
+    revision_snapshot = context_snapshot.get("revision")
+    if isinstance(revision_snapshot, dict):
+        overrides = revision_snapshot
+    else:
+        overrides = {
+            "model_override": cycle.model_override,
+            "thinking_override": cycle.thinking_override,
+        }
+
+    policy: dict[str, str] = {}
+    raw_model = str(overrides.get("model_override") or "").strip()
+    if raw_model and raw_model.lower() != "default":
+        policy["model"] = normalize_model_name(raw_model)
+
+    thinking = str(overrides.get("thinking_override") or "").strip().lower()
+    if thinking in EFFORT_TIER_SET:
+        policy["thinking"] = thinking
+    elif thinking:
+        logger.warning(
+            "Ignoring invalid thinking_override in CycleRun revision snapshot",
+        )
+    return policy
 
 
 async def _async_maybe_harvest_alert_resolution(session, cycle: Cycle, run: CycleRun) -> dict | None:
@@ -486,6 +518,7 @@ async def async_execute_cycle_run(run_id: int) -> None:
 
         cycle_name = cycle.name
         cycle_user_id = cycle.user_id
+        run_model_policy = _cycle_run_model_policy(cycle, run)
         owner = await uow.session.get(User, cycle.user_id)
         cycle.execution_mode = REUSABLE_THREAD_EXECUTION_MODE
         cycle.reopen_archived = True
@@ -551,6 +584,7 @@ async def async_execute_cycle_run(run_id: int) -> None:
                 user_id=cycle_user_id,
                 metadata=run_metadata,
                 cycle_run_id=run.id,
+                model_policy=run_model_policy,
             )
             if agent_run_id is None:
                 await _finalize_cycle_run(
