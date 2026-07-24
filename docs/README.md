@@ -17,6 +17,7 @@ Start here when you want to understand, run, or extend Illo Brain.
 - [Reconstructive Memory Rewrite](reconstructive-memory-rewrite.md) - no-legacy proposal for replacing passive memory retrieval with active evidence reconstruction.
 - [Personal Agent Connections MVP](personal-agent-connections-mvp.md) - implementation plan for connecting Illo with Hermes and OpenClaw.
 - [Universal Thread Context Ingress PRD](prd-universal-thread-context-ingress.md) - product plan for personal agents submitting context into Illo and Universal Threads.
+- [Model And Effort Routing PRD](prd-model-effort-routing.md) - effort-tier routing on one default model, cycle-override fix, and fast/deep retirement.
 - [Dependency Licensing](dependency-licensing.md) - Apache 2.0 project policy and third-party review notes.
 
 Planning notes, runtime journals, memory exports, logs, and operator notes belong

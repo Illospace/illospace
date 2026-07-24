@@ -17,6 +17,7 @@ from brain.systems.sessions.harvest import _extract_text
 from brain.platform.providers.model_policy import (
     get_default_model,
     infer_provider_from_model,
+    required_openai_auth_mode,
     resolve_default_provider,
 )
 from brain.systems.runs.direct_loop.final_reply import (
@@ -210,11 +211,6 @@ class FinalReplyReview:
         return payload
 
 
-def _required_openai_auth_mode(model: str) -> str | None:
-    normalized = normalize_model_name(model).lower()
-    return "chatgpt" if normalized == "gpt-5.5" or normalized.startswith("gpt-5.6") else None
-
-
 def _init_llm(
     user_id: str | None,
     session_id: str,
@@ -228,7 +224,7 @@ def _init_llm(
         user_id=user_id,
         org_id=org_id,
         provider=requested_provider,
-        auth_mode=_required_openai_auth_mode(model) if requested_provider == "openai" else None,
+        auth_mode=required_openai_auth_mode(model) if requested_provider == "openai" else None,
     )
     provider = get_provider(llm.provider, llm.client)
     extra_headers = llm.build_request_headers(session_id=session_id)

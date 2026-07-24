@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 from sqlalchemy import text
 
 from brain.platform.db.models.idea import Idea
+from brain.platform.providers.model_policy import EFFORT_TIER_SET
 from brain.systems.cortex.project_context.resolution import resolve_effective_project_context
 from brain.systems.cortex.thread_context import async_build_agent_visible_thread_context
 from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
@@ -17,11 +19,12 @@ from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill
 from brain.systems.runs.status_questions import build_status_question_context
 from brain.systems.runs.store import AsyncAgentRunStore
 
-_VALID_EFFORT_LEVELS = {"none", "low", "medium", "high", "xhigh"}
 _VALID_MODEL_PROVIDERS = {"anthropic", "openai"}
 THREAD_DISCUSSION_SURFACE = "thread_discussion"
 THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
 THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
+
+logger = logging.getLogger("work_intake")
 
 
 @dataclass(frozen=True)
@@ -164,7 +167,7 @@ def _merge_trigger_metadata(
 def metadata_choice(
     metadata: dict[str, Any],
     keys: tuple[str, ...],
-    valid_values: set[str],
+    valid_values: set[str] | frozenset[str],
     default: str,
 ) -> str:
     for key in keys:
@@ -174,6 +177,10 @@ def metadata_choice(
         value = str(raw).strip().lower()
         if value in valid_values:
             return value
+        logger.warning(
+            "Ignoring invalid metadata value for %s; falling through to lower-priority keys",
+            key,
+        )
     return default
 
 
@@ -183,7 +190,7 @@ def model_policy_from_metadata(metadata: dict[str, Any] | None) -> dict[str, str
     thinking = metadata_choice(
         metadata,
         ("thinking_tier", "effort", "effort_level", "thinking"),
-        _VALID_EFFORT_LEVELS,
+        EFFORT_TIER_SET,
         "",
     )
     if thinking:
@@ -757,6 +764,7 @@ async def _build_agent_run_request(
     idea_id = str(target.get("idea_id") or "")
     if not idea_id:
         raise ValueError("Work intake target requires idea_id for Cortex run admission")
+    payload_model_policy = dict(event.payload or {}).get("model_policy")
     return await _agent_run_request_for_cortex(
         session,
         idea_id=idea_id,
@@ -768,6 +776,9 @@ async def _build_agent_run_request(
         source=event.source,
         producer=producer,
         idempotency_key=idempotency_key,
+        payload_model_policy=(
+            payload_model_policy if isinstance(payload_model_policy, dict) else None
+        ),
     )
 
 
@@ -887,6 +898,7 @@ async def _agent_run_request_for_cortex(
     source: str | None = None,
     producer: str | None = None,
     idempotency_key: str | None = None,
+    payload_model_policy: dict[str, Any] | None = None,
 ) -> AgentRunRequest:
     idea = await _a_get_idea_for_intake(session, idea_id, fallback_user_id=user_id)
     if idea is None:
@@ -942,7 +954,11 @@ async def _agent_run_request_for_cortex(
         recipe=recipe,
         target_ref=target_ref,
         workspace_ref=workspace_ref,
-        model_policy=model_policy_from_metadata(metadata),
+        model_policy=(
+            dict(payload_model_policy)
+            if payload_model_policy
+            else model_policy_from_metadata(metadata)
+        ),
         metadata={
             **metadata,
             "event": event,
