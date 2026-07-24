@@ -16,19 +16,27 @@ from brain.systems.runs.tool_catalog.handlers.github import _handle_create_githu
 _H = "brain.systems.runs.tool_catalog.handlers.github"
 
 
-def test_customer_bug_contract_is_in_run_visible_github_tool_guidance():
+def test_create_github_issue_guidance_is_primitive_operation_and_failure_contract_only():
     from brain.systems.runs.tool_catalog.definitions.github import GITHUB_TOOLS
 
     definition = next(tool for tool in GITHUB_TOOLS if tool["name"] == "create_github_issue")
     guidance = definition["description"]
+    serialized_definition = json.dumps(definition)
 
-    assert "Customer-reported bug filing is a two-part contract" in guidance
-    assert "GitHub issue in the owning repo as the durable artifact" in guidance
-    assert "linked mirror in an existing workspace tracker" in guidance
-    assert "Never create a Domain while filing" in guidance
-    assert "customer quote, concrete impact, and source origin_ref" in guidance
-    assert "originating request, requester, and mechanism" in guidance
-    assert "final reply must name the GitHub issue and the exact blocker" in guidance
+    assert "Open a REAL GitHub issue" in guidance
+    assert "public write" in guidance
+    assert "Invalid repo or title inputs return an error" in guidance
+    assert "no_write_token=true" in guidance
+    assert "401/403/404" in guidance
+    for workflow_term in (
+        "customer-reported",
+        "credit loss",
+        "linked mirror",
+        "tracker record",
+        "never create a domain",
+        "slack",
+    ):
+        assert workflow_term not in serialized_definition.lower()
 
 
 def _vault_patches(*, bound_env: dict, secrets: list, get_secret=None):

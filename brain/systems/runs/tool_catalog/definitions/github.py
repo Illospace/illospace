@@ -139,22 +139,10 @@ GITHUB_TOOLS = [
         "name": "create_github_issue",
         "description": (
             "Open a REAL GitHub issue in a repository via the GitHub API. This performs a public "
-            "write to the target repo — it is NOT an internal tracker record and has real-world "
-            "effects. Use only when the target repo and the incident are both clear and a "
-            "write-capable token can reach the repo. If no write-capable token can reach a "
-            "(private) repo, this returns an error carrying no_write_token so the triage flow can "
-            "ask for clarification or fall back to an internal tracker record + handoff. Accepts "
-            "owner/name, GitHub URL, or git remote repo values. Customer-reported bug filing is a "
-            "two-part contract: create the GitHub issue in the owning repo as the durable artifact, "
-            "then create a linked mirror in an existing workspace tracker. Never create a Domain while "
-            "filing. Preserve the customer quote, concrete impact, and source origin_ref in the issue "
-            "body and the structured origin_ref input. A successful result with origin_ask contains "
-            "the originating request, requester, and mechanism; carry that context in every Slack "
-            "announcement. If this tool fails, the final reply must name the GitHub issue and the exact blocker; "
-            "a tracker record is retention/handoff, never a silent substitute. For a chantier parent mirror, use "
-            "the title '[Chantier] <title>' and a body that states the goal as 'Done means …', the "
-            "chantier slug, and key references. Do not add a hand-maintained child checklist: "
-            "native GitHub sub-issues are the progress surface."
+            "write to the target repository. The repo may be supplied as owner/name, a GitHub URL, "
+            "or a git remote URL. Invalid repo or title inputs return an error. If no write-capable "
+            "token can reach the repository, the error carries no_write_token=true; GitHub API "
+            "failures include their status code, with 401/403/404 also marked no_write_token=true."
         ),
         "input_schema": {
             "type": "object",
@@ -170,12 +158,10 @@ GITHUB_TOOLS = [
                 "body": {
                     "type": "string",
                     "description": (
-                        "Optional Markdown issue body. Prefix AI-authored triage issues with a "
-                        "clear AI-generated disclaimer. For a customer-reported bug, include the "
-                        "customer quote, concrete impact (including credit loss), and Slack origin_ref. "
-                        "A chantier parent body carries its "
-                        "'Done means …' goal, chantier slug, and key refs, without duplicating "
-                        "native sub-issues as a Markdown checklist."
+                        "Optional Markdown issue body. For a chantier parent, use the title "
+                        "'[Chantier] <title>' and a body carrying its 'Done means …' goal, "
+                        "chantier slug, and key references, without duplicating native sub-issues "
+                        "as a Markdown checklist."
                     ),
                 },
                 "labels": {
@@ -186,17 +172,13 @@ GITHUB_TOOLS = [
                 "assignees": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": (
-                        "Optional GitHub login handles to assign. Honor an explicit assignment request "
-                        "using the person's verified GitHub identity."
-                    ),
+                    "description": "Optional GitHub login handles to assign.",
                 },
                 "origin_ref": {
                     "type": "string",
                     "description": (
-                        "Optional source reference, especially the canonical Slack "
-                        "origin_ref. When it matches an open human ask, Illo replies "
-                        "with the issue in that originating thread after delivery succeeds."
+                        "Optional source reference. It is included with the issue and may be used "
+                        "to deliver the created artifact back to a matching open request."
                     ),
                 },
                 "token_secret_key": {

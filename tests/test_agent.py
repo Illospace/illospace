@@ -2255,7 +2255,7 @@ class TestFinalReplyReview:
 
         assert result["status"] == "continue"
         assert result["enforcement"] is FinalReplyEnforcement.BLOCK
-        assert "no successful linked tracker-record mirror" in result["rationale"]
+        assert "creating-work-items.md#customer-bug-filing-policy" in result["rationale"]
         provider.create.assert_not_called()
 
     def test_checker_rejects_silent_tracker_substitution_after_issue_failure(self):
