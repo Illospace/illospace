@@ -156,6 +156,7 @@ async def _handle_manage_domain(
         DomainError,
         DomainFieldTypeError,
         DomainNotFound,
+        DomainUnknownFieldsError,
     )
 
     org_id, user_id, run_id, idea_id = _domain_context()
@@ -319,6 +320,7 @@ async def _handle_manage_domain(
             if action == "create_record":
                 if not object_key:
                     return json.dumps({"error": "create_record requires: object_key"})
+                warnings: list[dict] = []
                 record = await service.create_record(
                     org_id,
                     domain.id,
@@ -329,12 +331,18 @@ async def _handle_manage_domain(
                     actor_kind=actor_kind,
                     run_id=run_id,
                     idea_id=idea_id,
+                    allow_partial=True,
+                    partial_warnings=warnings,
                 )
-                return json.dumps({"record": await service.serialize_record(record)}, default=str)
+                payload = {"record": await service.serialize_record(record)}
+                if warnings:
+                    payload["warnings"] = warnings
+                return json.dumps(payload, default=str)
 
             if action == "update_record":
                 if record_id is None:
                     return json.dumps({"error": "update_record requires: record_id"})
+                warnings = []
                 record = await service.update_record(
                     org_id,
                     domain.id,
@@ -346,8 +354,13 @@ async def _handle_manage_domain(
                     actor_kind=actor_kind,
                     run_id=run_id,
                     idea_id=idea_id,
+                    allow_partial=True,
+                    partial_warnings=warnings,
                 )
-                return json.dumps({"record": await service.serialize_record(record)}, default=str)
+                payload = {"record": await service.serialize_record(record)}
+                if warnings:
+                    payload["warnings"] = warnings
+                return json.dumps(payload, default=str)
 
             if action == "remove_record":
                 if record_id is None:
@@ -435,6 +448,15 @@ async def _handle_manage_domain(
                 "field": "field_type",
                 "received": exc.field_type,
                 "allowed_values": list(exc.allowed_values),
+            }
+        )
+    except DomainUnknownFieldsError as exc:
+        return json.dumps(
+            {
+                "error": str(exc),
+                "error_code": exc.code,
+                "unknown_fields": list(exc.unknown_fields),
+                "valid_fields": list(exc.valid_fields),
             }
         )
     except (DomainError, DomainNotFound) as exc:

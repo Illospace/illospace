@@ -13,6 +13,9 @@ SUNSET_MIGRATION_MODULE = (
 SUPERSEDED_MIGRATION_MODULE = (
     "brain.platform.db.alembic.versions.0032_chantier_superseded_by"
 )
+MEMBERS_BLOCKERS_MIGRATION_MODULE = (
+    "brain.platform.db.alembic.versions.0036_chantier_members_blockers"
+)
 
 
 def _schema() -> tuple[sa.MetaData, dict[str, sa.Table]]:
@@ -387,3 +390,53 @@ def test_superseded_migration_adds_repeatable_retirement_field_without_touching_
         }
         assert record["data"] == {"slug": "duplicate", "state": "exploring"}
         assert record["version"] == 1
+
+
+def test_members_blockers_migration_adds_list_fields_to_domain_one_object_type_75():
+    contract_migration = importlib.import_module(MIGRATION_MODULE)
+    members_blockers_migration = importlib.import_module(
+        MEMBERS_BLOCKERS_MIGRATION_MODULE
+    )
+    engine = sa.create_engine("sqlite://")
+    metadata, tables = _schema()
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        _seed(connection, tables)
+        connection.execute(
+            tables["domain_object_types"].insert(),
+            {
+                "id": 75,
+                "domain_id": 1,
+                "key": "chantier",
+                "name": "Chantier",
+                "description": None,
+                "title_field": "title",
+                "sort_order": 5,
+                "archived_at": None,
+            },
+        )
+        contract_migration._upgrade(connection)
+
+        members_blockers_migration._upgrade(connection)
+        members_blockers_migration._upgrade(connection)
+
+        fields = connection.execute(
+            sa.select(tables["domain_field_definitions"])
+            .where(
+                tables["domain_field_definitions"].c.object_type_id == 75,
+                tables["domain_field_definitions"].c.key.in_(
+                    ["blockers", "member_refs"]
+                ),
+            )
+            .order_by(tables["domain_field_definitions"].c.key)
+        ).mappings().all()
+
+        assert [field["key"] for field in fields] == ["blockers", "member_refs"]
+        for field in fields:
+            assert field["field_type"] == "json"
+            assert field["required"] is False
+            assert field["validation"] == {
+                "type": "array",
+                "items": {"type": "string", "min_length": 1},
+            }
