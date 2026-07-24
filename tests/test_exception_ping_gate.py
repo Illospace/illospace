@@ -43,7 +43,7 @@ class _SlackClient:
 
 def test_exception_ping_migration_adds_shared_cycle_state_once(monkeypatch):
     migration = importlib.import_module(
-        "brain.platform.db.alembic.versions.0036_exception_ping_state"
+        "brain.platform.db.alembic.versions.0037_exception_ping_state"
     )
     engine = sa.create_engine("sqlite://")
     with engine.begin() as connection:

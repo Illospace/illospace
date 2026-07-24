@@ -1,7 +1,7 @@
 """Add shared per-Cycle exception-ping throttle state.
 
-Revision ID: 0036_exception_ping_state
-Revises: 0035_open_ask_ledger
+Revision ID: 0037_exception_ping_state
+Revises: 0036_chantier_members_blockers
 Create Date: 2026-07-24
 """
 
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 
-revision = "0036_exception_ping_state"
-down_revision = "0035_open_ask_ledger"
+revision = "0037_exception_ping_state"
+down_revision = "0036_chantier_members_blockers"
 branch_labels = None
 depends_on = None
 
