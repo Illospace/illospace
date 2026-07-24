@@ -376,6 +376,64 @@ async def test_connection_can_be_removed_for_managed_connection():
     )
 
 
+async def test_bridge_ask_passes_explicit_effort_to_headless_admission():
+    session = _AsyncSession()
+    principal = _principal()
+    task = SimpleNamespace(id="ask-1")
+
+    with patch(
+        "brain.app.api.routers.agent_bridge.external_agents.authenticate_bridge_token",
+        return_value=principal,
+    ), patch(
+        "brain.app.api.routers.agent_bridge.external_agents.create_headless_ask",
+        new=AsyncMock(return_value=task),
+    ) as create_headless_ask, patch(
+        "brain.app.api.routers.agent_bridge.external_agents.serialize_task",
+        new=AsyncMock(return_value={"id": "ask-1", "status": "submitted"}),
+    ):
+        response = await _request(
+            "POST",
+            "/api/agent-bridge/illo/ask",
+            session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "question": "Review this carefully",
+                "context": {"source": "director"},
+                "metadata": {"request_id": "request-1"},
+                "effort": "xhigh",
+            },
+        )
+
+    assert response.status_code == 202
+    create_headless_ask.assert_awaited_once_with(
+        session,
+        principal,
+        question="Review this carefully",
+        context={"source": "director"},
+        metadata={"request_id": "request-1"},
+        effort="xhigh",
+    )
+
+
+async def test_bridge_ask_rejects_effort_outside_canonical_ladder():
+    with patch(
+        "brain.app.api.routers.agent_bridge.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_bridge.external_agents.create_headless_ask",
+        new=AsyncMock(),
+    ) as create_headless_ask:
+        response = await _request(
+            "POST",
+            "/api/agent-bridge/illo/ask",
+            headers={"Authorization": "Bearer bridge-token"},
+            json={"question": "Review this", "effort": "turbo"},
+        )
+
+    assert response.status_code == 422
+    create_headless_ask.assert_not_awaited()
+
+
 async def test_bridge_complete_commits_before_broadcasting_thread_message():
     order: list[str] = []
     session = _AsyncSession(order)

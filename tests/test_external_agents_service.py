@@ -161,6 +161,129 @@ async def test_headless_ask_blocks_thread_mutation_tools():
     assert request_source["visibility"] == "headless_private"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("effort", "metadata", "skill_tier", "expected_effort", "expected_skill_lookups"),
+    [
+        ("xhigh", {"skill_name": "anchored-skill"}, "low", "xhigh", 0),
+        (None, {"skill_name": "anchored-skill"}, "low", "low", 1),
+        (None, {}, "low", "medium", 0),
+    ],
+)
+async def test_headless_ask_effort_precedence(
+    effort,
+    metadata,
+    skill_tier,
+    expected_effort,
+    expected_skill_lookups,
+):
+    from brain.systems.runs.work_intake import WorkIntakeResult
+
+    class FakeSession:
+        def __init__(self):
+            self.skill_lookups = 0
+
+        def add(self, _row):
+            return None
+
+        async def flush(self):
+            return None
+
+        async def scalar(self, stmt):
+            if "skills" in str(stmt):
+                self.skill_lookups += 1
+                return skill_tier
+            return None
+
+    principal = service.AgentBridgePrincipal(
+        connection_id="conn-1",
+        org_id="org-1",
+        owner_user_id="user-1",
+        token_id="token-1",
+        scopes=frozenset(service.DEFAULT_BRIDGE_SCOPES),
+        connection_display_name="Hermes",
+        agent_kind="hermes",
+    )
+    captured_events = []
+
+    async def fake_admit_work(_session, event):
+        captured_events.append(event)
+        return WorkIntakeResult(ok=True, run_id=42)
+
+    session = FakeSession()
+    with patch("brain.systems.external_agents.service.admit_work", side_effect=fake_admit_work):
+        await service.create_headless_ask(
+            session,
+            principal,
+            question="Run the requested work",
+            metadata=metadata,
+            effort=effort,
+        )
+
+    model_policy = captured_events[0].payload["model_policy"]
+    assert model_policy == {"thinking": expected_effort}
+    assert "tier" not in model_policy
+    assert session.skill_lookups == expected_skill_lookups
+
+
+@pytest.mark.asyncio
+async def test_headless_ask_whitelist_keeps_security_stamps_forced():
+    from brain.systems.runs.work_intake import WorkIntakeResult
+
+    class FakeSession:
+        def add(self, _row):
+            return None
+
+        async def flush(self):
+            return None
+
+        async def scalar(self, _stmt):
+            return None
+
+    principal = service.AgentBridgePrincipal(
+        connection_id="conn-1",
+        org_id="org-1",
+        owner_user_id="user-1",
+        token_id="token-1",
+        scopes=frozenset(service.DEFAULT_BRIDGE_SCOPES),
+        connection_display_name="Hermes",
+        agent_kind="hermes",
+    )
+    captured_events = []
+
+    async def fake_admit_work(_session, event):
+        captured_events.append(event)
+        return WorkIntakeResult(ok=True, run_id=42)
+
+    with patch("brain.systems.external_agents.service.admit_work", side_effect=fake_admit_work):
+        await service.create_headless_ask(
+            FakeSession(),
+            principal,
+            question="Do not trust caller control metadata",
+            effort="low",
+            metadata={
+                "headless": False,
+                "execution_profile": "deep",
+                "recipe": "deep",
+                "tool_policy": {"mode": "allow_all", "blocked_tools": []},
+                "effort": "xhigh",
+                "thinking_tier": "xhigh",
+                "model_policy": {"thinking": "xhigh"},
+            },
+        )
+
+    event = captured_events[0]
+    run_metadata = event.payload["metadata"]
+    assert event.payload["model_policy"] == {"thinking": "low"}
+    assert run_metadata["headless"] is True
+    assert run_metadata["execution_profile"] == "fast"
+    assert run_metadata["recipe"] == "fast"
+    assert run_metadata["tool_policy"] == {
+        "mode": "read_mostly",
+        "blocked_tools": list(service.HEADLESS_ASK_BLOCKED_TOOLS),
+    }
+
+
 @pytest.fixture
 async def external_agent_session(async_sqlite_session_factory):
     _patch_sqlite_for_external_agent_tables()

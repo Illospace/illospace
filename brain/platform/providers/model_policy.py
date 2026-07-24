@@ -183,11 +183,6 @@ async def async_get_provider_model_catalogs(
     return get_provider_model_catalogs()
 
 
-def _load_skill_routing_row(skill_name: str) -> dict[str, str | None] | None:
-    del skill_name
-    return None
-
-
 async def _async_load_skill_routing_row(
     session: AsyncSession,
     skill_name: str,
@@ -466,8 +461,7 @@ def resolve_skill_runtime(
         fallback=preferred_provider,
         preferred_provider=preferred_provider,
     )
-    row = _load_skill_routing_row(skill_name) or {}
-    thinking_tier = row.get("thinking_tier") or "medium"
+    thinking_tier = "medium"
     model_name = get_default_model(
         provider,
         include_provider_prefix=False,
@@ -528,8 +522,7 @@ def resolve_skill_routing_profile(
 ) -> SkillRoutingProfile:
     """Return the raw skill routing profile for marketplace scoring."""
     del user_id, org_id, preferred_provider
-    row = _load_skill_routing_row(skill_name) or {}
-    thinking_tier = row.get("thinking_tier") or "medium"
+    thinking_tier = "medium"
     return SkillRoutingProfile(
         skill_name=skill_name,
         reasoning_effort=thinking_tier if thinking_tier in EFFORT_TIER_SET else "medium",
