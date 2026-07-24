@@ -17,7 +17,7 @@ EFFORT_TIERS = ("none", "low", "medium", "high", "xhigh")
 EFFORT_TIER_SET = frozenset(EFFORT_TIERS)
 DEFAULT_PROVIDER_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-6",
-    "openai": "gpt-5.5",
+    "openai": "gpt-5.6-sol",
 }
 PROVIDER_MODEL_OPTIONS: dict[str, tuple[str, ...]] = {
     "anthropic": (
@@ -317,6 +317,22 @@ async def async_resolve_default_provider(
             preferred_provider=preferred_provider,
         )
     ).provider
+
+
+def required_openai_auth_mode(model: str | None) -> str | None:
+    """Return the OpenAI auth mode a model requires, or None when either works.
+
+    GPT-5.5 and every GPT-5.6 variant are only reachable through the
+    ChatGPT/Codex subscription backend, never an API key. Callers pass the
+    result to credential resolution so a run validates and uses the credential
+    it will actually need.
+    """
+    value = str(model or "").strip().lower()
+    for prefix in ("anthropic/", "openai/", "anthropic:", "openai:"):
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+            break
+    return "chatgpt" if value == "gpt-5.5" or value.startswith("gpt-5.6") else None
 
 
 def infer_provider_from_model(model: str | None, default: str | None = None) -> str:

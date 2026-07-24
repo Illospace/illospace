@@ -49,6 +49,7 @@ from brain.platform.integrations.provider_error_sentinel import (
 from brain.platform.providers.model_policy import (
     async_get_default_model,
     infer_provider_from_model,
+    required_openai_auth_mode,
 )
 from brain.systems.runs import introspection as run_introspection
 from brain.systems.runs.direct_loop.final_reply_checker import (
@@ -193,12 +194,6 @@ def _normalize_model(model: str) -> str:
         if model.startswith(prefix):
             return model[len(prefix):]
     return model
-
-
-def _required_openai_auth_mode(model: str) -> str | None:
-    """Return the OpenAI auth mode required by model availability."""
-    normalized = _normalize_model(model).lower()
-    return "chatgpt" if normalized == "gpt-5.5" or normalized.startswith("gpt-5.6") else None
 
 
 _AUTO_OPENAI_AUTH_MODE = object()
@@ -407,7 +402,7 @@ async def _init_llm_async(
     if resolved_llm is None:
         requested_provider = infer_provider_from_model(model)
         auth_mode = (
-            _required_openai_auth_mode(model)
+            required_openai_auth_mode(model)
             if auth_mode_override is _AUTO_OPENAI_AUTH_MODE
             else auth_mode_override
         )

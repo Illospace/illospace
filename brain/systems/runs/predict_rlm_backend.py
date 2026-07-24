@@ -25,7 +25,6 @@ from brain.platform.integrations.llm import _resolve_key_from_env, resolve_llm_c
 from brain.platform.integrations.providers import LLMRequest, _merge_streamed_output_into_response, get_provider
 from brain.systems.runs.direct_agent import (
     AgentResult,
-    _required_openai_auth_mode,
     _agent_context,
 )
 from brain.systems.runs.execution_context import snapshot_agent_context
@@ -39,6 +38,7 @@ from brain.platform.providers.model_policy import (
     get_default_model,
     infer_provider_from_model,
     normalize_runtime_provider,
+    required_openai_auth_mode,
     resolve_default_provider,
 )
 
@@ -695,7 +695,7 @@ def _build_openai_illo_dspy_lm(
     session_id: str | None,
 ) -> Any:
     import dspy
-    required_auth_mode = _required_openai_auth_mode(model)
+    required_auth_mode = required_openai_auth_mode(model)
 
     class IlloOpenAIDSPyLM(dspy.LM):
         def __init__(self, model_name: str):

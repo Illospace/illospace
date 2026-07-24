@@ -904,7 +904,7 @@ class TestModelCatalog:
 
     def test_get_default_model_openai(self):
         from brain.platform.providers.model_policy import get_default_model
-        assert get_default_model(provider="openai", include_provider_prefix=False) == "gpt-5.5"
+        assert get_default_model(provider="openai", include_provider_prefix=False) == "gpt-5.6-sol"
 
     def test_get_model_options_default(self):
         from brain.platform.providers.model_policy import get_provider_model_options
@@ -918,7 +918,7 @@ class TestModelCatalog:
         from brain.platform.providers.model_policy import get_provider_model_catalogs
         catalogs = get_provider_model_catalogs()
         assert catalogs["anthropic"]["default"] == "claude-sonnet-4-6"
-        assert catalogs["openai"]["default"] == "gpt-5.5"
+        assert catalogs["openai"]["default"] == "gpt-5.6-sol"
         assert "claude-opus-4-6" in catalogs["anthropic"]["options"]
         assert "gpt-5.5" in catalogs["openai"]["options"]
 

@@ -73,11 +73,11 @@ class TestModelNormalization:
 
 class TestProviderInference:
     def test_direct_agent_requires_chatgpt_auth_for_subscription_models(self):
-        from brain.systems.runs.direct_agent import _required_openai_auth_mode
+        from brain.systems.runs.direct_agent import required_openai_auth_mode
 
-        assert _required_openai_auth_mode("openai/gpt-5.5") == "chatgpt"
-        assert _required_openai_auth_mode("openai/gpt-5.6-sol") == "chatgpt"
-        assert _required_openai_auth_mode("openai/gpt-5.4") is None
+        assert required_openai_auth_mode("openai/gpt-5.5") == "chatgpt"
+        assert required_openai_auth_mode("openai/gpt-5.6-sol") == "chatgpt"
+        assert required_openai_auth_mode("openai/gpt-5.4") is None
 
     def test_preview_model_falls_back_only_for_model_availability_errors(self):
         from brain.systems.runs.direct_loop.model_fallback import (
