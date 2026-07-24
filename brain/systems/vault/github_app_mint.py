@@ -20,19 +20,21 @@ from brain.systems.cortex.project_context.github import (
 from brain.systems.vault.runtime_secrets import RuntimeSecretUnavailable
 
 # Minted installation tokens carry issues:write (to file issues and manage
-# native parent/sub-issue relationships) plus read-only contents,
-# pull_requests, and checks, so the same App token serves
+# native parent/sub-issue relationships), pull_requests:write (to open, but
+# never merge, PRs), and read-only contents/checks. The same App token serves
 # read_github_source PR-listing/detail (including check-runs) and project-bound
-# git-clone/source reads. This lets the legacy
-# personal-PAT read fallbacks (GITHUB_TOKEN__AXEL_LEGACY via GH_TOKEN, and the
-# static GITHUB_TOKEN) be retired. The added scopes are read-only: the App can
-# read PRs/contents/check-runs but cannot push or open PRs, so the write blast-radius stays
-# issues-only and no GitHub re-approval is required (the installation already
-# holds Contents/Pull-requests read&write and Checks read).
+# git-clone/source reads. This lets the legacy personal-PAT read fallbacks
+# (GITHUB_TOKEN__AXEL_LEGACY via GH_TOKEN, and the static GITHUB_TOKEN) be
+# retired. Widening the minted token from pull_requests:read to :write does not
+# require GitHub re-approval for current Illo installations: the installation
+# already holds Contents/Pull-requests read&write and Checks read. GitHub rejects
+# a mint that exceeds an older installation's approved permissions, so a 422
+# retries the prior read-only PR scope. Existing issue/source tools keep working;
+# PR creation alone then reports that pull_requests:write is required.
 DEFAULT_INSTALLATION_PERMISSIONS: dict[str, str] = {
     "issues": "write",
     "contents": "read",
-    "pull_requests": "read",
+    "pull_requests": "write",
     "checks": "read",
 }
 _CACHE_FRESHNESS_WINDOW = timedelta(minutes=5)
@@ -336,12 +338,27 @@ async def async_mint_installation_token(
         cached = _TOKEN_CACHE.get(scope_key)
         if _cache_is_fresh(cached, now=current):
             return cached.token
-        minted = await _exchange_installation_token(
-            cred,
-            repositories=clean_repositories,
-            permissions=clean_permissions,
-            now=current,
-        )
+        try:
+            minted = await _exchange_installation_token(
+                cred,
+                repositories=clean_repositories,
+                permissions=clean_permissions,
+                now=current,
+            )
+        except GitHubConnectorError as exc:
+            if (
+                exc.status_code != 422
+                or clean_permissions.get("pull_requests") != "write"
+            ):
+                raise
+            fallback_permissions = dict(clean_permissions)
+            fallback_permissions["pull_requests"] = "read"
+            minted = await _exchange_installation_token(
+                cred,
+                repositories=clean_repositories,
+                permissions=fallback_permissions,
+                now=current,
+            )
         _TOKEN_CACHE[scope_key] = minted
         return minted.token
 

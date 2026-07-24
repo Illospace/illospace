@@ -400,7 +400,7 @@ async def test_github_app_project_binding_mints_before_manual_skip(patch_uow, se
         {
             "decrypted_blob": "github-app-blob",
             "repositories": ["uwear-backend"],
-            "permissions": {"issues": "write", "contents": "read", "pull_requests": "read", "checks": "read"},
+            "permissions": {"issues": "write", "contents": "read", "pull_requests": "write", "checks": "read"},
             "transaction_open": False,
         }
     ]
@@ -454,7 +454,7 @@ async def test_resolve_project_bound_env_tokens_can_filter_to_github_app_only(pa
     async def async_mint_installation_token(decrypted_blob, *, repositories, permissions):
         assert decrypted_blob == "github-app-blob"
         assert repositories == ["uwear-backend"]
-        assert permissions == {"issues": "write", "contents": "read", "pull_requests": "read", "checks": "read"}
+        assert permissions == {"issues": "write", "contents": "read", "pull_requests": "write", "checks": "read"}
         return "minted-installation-token"
 
     monkeypatch.setattr(
@@ -539,7 +539,7 @@ async def test_github_app_binding_mints_one_token_for_cross_repo_operation(
         "permissions": {
             "issues": "write",
             "contents": "read",
-            "pull_requests": "read",
+            "pull_requests": "write",
             "checks": "read",
         },
     }]
@@ -604,7 +604,7 @@ async def test_create_github_issue_uses_minted_github_app_project_binding(
     access_request = next(request for request in client.requests if request["url"].endswith("/access_tokens"))
     issue_request = next(request for request in client.requests if request["url"].endswith("/issues"))
     assert access_request["json"]["repositories"] == ["uwear-backend"]
-    assert access_request["json"]["permissions"] == {"issues": "write", "contents": "read", "pull_requests": "read", "checks": "read"}
+    assert access_request["json"]["permissions"] == {"issues": "write", "contents": "read", "pull_requests": "write", "checks": "read"}
     assert issue_request["headers"]["Authorization"] == "Bearer minted-issue-token"
 
 
