@@ -14,6 +14,7 @@ from brain.systems.cortex.project_context.github import (
     async_add_repo_issue_comment,
     async_add_repo_sub_issue,
     async_create_repo_issue,
+    async_create_repo_pull_request,
     async_grep_repo,
     async_get_repo_issue_parent,
     async_get_pull_request_deploy_info,
@@ -725,6 +726,127 @@ async def _handle_create_github_issue(
             "no_write_token": last_error.status_code in auth_statuses,
             "repo": repo_slug,
         })
+    return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
+
+
+def _existing_pull_request_number(message: str) -> int | None:
+    for pattern in (r"/pull/(\d+)", r"pull request\s+#?(\d+)"):
+        match = re.search(pattern, message, flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+async def _handle_create_github_pull_request(
+    repo: str | None = None,
+    base: str | None = None,
+    head: str | None = None,
+    title: str | None = None,
+    body: str | None = None,
+    draft: bool = False,
+    token_secret_key: str | None = None,
+) -> str:
+    """Open a REAL GitHub pull request without ever merging it."""
+
+    repo_slug = parse_github_repo_slug(repo or "")
+    if not repo_slug:
+        return json.dumps({
+            "error": "create_github_pull_request requires repo as owner/name or a GitHub URL"
+        })
+    clean_base = _clean(base)
+    if not clean_base:
+        return json.dumps({"error": "create_github_pull_request requires a non-empty base"})
+    clean_head = _clean(head)
+    if not clean_head:
+        return json.dumps({"error": "create_github_pull_request requires a non-empty head"})
+    clean_title = _clean(title)
+    if not clean_title:
+        return json.dumps({"error": "create_github_pull_request requires a non-empty title"})
+    clean_body = _clean(body)
+    if not clean_body:
+        return json.dumps({"error": "create_github_pull_request requires a non-empty body"})
+
+    candidates = await _github_token_candidates(
+        repo_slug=repo_slug,
+        token_secret_key=token_secret_key,
+        for_write=True,
+    )
+    write_candidates = [candidate for candidate in candidates if candidate.get("token")]
+    if not write_candidates:
+        return json.dumps({
+            "error": (
+                f"No GitHub App identity is connected for {repo_slug}. Connect the GitHub App "
+                "for this repo (or pass token_secret_key) so Illo can open the pull request."
+            ),
+            "status_code": 401,
+            "no_write_token": True,
+            "repo": repo_slug,
+        })
+
+    last_error: GitHubConnectorError | None = None
+    auth_statuses = {401, 403, 404}
+    for index, candidate in enumerate(write_candidates):
+        try:
+            payload = await async_create_repo_pull_request(
+                repo_slug,
+                base=clean_base,
+                head=clean_head,
+                title=clean_title,
+                body=clean_body,
+                draft=bool(draft),
+                token=candidate["token"],
+            )
+        except GitHubConnectorError as exc:
+            last_error = exc
+            if exc.status_code in auth_statuses and index < len(write_candidates) - 1:
+                continue
+            lowered = exc.message.lower()
+            if exc.status_code == 422 and "no commits between" in lowered:
+                return json.dumps({
+                    "error": "no_commits_between",
+                    "message": exc.message,
+                    "status_code": 422,
+                    "repo": repo_slug,
+                    "base": clean_base,
+                    "head": clean_head,
+                })
+            if exc.status_code == 422 and "pull request already exists" in lowered:
+                return json.dumps({
+                    "error": "pull_request_exists",
+                    "existing": _existing_pull_request_number(exc.message),
+                    "message": exc.message,
+                    "status_code": 422,
+                    "repo": repo_slug,
+                    "base": clean_base,
+                    "head": clean_head,
+                })
+            error_payload = {
+                "error": exc.message,
+                "status_code": exc.status_code,
+                "no_write_token": exc.status_code in auth_statuses,
+                "repo": repo_slug,
+                "token_key_name": candidate.get("key_name"),
+            }
+            if exc.status_code == 403:
+                error_payload["required_permission"] = "pull_requests:write"
+            return json.dumps(error_payload)
+
+        pull_request = payload.get("pull_request")
+        pull_request = pull_request if isinstance(pull_request, dict) else {}
+        result = {
+            "repo": repo_slug,
+            "number": pull_request.get("number"),
+            "html_url": pull_request.get("html_url"),
+            "state": pull_request.get("state"),
+            "draft": bool(pull_request.get("draft")),
+            "token_secret_key_used": bool(candidate.get("key_name")),
+            "token_source": candidate["source"],
+            "token_key_name": candidate.get("key_name"),
+        }
+        if last_error is not None:
+            result["fallback_from_status_code"] = last_error.status_code
+        return json.dumps(result, default=str)
+
     return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
 
 
@@ -1539,6 +1661,7 @@ __all__ = [
     "_handle_add_github_sub_issue",
     "_handle_check_fix_deploy_state",
     "_handle_create_github_issue",
+    "_handle_create_github_pull_request",
     "_handle_list_github_sub_issues",
     "_handle_read_github_source",
     "_handle_remove_github_sub_issue",

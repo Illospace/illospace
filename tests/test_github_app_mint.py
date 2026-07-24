@@ -206,11 +206,39 @@ async def test_mint_cache_separates_repositories_and_permissions(monkeypatch, rs
         permissions={"metadata": "read"},
     ) == "metadata-token"
 
-    default_scope = {"issues": "write", "contents": "read", "pull_requests": "read", "checks": "read"}
+    default_scope = {"issues": "write", "contents": "read", "pull_requests": "write", "checks": "read"}
     assert [request["json"] for request in requests] == [
         {"repositories": ["uwear-backend"], "permissions": default_scope},
         {"repositories": ["uwear-mobile"], "permissions": default_scope},
         {"repositories": ["uwear-backend"], "permissions": {"metadata": "read"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mint_falls_back_to_read_only_pull_requests_for_older_installation(
+    monkeypatch,
+    rsa_keypair,
+):
+    private_pem, _public_pem = rsa_keypair
+    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    requests = _patch_http(
+        monkeypatch,
+        [
+            httpx.Response(422, json={"message": "Validation Failed"}),
+            _token_response("read-only-pr-token", NOW + timedelta(hours=1)),
+        ],
+    )
+    blob = _blob(private_pem)
+
+    token = await async_mint_installation_token(
+        blob,
+        repositories=["uwear-backend"],
+    )
+
+    assert token == "read-only-pr-token"
+    assert [request["json"]["permissions"]["pull_requests"] for request in requests] == [
+        "write",
+        "read",
     ]
 
 

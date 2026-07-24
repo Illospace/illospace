@@ -49,6 +49,7 @@ from brain.systems.runs.tool_catalog.handlers.github import (
     _handle_add_github_sub_issue,
     _handle_check_fix_deploy_state,
     _handle_create_github_issue,
+    _handle_create_github_pull_request,
     _handle_list_github_sub_issues,
     _handle_read_github_source,
     _handle_remove_github_sub_issue,
@@ -309,6 +310,10 @@ def _get_tool_handlers(
         "create_github_issue": _private_async_adapter(
             "_handle_create_github_issue",
             _handle_create_github_issue,
+        ),
+        "create_github_pull_request": _private_async_adapter(
+            "_handle_create_github_pull_request",
+            _handle_create_github_pull_request,
         ),
         "update_github_issue": _private_async_adapter(
             "_handle_update_github_issue",

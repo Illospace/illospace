@@ -99,6 +99,14 @@ def _github_error(response: httpx.Response) -> GitHubConnectorError:
     except Exception:
         payload = {}
     raw_message = str(payload.get("message") or f"GitHub returned {response.status_code}")
+    if response.status_code == 422 and isinstance(payload.get("errors"), list):
+        validation_messages = [
+            str(error.get("message") or "").strip()
+            for error in payload["errors"]
+            if isinstance(error, dict) and str(error.get("message") or "").strip()
+        ]
+        if validation_messages:
+            raw_message = f"{raw_message}: {'; '.join(validation_messages)}"
     lowered = raw_message.lower()
     if response.status_code == 401 and "bad credentials" in lowered:
         message = "GitHub rejected this Vault token. Choose another token or save a fresh personal access token."
@@ -1960,6 +1968,52 @@ async def async_create_repo_issue(
     return {
         "repo": slug,
         "issue": _issue_payload(created if isinstance(created, dict) else {}),
+    }
+
+
+async def async_create_repo_pull_request(
+    slug: str,
+    *,
+    base: str,
+    head: str,
+    title: str,
+    body: str,
+    draft: bool = False,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Open a real GitHub pull request via POST /repos/{owner}/{repo}/pulls."""
+
+    owner, repo = slug.split("/", 1)
+    clean_base = (base or "").strip()
+    clean_head = (head or "").strip()
+    clean_title = (title or "").strip()
+    clean_body = (body or "").strip()
+    if not clean_base:
+        raise GitHubConnectorError(status_code=422, message="Pull request base branch is required.")
+    if not clean_head:
+        raise GitHubConnectorError(status_code=422, message="Pull request head branch is required.")
+    if not clean_title:
+        raise GitHubConnectorError(status_code=422, message="Pull request title is required.")
+    if not clean_body:
+        raise GitHubConnectorError(status_code=422, message="Pull request body is required.")
+    payload = {
+        "base": clean_base,
+        "head": clean_head,
+        "title": clean_title,
+        "body": clean_body,
+        "draft": bool(draft),
+    }
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        created = await _async_request(
+            client,
+            "POST",
+            f"/repos/{owner}/{repo}/pulls",
+            token=token,
+            json=payload,
+        )
+    return {
+        "repo": slug,
+        "pull_request": _pull_request_payload(created if isinstance(created, dict) else {}),
     }
 
 

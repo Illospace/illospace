@@ -363,6 +363,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "expected_effect": "open a real GitHub issue in the target repository",
         "output_budget_chars": 8_000,
     },
+    "create_github_pull_request": {
+        "permission": "write_workspace",
+        "risk_class": "high",
+        "side_effect_class": "append_only",
+        "reversibility": "append_only",
+        "action_manifest": True,
+        "expected_effect": "open, but never merge, a real GitHub pull request in the target repository",
+        "output_budget_chars": 8_000,
+    },
     "update_github_issue": {
         "permission": "write_workspace",
         "risk_class": "high",

@@ -190,6 +190,53 @@ GITHUB_TOOLS = [
         },
     },
     {
+        "name": "create_github_pull_request",
+        "description": (
+            "Open a REAL GitHub pull request via the GitHub API. This performs a public write to "
+            "the target repository; it never merges the pull request. Missions must restrict this "
+            "tool to a specific, single-purpose policy describing exactly when a pull request may "
+            "be opened. The shipped Uwear use case is recreating the evergreen staging→main "
+            "promotion pull request when it is missing. The repo may be supplied as owner/name, "
+            "a GitHub URL, or a git remote URL. If no write-capable token can reach the repository, "
+            "the error carries no_write_token=true; GitHub API failures include their status code."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Target repository as owner/name, GitHub URL, or git remote URL.",
+                },
+                "base": {
+                    "type": "string",
+                    "description": "Target branch the pull request proposes to merge into.",
+                },
+                "head": {
+                    "type": "string",
+                    "description": "Source branch containing the proposed changes.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Pull request title. Required.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Markdown pull request body. Required.",
+                },
+                "draft": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Whether to open the pull request as a draft.",
+                },
+                "token_secret_key": {
+                    "type": "string",
+                    "description": "Optional Vault secret key holding a write-capable GitHub token.",
+                },
+            },
+            "required": ["repo", "base", "head", "title", "body"],
+        },
+    },
+    {
         "name": "update_github_issue",
         "description": (
             "Update an EXISTING real GitHub issue via the GitHub API. This can transfer ownership, "
