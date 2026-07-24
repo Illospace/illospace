@@ -21,7 +21,10 @@ DEFAULT_RUNTIME_PROVIDER = "openai"
 DEFAULT_THINKING_TIER = "high"
 DEFAULT_PROVIDER_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-6",
-    "openai": "gpt-5.6-sol",
+    # GPT-5.6 Sol stays selectable, but it is a preview model measured at 2-4x
+    # GPT-5.5's per-call latency at every effort tier, which saturates the
+    # worker at fleet scale. Revisit when its latency lands near 5.5.
+    "openai": "gpt-5.5",
 }
 PROVIDER_MODEL_OPTIONS: dict[str, tuple[str, ...]] = {
     "anthropic": (

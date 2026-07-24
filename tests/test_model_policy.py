@@ -33,7 +33,7 @@ class TestModelPolicy:
         from brain.platform.providers.model_policy import get_default_model
 
         with patch("brain.platform.providers.model_policy.get_active_provider", return_value="openai"):
-            assert get_default_model() == "openai/gpt-5.6-sol"
+            assert get_default_model() == "openai/gpt-5.5"
 
     def test_openai_model_options_use_native_defaults(self):
         from brain.platform.providers.model_policy import get_provider_model_options
@@ -167,9 +167,9 @@ class TestModelPolicy:
         model, thinking = await async_resolve_skill_model(session, "deploy", user_id="user-1")
 
         assert runtime.provider == "openai"
-        assert runtime.model_name == "gpt-5.6-sol"
+        assert runtime.model_name == "gpt-5.5"
         assert runtime.reasoning_effort == "xhigh"
-        assert model == "openai/gpt-5.6-sol"
+        assert model == "openai/gpt-5.5"
         assert thinking == "xhigh"
 
     def test_run_resolve_model_fallback_uses_selected_provider(self):
@@ -241,7 +241,7 @@ class TestModelPolicy:
             user_id="user-1",
         )
 
-        assert catalogs["openai"]["default"] == "gpt-5.6-sol"
+        assert catalogs["openai"]["default"] == "gpt-5.5"
         assert "gpt-5.5" in catalogs["openai"]["options"]
         assert catalogs["anthropic"]["default"] == "claude-sonnet-4-6"
 
