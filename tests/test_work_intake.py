@@ -397,5 +397,109 @@ def test_legacy_routing_logic_is_removed_from_adapters():
         assert not (defined_or_imported & forbidden_names), filename
 
 
+def test_invalid_high_priority_metadata_warns_before_valid_fallback(caplog):
+    from brain.systems.runs.work_intake import model_policy_from_metadata
+
+    with caplog.at_level("WARNING", logger="work_intake"):
+        policy = model_policy_from_metadata(
+            {
+                "thinking_tier": "turbo",
+                "effort": "high",
+            }
+        )
+
+    assert policy["thinking"] == "high"
+    assert (
+        "Ignoring invalid metadata value for thinking_tier; "
+        "falling through to lower-priority keys"
+    ) in caplog.messages
+
+
 def test_cortex_thread_binding_compatibility_shell_is_removed():
     assert not Path("brain/systems/runs/cortex/thread_binding.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_cycle_payload_model_policy_reaches_cortex_run_request(monkeypatch):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    class _Session:
+        async def get(self, _model, _idea_id):
+            return SimpleNamespace(
+                id="idea-1",
+                title="Cycle thread",
+                org_id="org-1",
+                user_id="owner-1",
+                agent_details=None,
+            )
+
+        async def scalars(self, *_args, **_kwargs):
+            return SimpleNamespace(first=lambda: None)
+
+    async def fake_thread_context(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "brain.systems.runs.work_intake.async_build_agent_visible_thread_context",
+        fake_thread_context,
+    )
+
+    trigger = _trigger_payload(
+        source="cycle",
+        event_type="cycle.due_run",
+        target={"idea_id": "idea-1"},
+        payload={
+            "message": "Run the mission",
+            "metadata": {"source": "cycle", "cycle_run_id": 12},
+            "model_policy": {"model": "openai/gpt-5.4-mini", "thinking": "low"},
+        },
+        policy={"priority": 1, "run_event": "thread_reply"},
+        idempotency_key="cycle_run:12",
+    )
+
+    request = await build_agent_run_request(_Session(), WorkIntakeEvent.from_trigger_payload(trigger))
+
+    assert request.model_policy == {"model": "openai/gpt-5.4-mini", "thinking": "low"}
+
+
+@pytest.mark.asyncio
+async def test_empty_payload_model_policy_falls_back_to_metadata_parse(monkeypatch):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    class _Session:
+        async def get(self, _model, _idea_id):
+            return SimpleNamespace(
+                id="idea-1",
+                title="Cycle thread",
+                org_id="org-1",
+                user_id="owner-1",
+                agent_details=None,
+            )
+
+        async def scalars(self, *_args, **_kwargs):
+            return SimpleNamespace(first=lambda: None)
+
+    async def fake_thread_context(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "brain.systems.runs.work_intake.async_build_agent_visible_thread_context",
+        fake_thread_context,
+    )
+
+    trigger = _trigger_payload(
+        source="cycle",
+        event_type="cycle.due_run",
+        target={"idea_id": "idea-1"},
+        payload={
+            "message": "Run the mission",
+            "metadata": {"source": "cycle", "thinking_tier": "medium"},
+            "model_policy": {},
+        },
+        policy={"priority": 1, "run_event": "thread_reply"},
+        idempotency_key="cycle_run:13",
+    )
+
+    request = await build_agent_run_request(_Session(), WorkIntakeEvent.from_trigger_payload(trigger))
+
+    assert request.model_policy == {"thinking": "medium"}

@@ -7,6 +7,7 @@ from brain.platform.db.models.cycle import Cycle
 from brain.systems.cycles.access import CycleActor
 from brain.systems.cycles.common import (
     canonical_execution_mode,
+    validate_model_override,
     validate_nonempty_trimmed,
     validate_thinking_override,
 )
@@ -62,7 +63,7 @@ async def async_create_cycle(
         schedule_expr=expr,
         timezone=tz_name,
         enabled=enabled,
-        model_override=(model_override or "").strip() or None,
+        model_override=validate_model_override(model_override),
         thinking_override=validate_thinking_override(thinking_override),
         execution_mode=canonical_execution_mode(),
         target_idea_id=target_idea_id,
@@ -116,6 +117,16 @@ async def async_update_cycle(
 ) -> Cycle:
     next_timezone = validate_timezone_name(timezone_name) if _has_patch_value(timezone_name) else cycle.timezone
     next_schedule_expr = cycle.schedule_expr
+    next_model_override = (
+        validate_model_override(model_override)
+        if _is_patch_field_set(model_override)
+        else UNSET_CYCLE_FIELD
+    )
+    next_thinking_override = (
+        validate_thinking_override(thinking_override)
+        if _is_patch_field_set(thinking_override)
+        else UNSET_CYCLE_FIELD
+    )
     if _has_patch_value(run_at):
         next_schedule_expr = build_one_time_schedule_expr(run_at, next_timezone)
     elif _has_patch_value(schedule_expr):
@@ -129,10 +140,10 @@ async def async_update_cycle(
     cycle.schedule_expr = next_schedule_expr
     if _is_patch_field_set(enabled) and enabled is not None:
         cycle.enabled = enabled
-    if _is_patch_field_set(model_override):
-        cycle.model_override = (model_override or "").strip() or None
-    if _is_patch_field_set(thinking_override):
-        cycle.thinking_override = validate_thinking_override(thinking_override)
+    if _is_patch_field_set(next_model_override):
+        cycle.model_override = next_model_override
+    if _is_patch_field_set(next_thinking_override):
+        cycle.thinking_override = next_thinking_override
     if _is_patch_field_set(target_idea_id):
         cycle.target_idea_id = target_idea_id
 
