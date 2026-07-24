@@ -24,6 +24,7 @@ from brain.systems.cycles.contracts import (
 
 CYCLE_LAUNCH_ENVELOPE_VERSION = 2
 _MISSION_SEED_MAX_CHARS = 12_000
+_UWEAR_COORDINATOR_CYCLE_NAME = "Uwear Ticket Coordinator Check-ins"
 
 
 def cycle_launch_envelope(cycle: Cycle, run: CycleRun) -> dict:
@@ -144,6 +145,7 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
     )
     degradation_instruction = _degradation_instruction(envelope["degradation_tracking"])
     open_ask_instruction = _open_ask_instruction(envelope["open_ask_stragglers"])
+    exception_ping_instruction = _exception_ping_instruction(cycle)
     completion_instruction = (
         "- End with a short self-review summary suitable for the Cycle ledger and visible outputs.\n"
         if "short_self_review_summary" in json_list(result_contract.get("required_outputs"))
@@ -180,6 +182,7 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         f"{evidence_gap_destination} and name the gap.\n"
         f"{degradation_instruction}"
         f"{open_ask_instruction}"
+        f"{exception_ping_instruction}"
         f"{completion_instruction}\n"
         "## Result Contract\n"
         f"{_json_block(result_contract)}\n\n"
@@ -297,6 +300,29 @@ def _open_ask_instruction(stragglers: list) -> str:
         "answered from the digest itself:\n"
         + "\n".join(rows)
         + "\n"
+    )
+
+
+def _exception_ping_instruction(cycle: Cycle) -> str:
+    if cycle.name != _UWEAR_COORDINATOR_CYCLE_NAME:
+        return ""
+    return (
+        "- AUTHORITATIVE EXCEPTION-PING GATE: every person-addressed maintenance ping "
+        "and every off-slot material alert sent with `post_slack_reply` MUST include "
+        "`exception_ping` with `target_teammate_id` (the Slack mention id), `item_ref`, "
+        "`change_types`, and an evidence-backed `facts` object. The posting tool enforces "
+        "one shared 60-minute throttle per teammate across both run kinds; do not work "
+        "around a suppression by relabeling or reposting it. Scheduled digests should name "
+        "people without direct Slack mentions unless the message is intentionally an "
+        "exception ping.\n"
+        "- The code materiality allow-list is ownership change, blocker hit/clear, "
+        "active-set enter/leave, new unassigned high/critical severity, and chantier "
+        "must-surface. Supply before/after owner, blocker, or active facts; severity plus "
+        "`is_unassigned`; or `must_surface=true`, respectively. A same-owner PR's CI "
+        "transition within one hour of opening is not material on its own. An auto-filed "
+        "alert issue with `posted_to_alerts=true` must not also ping #4_software. Preserve "
+        "suppressed items in the Cycle ledger as "
+        "`Slack skipped: no material todo-list change`.\n"
     )
 
 

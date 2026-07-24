@@ -35,6 +35,7 @@ from brain.systems.cycles.degradation import (
     degradation_causes,
     degradation_tracking_for_run,
 )
+from brain.systems.cycles.exception_ping import exception_ping_ledger_snapshot
 from brain.systems.cycles.serializers import (
     serialize_cycle_guidance,
     serialize_cycle_output_target,
@@ -225,6 +226,9 @@ def _build_cycle_run_memory_snapshot(
                 "evidence_health": pending_evidence_health_receipt(scheduled_for),
                 "launch_context": launch_context,
                 "degradation_tracking": degradation_tracking,
+                "exception_ping_ledger": exception_ping_ledger_snapshot(
+                    getattr(cycle, "exception_ping_state", None)
+                ),
                 "launch_receipts": [
                     cycle_launch_receipt(
                         cycle_id=cycle.id,
