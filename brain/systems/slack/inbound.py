@@ -6,13 +6,13 @@ from typing import Any, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.kernel.common.coercion import optional_text
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.inbound import InboundEventRow
 from brain.platform.db.models.org import User
 from brain.systems.inbound.handlers import (
     InboundEventCompleter,
     InboundHandlerContext,
-    optional_text,
 )
 from brain.systems.inbound.surface_admission import (
     SurfaceAdmissionSpec,

@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.kernel.common.coercion import optional_text
 from brain.platform.db.models.domain import DomainRecord
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.idea import Idea, IdeaThread
@@ -28,7 +29,6 @@ from brain.systems.cortex.thread_links import thread_link_payload
 from brain.systems.inbound.handlers import (
     InboundCompletion,
     InboundHandlerContext,
-    optional_text,
     resolve_inbound_envelope_handler,
 )
 from brain.systems.inbound.status import (

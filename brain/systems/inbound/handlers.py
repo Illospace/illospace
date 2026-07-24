@@ -103,13 +103,6 @@ def resolve_inbound_envelope_handler(kind: str) -> InboundEnvelopeHandler | None
     return cast(InboundEnvelopeHandler, handler)
 
 
-def optional_text(value: Any) -> str | None:
-    """Return a stripped string or ``None`` for an empty optional value."""
-
-    text = str(value or "").strip()
-    return text or None
-
-
 register_inbound_envelope_handler(
     "app_report",
     "brain.systems.app_report.inbound:process_app_report_envelope",
@@ -125,7 +118,6 @@ __all__ = [
     "InboundEnvelopeHandler",
     "InboundEventCompleter",
     "InboundHandlerContext",
-    "optional_text",
     "register_inbound_envelope_handler",
     "resolve_inbound_envelope_handler",
     "unregister_inbound_envelope_handler",
