@@ -10,10 +10,18 @@ import uuid
 from typing import Any
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.effort import EFFORT_TIERS, EFFORT_TIER_SET
+from brain.platform.providers.model_policy import (
+    DEFAULT_PROVIDER_MODELS,
+    PROVIDER_MODEL_OPTIONS,
+    async_get_default_model,
+    async_get_default_thinking,
+)
 from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.domain import RunRecipe
 from brain.systems.runs.events import run_event
 from brain.systems.runs.execution_context import _agent_context
+from brain.systems.runs.routing_metadata import effective_routing_snapshot
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.tool_policy import normalize_tool_policy
 
@@ -98,6 +106,128 @@ def _current_mapping(name: str) -> dict[str, Any]:
         if isinstance(value, Mapping):
             return dict(value)
     return {}
+
+
+def _current_effective_routing() -> dict[str, Any]:
+    execution_metadata = getattr(_agent_context, "execution_metadata", None)
+    if not isinstance(execution_metadata, Mapping):
+        return {}
+    routing = execution_metadata.get("routing")
+    if not isinstance(routing, Mapping):
+        return {}
+    effective = routing.get("effective")
+    return dict(effective) if isinstance(effective, Mapping) else {}
+
+
+def _validate_spawn_effort(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized not in EFFORT_TIER_SET:
+        accepted = ", ".join(EFFORT_TIERS)
+        raise ValueError(
+            f"spawn_worker effort must be one of: {accepted}; got {value!r}"
+        )
+    return normalized
+
+
+def _validate_spawn_model(value: Any) -> tuple[str | None, str | None]:
+    if value is None:
+        return None, None
+    requested = str(value).strip().lower()
+    providers = ", ".join(sorted(DEFAULT_PROVIDER_MODELS))
+    if requested in DEFAULT_PROVIDER_MODELS:
+        return f"{requested}/{DEFAULT_PROVIDER_MODELS[requested]}", requested
+
+    normalized = requested.replace(":", "/", 1)
+    if "/" not in normalized:
+        raise ValueError(
+            "spawn_worker model must be a provider name "
+            f"({providers}) or a provider-prefixed catalog id such as "
+            "'anthropic/claude-sonnet-4-6'"
+        )
+    provider, model_name = normalized.split("/", 1)
+    if provider not in PROVIDER_MODEL_OPTIONS:
+        raise ValueError(
+            f"spawn_worker model provider must be one of: {providers}; got {provider!r}"
+        )
+    options = PROVIDER_MODEL_OPTIONS[provider]
+    if model_name not in options:
+        raise ValueError(
+            f"spawn_worker model for provider {provider!r} must be one of: "
+            f"{', '.join(options)}; got {model_name!r}"
+        )
+    return f"{provider}/{model_name}", requested
+
+
+def _canonical_inherited_model(value: Any) -> str:
+    model = str(value or "").strip()
+    normalized = model.replace(":", "/", 1)
+    if "/" in normalized:
+        provider, model_name = normalized.split("/", 1)
+        if model_name in PROVIDER_MODEL_OPTIONS.get(provider, ()):
+            return f"{provider}/{model_name}"
+        return model
+    for provider, options in PROVIDER_MODEL_OPTIONS.items():
+        if normalized in options:
+            return f"{provider}/{normalized}"
+    return model
+
+
+async def _materialized_parent_policy(session: Any, parent: Any) -> dict[str, Any]:
+    policy = dict(parent.model_policy or {})
+    live_routing = _current_effective_routing()
+
+    model = str(live_routing.get("model") or policy.get("model") or "").strip()
+    if not model:
+        model = await async_get_default_model(
+            session,
+            include_provider_prefix=True,
+            user_id=parent.user_id,
+            org_id=parent.org_id,
+        )
+    policy["model"] = _canonical_inherited_model(model)
+
+    thinking = str(
+        live_routing.get("effort")
+        or live_routing.get("thinking")
+        or policy.get("thinking")
+        or ""
+    ).strip().lower()
+    if not thinking:
+        thinking = await async_get_default_thinking(
+            session,
+            user_id=parent.user_id,
+            org_id=parent.org_id,
+        )
+    policy["thinking"] = thinking
+    return policy
+
+
+def _requested_routing(
+    *,
+    model: str,
+    effort: str,
+    requested_model: str | None,
+    effort_overridden: bool,
+) -> dict[str, Any]:
+    model_request: dict[str, Any] = {
+        "value": model,
+        "source": "spawn_worker.model" if requested_model is not None else "parent_effective",
+    }
+    if requested_model is not None and requested_model != model:
+        model_request["requested_value"] = requested_model
+    return {
+        "model": model_request,
+        "effort": {
+            "value": effort,
+            "source": "spawn_worker.effort" if effort_overridden else "parent_effective",
+        },
+    }
+
+
+def _routing_summary(model: str, effort: str) -> dict[str, Any]:
+    return effective_routing_snapshot(model, effort)
 
 
 def _inherited_run_mapping(
@@ -220,6 +350,8 @@ async def _handle_spawn_worker(
     objective: str,
     role: str = "worker",
     message: str | None = None,
+    effort: str | None = None,
+    model: str | None = None,
     headless: bool = False,
     idempotency_key: str | None = None,
     allowed_files: list[str] | None = None,
@@ -238,6 +370,12 @@ async def _handle_spawn_worker(
     objective_text = str(objective or "").strip()
     if not objective_text:
         return json.dumps({"error": "spawn_worker requires objective"})
+
+    try:
+        effort_override = _validate_spawn_effort(effort)
+        model_override, requested_model = _validate_spawn_model(model)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
 
     parent_run_id = _coerce_run_id(_runtime_run_id) or _current_run_id()
     if parent_run_id is None:
@@ -289,6 +427,23 @@ async def _handle_spawn_worker(
     async with UnitOfWork() as uow:
         store = AsyncAgentRunStore(uow.session)
         parent = await store.require_run(parent_run_id)
+        child_policy = await _materialized_parent_policy(uow.session, parent)
+        if model_override is not None:
+            child_policy["model"] = model_override
+        if effort_override is not None:
+            child_policy["thinking"] = effort_override
+        inherited_routing = (
+            dict(worker_metadata.get("routing") or {})
+            if isinstance(worker_metadata.get("routing"), Mapping)
+            else {}
+        )
+        inherited_routing["requested"] = _requested_routing(
+            model=str(child_policy["model"]),
+            effort=str(child_policy["thinking"]),
+            requested_model=requested_model,
+            effort_overridden=effort_override is not None,
+        )
+        worker_metadata["routing"] = inherited_routing
         child, created = await store.create_child_run_with_result(
             parent,
             recipe=RunRecipe.WORKER,
@@ -304,10 +459,16 @@ async def _handle_spawn_worker(
                 parent.workspace_ref,
                 _current_mapping("workspace_ref"),
             ),
-            model_policy=dict(parent.model_policy or {}),
+            model_policy=child_policy,
             metadata=worker_metadata,
         )
         deduplicated = not created
+        persisted_policy = dict(getattr(child, "model_policy", None) or child_policy)
+        child_model = str(persisted_policy.get("model") or child_policy["model"])
+        child_effort = str(
+            persisted_policy.get("thinking") or child_policy["thinking"]
+        )
+        child_routing = _routing_summary(child_model, child_effort)
         if created:
             await store.append_event(
                 run_event(
@@ -319,6 +480,7 @@ async def _handle_spawn_worker(
                         "headless": bool(headless),
                         "role": assignment.role,
                         "objective": assignment.objective,
+                        "routing": child_routing,
                     },
                     root_run_id=parent.root_run_id or parent.id,
                     producer="spawn_worker",
@@ -338,6 +500,9 @@ async def _handle_spawn_worker(
             "headless": bool(headless),
             "step_key": step_key,
             "deduplicated": deduplicated,
+            "model": child_model,
+            "effort": child_effort,
+            "routing": child_routing,
             "next_action": _delegation_next_action(
                 tool_name="spawn_worker",
                 response_tool=response_tool_text,
