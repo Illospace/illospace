@@ -28,7 +28,9 @@ from brain.platform.db.models.notification import (
     NotificationEvent,
 )
 from brain.platform.db.models.org import User
+from brain.platform.db.models.skill import Skill
 from brain.platform.db.repositories.notifications import NotificationEventRepository
+from brain.platform.effort import EFFORT_TIER_SET
 from brain.systems.cortex.thought_lifecycle import (
     ThoughtStatusCommand,
     ThreadMessageCommand,
@@ -47,6 +49,7 @@ from brain.systems.runs.cortex.read_models import (
     public_run_linked_message,
     run_id_from_public_message_metadata,
 )
+from brain.systems.runs.skill_commands import parse_slash_skill_names
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
 
@@ -89,6 +92,8 @@ HEADLESS_ASK_BLOCKED_TOOLS = (
     "post_ai_timeline_message",
     "post_thread_discussion_reply",
 )
+HEADLESS_ASK_ROUTING_FIELDS = frozenset({"effort"})
+HEADLESS_ASK_DEFAULT_EFFORT = "medium"
 
 TASK_TERMINAL_STATUSES = EXTERNAL_AGENT_TASK_TERMINAL_STATUSES
 CONNECTION_ADMIN_ROLES = {"owner", "admin"}
@@ -1588,6 +1593,65 @@ async def _refresh_task_if_supported(session: AsyncSession, task: ExternalAgentT
         await refresh(task)
 
 
+def _headless_ask_routing_overrides(*, effort: str | None) -> dict[str, str]:
+    candidates = {"effort": effort}
+    overrides = {
+        key: str(value).strip().lower()
+        for key, value in candidates.items()
+        if key in HEADLESS_ASK_ROUTING_FIELDS and value is not None
+    }
+    if overrides.get("effort") not in EFFORT_TIER_SET and "effort" in overrides:
+        allowed = ", ".join(sorted(EFFORT_TIER_SET))
+        raise ValueError(f"effort must be one of: {allowed}")
+    return overrides
+
+
+def _headless_ask_skill_anchor(
+    question: str,
+    metadata: Mapping[str, Any],
+) -> str | None:
+    skill_name = str(metadata.get("skill_name") or "").strip().lstrip("/")
+    if skill_name:
+        return skill_name
+
+    slash_skill_names = metadata.get("slash_skill_names")
+    if isinstance(slash_skill_names, list):
+        for value in slash_skill_names:
+            skill_name = str(value or "").strip().lstrip("/")
+            if skill_name:
+                return skill_name
+
+    parsed_names = parse_slash_skill_names(question)
+    return parsed_names[0] if parsed_names else None
+
+
+async def _headless_ask_effort(
+    session: AsyncSession,
+    *,
+    question: str,
+    metadata: Mapping[str, Any],
+    effort: str | None,
+) -> str:
+    routing_overrides = _headless_ask_routing_overrides(effort=effort)
+    if routing_overrides.get("effort"):
+        return routing_overrides["effort"]
+
+    skill_name = _headless_ask_skill_anchor(question, metadata)
+    if not skill_name:
+        return HEADLESS_ASK_DEFAULT_EFFORT
+
+    skill_tier = await session.scalar(
+        select(Skill.thinking_tier).where(
+            Skill.name == skill_name,
+            or_(Skill.archived == False, Skill.archived.is_(None)),  # noqa: E712
+        )
+    )
+    normalized_skill_tier = str(skill_tier or "").strip().lower()
+    if normalized_skill_tier in EFFORT_TIER_SET:
+        return normalized_skill_tier
+    return HEADLESS_ASK_DEFAULT_EFFORT
+
+
 async def create_headless_ask(
     session: AsyncSession,
     principal: AgentBridgePrincipal,
@@ -1595,9 +1659,16 @@ async def create_headless_ask(
     question: str,
     context: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
+    effort: str | None = None,
 ) -> ExternalAgentTaskRow:
     task_id = str(uuid.uuid4())
     metadata = dict(metadata or {})
+    resolved_effort = await _headless_ask_effort(
+        session,
+        question=question,
+        metadata=metadata,
+        effort=effort,
+    )
     metadata.setdefault(
         "request_source",
         request_source_context(
@@ -1639,7 +1710,7 @@ async def create_headless_ask(
             payload={
                 "message": _headless_prompt(question, context),
                 "workspace_ref": {"source": "external_agent_bridge", "mode": "headless"},
-                "model_policy": {"tier": "standard", "thinking": "medium"},
+                "model_policy": {"thinking": resolved_effort},
                 "metadata": {
                     **metadata,
                     "origin": "external_agent_headless_ask",

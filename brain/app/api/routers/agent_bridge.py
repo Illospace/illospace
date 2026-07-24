@@ -404,6 +404,7 @@ async def ask_illo(
         question=payload.question,
         context=payload.context,
         metadata=payload.metadata,
+        effort=payload.effort,
     )
     return await external_agents.serialize_task(task, include_events=True, session=db)
 

@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from brain.platform.effort import EFFORT_TIER_SET
+
 
 class ExternalAgentConnectionCreate(BaseModel):
     display_name: str = Field(min_length=1, max_length=200)
@@ -117,6 +119,18 @@ class BridgeAskIlloRequest(BaseModel):
     question: str = Field(min_length=1)
     context: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    effort: str | None = None
+
+    @field_validator("effort")
+    @classmethod
+    def validate_effort(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if normalized not in EFFORT_TIER_SET:
+            allowed = ", ".join(sorted(EFFORT_TIER_SET))
+            raise ValueError(f"effort must be one of: {allowed}")
+        return normalized
 
 
 class BridgeThreadCreateRequest(BaseModel):
