@@ -35,13 +35,12 @@ Illo runs everything strong and hot, and almost none of it is intentional:
   and the levers that should distinguish them are broken, fragmented, or dead.
 
 The intended end state, mirroring the director/workhorse routing Reda uses in
-Claude Code: **one default strong model** (org default today `gpt-5.5`;
-`gpt-5.6-sol` when available — the availability fallback for that already
-exists), with **effort as the primary routed knob** — `xhigh` for
-judgment-heavy work, `high` for standard work, `medium`/`low` for
-execution-heavy or reflex work — plus the ability to spawn workers at
-explicitly lower effort or on explicitly cheaper models, and escalation on
-failure instead of defaulting to the ceiling.
+Claude Code: **one model — `gpt-5.6-sol` — everywhere**, with **effort as the
+only routed knob**: `xhigh` for judgment-heavy work, `high` for standard work,
+`medium`/`low` for execution-heavy or reflex work, plus the ability to spawn
+workers at explicitly lower effort, and escalation on failure instead of
+defaulting to the ceiling. Cheaper models are not part of the design; the
+availability fallback to `gpt-5.5` exists only for a 5.6-sol outage.
 
 The stale "fast/deep mode" predates this thinking and should be retired, and
 the audit shows a meaningful amount of model-selection code is dead and should
@@ -257,8 +256,9 @@ run has a skill anchor.
   runtime-settings UI list (`runtime_settings/models.py:15-28`, unprefixed,
   OpenAI-only, rejects non-OpenAI at `:39-51`) and the composer list
   (`runSettings.ts:25-31`, provider-prefixed) are two more hand-maintained
-  copies with different value shapes. The frontend default model is
-  `openai/gpt-5.6-sol` while the backend default is `gpt-5.5`.
+  copies with different value shapes. The frontend default model was
+  `openai/gpt-5.6-sol` while the backend default was `gpt-5.5` (resolved in
+  Slice 1.5 — both are `gpt-5.6-sol` now).
 - The Anthropic side is stale: default `claude-sonnet-4-6`
   (`model_policy.py:17`), a hardcoded `claude-sonnet-4-6` key-verify ping
   (`cortex/_key_utils.py:125`), and no Anthropic-valid effort translation
@@ -293,10 +293,15 @@ run has a skill anchor.
 
 ### Principles
 
-1. **One default strong model; effort is the routed knob.** Model overrides are
-   the sanctioned exception, not the mechanism: a reflex lane may pin a mini
-   model; a verifier may pin the other provider. Everything else varies effort
-   on the org default model.
+1. **One model; effort is the only routed knob.** Illo runs `gpt-5.6-sol`
+   everywhere and varies reasoning effort. Cheap work is cheap because it
+   thinks less, not because it runs on a weaker model: a mini model on a
+   reflex lane trades quality for a saving the effort tiers already deliver,
+   and it splits the fleet across two credential paths (only `gpt-5.5` and
+   `gpt-5.6*` reach the ChatGPT/Codex backend — anything else needs an API
+   key). Model overrides survive for one genuine exception: routing a
+   verifier to the *other provider* for independent review. No cycle pins a
+   model (Reda, 2026-07-24).
 2. **Declarative routing, no LLM router.** Tiers come from configuration
    (org default, cycle override, skill tier) and from the acting agent's
    explicit choice at spawn time. We never spend a model call deciding which
@@ -323,7 +328,7 @@ run has a skill anchor.
 | `xhigh` | Maximum reasoning; judgment where a wrong call is expensive | Coordinator digest/triage verdicts (cycle 2), self-critique audit analysis, adversarial review, prioritization calls |
 | `high` | Default for real work | Interactive chat/thread runs, chantier implementation, promotion-readiness checks (cycle 9), contract repair |
 | `medium` | Execution-heavy, clear-spec | Headless bridge asks (status quo), tracker writes, sweeps, data pulls, formatting, readbacks |
-| `low` | Reflex: classify, filter, ack | GitHub Reflex event lane (cycle 8), Slack monitored-channel triage, title generation, final-reply checker, truth adjudication |
+| `low` | Reflex: classify, filter, ack | GitHub Reflex event lane (cycle 8 — `low` effort on the one model, no mini pin), Slack monitored-channel triage, title generation, final-reply checker, truth adjudication |
 | `none` | No reasoning pass | Pure templating/exports |
 
 Org default stays `high` (made explicit in config rather than implicit in
@@ -352,21 +357,19 @@ value per field), and the effective post-fallback route is recorded at
 execution. The `provider` policy key is retired: provider follows the
 canonical provider-prefixed model id, as execution already re-infers it.
 
-- **Org default** — unchanged mechanism (`memory_model_config`). Rollout flips
-  `default_model` to `openai/gpt-5.6-sol` when available; the availability
-  fallback already covers the transition. `default_thinking: high` gets
-  written explicitly.
+- **Org default** — unchanged mechanism (`memory_model_config`), now
+  `openai/gpt-5.6-sol` with an explicit `default_thinking: high` (migration
+  `0038`); the availability fallback to `gpt-5.5` covers a 5.6-sol outage.
 - **Cycles** — `model_override`/`thinking_override` keep their exact meaning
   and start working (Slice 1), sourced from the run's immutable revision
-  snapshot. Reflex cycles pin cheap models + `low`; judgment cycles pin
-  `xhigh`; everything else inherits.
-- **Per-spawn worker overrides** (Slice 2) — `spawn_worker` gains optional
-  `model` and `effort` parameters, validated against the catalog and tier set,
-  merged over the inherited parent policy field-by-field. This enables the
-  director/workhorse split (coordinator at `xhigh` fanning out `low`/`medium`
-  readers) and the cross-family pattern: both providers are integrated, so a
-  coordinator can spawn a verifier on the other provider (by prefixed model
-  id) for independent review.
+  snapshot. In practice only `thinking_override` is used: reflex cycles
+  declare `low`, judgment cycles `xhigh`, everything else inherits.
+  Migration `0038` clears every existing model pin.
+- **Per-spawn worker overrides** (Slice 2) — `spawn_worker` gains an `effort`
+  parameter (the everyday knob: a coordinator at `xhigh` fans out `low`/
+  `medium` readers on the same model) plus an optional `model` reserved for
+  the cross-provider verifier — both validated, merged field-by-field over
+  the inherited parent policy.
 - **Headless asks** (Slice 3) — caller-suppliable `effort` through a
   whitelist; default `medium`; the dead `tier` key dies; security stamps stay
   forced.
@@ -488,11 +491,27 @@ feature gates. Suggested order; 1–3 are the core value.
 - Tests: snapshot-sourced policy lands on the run; queued-run isolation from
   live cycle edits; absent overrides fall through to org defaults; invalid
   model rejected at write; vocabulary contract test.
-- Live receipt after deploy: bump cycle 8 `next_run_at`, confirm the new run's
-  `model_policy = {"model": "openai/gpt-5.4-mini", "thinking": "low"}` and
-  cycle 2 lands `xhigh`.
+- Live receipt after deploy (with Slice 1.5 applied): bump cycle 8
+  `next_run_at`, confirm the new run's `model_policy = {"thinking": "low"}`
+  on the org-default model, and cycle 2 lands `xhigh`.
 
-### Slice 2 — spawn_worker Model/Effort Overrides
+### Slice 1.5 — Single Model, Shared Auth-Mode Rule (shipped)
+
+Shipped alongside Slice 1 after Reda's single-model call (2026-07-24):
+
+- Org default model is `openai/gpt-5.6-sol` in code
+  (`DEFAULT_PROVIDER_MODELS`) and in org config (migration `0038`, which also
+  writes `default_thinking: high` explicitly and clears every cycle
+  `model_override`).
+- `required_openai_auth_mode` moved into `model_policy.py` as the single
+  owner, replacing three copies. The cycle-preflight copy recognized only
+  `gpt-5.5`, so on a GPT-5.6 default it validated an interchangeable
+  credential while the run required ChatGPT/Codex — the preflight's actionable
+  "reconnect OpenAI" block would have stopped firing exactly when the default
+  moved to 5.6-sol. A contract test now fails if any module redeclares the
+  rule.
+
+### Slice 2 — spawn_worker Effort Overrides
 
 - Optional `model` + `effort` parameters on the tool schema; handler validates
   (catalog + tier set + provider-supported efforts) and merges field-by-field
@@ -574,10 +593,10 @@ feature gates. Suggested order; 1–3 are the core value.
   breakdowns; fix or retire the audit endpoint's stale `metadata["usage"]`
   read.
 
-Runtime rollout steps (not PRs): write `default_thinking: high` explicitly into
-org config; flip `default_model` to `gpt-5.6-sol` when available; update doc
-1155 / cycle missions with the routing guidance (Illo-owned prose, versioned at
-runtime).
+Runtime rollout: the org-default and cycle-pin changes ship as migration `0038`
+rather than manual production writes. The one remaining runtime step is
+updating doc 1155 / cycle missions with the routing guidance (Illo-owned prose,
+versioned at runtime).
 
 ## Out Of Scope
 

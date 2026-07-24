@@ -10,6 +10,7 @@ from brain.platform.integrations.llm import async_resolve_llm_client
 from brain.platform.providers.model_policy import (
     async_get_default_model,
     infer_provider_from_model,
+    required_openai_auth_mode,
 )
 
 
@@ -43,10 +44,6 @@ def _normalize_model(model: str) -> str:
         if value.startswith(prefix):
             return value[len(prefix):]
     return value
-
-
-def _required_openai_auth_mode(model: str) -> str | None:
-    return "chatgpt" if _normalize_model(model).lower() == "gpt-5.5" else None
 
 
 def _credential_label(model: str, auth_mode: str | None, error_text: str = "") -> str:
@@ -89,7 +86,7 @@ async def async_preflight_cycle_external_auth(
     if provider != "openai":
         return CycleAuthPreflightResult(status="skipped", provider=provider, model=model)
 
-    auth_mode = _required_openai_auth_mode(model)
+    auth_mode = required_openai_auth_mode(model)
     try:
         await async_resolve_llm_client(
             user_id=user_id,

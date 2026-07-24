@@ -107,7 +107,7 @@ def test_get_agent_worker_backend_settings_remaps_cross_provider_sub_lm(monkeypa
 
     settings = get_agent_worker_backend_settings(org_id="org-1", provider="openai")
 
-    assert settings.predict_rlm_sub_lm == "openai/gpt-5.5"
+    assert settings.predict_rlm_sub_lm == "openai/gpt-5.6-sol"
 
 
 def test_get_agent_worker_backend_settings_falls_back_when_deno_missing(monkeypatch):
