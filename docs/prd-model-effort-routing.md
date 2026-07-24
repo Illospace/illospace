@@ -315,7 +315,19 @@ run has a skill anchor.
    set is defined once; providers get an explicit translation (not an identity
    pass-through); invalid declarations are rejected at admission, not silently
    skipped.
-5. **Compatibility constraints.** The two-provider architecture
+5. **Provider-generic core (Reda, 2026-07-24).** Illo happens to run on the
+   ChatGPT/Codex backend today, but nothing outside the provider layer may
+   know that. Routing surfaces (cycles, spawn_worker, headless asks, org
+   config, composer) speak canonical effort tiers and provider-prefixed model
+   ids only. All provider-specific knowledge — native effort vocabulary and
+   its rendering, model catalog, auth requirements, availability fallbacks,
+   pricing, context windows — lives in the provider layer: the effort
+   renderings in `brain/platform/effort.py` (transports render at the request
+   boundary) and, as Slice 6 lands, the per-model catalog contract.
+   Connecting a new provider = a transport + an effort rendering + catalog
+   entries; zero changes to routing surfaces. The completeness contract test
+   fails any provider whose rendering doesn't cover the full ladder.
+6. **Compatibility constraints.** The two-provider architecture
    (`providers.py`) and `memory_model_config` schema are untouched; cycle
    `model_override`/`thinking_override` semantics are preserved (and finally
    honored). No feature gates: each slice is live behavior on merge, verified
@@ -336,14 +348,15 @@ code). `xhigh` is claimed by declaration (cycle override, skill tier, spawn
 parameter, composer pick) — never the ambient default, which also means the
 composer stops defaulting to it (Finding 2 fix).
 
-**Per-provider rendering** (replaces the identity `THINKING_MAP`): canonical
-tiers translate per provider — OpenAI `reasoning.effort` `low/medium/high/
-xhigh`, `none` → omit; Anthropic `output_config.effort` `low/medium/high` with
-`xhigh → max`, `none` → omit (documented floor differences noted in the
-translation table); non-reasoning models get no reasoning kwargs at all. Exact
-accepted values per provider/model are validated at implementation time
-against the live APIs, and the catalog records which efforts each model
-supports (Slice 6 contract).
+**Per-provider rendering** (shipped — replaced the identity `THINKING_MAP`):
+`brain/platform/effort.py` owns the canonical ladder and a per-provider
+rendering table; transports render at the request boundary. Today: OpenAI
+`reasoning.effort` `low/medium/high/xhigh`, `none` → omit; Anthropic
+`output_config.effort` `low/medium/high` with `xhigh → max`, `none` → omit.
+Provider-native values pass through untranslated so deliberate native usage
+keeps working, and a contract test fails any provider whose rendering doesn't
+cover the full ladder. Per-model effort support (non-reasoning models get no
+reasoning kwargs at all) lands with the Slice 6 catalog contract.
 
 ### Routing Surfaces
 
@@ -511,11 +524,27 @@ Shipped alongside Slice 1 after Reda's single-model call (2026-07-24):
   moved to 5.6-sol. A contract test now fails if any module redeclares the
   rule.
 
+### Slice 1.6 — Provider-Generic Effort Rendering (shipped)
+
+Shipped after Reda's provider-genericity direction (2026-07-24):
+
+- Canonical ladder + per-provider renderings moved to the dependency-free
+  leaf `brain/platform/effort.py` (`model_policy` re-exports, so importers
+  are unchanged); both transports render canonical tiers at the request
+  boundary (`render_reasoning_effort`), fixing the latent `xhigh`-on-Anthropic
+  failure (`xhigh → max`, `none` → omit).
+- The misleading identity `THINKING_MAP` is gone; its uses were membership
+  checks, now against `EFFORT_TIER_SET`.
+- Completeness contract test: every provider rendering must cover the full
+  canonical ladder; native values pass through untranslated.
+
 ### Slice 2 — spawn_worker Effort Overrides
 
 - Optional `model` + `effort` parameters on the tool schema; handler validates
   (catalog + tier set + provider-supported efforts) and merges field-by-field
-  over the inherited policy.
+  over the inherited policy. The `model` value may be a provider-prefixed id
+  or a bare provider name meaning "that provider's default model" — the
+  provider-generic spelling of the cross-provider verifier.
 - Child policy is **materialized at spawn**: when inheriting, the parent's
   effective values (not the unresolved dict) are written to the child, so an
   org-config change between spawn and execution cannot silently reroute a
