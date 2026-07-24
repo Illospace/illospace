@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import os
 from typing import Any
 
+from brain.platform.model_catalog import get_model_catalog_entry
 from brain.platform.providers.model_policy import EFFORT_TIER_SET, infer_provider_from_model
 
 DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
@@ -15,23 +16,7 @@ _PROVIDER_CONTEXT_WINDOWS = {
     "openai": 128_000,
 }
 
-_MODEL_CONTEXT_WINDOWS = {
-    ("anthropic", "claude-opus-4-6"): 200_000,
-    ("anthropic", "claude-sonnet-4-6"): 200_000,
-    ("anthropic", "claude-haiku-4-5"): 200_000,
-    ("openai", "gpt-5.5"): 400_000,
-    ("openai", "gpt-5.4-pro"): 400_000,
-    ("openai", "gpt-5.4"): 256_000,
-    ("openai", "gpt-5.4-mini"): 128_000,
-    ("openai", "gpt-5.4-nano"): 128_000,
-    ("openai", "gpt-5-mini"): 128_000,
-    ("openai", "gpt-5-nano"): 128_000,
-    ("openai", "gpt-5.3-codex"): 192_000,
-    ("openai", "gpt-5.1-codex-mini"): 128_000,
-}
-
 _MODEL_PREFIX_CONTEXT_WINDOWS = (
-    (("anthropic", "claude-"), 200_000),
     (("openai", "gpt-5.5"), 400_000),
     (("openai", "gpt-5.4-pro"), 400_000),
     (("openai", "gpt-5.4"), 256_000),
@@ -110,9 +95,9 @@ def _context_window_for(provider: str, model: str) -> int:
         return max(1, _env_int("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", DEFAULT_CONTEXT_WINDOW_TOKENS))
 
     normalized = _strip_provider_prefix(model)
-    exact = _MODEL_CONTEXT_WINDOWS.get((provider, normalized))
-    if exact is not None:
-        return exact
+    catalog_entry = get_model_catalog_entry(f"{provider}/{normalized}")
+    if catalog_entry is not None:
+        return catalog_entry.context_window_tokens
     for (candidate_provider, prefix), tokens in _MODEL_PREFIX_CONTEXT_WINDOWS:
         if provider == candidate_provider and normalized.startswith(prefix):
             return tokens

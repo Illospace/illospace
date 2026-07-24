@@ -104,8 +104,8 @@ class TestModelPolicy:
     def test_cost_normalizes_openai_models(self):
         from brain.platform.providers.model_policy import calculate_model_cost, normalize_model_name
 
-        cost = calculate_model_cost("gpt-4o-mini", 1_000_000, 1_000_000)
-        assert abs(cost - 3.0) < 0.001
+        cost = calculate_model_cost("gpt-5-mini", 1_000_000, 1_000_000)
+        assert abs(cost - 2.25) < 0.001
         assert normalize_model_name("gpt-5.4-mini") == "openai/gpt-5.4-mini"
         assert normalize_model_name("gpt-5.4-nano") == "openai/gpt-5.4-nano"
         assert normalize_model_name("gpt-5.5") == "openai/gpt-5.5"
@@ -145,44 +145,6 @@ class TestModelPolicy:
         assert infer_provider_from_model("anthropic/claude-sonnet-4-6") == "anthropic"
 
     @pytest.mark.asyncio
-    async def test_resolve_skill_runtime_uses_thinking_with_selected_provider(self):
-        from brain.platform.providers.model_policy import async_resolve_skill_model, async_resolve_skill_runtime
-
-        row = {
-            "thinking_tier": "xhigh",
-        }
-
-        def execute_side_effect(stmt, params=None):
-            sql = str(stmt)
-            if "SELECT thinking_tier" in sql:
-                return _AsyncMappingResult(first=row)
-            if "SELECT org_id FROM users" in sql:
-                return _AsyncMappingResult(first={"org_id": "org-1"})
-            if "SELECT memory_model_config FROM orgs" in sql:
-                return _AsyncMappingResult(first={"memory_model_config": {}})
-            raise AssertionError(f"Unexpected SQL: {sql}")
-
-        session = _AsyncPolicySession(execute_side_effect)
-        runtime = await async_resolve_skill_runtime(session, "deploy", user_id="user-1")
-        model, thinking = await async_resolve_skill_model(session, "deploy", user_id="user-1")
-
-        assert runtime.provider == "openai"
-        assert runtime.model_name == "gpt-5.6-sol"
-        assert runtime.reasoning_effort == "xhigh"
-        assert model == "openai/gpt-5.6-sol"
-        assert thinking == "xhigh"
-
-    def test_run_resolve_model_fallback_uses_selected_provider(self):
-        from brain.systems.runs.modeling import resolve_model
-
-        with patch("brain.systems.runs.modeling.resolve_skill_model", side_effect=RuntimeError("boom")), \
-             patch("brain.systems.runs.modeling.get_default_model", return_value="openai/gpt-5.5"):
-            model, thinking = resolve_model("missing-skill", user_id="user-1", preferred_provider="openai")
-
-        assert model == "openai/gpt-5.5"
-        assert thinking == "medium"
-
-    @pytest.mark.asyncio
     async def test_resolve_default_provider_uses_org_default(self):
         from brain.platform.providers.model_policy import async_resolve_default_provider
 
@@ -194,7 +156,7 @@ class TestModelPolicy:
         assert await async_resolve_default_provider(session, user_id="user-1") == "openai"
 
     @pytest.mark.asyncio
-    async def test_resolve_default_provider_coerces_legacy_org_anthropic_to_openai(self):
+    async def test_resolve_default_provider_preserves_org_anthropic(self):
         from brain.platform.providers.model_policy import async_resolve_default_provider
 
         results = [
@@ -204,7 +166,7 @@ class TestModelPolicy:
             }),
         ]
         session = _AsyncPolicySession(lambda stmt, params=None: results.pop(0))
-        assert await async_resolve_default_provider(session, user_id="user-1") == "openai"
+        assert await async_resolve_default_provider(session, user_id="user-1") == "anthropic"
 
     @pytest.mark.asyncio
     async def test_resolve_default_provider_uses_preferred_provider_as_fallback(self):
@@ -243,7 +205,47 @@ class TestModelPolicy:
 
         assert catalogs["openai"]["default"] == "gpt-5.6-sol"
         assert "gpt-5.5" in catalogs["openai"]["options"]
-        assert catalogs["anthropic"]["default"] == "claude-sonnet-4-6"
+        assert catalogs["anthropic"]["default"] == "claude-sonnet-5"
+
+    def test_model_catalog_contract_is_provider_aware_and_pruned(self):
+        from brain.platform.providers.model_policy import get_model_catalog_contract
+
+        catalog = get_model_catalog_contract(
+            workspace_default="openai/gpt-5.6-sol",
+        )
+        by_id = {entry["id"]: entry for entry in catalog}
+
+        assert by_id["openai/gpt-5.6-sol"] == {
+            "id": "openai/gpt-5.6-sol",
+            "label": "GPT-5.6 Sol",
+            "provider": "openai",
+            "description": "Organization default; falls back to GPT-5.5 when unavailable.",
+            "supported_effort_tiers": ["none", "low", "medium", "high", "xhigh"],
+            "auth_requirement": "chatgpt",
+            "availability_fallback": "openai/gpt-5.5",
+            "default_provenance": {
+                "provider_default": True,
+                "workspace_default": True,
+            },
+        }
+        assert by_id["anthropic/claude-sonnet-5"]["auth_requirement"] == "api_key"
+        assert by_id["anthropic/claude-sonnet-5"]["default_provenance"] == {
+            "provider_default": True,
+            "workspace_default": False,
+        }
+        assert by_id["anthropic/claude-haiku-4-5"]["supported_effort_tiers"] == [
+            "none"
+        ]
+        assert not {
+            "openai/o3-mini",
+            "openai/gpt-4o",
+            "openai/gpt-4o-mini",
+            "openai/gpt-4.1",
+            "openai/gpt-4.1-mini",
+            "openai/gpt-5.2",
+            "openai/gpt-5.3-codex",
+            "openai/gpt-5.3-codex-spark",
+        } & by_id.keys()
 
     @pytest.mark.asyncio
     async def test_org_default_model_strips_provider_prefixes(self):

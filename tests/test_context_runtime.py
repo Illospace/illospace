@@ -165,7 +165,7 @@ def test_model_context_budget_is_model_and_provider_aware(monkeypatch):
         tools=[{"name": "read_file"}, {"name": "write_file"}],
     )
     anthropic_budget = resolve_model_context_budget(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         provider="anthropic",
         reasoning_effort="medium",
         max_output_tokens=16_384,

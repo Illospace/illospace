@@ -12,6 +12,7 @@ from brain.platform.integrations.transports.base import (
     validate_system_blocks,
     validate_tool_definitions,
 )
+from brain.platform.model_catalog import model_accepts_effort
 
 
 class AnthropicMessagesTransport:
@@ -32,7 +33,11 @@ class AnthropicMessagesTransport:
             kwargs["system"] = request.system
         if request.tools:
             kwargs["tools"] = request.tools
-        effort = render_reasoning_effort("anthropic", request.reasoning_effort)
+        effort = (
+            render_reasoning_effort("anthropic", request.reasoning_effort)
+            if model_accepts_effort(request.model, request.reasoning_effort)
+            else None
+        )
         if effort:
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs["output_config"] = {"effort": effort}

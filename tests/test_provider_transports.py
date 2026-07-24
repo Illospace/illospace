@@ -107,6 +107,22 @@ def test_anthropic_messages_transport_builds_native_kwargs():
     assert kwargs["extra_headers"] == {"x-test": "1"}
 
 
+def test_anthropic_messages_transport_omits_effort_for_unsupported_model():
+    from brain.platform.integrations.transports.anthropic import AnthropicMessagesTransport
+    from brain.platform.integrations.transports.base import LLMRequest
+
+    request = LLMRequest(
+        model="anthropic/claude-haiku-4-5",
+        messages=[{"role": "user", "content": "hello"}],
+        reasoning_effort="high",
+    )
+
+    kwargs = AnthropicMessagesTransport().build_kwargs(request)
+
+    assert "thinking" not in kwargs
+    assert "output_config" not in kwargs
+
+
 def test_anthropic_messages_transport_validates_message_shape():
     from brain.platform.integrations.transports.anthropic import AnthropicMessagesTransport
     from brain.platform.integrations.transports.base import LLMRequest, MessageValidationError

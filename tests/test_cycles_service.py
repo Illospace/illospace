@@ -557,7 +557,7 @@ def test_cycle_run_model_policy_treats_absent_and_default_models_as_org_fallback
 
 def test_cycle_run_model_policy_uses_bound_revision_instead_of_live_cycle():
     cycle = Cycle()
-    cycle.model_override = "anthropic/claude-opus-4-6"
+    cycle.model_override = "anthropic/claude-opus-5"
     cycle.thinking_override = "low"
     run = CycleRun()
     run.context_snapshot = {
@@ -1142,7 +1142,7 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
     session = object()
 
     cycle = Cycle()
-    cycle.model_override = "anthropic/claude-opus-4-6"
+    cycle.model_override = "anthropic/claude-opus-5"
     cycle.thinking_override = "low"
     cycle_run = CycleRun()
     cycle_run.context_snapshot = {
@@ -1202,7 +1202,7 @@ async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeyp
     cycle.timezone = "America/Toronto"
     cycle.target_idea_id = idea_id
     cycle.deleted_at = None
-    cycle.model_override = "anthropic/claude-sonnet-4-6"
+    cycle.model_override = "anthropic/claude-sonnet-5"
     cycle.thinking_override = None
 
     idea = Idea()
@@ -1306,7 +1306,7 @@ async def test_async_execute_cycle_run_uses_native_uow_without_sync_bridges(monk
     cycle.timezone = "America/Toronto"
     cycle.target_idea_id = idea_id
     cycle.deleted_at = None
-    cycle.model_override = "anthropic/claude-sonnet-4-6"
+    cycle.model_override = "anthropic/claude-sonnet-5"
     cycle.thinking_override = None
 
     idea = Idea()
@@ -1360,7 +1360,7 @@ async def test_execute_cycle_run_auth_blocks_expired_codex_before_agent_admissio
         encode_codex_auth_payload,
     )
 
-    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.3-codex")
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.4")
     expired_payload = json.dumps(encode_codex_auth_payload(OpenAICodexCredential(
         access_token="expired-access",
         refresh_token="refresh-token-123",
@@ -1426,7 +1426,7 @@ async def test_execute_cycle_run_valid_codex_preflight_proceeds_to_agent_admissi
         encode_codex_auth_payload,
     )
 
-    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.3-codex")
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.4")
     valid_payload = json.dumps(encode_codex_auth_payload(OpenAICodexCredential(
         access_token="fresh-access",
         refresh_token="refresh-token-123",
@@ -1496,7 +1496,7 @@ async def test_execute_cycle_run_creates_execution_thread_when_target_thread_is_
     cycle.timezone = "America/Toronto"
     cycle.target_idea_id = target_idea_id
     cycle.deleted_at = None
-    cycle.model_override = "anthropic/claude-sonnet-4-6"
+    cycle.model_override = "anthropic/claude-sonnet-5"
     cycle.thinking_override = None
 
     target_idea = Idea()

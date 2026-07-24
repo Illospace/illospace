@@ -15,51 +15,29 @@ from brain.platform.effort import (
     render_reasoning_effort,
 )
 from brain.platform.integrations.providers import get_active_provider
+from brain.platform.model_catalog import (
+    MODEL_CATALOG,
+    canonical_catalog_model_id,
+)
 
 
 DEFAULT_RUNTIME_PROVIDER = "openai"
 DEFAULT_THINKING_TIER = "high"
 DEFAULT_PROVIDER_MODELS: dict[str, str] = {
-    "anthropic": "claude-sonnet-4-6",
-    "openai": "gpt-5.6-sol",
+    entry.provider: entry.model_name
+    for entry in MODEL_CATALOG
+    if entry.provider_default
 }
 PROVIDER_MODEL_OPTIONS: dict[str, tuple[str, ...]] = {
-    "anthropic": (
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5",
-    ),
-    "openai": (
-        "gpt-5.6-sol",
-        "gpt-5.5",
-        "gpt-5.4-pro",
-        "gpt-5.4",
-        "gpt-5.4-mini",
-        "gpt-5.4-nano",
-        "gpt-5-mini",
-        "gpt-5-nano",
-        "gpt-5.3-codex",
-        "gpt-5.3-codex-spark",
-        "gpt-5.2",
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "gpt-4o",
-        "gpt-4o-mini",
-        "o3-mini",
-    ),
+    provider: tuple(
+        entry.model_name
+        for entry in MODEL_CATALOG
+        if entry.provider == provider
+    )
+    for provider in DEFAULT_PROVIDER_MODELS
 }
 
 OPENAI_MODEL_ALIASES = set(PROVIDER_MODEL_OPTIONS["openai"])
-
-
-@dataclass(frozen=True)
-class SkillRuntimeConfig:
-    """Resolved runtime settings for a skill."""
-
-    provider: str
-    model_name: str
-    reasoning_effort: str
-    thinking_tier: str = "medium"
 
 
 @dataclass(frozen=True)
@@ -69,15 +47,6 @@ class ProviderResolution:
     provider: str
     source: str
     explicit: bool = False
-
-
-@dataclass(frozen=True)
-class SkillRoutingProfile:
-    """Raw skill routing inputs used by the marketplace layer."""
-
-    skill_name: str
-    reasoning_effort: str | None
-    thinking_tier: str = "medium"
 
 
 def _strip_provider_prefix(model: str | None) -> str | None:
@@ -116,30 +85,12 @@ def normalize_default_provider(provider: str | None = None) -> str:
     return DEFAULT_RUNTIME_PROVIDER
 
 
-def _prefix_model(provider: str, model: str) -> str:
-    if model.startswith(("anthropic/", "openai/")):
-        return model
-    if model.startswith("anthropic:"):
-        return f"anthropic/{model[len('anthropic:'):]}"
-    if model.startswith("openai:"):
-        return f"openai/{model[len('openai:'):]}"
-    return f"{provider}/{model}"
-
-
 MODEL_PRICING_PER_MILLION: dict[str, dict[str, float]] = {
-    "anthropic/claude-opus-4-6": {"input": 5.0, "output": 25.0},
-    "anthropic/claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
-    "anthropic/claude-haiku-4-5": {"input": 1.0, "output": 5.0},
-    "openai/gpt-4o": {"input": 5.0, "output": 15.0},
-    "openai/gpt-4o-mini": {"input": 0.6, "output": 2.4},
-    "openai/o3-mini": {"input": 1.1, "output": 4.4},
-    "openai/gpt-5.5": {"input": 5.0, "output": 30.0},
-    "openai/gpt-5.4": {"input": 2.5, "output": 15.0},
-    "openai/gpt-5.4-pro": {"input": 30.0, "output": 180.0},
-    "openai/gpt-5.4-mini": {"input": 0.75, "output": 4.5},
-    "openai/gpt-5.4-nano": {"input": 0.05, "output": 0.4},
-    "openai/gpt-5-mini": {"input": 0.25, "output": 2.0},
-    "openai/gpt-5-nano": {"input": 0.05, "output": 0.4},
+    entry.id: {
+        "input": entry.input_price_per_million,
+        "output": entry.output_price_per_million,
+    }
+    for entry in MODEL_CATALOG
 }
 
 
@@ -181,29 +132,6 @@ async def async_get_provider_model_catalogs(
     """Return provider model catalogs using async call shape."""
     del session, user_id, org_id
     return get_provider_model_catalogs()
-
-
-async def _async_load_skill_routing_row(
-    session: AsyncSession,
-    skill_name: str,
-) -> dict[str, str | None] | None:
-    try:
-        row = (
-            await session.execute(
-                text(
-                    """
-                    SELECT thinking_tier
-                    FROM skills
-                    WHERE name = :name AND NOT archived
-                    LIMIT 1
-                    """
-                ),
-                {"name": skill_name},
-            )
-        ).mappings().first()
-        return dict(row) if row else None
-    except Exception:
-        return None
 
 
 async def async_resolve_effective_org_id(
@@ -271,7 +199,11 @@ async def async_resolve_provider_selection(
             config = (org_row or {}).get("memory_model_config") or {}
             org_provider = (config.get("default_provider") or "").strip().lower()
             if org_provider in DEFAULT_PROVIDER_MODELS:
-                return ProviderResolution(provider=normalize_default_provider(org_provider), source="org_default_provider", explicit=True)
+                return ProviderResolution(
+                    provider=normalize_runtime_provider(org_provider),
+                    source="org_default_provider",
+                    explicit=True,
+                )
     except Exception:
         pass
 
@@ -330,6 +262,35 @@ def required_openai_auth_mode(model: str | None) -> str | None:
             value = value[len(prefix):]
             break
     return "chatgpt" if value == "gpt-5.5" or value.startswith("gpt-5.6") else None
+
+
+def get_model_catalog_contract(
+    *,
+    workspace_default: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return the provider-aware model contract served to runtime pickers."""
+
+    canonical_workspace_default = canonical_catalog_model_id(workspace_default)
+    return [
+        {
+            "id": entry.id,
+            "label": entry.label,
+            "provider": entry.provider,
+            "description": entry.description,
+            "supported_effort_tiers": list(entry.supported_effort_tiers),
+            "auth_requirement": (
+                "chatgpt"
+                if required_openai_auth_mode(entry.id) == "chatgpt"
+                else "api_key"
+            ),
+            "availability_fallback": entry.availability_fallback,
+            "default_provenance": {
+                "provider_default": entry.provider_default,
+                "workspace_default": entry.id == canonical_workspace_default,
+            },
+        }
+        for entry in MODEL_CATALOG
+    ]
 
 
 def infer_provider_from_model(model: str | None, default: str | None = None) -> str:
@@ -447,139 +408,6 @@ async def async_get_default_thinking(
     return DEFAULT_THINKING_TIER
 
 
-def resolve_skill_runtime(
-    skill_name: str,
-    *,
-    user_id: str | None = None,
-    org_id: str | None = None,
-    preferred_provider: str | None = None,
-) -> SkillRuntimeConfig:
-    """Resolve the native runtime configuration for a skill."""
-    provider = resolve_default_provider(
-        user_id=user_id,
-        org_id=org_id,
-        fallback=preferred_provider,
-        preferred_provider=preferred_provider,
-    )
-    thinking_tier = "medium"
-    model_name = get_default_model(
-        provider,
-        include_provider_prefix=False,
-        user_id=user_id,
-        org_id=org_id,
-    )
-    reasoning_effort = thinking_tier if thinking_tier in EFFORT_TIER_SET else "medium"
-
-    return SkillRuntimeConfig(
-        provider=provider,
-        model_name=model_name,
-        reasoning_effort=reasoning_effort,
-        thinking_tier=thinking_tier,
-    )
-
-
-async def async_resolve_skill_runtime(
-    session: AsyncSession,
-    skill_name: str,
-    *,
-    user_id: str | None = None,
-    org_id: str | None = None,
-    preferred_provider: str | None = None,
-) -> SkillRuntimeConfig:
-    """Resolve the native runtime configuration for a skill using an async session."""
-    provider = await async_resolve_default_provider(
-        session,
-        user_id=user_id,
-        org_id=org_id,
-        fallback=preferred_provider,
-        preferred_provider=preferred_provider,
-    )
-    row = await _async_load_skill_routing_row(session, skill_name) or {}
-    thinking_tier = row.get("thinking_tier") or "medium"
-    model_name = await async_get_default_model(
-        session,
-        provider,
-        include_provider_prefix=False,
-        user_id=user_id,
-        org_id=org_id,
-    )
-    reasoning_effort = thinking_tier if thinking_tier in EFFORT_TIER_SET else "medium"
-
-    return SkillRuntimeConfig(
-        provider=provider,
-        model_name=model_name,
-        reasoning_effort=reasoning_effort,
-        thinking_tier=thinking_tier,
-    )
-
-
-def resolve_skill_routing_profile(
-    skill_name: str,
-    *,
-    user_id: str | None = None,
-    org_id: str | None = None,
-    preferred_provider: str | None = None,
-) -> SkillRoutingProfile:
-    """Return the raw skill routing profile for marketplace scoring."""
-    del user_id, org_id, preferred_provider
-    thinking_tier = "medium"
-    return SkillRoutingProfile(
-        skill_name=skill_name,
-        reasoning_effort=thinking_tier if thinking_tier in EFFORT_TIER_SET else "medium",
-        thinking_tier=thinking_tier,
-    )
-
-
-async def async_resolve_skill_routing_profile(
-    session: AsyncSession,
-    skill_name: str,
-) -> SkillRoutingProfile:
-    """Return the raw skill routing profile using an async session."""
-    row = await _async_load_skill_routing_row(session, skill_name) or {}
-    thinking_tier = row.get("thinking_tier") or "medium"
-    return SkillRoutingProfile(
-        skill_name=skill_name,
-        reasoning_effort=thinking_tier if thinking_tier in EFFORT_TIER_SET else "medium",
-        thinking_tier=thinking_tier,
-    )
-
-
-def resolve_skill_model(
-    skill_name: str,
-    *,
-    user_id: str | None = None,
-    org_id: str | None = None,
-    preferred_provider: str | None = None,
-) -> tuple[str, str]:
-    """Resolve (provider/model, thinking) from skill runtime settings."""
-    runtime = resolve_skill_runtime(
-        skill_name,
-        user_id=user_id,
-        org_id=org_id,
-        preferred_provider=preferred_provider,
-    )
-    return _prefix_model(runtime.provider, runtime.model_name), runtime.reasoning_effort
-
-
-async def async_resolve_skill_model(
-    session: AsyncSession,
-    skill_name: str,
-    *,
-    user_id: str | None = None,
-    org_id: str | None = None,
-    preferred_provider: str | None = None,
-) -> tuple[str, str]:
-    """Resolve (provider/model, thinking) from skill runtime settings using an async session."""
-    runtime = await async_resolve_skill_runtime(
-        session,
-        skill_name,
-        user_id=user_id,
-        org_id=org_id,
-        preferred_provider=preferred_provider,
-    )
-    return _prefix_model(runtime.provider, runtime.model_name), runtime.reasoning_effort
-
-
 def normalize_model_name(model: str | None) -> str:
     """Normalize a model string to the canonical priced identifier."""
     if not model:
@@ -590,35 +418,26 @@ def normalize_model_name(model: str | None) -> str:
     if "gpu_server" in lower or "local" in lower or value.startswith("brain.platform.gpu/"):
         return "local"
 
-    if value.startswith("anthropic:"):
-        return f"anthropic/{value[len('anthropic:'):]}"
-    if value.startswith("openai:"):
-        return f"openai/{value[len('openai:'):]}"
-
-    for prefix in ("anthropic/", "openai/"):
-        if value.startswith(prefix):
-            return value
-
-    if value in OPENAI_MODEL_ALIASES:
-        return f"openai/{value}"
-
-    for provider, model_options in PROVIDER_MODEL_OPTIONS.items():
-        if value in model_options:
-            return f"{provider}/{value}"
+    catalog_id = canonical_catalog_model_id(value)
+    if catalog_id:
+        return catalog_id
+    explicitly_prefixed = value.replace(":", "/", 1)
+    if explicitly_prefixed.startswith(("anthropic/", "openai/")):
+        return explicitly_prefixed
 
     if lower.startswith("claude-"):
+        if "fable" in lower:
+            return "anthropic/claude-fable-5"
         if "opus" in lower:
-            return "anthropic/claude-opus-4-6"
+            return "anthropic/claude-opus-5"
         if "haiku" in lower:
             return "anthropic/claude-haiku-4-5"
         if "sonnet" in lower:
-            return "anthropic/claude-sonnet-4-6"
-    if "gpt-4o-mini" in lower:
-        return "openai/gpt-4o-mini"
-    if "gpt-4o" in lower:
-        return "openai/gpt-4o"
+            return "anthropic/claude-sonnet-5"
     if "gpt-5.5" in lower:
         return "openai/gpt-5.5"
+    if "gpt-5.6-sol" in lower:
+        return "openai/gpt-5.6-sol"
     if "gpt-5.4-mini" in lower:
         return "openai/gpt-5.4-mini"
     if "gpt-5.4-nano" in lower:
@@ -631,8 +450,6 @@ def normalize_model_name(model: str | None) -> str:
         return "openai/gpt-5-mini"
     if "gpt-5-nano" in lower:
         return "openai/gpt-5-nano"
-    if "o3-mini" in lower:
-        return "openai/o3-mini"
     return "openai/gpt-5.5"
 
 

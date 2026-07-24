@@ -451,6 +451,7 @@
     mode: cortex.executionProfile,
     model: cortex.model,
     effort: cortex.effortLevel,
+    modelCatalog: cortex.modelCatalog,
   })}
   onSettingsChange={(key, nextValue) =>
     applyRunSetting(key, nextValue, {

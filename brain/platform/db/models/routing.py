@@ -65,7 +65,6 @@ class RoutingDecision(Base, CreatedAtMixin):
     decision_mode: Mapped[str] = mapped_column(Text, nullable=False)
     selected_provider: Mapped[str] = mapped_column(String(32), nullable=False)
     selected_model: Mapped[str] = mapped_column(String(120), nullable=False)
-    selected_reasoning_effort: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     inputs: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict)
     candidate_scores: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list)
     constraints: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict)

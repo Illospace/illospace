@@ -27,6 +27,22 @@ class RuntimeOption(BaseModel):
     group: str | None = None
 
 
+class RuntimeModelDefaultProvenance(BaseModel):
+    provider_default: bool = False
+    workspace_default: bool = False
+
+
+class RuntimeModelCatalogEntry(BaseModel):
+    id: str
+    label: str
+    provider: Literal["openai", "anthropic"]
+    description: str
+    supported_effort_tiers: list[Literal["none", "low", "medium", "high", "xhigh"]]
+    auth_requirement: Literal["chatgpt", "api_key"]
+    availability_fallback: str | None = None
+    default_provenance: RuntimeModelDefaultProvenance
+
+
 class RuntimeConnectionRead(BaseModel):
     status: ConnectionStatus
     setup_required: bool
@@ -41,7 +57,7 @@ class RuntimeConnectionRead(BaseModel):
 class RuntimeModelsRead(BaseModel):
     default: str
     thinking: Literal["none", "low", "medium", "high", "xhigh"] = "high"
-    options: list[RuntimeOption]
+    catalog: list[RuntimeModelCatalogEntry]
     thinking_options: list[RuntimeOption] = Field(default_factory=list)
 
 

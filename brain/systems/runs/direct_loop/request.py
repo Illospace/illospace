@@ -15,7 +15,7 @@ _PROMPT_CACHE_KEY_DIGEST_LEN = 24
 _PROMPT_CACHE_KEY_PREFIX = "illo"
 
 
-def normalize_model_name(model: str) -> str:
+def strip_provider_prefix(model: str) -> str:
     """Strip provider prefixes before passing model names to provider SDKs."""
 
     for prefix in ("anthropic/", "openai/", "anthropic:", "openai:"):
@@ -169,7 +169,7 @@ def get_extended_prompt_cache_retention(model: str) -> str | None:
     never getting extended retention anyway.
     """
 
-    normalized = normalize_model_name(model)
+    normalized = strip_provider_prefix(model)
     if required_openai_auth_mode(normalized) == "chatgpt":
         return None
     supported_prefixes = (

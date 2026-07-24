@@ -30,7 +30,7 @@ from brain.systems.runs.direct_loop.final_reply_evidence import (
     FinalReplyEvidence,
     ToolResultEvidence,
 )
-from brain.systems.runs.direct_loop.request import build_api_request, normalize_model_name
+from brain.systems.runs.direct_loop.request import build_api_request, strip_provider_prefix
 from brain.systems.runs.status import RunStatus
 from brain.systems.sessions import _content_to_dicts
 
@@ -826,7 +826,7 @@ def review_candidate_final_reply(
     llm=None,
     model: str | None = None,
     session_id: str | None = None,
-    normalize_model: Callable[[str], str] = normalize_model_name,
+    normalize_model: Callable[[str], str] = strip_provider_prefix,
     init_llm: Callable = _init_llm,
     build_request: Callable = build_api_request,
     extract_text: Callable = _extract_text,

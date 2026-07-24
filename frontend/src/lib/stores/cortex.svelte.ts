@@ -36,6 +36,7 @@ import { wsClient } from '$lib/stores/ws.svelte';
 import { ui } from '$lib/stores/ui.svelte';
 import { bloop, ding, statusChime } from '$lib/utils/sounds';
 import type { TeamMember } from '$lib/utils/attractors';
+import type { RuntimeModelCatalogEntry } from '$lib/types/runtimeSettings';
 import { getRunDecision } from '$lib/utils/backgroundRun';
 import {
   browserCommandPayload,
@@ -121,6 +122,7 @@ class CortexStore {
   view = $state<'canvas' | 'list'>('canvas');
   executionProfile = $state<CortexExecutionProfile>('fast');
   model = $state<string>('openai/gpt-5.6-sol');
+  modelCatalog = $state<RuntimeModelCatalogEntry[]>([]);
   effortLevel = $state<CortexEffortLevel>('xhigh');
   constellationMode = $state(false);
   canvasOpen = $state(false);
@@ -224,6 +226,13 @@ class CortexStore {
     if (typeof localStorage !== 'undefined') {
       persistRunSettings(localStorage, { model: this.model });
     }
+    const catalogEntry = this.modelCatalog.find((entry) => entry.id === this.model);
+    if (
+      catalogEntry &&
+      !catalogEntry.supported_effort_tiers.includes(this.effortLevel)
+    ) {
+      this.setEffortLevel(catalogEntry.supported_effort_tiers[0] || 'none');
+    }
   }
 
   setEffortLevel(level: CortexEffortLevel) {
@@ -233,13 +242,36 @@ class CortexStore {
     }
   }
 
-  applyWorkspaceRunDefaults(model: string, effortLevel: unknown) {
-    if (typeof localStorage === 'undefined') return;
-    if (localStorage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model) === null) {
+  applyWorkspaceRunDefaults(
+    model: string,
+    effortLevel: unknown,
+    modelCatalog: RuntimeModelCatalogEntry[] = [],
+  ) {
+    this.modelCatalog = modelCatalog;
+    if (typeof localStorage === 'undefined') {
       this.model = this._normalizeModel(model);
+      this.effortLevel = this._normalizeEffortLevel(effortLevel);
+      return;
+    }
+    const storedModel = localStorage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model);
+    const selectedModelIsCataloged = modelCatalog.some(
+      (entry) => entry.id === this.model,
+    );
+    if (storedModel === null || (modelCatalog.length > 0 && !selectedModelIsCataloged)) {
+      this.model = this._normalizeModel(model);
+      if (storedModel !== null) {
+        persistRunSettings(localStorage, { model: this.model });
+      }
     }
     if (localStorage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.effortLevel) === null) {
       this.effortLevel = this._normalizeEffortLevel(effortLevel);
+    }
+    const catalogEntry = modelCatalog.find((entry) => entry.id === this.model);
+    if (
+      catalogEntry &&
+      !catalogEntry.supported_effort_tiers.includes(this.effortLevel)
+    ) {
+      this.setEffortLevel(catalogEntry.supported_effort_tiers[0] || 'none');
     }
   }
 
