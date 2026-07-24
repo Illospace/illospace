@@ -2752,3 +2752,30 @@ def test_finalize_cycle_run_from_run_skips_terminal_runs(monkeypatch):
 
     assert cycle_run.status == "completed"
     assert cycle.last_status is None
+
+
+def test_cycle_run_model_policy_ignores_live_cycle_when_snapshot_pins_a_model():
+    """A cleared cycle whose bound revision still pins a model keeps the pin.
+
+    This is why migration 0039 records a pin-free revision: clearing
+    `cycles.model_override` alone does not change what a run resolves, because
+    routing reads the revision snapshot bound to the run.
+    """
+    cycle = Cycle()
+    cycle.model_override = None
+    cycle.thinking_override = "low"
+    run = CycleRun()
+    run.context_snapshot = {
+        "revision": {"model_override": "gpt-5.4-mini", "thinking_override": "low"}
+    }
+
+    assert service._cycle_run_model_policy(cycle, run) == {
+        "model": "openai/gpt-5.4-mini",
+        "thinking": "low",
+    }
+
+    run.context_snapshot = {
+        "revision": {"model_override": None, "thinking_override": "low"}
+    }
+
+    assert service._cycle_run_model_policy(cycle, run) == {"thinking": "low"}
