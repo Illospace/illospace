@@ -31,7 +31,7 @@ state; this section is the record of what actually landed. Read this first.
 | 3 | #488 | Caller-suppliable `effort` on headless asks (typed param, not metadata, so routing cannot be injected); skill-anchored runs fall back to `skills.thinking_tier` |
 | 4 | #492 | fast/deep retired: central admission coercion turns any inbound `deep` into `fast` with a `deep_run_coerced` log; composer Mode group removed; model/effort default to a **workspace-default sentinel** that omits the keys so org defaults apply |
 | — | #491 | Generic worker join primitive (`run.worker_continuation_queued`), opt-in per spawn via `join_parent` — the replacement for deep's fan-out → join → synthesize |
-| 5 | #482 | Retired `DeepRecipe`, `ScoutRecipe`, phase barriers, their registrations/tests/mocks, and deep/scout presentation branches; retained permanent admission coercion plus legacy enum values for historical rows; preserved metadata-requested verification modes |
+| 5 | #482 | Retired `DeepRecipe`, `ScoutRecipe`, phase barriers, their registrations/tests/mocks, and deep/scout presentation branches; retained permanent admission coercion plus legacy enum values for historical rows; left verification code in place pending a product decision, with no live consumer |
 | 6 | #490 | One provider-aware catalog owner (`brain/platform/model_catalog.py`) replacing four drifted lists; dead marketplace/resolvers deleted; `normalize_model_name` name collision resolved; migration `0040` |
 | 7 | #493 | Budget visibility from the real `agent_api_calls` ledger (the audit endpoint had been summing a `metadata->usage` key nothing writes); `effort` column added, migration `0041` |
 
@@ -187,37 +187,22 @@ A returning user's stored picks also survive any later org-default change.
 The fix (Slice 4) is a "workspace default" sentinel state that omits the keys
 unless the human explicitly picks a model/effort.
 
-### Finding 3 — Fast/Deep Selects The Loop, Not The Model
+### Finding 3 — Fast/Deep Selected The Loop, Not The Model (Historical)
 
-`execution_profile` selects the run recipe. Resolution: `profile_from_metadata`
-(`work_intake.py:205-217`) → `RunProfile.FAST|DEEP`
-(`brain/systems/runs/domain.py:13-15`) → recipe dispatch keyed on the stored
-**recipe** (`brain/systems/runs/engine.py:330-334`) — note a `recipe` metadata
-key overrides the profile independently (`work_intake.py:220-227`):
+Before Slice 5, `execution_profile` selected the run recipe rather than the
+model or thinking tier. `fast` resolved to the direct, streamed `FastRecipe`;
+`deep` resolved to the now-deleted `DeepRecipe`, which planned scout and worker
+children, synthesized their output, and was the only live consumer of blocking
+verification and phase-specific tool policies. The frontend Mode toggle and
+the idea self-critique audit endpoint were the two live `deep` senders found in
+the original analysis.
 
-- `fast` → `FastRecipe` (`recipes/fast.py:128`): direct single-session loop,
-  live streamed reply. This is what everything actually uses.
-- `deep` → `DeepRecipe` (`recipes/deep.py:90`): plans a run graph (scout node,
-  worker nodes, coordinator synthesis, phase barriers), waits for child
-  completion and synthesizes in-run (`recipes/deep.py:465`), applies blocking
-  verification (`verification/policy.py:23`, consumed only by
-  `recipes/deep.py:535`), and runs phase-specific tool policies (synthesis is
-  toolless with `max_turns=2`, `recipes/deep.py:603`).
-
-It does **not** change model or thinking. Live `deep` senders are exactly two:
-the frontend composer Mode toggle
-(`frontend/src/lib/features/composer/domain/runSettings.ts:10-23`, default
-`fast`; mode display also in `ThreadStageScreen.svelte:399,970`) and the idea
-self-critique audit endpoint (`app/api/routers/cortex/_misc.py:850`). Every
-backend sender hardcodes `"fast"` (`external_agents/service.py:1648`,
-`inbound/service.py:1072,1256`, `slack/triggers.py:52`, `onboarding.py:101`,
-`jobs/pipelines/aws_health_scan.py:82`), and chantier continuation propagates
-the source run's profile forward (`chantier_continuation.py:267-276`).
-`agent_runs.profile`/`.recipe` are the run-type discriminator columns
-(`agent_run.py:82-83`); there is no dedicated `execution_profile` column and
-no pydantic field — the value rides free-form metadata, e.g. through `/notify`
-(`app/api/routers/cortex/_ideas.py:847`), so old clients can keep sending it
-and retirement needs an admission-side coercion, not just sender cleanup.
+After Slice 5, only `fast` and `worker` are registered recipes. Admission
+coerces a `deep` profile and either a `deep` or `scout` recipe to `fast`, while
+the legacy enum values remain readable for historical rows. The sender
+branches identified above were removed. `agent_runs.profile` and `.recipe`
+remain the stored run-type discriminators, and this routing still does not
+select a model or thinking tier.
 
 One whole parallel resolver is dead code referenced only by the first test in
 one file: `run_profile_policy` / `select_run_runtime` / `RunProfilePolicy` /
@@ -627,7 +612,8 @@ Shipped after Reda's provider-genericity direction (2026-07-24):
   recipe tests, and frontend presentation/mock branches; updated fast guidance
   to use joined worker continuations.
 - Kept admission coercion permanently, retained legacy enum values for stored
-  deep/scout rows, and preserved explicit metadata-requested verification modes.
+  deep/scout rows, and left the verification package in place pending a product
+  decision. Verification metadata and modes currently have no live consumer.
 
 ### Slice 6 — Stale Model Code Cleanup + Catalog Contract (SHIPPED, #490)
 

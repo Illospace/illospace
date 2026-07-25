@@ -458,6 +458,28 @@ def test_deep_recipe_metadata_is_coerced_independently_with_structured_source_lo
     assert "source=notify" in record.getMessage()
 
 
+def test_scout_recipe_metadata_uses_retired_recipe_coercion_log(caplog):
+    from brain.systems.runs.domain import RunProfile, RunRecipe
+    from brain.systems.runs.work_intake import recipe_for_profile
+
+    with caplog.at_level("WARNING", logger="work_intake"):
+        recipe = recipe_for_profile(
+            RunProfile.FAST,
+            {
+                "recipe": "scout",
+                "work_intake": {"source": "stale-client"},
+            },
+        )
+
+    assert recipe is RunRecipe.FAST
+    record = next(record for record in caplog.records if record.event == "deep_run_coerced")
+    assert record.routing_source == "stale-client"
+    assert record.routing_field == "recipe"
+    assert record.requested_value == "scout"
+    assert record.coerced_value == "fast"
+    assert "retired scout run recipe" in record.getMessage()
+
+
 def test_cortex_thread_binding_compatibility_shell_is_removed():
     assert not Path("brain/systems/runs/cortex/thread_binding.py").exists()
 

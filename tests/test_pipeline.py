@@ -72,6 +72,63 @@ async def test_historical_deep_profile_and_scout_recipe_rows_remain_readable(ses
     ]
 
 
+async def test_scout_metadata_is_admitted_as_fast_and_executes_registered_recipe(
+    session_factory,
+    monkeypatch,
+):
+    from brain.systems.runs.domain import RunProfile, RunRecipe
+    from brain.systems.runs.engine import AsyncAgentRunEngine, RunRecipeResult
+    from brain.systems.runs.recipes import default_recipes
+    from brain.systems.runs.recipes.fast import FastRecipe
+    from brain.systems.runs.status import RunStatus
+    from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
+
+    executed_recipes = []
+
+    async def execute_fast(_self, runtime):
+        executed_recipes.append(runtime.request.normalized_recipe)
+        return RunRecipeResult(output="Scout request reached fast.")
+
+    monkeypatch.setattr(FastRecipe, "execute", execute_fast)
+    session = session_factory()
+    admission = await admit_work(
+        session,
+        WorkIntakeEvent(
+            source="chat",
+            event_type="chat.room_message_mention",
+            org_id="org-1",
+            actor={"id": "user-1", "org_id": "org-1", "internal": False},
+            target={"conversation_id": "conv-1"},
+            payload={
+                "message": "Handle this stale scout request.",
+                "metadata": {
+                    "recipe": "scout",
+                    "chat_trigger": {
+                        "conversation_id": "conv-1",
+                        "message_id": 22,
+                    },
+                },
+            },
+        ),
+    )
+
+    assert admission.ok is True
+    row = await session.get(AgentRunRow, admission.run_id)
+    assert row is not None
+    assert (row.profile, row.recipe) == (
+        RunProfile.FAST.value,
+        RunRecipe.FAST.value,
+    )
+
+    completed = await AsyncAgentRunEngine(
+        session,
+        recipes=default_recipes(),
+    ).run_existing(admission.run_id)
+
+    assert completed.status is RunStatus.COMPLETED
+    assert executed_recipes == [RunRecipe.FAST]
+
+
 async def test_child_run_can_use_headless_thread_without_bypassing_store(session_factory):
     from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
     from brain.systems.runs.store import AsyncAgentRunStore
@@ -108,6 +165,7 @@ async def test_child_run_can_use_headless_thread_without_bypassing_store(session
     await session.commit()
 
     assert same_child.id == child.id
+    assert child.root_run_id == parent.id
     rows = (await session.scalars(select(AgentRunRow).order_by(AgentRunRow.id.asc()))).all()
     assert [row.thread_id for row in rows] == ["idea-1", "headless-worker:1:report"]
     assert rows[1].metadata_["headless"] is True
