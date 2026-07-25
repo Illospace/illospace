@@ -1,8 +1,8 @@
 # PRD: Model And Effort Routing Layer
 
-Status: approved by Reda 2026-07-24 (decisions 1–4 resolved, see Decisions);
-code + production audit complete 2026-07-24; adversarial cross-family review
-(Codex, xhigh) folded 2026-07-24; Slice 1 in progress
+Status: SHIPPED — all slices deployed to illo-dev 2026-07-25 except Slice 5,
+which is tracked in issue #482 and gated on a quiet coercion-log window. See
+"Implementation Status" immediately below for the per-slice record.
 Date: 2026-07-24
 Owner: Reda
 Related docs:
@@ -13,9 +13,51 @@ Related docs:
 
 ## Implementation Status
 
-Nothing is implemented yet. The slices in "Implementation Slices" ship as
-separate PRs after this PRD is approved. Per house convention, each shipped
-slice adds a status subsection here.
+**Every slice is shipped and deployed to illo-dev except Slice 5.** The design
+sections below describe the intended end state; this section is the record of
+what actually landed and what is left. Read this first.
+
+### Shipped And Deployed (2026-07-24 / 2026-07-25)
+
+| Slice | PR | What landed |
+|---|---|---|
+| 1 | #463 | Cycle `model_override`/`thinking_override` finally route scheduled runs, sourced from the run's bound revision snapshot; one canonical `EFFORT_TIERS` vocabulary + contract test; model-override validation at the shared cycle command layer; migration `0037` (which also merged two pre-existing alembic heads) |
+| 1.5 | #465 | One model: org default `openai/gpt-5.6-sol` in code and config (migration `0038`, which also cleared every cycle model pin); `required_openai_auth_mode` consolidated from three copies into one |
+| 1.6 | #466 | Provider-generic effort rendering: `brain/platform/effort.py` owns the canonical ladder and per-provider renderings; transports render at the request boundary (`xhigh → max` on Anthropic, `none` → omit) |
+| — | #467 | Cleared model pins in the **revision ledger**, not just the cycle row — without this, Slice 1's fix routed nothing |
+| — | #469 | Ship `provider-alert-severity.json` in the image (silent alerts channel) + a guard that fails if any `deploy/compose` runtime asset is missing a `COPY` |
+| — | #471 | Stop asking the Codex backend for `prompt_cache_retention`; every call had been paying a rejected round trip |
+| — | #472 | `ILLO_AGENT_RUNNER_CONCURRENCY` passed into the worker container (was unreachable); set to 10 in `.env` |
+| — | #486 | Worker restarts never leave a second worker behind; exactly-one-worker invariant asserted |
+| 2 | #489 | `spawn_worker` gains `effort` and `model` (bare provider name = that provider's default); child policy **materialized at spawn**; requested + effective routing recorded and echoed |
+| 3 | #488 | Caller-suppliable `effort` on headless asks (typed param, not metadata, so routing cannot be injected); skill-anchored runs fall back to `skills.thinking_tier` |
+| 4 | #492 | fast/deep retired: central admission coercion turns any inbound `deep` into `fast` with a `deep_run_coerced` log; composer Mode group removed; model/effort default to a **workspace-default sentinel** that omits the keys so org defaults apply |
+| — | #491 | Generic worker join primitive (`run.worker_continuation_queued`), opt-in per spawn via `join_parent` — the replacement for deep's fan-out → join → synthesize |
+| 6 | #490 | One provider-aware catalog owner (`brain/platform/model_catalog.py`) replacing four drifted lists; dead marketplace/resolvers deleted; `normalize_model_name` name collision resolved; migration `0040` |
+| 7 | #493 | Budget visibility from the real `agent_api_calls` ledger (the audit endpoint had been summing a `metadata->usage` key nothing writes); `effort` column added, migration `0041` |
+
+### Not Shipped
+
+**Slice 5 — remove the deep machinery (issue #482).** Its structural blocker is
+gone: #491 shipped the join primitive, so deleting deep no longer removes a
+capability. The remaining precondition is a **quiet window on the
+`deep_run_coerced` log**, which needs real elapsed time after #492's deploy.
+Check that log before proceeding; the deletion scope is in "Fast/Deep
+Deprecation Plan" below.
+
+### Corrections To Earlier Assumptions In This Document
+
+Two beliefs that shaped the original design turned out to be wrong, and the
+text below has been updated but is worth calling out:
+
+- **GPT-5.6 Sol is not slow.** A controlled A/B against the live backend showed
+  it equal to or faster than GPT-5.5 (2.2s vs 2.6s at medium, 1.7s vs 2.7s at
+  high on ~30k-token requests). An earlier reading that suggested otherwise
+  compared 5.5 on an idle system against 5.6-sol on a saturated one. Never
+  infer model speed from production averages spanning a config change —
+  workload mix and saturation dominate.
+- **Effort is not a latency knob.** Slow production calls were genuine
+  reasoning on heavy multi-turn work, not a tier problem.
 
 ## Problem Statement
 
@@ -538,7 +580,7 @@ Shipped after Reda's provider-genericity direction (2026-07-24):
 - Completeness contract test: every provider rendering must cover the full
   canonical ladder; native values pass through untranslated.
 
-### Slice 2 — spawn_worker Effort Overrides
+### Slice 2 — spawn_worker Effort Overrides (SHIPPED, #489)
 
 - Optional `model` + `effort` parameters on the tool schema; handler validates
   (catalog + tier set + provider-supported efforts) and merges field-by-field
@@ -558,7 +600,7 @@ Shipped after Reda's provider-genericity direction (2026-07-24):
   invalid model/effort rejected; cross-provider spawn resolves the right
   transport.
 
-### Slice 3 — Headless Ask Effort + Skill Tier Wiring
+### Slice 3 — Headless Ask Effort + Skill Tier Wiring (SHIPPED, #488)
 
 - Bridge ask schema (`app/api/schemas/external_agents.py`) gains an optional
   `effort` field; the route plumbs it; `create_headless_ask` builds its
@@ -572,7 +614,7 @@ Shipped after Reda's provider-genericity direction (2026-07-24):
 - Tests: effort passthrough; whitelist blocks non-routing overrides;
   skill-tier fallback ordering (explicit effort > skill tier > medium).
 
-### Slice 4 — Retire The Fast/Deep Mode Surface + Composer Defaults
+### Slice 4 — Retire The Fast/Deep Mode Surface + Composer Defaults (SHIPPED, #492)
 
 - Deprecation-plan steps 1–4: dead resolver deletion (first test only),
   central deep→fast coercion with logging, composer Mode removal (incl.
@@ -584,7 +626,7 @@ Shipped after Reda's provider-genericity direction (2026-07-24):
 - After this PR no surface can create a `deep` run (coercion guarantees it);
   recipes remain in-tree, unreachable, with the coercion log as the watchdog.
 
-### Slice 5 — Remove The Deep Machinery (gated: Open Question 1 + join primitive)
+### Slice 5 — Remove The Deep Machinery (NOT SHIPPED — issue #482)
 
 - Precondition A: quiet coercion log over an agreed window.
 - Precondition B: generalized worker join/continuation shipped (chantier
@@ -594,7 +636,7 @@ Shipped after Reda's provider-genericity direction (2026-07-24):
   simplification, frontend run-graph presentation cleanup, enum read
   tolerance for historical rows, nonterminal-deep drain, doc update.
 
-### Slice 6 — Stale Model Code Cleanup + Catalog Contract
+### Slice 6 — Stale Model Code Cleanup + Catalog Contract (SHIPPED, #490)
 
 - Delete the routing marketplace surface + its tests; drop
   `selected_reasoning_effort` (alembic, following the
@@ -613,7 +655,7 @@ Shipped after Reda's provider-genericity direction (2026-07-24):
   the current generation, including validated effort values (`max` vs
   `xhigh`) at implementation time.
 
-### Slice 7 — Run Budget Visibility (optional)
+### Slice 7 — Run Budget Visibility (SHIPPED, #493)
 
 - Aggregate from `agent_api_calls` via `token_usage.py` (the real ledger —
   not the unwritten `metadata->usage` key): worker results include child
@@ -626,6 +668,73 @@ Runtime rollout: the org-default and cycle-pin changes ship as migration `0038`
 rather than manual production writes. The one remaining runtime step is
 updating doc 1155 / cycle missions with the routing guidance (Illo-owned prose,
 versioned at runtime).
+
+## Operating Notes For Whoever Picks This Up
+
+Hard-won specifics that are not obvious from the code.
+
+### Where routing is decided now
+
+`agent_runs.model_policy` is still the single carrier (`{model, thinking}`).
+Precedence: explicit per-run declaration (composer pick, cycle override via
+revision snapshot, `spawn_worker` parameter, headless-ask effort) → skill tier
+where a run has a skill anchor → org `memory_model_config` → code default in
+`DEFAULT_PROVIDER_MODELS`. Requested routing with provenance is recorded at
+admission; effective post-fallback routing is recorded at execution.
+
+### Traps that have already bitten
+
+- **Cycles route from the revision snapshot, not the live cycle row.** Changing
+  `cycles.model_override` alone changes nothing for future runs — the newest
+  `cycle_revisions` row is what a run snapshots. Migration `0039` exists purely
+  because `0038` missed this.
+- **Verify the consumer, not the sender.** Two separate bugs this cycle passed
+  their own tests while routing nothing, because the fix touched the value the
+  sender holds rather than the one the consumer reads. When changing routing,
+  assert on the resulting `AgentRunRequest`/run row, never on the event payload.
+- **Alembic heads.** This repo has had multiple two-head incidents, including
+  two in this effort (two `0036` heads found in production, and Slices 6 and 7
+  independently claiming `0040`). After adding any migration run
+  `venv/bin/python -m alembic heads` and expect exactly one. A guard test also
+  checks the docstring `Revision ID:` matches the identifier.
+- **The Codex backend is not the OpenAI Responses API.** It rejects
+  `prompt_cache_retention` and requires `stream=True`. Only `gpt-5.5` and
+  `gpt-5.6*` route there (`required_openai_auth_mode`); anything else needs an
+  API key, which is a second reason not to pin cheap models per lane.
+- **`upgrade.sh` does not recreate `slack-connector`** (it is on the `slack`
+  compose profile), so the Slack lane silently runs old code until recreated by
+  hand. That is how #469's packaging bug stayed latent for weeks.
+- **Frontend changes need `node_modules`.** `npm run check` cannot run without
+  it, and a type error shipped to CI once because of that. The main repo
+  checkout has one; symlink it into a worktree to verify locally.
+
+### Verifying a routing change on illo-dev
+
+Read-only inspection recipes live in the deploy notes. The quickest end-to-end
+receipt is a naturally-due cycle: bump nothing, wait for the next fire, then
+check the resulting run's `model_policy` and the model actually used:
+
+```sql
+SELECT cr.id, ar.id, ar.model_policy, ar.status
+FROM cycle_runs cr JOIN agent_runs ar ON ar.id = cr.run_id
+WHERE cr.cycle_id = 8 ORDER BY cr.id DESC LIMIT 1;
+
+SELECT DISTINCT model FROM agent_api_calls WHERE run_id = <that run>;
+```
+
+Prefer watching a naturally-due cycle over bumping `next_run_at`, which risks a
+catch-up flood.
+
+### Deploy shape
+
+`git pull && ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_SECONDS=300
+deploy/scripts/upgrade.sh --build --no-pull`, then recreate `slack-connector`
+by hand. If the worker drain times out the script now refuses the swap, removes
+the temporary handoff worker and exits non-zero, leaving exactly one worker on
+the **old** code — finish with `docker rm -f illospace-worker-1` and
+`compose up -d --no-deps worker`. Runs interrupted that way are requeued by the
+stale-run reaper (`agent_run_stale_interrupted_requeued`, 300s threshold);
+that path was exercised repeatedly and lost no work.
 
 ## Out Of Scope
 
