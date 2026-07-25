@@ -81,6 +81,33 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
         "retry_policy": {"max_attempts": 2, "backoff_seconds": 0},
     },
     {
+        "job_key": "uwear_staging_promotion_pr",
+        "family": "uwear_staging_promotion_pr",
+        "program_key": "uwear_staging_promotion_pr",
+        "handler_kind": CATALOG_HANDLER_KIND,
+        "handler_ref": "brain.app.scheduler.programs:uwear_staging_promotion_pr",
+        "cron_expr": "0 * * * *",
+        "timezone": "UTC",
+        "default_payload": {
+            "name": "Uwear Staging Promotion PR",
+            "description": "Hourly staging-to-main promotion pull request reconciliation",
+            "action_manifest": ["create_github_pull_request"],
+        },
+        "task_contract": {
+            "memory_scope": {"visibility": "system"},
+            "allowed_actions": ["scheduler.run", "create_github_pull_request"],
+            "output_channel": "scheduler",
+            "success_criteria": [
+                "Each configured repository with staging ahead has one open promotion pull request"
+            ],
+        },
+        "priority": 90,
+        "max_concurrency": 1,
+        "timeout_seconds": 300,
+        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+        "misfire_policy": "skip",
+    },
+    {
         "job_key": "uwear_aws_health_scan",
         "family": "uwear_aws_health_scan",
         "program_key": "uwear_aws_health_scan",

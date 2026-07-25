@@ -18,6 +18,20 @@ from brain.systems.runs.tool_catalog.handlers.github import (
 
 
 _H = "brain.systems.runs.tool_catalog.handlers.github"
+_P = "brain.systems.cortex.project_context.github_promotion"
+
+
+def _promotion_read_patches():
+    return (
+        patch(
+            f"{_P}.async_compare_repo_branches",
+            new=AsyncMock(return_value={"ahead_by": 1, "commits": []}),
+        ),
+        patch(
+            f"{_P}.async_list_repo_pull_requests",
+            new=AsyncMock(return_value={"pull_requests": []}),
+        ),
+    )
 
 
 def _vault_patches(*, bound_env: dict, secrets: list, get_secret=None):
@@ -48,8 +62,9 @@ def test_create_github_pull_request_definition_and_registry_wiring():
     assert "REAL GitHub pull request" in description
     assert "public write" in description
     assert "never merges" in description
-    assert "Missions must restrict" in description
     assert "staging→main" in description
+    assert "configured Uwear repositories" in description
+    assert "non-draft" in description
     assert schema["required"] == ["repo", "base", "head", "title", "body"]
     assert schema["properties"]["draft"]["default"] is False
     assert name in {tool["name"] for tool in COORDINATOR_TOOLS}
@@ -83,15 +98,24 @@ async def test_create_github_pull_request_happy_path_opens_real_pull_request():
         bound_env={"GITHUB_TOKEN": "write-token"},
         secrets=[],
     )
-    with bind_agent_context({"user_id": "u", "org_id": "o"}), p1, p2, p3, patch(
-        f"{_H}.async_create_repo_pull_request",
-        new=AsyncMock(return_value=created),
-    ) as create:
+    compare, search = _promotion_read_patches()
+    with (
+        bind_agent_context({"user_id": "u", "org_id": "o"}),
+        p1,
+        p2,
+        p3,
+        compare,
+        search,
+        patch(
+            f"{_P}.async_create_repo_pull_request",
+            new=AsyncMock(return_value=created),
+        ) as create,
+    ):
         result = await _handle_create_github_pull_request(
             repo="https://github.com/uwear-ai/uwear-backend.git",
             base="main",
             head="staging",
-            title="Promote staging to main",
+            title="Staging → main promotion",
             body="Evergreen promotion pull request.",
         )
 
@@ -110,7 +134,7 @@ async def test_create_github_pull_request_happy_path_opens_real_pull_request():
         "uwear-ai/uwear-backend",
         base="main",
         head="staging",
-        title="Promote staging to main",
+        title="Staging → main promotion",
         body="Evergreen promotion pull request.",
         draft=False,
         token="write-token",
@@ -120,14 +144,14 @@ async def test_create_github_pull_request_happy_path_opens_real_pull_request():
 @pytest.mark.asyncio
 async def test_create_github_pull_request_returns_no_write_token():
     with patch(
-        f"{_H}.async_create_repo_pull_request",
+        f"{_H}.async_reconcile_promotion_pull_request",
         new=AsyncMock(),
-    ) as create:
+    ) as reconcile:
         result = await _handle_create_github_pull_request(
             repo="uwear-ai/uwear-backend",
             base="main",
             head="staging",
-            title="Promote staging to main",
+            title="Staging → main promotion",
             body="Evergreen promotion pull request.",
         )
 
@@ -135,7 +159,7 @@ async def test_create_github_pull_request_returns_no_write_token():
     assert payload["no_write_token"] is True
     assert payload["status_code"] == 401
     assert payload["repo"] == "uwear-ai/uwear-backend"
-    create.assert_not_awaited()
+    reconcile.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -144,20 +168,29 @@ async def test_create_github_pull_request_maps_no_commits_422():
         bound_env={"GITHUB_TOKEN": "write-token"},
         secrets=[],
     )
-    with bind_agent_context({"user_id": "u", "org_id": "o"}), p1, p2, p3, patch(
-        f"{_H}.async_create_repo_pull_request",
-        new=AsyncMock(
-            side_effect=GitHubConnectorError(
-                status_code=422,
-                message="Validation Failed: No commits between main and staging",
-            )
+    compare, search = _promotion_read_patches()
+    with (
+        bind_agent_context({"user_id": "u", "org_id": "o"}),
+        p1,
+        p2,
+        p3,
+        compare,
+        search,
+        patch(
+            f"{_P}.async_create_repo_pull_request",
+            new=AsyncMock(
+                side_effect=GitHubConnectorError(
+                    status_code=422,
+                    message="Validation Failed: No commits between main and staging",
+                )
+            ),
         ),
     ):
         result = await _handle_create_github_pull_request(
             repo="uwear-ai/uwear-backend",
             base="main",
             head="staging",
-            title="Promote staging to main",
+            title="Staging → main promotion",
             body="Evergreen promotion pull request.",
         )
 
@@ -174,23 +207,33 @@ async def test_create_github_pull_request_maps_already_exists_422():
         bound_env={"GITHUB_TOKEN": "write-token"},
         secrets=[],
     )
-    with bind_agent_context({"user_id": "u", "org_id": "o"}), p1, p2, p3, patch(
-        f"{_H}.async_create_repo_pull_request",
-        new=AsyncMock(
-            side_effect=GitHubConnectorError(
-                status_code=422,
-                message=(
-                    "Validation Failed: A pull request already exists for "
-                    "uwear-ai:staging: https://github.com/uwear-ai/uwear-backend/pull/841"
-                ),
-            )
+    compare, search = _promotion_read_patches()
+    with (
+        bind_agent_context({"user_id": "u", "org_id": "o"}),
+        p1,
+        p2,
+        p3,
+        compare,
+        search,
+        patch(
+            f"{_P}.async_create_repo_pull_request",
+            new=AsyncMock(
+                side_effect=GitHubConnectorError(
+                    status_code=422,
+                    message=(
+                        "Validation Failed: A pull request already exists for "
+                        "uwear-ai:staging: "
+                        "https://github.com/uwear-ai/uwear-backend/pull/841"
+                    ),
+                )
+            ),
         ),
     ):
         result = await _handle_create_github_pull_request(
             repo="uwear-ai/uwear-backend",
             base="main",
             head="staging",
-            title="Promote staging to main",
+            title="Staging → main promotion",
             body="Evergreen promotion pull request.",
         )
 
@@ -198,6 +241,43 @@ async def test_create_github_pull_request_maps_already_exists_422():
     assert payload["error"] == "pull_request_exists"
     assert payload["existing"] == 841
     assert payload["status_code"] == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"repo": "acme/widgets"}, "repository must be one of"),
+        ({"base": "release"}, "base must be 'main'"),
+        ({"head": "feature"}, "head must be 'staging'"),
+        ({"title": "Open my feature PR"}, "title must be 'Staging → main promotion'"),
+        ({"draft": True}, "draft must be false"),
+    ],
+)
+async def test_create_github_pull_request_rejects_non_promotion_writes(overrides, message):
+    arguments = {
+        "repo": "uwear-ai/uwear-backend",
+        "base": "main",
+        "head": "staging",
+        "title": "Staging → main promotion",
+        "body": "## Commits being promoted\n\n- Fix release issue (#475)",
+        "draft": False,
+        **overrides,
+    }
+    with (
+        patch(f"{_H}._github_token_candidates", new=AsyncMock()) as candidates,
+        patch(
+            f"{_H}.async_reconcile_promotion_pull_request",
+            new=AsyncMock(),
+        ) as reconcile,
+    ):
+        result = await _handle_create_github_pull_request(**arguments)
+
+    payload = json.loads(result)
+    assert payload["error"] == "promotion_pull_request_policy_violation"
+    assert message in payload["message"]
+    candidates.assert_not_awaited()
+    reconcile.assert_not_awaited()
 
 
 @pytest.mark.asyncio
