@@ -604,6 +604,9 @@ def test_manage_cycle_schema_matches_canonical_runtime_policy():
 
     assert "execution_mode" not in properties
     assert "reopen_archived" not in properties
+    assert "usage_summary" in properties["action"]["enum"]
+    assert properties["days"]["minimum"] == 1
+    assert properties["run_limit"]["maximum"] == 500
     assert "add_guidance" in properties["action"]["enum"]
     assert "add_output_target" in properties["action"]["enum"]
     assert properties["run_kind"]["enum"] == [

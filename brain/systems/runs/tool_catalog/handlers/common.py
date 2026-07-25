@@ -60,6 +60,11 @@ _ACTION_MANIFEST_TOOL_NAMES = action_manifest_tool_names()
 _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
     "manage_cycle": {
         "list": {"required": [], "optional": [], "effect": "read scheduled cycles"},
+        "usage_summary": {
+            "required": [],
+            "optional": ["id", "days", "run_limit"],
+            "effect": "read token and estimated-cost usage by cycle",
+        },
         "create": {
             "required": ["name", "prompt", "timezone", "schedule_expr or run_at"],
             "optional": ["enabled", "target_idea_id", "model_override", "thinking_override", "guidance", "rationale"],

@@ -173,6 +173,19 @@ async def test_audit_analyze_authorizes_and_projects_failed_thread_content():
         patch.object(_misc, "UnitOfWork", return_value=_Uow(session)),
         patch.object(_misc, "_a_require_idea_for_user", authorize),
         patch.object(_misc, "admit_work", side_effect=capture_admission),
+        patch.object(
+            _misc,
+            "async_summarize_runs_usage",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": run.id,
+                        "tokens_total": 12_345,
+                        "estimated_cost": 0.06789,
+                    }
+                ]
+            ),
+        ),
     ):
         result = await _misc.idea_audit_analyze(
             "idea-1",
@@ -189,6 +202,8 @@ async def test_audit_analyze_authorizes_and_projects_failed_thread_content():
     admitted_message = captured["event"].payload["message"]
     assert "raw-secret" not in admitted_message
     assert "temporary upstream problem" in admitted_message
+    assert "Total tokens: 12,345" in admitted_message
+    assert "Est cost: $0.0679" in admitted_message
 
 
 @pytest.mark.asyncio
@@ -301,3 +316,79 @@ async def test_audit_analysis_result_returns_typed_failure_without_diagnostics()
         "category": "upstream",
         "message": result["failure"]["message"],
     }
+
+
+@pytest.mark.asyncio
+async def test_audit_eval_returns_real_api_call_count_without_legacy_attempts_key():
+    from brain.app.api.routers.cortex import _misc
+
+    now = datetime.now(timezone.utc)
+    run = SimpleNamespace(
+        id=73,
+        status="completed",
+        input_message="Inspect the routing audit",
+        metadata_={},
+        completed_at=now,
+        created_at=now,
+    )
+    artifact = SimpleNamespace(
+        text="The routing audit is complete.",
+        created_at=now,
+    )
+
+    class EvalSession:
+        async def execute(self, _statement):
+            return _Rows([(run, artifact)])
+
+    request = SimpleNamespace(
+        json=AsyncMock(
+            return_value={
+                "proposal": {
+                    "type": "skill",
+                    "description": "Improve routing guidance",
+                    "recommendation": "Use the measured burn",
+                }
+            }
+        )
+    )
+
+    with (
+        patch.object(_misc, "UnitOfWork", return_value=_Uow(EvalSession())),
+        patch.object(
+            _misc,
+            "async_summarize_runs_usage",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": 73,
+                        "tokens_total": 2_500,
+                        "api_calls": 4,
+                    }
+                ]
+            ),
+        ),
+        patch(
+            "brain.platform.integrations.completions.simple_text_completion",
+            return_value=json.dumps(
+                {
+                    "score": 8,
+                    "task_solved": "yes",
+                    "output_better": "yes",
+                    "less_waste": "yes",
+                    "regression_risk": "low",
+                    "reasoning": "Measured routing should improve the proposal.",
+                }
+            ),
+        ),
+        patch(
+            "brain.platform.providers.model_policy.get_default_model",
+            return_value="openai/gpt-5.4",
+        ),
+    ):
+        result = await _misc.audit_eval(
+            request,
+            user={"id": "user-1", "org_id": "org-1"},
+        )
+
+    assert result["benchmarks"][0]["tokens"] == 2_500
+    assert result["benchmarks"][0]["api_calls"] == 4

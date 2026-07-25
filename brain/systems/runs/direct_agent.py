@@ -1694,6 +1694,7 @@ async def run_agent_async(
                             run_id=run_id,
                             turn=turn,
                             model=preferred_model,
+                            effort=thinking,
                             context_messages=len(state.messages),
                             system_prompt_chars=len(json.dumps(system)) if system else 0,
                             status="model_unavailable",
@@ -1749,7 +1750,7 @@ async def run_agent_async(
                     )
                     await _async_record_api_call(
                         session_id=session_id, run_id=run_id, turn=turn,
-                        model=model,
+                        model=model, effort=thinking,
                         context_messages=len(state.messages),
                         system_prompt_chars=len(json.dumps(system)) if system else 0,
                         status="context_overflow",
@@ -1815,7 +1816,7 @@ async def run_agent_async(
             # Per-call telemetry (fire-and-forget)
             await _async_record_api_call(
                 session_id=session_id, run_id=run_id, turn=turn,
-                model=model,
+                model=model, effort=thinking,
                 tokens_input=getattr(response.usage, "input_tokens", 0),
                 tokens_output=getattr(response.usage, "output_tokens", 0),
                 cache_read=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
@@ -2053,7 +2054,7 @@ async def run_agent_async(
             )
             await _async_record_api_call(
                 session_id=session_id, run_id=run_id, turn=0,
-                model=model, status="error", error=f"{e} | body={str(_body)[:200]}",
+                model=model, effort=thinking, status="error", error=f"{e} | body={str(_body)[:200]}",
             )
             return _make_result(
                 "",

@@ -14,6 +14,7 @@ def _api_call_params(
     run_id: int | None,
     turn: int,
     model: str,
+    effort: str | None,
     tokens_input: int,
     tokens_output: int,
     cache_read: int,
@@ -33,6 +34,7 @@ def _api_call_params(
         "turn": turn,
         "trace_id": trace_id_for_run_id(run_id),
         "model": model,
+        "effort": (str(effort).strip().lower() or None) if effort is not None else None,
         "ti": tokens_input,
         "to": tokens_output,
         "cr": cache_read,
@@ -51,6 +53,7 @@ async def async_record_api_call(
     run_id: int | None = None,
     turn: int = 0,
     model: str = "",
+    effort: str | None = None,
     tokens_input: int = 0,
     tokens_output: int = 0,
     cache_read: int = 0,
@@ -76,6 +79,7 @@ async def async_record_api_call(
             run_id=run_id,
             turn=turn,
             model=model,
+            effort=effort,
             tokens_input=tokens_input,
             tokens_output=tokens_output,
             cache_read=cache_read,
@@ -92,20 +96,20 @@ async def async_record_api_call(
             try:
                 await active_session.execute(sa_text(
                     "INSERT INTO agent_api_calls "
-                    "(session_id, run_id, trace_id, turn_number, model, tokens_input, tokens_output, "
+                    "(session_id, run_id, trace_id, turn_number, model, effort, tokens_input, tokens_output, "
                     "cache_read, cache_write, context_messages, system_prompt_chars, "
                     "status, stop_reason, latency_ms, error) "
-                    "VALUES (:sid, :did, :trace_id, :turn, :model, :ti, :to, :cr, :cw, :ctx, :spc, "
+                    "VALUES (:sid, :did, :trace_id, :turn, :model, :effort, :ti, :to, :cr, :cw, :ctx, :spc, "
                     ":status, :stop, :lat, :err)"
                 ), params)
             except SQLAlchemyError:
                 await active_session.rollback()
                 await active_session.execute(sa_text(
                     "INSERT INTO agent_api_calls "
-                    "(session_id, run_id, turn_number, model, tokens_input, tokens_output, "
+                    "(session_id, run_id, turn_number, model, effort, tokens_input, tokens_output, "
                     "cache_read, cache_write, context_messages, system_prompt_chars, "
                     "status, stop_reason, latency_ms, error) "
-                    "VALUES (:sid, :did, :turn, :model, :ti, :to, :cr, :cw, :ctx, :spc, "
+                    "VALUES (:sid, :did, :turn, :model, :effort, :ti, :to, :cr, :cw, :ctx, :spc, "
                     ":status, :stop, :lat, :err)"
                 ), params)
 

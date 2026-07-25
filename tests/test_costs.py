@@ -250,9 +250,10 @@ async def test_async_summarize_recent_run_usage_uses_async_session():
         target_ref={},
         model_policy={},
     )
-    call = SimpleNamespace(
+    low_call = SimpleNamespace(
         run_id=7,
         model="openai/gpt-5.4",
+        effort="low",
         api_calls=2,
         tokens_input=10,
         tokens_output=5,
@@ -260,14 +261,111 @@ async def test_async_summarize_recent_run_usage_uses_async_session():
         cache_write=1,
         last_call_at=created_at,
     )
+    high_call = SimpleNamespace(
+        run_id=7,
+        model="openai/gpt-5.4",
+        effort="high",
+        api_calls=1,
+        tokens_input=20,
+        tokens_output=10,
+        cache_read=0,
+        cache_write=0,
+        last_call_at=created_at,
+    )
 
     session = MagicMock()
     session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: [run]))
-    session.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: [call]))
+    session.execute = AsyncMock(
+        return_value=SimpleNamespace(all=lambda: [low_call, high_call])
+    )
 
     rows = await async_summarize_recent_run_usage(session, limit=10, org_id="org-1")
 
     assert rows[0]["id"] == 7
-    assert rows[0]["tokens_total"] == 15
-    assert rows[0]["api_calls"] == 2
+    assert rows[0]["tokens_input"] == 30
+    assert rows[0]["tokens_output"] == 15
+    assert rows[0]["tokens_total"] == 45
+    assert rows[0]["api_calls"] == 3
+    assert rows[0]["estimated_cost"] == 0.000296
     assert rows[0]["model_used"] == "openai/gpt-5.4"
+    assert rows[0]["by_effort"] == [
+        {
+            "effort": "high",
+            "api_calls": 1,
+            "tokens_input": 20,
+            "tokens_output": 10,
+            "tokens_total": 30,
+            "cache_read": 0,
+            "cache_write": 0,
+            "estimated_cost": 0.0002,
+        },
+        {
+            "effort": "low",
+            "api_calls": 2,
+            "tokens_input": 10,
+            "tokens_output": 5,
+            "tokens_total": 15,
+            "cache_read": 3,
+            "cache_write": 1,
+            "estimated_cost": 0.000096,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_summarize_run_trees_usage_includes_worker_descendants(monkeypatch):
+    from brain.systems.runs import token_usage
+
+    root = SimpleNamespace(id=70, root_run_id=70)
+    worker = SimpleNamespace(id=71, root_run_id=70)
+    session = MagicMock()
+    session.scalars = AsyncMock(
+        return_value=SimpleNamespace(all=lambda: [root, worker])
+    )
+
+    async def summarize(_session, runs):
+        assert [run.id for run in runs] == [70, 71]
+        return [
+            {
+                "id": 70,
+                "api_calls": 1,
+                "tokens_input": 100,
+                "tokens_output": 20,
+                "tokens_total": 120,
+                "cache_read": 0,
+                "cache_write": 0,
+                "estimated_cost": 0.001,
+                "by_effort": [],
+            },
+            {
+                "id": 71,
+                "api_calls": 2,
+                "tokens_input": 300,
+                "tokens_output": 80,
+                "tokens_total": 380,
+                "cache_read": 50,
+                "cache_write": 0,
+                "estimated_cost": 0.004,
+                "by_effort": [
+                    {
+                        "effort": "low",
+                        "api_calls": 2,
+                        "tokens_input": 300,
+                        "tokens_output": 80,
+                        "tokens_total": 380,
+                        "cache_read": 50,
+                        "cache_write": 0,
+                        "estimated_cost": 0.004,
+                    }
+                ],
+            },
+        ]
+
+    monkeypatch.setattr(token_usage, "async_summarize_runs_usage", summarize)
+
+    usage = await token_usage.async_summarize_run_trees_usage(session, [70])
+
+    assert usage[70]["api_calls"] == 3
+    assert usage[70]["tokens_total"] == 500
+    assert usage[70]["estimated_cost"] == 0.005
+    assert usage[70]["by_effort"][0]["effort"] == "low"

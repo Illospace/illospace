@@ -24,6 +24,10 @@ from brain.systems.runs.routing_metadata import (
     effective_routing_snapshot,
     routing_metadata_with_effective,
 )
+from brain.systems.runs.token_usage import (
+    async_summarize_run_usage_in_savepoint,
+    usage_totals_payload,
+)
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 from brain.systems.runs.recipes.surface_guidance import response_surface_guidance
 
@@ -80,6 +84,21 @@ def _thread_attachment_context(runtime: RunRuntime) -> dict[str, Any] | None:
         if isinstance(value, dict):
             return value
     return None
+
+
+async def _worker_run_usage(runtime: RunRuntime) -> dict[str, Any] | None:
+    try:
+        return await async_summarize_run_usage_in_savepoint(
+            runtime.store.session,
+            runtime.run.id,
+        )
+    except Exception:
+        logger.warning(
+            "worker_usage_summary_failed",
+            extra={"run_id": runtime.run.id},
+            exc_info=True,
+        )
+        return None
 
 
 class WorkerRecipe(BaseRunRecipe):
@@ -225,6 +244,7 @@ class WorkerRecipe(BaseRunRecipe):
         public_output = output if status == RunStatus.COMPLETED else str((failure or {}).get("message") or "")
         if public_output and not streamed_output:
             await runtime.text_delta(public_output)
+        usage = await _worker_run_usage(runtime)
         worker_result = worker_result_artifact(
             runtime.run.id,
             assignment=assignment,
@@ -234,6 +254,7 @@ class WorkerRecipe(BaseRunRecipe):
             root_run_id=runtime.run.root_run_id,
             failure=failure,
             routing=effective_routing,
+            usage=usage,
         )
         return RunRecipeResult(
             output=output,
@@ -312,6 +333,7 @@ def worker_result_artifact(
     root_run_id: int | None,
     failure: dict[str, str] | None = None,
     routing: dict[str, Any] | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> AgentRunArtifact:
     payload = {
         "status": status.value,
@@ -328,6 +350,8 @@ def worker_result_artifact(
         payload["failure"] = dict(failure)
     if routing:
         payload["routing"] = dict(routing)
+    if usage:
+        payload["usage"] = usage_totals_payload(usage)
     return AgentRunArtifact(
         run_id=run_id,
         root_run_id=root_run_id,

@@ -430,6 +430,25 @@ def test_manage_cycle_list_is_not_audited():
     assert completions == []
 
 
+def test_manage_cycle_usage_summary_is_not_audited():
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+
+    records, completions, record, complete = _capture_manifests()
+    handlers = _get_tool_handlers()
+
+    with patch("brain.systems.runs.actions.record_action_manifest", side_effect=record), \
+         patch("brain.systems.runs.actions.complete_action_manifest", side_effect=complete), \
+         patch(
+             "brain.systems.runs.tool_handlers._handle_manage_cycle",
+             return_value={"usage_summary": {"cycles": []}},
+         ):
+        result = handlers["manage_cycle"](action="usage_summary", days=7)
+
+    assert result == {"usage_summary": {"cycles": []}}
+    assert records == []
+    assert completions == []
+
+
 def test_tool_registration_normalizes_legacy_policy_strings():
     from brain.systems.runs.tool_catalog.metadata import (
         ToolAvailability,

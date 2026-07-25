@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select
 
-from brain.platform.db.models.cycle import Cycle
+from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cycles.access import (
@@ -37,6 +38,11 @@ from brain.systems.cycles.serializers import (
     serialize_cycle_output_target,
 )
 from brain.systems.cycles.service import async_run_cycle_now
+from brain.systems.runs.token_usage import (
+    async_summarize_run_trees_usage,
+    merge_usage_totals,
+    usage_totals_payload,
+)
 from brain.systems.runs.tool_catalog.handlers.common import *
 
 
@@ -60,6 +66,8 @@ class ManageCycleArgs:
     output_target_id: str | None = None
     output_target_label: str | None = None
     output_target_config: dict | None = None
+    days: int | None = None
+    run_limit: int | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +99,8 @@ async def _handle_manage_cycle(
     output_target_id: str | None = None,
     output_target_label: str | None = None,
     output_target_config: dict | None = None,
+    days: int | None = None,
+    run_limit: int | None = None,
 ):
     return await _handle_manage_cycle_async(
         action=action,
@@ -112,6 +122,8 @@ async def _handle_manage_cycle(
         output_target_id=output_target_id,
         output_target_label=output_target_label,
         output_target_config=output_target_config,
+        days=days,
+        run_limit=run_limit,
     )
 
 
@@ -135,6 +147,8 @@ async def _handle_manage_cycle_async(
     output_target_id: str | None = None,
     output_target_label: str | None = None,
     output_target_config: dict | None = None,
+    days: int | None = None,
+    run_limit: int | None = None,
 ) -> str:
     normalized_action = str(action or "").strip().lower()
     if normalized_action in {"help", "schema"}:
@@ -167,6 +181,8 @@ async def _handle_manage_cycle_async(
         output_target_id=output_target_id,
         output_target_label=output_target_label,
         output_target_config=output_target_config,
+        days=days,
+        run_limit=run_limit,
     )
     context = ManageCycleContext(args=args, actor=_tool_actor(str(user_id)))
 
@@ -190,6 +206,79 @@ async def _action_list(ctx: ManageCycleContext) -> dict[str, Any]:
             .order_by(Cycle.created_at.desc())
         )
         return {"cycles": [serialize_cycle(cycle) for cycle in result.all()]}
+
+
+def _window_value(value: int | None, *, field: str, maximum: int) -> int | None:
+    if value is None:
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be an integer") from exc
+    if normalized < 1 or normalized > maximum:
+        raise ValueError(f"{field} must be between 1 and {maximum}")
+    return normalized
+
+
+async def _action_usage_summary(ctx: ManageCycleContext) -> dict[str, Any]:
+    args = ctx.args
+    days = _window_value(args.days, field="days", maximum=3650)
+    run_limit = _window_value(args.run_limit, field="run_limit", maximum=500)
+    if days is None and run_limit is None:
+        days = 30
+    effective_limit = run_limit or 500
+    since = datetime.now(timezone.utc) - timedelta(days=days) if days is not None else None
+
+    async with UnitOfWork() as uow:
+        stmt = (
+            select(CycleRun, Cycle)
+            .join(Cycle, Cycle.id == CycleRun.cycle_id)
+            .where(
+                *cycle_scope_conditions(ctx.actor),
+                CycleRun.run_id.isnot(None),
+            )
+            .order_by(CycleRun.scheduled_for.desc(), CycleRun.id.desc())
+            .limit(effective_limit)
+        )
+        if args.id is not None:
+            stmt = stmt.where(Cycle.id == args.id)
+        if since is not None:
+            stmt = stmt.where(CycleRun.scheduled_for >= since)
+        selected_rows = list((await uow.session.execute(stmt)).all())
+        run_ids = [int(cycle_run.run_id) for cycle_run, _cycle in selected_rows]
+        usage_by_run = await async_summarize_run_trees_usage(uow.session, run_ids)
+
+    cycles: dict[int, dict[str, Any]] = {}
+    totals = usage_totals_payload(include_runs=True)
+    for cycle_run, cycle in selected_rows:
+        cycle_usage = cycles.setdefault(
+            int(cycle.id),
+            {
+                "cycle_id": int(cycle.id),
+                "name": cycle.name,
+                **usage_totals_payload(include_runs=True),
+            },
+        )
+        usage = usage_by_run.get(int(cycle_run.run_id), {})
+        merge_usage_totals(cycle_usage, usage, runs=1)
+        merge_usage_totals(totals, usage, runs=1)
+
+    return {
+        "usage_summary": {
+            "window": {
+                "days": days,
+                "run_limit": effective_limit,
+                "since": since.isoformat() if since is not None else None,
+                "selected_runs": len(selected_rows),
+                "truncated": len(selected_rows) == effective_limit,
+            },
+            "totals": totals,
+            "cycles": sorted(
+                cycles.values(),
+                key=lambda item: (-item["estimated_cost"], -item["tokens_total"], item["cycle_id"]),
+            ),
+        }
+    }
 
 
 async def _action_create(ctx: ManageCycleContext) -> dict[str, Any]:
@@ -323,6 +412,7 @@ async def _action_remove_output_target(ctx: ManageCycleContext) -> dict[str, Any
 
 CYCLE_ACTIONS: dict[str, CycleAction] = {
     "list": _action_list,
+    "usage_summary": _action_usage_summary,
     "create": _action_create,
     "update": _action_update,
     "delete": _action_delete,

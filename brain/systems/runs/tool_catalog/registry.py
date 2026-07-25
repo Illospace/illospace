@@ -980,6 +980,8 @@ def action_policy_for_tool(
     kwargs_dict = dict(kwargs or {})
     if tool_name in {"manage_cycle", "manage_cron_job"} and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list"}:
         return None
+    if tool_name == "manage_cycle" and _arg_at(args_tuple, kwargs_dict, "action", 0) == "usage_summary":
+        return None
     if tool_name == "manage_domain" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "query_records", "get_record", "events"}:
         return None
     if tool_name == "manage_slack" and _arg_at(

@@ -11,12 +11,21 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Iterable
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.agent import AgentApiCall
 from brain.platform.db.models.agent_run import AgentRunRow
-from brain.systems.runs.modeling import calculate_cost
+from brain.platform.providers.model_policy import calculate_model_cost
+
+USAGE_COUNT_FIELDS = (
+    "api_calls",
+    "tokens_input",
+    "tokens_output",
+    "tokens_total",
+    "cache_read",
+    "cache_write",
+)
 
 
 def _coerce_int(value: Any) -> int:
@@ -87,7 +96,69 @@ def _empty_usage() -> dict[str, Any]:
         "cache_write": 0,
         "estimated_cost": 0.0,
         "last_used_at": None,
+        "by_effort": [],
     }
+
+
+def usage_totals_payload(
+    usage: dict[str, Any] | None = None,
+    *,
+    include_runs: bool = False,
+) -> dict[str, Any]:
+    """Return the stable token/cost reporting contract without run metadata."""
+
+    source = usage or {}
+    payload = {
+        key: _coerce_int(source.get(key))
+        for key in USAGE_COUNT_FIELDS
+    }
+    if include_runs:
+        payload = {"runs": _coerce_int(source.get("runs")), **payload}
+    payload["estimated_cost"] = round(float(source.get("estimated_cost") or 0), 6)
+    payload["by_effort"] = [
+        {
+            **{key: _coerce_int(item.get(key)) for key in USAGE_COUNT_FIELDS},
+            "effort": item.get("effort"),
+            "estimated_cost": round(float(item.get("estimated_cost") or 0), 6),
+        }
+        for item in source.get("by_effort") or []
+        if isinstance(item, dict)
+    ]
+    return payload
+
+
+def merge_usage_totals(
+    target: dict[str, Any],
+    usage: dict[str, Any] | None,
+    *,
+    runs: int = 0,
+) -> None:
+    """Merge one stable usage payload into another in place."""
+
+    source = usage_totals_payload(usage)
+    if "runs" in target:
+        target["runs"] += int(runs)
+    for key in USAGE_COUNT_FIELDS:
+        target[key] += source[key]
+    target["estimated_cost"] = round(
+        float(target.get("estimated_cost") or 0) + source["estimated_cost"],
+        6,
+    )
+    by_effort = {
+        item.get("effort"): item
+        for item in target.get("by_effort") or []
+        if isinstance(item, dict)
+    }
+    for item in source["by_effort"]:
+        effort = item.get("effort")
+        effort_usage = by_effort.setdefault(effort, _effort_usage_row(effort))
+        for key in USAGE_COUNT_FIELDS:
+            effort_usage[key] += item[key]
+        effort_usage["estimated_cost"] = round(
+            effort_usage["estimated_cost"] + item["estimated_cost"],
+            6,
+        )
+    target["by_effort"] = _sorted_effort_usage(by_effort)
 
 
 def _add_call_usage(target: dict[str, Any], row: Any) -> None:
@@ -109,12 +180,54 @@ def _add_call_usage(target: dict[str, Any], row: Any) -> None:
 
 
 def _model_cost(row: Any) -> float:
-    return calculate_cost(
+    return calculate_model_cost(
         model=getattr(row, "model", None),
         tokens_input=_coerce_int(row.tokens_input),
         tokens_output=_coerce_int(row.tokens_output),
         cache_read=_coerce_int(row.cache_read),
         cache_write=_coerce_int(row.cache_write),
+    )
+
+
+def _effort_usage_row(effort: str | None) -> dict[str, Any]:
+    return {
+        "effort": effort,
+        "api_calls": 0,
+        "tokens_input": 0,
+        "tokens_output": 0,
+        "tokens_total": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "estimated_cost": 0.0,
+    }
+
+
+def _add_effort_usage(
+    usage_by_effort: dict[str | None, dict[str, Any]],
+    row: Any,
+    *,
+    cost: float,
+) -> None:
+    raw_effort = getattr(row, "effort", None)
+    effort = str(raw_effort).strip().lower() if raw_effort else None
+    target = usage_by_effort.setdefault(effort, _effort_usage_row(effort))
+    input_tokens = _coerce_int(row.tokens_input)
+    output_tokens = _coerce_int(row.tokens_output)
+    target["api_calls"] += _coerce_int(row.api_calls)
+    target["tokens_input"] += input_tokens
+    target["tokens_output"] += output_tokens
+    target["tokens_total"] += input_tokens + output_tokens
+    target["cache_read"] += _coerce_int(row.cache_read)
+    target["cache_write"] += _coerce_int(row.cache_write)
+    target["estimated_cost"] = round(target["estimated_cost"] + cost, 6)
+
+
+def _sorted_effort_usage(
+    usage_by_effort: dict[str | None, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return sorted(
+        usage_by_effort.values(),
+        key=lambda item: (item["effort"] is None, str(item["effort"] or "")),
     )
 
 
@@ -170,6 +283,78 @@ async def async_summarize_run_usage(session: AsyncSession, run_id: int) -> dict[
     return rows[0] if rows else None
 
 
+async def async_summarize_run_usage_in_savepoint(
+    session: AsyncSession,
+    run_id: int,
+) -> dict[str, Any] | None:
+    """Read one run's usage without letting a failed report abort caller writes."""
+
+    begin_nested = getattr(session, "begin_nested", None)
+    if not callable(begin_nested):
+        return await async_summarize_run_usage(session, run_id)
+    async with begin_nested():
+        return await async_summarize_run_usage(session, run_id)
+
+
+async def async_summarize_run_trees_usage(
+    session: AsyncSession,
+    root_run_ids: Iterable[int],
+) -> dict[int, dict[str, Any]]:
+    """Aggregate each selected root run together with all of its descendants."""
+
+    root_ids = list(dict.fromkeys(int(run_id) for run_id in root_run_ids))
+    usage_by_root = {
+        run_id: usage_totals_payload()
+        for run_id in root_ids
+    }
+    if not root_ids:
+        return usage_by_root
+
+    runs = list(
+        (
+            await session.scalars(
+                select(AgentRunRow).where(
+                    or_(
+                        AgentRunRow.id.in_(root_ids),
+                        AgentRunRow.root_run_id.in_(root_ids),
+                    )
+                )
+            )
+        ).all()
+    )
+    raw_usage_by_run = {
+        int(usage["id"]): usage
+        for usage in await async_summarize_runs_usage(session, runs)
+    }
+    root_id_set = set(root_ids)
+    for run in runs:
+        run_id = int(run.id)
+        tree_root_id = (
+            run_id
+            if run_id in root_id_set
+            else int(run.root_run_id) if run.root_run_id in root_id_set else None
+        )
+        if tree_root_id is not None:
+            merge_usage_totals(
+                usage_by_root[tree_root_id],
+                raw_usage_by_run.get(run_id),
+            )
+    return usage_by_root
+
+
+async def async_summarize_run_tree_usage_in_savepoint(
+    session: AsyncSession,
+    root_run_id: int,
+) -> dict[str, Any]:
+    """Read a run tree's usage while containing reporting-query failures."""
+
+    begin_nested = getattr(session, "begin_nested", None)
+    if not callable(begin_nested):
+        return (await async_summarize_run_trees_usage(session, [root_run_id]))[root_run_id]
+    async with begin_nested():
+        return (await async_summarize_run_trees_usage(session, [root_run_id]))[root_run_id]
+
+
 async def async_summarize_runs_usage(
     session: AsyncSession,
     runs: Iterable[AgentRunRow],
@@ -179,6 +364,7 @@ async def async_summarize_runs_usage(
 
     usage_by_run: dict[int, dict[str, Any]] = {}
     model_rank: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    effort_usage_by_run: dict[int, dict[str | None, dict[str, Any]]] = defaultdict(dict)
     for run in runs:
         row = _empty_usage()
         row.update(
@@ -206,7 +392,8 @@ async def async_summarize_runs_usage(
             continue
         _add_call_usage(row, call_row)
         cost = _model_cost(call_row)
-        row["estimated_cost"] += cost
+        row["estimated_cost"] = round(row["estimated_cost"] + cost, 6)
+        _add_effort_usage(effort_usage_by_run[call_row.run_id], call_row, cost=cost)
         model = call_row.model or row.get("model_used")
         if isinstance(model, str) and model:
             model_rank[call_row.run_id][model] += (
@@ -218,6 +405,8 @@ async def async_summarize_runs_usage(
     for run_id, ranks in model_rank.items():
         if ranks:
             usage_by_run[run_id]["model_used"] = max(ranks.items(), key=lambda item: item[1])[0]
+    for run_id, usage_by_effort in effort_usage_by_run.items():
+        usage_by_run[run_id]["by_effort"] = _sorted_effort_usage(usage_by_effort)
 
     return [usage_by_run[run.id] for run in runs]
 
@@ -227,6 +416,7 @@ def _run_usage_call_stmt(run_ids: list[int]):
         select(
             AgentApiCall.run_id.label("run_id"),
             AgentApiCall.model.label("model"),
+            AgentApiCall.effort.label("effort"),
             func.count(AgentApiCall.id).label("api_calls"),
             func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("tokens_input"),
             func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("tokens_output"),
@@ -235,7 +425,7 @@ def _run_usage_call_stmt(run_ids: list[int]):
             func.max(AgentApiCall.created_at).label("last_call_at"),
         )
         .where(AgentApiCall.run_id.in_(run_ids))
-        .group_by(AgentApiCall.run_id, AgentApiCall.model)
+        .group_by(AgentApiCall.run_id, AgentApiCall.model, AgentApiCall.effort)
     )
 
 
@@ -255,7 +445,15 @@ async def async_summarize_member_token_usage(
         _add_call_usage(target, row)
 
     for row in (await session.execute(_member_cost_stmt(org_id=org_id, since=since))).all():
-        usage_by_user[row.user_id]["estimated_cost"] += _model_cost(row)
+        target = usage_by_user[row.user_id]
+        cost = _model_cost(row)
+        target["estimated_cost"] = round(target["estimated_cost"] + cost, 6)
+        usage_by_effort = {
+            item["effort"]: item
+            for item in target["by_effort"]
+        }
+        _add_effort_usage(usage_by_effort, row, cost=cost)
+        target["by_effort"] = _sorted_effort_usage(usage_by_effort)
 
     return dict(usage_by_user)
 
@@ -283,6 +481,8 @@ def _member_cost_stmt(*, org_id: str, since: datetime):
         select(
             AgentRunRow.user_id.label("user_id"),
             AgentApiCall.model.label("model"),
+            AgentApiCall.effort.label("effort"),
+            func.count(AgentApiCall.id).label("api_calls"),
             func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("tokens_input"),
             func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("tokens_output"),
             func.coalesce(func.sum(AgentApiCall.cache_read), 0).label("cache_read"),
@@ -290,7 +490,7 @@ def _member_cost_stmt(*, org_id: str, since: datetime):
         )
         .join(AgentRunRow, AgentRunRow.id == AgentApiCall.run_id)
         .where(AgentRunRow.org_id == org_id, AgentApiCall.created_at >= since)
-        .group_by(AgentRunRow.user_id, AgentApiCall.model)
+        .group_by(AgentRunRow.user_id, AgentApiCall.model, AgentApiCall.effort)
     )
 
 
@@ -333,6 +533,8 @@ async def async_summarize_token_totals(
     cost_stmt = (
         select(
             AgentApiCall.model.label("model"),
+            AgentApiCall.effort.label("effort"),
+            func.count(AgentApiCall.id).label("api_calls"),
             func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("tokens_input"),
             func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("tokens_output"),
             func.coalesce(func.sum(AgentApiCall.cache_read), 0).label("cache_read"),
@@ -340,9 +542,14 @@ async def async_summarize_token_totals(
         )
         .join(AgentRunRow, AgentRunRow.id == AgentApiCall.run_id)
         .where(*filters)
-        .group_by(AgentApiCall.model)
+        .group_by(AgentApiCall.model, AgentApiCall.effort)
     )
     cost_stmt = _apply_status_filter(cost_stmt, statuses)
 
-    result["estimated_cost"] = sum(_model_cost(row) for row in (await session.execute(cost_stmt)).all())
+    usage_by_effort: dict[str | None, dict[str, Any]] = {}
+    for row in (await session.execute(cost_stmt)).all():
+        cost = _model_cost(row)
+        result["estimated_cost"] = round(result["estimated_cost"] + cost, 6)
+        _add_effort_usage(usage_by_effort, row, cost=cost)
+    result["by_effort"] = _sorted_effort_usage(usage_by_effort)
     return result

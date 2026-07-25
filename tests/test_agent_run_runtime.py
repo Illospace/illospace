@@ -4111,6 +4111,32 @@ async def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_
         lambda **kwargs: {"read_file": lambda **tool_args: {"content": "setup steps", "path": tool_args["path"]}},
     )
     monkeypatch.setattr("brain.systems.runs.recipes.workers.invoke_direct_agent_async", fake_invoke)
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.workers.async_summarize_run_usage_in_savepoint",
+        lambda *_args, **_kwargs: _AwaitableValue(
+            {
+                "api_calls": 2,
+                "tokens_input": 1_200,
+                "tokens_output": 300,
+                "tokens_total": 1_500,
+                "cache_read": 800,
+                "cache_write": 0,
+                "estimated_cost": 0.009,
+                "by_effort": [
+                    {
+                        "effort": "high",
+                        "api_calls": 2,
+                        "tokens_input": 1_200,
+                        "tokens_output": 300,
+                        "tokens_total": 1_500,
+                        "cache_read": 800,
+                        "cache_write": 0,
+                        "estimated_cost": 0.009,
+                    }
+                ],
+            }
+        ),
+    )
 
     runtime = _runtime("worker")
     result = await WorkerRecipe().execute(runtime)
@@ -4148,6 +4174,9 @@ async def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_
         "provider": "anthropic",
         "auth_mode": "api_key",
     }
+    assert worker_result.payload["usage"]["tokens_total"] == 1_500
+    assert worker_result.payload["usage"]["estimated_cost"] == 0.009
+    assert worker_result.payload["usage"]["by_effort"][0]["effort"] == "high"
 
 
 async def test_worker_recipe_keeps_failed_provider_diagnostics_internal(monkeypatch):

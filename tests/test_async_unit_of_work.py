@@ -307,6 +307,7 @@ async def test_async_record_api_call_uses_supplied_async_session():
         run_id=7,
         turn=2,
         model="test-model",
+        effort="low",
         tokens_input=11,
         tokens_output=13,
         cache_read=3,
@@ -325,6 +326,7 @@ async def test_async_record_api_call_uses_supplied_async_session():
     assert params["sid"] == "session-1"
     assert params["did"] == 7
     assert params["trace_id"] == "run:7"
+    assert params["effort"] == "low"
     assert params["ti"] == 11
     assert params["to"] == 13
 

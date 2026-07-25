@@ -83,6 +83,7 @@ class AgentApiCall(Base, CreatedAtMixin):
     trace_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     turn_number: Mapped[int] = mapped_column(Integer, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)
+    effort: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     tokens_input: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     tokens_output: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     cache_read: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
