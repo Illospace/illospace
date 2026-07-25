@@ -101,7 +101,7 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
         "priority": 90,
         "max_concurrency": 1,
         "timeout_seconds": 900,
-        "retry_policy": {"max_attempts": 2, "backoff_seconds": 0},
+        "retry_policy": {"max_attempts": 2, "backoff_seconds": 120},
         "misfire_policy": "skip",
     },
 )

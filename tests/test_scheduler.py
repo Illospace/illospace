@@ -165,6 +165,7 @@ async def test_uwear_aws_health_scan_catalog_config(session):
     assert job.misfire_policy == "skip"
     assert job.timeout_seconds == 900
     assert job.max_concurrency == 1
+    assert job.retry_policy == {"max_attempts": 2, "backoff_seconds": 120}
     assert build_scheduler_step_plan(job) == [
         {
             "step_key": "uwear_aws_health_scan",
