@@ -139,9 +139,14 @@ async def test_sync_scheduler_catalog_seeds_scheduler_jobs_without_cron_table(se
     result = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=now)
     await session.flush()
 
-    assert result == {"upserted": 3, "retired": 0}
+    assert result == {"upserted": 4, "retired": 0}
     jobs = {job["job_key"]: job for job in await async_list_scheduler_jobs(session)}
-    assert set(jobs) == {"curiosity_cron", "nightly_sleep", "uwear_aws_health_scan"}
+    assert set(jobs) == {
+        "curiosity_cron",
+        "nightly_sleep",
+        "uwear_aws_health_scan",
+        "uwear_staging_promotion_pr",
+    }
     assert jobs["nightly_sleep"]["owner_mode"] == "scheduler"
     assert jobs["nightly_sleep"]["handler_kind"] == "scheduler_builtin"
     assert jobs["nightly_sleep"]["default_payload"]["scheduler_split_steps"] is True
@@ -177,6 +182,43 @@ async def test_uwear_aws_health_scan_catalog_config(session):
     ]
 
 
+async def test_uwear_staging_promotion_pr_catalog_config(session):
+    now = datetime(2026, 4, 21, 0, 0, tzinfo=timezone.utc)
+
+    await async_sync_scheduler_catalog(session, timezone_name="America/Toronto", now=now)
+    jobs = {job.job_key: job for job in (await session.scalars(select(SchedulerJob))).all()}
+    job = jobs["uwear_staging_promotion_pr"]
+
+    catalog_keys = [definition["job_key"] for definition in scheduler_catalog.SCHEDULER_CATALOG]
+    assert catalog_keys.index("uwear_staging_promotion_pr") + 1 == catalog_keys.index(
+        "uwear_aws_health_scan"
+    )
+    assert job.cron_expr == "0 * * * *"
+    assert job.timezone == "UTC"
+    assert job.misfire_policy == "skip"
+    assert job.timeout_seconds == 300
+    assert job.max_concurrency == 1
+    assert job.retry_policy == {"max_attempts": 1, "backoff_seconds": 0}
+    assert job.task_contract["allowed_actions"] == [
+        "scheduler.run",
+        "create_github_pull_request",
+    ]
+    assert build_scheduler_step_plan(job) == [
+        {
+            "step_key": "uwear_staging_promotion_pr",
+            "sequence_no": 1,
+            "kind": "single",
+            "handler_ref": "brain.app.scheduler.programs:uwear_staging_promotion_pr",
+            "payload": {"program": "uwear_staging_promotion_pr"},
+            "command": [
+                "python3",
+                "-m",
+                "brain.jobs.pipelines.staging_promotion_pr",
+            ],
+        }
+    ]
+
+
 async def test_sync_scheduler_catalog_is_idempotent_and_reseeds_forward_on_restart(session):
     first_boot = datetime(2026, 4, 20, 0, 0, tzinfo=timezone.utc)
     await async_sync_scheduler_catalog(session, timezone_name="UTC", now=first_boot)
@@ -187,8 +229,8 @@ async def test_sync_scheduler_catalog_is_idempotent_and_reseeds_forward_on_resta
     result = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=restart)
     jobs = {job.job_key: job for job in (await session.scalars(select(SchedulerJob))).all()}
 
-    assert result == {"upserted": 3, "retired": 0}
-    assert await session.scalar(select(func.count()).select_from(SchedulerJob)) == 3
+    assert result == {"upserted": 4, "retired": 0}
+    assert await session.scalar(select(func.count()).select_from(SchedulerJob)) == 4
     assert {key: job.id for key, job in jobs.items()} == first_ids
     assert all(job.next_run_at > restart for job in jobs.values())
     assert await async_materialize_due_runs(session, now=restart) == []
@@ -220,12 +262,17 @@ async def test_sync_scheduler_catalog_retires_jobs_dropped_from_full_catalog(ses
     result = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=now)
     jobs = {job.job_key: job for job in (await session.scalars(select(SchedulerJob))).all()}
 
-    assert result == {"upserted": 1, "retired": 2}
+    assert result == {"upserted": 1, "retired": 3}
     assert jobs["nightly_sleep"].enabled is True
     assert jobs["curiosity_cron"].enabled is False
     assert jobs["curiosity_cron"].pause_reason == "removed from scheduler catalog"
     assert jobs["uwear_aws_health_scan"].enabled is False
     assert jobs["uwear_aws_health_scan"].pause_reason == "removed from scheduler catalog"
+    assert jobs["uwear_staging_promotion_pr"].enabled is False
+    assert (
+        jobs["uwear_staging_promotion_pr"].pause_reason
+        == "removed from scheduler catalog"
+    )
 
     repeated = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=now)
     assert repeated == {"upserted": 1, "retired": 0}
@@ -237,9 +284,9 @@ async def test_scheduler_daemon_startup_syncs_catalog_before_snapshot(session):
     result = await async_scheduler_daemon_startup(session, now=now, timezone_name="UTC")
 
     assert result["ok"] is True
-    assert result["catalog"] == {"upserted": 3, "retired": 0}
-    assert result["snapshot"]["summary"]["jobs_total"] == 3
-    assert result["snapshot"]["summary"]["jobs_enabled"] == 3
+    assert result["catalog"] == {"upserted": 4, "retired": 0}
+    assert result["snapshot"]["summary"]["jobs_total"] == 4
+    assert result["snapshot"]["summary"]["jobs_enabled"] == 4
     assert all(job["next_run_at"] > now.isoformat() for job in result["snapshot"]["jobs"])
 
 

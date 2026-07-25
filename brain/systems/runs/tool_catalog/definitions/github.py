@@ -192,41 +192,40 @@ GITHUB_TOOLS = [
     {
         "name": "create_github_pull_request",
         "description": (
-            "Open a REAL GitHub pull request via the GitHub API. This performs a public write to "
-            "the target repository; it never merges the pull request. Missions must restrict this "
-            "tool to a specific, single-purpose policy describing exactly when a pull request may "
-            "be opened. The shipped Uwear use case is recreating the evergreen staging→main "
-            "promotion pull request when it is missing. The repo may be supplied as owner/name, "
-            "a GitHub URL, or a git remote URL. If no write-capable token can reach the repository, "
-            "the error carries no_write_token=true; GitHub API failures include their status code."
+            "Open a REAL GitHub pull request for the evergreen staging→main promotion via the "
+            "GitHub API when it is missing. This public write is restricted to the configured "
+            "Uwear repositories, the exact promotion branches and title, and a non-draft pull "
+            "request; the tool never merges, approves, reviews, or updates a pull request. If no "
+            "write-capable token can reach the repository, the error carries no_write_token=true; "
+            "GitHub API failures include their status code."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "repo": {
                     "type": "string",
-                    "description": "Target repository as owner/name, GitHub URL, or git remote URL.",
+                    "description": "Configured Uwear repository as owner/name, GitHub URL, or git remote URL.",
                 },
                 "base": {
                     "type": "string",
-                    "description": "Target branch the pull request proposes to merge into.",
+                    "description": "Target branch. Must be main.",
                 },
                 "head": {
                     "type": "string",
-                    "description": "Source branch containing the proposed changes.",
+                    "description": "Source branch. Must be staging.",
                 },
                 "title": {
                     "type": "string",
-                    "description": "Pull request title. Required.",
+                    "description": "Pull request title. Must be 'Staging → main promotion'.",
                 },
                 "body": {
                     "type": "string",
-                    "description": "Markdown pull request body. Required.",
+                    "description": "Markdown summary of the commits and linked issues being promoted.",
                 },
                 "draft": {
                     "type": "boolean",
                     "default": False,
-                    "description": "Whether to open the pull request as a draft.",
+                    "description": "Must be false; promotion pull requests are never opened as drafts.",
                 },
                 "token_secret_key": {
                     "type": "string",

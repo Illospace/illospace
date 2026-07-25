@@ -1863,14 +1863,13 @@ async def async_get_pull_request_deploy_info(
     }
 
 
-async def async_compare_commits(
+async def _async_compare_payload(
     slug: str,
     base: str,
     head: str,
     *,
     token: str | None = None,
-) -> str:
-    """Return GitHub's compare status for ``base...head``."""
+) -> dict[str, Any]:
     owner, repo = slug.split("/", 1)
     async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
         payload = await _async_request(
@@ -1879,7 +1878,70 @@ async def async_compare_commits(
             f"/repos/{owner}/{repo}/compare/{base}...{head}",
             token=token,
         )
-    status = payload.get("status") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        raise GitHubConnectorError(
+            status_code=502,
+            message="GitHub compare response was not an object.",
+        )
+    return payload
+
+
+async def async_compare_repo_branches(
+    slug: str,
+    base: str,
+    head: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Return the ahead count and commit subjects for a branch comparison."""
+
+    payload = await _async_compare_payload(slug, base, head, token=token)
+    ahead_by = payload.get("ahead_by")
+    if not isinstance(ahead_by, int) or isinstance(ahead_by, bool) or ahead_by < 0:
+        raise GitHubConnectorError(
+            status_code=502,
+            message="GitHub compare response omitted a valid ahead_by count.",
+        )
+
+    raw_commits = payload.get("commits")
+    if not isinstance(raw_commits, list):
+        raise GitHubConnectorError(
+            status_code=502,
+            message="GitHub compare response omitted its commits.",
+        )
+    commits = []
+    for item in raw_commits:
+        if not isinstance(item, dict):
+            continue
+        details = item.get("commit")
+        message = details.get("message") if isinstance(details, dict) else None
+        subject = str(message or "").splitlines()[0].strip()
+        commits.append({
+            "sha": item.get("sha"),
+            "html_url": item.get("html_url"),
+            "subject": subject or "(no commit subject)",
+        })
+
+    return {
+        "repo": slug,
+        "base": base,
+        "head": head,
+        "status": payload.get("status"),
+        "ahead_by": ahead_by,
+        "commits": commits,
+    }
+
+
+async def async_compare_commits(
+    slug: str,
+    base: str,
+    head: str,
+    *,
+    token: str | None = None,
+) -> str:
+    """Return GitHub's compare status for ``base...head``."""
+    payload = await _async_compare_payload(slug, base, head, token=token)
+    status = payload.get("status")
     if status not in {"identical", "behind", "ahead", "diverged"}:
         raise GitHubConnectorError(
             status_code=502,

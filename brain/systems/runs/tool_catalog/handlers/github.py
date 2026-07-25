@@ -62,6 +62,14 @@ _SLACK_ORIGIN_REF_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])(slack:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[0-9.]+)"
 )
 
+PROMOTION_PULL_REQUEST_REPOS = frozenset({
+    "uwear-ai/uwear-backend",
+    "uwear-ai/uwearaiapp",
+})
+PROMOTION_PULL_REQUEST_BASE = "main"
+PROMOTION_PULL_REQUEST_HEAD = "staging"
+PROMOTION_PULL_REQUEST_TITLE = "Staging → main promotion"
+
 
 def _origin_ref_from_body(body: str | None) -> str | None:
     match = _SLACK_ORIGIN_REF_PATTERN.search(str(body or ""))
@@ -737,6 +745,27 @@ def _existing_pull_request_number(message: str) -> int | None:
     return None
 
 
+def _promotion_pull_request_policy_error(
+    *,
+    repo: str,
+    base: str,
+    head: str,
+    title: str,
+    draft: bool,
+) -> str | None:
+    if repo not in PROMOTION_PULL_REQUEST_REPOS:
+        return f"repository must be one of {sorted(PROMOTION_PULL_REQUEST_REPOS)}"
+    if base != PROMOTION_PULL_REQUEST_BASE:
+        return f"base must be {PROMOTION_PULL_REQUEST_BASE!r}"
+    if head != PROMOTION_PULL_REQUEST_HEAD:
+        return f"head must be {PROMOTION_PULL_REQUEST_HEAD!r}"
+    if title != PROMOTION_PULL_REQUEST_TITLE:
+        return f"title must be {PROMOTION_PULL_REQUEST_TITLE!r}"
+    if draft:
+        return "draft must be false"
+    return None
+
+
 async def _handle_create_github_pull_request(
     repo: str | None = None,
     base: str | None = None,
@@ -765,6 +794,19 @@ async def _handle_create_github_pull_request(
     clean_body = _clean(body)
     if not clean_body:
         return json.dumps({"error": "create_github_pull_request requires a non-empty body"})
+    policy_error = _promotion_pull_request_policy_error(
+        repo=repo_slug,
+        base=clean_base,
+        head=clean_head,
+        title=clean_title,
+        draft=bool(draft),
+    )
+    if policy_error:
+        return json.dumps({
+            "error": "promotion_pull_request_policy_violation",
+            "message": policy_error,
+            "repo": repo_slug,
+        })
 
     candidates = await _github_token_candidates(
         repo_slug=repo_slug,

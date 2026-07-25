@@ -48,8 +48,9 @@ def test_create_github_pull_request_definition_and_registry_wiring():
     assert "REAL GitHub pull request" in description
     assert "public write" in description
     assert "never merges" in description
-    assert "Missions must restrict" in description
     assert "staging→main" in description
+    assert "configured Uwear repositories" in description
+    assert "non-draft" in description
     assert schema["required"] == ["repo", "base", "head", "title", "body"]
     assert schema["properties"]["draft"]["default"] is False
     assert name in {tool["name"] for tool in COORDINATOR_TOOLS}
@@ -91,7 +92,7 @@ async def test_create_github_pull_request_happy_path_opens_real_pull_request():
             repo="https://github.com/uwear-ai/uwear-backend.git",
             base="main",
             head="staging",
-            title="Promote staging to main",
+            title="Staging → main promotion",
             body="Evergreen promotion pull request.",
         )
 
@@ -110,7 +111,7 @@ async def test_create_github_pull_request_happy_path_opens_real_pull_request():
         "uwear-ai/uwear-backend",
         base="main",
         head="staging",
-        title="Promote staging to main",
+        title="Staging → main promotion",
         body="Evergreen promotion pull request.",
         draft=False,
         token="write-token",
@@ -127,7 +128,7 @@ async def test_create_github_pull_request_returns_no_write_token():
             repo="uwear-ai/uwear-backend",
             base="main",
             head="staging",
-            title="Promote staging to main",
+            title="Staging → main promotion",
             body="Evergreen promotion pull request.",
         )
 
@@ -157,7 +158,7 @@ async def test_create_github_pull_request_maps_no_commits_422():
             repo="uwear-ai/uwear-backend",
             base="main",
             head="staging",
-            title="Promote staging to main",
+            title="Staging → main promotion",
             body="Evergreen promotion pull request.",
         )
 
@@ -190,7 +191,7 @@ async def test_create_github_pull_request_maps_already_exists_422():
             repo="uwear-ai/uwear-backend",
             base="main",
             head="staging",
-            title="Promote staging to main",
+            title="Staging → main promotion",
             body="Evergreen promotion pull request.",
         )
 
@@ -198,6 +199,39 @@ async def test_create_github_pull_request_maps_already_exists_422():
     assert payload["error"] == "pull_request_exists"
     assert payload["existing"] == 841
     assert payload["status_code"] == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"repo": "acme/widgets"}, "repository must be one of"),
+        ({"base": "release"}, "base must be 'main'"),
+        ({"head": "feature"}, "head must be 'staging'"),
+        ({"title": "Open my feature PR"}, "title must be 'Staging → main promotion'"),
+        ({"draft": True}, "draft must be false"),
+    ],
+)
+async def test_create_github_pull_request_rejects_non_promotion_writes(overrides, message):
+    arguments = {
+        "repo": "uwear-ai/uwear-backend",
+        "base": "main",
+        "head": "staging",
+        "title": "Staging → main promotion",
+        "body": "## Commits being promoted\n\n- Fix release issue (#475)",
+        "draft": False,
+        **overrides,
+    }
+    with patch(
+        f"{_H}.async_create_repo_pull_request",
+        new=AsyncMock(),
+    ) as create:
+        result = await _handle_create_github_pull_request(**arguments)
+
+    payload = json.loads(result)
+    assert payload["error"] == "promotion_pull_request_policy_violation"
+    assert message in payload["message"]
+    create.assert_not_awaited()
 
 
 @pytest.mark.asyncio
