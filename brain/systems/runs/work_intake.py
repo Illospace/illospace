@@ -23,6 +23,7 @@ _VALID_MODEL_PROVIDERS = {"anthropic", "openai"}
 THREAD_DISCUSSION_SURFACE = "thread_discussion"
 THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
 THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
+AGENT_RUN_CONTINUATION_TARGET = "agent_run_continuation"
 
 logger = logging.getLogger("work_intake")
 
@@ -605,6 +606,44 @@ def _build_inbound_signal_request(
     )
 
 
+def _build_agent_run_continuation_request(
+    event: WorkIntakeEvent,
+    *,
+    target: dict[str, Any],
+    metadata: dict[str, Any],
+    message: str,
+    producer: str,
+    idempotency_key: str | None,
+    priority: int,
+) -> AgentRunRequest:
+    thread_id = str(target.get("thread_id") or "").strip()
+    if not thread_id:
+        raise ValueError("Agent run continuation requires thread_id")
+    target_ref = target.get("target_ref")
+    if not isinstance(target_ref, dict):
+        raise ValueError("Agent run continuation requires target_ref")
+    profile = profile_from_metadata(metadata)
+    return AgentRunRequest(
+        org_id=_event_org_id(event),
+        user_id=_event_actor_user_id(event),
+        thread_id=thread_id,
+        message=message,
+        profile=profile,
+        recipe=recipe_for_profile(profile, metadata),
+        target_ref=dict(target_ref),
+        workspace_ref=_event_workspace_ref(event),
+        model_policy=_event_model_policy(event, metadata),
+        metadata={
+            **metadata,
+            "event": _event_run_event(event),
+            "priority": priority,
+            "source": event.source,
+            "producer": producer,
+            "idempotency_key": idempotency_key,
+        },
+    )
+
+
 async def build_agent_run_request(
     session: Any,
     event: WorkIntakeEvent,
@@ -752,6 +791,17 @@ async def _build_agent_run_request(
 
     if target.get("kind") in {"app_report", "inbound_submission"}:
         return _build_inbound_signal_request(
+            event,
+            target=target,
+            metadata=metadata,
+            message=message,
+            producer=producer,
+            idempotency_key=idempotency_key,
+            priority=priority,
+        )
+
+    if target.get("kind") == AGENT_RUN_CONTINUATION_TARGET:
+        return _build_agent_run_continuation_request(
             event,
             target=target,
             metadata=metadata,
@@ -1043,6 +1093,7 @@ async def admit_work(
 
 
 __all__ = [
+    "AGENT_RUN_CONTINUATION_TARGET",
     "build_agent_run_request",
     "admit_work",
     "model_policy_from_metadata",

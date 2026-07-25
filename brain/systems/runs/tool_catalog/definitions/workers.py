@@ -50,6 +50,15 @@ WORKER_SPAWN_TOOLS = [
                     "default": False,
                     "description": "When true, hide the worker from visible thread history and block visible reply tools.",
                 },
+                "join_parent": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When true, queue one continuation on the parent thread after the parent "
+                        "and all of its spawn_worker children reach terminal state. Has no effect "
+                        "on existing fire-and-forget calls when omitted."
+                    ),
+                },
                 "idempotency_key": {
                     "type": "string",
                     "description": "Optional stable key to avoid duplicate workers for the same background task.",

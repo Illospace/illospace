@@ -353,6 +353,7 @@ async def _handle_spawn_worker(
     effort: str | None = None,
     model: str | None = None,
     headless: bool = False,
+    join_parent: bool = False,
     idempotency_key: str | None = None,
     allowed_files: list[str] | None = None,
     forbidden_files: list[str] | None = None,
@@ -420,6 +421,10 @@ async def _handle_spawn_worker(
         "tool_policy": merged_tool_policy,
         "thread_attachment_context": inherited_metadata.get("thread_attachment_context"),
     }
+    if join_parent:
+        worker_metadata["join_parent"] = True
+    else:
+        worker_metadata.pop("join_parent", None)
     worker_metadata = {key: value for key, value in worker_metadata.items() if value is not None}
     response_tool = _current_agent_value("required_response_tool")
     response_tool_text = str(response_tool).strip() if response_tool else None
