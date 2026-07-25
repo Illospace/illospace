@@ -26,30 +26,6 @@ class TestWorkerAssignment:
         assert payload["scope"]["risk_level"] == "medium"
         assert payload["evidence_requirements"][0]["artifact_type"] == "worker_result"
 
-    def test_configured_deep_plan_becomes_worker_specs(self):
-        from brain.systems.runs.recipes.deep import DeepRecipe
-
-        assignments = DeepRecipe()._configured_assignments({
-            "worker_assignments": [
-            {
-                "role": "researcher",
-                "objective": "Find the relevant files",
-                "expected_artifacts": ["file_observation"],
-                "risk_level": "low",
-            },
-            {
-                "role": "reviewer",
-                "objective": "Check the final diff",
-            },
-            ]
-        })
-
-        assert assignments is not None
-        assert [assignment.role for assignment in assignments] == ["researcher", "reviewer"]
-        assert assignments[0].expected_artifacts == ("file_observation",)
-        assert assignments[1].required_artifact_types() == ()
-
-
 class TestWorkerScope:
     def test_worker_scope_from_runtime_metadata(self):
         from brain.systems.runs.recipes.workers import worker_scope_from_runtime

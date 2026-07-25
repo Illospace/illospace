@@ -20,8 +20,6 @@ def verification_mode_for_run(profile: RunProfile | str, metadata: dict[str, Any
         return VerificationMode.SKIP
     if metadata.get("strict") or metadata.get("verification") == "blocking":
         return VerificationMode.BLOCKING
-    if str(profile) == RunProfile.DEEP.value:
-        return VerificationMode.BLOCKING
     return VerificationMode.LIGHTWEIGHT
 
 

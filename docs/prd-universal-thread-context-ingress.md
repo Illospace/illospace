@@ -364,8 +364,8 @@ largest product gaps:
   `read_thread_discussion`, so it can acknowledge or answer in Discussion
   without pretending every response belongs in the AI Timeline.
 - Discussion-origin final answers settle back into `thread_discussion_comments`.
-  They do not mirror into `IdeaThread`, and Fast mode hides `cortex_reply` for
-  Discussion-origin runs. When Illo visibly continues the AI Timeline from a
+  They do not mirror into `IdeaThread`, and Discussion-origin runs hide
+  `cortex_reply`. When Illo visibly continues the AI Timeline from a
   Discussion request, it must use a separate explicit action/tool, not a reused
   reply channel.
 - Production test run `283` proved that separate explicit action/tool is needed:

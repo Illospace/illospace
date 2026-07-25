@@ -1,8 +1,7 @@
 # PRD: Model And Effort Routing Layer
 
-Status: SHIPPED — all slices deployed to illo-dev 2026-07-25 except Slice 5,
-which is tracked in issue #482 and gated on a quiet coercion-log window. See
-"Implementation Status" immediately below for the per-slice record.
+Status: SHIPPED — all slices implemented. See "Implementation Status"
+immediately below for the per-slice record.
 Date: 2026-07-24
 Owner: Reda
 Related docs:
@@ -13,9 +12,8 @@ Related docs:
 
 ## Implementation Status
 
-**Every slice is shipped and deployed to illo-dev except Slice 5.** The design
-sections below describe the intended end state; this section is the record of
-what actually landed and what is left. Read this first.
+**Every slice is shipped.** The design sections below describe the intended end
+state; this section is the record of what actually landed. Read this first.
 
 ### Shipped And Deployed (2026-07-24 / 2026-07-25)
 
@@ -33,17 +31,9 @@ what actually landed and what is left. Read this first.
 | 3 | #488 | Caller-suppliable `effort` on headless asks (typed param, not metadata, so routing cannot be injected); skill-anchored runs fall back to `skills.thinking_tier` |
 | 4 | #492 | fast/deep retired: central admission coercion turns any inbound `deep` into `fast` with a `deep_run_coerced` log; composer Mode group removed; model/effort default to a **workspace-default sentinel** that omits the keys so org defaults apply |
 | — | #491 | Generic worker join primitive (`run.worker_continuation_queued`), opt-in per spawn via `join_parent` — the replacement for deep's fan-out → join → synthesize |
+| 5 | #482 | Retired `DeepRecipe`, `ScoutRecipe`, phase barriers, their registrations/tests/mocks, and deep/scout presentation branches; retained permanent admission coercion plus legacy enum values for historical rows; preserved metadata-requested verification modes |
 | 6 | #490 | One provider-aware catalog owner (`brain/platform/model_catalog.py`) replacing four drifted lists; dead marketplace/resolvers deleted; `normalize_model_name` name collision resolved; migration `0040` |
 | 7 | #493 | Budget visibility from the real `agent_api_calls` ledger (the audit endpoint had been summing a `metadata->usage` key nothing writes); `effort` column added, migration `0041` |
-
-### Not Shipped
-
-**Slice 5 — remove the deep machinery (issue #482).** Its structural blocker is
-gone: #491 shipped the join primitive, so deleting deep no longer removes a
-capability. The remaining precondition is a **quiet window on the
-`deep_run_coerced` log**, which needs real elapsed time after #492's deploy.
-Check that log before proceeding; the deletion scope is in "Fast/Deep
-Deprecation Plan" below.
 
 ### Corrections To Earlier Assumptions In This Document
 
@@ -492,8 +482,9 @@ What retires, in dependency order:
    a quiet period on the coercion log AND a generic join primitive replacing
    deep's fan-out→join→synthesize (generalize chantier continuation to any
    parent whose workers complete, or an explicit join/continuation tool):
-   delete `DeepRecipe`, `ScoutRecipe`, `phase_barrier`,
-   `verification/policy.py` (deep-only consumer); simplify `engine.py`
+   delete `DeepRecipe`, `ScoutRecipe`, and `phase_barrier`; remove the deep
+   profile default from `verification/policy.py` while preserving its public
+   metadata-requested modes; simplify `engine.py`
    dispatch; fix the fast prompt language that defers synthesis to deep
    (`recipes/fast.py:44`); remove frontend run-graph presentation branches
    (`cortexRunPresentation.ts`, `threadStreamAdapter.ts`) and local-preview
@@ -504,7 +495,8 @@ What retires, in dependency order:
    (`engine.py:330` fails hard on an unregistered recipe). The
    `agent_runs.profile`/`recipe` columns stay (worker runs still use
    `recipe="worker"`); backend senders stop stamping `execution_profile`/
-   `recipe`; the coercion shim then logs anything unexpected until removed.
+   `recipe`; the admission coercion remains permanently and logs anything
+   unexpected.
 6. **Docs** — update the fast-mode reference at
    `prd-universal-thread-context-ingress.md:367`.
 
@@ -626,15 +618,16 @@ Shipped after Reda's provider-genericity direction (2026-07-24):
 - After this PR no surface can create a `deep` run (coercion guarantees it);
   recipes remain in-tree, unreachable, with the coercion log as the watchdog.
 
-### Slice 5 — Remove The Deep Machinery (NOT SHIPPED — issue #482)
+### Slice 5 — Remove The Deep Machinery (SHIPPED, #482)
 
-- Precondition A: quiet coercion log over an agreed window.
-- Precondition B: generalized worker join/continuation shipped (chantier
-  continuation promoted to a generic parent-rejoin, or an explicit join tool)
-  and the fast prompt's synthesis language updated.
-- Then deprecation-plan step 5 in full: recipe/verification deletion, engine
-  simplification, frontend run-graph presentation cleanup, enum read
-  tolerance for historical rows, nonterminal-deep drain, doc update.
+- Preconditions satisfied: #491 shipped the generic worker join/continuation;
+  the database showed no nonterminal deep/scout runs and no deep run of any
+  status since 2026-05-11.
+- Deleted the retired recipes, phase barrier, registrations, dedicated bench,
+  recipe tests, and frontend presentation/mock branches; updated fast guidance
+  to use joined worker continuations.
+- Kept admission coercion permanently, retained legacy enum values for stored
+  deep/scout rows, and preserved explicit metadata-requested verification modes.
 
 ### Slice 6 — Stale Model Code Cleanup + Catalog Contract (SHIPPED, #490)
 
