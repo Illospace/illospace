@@ -1672,6 +1672,27 @@ async def test_spawn_worker_without_overrides_materializes_parent_effective_defa
     assert payload["effort"] == "medium"
 
 
+async def test_spawn_worker_join_parent_metadata_is_strictly_opt_in(monkeypatch):
+    _payload, fire_and_forget, _events = await _captured_spawn_worker(
+        monkeypatch,
+        parent_model_policy={
+            "model": "openai/gpt-5.6-sol",
+            "thinking": "medium",
+        },
+    )
+    _payload, joined, _events = await _captured_spawn_worker(
+        monkeypatch,
+        parent_model_policy={
+            "model": "openai/gpt-5.6-sol",
+            "thinking": "medium",
+        },
+        join_parent=True,
+    )
+
+    assert "join_parent" not in fire_and_forget["metadata"]
+    assert joined["metadata"]["join_parent"] is True
+
+
 async def test_spawn_worker_inherits_live_parent_route_after_parent_fallback(monkeypatch):
     import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
 

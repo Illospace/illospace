@@ -1,4 +1,8 @@
-"""Event-driven continuation for chantier-scoped worker fan-outs."""
+"""Event-driven continuation for worker fan-outs.
+
+The chantier continuation remains the primary, backwards-compatible scope.
+Opted-in non-chantier fan-outs fall back to their parent run's own thread.
+"""
 
 from __future__ import annotations
 
@@ -16,11 +20,17 @@ from brain.systems.runs.domain import ArtifactType
 from brain.systems.runs.events import run_event
 from brain.systems.runs.status import TERMINAL_RUN_STATUSES, RunStatus, coerce_run_status
 from brain.systems.runs.store import AsyncAgentRunStore
-from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
+from brain.systems.runs.work_intake import (
+    AGENT_RUN_CONTINUATION_TARGET,
+    WorkIntakeEvent,
+    admit_work,
+)
 
 
 CONTINUATION_QUEUED_EVENT = "run.chantier_continuation_queued"
 CONTINUATION_SOURCE = "chantier_continuation"
+GENERIC_CONTINUATION_QUEUED_EVENT = "run.worker_continuation_queued"
+GENERIC_CONTINUATION_SOURCE = "worker_continuation"
 _MAX_CHILD_OUTPUT_CHARS = 6_000
 _MAX_OUTPUTS_CHARS = 24_000
 
@@ -37,11 +47,13 @@ async def queue_chantier_continuation_for_terminal_run(
     *,
     terminal_run_id: int,
 ) -> int | None:
-    """Queue one continuation after a chantier fan-out reaches its barrier.
+    """Queue one continuation after a worker fan-out reaches its barrier.
 
     The fan-out parent row is the serialization boundary. The continuation's
     source idempotency key is also derived from that parent, so a retry or two
     workers reaching terminal state together cannot admit duplicate runs.
+    Chantier-scoped fan-outs retain their original behavior; other fan-outs
+    must explicitly opt in through worker metadata.
     """
 
     terminal_run = await session.get(AgentRunRow, int(terminal_run_id))
@@ -68,7 +80,12 @@ async def queue_chantier_continuation_for_terminal_run(
 
     scope = await _resolve_chantier_scope(session, anchor)
     if scope is None:
-        return None
+        return await _queue_generic_continuation(
+            session,
+            store=store,
+            anchor=anchor,
+            workers=workers,
+        )
 
     child_results = await _child_results(session, workers)
     idempotency_key = f"chantier:continuation:{anchor.id}"
@@ -131,6 +148,74 @@ async def queue_chantier_continuation_for_terminal_run(
     return int(admission.run_id)
 
 
+async def _queue_generic_continuation(
+    session: AsyncSession,
+    *,
+    store: AsyncAgentRunStore,
+    anchor: AgentRunRow,
+    workers: list[AgentRunRow],
+) -> int | None:
+    if not _wants_generic_continuation(workers):
+        return None
+    if await store.has_event_type(anchor.id, GENERIC_CONTINUATION_QUEUED_EVENT):
+        return await _existing_generic_continuation_run_id(session, anchor.id)
+
+    child_results = await _child_results(session, workers)
+    idempotency_key = f"worker:continuation:{anchor.id}"
+    admission = await admit_work(
+        session,
+        WorkIntakeEvent(
+            source=GENERIC_CONTINUATION_SOURCE,
+            event_type="worker.child_runs_completed",
+            org_id=str(anchor.org_id or ""),
+            actor={
+                "id": anchor.user_id,
+                "org_id": anchor.org_id,
+                "principal_type": "agent_runtime",
+                "name": "worker continuation hook",
+            },
+            target=_generic_continuation_target(anchor),
+            payload={
+                "message": _generic_continuation_message(
+                    anchor=anchor,
+                    child_results=child_results,
+                ),
+                "workspace_ref": dict(anchor.workspace_ref or {}),
+                "model_policy": dict(anchor.model_policy or {}),
+                "metadata": _generic_continuation_metadata(
+                    anchor,
+                    worker_ids=[int(worker.id) for worker in workers],
+                ),
+            },
+            policy={
+                "producer": "run_completion_hook",
+                "idempotency_key": idempotency_key,
+                "run_event": "worker_continuation",
+            },
+        ),
+    )
+    if not admission.ok or admission.run_id is None:
+        raise RuntimeError(
+            "Worker continuation admission failed for fan-out "
+            f"{anchor.id}: {admission.skipped_reason or 'missing run id'}"
+        )
+
+    await store.append_event(
+        run_event(
+            anchor.id,
+            GENERIC_CONTINUATION_QUEUED_EVENT,
+            {
+                "continuation_run_id": int(admission.run_id),
+                "anchor_thread_id": anchor.thread_id,
+                "worker_run_ids": [int(worker.id) for worker in workers],
+            },
+            root_run_id=anchor.root_run_id or anchor.id,
+            producer="run_completion_hook",
+        )
+    )
+    return int(admission.run_id)
+
+
 async def _fanout_anchor_id(
     session: AsyncSession,
     terminal_run: AgentRunRow,
@@ -174,6 +259,16 @@ def _is_spawned_worker(metadata: Mapping[str, Any]) -> bool:
     return bool(
         metadata.get("spawned_by_tool")
         or str(metadata.get("origin") or "") == "spawn_worker"
+    )
+
+
+def _wants_generic_continuation(workers: list[AgentRunRow]) -> bool:
+    return any(
+        (worker.metadata_ if isinstance(worker.metadata_, dict) else {}).get(
+            "join_parent"
+        )
+        is True
+        for worker in workers
     )
 
 
@@ -301,6 +396,47 @@ def _continuation_metadata(
     return metadata
 
 
+def _generic_continuation_target(anchor: AgentRunRow) -> dict[str, Any]:
+    return {
+        "kind": AGENT_RUN_CONTINUATION_TARGET,
+        "thread_id": anchor.thread_id,
+        "target_ref": dict(anchor.target_ref or {}),
+    }
+
+
+def _generic_continuation_metadata(
+    anchor: AgentRunRow,
+    *,
+    worker_ids: list[int],
+) -> dict[str, Any]:
+    source_metadata = anchor.metadata_ if isinstance(anchor.metadata_, dict) else {}
+    metadata: dict[str, Any] = {
+        "execution_profile": anchor.profile,
+        "worker_continuation": {
+            "anchor_run_id": int(anchor.id),
+            "anchor_thread_id": anchor.thread_id,
+            "completed_fanout_run_id": int(anchor.id),
+            "worker_run_ids": worker_ids,
+        },
+    }
+    for key in (
+        "slack_trigger",
+        "slack_thread_id",
+        "discussion_trigger",
+        "originating_surface",
+        "triggering_surface",
+        "source_surface",
+        "required_response_tool",
+        "final_answer_target_surface",
+    ):
+        value = source_metadata.get(key)
+        if value not in (None, "", {}, []):
+            metadata[key] = value
+    for key, value in dict(anchor.model_policy or {}).items():
+        metadata.setdefault(str(key), value)
+    return metadata
+
+
 async def _child_results(
     session: AsyncSession,
     workers: list[AgentRunRow],
@@ -393,6 +529,34 @@ def _continuation_message(
     return "\n".join(lines)
 
 
+def _generic_continuation_message(
+    *,
+    anchor: AgentRunRow,
+    child_results: list[dict[str, Any]],
+) -> str:
+    lines = [
+        "Automated worker continuation: the worker fan-out has reached its terminal barrier.",
+        "No human follow-up triggered this run.",
+        "",
+        f"Anchor thread: {anchor.thread_id}",
+        f"Completed fan-out run: {anchor.id}",
+        "",
+        "Consume every durable worker result below. Synthesize their evidence, continue the "
+        "parent thread's work, and decide the next step. Ask genuinely blocking questions on "
+        "the parent surface when needed. Do not wait for a human nudge merely because the "
+        "fan-out parent already ended.",
+    ]
+    for result in child_results:
+        lines.extend(
+            [
+                "",
+                f"## Worker run {result['run_id']} ({result['role']}, {result['status']})",
+                str(result["output"] or "[No textual artifact was recorded.]"),
+            ]
+        )
+    return "\n".join(lines)
+
+
 async def _existing_continuation_run_id(
     session: AsyncSession,
     fanout_run_id: int,
@@ -406,8 +570,29 @@ async def _existing_continuation_run_id(
     )
 
 
+async def _existing_generic_continuation_run_id(
+    session: AsyncSession,
+    fanout_run_id: int,
+) -> int | None:
+    key = f"worker:continuation:{fanout_run_id}"
+    return await session.scalar(
+        select(AgentRunRow.id)
+        .where(AgentRunRow.source_idempotency_key == key)
+        .order_by(AgentRunRow.id.asc())
+        .limit(1)
+    )
+
+
+queue_worker_continuation_for_terminal_run = (
+    queue_chantier_continuation_for_terminal_run
+)
+
+
 __all__ = [
     "CONTINUATION_QUEUED_EVENT",
     "CONTINUATION_SOURCE",
+    "GENERIC_CONTINUATION_QUEUED_EVENT",
+    "GENERIC_CONTINUATION_SOURCE",
     "queue_chantier_continuation_for_terminal_run",
+    "queue_worker_continuation_for_terminal_run",
 ]
