@@ -6,6 +6,7 @@ import type {
   CortexWorkspaceComposerSettingsGroup,
   CortexWorkspaceComposerIntentOption,
 } from '$lib/features/composer/domain/composerAdapter';
+import type { RuntimeModelCatalogEntry } from '$lib/types/runtimeSettings';
 
 export const EXECUTION_PROFILE_OPTIONS = [
   {
@@ -20,14 +21,6 @@ export const EXECUTION_PROFILE_OPTIONS = [
     description: 'Run graph with coordinator and workers',
     icon: 'route',
   },
-] as const satisfies readonly CortexWorkspaceComposerIntentOption[];
-
-export const MODEL_OPTIONS = [
-  { value: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol', description: 'Preview model for eligible personal connections' },
-  { value: 'openai/gpt-5.5', label: 'GPT-5.5', description: 'Best quality for hard reasoning' },
-  { value: 'openai/gpt-5.4', label: 'GPT-5.4', description: 'Balanced general-purpose model' },
-  { value: 'openai/gpt-5.4-mini', label: 'GPT-5.4 Mini', description: 'Fast and economical' },
-  { value: 'openai/gpt-5-mini', label: 'GPT-5 Mini', description: 'Lower cost and latency' },
 ] as const satisfies readonly CortexWorkspaceComposerIntentOption[];
 
 export const EFFORT_OPTIONS = [
@@ -45,11 +38,34 @@ export const STEERING_INTENT_OPTIONS = [
 
 export type ActiveRunMessageIntent = (typeof STEERING_INTENT_OPTIONS)[number]['value'];
 
+function modelOptions(
+  catalog: readonly RuntimeModelCatalogEntry[],
+  selectedModel: string,
+): readonly CortexWorkspaceComposerIntentOption[] {
+  const options = catalog.map((entry) => ({
+    value: entry.id,
+    label: entry.label,
+    description: entry.description,
+  }));
+  if (options.length > 0 || !selectedModel) return options;
+  return [{
+    value: selectedModel,
+    label: selectedModel.split('/', 2).at(-1) || selectedModel,
+    description: 'Current workspace model',
+  }];
+}
+
 export function buildRunSettingsGroups(values: {
   mode: CortexExecutionProfile;
   model: string;
   effort: CortexEffortLevel;
+  modelCatalog: readonly RuntimeModelCatalogEntry[];
 }): readonly CortexWorkspaceComposerSettingsGroup[] {
+  const selectedCatalogEntry = values.modelCatalog.find((entry) => entry.id === values.model);
+  const effortOptions = selectedCatalogEntry
+    ? EFFORT_OPTIONS.filter((option) =>
+        selectedCatalogEntry.supported_effort_tiers.includes(option.value))
+    : EFFORT_OPTIONS;
   return [
     {
       key: 'mode',
@@ -61,14 +77,14 @@ export function buildRunSettingsGroups(values: {
     {
       key: 'model',
       label: 'Model',
-      options: MODEL_OPTIONS,
+      options: modelOptions(values.modelCatalog, values.model),
       value: values.model,
       ariaLabel: 'Model',
     },
     {
       key: 'effort',
       label: 'Effort',
-      options: EFFORT_OPTIONS,
+      options: effortOptions,
       value: values.effort,
       ariaLabel: 'Effort',
     },

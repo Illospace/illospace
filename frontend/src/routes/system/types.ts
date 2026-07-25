@@ -8,6 +8,7 @@ import type {
 export type {
   EmbedderKey,
   RuntimeOption,
+  RuntimeModelCatalogEntry,
   RuntimeSettings,
   RuntimeVoiceLanguage,
   RuntimeVoiceModelSize,

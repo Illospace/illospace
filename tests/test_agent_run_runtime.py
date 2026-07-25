@@ -1703,6 +1703,13 @@ async def test_spawn_worker_inherits_live_parent_route_after_parent_fallback(mon
 
 
 async def test_spawn_worker_bare_provider_resolves_provider_default_and_transport(monkeypatch):
+    from brain.platform.providers.model_policy import DEFAULT_PROVIDER_MODELS
+
+    # Derived rather than hardcoded: this asserts that a bare provider name
+    # resolves to *that provider's default*, so it must not need editing every
+    # time the catalogued lineup is refreshed.
+    expected_model = f"anthropic/{DEFAULT_PROVIDER_MODELS['anthropic']}"
+
     payload, captured, _events = await _captured_spawn_worker(
         monkeypatch,
         parent_model_policy={
@@ -1714,18 +1721,18 @@ async def test_spawn_worker_bare_provider_resolves_provider_default_and_transpor
     )
 
     assert captured["model_policy"] == {
-        "model": "anthropic/claude-sonnet-4-6",
+        "model": expected_model,
         "thinking": "xhigh",
     }
     assert captured["metadata"]["routing"]["requested"]["model"] == {
-        "value": "anthropic/claude-sonnet-4-6",
+        "value": expected_model,
         "source": "spawn_worker.model",
         "requested_value": "anthropic",
     }
-    assert payload["model"] == "anthropic/claude-sonnet-4-6"
+    assert payload["model"] == expected_model
     assert payload["effort"] == "xhigh"
     assert payload["routing"] == {
-        "model": "anthropic/claude-sonnet-4-6",
+        "model": expected_model,
         "effort": "xhigh",
         "provider": "anthropic",
         "auth_mode": None,

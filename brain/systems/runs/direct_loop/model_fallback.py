@@ -5,11 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from brain.platform.model_catalog import availability_fallback_for
 
-_MODEL_FALLBACKS = {
-    "openai/gpt-5.6": "openai/gpt-5.5",
-    "openai/gpt-5.6-sol": "openai/gpt-5.5",
-}
 _UNAVAILABLE_TERMS = (
     "model_not_found",
     "model is not available",
@@ -30,7 +27,7 @@ def _canonical_model(model: str | None) -> str:
 
 def fallback_model_for(model: str | None) -> str | None:
     """Return the next configured model for a limited-availability model."""
-    return _MODEL_FALLBACKS.get(_canonical_model(model))
+    return availability_fallback_for(_canonical_model(model))
 
 
 def _error_text(exc: Any) -> str:

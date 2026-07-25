@@ -111,8 +111,26 @@
   const hasPersonalOpenAIConnection = $derived(hasPersonalOpenAIRuntimeConnection(settings));
   const hasOrgOpenAIConnection = $derived(Boolean(settings?.connection?.has_org_key));
   const connectionStatus = $derived(settings?.connection?.status ?? 'missing');
-  const modelOptions = $derived(settings?.models?.options ?? []);
-  const thinkingOptions = $derived(settings?.models?.thinking_options ?? []);
+  const modelOptions = $derived(
+    (settings?.models?.catalog ?? []).map((entry) => ({
+      key: entry.id,
+      label: entry.label,
+      description: entry.description,
+      group: entry.provider,
+    })),
+  );
+  const selectedModelCatalogEntry = $derived(
+    settings?.models?.catalog.find((entry) => entry.id === modelDraft.default),
+  );
+  const thinkingOptions = $derived(
+    (settings?.models?.thinking_options ?? []).filter(
+      (option) =>
+        !selectedModelCatalogEntry ||
+        selectedModelCatalogEntry.supported_effort_tiers.includes(
+          option.key as RuntimeSettings['models']['thinking'],
+        ),
+    ),
+  );
   const setupMode = $derived($page.url.searchParams.get('setup') === '1');
   const setupCanContinue = $derived(setupMode && connectionStatus === 'connected');
   const memoryVaultProvider = $derived<MemoryVaultProvider>(embeddingProvider(memoryDraft.embedder));
@@ -440,8 +458,9 @@
         const models = await api.updateRuntimeModels(modelDraft);
         nextSettings = { ...nextSettings, models };
         cortex.applyWorkspaceRunDefaults(
-          `openai/${models.default}`,
+          models.default,
           models.thinking,
+          models.catalog,
         );
         saved.push('Model');
       }
@@ -473,7 +492,13 @@
   }
 
   function updateModel(value: string) {
-    modelDraft = { ...modelDraft, default: value };
+    const entry = settings?.models?.catalog.find((candidate) => candidate.id === value);
+    const thinking = entry?.supported_effort_tiers.includes(
+      modelDraft.thinking as RuntimeSettings['models']['thinking'],
+    )
+      ? modelDraft.thinking
+      : entry?.supported_effort_tiers[0] || modelDraft.thinking;
+    modelDraft = { default: value, thinking };
   }
 
   function updateThinking(value: string) {

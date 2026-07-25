@@ -400,6 +400,7 @@
     mode: string;
     model: string;
     effort: string;
+    modelCatalog?: readonly unknown[];
   }) {
     return [
       {
@@ -437,6 +438,7 @@
       mode: cortex.executionProfile,
       model: cortex.model,
       effort: cortex.effortLevel,
+      modelCatalog: cortex.modelCatalog,
     }),
   );
 

@@ -7,38 +7,7 @@ import sys
 from sqlalchemy import text
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.providers.model_policy import (
-    calculate_model_cost,
-    get_default_model,
-    resolve_skill_model,
-)
-
-
-def resolve_model(
-    skill_name: str,
-    *,
-    user_id: str | None = None,
-    org_id: str | None = None,
-    preferred_provider: str | None = None,
-) -> tuple[str, str]:
-    """Resolve model and thinking level from skill runtime settings."""
-    try:
-        return resolve_skill_model(
-            skill_name,
-            user_id=user_id,
-            org_id=org_id,
-            preferred_provider=preferred_provider,
-        )
-    except Exception as exc:
-        print(f"Warning: resolve_model failed for skill '{skill_name}': {exc}", file=sys.stderr)
-        return (
-            get_default_model(
-                provider=preferred_provider,
-                user_id=user_id,
-                org_id=org_id,
-            ),
-            "medium",
-        )
+from brain.platform.providers.model_policy import calculate_model_cost
 
 
 async def get_skill_runtime_settings() -> list[dict]:
@@ -73,4 +42,4 @@ def calculate_cost(
     )
 
 
-__all__ = ["calculate_cost", "get_skill_runtime_settings", "resolve_model"]
+__all__ = ["calculate_cost", "get_skill_runtime_settings"]

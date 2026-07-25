@@ -9,7 +9,7 @@ class TestCostCalculation:
         """Without cache args, cost = input_rate * input + output_rate * output."""
         from brain.systems.runs.modeling import calculate_cost
 
-        cost = calculate_cost("anthropic/claude-opus-4-6", 1_000_000, 100_000)
+        cost = calculate_cost("anthropic/claude-opus-5", 1_000_000, 100_000)
         # opus: $5/M input + $25/M output
         expected = 5.0 + 2.5
         assert abs(cost - expected) < 0.001
@@ -25,7 +25,7 @@ class TestCostCalculation:
         """Sonnet pricing should be $3/M input, $15/M output."""
         from brain.systems.runs.modeling import calculate_cost
 
-        cost = calculate_cost("anthropic/claude-sonnet-4-6", 1_000_000, 1_000_000)
+        cost = calculate_cost("anthropic/claude-sonnet-5", 1_000_000, 1_000_000)
         expected = 3.0 + 15.0
         assert abs(cost - expected) < 0.001
 
@@ -41,7 +41,7 @@ class TestCostCalculation:
         """Zero tokens should produce zero cost."""
         from brain.systems.runs.modeling import calculate_cost
 
-        cost = calculate_cost("anthropic/claude-opus-4-6", 0, 0)
+        cost = calculate_cost("anthropic/claude-opus-5", 0, 0)
         assert cost == 0.0
 
     def test_unknown_model_defaults_to_default_openai_pricing(self):

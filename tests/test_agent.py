@@ -96,6 +96,7 @@ class TestProviderInference:
         expired = SimpleNamespace(status_code=401, response_body="access token expired")
 
         assert fallback_model_for("openai/gpt-5.6-sol") == "openai/gpt-5.5"
+        assert fallback_model_for("openai/gpt-5.6") == "openai/gpt-5.5"
         assert fallback_model_for("gpt-5.5") is None
         assert is_model_unavailable_error(unsupported) is True
         assert is_model_unavailable_error(missing) is True

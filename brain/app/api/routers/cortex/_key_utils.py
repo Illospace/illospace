@@ -122,7 +122,7 @@ def verify_provider_api_key(api_key: str, provider: str) -> None:
         resp = create_message_with_token(
             api_key,
             timeout=15,
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5",
             max_tokens=5,
             messages=[{"role": "user", "content": "hi"}],
         )

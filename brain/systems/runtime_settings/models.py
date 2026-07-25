@@ -4,29 +4,15 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.org import Org, User
+from brain.platform.model_catalog import get_model_catalog_entry
 from brain.platform.providers.model_policy import (
     EFFORT_TIERS,
-    PROVIDER_MODEL_OPTIONS,
     async_get_default_model,
     async_get_default_thinking,
+    get_model_catalog_contract,
 )
 
 from .schemas import RuntimeModelsRead, RuntimeModelsUpdate, RuntimeOption
-
-OPENAI_MODEL_OPTIONS = [
-    RuntimeOption(key="gpt-5.6-sol", label="GPT-5.6 Sol", description="Latest model; falls back to GPT-5.5 when unavailable."),
-    RuntimeOption(key="gpt-5.5", label="GPT-5.5", description="Default model for hard reasoning."),
-    RuntimeOption(key="gpt-5.4-pro", label="GPT-5.4 Pro", description="Previous maximum-quality route."),
-    RuntimeOption(key="gpt-5.4", label="GPT-5.4", description="Balanced general-purpose model."),
-    RuntimeOption(key="gpt-5.4-mini", label="GPT-5.4 Mini", description="Fast and economical for lighter tasks."),
-    RuntimeOption(key="gpt-5-mini", label="GPT-5 Mini", description="Low-cost route."),
-    RuntimeOption(key="gpt-5-nano", label="GPT-5 Nano", description="Smallest low-latency route."),
-    RuntimeOption(key="gpt-5.3-codex", label="GPT-5.3 Codex", description="Coding-optimized model."),
-    RuntimeOption(key="gpt-5.3-codex-spark", label="GPT-5.3 Codex Spark", description="Fast coding model."),
-    RuntimeOption(key="gpt-5.2", label="GPT-5.2", description="Stable professional-work model."),
-    RuntimeOption(key="gpt-4.1", label="GPT-4.1", description="Legacy high-quality fallback."),
-    RuntimeOption(key="gpt-4.1-mini", label="GPT-4.1 Mini", description="Legacy lightweight fallback."),
-]
 
 _THINKING_OPTION_DETAILS = {
     "none": ("None", "No additional reasoning effort."),
@@ -49,22 +35,16 @@ def _normalize_model(model: str) -> str:
     value = model.strip()
     if not value:
         raise HTTPException(status_code=400, detail="Model values cannot be empty")
-    if ":" in value or "/" in value:
-        separator = ":" if ":" in value else "/"
-        provider, name = value.split(separator, 1)
-        if provider != "openai":
-            raise HTTPException(status_code=400, detail="Only OpenAI models can be configured here")
-        value = name
-    if value not in PROVIDER_MODEL_OPTIONS["openai"]:
-        raise HTTPException(status_code=400, detail=f"Unsupported OpenAI model: {value}")
-    return value
+    entry = get_model_catalog_entry(value)
+    if entry is None:
+        raise HTTPException(status_code=400, detail=f"Unsupported model: {value}")
+    return entry.id
 
 
 async def async_get_runtime_models(session: AsyncSession, user: User) -> RuntimeModelsRead:
     default = await async_get_default_model(
         session,
-        "openai",
-        include_provider_prefix=False,
+        include_provider_prefix=True,
         org_id=user.org_id,
         user_id=user.id,
     )
@@ -76,7 +56,7 @@ async def async_get_runtime_models(session: AsyncSession, user: User) -> Runtime
     return RuntimeModelsRead(
         default=_normalize_model(default),
         thinking=thinking,
-        options=OPENAI_MODEL_OPTIONS,
+        catalog=get_model_catalog_contract(workspace_default=default),
         thinking_options=THINKING_OPTIONS,
     )
 
@@ -87,11 +67,18 @@ async def async_update_runtime_models(
     update: RuntimeModelsUpdate,
 ) -> RuntimeModelsRead:
     model = _normalize_model(update.default)
+    entry = get_model_catalog_entry(model)
+    assert entry is not None
+    if update.thinking is not None and update.thinking not in entry.supported_effort_tiers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{entry.label} does not support {update.thinking} effort",
+        )
     org = await session.get(Org, user.org_id)
     if org is not None:
         config = dict(org.memory_model_config or {})
-        config["default_provider"] = "openai"
-        config["default_model"] = f"openai/{model}"
+        config["default_provider"] = entry.provider
+        config["default_model"] = entry.id
         if update.thinking is not None:
             config["default_thinking"] = update.thinking
         for stale_key in (

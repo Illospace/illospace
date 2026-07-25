@@ -12,6 +12,20 @@ export interface RuntimeOption {
   group?: string | null;
 }
 
+export interface RuntimeModelCatalogEntry {
+  id: string;
+  label: string;
+  provider: 'openai' | 'anthropic';
+  description: string;
+  supported_effort_tiers: RuntimeThinking[];
+  auth_requirement: 'chatgpt' | 'api_key';
+  availability_fallback?: string | null;
+  default_provenance: {
+    provider_default: boolean;
+    workspace_default: boolean;
+  };
+}
+
 export interface RuntimeSettings {
   connection: {
     status: 'connected' | 'missing' | 'error';
@@ -26,7 +40,7 @@ export interface RuntimeSettings {
   models: {
     default: string;
     thinking: RuntimeThinking;
-    options: RuntimeOption[];
+    catalog: RuntimeModelCatalogEntry[];
     thinking_options: RuntimeOption[];
   };
   memory: {

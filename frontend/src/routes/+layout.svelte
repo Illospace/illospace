@@ -106,6 +106,7 @@
           cortex.applyWorkspaceRunDefaults(
             workspaceModel,
             runtime.models?.thinking || 'xhigh',
+            runtime.models?.catalog || [],
           );
           if (requiresPersonalOpenAIOnboarding(runtime) && !isSystemPage) {
             goto('/onboarding');
