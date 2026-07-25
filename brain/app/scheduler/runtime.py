@@ -37,6 +37,8 @@ RUN_STATUS_EXECUTING = "executing"
 RETRY_POLICY_DEFAULT_MAX_ATTEMPTS = 2
 RETRY_POLICY_DEFAULT_BACKOFF_SECONDS = 0
 SCHEDULER_FAILURE_ALERT_THRESHOLD_DEFAULT = 3
+SCHEDULER_FAILURE_RATE_THRESHOLD_DEFAULT = 3
+SCHEDULER_FAILURE_RATE_WINDOW_HOURS_DEFAULT = 24
 
 LEASE_TTL_SECONDS = int(os.getenv("SCHEDULER_LEASE_TTL_SECONDS", "7200"))
 
@@ -144,6 +146,34 @@ def scheduler_failure_alert_threshold() -> int:
     return max(1, configured)
 
 
+def scheduler_failure_rate_threshold() -> int:
+    """Return the rolling failure count that opens one durable rate alert."""
+    try:
+        configured = int(
+            os.getenv(
+                "SCHEDULER_FAILURE_RATE_THRESHOLD",
+                str(SCHEDULER_FAILURE_RATE_THRESHOLD_DEFAULT),
+            )
+        )
+    except (TypeError, ValueError):
+        configured = SCHEDULER_FAILURE_RATE_THRESHOLD_DEFAULT
+    return max(1, configured)
+
+
+def scheduler_failure_rate_window_hours() -> int:
+    """Return the rolling failure-rate window in hours."""
+    try:
+        configured = int(
+            os.getenv(
+                "SCHEDULER_FAILURE_RATE_WINDOW_HOURS",
+                str(SCHEDULER_FAILURE_RATE_WINDOW_HOURS_DEFAULT),
+            )
+        )
+    except (TypeError, ValueError):
+        configured = SCHEDULER_FAILURE_RATE_WINDOW_HOURS_DEFAULT
+    return max(1, configured)
+
+
 def normalize_scheduler_failure_identity(failure_identity: str) -> str:
     """Remove volatile runtime tokens before identifying a failure streak."""
     normalized = str(failure_identity or "").strip()
@@ -178,7 +208,32 @@ def _scheduler_failure_guard_state(job: SchedulerJob) -> dict[str, Any]:
         "alerted_at": (
             job.failure_alerted_at.isoformat() if job.failure_alerted_at else None
         ),
+        "rate_alerted_at": (
+            job.rate_alerted_at.isoformat() if job.rate_alerted_at else None
+        ),
     }
+
+
+async def _async_scheduler_failure_rate_count(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    now: datetime,
+    window_hours: int,
+) -> int:
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(SchedulerRun)
+            .where(
+                SchedulerRun.job_id == job_id,
+                SchedulerRun.status == RUN_STATUS_SETTLED_FAILURE,
+                SchedulerRun.started_at
+                > now - timedelta(hours=window_hours),
+            )
+        )
+        or 0
+    )
 
 
 async def async_record_scheduler_job_failure(
@@ -189,7 +244,7 @@ async def async_record_scheduler_job_failure(
     error_text: str,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Persist an identical-failure streak and mark only its threshold edge."""
+    """Persist failure guard state and mark only newly crossed alert edges."""
     now = _utcnow(now)
     locked_job = await session.scalar(
         select(SchedulerJob)
@@ -219,27 +274,60 @@ async def async_record_scheduler_job_failure(
         locked_job.failure_alerted_at = now
         alert_emitted = True
 
+    rate_window_hours = scheduler_failure_rate_window_hours()
+    rate_failures = await _async_scheduler_failure_rate_count(
+        session,
+        locked_job.id,
+        now=now,
+        window_hours=rate_window_hours,
+    )
+    rate_alert_latched = False
+    if (
+        rate_failures >= scheduler_failure_rate_threshold()
+        and locked_job.rate_alerted_at is None
+    ):
+        locked_job.rate_alerted_at = now
+        rate_alert_latched = True
+
     await session.flush()
     return {
         **_scheduler_failure_guard_state(locked_job),
         "alert_emitted": alert_emitted,
+        "rate_failures": rate_failures,
+        "rate_window_hours": rate_window_hours,
+        "rate_alert_latched": rate_alert_latched,
     }
 
 
 async def async_reset_scheduler_job_failure_guard(
     session: AsyncSession,
     job: SchedulerJob,
+    *,
+    now: datetime | None = None,
 ) -> None:
-    """Close a repeated-failure alert after the job succeeds."""
+    """Close recovered failure alerts after the job succeeds."""
     if not any(
         (
             job.failure_signature,
             job.consecutive_failure_count,
             job.failure_alerted_at,
             job.last_failure_error,
+            job.rate_alerted_at,
         )
     ):
         return
+
+    if job.rate_alerted_at is not None:
+        now = _utcnow(now)
+        rate_failures = await _async_scheduler_failure_rate_count(
+            session,
+            job.id,
+            now=now,
+            window_hours=scheduler_failure_rate_window_hours(),
+        )
+        if rate_failures < scheduler_failure_rate_threshold():
+            job.rate_alerted_at = None
+
     job.failure_signature = None
     job.consecutive_failure_count = 0
     job.failure_alerted_at = None
