@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from brain.app.scheduler.runtime import RUN_STATUS_SETTLED_SUCCESS
+from brain.platform.db.enums import SettlementState
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.org import User
 from brain.platform.db.models.scheduler import SchedulerJob, SchedulerRun
@@ -66,7 +66,7 @@ async def spawn_health_scan_run(*, now: datetime | None = None) -> int:
             .join(SchedulerJob, SchedulerRun.job_id == SchedulerJob.id)
             .where(
                 SchedulerJob.job_key == "uwear_aws_health_scan",
-                SchedulerRun.status == RUN_STATUS_SETTLED_SUCCESS,
+                SchedulerRun.status == SettlementState.SETTLED_SUCCESS,
                 SchedulerRun.started_at.is_not(None),
             )
             .order_by(SchedulerRun.started_at.desc(), SchedulerRun.id.desc())
