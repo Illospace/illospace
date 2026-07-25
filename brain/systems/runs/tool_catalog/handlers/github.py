@@ -14,7 +14,6 @@ from brain.systems.cortex.project_context.github import (
     async_add_repo_issue_comment,
     async_add_repo_sub_issue,
     async_create_repo_issue,
-    async_create_repo_pull_request,
     async_grep_repo,
     async_get_repo_issue_parent,
     async_get_pull_request_deploy_info,
@@ -30,6 +29,13 @@ from brain.systems.cortex.project_context.github import (
     async_remove_repo_sub_issue,
     async_update_repo_issue,
     parse_github_repo_slug,
+)
+from brain.systems.cortex.project_context.github_promotion import (
+    PROMOTION_PULL_REQUEST_POLICY,
+    PromotionPullRequestOperationError,
+    PromotionPullRequestPolicyViolation,
+    PromotionPullRequestTarget,
+    async_reconcile_promotion_pull_request,
 )
 from brain.systems.deploy_state import (
     DeployState,
@@ -61,14 +67,6 @@ def _clean(value: Any) -> str | None:
 _SLACK_ORIGIN_REF_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])(slack:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[0-9.]+)"
 )
-
-PROMOTION_PULL_REQUEST_REPOS = frozenset({
-    "uwear-ai/uwear-backend",
-    "uwear-ai/uwearaiapp",
-})
-PROMOTION_PULL_REQUEST_BASE = "main"
-PROMOTION_PULL_REQUEST_HEAD = "staging"
-PROMOTION_PULL_REQUEST_TITLE = "Staging → main promotion"
 
 
 def _origin_ref_from_body(body: str | None) -> str | None:
@@ -737,35 +735,6 @@ async def _handle_create_github_issue(
     return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
 
 
-def _existing_pull_request_number(message: str) -> int | None:
-    for pattern in (r"/pull/(\d+)", r"pull request\s+#?(\d+)"):
-        match = re.search(pattern, message, flags=re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-    return None
-
-
-def _promotion_pull_request_policy_error(
-    *,
-    repo: str,
-    base: str,
-    head: str,
-    title: str,
-    draft: bool,
-) -> str | None:
-    if repo not in PROMOTION_PULL_REQUEST_REPOS:
-        return f"repository must be one of {sorted(PROMOTION_PULL_REQUEST_REPOS)}"
-    if base != PROMOTION_PULL_REQUEST_BASE:
-        return f"base must be {PROMOTION_PULL_REQUEST_BASE!r}"
-    if head != PROMOTION_PULL_REQUEST_HEAD:
-        return f"head must be {PROMOTION_PULL_REQUEST_HEAD!r}"
-    if title != PROMOTION_PULL_REQUEST_TITLE:
-        return f"title must be {PROMOTION_PULL_REQUEST_TITLE!r}"
-    if draft:
-        return "draft must be false"
-    return None
-
-
 async def _handle_create_github_pull_request(
     repo: str | None = None,
     base: str | None = None,
@@ -794,17 +763,19 @@ async def _handle_create_github_pull_request(
     clean_body = _clean(body)
     if not clean_body:
         return json.dumps({"error": "create_github_pull_request requires a non-empty body"})
-    policy_error = _promotion_pull_request_policy_error(
+    target = PromotionPullRequestTarget(
         repo=repo_slug,
         base=clean_base,
         head=clean_head,
         title=clean_title,
         draft=bool(draft),
     )
-    if policy_error:
+    try:
+        PROMOTION_PULL_REQUEST_POLICY.validate(target)
+    except PromotionPullRequestPolicyViolation as exc:
         return json.dumps({
             "error": "promotion_pull_request_policy_violation",
-            "message": policy_error,
+            "message": str(exc),
             "repo": repo_slug,
         })
 
@@ -829,39 +800,24 @@ async def _handle_create_github_pull_request(
     auth_statuses = {401, 403, 404}
     for index, candidate in enumerate(write_candidates):
         try:
-            payload = await async_create_repo_pull_request(
-                repo_slug,
-                base=clean_base,
-                head=clean_head,
-                title=clean_title,
+            result = await async_reconcile_promotion_pull_request(
+                target,
                 body=clean_body,
-                draft=bool(draft),
                 token=candidate["token"],
             )
+        except PromotionPullRequestOperationError as exc:
+            return json.dumps({
+                "error": exc.code,
+                "message": exc.detail,
+                "status_code": exc.status_code,
+                "repo": repo_slug,
+                "base": clean_base,
+                "head": clean_head,
+            })
         except GitHubConnectorError as exc:
             last_error = exc
             if exc.status_code in auth_statuses and index < len(write_candidates) - 1:
                 continue
-            lowered = exc.message.lower()
-            if exc.status_code == 422 and "no commits between" in lowered:
-                return json.dumps({
-                    "error": "no_commits_between",
-                    "message": exc.message,
-                    "status_code": 422,
-                    "repo": repo_slug,
-                    "base": clean_base,
-                    "head": clean_head,
-                })
-            if exc.status_code == 422 and "pull request already exists" in lowered:
-                return json.dumps({
-                    "error": "pull_request_exists",
-                    "existing": _existing_pull_request_number(exc.message),
-                    "message": exc.message,
-                    "status_code": 422,
-                    "repo": repo_slug,
-                    "base": clean_base,
-                    "head": clean_head,
-                })
             error_payload = {
                 "error": exc.message,
                 "status_code": exc.status_code,
@@ -873,21 +829,37 @@ async def _handle_create_github_pull_request(
                 error_payload["required_permission"] = "pull_requests:write"
             return json.dumps(error_payload)
 
-        pull_request = payload.get("pull_request")
-        pull_request = pull_request if isinstance(pull_request, dict) else {}
-        result = {
+        if result.settled_by == "create_conflict":
+            return json.dumps({
+                "error": "pull_request_exists",
+                "existing": result.number,
+                "message": result.conflict_message,
+                "status_code": 422,
+                "repo": repo_slug,
+                "base": clean_base,
+                "head": clean_head,
+            })
+
+        payload = {
             "repo": repo_slug,
-            "number": pull_request.get("number"),
-            "html_url": pull_request.get("html_url"),
-            "state": pull_request.get("state"),
-            "draft": bool(pull_request.get("draft")),
+            "number": result.number,
             "token_secret_key_used": bool(candidate.get("key_name")),
             "token_source": candidate["source"],
             "token_key_name": candidate.get("key_name"),
         }
+        if result.outcome == "created":
+            payload.update(
+                {
+                    "html_url": result.html_url,
+                    "state": result.state,
+                    "draft": result.draft,
+                }
+            )
+        else:
+            payload["outcome"] = result.outcome
         if last_error is not None:
-            result["fallback_from_status_code"] = last_error.status_code
-        return json.dumps(result, default=str)
+            payload["fallback_from_status_code"] = last_error.status_code
+        return json.dumps(payload, default=str)
 
     return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
 
