@@ -1550,7 +1550,7 @@ async def test_intermittent_failures_emit_one_rate_alert_until_window_recovers(
     threshold_run = await add_run("settled_failure", 4)
 
     assert threshold_run.result_summary["failure_guard"]["rate_failures"] == 3
-    assert threshold_run.result_summary["failure_guard"]["rate_alert_emitted"] is True
+    assert threshold_run.result_summary["failure_guard"]["rate_alert_latched"] is True
     first_rate_alerted_at = job.rate_alerted_at
     assert first_rate_alerted_at is not None
     slack_sender.assert_awaited_once_with(
@@ -1565,7 +1565,7 @@ async def test_intermittent_failures_emit_one_rate_alert_until_window_recovers(
     extra_failure = await add_run("settled_failure", 6)
 
     assert extra_failure.result_summary["failure_guard"]["rate_failures"] == 4
-    assert extra_failure.result_summary["failure_guard"]["rate_alert_emitted"] is False
+    assert extra_failure.result_summary["failure_guard"]["rate_alert_latched"] is False
     assert job.rate_alerted_at == first_rate_alerted_at
     assert slack_sender.await_count == 1
 
@@ -1579,7 +1579,7 @@ async def test_intermittent_failures_emit_one_rate_alert_until_window_recovers(
     rearmed_run = await add_run("settled_failure", 36)
 
     assert rearmed_run.result_summary["failure_guard"]["rate_failures"] == 3
-    assert rearmed_run.result_summary["failure_guard"]["rate_alert_emitted"] is True
+    assert rearmed_run.result_summary["failure_guard"]["rate_alert_latched"] is True
     assert slack_sender.await_count == 2
     assert slack_sender.await_args_list[-1].kwargs == {
         "job_key": "nightly_sleep",
@@ -1592,11 +1592,13 @@ async def test_intermittent_failures_emit_one_rate_alert_until_window_recovers(
 
 async def test_consecutive_and_rate_edges_coexist_without_duplicate_delivery(
     session,
+    caplog,
     monkeypatch,
 ):
     monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "3")
     monkeypatch.setenv("SCHEDULER_FAILURE_RATE_THRESHOLD", "3")
     monkeypatch.setenv("SCHEDULER_FAILURE_RATE_WINDOW_HOURS", "24")
+    caplog.set_level(logging.ERROR, logger="brain.app.scheduler.executor")
     slack_sender = AsyncMock()
     monkeypatch.setattr(
         scheduler_executor,
@@ -1635,9 +1637,13 @@ async def test_consecutive_and_rate_edges_coexist_without_duplicate_delivery(
     assert threshold_run is not None
     guard = threshold_run.result_summary["failure_guard"]
     assert guard["alert_emitted"] is True
-    assert guard["rate_alert_emitted"] is True
+    assert guard["rate_alert_latched"] is True
     assert job.failure_alerted_at is not None
     assert job.rate_alerted_at is not None
+    assert (
+        "rolling edge also crossed and was folded into this single delivered alert"
+        in caplog.text
+    )
     slack_sender.assert_awaited_once_with(
         job_key="nightly_sleep",
         run_id=threshold_run.id,

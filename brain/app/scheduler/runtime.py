@@ -281,13 +281,13 @@ async def async_record_scheduler_job_failure(
         now=now,
         window_hours=rate_window_hours,
     )
-    rate_alert_emitted = False
+    rate_alert_latched = False
     if (
         rate_failures >= scheduler_failure_rate_threshold()
         and locked_job.rate_alerted_at is None
     ):
         locked_job.rate_alerted_at = now
-        rate_alert_emitted = True
+        rate_alert_latched = True
 
     await session.flush()
     return {
@@ -295,7 +295,7 @@ async def async_record_scheduler_job_failure(
         "alert_emitted": alert_emitted,
         "rate_failures": rate_failures,
         "rate_window_hours": rate_window_hours,
-        "rate_alert_emitted": rate_alert_emitted,
+        "rate_alert_latched": rate_alert_latched,
     }
 
 

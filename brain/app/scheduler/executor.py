@@ -481,9 +481,16 @@ async def _async_apply_failure_guard(
         "failure_guard": guard,
     }
     if guard["alert_emitted"]:
+        rate_alert_note = (
+            " (rolling edge also crossed and was folded into this single "
+            "delivered alert)"
+            if guard["rate_alert_latched"]
+            else ""
+        )
         logger.error(
-            "Scheduler job repeated failure alert: job_key=%s run_id=%s "
+            "Scheduler job repeated failure alert%s: job_key=%s run_id=%s "
             "consecutive_failures=%s failure_signature=%s error=%s",
+            rate_alert_note,
             job.job_key,
             run.id,
             guard["consecutive_failures"],
@@ -504,7 +511,7 @@ async def _async_apply_failure_guard(
                 job.job_key,
                 run.id,
             )
-    elif guard["rate_alert_emitted"]:
+    elif guard["rate_alert_latched"]:
         logger.error(
             "Scheduler job intermittent failure alert: job_key=%s run_id=%s "
             "rate_failures=%s rate_window_hours=%s error=%s",
