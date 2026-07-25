@@ -129,7 +129,16 @@ _GITHUB_PR_URL_RE = re.compile(
     r"https?://github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/(?P<number>[1-9][0-9]*)\b",
     re.IGNORECASE,
 )
+_GITHUB_PR_KEY_RE = re.compile(
+    r"\bgithub:(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+):pr:(?P<number>[1-9][0-9]*)\b",
+    re.IGNORECASE,
+)
+_GITHUB_ISSUE_KEY_RE = re.compile(
+    r"\bgithub:(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+):issue:[1-9][0-9]*\b",
+    re.IGNORECASE,
+)
 _SHORT_PR_RE = re.compile(r"\b(?:pr|pull request)\s*#?(?P<number>[1-9][0-9]*)\b", re.IGNORECASE)
+_BARE_PR_RE = re.compile(r"^(?P<number>[1-9][0-9]*)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,7 +184,8 @@ def _iso(value: datetime | str | object) -> str | None:
     return parsed.isoformat() if parsed else None
 
 
-def _append_progress_note(data: Mapping[str, object], line: str) -> str | None:
+def append_progress_note(data: Mapping[str, object], line: str) -> str | None:
+    """Append one line using the tracker progress-note convention."""
     if "progress_note" not in data:
         return None
     current = str(data.get("progress_note") or "").rstrip()
@@ -218,10 +228,20 @@ def _human_reply(message: Mapping[str, object], *, bot_user_id: str | None) -> b
     return not bot_user_id or user_id != bot_user_id
 
 
-def _fix_pr_from_text(text: str, *, repo: str | None) -> str | None:
+def github_repo_from_issue_text(text: str) -> str | None:
+    """Extract ``owner/repo`` from a tracker GitHub issue key."""
+    match = _GITHUB_ISSUE_KEY_RE.search(_text(text))
+    return match.group("repo") if match else None
+
+
+def fix_pr_from_text(text: str, *, repo: str | None) -> str | None:
+    """Normalize a supported PR reference to ``owner/repo#N``."""
     url_match = _GITHUB_PR_URL_RE.search(text)
     if url_match:
         return f"{url_match.group('repo')}#{url_match.group('number')}"
+    key_match = _GITHUB_PR_KEY_RE.search(text)
+    if key_match:
+        return f"{key_match.group('repo')}#{key_match.group('number')}"
     repo_match = _REPO_PR_RE.search(text)
     if repo_match:
         return f"{repo_match.group('repo')}#{repo_match.group('number')}"
@@ -229,6 +249,9 @@ def _fix_pr_from_text(text: str, *, repo: str | None) -> str | None:
     clean_repo = _text(repo)
     if short_match and clean_repo:
         return f"{clean_repo}#{short_match.group('number')}"
+    bare_match = _BARE_PR_RE.fullmatch(_text(text))
+    if bare_match and clean_repo:
+        return f"{clean_repo}#{bare_match.group('number')}"
     return None
 
 
@@ -271,7 +294,7 @@ def _resolution_signals(
                 text=text,
                 source=source,
                 fix_pr=(
-                    _fix_pr_from_text(text, repo=repo)
+                    fix_pr_from_text(text, repo=repo)
                     if kind in {"deployed", "verified"}
                     else None
                 ),
@@ -314,7 +337,7 @@ def alert_thread_source_from_run(
 
 
 async def _alert_thread_sources(session, *, org_id: str) -> list[AlertThreadSource]:
-    records = await _ticket_records(session, org_id=org_id)
+    records = await ticket_records(session, org_id=org_id)
     if not records:
         return []
     records_by_id = {record.id: record for record in records}
@@ -468,7 +491,7 @@ async def _resolution_patch(
         status = _matching_enum_option(fields.get("status"), "Todo", "In Progress", "Blocked")
     if status is not None:
         patch["status"] = status
-    note = _append_progress_note(data, _resolution_note(signal))
+    note = append_progress_note(data, _resolution_note(signal))
     if note is not None:
         patch["progress_note"] = note
     return {key: value for key, value in patch.items() if key in fields}
@@ -583,7 +606,7 @@ async def run_alert_resolution_harvest(
             summary["skipped"] += 1
             continue
         try:
-            await _update_record(
+            await update_record(
                 session,
                 record,
                 patch,
@@ -643,7 +666,7 @@ def _json_text(session, key: str):
     return DomainRecord.data[key].as_string()
 
 
-async def _ticket_records(
+async def ticket_records(
     session,
     *,
     org_id: str,
@@ -685,7 +708,7 @@ async def _ticket_records(
     return list((await session.scalars(stmt.order_by(DomainRecord.id))).all())
 
 
-async def _update_record(
+async def update_record(
     session,
     record: DomainRecord,
     patch: dict,
@@ -746,7 +769,7 @@ async def _sweep_main_merge(
 ) -> None:
     kind = classify_merge_event(event)
     fix_pr = f"{repo}#{event.get('number')}" if kind is MergeKind.HOTFIX and event.get("number") else None
-    records = await _ticket_records(
+    records = await ticket_records(
         session,
         org_id=org_id,
         states={DeployState.STAGING.value, DeployState.PROD_PENDING.value},
@@ -775,7 +798,7 @@ async def _sweep_main_merge(
             patch.update({"deploy_state": DeployState.DEPLOYED.value, "deployed_at": deployed_at})
             if fix_pr and data.get("fix_pr") == fix_pr:
                 patch.update({"fix_merge_sha": sha, "fix_merged_at": deployed_at})
-            note = _append_progress_note(data, f"deployed to main at {deployed_at}")
+            note = append_progress_note(data, f"deployed to main at {deployed_at}")
             if note is not None:
                 patch["progress_note"] = note
             bucket = "deployed"
@@ -788,7 +811,7 @@ async def _sweep_main_merge(
                 summary["skipped"] += 1
                 continue
             patch["deploy_state"] = DeployState.PROD_PENDING.value
-            note = _append_progress_note(data, "fix confirmed on staging; awaiting promotion")
+            note = append_progress_note(data, "fix confirmed on staging; awaiting promotion")
             if note is not None:
                 patch["progress_note"] = note
             bucket = "prod_pending"
@@ -796,7 +819,7 @@ async def _sweep_main_merge(
             summary["skipped"] += 1
             continue
         try:
-            await _update_record(session, record, patch, reason=f"deploy_sweep:{kind.value}")
+            await update_record(session, record, patch, reason=f"deploy_sweep:{kind.value}")
         except Exception as exc:
             logger.warning("deploy sweep skipped record %s: %s", record.id, exc)
             summary["errors"].append(record.id)
@@ -821,7 +844,7 @@ async def _sweep_staging_merge(
         summary["skipped"] += 1
         return
     fix_pr = f"{repo}#{number}"
-    records = await _ticket_records(session, org_id=org_id, fix_pr=fix_pr)
+    records = await ticket_records(session, org_id=org_id, fix_pr=fix_pr)
     for record in records:
         summary["examined"] += 1
         data = record.data or {}
@@ -841,11 +864,11 @@ async def _sweep_staging_merge(
         }
         if state is DeployState.DEPLOYED:
             patch["deployed_at"] = merged_at
-        note = _append_progress_note(data, f"fix {fix_pr} merged to staging at {merged_at}")
+        note = append_progress_note(data, f"fix {fix_pr} merged to staging at {merged_at}")
         if note is not None:
             patch["progress_note"] = note
         try:
-            await _update_record(session, record, patch, reason="deploy_sweep:fix_to_staging")
+            await update_record(session, record, patch, reason="deploy_sweep:fix_to_staging")
         except Exception as exc:
             logger.warning("deploy sweep skipped record %s: %s", record.id, exc)
             summary["errors"].append(record.id)
@@ -943,7 +966,7 @@ async def run_deploy_verification(
         return summary
     try:
         summary["fields"] = await ensure_deploy_state_fields(session, org_id=org_id)
-        records = await _ticket_records(
+        records = await ticket_records(
             session,
             org_id=org_id,
             states={DeployState.DEPLOYED.value},
@@ -995,14 +1018,14 @@ async def run_deploy_verification(
             "verified_at": current.isoformat(),
             "status": "Done",
         }
-        note = _append_progress_note(
+        note = append_progress_note(
             data,
             f"verified quiet since deploy at {deployed_iso}",
         )
         if note is not None:
             patch["progress_note"] = note
         try:
-            await _update_record(session, record, patch, reason="deploy_verification")
+            await update_record(session, record, patch, reason="deploy_verification")
         except Exception as exc:
             logger.warning("deploy verification skipped record %s: %s", record.id, exc)
             summary["errors"].append(record.id)
