@@ -204,6 +204,12 @@ async def test_audit_analyze_authorizes_and_projects_failed_thread_content():
     assert "temporary upstream problem" in admitted_message
     assert "Total tokens: 12,345" in admitted_message
     assert "Est cost: $0.0679" in admitted_message
+    assert captured["event"].payload["metadata"] == {
+        "run_profile": "fast",
+        "recipe": "fast",
+        "thinking_tier": "xhigh",
+        "source": "audit",
+    }
 
 
 @pytest.mark.asyncio

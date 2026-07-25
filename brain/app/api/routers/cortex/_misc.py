@@ -852,7 +852,12 @@ async def idea_audit_analyze(
                 target={"kind": "cortex_idea", "idea_id": idea_id},
                 payload={
                     "message": f"/audit {summary}",
-                    "metadata": {"run_profile": "deep", "recipe": "deep", "source": "audit"},
+                    "metadata": {
+                        "run_profile": "fast",
+                        "recipe": "fast",
+                        "thinking_tier": "xhigh",
+                        "source": "audit",
+                    },
                 },
                 policy={
                     "priority": 2,

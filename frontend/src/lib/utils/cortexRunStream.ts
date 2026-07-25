@@ -404,7 +404,7 @@ export function applyAgentActivityToStream(
   stream: CortexRunStreamItem[],
   msg: any,
   selectedIdeaId: string | null,
-  executionProfile: string,
+  fallbackExecutionProfile: string,
 ): CortexRunStreamItem[] {
   if (!msg || msg.idea_id !== selectedIdeaId) return stream;
   const activity = typeof msg.activity === 'string' ? msg.activity.trim() : '';
@@ -412,6 +412,10 @@ export function applyAgentActivityToStream(
   const runId = msg.run_id ?? msg.id;
   if (runId == null) return stream;
   const now = eventAt(msg);
+  const eventExecutionProfile = String(
+    msg.execution_profile ?? msg.profile ?? msg.strategy ?? '',
+  ).trim().toLowerCase();
+  const executionProfile = eventExecutionProfile || fallbackExecutionProfile;
   let matched = false;
   const activityEntry = {
     at: now,
@@ -459,10 +463,7 @@ export function applyAgentActivityToStream(
     live_lines: [activity],
     activity_trace: [activityEntry],
     work_log: [workEntry],
-    execution_profile:
-      msg.strategy === 'fast' || msg.profile === 'fast' || executionProfile === 'fast'
-        ? 'fast'
-        : undefined,
+    execution_profile: executionProfile || undefined,
   };
   if (msg.type === 'tool_started' || msg.type === 'tool_finished') {
     runItem = appendRunToolCall(runItem, msg, now);

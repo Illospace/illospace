@@ -2,11 +2,14 @@ import { browser, dev } from '$app/environment';
 import { api, type CortexBootstrapPayload, type ThreadStreamPage } from '$lib/api/client';
 import { auth } from '$lib/stores/auth.svelte';
 import {
-  CORTEX_RUN_SETTINGS_STORAGE_KEYS,
+  WORKSPACE_DEFAULT_RUN_SETTING,
   loadRunSettings,
   normalizeRunOptions as normalizeCortexRunOptions,
   normalizeRunSettings,
   persistRunSettings,
+  routingMetadataForRunOptions,
+  runSettingsOptions as selectedRunSettingsOptions,
+  type CortexEffortSelection,
 } from '$lib/features/cortex/controllers/runSettingsController';
 import {
   hasWorkingIdeas as hasWorkingCortexIdeas,
@@ -76,8 +79,6 @@ import type {
   BrowserFrame,
   BrowserSessionState,
   Connection,
-  CortexEffortLevel,
-  CortexExecutionProfile,
   Idea,
   StreamItem,
   VaultAgentGrantPrompt,
@@ -120,10 +121,9 @@ class CortexStore {
   loading = $state(true);
   teamMembersLoaded = $state(false);
   view = $state<'canvas' | 'list'>('canvas');
-  executionProfile = $state<CortexExecutionProfile>('fast');
-  model = $state<string>('openai/gpt-5.6-sol');
+  model = $state<string>(WORKSPACE_DEFAULT_RUN_SETTING);
   modelCatalog = $state<RuntimeModelCatalogEntry[]>([]);
-  effortLevel = $state<CortexEffortLevel>('xhigh');
+  effortLevel = $state<CortexEffortSelection>(WORKSPACE_DEFAULT_RUN_SETTING);
   constellationMode = $state(false);
   canvasOpen = $state(false);
   browserSession = $state<BrowserSessionState | null>(null);
@@ -194,31 +194,19 @@ class CortexStore {
     this._loadRunSettings();
   }
 
-  private _normalizeExecutionProfile(value: unknown): CortexExecutionProfile {
-    return normalizeRunSettings({ executionProfile: value }).executionProfile;
-  }
-
   private _normalizeModel(value: unknown): string {
     return normalizeRunSettings({ model: value }).model;
   }
 
-  private _normalizeEffortLevel(value: unknown): CortexEffortLevel {
+  private _normalizeEffortLevel(value: unknown): CortexEffortSelection {
     return normalizeRunSettings({ effortLevel: value }).effortLevel;
   }
 
   private _loadRunSettings() {
     if (typeof localStorage === 'undefined') return;
     const settings = loadRunSettings(localStorage);
-    this.executionProfile = settings.executionProfile;
     this.model = settings.model;
     this.effortLevel = settings.effortLevel;
-  }
-
-  setExecutionProfile(profile: CortexExecutionProfile) {
-    this.executionProfile = this._normalizeExecutionProfile(profile);
-    if (typeof localStorage !== 'undefined') {
-      persistRunSettings(localStorage, { executionProfile: this.executionProfile });
-    }
   }
 
   setModel(model: string) {
@@ -226,16 +214,17 @@ class CortexStore {
     if (typeof localStorage !== 'undefined') {
       persistRunSettings(localStorage, { model: this.model });
     }
-    const catalogEntry = this.modelCatalog.find((entry) => entry.id === this.model);
+    const catalogEntry = this._selectedCatalogEntry();
     if (
       catalogEntry &&
+      this.effortLevel !== WORKSPACE_DEFAULT_RUN_SETTING &&
       !catalogEntry.supported_effort_tiers.includes(this.effortLevel)
     ) {
-      this.setEffortLevel(catalogEntry.supported_effort_tiers[0] || 'none');
+      this.setEffortLevel(WORKSPACE_DEFAULT_RUN_SETTING);
     }
   }
 
-  setEffortLevel(level: CortexEffortLevel) {
+  setEffortLevel(level: CortexEffortSelection) {
     this.effortLevel = this._normalizeEffortLevel(level);
     if (typeof localStorage !== 'undefined') {
       persistRunSettings(localStorage, { effortLevel: this.effortLevel });
@@ -244,43 +233,42 @@ class CortexStore {
 
   applyWorkspaceRunDefaults(
     model: string,
-    effortLevel: unknown,
+    _effortLevel: unknown,
     modelCatalog: RuntimeModelCatalogEntry[] = [],
   ) {
     this.modelCatalog = modelCatalog;
-    if (typeof localStorage === 'undefined') {
-      this.model = this._normalizeModel(model);
-      this.effortLevel = this._normalizeEffortLevel(effortLevel);
-      return;
-    }
-    const storedModel = localStorage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model);
-    const selectedModelIsCataloged = modelCatalog.some(
-      (entry) => entry.id === this.model,
+    const selectedModelIsCataloged = (
+      this.model === WORKSPACE_DEFAULT_RUN_SETTING
+      || modelCatalog.some((entry) => entry.id === this.model)
     );
-    if (storedModel === null || (modelCatalog.length > 0 && !selectedModelIsCataloged)) {
-      this.model = this._normalizeModel(model);
-      if (storedModel !== null) {
-        persistRunSettings(localStorage, { model: this.model });
-      }
+    if (modelCatalog.length > 0 && !selectedModelIsCataloged) {
+      this.setModel(WORKSPACE_DEFAULT_RUN_SETTING);
     }
-    if (localStorage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.effortLevel) === null) {
-      this.effortLevel = this._normalizeEffortLevel(effortLevel);
-    }
-    const catalogEntry = modelCatalog.find((entry) => entry.id === this.model);
+
+    const workspaceModel = this._normalizeModel(model);
+    const catalogEntry = this._selectedCatalogEntry(workspaceModel);
     if (
       catalogEntry &&
+      this.effortLevel !== WORKSPACE_DEFAULT_RUN_SETTING &&
       !catalogEntry.supported_effort_tiers.includes(this.effortLevel)
     ) {
-      this.setEffortLevel(catalogEntry.supported_effort_tiers[0] || 'none');
+      this.setEffortLevel(WORKSPACE_DEFAULT_RUN_SETTING);
     }
   }
 
-  runSettingsOptions(): Pick<AgentRunOptions, 'executionProfile' | 'model' | 'effortLevel'> {
-    return {
-      executionProfile: this.executionProfile,
+  runSettingsOptions(): Pick<AgentRunOptions, 'model' | 'effortLevel'> {
+    return selectedRunSettingsOptions({
       model: this.model,
       effortLevel: this.effortLevel,
-    };
+    });
+  }
+
+  private _selectedCatalogEntry(workspaceModel = ''): RuntimeModelCatalogEntry | undefined {
+    if (this.model !== WORKSPACE_DEFAULT_RUN_SETTING) {
+      return this.modelCatalog.find((entry) => entry.id === this.model);
+    }
+    return this.modelCatalog.find((entry) =>
+      entry.default_provenance.workspace_default || entry.id === workspaceModel);
   }
 
   private _ideaRevision(idea: Pick<Idea, 'updated_at' | 'created_at'> | null | undefined): string {
@@ -828,7 +816,7 @@ class CortexStore {
       this.stream as CortexRunStreamItem[],
       msg,
       this.selectedIdeaId,
-      this.executionProfile,
+      'fast',
     ) as StreamItem[];
   }
 
@@ -1565,9 +1553,7 @@ class CortexStore {
     const projectContextAttachment = attachments.find((att: any) => att?.type === 'project_context' || att?.project_context);
     const projectContext = projectContextAttachment?.project_context;
     const messageMetadata: Record<string, any> = {
-      execution_profile: runOptions.executionProfile,
-      model: runOptions.model,
-      effort: runOptions.effortLevel,
+      ...routingMetadataForRunOptions(runOptions),
       ...(runOptions.metadata || {}),
     };
     if (projectContext) messageMetadata.project_context = projectContext;
@@ -1584,10 +1570,7 @@ class CortexStore {
       this._ensureIdeasSnapshotReconcile();
       const runMetadata: Record<string, any> = {
         ...(decision.isExplicit ? {} : { background_activation: decision.reason }),
-        execution_profile: runOptions.executionProfile,
-        model: runOptions.model,
-        thinking_tier: runOptions.effortLevel,
-        effort: runOptions.effortLevel,
+        ...routingMetadataForRunOptions(runOptions),
         thread_message_id: threadMessage?.id,
         ...(runOptions.metadata || {}),
       };

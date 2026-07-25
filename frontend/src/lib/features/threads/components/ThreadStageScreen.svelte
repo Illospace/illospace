@@ -22,6 +22,7 @@
     type ProjectContextPickerState,
   } from '$lib/utils/projectContext';
   import { ATTACHMENT_INPUT_ACCEPT } from '$lib/utils/attachmentPreview';
+  import { WORKSPACE_DEFAULT_RUN_SETTING } from '$lib/features/cortex/controllers/runSettingsController';
   import {
     getWorkspaceComposerDropFiles,
     getWorkspaceComposerInputFiles,
@@ -388,32 +389,20 @@
     working: 'Working',
     done: 'Unread',
   };
-  const RUN_SETTING_MODEL_LABELS: Record<string, string> = {
-    'openai/gpt-5.6-sol': 'GPT-5.6 Sol',
-    'openai/gpt-5.5': 'GPT-5.5',
-    'openai/gpt-5.4': 'GPT-5.4',
-    'openai/gpt-5.4-mini': 'GPT-5.4 Mini',
-    'openai/gpt-5-mini': 'GPT-5 Mini',
-  };
 
   function buildRunSettingsPlaceholderGroups(values: {
-    mode: string;
     model: string;
     effort: string;
-    modelCatalog?: readonly unknown[];
+    modelCatalog?: readonly { id: string; label: string }[];
   }) {
+    const modelLabel = values.model === WORKSPACE_DEFAULT_RUN_SETTING
+      ? 'Workspace default'
+      : values.modelCatalog?.find((entry) => entry.id === values.model)?.label ?? values.model;
     return [
-      {
-        key: 'mode',
-        label: 'Mode',
-        options: [{ value: values.mode, label: values.mode === 'deep' ? 'Deep' : 'Fast' }],
-        value: values.mode,
-        ariaLabel: 'Mode',
-      },
       {
         key: 'model',
         label: 'Model',
-        options: [{ value: values.model, label: RUN_SETTING_MODEL_LABELS[values.model] ?? values.model }],
+        options: [{ value: values.model, label: modelLabel }],
         value: values.model,
         ariaLabel: 'Model',
       },
@@ -422,9 +411,11 @@
         label: 'Effort',
         options: [{
           value: values.effort,
-          label: values.effort === 'xhigh'
-            ? 'xHigh'
-            : `${values.effort.slice(0, 1).toUpperCase()}${values.effort.slice(1)}`,
+          label: values.effort === WORKSPACE_DEFAULT_RUN_SETTING
+            ? 'Workspace default'
+            : values.effort === 'xhigh'
+              ? 'xHigh'
+              : `${values.effort.slice(0, 1).toUpperCase()}${values.effort.slice(1)}`,
         }],
         value: values.effort,
         ariaLabel: 'Effort',
@@ -435,7 +426,6 @@
   let idea = $derived(cortex.selectedIdea);
   const runSettingsGroups = $derived(
     (buildRunSettingsGroups ?? buildRunSettingsPlaceholderGroups)({
-      mode: cortex.executionProfile,
       model: cortex.model,
       effort: cortex.effortLevel,
       modelCatalog: cortex.modelCatalog,
@@ -943,7 +933,6 @@
     pendingAttachments = [];
     try {
       await cortex.sendMessage(text || '(attachment)', attachments, {
-        executionProfile: cortex.executionProfile,
         skipRun: Boolean(fastSteerTarget && !queueAfterTarget),
         metadata: fastSteerTarget
           ? queueAfterTarget
@@ -970,13 +959,17 @@
   }
 
   function setRunSetting(key: string, value: string) {
-    if (key === 'mode' && (value === 'fast' || value === 'deep')) {
-      cortex.setExecutionProfile(value);
-    }
     if (key === 'model') cortex.setModel(value);
     if (
       key === 'effort'
-      && (value === 'none' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh')
+      && (
+        value === WORKSPACE_DEFAULT_RUN_SETTING
+        || value === 'none'
+        || value === 'low'
+        || value === 'medium'
+        || value === 'high'
+        || value === 'xhigh'
+      )
     ) {
       cortex.setEffortLevel(value);
     }
@@ -1533,7 +1526,7 @@
         settingsGroups={runSettingsGroups}
         onSettingsOpen={() => ensureThreadModuleLoaded('run-settings')}
         onSettingsChange={setRunSetting}
-        settingsAriaLabel="Mode, Model, and Effort"
+        settingsAriaLabel="Model and Effort"
         secondaryIntentOptions={activeFastRun() ? STEERING_INTENT_OPTIONS : undefined}
         secondaryIntentValue={activeFastRun() ? activeRunMessageIntent : undefined}
         secondaryIntentAriaLabel="Message intent"

@@ -210,6 +210,35 @@ def model_policy_from_metadata(metadata: dict[str, Any] | None) -> dict[str, str
     return policy
 
 
+def _routing_metadata_source(metadata: dict[str, Any]) -> str:
+    source = str(metadata.get("source") or "").strip()
+    if source:
+        return source
+    for container_key in ("work_intake", "illo_trigger"):
+        container = metadata.get(container_key)
+        if isinstance(container, dict):
+            source = str(container.get("source") or "").strip()
+            if source:
+                return source
+    return "unknown"
+
+
+def _warn_deep_coercion(metadata: dict[str, Any], *, field: str) -> None:
+    source = _routing_metadata_source(metadata)
+    logger.warning(
+        "Coercing retired deep run %s to fast (source=%s)",
+        field,
+        source,
+        extra={
+            "event": "deep_run_coerced",
+            "routing_source": source,
+            "routing_field": field,
+            "requested_value": "deep",
+            "coerced_value": "fast",
+        },
+    )
+
+
 def profile_from_metadata(metadata: dict[str, Any] | None) -> RunProfile:
     metadata = metadata or {}
     raw = (
@@ -220,19 +249,31 @@ def profile_from_metadata(metadata: dict[str, Any] | None) -> RunProfile:
         or "fast"
     )
     try:
-        return RunProfile(str(raw).strip().lower())
+        profile = RunProfile(str(raw).strip().lower())
     except Exception:
         return RunProfile.FAST
+    if profile is RunProfile.DEEP:
+        _warn_deep_coercion(metadata, field="profile")
+        return RunProfile.FAST
+    return profile
 
 
 def recipe_for_profile(profile: RunProfile, metadata: dict[str, Any] | None) -> RunRecipe:
-    raw_recipe = (metadata or {}).get("recipe")
+    metadata = metadata or {}
+    raw_recipe = metadata.get("recipe")
     if raw_recipe:
         try:
-            return RunRecipe(str(raw_recipe).strip().lower())
+            recipe = RunRecipe(str(raw_recipe).strip().lower())
         except Exception:
             pass
-    return RunRecipe.DEEP if profile is RunProfile.DEEP else RunRecipe.FAST
+        else:
+            if recipe is RunRecipe.DEEP:
+                _warn_deep_coercion(metadata, field="recipe")
+                return RunRecipe.FAST
+            return recipe
+    if profile is RunProfile.DEEP:
+        _warn_deep_coercion(metadata, field="profile")
+    return RunRecipe.FAST
 
 
 def _chat_thread_id(chat_trigger: dict[str, Any], target: dict[str, Any]) -> str:

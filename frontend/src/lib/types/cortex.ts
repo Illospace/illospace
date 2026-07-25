@@ -231,7 +231,6 @@ export type CortexExecutionProfile = 'fast' | 'deep';
 export type CortexEffortLevel = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
 
 export interface AgentRunOptions {
-  executionProfile?: CortexExecutionProfile;
   model?: string;
   effortLevel?: CortexEffortLevel;
   metadata?: Record<string, any>;
