@@ -5,11 +5,14 @@ import asyncio
 import json
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from brain.platform.db.enums import SettlementState
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.org import User
+from brain.platform.db.models.scheduler import SchedulerJob, SchedulerRun
 from brain.platform.db.models.skill_bundle import SkillInstallation
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
@@ -43,8 +46,14 @@ async def _skill_actor(session, skill_installation_id: int | None) -> User:
     return actor
 
 
-async def spawn_health_scan_run() -> int:
+async def spawn_health_scan_run(*, now: datetime | None = None) -> int:
     """Admit exactly one headless run through the canonical work-intake boundary."""
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    else:
+        clock = clock.astimezone(timezone.utc)
+
     invocation_id = str(uuid.uuid4())
     async with UnitOfWork() as uow:
         skill = await uow.skills.get_by_name(SKILL_NAME)
@@ -52,6 +61,27 @@ async def spawn_health_scan_run() -> int:
             raise LookupError(f"Skill '{SKILL_NAME}' not found")
 
         actor = await _skill_actor(uow.session, skill.skill_installation_id)
+        last_success_started_at = await uow.session.scalar(
+            select(SchedulerRun.started_at)
+            .join(SchedulerJob, SchedulerRun.job_id == SchedulerJob.id)
+            .where(
+                SchedulerJob.job_key == "uwear_aws_health_scan",
+                SchedulerRun.status == SettlementState.SETTLED_SUCCESS,
+                SchedulerRun.started_at.is_not(None),
+            )
+            .order_by(SchedulerRun.started_at.desc(), SchedulerRun.id.desc())
+            .limit(1)
+        )
+        coverage_line = ""
+        if last_success_started_at is not None:
+            if last_success_started_at.tzinfo is None:
+                last_success_started_at = last_success_started_at.replace(tzinfo=timezone.utc)
+            else:
+                last_success_started_at = last_success_started_at.astimezone(timezone.utc)
+            if last_success_started_at < clock - timedelta(minutes=70):
+                coverage_since = max(last_success_started_at, clock - timedelta(hours=6))
+                coverage_line = f"\ncoverage-since: {coverage_since.isoformat()}"
+
         result = await admit_work(
             uow.session,
             WorkIntakeEvent(
@@ -69,7 +99,7 @@ async def spawn_health_scan_run() -> int:
                     "message": (
                         f"/{SKILL_NAME}\n\n"
                         "Execute this skill exactly once. Load and follow its full procedure, "
-                        "then return its required health verdict and evidence."
+                        f"then return its required health verdict and evidence.{coverage_line}"
                     ),
                     "workspace_ref": {"source": "scheduler", "mode": "headless"},
                     "metadata": {
