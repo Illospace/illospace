@@ -6,17 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
-def test_agent_runtime_root_exports_canonical_run_profile_primitives():
-    from brain.systems import runs as agent_runtime
-
-    assert agent_runtime.run_execution_profile({"execution_profile": "fast"}) == "fast"
-    assert agent_runtime.requested_run_profile({"executionProfile": "deep"}) == "deep"
-    assert agent_runtime.run_profile_policy("fast").stream_live_reply is True
-    assert agent_runtime.select_run_runtime(
-        agent_runtime.run_profile_policy("deep")
-    ).run_graph is True
-
-
 def test_retired_cortex_runtime_modules_stay_out_of_live_paths():
     root = Path(__file__).resolve().parents[1]
     retired_roots = [

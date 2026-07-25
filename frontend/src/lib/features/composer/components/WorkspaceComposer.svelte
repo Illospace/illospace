@@ -448,18 +448,16 @@
   canSubmit={(isVoiceRecording || inputValue.trim().length > 0 || pendingAttachments.length > 0) && projectContextValid}
   footerStatusActive={isVoiceRecording}
   settingsGroups={buildRunSettingsGroups({
-    mode: cortex.executionProfile,
     model: cortex.model,
     effort: cortex.effortLevel,
     modelCatalog: cortex.modelCatalog,
   })}
   onSettingsChange={(key, nextValue) =>
     applyRunSetting(key, nextValue, {
-      setExecutionProfile: (value) => cortex.setExecutionProfile(value),
       setModel: (value) => cortex.setModel(value),
       setEffortLevel: (value) => cortex.setEffortLevel(value),
     })}
-  settingsAriaLabel="Mode, Model, and Effort"
+  settingsAriaLabel="Model and Effort"
   attachments={pendingAttachments}
   context={context}
   disabled={sending}

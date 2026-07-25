@@ -40,7 +40,7 @@
     settingsGroups,
     onSettingsOpen,
     onSettingsChange,
-    settingsAriaLabel = 'Mode, Model, and Effort',
+    settingsAriaLabel = 'Model and Effort',
     attachments = [],
     onAttach,
     onRemoveAttachment,

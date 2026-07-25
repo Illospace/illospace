@@ -13,6 +13,7 @@
     CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
     type ConstellationPageFrameModalContext,
   } from '$lib/components/constellation/constellationPageFrameContext';
+  import { cortex } from '$lib/stores/cortex.svelte';
   import {
     closeOAuthPopup,
     navigateOpenAIOAuthPopup,
@@ -20,7 +21,6 @@
   } from '$lib/utils/oauthPopup';
   import { hasPersonalOpenAIRuntimeConnection } from '$lib/utils/runtimeOnboarding';
   import { auth } from '$lib/stores/auth.svelte';
-  import { cortex } from '$lib/stores/cortex.svelte';
 
   import MemoryCard from './MemoryCard.svelte';
   import ModelsCard from './ModelsCard.svelte';

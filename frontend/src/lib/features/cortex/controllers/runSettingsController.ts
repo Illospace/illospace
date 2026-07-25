@@ -1,49 +1,63 @@
 import type {
   AgentRunOptions,
   CortexEffortLevel,
-  CortexExecutionProfile,
 } from '$lib/types/cortex';
 
-export type CortexRunSettings = Required<
-  Pick<AgentRunOptions, 'executionProfile' | 'model' | 'effortLevel'>
->;
+export const WORKSPACE_DEFAULT_RUN_SETTING = 'workspace-default' as const;
+export type CortexEffortSelection =
+  | CortexEffortLevel
+  | typeof WORKSPACE_DEFAULT_RUN_SETTING;
+
+export interface CortexRunSettings {
+  model: string;
+  effortLevel: CortexEffortSelection;
+}
 
 export type CortexRunSettingsInput = {
-  executionProfile?: unknown;
   model?: unknown;
   effortLevel?: unknown;
 };
 
-export type RunSettingsStorage = Pick<Storage, 'getItem' | 'setItem'>;
-
-export const DEFAULT_RUN_MODEL = 'openai/gpt-5.6-sol';
+export type RunSettingsStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 export const CORTEX_RUN_SETTINGS_STORAGE_KEYS = {
-  executionProfile: 'illo:cortex:execution-profile',
   model: 'illo:cortex:model',
   effortLevel: 'illo:cortex:effort-level',
+  workspaceDefaultMigration: 'illo:cortex:workspace-default-migration',
 } as const;
 
+const LEGACY_EXECUTION_PROFILE_STORAGE_KEY = 'illo:cortex:execution-profile';
+const WORKSPACE_DEFAULT_MIGRATION_VERSION = '1';
+
 export const DEFAULT_CORTEX_RUN_SETTINGS: CortexRunSettings = {
-  executionProfile: 'fast',
-  model: DEFAULT_RUN_MODEL,
-  effortLevel: 'xhigh',
+  model: WORKSPACE_DEFAULT_RUN_SETTING,
+  effortLevel: WORKSPACE_DEFAULT_RUN_SETTING,
 };
 
-export function normalizeExecutionProfile(value: unknown): CortexExecutionProfile {
-  return String(value || '').trim().toLowerCase() === 'deep' ? 'deep' : 'fast';
+export function isWorkspaceDefaultRunSetting(
+  value: unknown,
+): value is typeof WORKSPACE_DEFAULT_RUN_SETTING {
+  return String(value || '').trim().toLowerCase() === WORKSPACE_DEFAULT_RUN_SETTING;
 }
 
-export function normalizeModel(value: unknown, fallback = DEFAULT_RUN_MODEL): string {
+export function normalizeModel(
+  value: unknown,
+  fallback: string = WORKSPACE_DEFAULT_RUN_SETTING,
+): string {
   const normalized = String(value || '').trim().replace(':', '/');
+  if (isWorkspaceDefaultRunSetting(normalized)) return WORKSPACE_DEFAULT_RUN_SETTING;
   return normalized || fallback;
 }
 
-export function normalizeEffortLevel(value: unknown): CortexEffortLevel {
+export function normalizeEffortLevel(
+  value: unknown,
+  fallback: CortexEffortSelection = WORKSPACE_DEFAULT_RUN_SETTING,
+): CortexEffortSelection {
   const normalized = String(value || '').trim().toLowerCase();
+  if (isWorkspaceDefaultRunSetting(normalized)) return WORKSPACE_DEFAULT_RUN_SETTING;
   return normalized === 'none' || normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'xhigh'
     ? normalized
-    : 'high';
+    : fallback;
 }
 
 export function normalizeRunSettings(
@@ -51,32 +65,58 @@ export function normalizeRunSettings(
   fallback: CortexRunSettings = DEFAULT_CORTEX_RUN_SETTINGS,
 ): CortexRunSettings {
   return {
-    executionProfile: normalizeExecutionProfile(settings?.executionProfile ?? fallback.executionProfile),
     model: normalizeModel(settings?.model ?? fallback.model, fallback.model),
-    effortLevel: normalizeEffortLevel(settings?.effortLevel ?? fallback.effortLevel),
+    effortLevel: normalizeEffortLevel(
+      settings?.effortLevel ?? fallback.effortLevel,
+      fallback.effortLevel,
+    ),
   };
 }
 
 export function runSettingsOptions(
   settings: CortexRunSettingsInput,
-): Pick<AgentRunOptions, 'executionProfile' | 'model' | 'effortLevel'> {
-  return normalizeRunSettings(settings);
+): Pick<AgentRunOptions, 'model' | 'effortLevel'> {
+  const normalized = normalizeRunSettings(settings);
+  const options: Pick<AgentRunOptions, 'model' | 'effortLevel'> = {};
+  if (!isWorkspaceDefaultRunSetting(normalized.model)) {
+    options.model = normalized.model;
+  }
+  if (!isWorkspaceDefaultRunSetting(normalized.effortLevel)) {
+    options.effortLevel = normalized.effortLevel;
+  }
+  return options;
 }
 
 export function normalizeRunOptions(
   options: AgentRunOptions = {},
   currentSettings: CortexRunSettingsInput = DEFAULT_CORTEX_RUN_SETTINGS,
 ): AgentRunOptions {
-  const settings = normalizeRunSettings({
-    executionProfile: options.executionProfile ?? currentSettings.executionProfile,
+  const settings = runSettingsOptions({
     model: options.model ?? currentSettings.model,
     effortLevel: options.effortLevel ?? currentSettings.effortLevel,
   });
+  const {
+    model: _model,
+    effortLevel: _effortLevel,
+    ...remainingOptions
+  } = options;
   return {
-    ...options,
+    ...remainingOptions,
     ...settings,
     metadata: { ...(options.metadata || {}) },
   };
+}
+
+export function routingMetadataForRunOptions(
+  options: AgentRunOptions,
+): Record<string, string> {
+  const metadata: Record<string, string> = {};
+  if (options.model) metadata.model = options.model;
+  if (options.effortLevel) {
+    metadata.thinking_tier = options.effortLevel;
+    metadata.effort = options.effortLevel;
+  }
+  return metadata;
 }
 
 export function loadRunSettings(
@@ -85,8 +125,20 @@ export function loadRunSettings(
 ): CortexRunSettings {
   if (!storage) return { ...fallback };
   try {
+    if (
+      storage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.workspaceDefaultMigration)
+      !== WORKSPACE_DEFAULT_MIGRATION_VERSION
+    ) {
+      storage.removeItem(LEGACY_EXECUTION_PROFILE_STORAGE_KEY);
+      storage.removeItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model);
+      storage.removeItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.effortLevel);
+      storage.setItem(
+        CORTEX_RUN_SETTINGS_STORAGE_KEYS.workspaceDefaultMigration,
+        WORKSPACE_DEFAULT_MIGRATION_VERSION,
+      );
+      return { ...fallback };
+    }
     return normalizeRunSettings({
-      executionProfile: storage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.executionProfile),
       model: storage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model),
       effortLevel: storage.getItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.effortLevel),
     }, fallback);
@@ -101,20 +153,25 @@ export function persistRunSettings(
 ): boolean {
   if (!storage) return false;
   try {
-    if (settings.executionProfile !== undefined) {
-      storage.setItem(
-        CORTEX_RUN_SETTINGS_STORAGE_KEYS.executionProfile,
-        normalizeExecutionProfile(settings.executionProfile),
-      );
-    }
+    storage.setItem(
+      CORTEX_RUN_SETTINGS_STORAGE_KEYS.workspaceDefaultMigration,
+      WORKSPACE_DEFAULT_MIGRATION_VERSION,
+    );
     if (settings.model !== undefined) {
-      storage.setItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model, normalizeModel(settings.model));
+      const model = normalizeModel(settings.model);
+      if (isWorkspaceDefaultRunSetting(model)) {
+        storage.removeItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model);
+      } else {
+        storage.setItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.model, model);
+      }
     }
     if (settings.effortLevel !== undefined) {
-      storage.setItem(
-        CORTEX_RUN_SETTINGS_STORAGE_KEYS.effortLevel,
-        normalizeEffortLevel(settings.effortLevel),
-      );
+      const effortLevel = normalizeEffortLevel(settings.effortLevel);
+      if (isWorkspaceDefaultRunSetting(effortLevel)) {
+        storage.removeItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.effortLevel);
+      } else {
+        storage.setItem(CORTEX_RUN_SETTINGS_STORAGE_KEYS.effortLevel, effortLevel);
+      }
     }
     return true;
   } catch {

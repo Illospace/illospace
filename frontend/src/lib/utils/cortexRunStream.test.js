@@ -119,6 +119,17 @@ test('appends, extends, and resets live text deltas', () => {
   assert.deepEqual(reset, []);
 });
 
+test('preserves a historical deep profile when live activity precedes its snapshot', () => {
+  const stream = applyAgentActivityToStream([], {
+    idea_id: 'idea-1',
+    run_id: 13,
+    activity: 'Coordinating workers',
+    profile: 'deep',
+  }, 'idea-1', 'fast');
+
+  assert.equal(stream[0].execution_profile, 'deep');
+});
+
 test('keeps live agent text visible until a settled run reply exists', () => {
   const run = { type: 'run', id: '12', run_id: 12, status: 'running' };
   const live = {

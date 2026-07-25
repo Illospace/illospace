@@ -178,8 +178,8 @@ async def test_cycle_tool_and_external_agent_events_share_the_same_intake_policy
     assert {request.thread_id for request in requests} == {"idea-1"}
     assert {request.target_ref["kind"] for request in requests} == {"cortex_idea"}
     assert {request.user_id for request in requests} == {"owner-1"}
-    assert requests[0].profile == RunProfile.DEEP
-    assert requests[0].recipe == RunRecipe.DEEP
+    assert requests[0].profile == RunProfile.FAST
+    assert requests[0].recipe == RunRecipe.FAST
     assert requests[0].model_policy["model"] == "openai/gpt-5.4"
     assert requests[1].model_policy["thinking"] == "xhigh"
     assert requests[2].model_policy["provider"] == "anthropic"

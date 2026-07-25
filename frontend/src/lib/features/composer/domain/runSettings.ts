@@ -1,29 +1,25 @@
-import type {
-  CortexEffortLevel,
-  CortexExecutionProfile,
-} from '$lib/stores/cortex.svelte';
+import {
+  WORKSPACE_DEFAULT_RUN_SETTING,
+  type CortexEffortSelection,
+} from '$lib/features/cortex/controllers/runSettingsController';
 import type {
   CortexWorkspaceComposerSettingsGroup,
   CortexWorkspaceComposerIntentOption,
 } from '$lib/features/composer/domain/composerAdapter';
 import type { RuntimeModelCatalogEntry } from '$lib/types/runtimeSettings';
 
-export const EXECUTION_PROFILE_OPTIONS = [
-  {
-    value: 'fast',
-    label: 'Fast',
-    description: 'Direct single-session work',
-    icon: 'bolt',
-  },
-  {
-    value: 'deep',
-    label: 'Deep',
-    description: 'Run graph with coordinator and workers',
-    icon: 'route',
-  },
-] as const satisfies readonly CortexWorkspaceComposerIntentOption[];
+const WORKSPACE_DEFAULT_MODEL_OPTION = {
+  value: WORKSPACE_DEFAULT_RUN_SETTING,
+  label: 'Workspace default',
+  description: 'Use the model configured for this workspace',
+} as const satisfies CortexWorkspaceComposerIntentOption;
 
 export const EFFORT_OPTIONS = [
+  {
+    value: WORKSPACE_DEFAULT_RUN_SETTING,
+    label: 'Workspace default',
+    description: 'Use the effort configured for this workspace',
+  },
   { value: 'none', label: 'None', description: 'No additional reasoning effort' },
   { value: 'low', label: 'Low', description: 'Quick reasoning pass' },
   { value: 'medium', label: 'Medium', description: 'Balanced reasoning depth' },
@@ -42,38 +38,46 @@ function modelOptions(
   catalog: readonly RuntimeModelCatalogEntry[],
   selectedModel: string,
 ): readonly CortexWorkspaceComposerIntentOption[] {
-  const options = catalog.map((entry) => ({
+  const catalogOptions = catalog.map((entry) => ({
     value: entry.id,
     label: entry.label,
     description: entry.description,
   }));
-  if (options.length > 0 || !selectedModel) return options;
-  return [{
-    value: selectedModel,
-    label: selectedModel.split('/', 2).at(-1) || selectedModel,
-    description: 'Current workspace model',
-  }];
+  if (
+    catalogOptions.length === 0
+    && selectedModel
+    && selectedModel !== WORKSPACE_DEFAULT_RUN_SETTING
+  ) {
+    return [
+      WORKSPACE_DEFAULT_MODEL_OPTION,
+      {
+        value: selectedModel,
+        label: selectedModel.split('/', 2).at(-1) || selectedModel,
+        description: 'Current model selection',
+      },
+    ];
+  }
+  return [WORKSPACE_DEFAULT_MODEL_OPTION, ...catalogOptions];
 }
 
 export function buildRunSettingsGroups(values: {
-  mode: CortexExecutionProfile;
   model: string;
-  effort: CortexEffortLevel;
   modelCatalog: readonly RuntimeModelCatalogEntry[];
+  effort: CortexEffortSelection;
 }): readonly CortexWorkspaceComposerSettingsGroup[] {
-  const selectedCatalogEntry = values.modelCatalog.find((entry) => entry.id === values.model);
+  const selectedCatalogEntry = values.modelCatalog.find((entry) =>
+    values.model === WORKSPACE_DEFAULT_RUN_SETTING
+      ? entry.default_provenance.workspace_default
+      : entry.id === values.model);
+  const [workspaceDefaultEffortOption, ...explicitEffortOptions] = EFFORT_OPTIONS;
   const effortOptions = selectedCatalogEntry
-    ? EFFORT_OPTIONS.filter((option) =>
-        selectedCatalogEntry.supported_effort_tiers.includes(option.value))
+    ? [
+        workspaceDefaultEffortOption,
+        ...explicitEffortOptions.filter((option) =>
+          selectedCatalogEntry.supported_effort_tiers.includes(option.value)),
+      ]
     : EFFORT_OPTIONS;
   return [
-    {
-      key: 'mode',
-      label: 'Mode',
-      options: EXECUTION_PROFILE_OPTIONS,
-      value: values.mode,
-      ariaLabel: 'Mode',
-    },
     {
       key: 'model',
       label: 'Model',
@@ -95,12 +99,10 @@ export function applyRunSetting(
   key: string,
   value: string,
   handlers: {
-    setExecutionProfile: (value: CortexExecutionProfile) => void;
     setModel: (value: string) => void;
-    setEffortLevel: (value: CortexEffortLevel) => void;
+    setEffortLevel: (value: CortexEffortSelection) => void;
   },
 ): void {
-  if (key === 'mode') handlers.setExecutionProfile(value as CortexExecutionProfile);
   if (key === 'model') handlers.setModel(value);
-  if (key === 'effort') handlers.setEffortLevel(value as CortexEffortLevel);
+  if (key === 'effort') handlers.setEffortLevel(value as CortexEffortSelection);
 }

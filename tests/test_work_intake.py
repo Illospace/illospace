@@ -45,8 +45,8 @@ async def test_chat_work_intake_builds_agent_run_request_from_normalized_trigger
     assert request.user_id == "user-1"
     assert request.thread_id == "chat:conv-1:22"
     assert request.message == "Summarize this"
-    assert request.profile == RunProfile.DEEP
-    assert request.recipe == RunRecipe.DEEP
+    assert request.profile == RunProfile.FAST
+    assert request.recipe == RunRecipe.FAST
     assert request.target_ref == {
         "conversation_id": "conv-1",
         "kind": "chat_message",
@@ -212,8 +212,8 @@ async def test_cortex_agent_run_request_uses_shared_work_intake_policy(monkeypat
         ),
     )
 
-    assert request.profile == RunProfile.DEEP
-    assert request.recipe == RunRecipe.DEEP
+    assert request.profile == RunProfile.FAST
+    assert request.recipe == RunRecipe.FAST
     assert request.user_id == "user-1"
     assert request.thread_id == "idea-1"
     assert request.target_ref["kind"] == "cortex_idea"
@@ -413,6 +413,49 @@ def test_invalid_high_priority_metadata_warns_before_valid_fallback(caplog):
         "Ignoring invalid metadata value for thinking_tier; "
         "falling through to lower-priority keys"
     ) in caplog.messages
+
+
+def test_deep_profile_metadata_is_coerced_to_fast_with_structured_source_log(caplog):
+    from brain.systems.runs.domain import RunProfile
+    from brain.systems.runs.work_intake import profile_from_metadata
+
+    with caplog.at_level("WARNING", logger="work_intake"):
+        profile = profile_from_metadata(
+            {
+                "execution_profile": "deep",
+                "source": "stale-browser",
+            }
+        )
+
+    assert profile is RunProfile.FAST
+    record = next(record for record in caplog.records if record.event == "deep_run_coerced")
+    assert record.routing_source == "stale-browser"
+    assert record.routing_field == "profile"
+    assert record.requested_value == "deep"
+    assert record.coerced_value == "fast"
+    assert "source=stale-browser" in record.getMessage()
+
+
+def test_deep_recipe_metadata_is_coerced_independently_with_structured_source_log(caplog):
+    from brain.systems.runs.domain import RunProfile, RunRecipe
+    from brain.systems.runs.work_intake import recipe_for_profile
+
+    with caplog.at_level("WARNING", logger="work_intake"):
+        recipe = recipe_for_profile(
+            RunProfile.FAST,
+            {
+                "recipe": "deep",
+                "work_intake": {"source": "notify"},
+            },
+        )
+
+    assert recipe is RunRecipe.FAST
+    record = next(record for record in caplog.records if record.event == "deep_run_coerced")
+    assert record.routing_source == "notify"
+    assert record.routing_field == "recipe"
+    assert record.requested_value == "deep"
+    assert record.coerced_value == "fast"
+    assert "source=notify" in record.getMessage()
 
 
 def test_cortex_thread_binding_compatibility_shell_is_removed():
