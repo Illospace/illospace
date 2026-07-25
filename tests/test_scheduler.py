@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -1343,6 +1343,49 @@ async def test_scheduler_failure_alert_uses_vault_first_slack_client(monkeypatch
     }
 
 
+async def test_scheduler_failure_rate_alert_uses_intermittent_message(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class FakeSlackClient:
+        async def conversations_list(self, **kwargs):
+            return {"channels": [{"id": "C_ALERTS", "name": "alerts"}]}
+
+        async def post_message(self, *, channel, text):
+            calls["post"] = {"channel": channel, "text": text}
+            return {"ok": True, "message": {"text": text}}
+
+    async def fake_client_from_runtime(*, requested_by, reason):
+        return FakeSlackClient()
+
+    monkeypatch.setenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "#alerts")
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
+    monkeypatch.setattr(
+        scheduler_executor,
+        "slack_web_client_from_runtime",
+        fake_client_from_runtime,
+    )
+
+    await scheduler_executor.async_deliver_scheduler_failure_alert(
+        job_key="uwear_aws_health_scan",
+        run_id=84,
+        rate_failure_count=3,
+        rate_window_hours=24,
+        error_text="TimeoutError: health scan timed out\ntraceback details",
+    )
+
+    assert calls["post"] == {
+        "channel": "C_ALERTS",
+        "text": (
+            "Scheduler job intermittent failure\n"
+            "Job key: uwear_aws_health_scan\n"
+            "3 failures in the last 24h (intermittent)\n"
+            "Error: TimeoutError: health scan timed out\n"
+            "Job: <https://illo.example.com/api/system/scheduler"
+            "?job_key=uwear_aws_health_scan&run_id=84|open scheduler state>"
+        ),
+    }
+
+
 async def test_repeated_heuristic_review_failure_emits_one_durable_alert(session, caplog, monkeypatch):
     monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "3")
     caplog.set_level(logging.ERROR, logger="brain.app.scheduler.executor")
@@ -1449,6 +1492,158 @@ async def test_repeated_heuristic_review_failure_emits_one_durable_alert(session
     assert job.consecutive_failure_count == 0
     assert job.failure_signature is None
     assert job.failure_alerted_at is None
+
+
+async def test_intermittent_failures_emit_one_rate_alert_until_window_recovers(
+    session,
+    monkeypatch,
+):
+    monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "99")
+    monkeypatch.setenv("SCHEDULER_FAILURE_RATE_THRESHOLD", "3")
+    monkeypatch.setenv("SCHEDULER_FAILURE_RATE_WINDOW_HOURS", "24")
+    slack_sender = AsyncMock()
+    monkeypatch.setattr(
+        scheduler_executor,
+        "async_deliver_scheduler_failure_alert",
+        slack_sender,
+    )
+    job = _make_scheduler_job()
+    session.add(job)
+    await session.flush()
+    base = datetime(2026, 4, 21, tzinfo=timezone.utc)
+
+    async def add_run(status: str, hour: int) -> SchedulerRun:
+        started_at = base + timedelta(hours=hour)
+        run = SchedulerRun(
+            job_id=job.id,
+            scheduled_for=started_at,
+            window_start=started_at,
+            window_end=started_at + timedelta(hours=1),
+            status=status,
+            idempotency_key=f"failure-rate:{hour}",
+            started_at=started_at,
+            finished_at=started_at,
+        )
+        session.add(run)
+        await session.flush()
+        if status == "settled_failure":
+            await scheduler_executor._async_apply_failure_guard(
+                session,
+                job,
+                run,
+                failure_key="health_scan",
+                error_text=f"RuntimeError: failed at hour {hour}",
+                now=started_at,
+            )
+        else:
+            await scheduler_executor.async_reset_scheduler_job_failure_guard(
+                session,
+                job,
+                now=started_at,
+            )
+        return run
+
+    await add_run("settled_failure", 0)
+    await add_run("settled_success", 1)
+    await add_run("settled_failure", 2)
+    await add_run("settled_success", 3)
+    threshold_run = await add_run("settled_failure", 4)
+
+    assert threshold_run.result_summary["failure_guard"]["rate_failures"] == 3
+    assert threshold_run.result_summary["failure_guard"]["rate_alert_emitted"] is True
+    first_rate_alerted_at = job.rate_alerted_at
+    assert first_rate_alerted_at is not None
+    slack_sender.assert_awaited_once_with(
+        job_key="nightly_sleep",
+        run_id=threshold_run.id,
+        rate_failure_count=3,
+        rate_window_hours=24,
+        error_text="RuntimeError: failed at hour 4",
+    )
+
+    await add_run("settled_success", 5)
+    extra_failure = await add_run("settled_failure", 6)
+
+    assert extra_failure.result_summary["failure_guard"]["rate_failures"] == 4
+    assert extra_failure.result_summary["failure_guard"]["rate_alert_emitted"] is False
+    assert job.rate_alerted_at == first_rate_alerted_at
+    assert slack_sender.await_count == 1
+
+    await add_run("settled_success", 31)
+    assert job.rate_alerted_at is None
+
+    await add_run("settled_failure", 32)
+    await add_run("settled_success", 33)
+    await add_run("settled_failure", 34)
+    await add_run("settled_success", 35)
+    rearmed_run = await add_run("settled_failure", 36)
+
+    assert rearmed_run.result_summary["failure_guard"]["rate_failures"] == 3
+    assert rearmed_run.result_summary["failure_guard"]["rate_alert_emitted"] is True
+    assert slack_sender.await_count == 2
+    assert slack_sender.await_args_list[-1].kwargs == {
+        "job_key": "nightly_sleep",
+        "run_id": rearmed_run.id,
+        "rate_failure_count": 3,
+        "rate_window_hours": 24,
+        "error_text": "RuntimeError: failed at hour 36",
+    }
+
+
+async def test_consecutive_and_rate_edges_coexist_without_duplicate_delivery(
+    session,
+    monkeypatch,
+):
+    monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "3")
+    monkeypatch.setenv("SCHEDULER_FAILURE_RATE_THRESHOLD", "3")
+    monkeypatch.setenv("SCHEDULER_FAILURE_RATE_WINDOW_HOURS", "24")
+    slack_sender = AsyncMock()
+    monkeypatch.setattr(
+        scheduler_executor,
+        "async_deliver_scheduler_failure_alert",
+        slack_sender,
+    )
+    job = _make_scheduler_job()
+    session.add(job)
+    await session.flush()
+    base = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    threshold_run = None
+
+    for hour in range(3):
+        started_at = base + timedelta(hours=hour)
+        threshold_run = SchedulerRun(
+            job_id=job.id,
+            scheduled_for=started_at,
+            window_start=started_at,
+            window_end=started_at + timedelta(hours=1),
+            status="settled_failure",
+            idempotency_key=f"coexisting-failure-guards:{hour}",
+            started_at=started_at,
+            finished_at=started_at,
+        )
+        session.add(threshold_run)
+        await session.flush()
+        await scheduler_executor._async_apply_failure_guard(
+            session,
+            job,
+            threshold_run,
+            failure_key="health_scan",
+            error_text="RuntimeError: health scan failed",
+            now=started_at,
+        )
+
+    assert threshold_run is not None
+    guard = threshold_run.result_summary["failure_guard"]
+    assert guard["alert_emitted"] is True
+    assert guard["rate_alert_emitted"] is True
+    assert job.failure_alerted_at is not None
+    assert job.rate_alerted_at is not None
+    slack_sender.assert_awaited_once_with(
+        job_key="nightly_sleep",
+        run_id=threshold_run.id,
+        consecutive_failure_count=3,
+        error_text="RuntimeError: health scan failed",
+    )
 
 
 async def test_retry_policy_backoff_controls_automatic_reclaim(session):

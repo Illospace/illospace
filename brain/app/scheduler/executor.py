@@ -416,10 +416,12 @@ async def async_deliver_scheduler_failure_alert(
     *,
     job_key: str,
     run_id: int,
-    consecutive_failure_count: int,
+    consecutive_failure_count: int | None = None,
+    rate_failure_count: int | None = None,
+    rate_window_hours: int | None = None,
     error_text: str,
 ) -> None:
-    """Post one scheduler failure-threshold edge through Illo's Slack client."""
+    """Post one scheduler failure-guard edge through Illo's Slack client."""
     client = await slack_web_client_from_runtime(
         requested_by="scheduler_failure_alert",
         reason="Deliver a repeated scheduler job failure alert to the team.",
@@ -437,12 +439,21 @@ async def async_deliver_scheduler_failure_alert(
         f"{public_app_base_url()}/api/system/scheduler"
         f"?job_key={quote(job_key, safe='')}&run_id={run_id}"
     )
+    if rate_failure_count is not None:
+        failure_summary = (
+            f"{rate_failure_count} failures in the last "
+            f"{rate_window_hours}h (intermittent)"
+        )
+        alert_title = "Scheduler job intermittent failure"
+    else:
+        failure_summary = f"Consecutive failures: {consecutive_failure_count}"
+        alert_title = "Scheduler job repeated failure"
     await client.post_message(
         channel=channel,
         text=(
-            "Scheduler job repeated failure\n"
+            f"{alert_title}\n"
             f"Job key: {job_key}\n"
-            f"Consecutive failures: {consecutive_failure_count}\n"
+            f"{failure_summary}\n"
             f"Error: {first_error_line}\n"
             f"Job: <{job_url}|open scheduler state>"
         ),
@@ -489,6 +500,31 @@ async def _async_apply_failure_guard(
         except Exception:
             logger.exception(
                 "Scheduler job repeated failure Slack delivery failed: "
+                "job_key=%s run_id=%s",
+                job.job_key,
+                run.id,
+            )
+    elif guard["rate_alert_emitted"]:
+        logger.error(
+            "Scheduler job intermittent failure alert: job_key=%s run_id=%s "
+            "rate_failures=%s rate_window_hours=%s error=%s",
+            job.job_key,
+            run.id,
+            guard["rate_failures"],
+            guard["rate_window_hours"],
+            error_text,
+        )
+        try:
+            await async_deliver_scheduler_failure_alert(
+                job_key=job.job_key,
+                run_id=run.id,
+                rate_failure_count=guard["rate_failures"],
+                rate_window_hours=guard["rate_window_hours"],
+                error_text=error_text,
+            )
+        except Exception:
+            logger.exception(
+                "Scheduler job intermittent failure Slack delivery failed: "
                 "job_key=%s run_id=%s",
                 job.job_key,
                 run.id,
@@ -715,7 +751,7 @@ async def async_run_scheduler_run(
         error_text=None,
         now=now,
     )
-    await async_reset_scheduler_job_failure_guard(session, job)
+    await async_reset_scheduler_job_failure_guard(session, job, now=now)
     return run
 
 
@@ -950,7 +986,7 @@ async def async_execute_scheduler_run(
             now=now,
         )
     elif run.status == RUN_STATUS_SETTLED_SUCCESS:
-        await async_reset_scheduler_job_failure_guard(session, job)
+        await async_reset_scheduler_job_failure_guard(session, job, now=now)
 
     return run
 

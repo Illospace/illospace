@@ -97,6 +97,9 @@ class SchedulerJob(Base, CreatedAtMixin):
     failure_alerted_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    rate_alerted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_failure_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
