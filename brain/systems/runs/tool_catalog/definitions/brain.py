@@ -859,7 +859,9 @@ BRAIN_TOOLS = [
             "Create, update, delete, list, manually run, or orient workspace Cycles, which are recurring "
             "Illo prompts/check-ins/reports or one-time reminders. This is the action tool. For answering questions about "
             "which Cycles exist or what ran recently, prefer read_cycles first. Actions: 'create', "
-            "'list', 'update', 'delete', 'run', 'add_guidance', 'add_output_target', 'remove_output_target'. Use action='help' or action='schema' with operation to inspect "
+            "'list', 'usage_summary', 'update', 'delete', 'run', 'add_guidance', 'add_output_target', "
+            "'remove_output_target'. usage_summary is read-only and reports real token/cost burn from model API calls. "
+            "Use action='help' or action='schema' with operation to inspect "
             "arguments before mutating."
         ),
         "input_schema": {
@@ -872,6 +874,7 @@ BRAIN_TOOLS = [
                         "schema",
                         "create",
                         "list",
+                        "usage_summary",
                         "update",
                         "delete",
                         "run",
@@ -886,6 +889,18 @@ BRAIN_TOOLS = [
                     "description": "Optional operation name to inspect when action is help or schema.",
                 },
                 "id": {"type": "integer", "description": "Cycle id (required for update/delete/run)"},
+                "days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3650,
+                    "description": "For usage_summary, include Cycle runs scheduled within the last N days. Omit when selecting only by run_limit.",
+                },
+                "run_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "description": "For usage_summary, cap the window to the most recent N Cycle runs.",
+                },
                 "name": {"type": "string", "description": "Cycle name"},
                 "prompt": {"type": "string", "description": "Prompt Illo should run each cycle"},
                 "schedule_expr": {

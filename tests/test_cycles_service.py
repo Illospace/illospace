@@ -1581,6 +1581,83 @@ async def test_manage_cycle_list_uses_native_uow_without_sync_bridges(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_manage_cycle_usage_summary_groups_real_ledger_usage_by_cycle(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import cycles as cycle_handlers
+
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="America/Toronto",
+    )
+    cycle_run = CycleRun()
+    cycle_run.id = 12
+    cycle_run.cycle_id = cycle.id
+    cycle_run.run_id = 77
+    cycle_run.scheduled_for = datetime.now(timezone.utc)
+
+    class UsageSession:
+        async def execute(self, _statement):
+            return _AllResult([(cycle_run, cycle)])
+
+    usage = {
+        "api_calls": 2,
+        "tokens_input": 1_000,
+        "tokens_output": 250,
+        "tokens_total": 1_250,
+        "cache_read": 400,
+        "cache_write": 0,
+        "estimated_cost": 0.0125,
+        "by_effort": [
+            {
+                "effort": "low",
+                "api_calls": 2,
+                "tokens_input": 1_000,
+                "tokens_output": 250,
+                "tokens_total": 1_250,
+                "cache_read": 400,
+                "cache_write": 0,
+                "estimated_cost": 0.0125,
+            }
+        ],
+    }
+
+    async def summarize(_session, run_ids):
+        assert list(run_ids) == [77]
+        return {77: usage}
+
+    factory = _AsyncUnitOfWorkFactory([UsageSession()])
+    monkeypatch.setattr(cycle_handlers, "UnitOfWork", factory)
+    monkeypatch.setattr(cycle_handlers, "async_summarize_run_trees_usage", summarize)
+
+    with bind_agent_context({"user_id": "user-1", "org_id": None}):
+        payload = json.loads(
+            await cycle_handlers._handle_manage_cycle_async(
+                action="usage_summary",
+                run_limit=10,
+            )
+        )
+
+    summary = payload["usage_summary"]
+    assert summary["window"]["days"] is None
+    assert summary["window"]["run_limit"] == 10
+    assert summary["totals"]["tokens_total"] == 1_250
+    assert summary["totals"]["estimated_cost"] == 0.0125
+    assert summary["cycles"][0]["cycle_id"] == cycle.id
+    assert summary["cycles"][0]["by_effort"][0]["effort"] == "low"
+
+
+def test_cycle_self_review_summary_includes_run_burn():
+    from brain.systems.cycles.memory import cycle_run_evaluation_summary
+
+    summary = cycle_run_evaluation_summary(
+        status="completed",
+        usage={"tokens_total": 12_345, "estimated_cost": 0.06789},
+    )
+
+    assert summary.endswith("Burn: 12,345 tokens; estimated cost $0.067890.")
+
+
+@pytest.mark.asyncio
 async def test_manage_cycle_run_propagates_agent_trigger_provenance(monkeypatch):
     from brain.systems.runs.tool_catalog.handlers import cycles as cycle_handlers
     from brain.systems.runs.execution_context import bind_agent_context

@@ -1,6 +1,9 @@
 """Durable Cycle memory, revisions, snapshots, and evaluations."""
 from __future__ import annotations
 
+import logging
+from typing import Any
+
 from sqlalchemy import func, select
 
 from brain.kernel.common.serialization import jsonable
@@ -42,6 +45,12 @@ from brain.systems.cycles.serializers import (
     serialize_cycle_revision,
 )
 from brain.systems.cycles.output_targets import default_output_target_specs
+from brain.systems.runs.token_usage import (
+    async_summarize_run_tree_usage_in_savepoint,
+    usage_totals_payload,
+)
+
+logger = logging.getLogger(__name__)
 
 
 async def async_record_cycle_revision(
@@ -356,10 +365,27 @@ async def record_cycle_run_evaluation(
 ) -> None:
     if run.id is None:
         raise ValueError("CycleRun must be flushed before recording an evaluation")
+    usage = None
+    if run.run_id is not None:
+        try:
+            run_usage = await async_summarize_run_tree_usage_in_savepoint(
+                session,
+                int(run.run_id),
+            )
+        except Exception:
+            logger.warning(
+                "cycle_run_usage_summary_failed",
+                extra={"cycle_run_id": run.id, "agent_run_id": run.run_id},
+                exc_info=True,
+            )
+            run_usage = None
+        if run_usage is not None:
+            usage = usage_totals_payload(run_usage)
     summary = cycle_run_evaluation_summary(
         status=status,
         error=error,
         skip_reason=skip_reason,
+        usage=usage,
     )
     score = 1 if status == "completed" else 0 if status in {"failed", "degraded", "auth_blocked"} else None
     context_snapshot = json_dict(getattr(run, "context_snapshot", None))
@@ -387,6 +413,8 @@ async def record_cycle_run_evaluation(
         "observed_causes": observed_causes,
         "result_state": degradation_state,
     }
+    if usage is not None:
+        context_snapshot["usage"] = usage
     run.context_snapshot = jsonable(context_snapshot)
     run.self_review_summary = summary
     session.add(
@@ -408,6 +436,7 @@ async def record_cycle_run_evaluation(
                 "evidence_health": context_snapshot.get("evidence_health"),
                 "degradation_tracking": context_snapshot.get("degradation_tracking"),
                 "launch_receipts": context_snapshot.get("launch_receipts", []),
+                "usage": usage,
                 MISSION_RESULT_CONTRACT_VERDICT_KEY: context_snapshot.get(
                     MISSION_RESULT_CONTRACT_VERDICT_KEY
                 ),
@@ -469,22 +498,29 @@ def cycle_run_evaluation_summary(
     status: str,
     error: str | None = None,
     skip_reason: str | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> str:
+    burn = ""
+    if usage is not None:
+        burn = (
+            f" Burn: {int(usage.get('tokens_total') or 0):,} tokens; "
+            f"estimated cost ${float(usage.get('estimated_cost') or 0):.6f}."
+        )
     if status == "completed":
-        return "Cycle run completed and was recorded in the Cycle ledger."
+        return "Cycle run completed and was recorded in the Cycle ledger." + burn
     if status == "failed":
         detail = error or "unknown failure"
-        return f"Cycle run failed and was recorded in the Cycle ledger: {detail}"
+        return f"Cycle run failed and was recorded in the Cycle ledger: {detail}" + burn
     if status == "degraded":
         detail = error or "mission result contract degraded"
-        return f"Cycle run degraded and was recorded in the Cycle ledger: {detail}"
+        return f"Cycle run degraded and was recorded in the Cycle ledger: {detail}" + burn
     if status == "auth_blocked":
         detail = error or "external auth preflight blocked the run"
-        return f"Cycle run was auth-blocked and recorded in the Cycle ledger: {detail}"
+        return f"Cycle run was auth-blocked and recorded in the Cycle ledger: {detail}" + burn
     if status == "skipped":
         detail = skip_reason or "unknown skip reason"
-        return f"Cycle run was skipped and recorded in the Cycle ledger: {detail}"
-    return f"Cycle run reached status {status} and was recorded in the Cycle ledger."
+        return f"Cycle run was skipped and recorded in the Cycle ledger: {detail}" + burn
+    return f"Cycle run reached status {status} and was recorded in the Cycle ledger." + burn
 
 
 def _aware_utc(value):

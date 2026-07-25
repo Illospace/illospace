@@ -66,6 +66,7 @@ from brain.systems.cortex.upload_preview import (
 )
 from brain.systems.services.runtime_introspection import async_get_provider_auth_status
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
+from brain.systems.runs.token_usage import async_summarize_runs_usage
 
 logger = logging.getLogger(__name__)
 
@@ -774,9 +775,13 @@ async def idea_audit_analyze(
         skills_used = set()
         failed = sum(1 for d in runs if d.status == "failed")
         all_misses = []
+        usage_by_run = {
+            int(usage["id"]): usage
+            for usage in await async_summarize_runs_usage(uow.session, runs)
+        }
         for d in runs:
             metadata = d.metadata_ if isinstance(d.metadata_, dict) else {}
-            usage = metadata.get("usage") if isinstance(metadata.get("usage"), dict) else {}
+            usage = usage_by_run.get(int(d.id), {})
             routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
             total_cost += float(usage.get("estimated_cost") or 0)
             total_tokens += int(usage.get("tokens_total") or 0)
@@ -1117,17 +1122,24 @@ async def audit_eval(
                 detail="No completed runs with output artifacts found for evaluation",
             )
 
+        usage_by_run = {
+            int(usage["id"]): usage
+            for usage in await async_summarize_runs_usage(
+                uow.session,
+                [run for run, _artifact in benchmarks],
+            )
+        }
         benchmark_data = []
         for d, artifact in benchmarks:
             metadata = d.metadata_ if isinstance(d.metadata_, dict) else {}
             routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
-            usage = metadata.get("usage") if isinstance(metadata.get("usage"), dict) else {}
+            usage = usage_by_run.get(int(d.id), {})
             benchmark_data.append({
                 "run_id": d.id,
                 "task_summary": d.input_message or routing.get("selected_skill") or "unknown",
                 "output_artifact": (artifact.text or "")[:2000],
                 "tokens_total": usage.get("tokens_total") or 0,
-                "attempts": usage.get("attempts") or 1,
+                "api_calls": usage.get("api_calls") or 0,
                 "skill_used": routing.get("selected_skill"),
             })
 
@@ -1143,7 +1155,7 @@ TASK SUMMARY:
 ACTUAL OUTPUT PRODUCED:
 {bm['output_artifact']}
 
-ACTUAL COST: {bm['tokens_total']} tokens · {bm['attempts']} attempts
+ACTUAL COST: {bm['tokens_total']} tokens · {bm['api_calls']} model API calls
 
 PROPOSED CHANGE ({proposal_type}):
 {proposal_desc}
@@ -1188,7 +1200,7 @@ Respond as JSON only: {{"score": N, "task_solved": "yes|partial|no", "output_bet
             "run_id": bm["run_id"],
             "task_summary": bm["task_summary"],
             "tokens": bm["tokens_total"],
-            "attempts": bm["attempts"],
+            "api_calls": bm["api_calls"],
             "score": parsed.get("score", 5),
             "task_solved": parsed.get("task_solved", "partial"),
             "output_better": parsed.get("output_better", "neutral"),
