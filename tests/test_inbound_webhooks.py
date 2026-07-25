@@ -1296,7 +1296,7 @@ async def test_postgres_merged_main_envelope_flips_record_and_emits_domain_event
             }
         ],
     )
-    from brain.systems.deploy_state_sweep import (
+    from brain.systems.deploy_tracker import (
         DEPLOY_STATE_FIELD_DEFINITIONS,
         ensure_deploy_state_fields,
     )

@@ -1,10 +1,9 @@
-"""Deterministic persistence wiring for the deploy-state lifecycle.
+"""Deterministic coordination for the deploy-state lifecycle.
 
 The pure axis and ladder live in :mod:`brain.systems.deploy_state`.  This module
-owns best-effort reads of GitHub-ticket records and monitored-alert threads,
-plus optimistic writes through ``AsyncDomainService``. It never posts to Slack
-and never lets GitHub, Slack, or record conflicts fail a coordinator sweep,
-webhook ingestion, or notification tick.
+combines deploy-tracker persistence with monitored-alert reads. It never posts
+to Slack and never lets GitHub, Slack, or record conflicts fail a coordinator
+sweep, webhook ingestion, or notification tick.
 """
 
 from __future__ import annotations
@@ -18,16 +17,15 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Awaitable, Mapping, Protocol, Sequence
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import select
 
 from brain.platform.db.models.domain import (
-    Domain,
     DomainEvent,
     DomainFieldDefinition,
-    DomainObjectType,
     DomainRecord,
 )
 from brain.platform.db.models.run import AgentRun
+from brain.systems import deploy_fix_refs, deploy_tracker
 from brain.systems.deploy_state import (
     DeployState,
     MergeKind,
@@ -39,60 +37,12 @@ from brain.systems.deploy_state_config import (
     deploy_feature_enabled,
     deploy_quiet_window,
     deploy_settle_window,
-    deploy_ticket_object_keys,
 )
 from brain.systems.deploy_state_github import is_ancestor_of
 from brain.systems.user_domains.service import AsyncDomainService
 
 
 logger = logging.getLogger("illo.deploy_state")
-
-DEPLOY_STATE_FIELD_DEFINITIONS: tuple[dict, ...] = (
-    {"key": "rollbar_item", "name": "Rollbar Item", "field_type": "text"},
-    {"key": "alert_last_seen_at", "name": "Alert Last Seen At", "field_type": "datetime"},
-    {"key": "alert_occurrences", "name": "Alert Occurrences", "field_type": "number"},
-    {"key": "fix_pr", "name": "Fix PR", "field_type": "text"},
-    {"key": "fix_merge_sha", "name": "Fix Merge SHA", "field_type": "text"},
-    {"key": "fix_merged_at", "name": "Fix Merged At", "field_type": "datetime"},
-    {
-        "key": "deploy_state",
-        "name": "Deploy State",
-        "field_type": "enum",
-        "options": [state.value for state in DeployState],
-    },
-    {"key": "deployed_at", "name": "Deployed At", "field_type": "datetime"},
-    {"key": "verified_at", "name": "Verified At", "field_type": "datetime"},
-    {
-        "key": "alert_slack_channel",
-        "name": "Alert Slack Channel",
-        "field_type": "text",
-    },
-    {
-        "key": "alert_slack_thread_ts",
-        "name": "Alert Slack Thread Timestamp",
-        "field_type": "text",
-    },
-    {
-        "key": "alert_slack_bot_user_id",
-        "name": "Alert Slack Bot User Id",
-        "field_type": "text",
-    },
-    {
-        "key": "resolution_confirmed_ts",
-        "name": "Resolution Confirming Slack Timestamp",
-        "field_type": "text",
-    },
-    {
-        "key": "resolution_reproduced_ts",
-        "name": "Resolution Reproduced Slack Timestamp",
-        "field_type": "text",
-    },
-    {
-        "key": "promotion_recommended_at",
-        "name": "Promotion Recommended At",
-        "field_type": "datetime",
-    },
-)
 
 _SLACK_THREAD_PAGE_LIMIT = 200
 _SLACK_THREAD_MAX_PAGES = 3
@@ -122,23 +72,6 @@ _VERIFICATION_PATTERNS = (
 _DEPLOYMENT_RE = re.compile(r"\bdeploy(?:e|ed|ment)?\b")
 _MERGE_OR_PROMOTION_RE = re.compile(r"\b(?:merge(?:d|e|ee)?|promot(?:ed|e|ee|ion))\b")
 _PR_REFERENCE_RE = re.compile(r"\b(?:pr|pull request)\b|#[1-9][0-9]*\b")
-_REPO_PR_RE = re.compile(
-    r"\b(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(?P<number>[1-9][0-9]*)\b"
-)
-_GITHUB_PR_URL_RE = re.compile(
-    r"https?://github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/(?P<number>[1-9][0-9]*)\b",
-    re.IGNORECASE,
-)
-_GITHUB_PR_KEY_RE = re.compile(
-    r"\bgithub:(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+):pr:(?P<number>[1-9][0-9]*)\b",
-    re.IGNORECASE,
-)
-_GITHUB_ISSUE_KEY_RE = re.compile(
-    r"\bgithub:(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+):issue:[1-9][0-9]*\b",
-    re.IGNORECASE,
-)
-_SHORT_PR_RE = re.compile(r"\b(?:pr|pull request)\s*#?(?P<number>[1-9][0-9]*)\b", re.IGNORECASE)
-_BARE_PR_RE = re.compile(r"^(?P<number>[1-9][0-9]*)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,14 +117,6 @@ def _iso(value: datetime | str | object) -> str | None:
     return parsed.isoformat() if parsed else None
 
 
-def append_progress_note(data: Mapping[str, object], line: str) -> str | None:
-    """Append one line using the tracker progress-note convention."""
-    if "progress_note" not in data:
-        return None
-    current = str(data.get("progress_note") or "").rstrip()
-    return f"{current}\n{line}".lstrip()
-
-
 def _text(value: object) -> str:
     return str(value or "").strip()
 
@@ -226,33 +151,6 @@ def _human_reply(message: Mapping[str, object], *, bot_user_id: str | None) -> b
     if _text(message.get("subtype")).casefold() == "bot_message":
         return False
     return not bot_user_id or user_id != bot_user_id
-
-
-def github_repo_from_issue_text(text: str) -> str | None:
-    """Extract ``owner/repo`` from a tracker GitHub issue key."""
-    match = _GITHUB_ISSUE_KEY_RE.search(_text(text))
-    return match.group("repo") if match else None
-
-
-def fix_pr_from_text(text: str, *, repo: str | None) -> str | None:
-    """Normalize a supported PR reference to ``owner/repo#N``."""
-    url_match = _GITHUB_PR_URL_RE.search(text)
-    if url_match:
-        return f"{url_match.group('repo')}#{url_match.group('number')}"
-    key_match = _GITHUB_PR_KEY_RE.search(text)
-    if key_match:
-        return f"{key_match.group('repo')}#{key_match.group('number')}"
-    repo_match = _REPO_PR_RE.search(text)
-    if repo_match:
-        return f"{repo_match.group('repo')}#{repo_match.group('number')}"
-    short_match = _SHORT_PR_RE.search(text)
-    clean_repo = _text(repo)
-    if short_match and clean_repo:
-        return f"{clean_repo}#{short_match.group('number')}"
-    bare_match = _BARE_PR_RE.fullmatch(_text(text))
-    if bare_match and clean_repo:
-        return f"{clean_repo}#{bare_match.group('number')}"
-    return None
 
 
 def _resolution_kind(text: str) -> str | None:
@@ -294,7 +192,10 @@ def _resolution_signals(
                 text=text,
                 source=source,
                 fix_pr=(
-                    fix_pr_from_text(text, repo=repo)
+                    deploy_fix_refs.normalize_fix_pr_reference(
+                        text,
+                        default_repo=repo,
+                    )
                     if kind in {"deployed", "verified"}
                     else None
                 ),
@@ -337,7 +238,10 @@ def alert_thread_source_from_run(
 
 
 async def _alert_thread_sources(session, *, org_id: str) -> list[AlertThreadSource]:
-    records = await ticket_records(session, org_id=org_id)
+    records = await deploy_tracker.list_deploy_ticket_records(
+        session,
+        org_id=org_id,
+    )
     if not records:
         return []
     records_by_id = {record.id: record for record in records}
@@ -491,7 +395,7 @@ async def _resolution_patch(
         status = _matching_enum_option(fields.get("status"), "Todo", "In Progress", "Blocked")
     if status is not None:
         patch["status"] = status
-    note = append_progress_note(data, _resolution_note(signal))
+    note = deploy_tracker.append_progress_note(data, _resolution_note(signal))
     if note is not None:
         patch["progress_note"] = note
     return {key: value for key, value in patch.items() if key in fields}
@@ -528,7 +432,10 @@ async def run_alert_resolution_harvest(
         summary["disabled"] = True
         return summary
     try:
-        summary["fields"] = await ensure_deploy_state_fields(session, org_id=org_id)
+        summary["fields"] = await deploy_tracker.ensure_deploy_state_fields(
+            session,
+            org_id=org_id,
+        )
         resolved_sources = list(sources) if sources is not None else await _alert_thread_sources(
             session, org_id=org_id
         )
@@ -606,7 +513,7 @@ async def run_alert_resolution_harvest(
             summary["skipped"] += 1
             continue
         try:
-            await update_record(
+            await deploy_tracker.update_deploy_ticket_record(
                 session,
                 record,
                 patch,
@@ -626,105 +533,6 @@ async def run_alert_resolution_harvest(
             }
         )
     return summary
-
-
-async def ensure_deploy_state_fields(session, *, org_id: str) -> dict:
-    """Idempotently add optional deploy fields to every active ticket type."""
-    object_types = (
-        await session.scalars(
-            select(DomainObjectType)
-            .join(Domain, Domain.id == DomainObjectType.domain_id)
-            .where(
-                Domain.org_id == str(org_id),
-                Domain.archived_at.is_(None),
-                DomainObjectType.key.in_(deploy_ticket_object_keys()),
-                DomainObjectType.archived_at.is_(None),
-            )
-            .order_by(DomainObjectType.id)
-        )
-    ).all()
-    service = AsyncDomainService(session)
-    added = 0
-    for object_type in object_types:
-        existing = {
-            field.key
-            for field in await service.list_fields(object_type.id)
-        }
-        for payload in DEPLOY_STATE_FIELD_DEFINITIONS:
-            if payload["key"] in existing:
-                continue
-            await service.add_field_definition(object_type, dict(payload), emit_event=False)
-            existing.add(str(payload["key"]))
-            added += 1
-    return {"object_types": len(object_types), "fields_added": added}
-
-
-def _json_text(session, key: str):
-    bind = session.get_bind()
-    if bind is not None and bind.dialect.name == "sqlite":
-        return func.json_extract(DomainRecord.data, f"$.{key}")
-    return DomainRecord.data[key].as_string()
-
-
-async def ticket_records(
-    session,
-    *,
-    org_id: str,
-    states: set[str] | None = None,
-    fix_pr_prefix: str | None = None,
-    fix_pr: str | None = None,
-) -> list[DomainRecord]:
-    """Select ticket records by deploy-state and/or fix-PR identity.
-
-    Selection keys on where the FIX lives (``fix_pr`` is repo-qualified), not
-    on the ticket's own ``repo`` field — an app ticket fixed by a backend PR
-    must be swept by the backend promotion, not the app one.
-    """
-    stmt = (
-        select(DomainRecord)
-        .join(DomainObjectType, DomainObjectType.id == DomainRecord.object_type_id)
-        .join(Domain, Domain.id == DomainRecord.domain_id)
-        .where(
-            DomainRecord.org_id == str(org_id),
-            DomainRecord.archived_at.is_(None),
-            Domain.archived_at.is_(None),
-            DomainObjectType.key.in_(deploy_ticket_object_keys()),
-            DomainObjectType.archived_at.is_(None),
-        )
-    )
-    conditions = []
-    if states:
-        state_arm = _json_text(session, "deploy_state").in_(states)
-        if fix_pr_prefix:
-            state_arm = and_(
-                state_arm,
-                _json_text(session, "fix_pr").like(f"{fix_pr_prefix}%"),
-            )
-        conditions.append(state_arm)
-    if fix_pr:
-        conditions.append(_json_text(session, "fix_pr") == fix_pr)
-    if conditions:
-        stmt = stmt.where(or_(*conditions))
-    return list((await session.scalars(stmt.order_by(DomainRecord.id))).all())
-
-
-async def update_record(
-    session,
-    record: DomainRecord,
-    patch: dict,
-    *,
-    reason: str,
-) -> None:
-    async with session.begin_nested():
-        await AsyncDomainService(session).update_record(
-            str(record.org_id),
-            record.domain_id,
-            record.id,
-            data_patch=patch,
-            expected_version=record.version,
-            actor_kind="system",
-            reason=reason,
-        )
 
 
 async def _check_ancestry(
@@ -769,7 +577,7 @@ async def _sweep_main_merge(
 ) -> None:
     kind = classify_merge_event(event)
     fix_pr = f"{repo}#{event.get('number')}" if kind is MergeKind.HOTFIX and event.get("number") else None
-    records = await ticket_records(
+    records = await deploy_tracker.list_deploy_ticket_records(
         session,
         org_id=org_id,
         states={DeployState.STAGING.value, DeployState.PROD_PENDING.value},
@@ -798,7 +606,10 @@ async def _sweep_main_merge(
             patch.update({"deploy_state": DeployState.DEPLOYED.value, "deployed_at": deployed_at})
             if fix_pr and data.get("fix_pr") == fix_pr:
                 patch.update({"fix_merge_sha": sha, "fix_merged_at": deployed_at})
-            note = append_progress_note(data, f"deployed to main at {deployed_at}")
+            note = deploy_tracker.append_progress_note(
+                data,
+                f"deployed to main at {deployed_at}",
+            )
             if note is not None:
                 patch["progress_note"] = note
             bucket = "deployed"
@@ -811,7 +622,10 @@ async def _sweep_main_merge(
                 summary["skipped"] += 1
                 continue
             patch["deploy_state"] = DeployState.PROD_PENDING.value
-            note = append_progress_note(data, "fix confirmed on staging; awaiting promotion")
+            note = deploy_tracker.append_progress_note(
+                data,
+                "fix confirmed on staging; awaiting promotion",
+            )
             if note is not None:
                 patch["progress_note"] = note
             bucket = "prod_pending"
@@ -819,7 +633,12 @@ async def _sweep_main_merge(
             summary["skipped"] += 1
             continue
         try:
-            await update_record(session, record, patch, reason=f"deploy_sweep:{kind.value}")
+            await deploy_tracker.update_deploy_ticket_record(
+                session,
+                record,
+                patch,
+                reason=f"deploy_sweep:{kind.value}",
+            )
         except Exception as exc:
             logger.warning("deploy sweep skipped record %s: %s", record.id, exc)
             summary["errors"].append(record.id)
@@ -844,7 +663,11 @@ async def _sweep_staging_merge(
         summary["skipped"] += 1
         return
     fix_pr = f"{repo}#{number}"
-    records = await ticket_records(session, org_id=org_id, fix_pr=fix_pr)
+    records = await deploy_tracker.list_deploy_ticket_records(
+        session,
+        org_id=org_id,
+        fix_pr=fix_pr,
+    )
     for record in records:
         summary["examined"] += 1
         data = record.data or {}
@@ -864,11 +687,19 @@ async def _sweep_staging_merge(
         }
         if state is DeployState.DEPLOYED:
             patch["deployed_at"] = merged_at
-        note = append_progress_note(data, f"fix {fix_pr} merged to staging at {merged_at}")
+        note = deploy_tracker.append_progress_note(
+            data,
+            f"fix {fix_pr} merged to staging at {merged_at}",
+        )
         if note is not None:
             patch["progress_note"] = note
         try:
-            await update_record(session, record, patch, reason="deploy_sweep:fix_to_staging")
+            await deploy_tracker.update_deploy_ticket_record(
+                session,
+                record,
+                patch,
+                reason="deploy_sweep:fix_to_staging",
+            )
         except Exception as exc:
             logger.warning("deploy sweep skipped record %s: %s", record.id, exc)
             summary["errors"].append(record.id)
@@ -895,7 +726,10 @@ async def run_deploy_sweep(
         return summary
     try:
         tokens = tuple(ancestry_tokens or (None,))
-        summary["fields"] = await ensure_deploy_state_fields(session, org_id=org_id)
+        summary["fields"] = await deploy_tracker.ensure_deploy_state_fields(
+            session,
+            org_id=org_id,
+        )
         if kind in {MergeKind.PROMOTION, MergeKind.HOTFIX}:
             await _sweep_main_merge(
                 session,
@@ -965,8 +799,11 @@ async def run_deploy_verification(
         summary["disabled"] = True
         return summary
     try:
-        summary["fields"] = await ensure_deploy_state_fields(session, org_id=org_id)
-        records = await ticket_records(
+        summary["fields"] = await deploy_tracker.ensure_deploy_state_fields(
+            session,
+            org_id=org_id,
+        )
+        records = await deploy_tracker.list_deploy_ticket_records(
             session,
             org_id=org_id,
             states={DeployState.DEPLOYED.value},
@@ -1018,14 +855,19 @@ async def run_deploy_verification(
             "verified_at": current.isoformat(),
             "status": "Done",
         }
-        note = append_progress_note(
+        note = deploy_tracker.append_progress_note(
             data,
             f"verified quiet since deploy at {deployed_iso}",
         )
         if note is not None:
             patch["progress_note"] = note
         try:
-            await update_record(session, record, patch, reason="deploy_verification")
+            await deploy_tracker.update_deploy_ticket_record(
+                session,
+                record,
+                patch,
+                reason="deploy_verification",
+            )
         except Exception as exc:
             logger.warning("deploy verification skipped record %s: %s", record.id, exc)
             summary["errors"].append(record.id)

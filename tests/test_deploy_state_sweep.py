@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
@@ -22,14 +21,14 @@ from brain.platform.db.models.domain import (
 )
 from brain.systems.deploy_state_sweep import (
     AlertThreadSource,
-    DEPLOY_STATE_FIELD_DEFINITIONS,
     alert_thread_source_from_run,
-    ensure_deploy_state_fields,
-    fix_pr_from_text,
-    github_repo_from_issue_text,
     run_alert_resolution_harvest,
     run_deploy_sweep,
     run_deploy_verification,
+)
+from brain.systems.deploy_tracker import (
+    DEPLOY_STATE_FIELD_DEFINITIONS,
+    ensure_deploy_state_fields,
 )
 from brain.systems.user_domains.service import AsyncDomainService
 
@@ -115,37 +114,6 @@ async def _record(session, domain, *, title, **data):
             **data,
         },
     )
-
-
-@pytest.mark.parametrize(
-    ("value", "title", "expected"),
-    [
-        (
-            "uwear-ai/uwear-backend#1264",
-            "Canonical",
-            "uwear-ai/uwear-backend#1264",
-        ),
-        (
-            "https://github.com/uwear-ai/uwear-backend/pull/1237",
-            "URL",
-            "uwear-ai/uwear-backend#1237",
-        ),
-        (
-            "github:uwear-ai/uwear-backend:pr:1178",
-            "Internal key",
-            "uwear-ai/uwear-backend#1178",
-        ),
-        (
-            "591",
-            "github:uwear-ai/uwearaiapp:issue:389",
-            "uwear-ai/uwearaiapp#591",
-        ),
-        ("", "Nothing", None),
-    ],
-)
-async def test_fix_pr_formats_share_one_normalizer(value, title, expected):
-    repo = github_repo_from_issue_text(title)
-    assert fix_pr_from_text(value, repo=repo) == expected
 
 
 async def test_ensure_fields_is_runtime_id_agnostic_and_idempotent(session):
@@ -682,242 +650,6 @@ def test_alert_resolution_phrase_classifier_handles_en_fr_and_unshipped_negation
     from brain.systems.deploy_state_sweep import _resolution_kind
 
     assert _resolution_kind(text) == expected
-
-
-async def test_deploy_fix_ref_backfill_is_dry_run_safe_scoped_and_idempotent(session):
-    from scripts.backfill_deploy_fix_refs import backfill_deploy_fix_refs
-
-    domain = await _domain(session)
-    await ensure_deploy_state_fields(session, org_id=ORG_ID)
-    canonical = await _record(
-        session,
-        domain,
-        title="Canonical",
-        deploy_state="staging",
-        fix_pr="uwear-ai/uwear-backend#1264",
-    )
-    full_url = await _record(
-        session,
-        domain,
-        title="Full URL",
-        deploy_state="prod_pending",
-        fix_pr="https://github.com/uwear-ai/uwear-backend/pull/1237",
-    )
-    internal_key = await _record(
-        session,
-        domain,
-        title="Internal key",
-        deploy_state="staging",
-        fix_pr="github:uwear-ai/uwear-backend:pr:1178",
-    )
-    invalid_merge_sha = await _record(
-        session,
-        domain,
-        title="Invalid merge SHA",
-        deploy_state="staging",
-        fix_pr="uwear-ai/uwear-backend#555",
-    )
-    bare_number = await _record(
-        session,
-        domain,
-        title="github:uwear-ai/uwearaiapp:issue:389",
-        deploy_state="prod_pending",
-        fix_pr="591",
-    )
-    no_reference = await _record(
-        session,
-        domain,
-        title="No reference",
-        deploy_state="prod_pending",
-        fix_pr="",
-    )
-    deployed = await _record(
-        session,
-        domain,
-        title="Already deployed",
-        deploy_state="deployed",
-        fix_pr="https://github.com/uwear-ai/uwear-backend/pull/999",
-    )
-    archived = await _record(
-        session,
-        domain,
-        title="Archived",
-        deploy_state="staging",
-        fix_pr="https://github.com/uwear-ai/uwear-backend/pull/777",
-    )
-    archived.archived_at = NOW
-    await session.flush()
-
-    records = [
-        canonical,
-        full_url,
-        internal_key,
-        invalid_merge_sha,
-        bare_number,
-        no_reference,
-        deployed,
-        archived,
-    ]
-    before_data = {record.id: deepcopy(record.data) for record in records}
-    before_versions = {record.id: record.version for record in records}
-    merge_shas = {
-        ("uwear-ai/uwear-backend", 1264): "a" * 40,
-        ("uwear-ai/uwear-backend", 1178): "c" * 40,
-        ("uwear-ai/uwearaiapp", 591): "d" * 40,
-    }
-
-    async def github_response(repo, number):
-        merge_sha = merge_shas.get((repo, number))
-        if number == 555:
-            return {
-                "pull_request": {
-                    "merged_at": NOW.isoformat(),
-                    "merge_commit_sha": "not-a-merge-sha",
-                }
-            }
-        return {
-            "pull_request": {
-                "merged_at": NOW.isoformat() if merge_sha else None,
-                # Open PRs can expose a temporary merge SHA; never persist it.
-                "merge_commit_sha": merge_sha or ("b" * 40),
-            }
-        }
-
-    github_lookup = AsyncMock(side_effect=github_response)
-    dry_report = await backfill_deploy_fix_refs(
-        session,
-        org_id=ORG_ID,
-        pull_request_lookup=github_lookup,
-    )
-
-    assert dry_report["applied"] is False
-    assert len(dry_report["records"]) == 7
-    assert archived.id not in {
-        row["record_id"] for row in dry_report["records"]
-    }
-    for record in records:
-        await session.refresh(record)
-        assert record.data == before_data[record.id]
-        assert record.version == before_versions[record.id]
-
-    first_report = await backfill_deploy_fix_refs(
-        session,
-        org_id=ORG_ID,
-        apply=True,
-        pull_request_lookup=github_lookup,
-    )
-    assert first_report["applied"] is True
-    assert {
-        row["record_id"]: row["new_fix_pr"] for row in first_report["records"]
-    } == {
-        canonical.id: "uwear-ai/uwear-backend#1264",
-        full_url.id: "uwear-ai/uwear-backend#1237",
-        internal_key.id: "uwear-ai/uwear-backend#1178",
-        invalid_merge_sha.id: "uwear-ai/uwear-backend#555",
-        bare_number.id: "uwear-ai/uwearaiapp#591",
-        no_reference.id: None,
-        deployed.id: "uwear-ai/uwear-backend#999",
-    }
-    rows_by_id = {
-        row["record_id"]: row for row in first_report["records"]
-    }
-    assert rows_by_id[canonical.id]["sha_found"] is True
-    assert rows_by_id[full_url.id]["sha_found"] is False
-    assert rows_by_id[full_url.id]["unresolvable_reason"] is None
-    assert rows_by_id[invalid_merge_sha.id]["sha_found"] is False
-    assert rows_by_id[invalid_merge_sha.id]["unresolvable_reason"] == (
-        "merged PR has no valid merge_commit_sha"
-    )
-    assert rows_by_id[no_reference.id]["unresolvable_reason"] == (
-        "no fix PR reference"
-    )
-    assert rows_by_id[deployed.id]["sha_found"] is False
-    assert all(
-        call.args != ("uwear-ai/uwear-backend", 999)
-        for call in github_lookup.await_args_list
-    )
-
-    allowed_keys = {"fix_pr", "fix_merge_sha", "progress_note"}
-    for record in records:
-        await session.refresh(record)
-        changed_keys = {
-            key
-            for key in set(before_data[record.id]) | set(record.data)
-            if before_data[record.id].get(key) != record.data.get(key)
-        }
-        assert changed_keys <= allowed_keys
-        assert record.data.get("deploy_state") == before_data[record.id].get(
-            "deploy_state"
-        )
-    assert canonical.data["fix_merge_sha"] == "a" * 40
-    assert full_url.data.get("fix_merge_sha") is None
-    assert internal_key.data["fix_merge_sha"] == "c" * 40
-    assert invalid_merge_sha.data.get("fix_merge_sha") is None
-    assert bare_number.data["fix_merge_sha"] == "d" * 40
-    assert no_reference.data["progress_note"].splitlines().count(
-        "needs-human: no fix PR reference"
-    ) == 1
-    assert archived.data == before_data[archived.id]
-
-    after_first_data = {record.id: deepcopy(record.data) for record in records}
-    after_first_versions = {record.id: record.version for record in records}
-    second_report = await backfill_deploy_fix_refs(
-        session,
-        org_id=ORG_ID,
-        apply=True,
-        pull_request_lookup=github_lookup,
-    )
-    assert second_report["applied"] is True
-    for record in records:
-        await session.refresh(record)
-        assert record.data == after_first_data[record.id]
-        assert record.version == after_first_versions[record.id]
-
-    backfill_events = (
-        await session.scalars(
-            select(DomainEvent).where(DomainEvent.reason == "deploy_backfill")
-        )
-    ).all()
-    assert len(backfill_events) == 6
-    assert all(event.actor_kind == "system" for event in backfill_events)
-    assert all(set(event.patch) <= allowed_keys for event in backfill_events)
-
-
-async def test_deploy_fix_ref_backfill_github_lookup_uses_read_only_app_token(
-    monkeypatch,
-):
-    import scripts.backfill_deploy_fix_refs as backfill
-
-    resolve = AsyncMock(return_value={"GITHUB_TOKEN": "app-token"})
-    get_pr = AsyncMock(return_value={"pull_request": {"merged_at": None}})
-    monkeypatch.setattr(
-        backfill,
-        "async_resolve_project_bound_env_tokens",
-        resolve,
-    )
-    monkeypatch.setattr(
-        backfill,
-        "async_get_pull_request_deploy_info",
-        get_pr,
-    )
-
-    lookup = backfill.github_app_pull_request_lookup(
-        org_id=ORG_ID,
-        actor_user_id="22222222-2222-4222-8222-222222222222",
-    )
-    await lookup(REPO, 1264)
-    await lookup(REPO, 1265)
-
-    resolve.assert_awaited_once_with(
-        actor_user_id="22222222-2222-4222-8222-222222222222",
-        org_id=ORG_ID,
-        project_slug=REPO,
-        github_app_only=True,
-        github_app_permissions={"pull_requests": "read"},
-    )
-    assert get_pr.await_args_list[0].args == (REPO, 1264)
-    assert get_pr.await_args_list[0].kwargs == {"token": "app-token"}
-    assert get_pr.await_args_list[1].args == (REPO, 1265)
 
 
 async def test_sweep_exception_does_not_propagate_from_inbound_hook(session, monkeypatch):
