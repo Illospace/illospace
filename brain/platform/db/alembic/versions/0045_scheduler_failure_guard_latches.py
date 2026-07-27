@@ -116,6 +116,21 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if _table_exists(_TABLE):
+        unexpected_kind = op.get_bind().execute(
+            sa.text(
+                "SELECT trigger_kind "
+                "FROM scheduler_failure_guard_latches "
+                "WHERE trigger_kind NOT IN ('consecutive', 'rolling_window') "
+                "LIMIT 1"
+            )
+        ).scalar()
+        if unexpected_kind is not None:
+            raise RuntimeError(
+                "Cannot downgrade scheduler failure-guard latches with "
+                f"unrepresentable trigger kind: {unexpected_kind}"
+            )
+
     if not _job_column_exists("failure_alerted_at"):
         op.add_column(
             _JOB_TABLE,
@@ -153,3 +168,4 @@ def downgrade() -> None:
             "AND trigger_kind = 'rolling_window')"
         )
     )
+    op.drop_table(_TABLE)

@@ -31,6 +31,12 @@ from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.slack.client import slack_web_client_from_runtime
 from brain.app.scheduler.catalog import normalize_owner_mode
 from brain.app.scheduler.contracts import validate_scheduler_run_contract
+from brain.app.scheduler.failure_guard import (
+    FailureGuardEvaluation,
+    async_record_scheduler_job_failure,
+    async_reset_scheduler_job_failure_guard,
+    serialize_failure_guard,
+)
 from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.programs import (
     NIGHTLY_SLEEP_STEP_KEYS,
@@ -40,7 +46,6 @@ from brain.app.scheduler.programs import (
     nightly_commands_for_step,
 )
 from brain.app.scheduler.runtime import (
-    FailureGuardEvaluation,
     LEASE_TTL_SECONDS,
     RUN_STATUS_CLAIMED,
     RUN_STATUS_PAUSED,
@@ -55,8 +60,6 @@ from brain.app.scheduler.runtime import (
     async_finish_run,
     async_find_scheduler_job,
     async_heartbeat_lease,
-    async_record_scheduler_job_failure,
-    async_reset_scheduler_job_failure_guard,
     async_retry_run,
     async_set_scheduler_job_load_shed as async_set_scheduler_job_load_shed_state,
     async_set_scheduler_job_owner_mode as async_set_scheduler_job_owner_mode_state,
@@ -65,7 +68,6 @@ from brain.app.scheduler.runtime import (
     normalize_retry_policy,
     retry_available,
     retry_available_at,
-    serialize_failure_guard,
     trace_id_for_run_id,
     trace_id_for_scheduler_run_id,
 )
@@ -452,7 +454,7 @@ async def async_deliver_scheduler_failure_alert(
             (
                 "Triggers crossed:",
                 *(
-                    f"- {edge.kind.value}: {edge.alert_summary}"
+                    f"- {edge.kind}: {edge.alert_summary}"
                     for edge in crossed_edges
                 ),
             )
@@ -502,7 +504,7 @@ async def _async_apply_failure_guard(
             alert_title,
             job.job_key,
             run.id,
-            ",".join(edge.kind.value for edge in crossed_edges),
+            ",".join(str(edge.kind) for edge in crossed_edges),
             guard.failure_signature,
             error_text,
         )

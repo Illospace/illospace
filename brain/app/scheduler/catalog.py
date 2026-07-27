@@ -15,14 +15,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.scheduler import OWNER_MODE_SCHEDULER, SchedulerJob, SchedulerRun
-from brain.app.scheduler.planner import next_run_after
-from brain.app.scheduler.runtime import (
+from brain.app.scheduler.failure_guard import (
     FailureGuardEvaluation,
     async_read_scheduler_failure_guard,
+    scheduler_failure_guard_registry,
+    serialize_failure_guard,
+)
+from brain.app.scheduler.planner import next_run_after
+from brain.app.scheduler.runtime import (
     normalize_owner_mode as _normalize_owner_mode,
     normalize_run_status,
-    scheduler_failure_guard_policy,
-    serialize_failure_guard,
 )
 
 DEFAULT_SCHEDULER_TIMEZONE = os.getenv("SCHEDULER_DEFAULT_TIMEZONE", "America/Toronto")
@@ -484,7 +486,7 @@ async def async_list_scheduler_jobs(
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     now = now or datetime.now(timezone.utc)
-    policy = scheduler_failure_guard_policy()
+    registry = scheduler_failure_guard_registry()
     result = await session.scalars(
         select(SchedulerJob).order_by(SchedulerJob.family.asc(), SchedulerJob.id.asc())
     )
@@ -494,7 +496,7 @@ async def async_list_scheduler_jobs(
             session,
             job,
             now=now,
-            policy=policy,
+            registry=registry,
         )
         jobs.append(_serialize_job(job, failure_guard))
     return jobs

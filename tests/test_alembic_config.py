@@ -44,6 +44,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0021_remove_intelligence_tiers.py",
     # Downgrade removes only the packet brief delivery outbox table introduced by this migration.
     "0026_packet_brief_deliveries.py",
+    # Downgrade removes the normalized latch table after restoring its representable columns.
+    "0045_scheduler_failure_guard_latches.py",
 }
 
 
