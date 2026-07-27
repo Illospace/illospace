@@ -636,6 +636,7 @@ async def resolve_project_bound_env_tokens(
     project_slug: str | None = None,
     project_slugs: list[str] | tuple[str, ...] | set[str] | None = None,
     target_registry_id: int | None = None,
+    github_app_permissions: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Return env-name/token pairs for project-bound secrets.
 
@@ -650,6 +651,7 @@ async def resolve_project_bound_env_tokens(
         project_slug=project_slug,
         project_slugs=project_slugs,
         target_registry_id=target_registry_id,
+        github_app_permissions=github_app_permissions,
     )
 
 
@@ -661,13 +663,15 @@ async def async_resolve_project_bound_env_tokens(
     project_slugs: list[str] | tuple[str, ...] | set[str] | None = None,
     target_registry_id: int | None = None,
     github_app_only: bool = False,
+    github_app_permissions: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Return env-name/token pairs for matching org project bindings.
 
     Matching bindings for the same GitHub App and env name mint one token
     down-scoped to their combined repository names. Cross-repository GitHub
     operations can therefore use one installation identity without widening
-    its permissions or repository access beyond the supplied bindings.
+    its repository access beyond the supplied bindings. Callers may request a
+    different subset of the permissions already approved on the installation.
     """
     if not project_slug and not project_slugs and target_registry_id is None:
         return {}
@@ -757,7 +761,11 @@ async def async_resolve_project_bound_env_tokens(
             env[env_name] = await async_mint_installation_token(
                 decrypted_blob,
                 repositories=repo_names,
-                permissions=DEFAULT_INSTALLATION_PERMISSIONS,
+                permissions=(
+                    DEFAULT_INSTALLATION_PERMISSIONS
+                    if github_app_permissions is None
+                    else github_app_permissions
+                ),
             )
         finally:
             decrypted_blob = None

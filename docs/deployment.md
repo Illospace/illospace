@@ -101,3 +101,50 @@ contract.
   scheduler start.
 - Treat browser automation and tool execution as privileged server
   capabilities.
+
+## External Illo Deadman
+
+Runtime liveness must be observed outside Illo's host. The scheduler publishes
+a heartbeat every five minutes to the public orphan branch `ops/heartbeat` in
+`Illospace/illospace`; `.github/workflows/illo-deadman.yml` reads it without
+using the host, its database, or the tailnet. The public heartbeat is deliberately
+limited to this shape:
+
+```json
+{"ts":"2026-07-27T12:00:00Z","last_run_id":2718,"last_surface":"slack"}
+```
+
+No credential, customer identifier, thread content, prompt, response, or error
+body belongs in that branch. The branch also carries the watcher's one-shot
+alarm state.
+
+The emitter reuses Illo's org-owned GitHub App project binding for
+`illospace/illospace` and mints a repository-scoped installation token with
+`contents:write`. The installed App must have Contents read/write approval.
+There is no separate heartbeat PAT. If the binding or token is unavailable, the
+scheduler job records a clean skip instead of entering a crash loop.
+
+In the `Illospace/illospace` repository settings, allow Actions workflows read
+and write access, then create these two Actions secrets:
+
+- `SLACK_DEADMAN_WEBHOOK_URL` — required incoming-webhook URL targeting
+  `#alerts`. Configure the webhook with a distinct identity such as
+  `Illo Deadman (GitHub)`; it must not look like Illo and must not use Illo's
+  Slack bot token.
+- `ILLO_DEADMAN_HEALTHCHECK_URL` — the success-ping URL for an independent
+  healthchecks.io, Cronitor, or equivalent check. This self-monitor is optional
+  to the workflow so first deployment is not blocked, but production should
+  configure it. When absent, every successful watcher run emits a prominent
+  warning rather than claiming self-visibility.
+
+GitHub's five-minute schedule is a minimum interval, not a delivery guarantee.
+The watcher declares a 12-minute staleness threshold so ordinary scheduler
+delay does not trigger on one late run while the alarm normally still lands
+within about 15 minutes. GitHub disables scheduled workflows after 60 days
+without repository activity; the independent success-ping monitor is what makes
+that silent-stop mode observable.
+
+For a non-destructive setup check, run the **Illo External Deadman** workflow
+manually with `force_stale=true` and leave `dry_run=true`. The run must report an
+`alarm` action and a dry-run notice without posting to Slack or changing the
+stored one-shot state.

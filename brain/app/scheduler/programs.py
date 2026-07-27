@@ -22,6 +22,11 @@ UWEAR_STAGING_PROMOTION_PR_COMMAND = [
     "-m",
     "brain.jobs.pipelines.staging_promotion_pr",
 ]
+ILLO_EXTERNAL_HEARTBEAT_COMMAND = [
+    "python3",
+    "-m",
+    "brain.jobs.pipelines.illo_heartbeat",
+]
 
 
 def _python_one_liner(code: str) -> list[str]:
@@ -492,6 +497,18 @@ def build_scheduler_step_plan(job: SchedulerJob) -> list[dict[str, object]]:
             }
         ]
 
+    if job.program_key == "illo_external_heartbeat" or "illo_external_heartbeat" in identity:
+        return [
+            {
+                "step_key": "illo_external_heartbeat",
+                "sequence_no": 1,
+                "kind": "single",
+                "handler_ref": job.handler_ref,
+                "payload": {"program": "illo_external_heartbeat"},
+                "command": ILLO_EXTERNAL_HEARTBEAT_COMMAND,
+            }
+        ]
+
     return [
         {
             "step_key": job.program_key or "scheduler_job",
@@ -563,6 +580,19 @@ def _uwear_staging_promotion_pr_steps(
     ]
 
 
+def _illo_external_heartbeat_steps(
+    job: SchedulerJob,
+    run: SchedulerRun,
+) -> list[StepSpec]:
+    return [
+        StepSpec(
+            "illo_external_heartbeat",
+            ILLO_EXTERNAL_HEARTBEAT_COMMAND,
+            "Publish Illo's external heartbeat",
+        ),
+    ]
+
+
 def _fallback_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
     payload = job.default_payload or {}
     command = payload.get("command")
@@ -575,6 +605,8 @@ def _fallback_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
 
 def get_step_specs(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
     key = _job_identity(job)
+    if "illo_external_heartbeat" in key:
+        return _illo_external_heartbeat_steps(job, run)
     if "uwear_staging_promotion_pr" in key:
         return _uwear_staging_promotion_pr_steps(job, run)
     if "uwear_aws_health_scan" in key:
