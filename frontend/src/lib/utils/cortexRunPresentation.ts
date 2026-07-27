@@ -28,7 +28,6 @@ export function isActiveRun(source: any): boolean {
 }
 
 export function shouldShowRunInTranscript(source: any): boolean {
-  if (!isFastRun(source)) return true;
   if (source?.requires_approval) return true;
   if (source?.error) return true;
   return FAST_TRANSCRIPT_VISIBLE_STATUSES.has(String(source?.status || ''));

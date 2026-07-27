@@ -24,6 +24,7 @@ from brain.systems.runs.direct_loop.loop_control import (
 )
 from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
 from brain.systems.runs.direct_loop.final_reply_evidence import ToolResultEvidence
+from brain.systems.runs.tool_catalog.metadata import is_write_side_effect_class
 from brain.systems.runs.tool_catalog.registry import (
     action_policy_for_tool,
     get_tool_registration,
@@ -170,8 +171,7 @@ def _must_finish_before_reporting(request: PendingToolCall) -> bool:
         return bool(getattr(request.handler, "_action_manifest_audited", False))
     if action_policy_for_tool(request.tool_name, kwargs=request.tool_input) is None:
         return False
-    side_effect = str(getattr(registration.side_effect_class, "value", registration.side_effect_class))
-    return side_effect not in {"read_only", "read_only_external"}
+    return is_write_side_effect_class(registration.side_effect_class)
 
 
 def _truncate_middle_text(text: str, max_chars: int) -> str:
@@ -567,6 +567,7 @@ async def async_emit_resolved_tool_call(
     if run_id and idea_id:
         from brain.systems.runs.events import async_record_tool_call
 
+        registration = get_tool_registration(resolved.tool_name)
         await async_record_tool_call(
             run_id,
             idea_id,
@@ -574,6 +575,11 @@ async def async_emit_resolved_tool_call(
             resolved.tool_input,
             callback_result_text,
             source=tool_call_source,
+            side_effect=(
+                registration.side_effect_class
+                if registration is not None
+                else "unknown"
+            ),
         )
 
 

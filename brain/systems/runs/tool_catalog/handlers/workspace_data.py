@@ -721,11 +721,13 @@ async def _query_tool_calls(
     idea_id: str | None,
     search: str | None,
     limit: int,
+    run_id: int | None = None,
 ) -> None:
     from brain.platform.db.models.agent_run import AgentRunEventRow
     from brain.platform.db.models.run import AgentRun
     from brain.platform.db.models.idea import Idea
     from brain.systems.runs.presentation import public_tool_event_payload
+    from brain.systems.runs.tool_event_read_model import tool_call_summary
 
     stmt = (
         select(AgentRunEventRow, AgentRun, Idea)
@@ -751,6 +753,12 @@ async def _query_tool_calls(
         stmt = stmt.where(text_match)
 
     rows = await _session_execute_all(session, stmt)
+    if run_id is not None:
+        payload["tool_call_summary"] = await tool_call_summary(
+            session,
+            run_id,
+            now=_now_utc(),
+        )
     tool_calls = []
     for event, run, idea in rows:
         public_event = public_tool_event_payload(event.payload, event.event_type)
@@ -766,6 +774,8 @@ async def _query_tool_calls(
             "run_status": run.status if run else None,
             "tool_name": public_event.get("tool_name"),
             "source": public_event.get("source"),
+            "side_effect": public_event.get("side_effect"),
+            "is_write": public_event.get("is_write"),
             "args": _snippet(public_event.get("args"), 420),
             "result": _snippet(
                 failure.get("message") if failure else public_event.get("result") or public_event.get("result_preview"),
@@ -1656,6 +1666,7 @@ async def _run_tool_calls(session: Any, payload: dict[str, Any], ctx: WorkspaceD
         user_id=ctx.user_id,
         person_ids=ctx.person_ids,
         idea_id=ctx.idea_id,
+        run_id=ctx.run_id,
         search=ctx.search,
         limit=ctx.limit,
     )

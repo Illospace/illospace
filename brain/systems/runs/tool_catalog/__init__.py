@@ -7,6 +7,7 @@ from brain.systems.runs.tool_catalog.registry import (
     all_tool_registrations,
     get_tool_registration,
     parallel_safe_tool_names,
+    side_effect_class_for_tool,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "all_tool_registrations",
     "get_tool_registration",
     "parallel_safe_tool_names",
+    "side_effect_class_for_tool",
 ]

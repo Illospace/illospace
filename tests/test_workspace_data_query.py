@@ -297,6 +297,141 @@ async def test_workspace_tool_calls_project_legacy_structured_failures_safely():
     assert payload["sources"]["tool_calls"][0]["failure"]["status"] == "failed"
 
 
+async def test_workspace_tool_calls_keep_team_scope_and_report_current_run_summary(monkeypatch):
+    from brain.systems.runs.tool_catalog.handlers import workspace_data
+
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    teammate_event = SimpleNamespace(
+        id=12,
+        run_id=8,
+        event_type="run.tool_completed",
+        payload={
+            "tool_name": "read_file",
+            "args": {"path": "README.md"},
+            "result": "read",
+            "side_effect": "read",
+        },
+        created_at=now - timedelta(seconds=5),
+    )
+    current_run_write = SimpleNamespace(
+        id=11,
+        run_id=7,
+        event_type="run.tool_completed",
+        payload={
+            "tool_name": "write_file",
+            "args": {"path": "README.md"},
+            "result": "wrote",
+            "side_effect": "file_write",
+            "is_write": True,
+        },
+        created_at=now - timedelta(seconds=80),
+    )
+    teammate_run = SimpleNamespace(
+        id=8,
+        thread_id="idea-team",
+        status="completed",
+    )
+    current_run = SimpleNamespace(id=7, thread_id="idea-1", status="running")
+
+    class Result:
+        def all(self):
+            return [
+                (teammate_event, teammate_run, None),
+                (current_run_write, current_run, None),
+            ]
+
+    captured = {}
+
+    class StubSession:
+        def execute(self, stmt):
+            captured["listing_sql"] = str(
+                stmt.compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            )
+            return Result()
+
+        def scalar(self, stmt):
+            captured["summary_sql"] = str(
+                stmt.compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            )
+            return current_run_write
+
+    monkeypatch.setattr(workspace_data, "_now_utc", lambda: now)
+    payload = {"sources": {}}
+    await workspace_data._query_tool_calls(
+        StubSession(),
+        payload,
+        start=None,
+        end=None,
+        org_id=None,
+        user_id=None,
+        person_ids=[],
+        idea_id=None,
+        search=None,
+        limit=10,
+        run_id=7,
+    )
+
+    assert [row["run_id"] for row in payload["sources"]["tool_calls"]] == [8, 7]
+    assert payload["sources"]["tool_calls"][0]["side_effect"] == "read"
+    assert payload["sources"]["tool_calls"][0]["is_write"] is False
+    assert payload["sources"]["tool_calls"][1]["side_effect"] == "file_write"
+    assert payload["sources"]["tool_calls"][1]["is_write"] is True
+    assert "agent_runs.id = 7" not in captured["listing_sql"]
+    assert "LIMIT 10" in captured["listing_sql"]
+    assert "agent_run_events.run_id = 7" in captured["summary_sql"]
+    assert "run.tool_completed" in captured["summary_sql"]
+    assert "run.tool_failed" in captured["summary_sql"]
+    assert "read" in captured["summary_sql"]
+    assert (
+        "ORDER BY agent_run_events.created_at DESC, "
+        "agent_run_events.id DESC" in captured["summary_sql"]
+    )
+    assert "LIMIT 1" in captured["summary_sql"]
+    assert payload["tool_call_summary"] == {
+        "run_id": 7,
+        "last_write_tool_call_at": (now - timedelta(seconds=80)).isoformat(),
+        "seconds_since_last_write_tool_call": 80,
+    }
+
+
+async def test_workspace_tool_call_source_forwards_current_run_for_summary(monkeypatch):
+    from brain.systems.runs.tool_catalog.handlers import workspace_data
+
+    captured = {}
+
+    async def query_tool_calls(_session, _payload, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(workspace_data, "_query_tool_calls", query_tool_calls)
+    ctx = workspace_data.WorkspaceDataQueryContext(
+        start=None,
+        end=None,
+        org_id="org-1",
+        user_id="user-1",
+        person_ids=[],
+        idea_id=None,
+        run_id=507,
+        domain_id=None,
+        cycle_id=None,
+        object_key=None,
+        query=None,
+        search=None,
+        include_archived=False,
+        limit=10,
+        offset=0,
+    )
+
+    await workspace_data._run_tool_calls(object(), {"sources": {}}, ctx)
+
+    assert captured["run_id"] == 507
+
+
 async def test_workspace_data_runs_include_latest_final_answer_artifact():
     from brain.systems.runs.tool_catalog.handlers import workspace_data
 

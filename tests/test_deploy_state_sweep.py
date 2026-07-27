@@ -21,12 +21,14 @@ from brain.platform.db.models.domain import (
 )
 from brain.systems.deploy_state_sweep import (
     AlertThreadSource,
-    DEPLOY_STATE_FIELD_DEFINITIONS,
     alert_thread_source_from_run,
-    ensure_deploy_state_fields,
     run_alert_resolution_harvest,
     run_deploy_sweep,
     run_deploy_verification,
+)
+from brain.systems.deploy_tracker import (
+    DEPLOY_STATE_FIELD_DEFINITIONS,
+    ensure_deploy_state_fields,
 )
 from brain.systems.user_domains.service import AsyncDomainService
 

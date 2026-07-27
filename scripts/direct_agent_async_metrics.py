@@ -19,8 +19,6 @@ FILES = {
     "recipes": (
         "brain/systems/runs/recipes/fast.py",
         "brain/systems/runs/recipes/workers.py",
-        "brain/systems/runs/recipes/deep.py",
-        "brain/systems/runs/recipes/phase_barrier.py",
     ),
     "retry": "brain/systems/runs/direct_loop/retry.py",
     "cancel": "brain/systems/runs/cancel.py",

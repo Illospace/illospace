@@ -14,25 +14,24 @@ import {
   runWorkTimelineItems,
 } from './cortexRunPresentation.ts';
 
-test('shows fast run cards as live work logs in the transcript', () => {
-  assert.equal(shouldShowRunInTranscript({ execution_profile: 'fast', status: 'queued' }), true);
-  assert.equal(shouldShowRunInTranscript({ execution_profile: 'fast', status: 'running' }), true);
-  assert.equal(shouldShowRunInTranscript({ execution_profile: 'fast', status: 'pending_approval' }), true);
-  assert.equal(shouldShowRunInTranscript({ execution_profile: 'fast', status: 'completed' }), true);
-  assert.equal(shouldShowRunInTranscript({ execution_profile: 'fast', status: 'failed' }), true);
-  assert.equal(shouldShowRunInTranscript({ execution_profile: 'deep', status: 'running' }), true);
+test('shows run cards as live work logs in the transcript', () => {
+  assert.equal(shouldShowRunInTranscript({ status: 'queued' }), true);
+  assert.equal(shouldShowRunInTranscript({ status: 'running' }), true);
+  assert.equal(shouldShowRunInTranscript({ status: 'pending_approval' }), true);
+  assert.equal(shouldShowRunInTranscript({ status: 'completed' }), true);
+  assert.equal(shouldShowRunInTranscript({ status: 'failed' }), true);
 });
 
 test('builds codex-style run work summaries', () => {
   assert.equal(
-    runWorkSummaryTitle({ execution_profile: 'fast', status: 'completed', duration_sec: 515 }),
+    runWorkSummaryTitle({ status: 'completed', duration_sec: 515 }),
     'Worked for 8m 35s',
   );
   assert.equal(
     runWorkSummarySubtitle({ work_summary: { tool_count: 2, activity_count: 5 } }),
     '2 tools · 5 events',
   );
-  assert.equal(runWorkSummaryTitle({ execution_profile: 'fast', status: 'running' }), 'Working');
+  assert.equal(runWorkSummaryTitle({ status: 'running' }), 'Working');
 });
 
 test('finds active fast runs and live fast replies', () => {

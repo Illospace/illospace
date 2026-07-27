@@ -54,10 +54,6 @@ REQUIRED_ACTIVATION_CLI_RUN_SYNC_REASON = (
     "it is not imported by the application runtime."
 )
 OFFLINE_SQLITE_BENCH_SURFACES = {
-    "scripts/bench_agent_run_deep_child_runs.py": {
-        "sqlalchemy_create_engine",
-        "sqlalchemy_sessionmaker",
-    },
     "scripts/bench_agent_run_fast_readme.py": {
         "sqlalchemy_create_engine",
         "sqlalchemy_sessionmaker",

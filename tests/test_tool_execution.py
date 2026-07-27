@@ -20,6 +20,7 @@ from brain.systems.runs.tool_outcomes import (
 from brain.systems.runs.direct_loop.tool_execution import (
     PendingToolCall,
     ResolvedToolCall,
+    async_emit_resolved_tool_call,
     async_execute_parallel_tool_batch,
     async_execute_tool_calls,
     async_resolve_tool_call,
@@ -348,6 +349,31 @@ def test_failure_policy_reads_thresholds_from_environment(monkeypatch):
     assert policy.failure_threshold == 5
     assert policy.failure_window_calls == 12
     assert policy.zero_success_failure_threshold == 4
+
+
+async def test_direct_loop_stamps_registry_side_effect_at_emit(monkeypatch):
+    recorded = []
+
+    async def record(*args, **kwargs):
+        recorded.append((args, kwargs))
+
+    monkeypatch.setattr("brain.systems.runs.events.async_record_tool_call", record)
+
+    await async_emit_resolved_tool_call(
+        ResolvedToolCall(
+            block_id="tool-1",
+            tool_name="create_github_pull_request",
+            tool_input={"repo": "Illospace/illospace"},
+            result_text='{"ok": true}',
+        ),
+        [],
+        None,
+        42,
+        "idea-1",
+        "test",
+    )
+
+    assert recorded[0][1]["side_effect"] == "append_only"
 
 
 async def test_failure_policy_disables_parallel_tool_before_third_attempt():

@@ -12,7 +12,6 @@ import {
   runWorkSummaryTitle,
   runWorkTimelineItems,
   isActiveRun,
-  isFastRun,
   shouldShowRunInTranscript,
 } from '$lib/utils/cortexRunPresentation';
 import { shouldRenderLiveAgentTextItem, streamItemRunId } from '$lib/utils/cortexRunStream';
@@ -399,8 +398,8 @@ function mapThreadRunItem(
     kind: 'run',
     id: item.id,
     status: runStatus,
-    skill: item.skill_name || item.title || (isFastRun(item) ? 'Fast' : 'run'),
-    event: item.title || (isFastRun(item) ? 'Fast work log' : 'Latest run'),
+    skill: item.skill_name || item.title || 'run',
+    event: item.title || 'Work log',
     summaryTitle: runWorkSummaryTitle(item),
     summarySubtitle: runWorkSummarySubtitle(item),
     defaultExpanded: activeRun || Boolean(item.requires_approval),
@@ -577,10 +576,9 @@ export function buildThreadTranscriptItems({
     const activeRun = activeStreamRun ?? runInfo ?? latestRun;
     const activeStartedAt = activeRun?.started_at || runInfo?.started_at;
     const activeActivity = getRunActivity(activeRun);
-    const activeIsFast = isFastRun(activeRun);
     const activitySteps = runActivitySteps(activeRun, {
       elapsedLabel: (iso) => elapsedLabel(iso, nowMs),
-      limit: activeIsFast ? 6 : 1,
+      limit: 6,
     });
     if (activeStartedAt && activeActivity && activitySteps.length === 0) {
       activitySteps.push({
@@ -589,13 +587,11 @@ export function buildThreadTranscriptItems({
       });
     }
     const hasActiveRun = Boolean(activeRun && isActiveRun(activeRun));
-    if (hasActiveRun && !(activeIsFast && activeStreamRun && shouldShowRunInTranscript(activeStreamRun))) {
+    if (hasActiveRun && !(activeStreamRun && shouldShowRunInTranscript(activeStreamRun))) {
       items.push({
         kind: 'thinking',
         id: `thinking-${idea.id}`,
-        label: activeIsFast
-          ? (activitySteps[activitySteps.length - 1]?.label || 'Illo is working...')
-          : 'Illo is working through the active thread.',
+        label: activitySteps[activitySteps.length - 1]?.label || 'Illo is working...',
         steps: activitySteps.length ? activitySteps : undefined,
       });
     }
