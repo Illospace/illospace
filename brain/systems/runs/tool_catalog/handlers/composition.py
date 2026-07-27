@@ -225,8 +225,42 @@ def _get_tool_handlers(
             org_id=getattr(_agent_context, "org_id", None),
         )
 
+    async def _manage_runtime_preferences(
+        action="get",
+        setting=None,
+        value=None,
+    ):
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.systems.runtime_settings.preferences import (
+            RuntimePreferenceAccessError,
+            async_manage_runtime_preferences,
+            authenticate_runtime_preference_principal,
+            denied_runtime_preference_result,
+        )
+
+        async with UnitOfWork() as uow:
+            try:
+                principal = await authenticate_runtime_preference_principal(
+                    uow.session,
+                    user_id=_current_agent_value("user_id"),
+                    org_id=_current_agent_value("org_id"),
+                )
+            except RuntimePreferenceAccessError as exc:
+                result = denied_runtime_preference_result(exc)
+            else:
+                result = await async_manage_runtime_preferences(
+                    uow.session,
+                    principal=principal,
+                    run_id=_coerce_agent_run_id(_current_run_id()),
+                    action=action,
+                    setting=setting,
+                    value=value,
+                )
+        return result
+
     _manage_deployment._illo_run_on_event_loop = True
     _manage_runtime_services._illo_run_on_event_loop = True
+    _manage_runtime_preferences._illo_run_on_event_loop = True
 
     handlers = {
         # Brain tools (workspace-independent — always hit shared DB)
@@ -281,6 +315,7 @@ def _get_tool_handlers(
                 org_id=getattr(_agent_context, "org_id", None),
             )
         ),
+        "manage_runtime_preferences": _manage_runtime_preferences,
         "read_self_context": _handle_read_self_context,
         "read_capabilities": _handle_read_capabilities,
         "manage_deployment": _manage_deployment,

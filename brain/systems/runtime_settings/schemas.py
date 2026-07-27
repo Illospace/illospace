@@ -113,6 +113,11 @@ class RuntimeVoiceTranscriptRead(BaseModel):
     bytes_streamed: int = 0
 
 
+class RuntimeDisplayRead(BaseModel):
+    scope: Literal["installation"] = "installation"
+    display_timezone: str = "America/New_York"
+
+
 class RuntimePermissionsRead(BaseModel):
     can_manage_settings: bool
 
@@ -202,6 +207,7 @@ class RuntimeSettingsRead(BaseModel):
     models: RuntimeModelsRead
     memory: RuntimeMemoryRead
     voice: RuntimeVoiceRead
+    display: RuntimeDisplayRead
     permissions: RuntimePermissionsRead
 
 
@@ -238,3 +244,7 @@ class RuntimeVoiceUpdate(BaseModel):
     provider: VoiceProviderKey = "openai"
     language: VoiceLanguageKey = "auto"
     model_size: VoiceModelSizeKey = "base"
+
+
+class RuntimeDisplayUpdate(BaseModel):
+    display_timezone: str = Field(min_length=1)

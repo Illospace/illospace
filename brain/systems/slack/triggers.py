@@ -241,6 +241,8 @@ def slack_run_message(payload: Mapping[str, Any], slack_trigger_payload: Mapping
         "Use read_slack_conversation if more Slack context is needed.",
         f"Default Slack reply target: {reply_mode}",
         "",
+        _durable_preference_guidance(),
+        "",
         f"Slack surface: {surface}",
         f"Team: {slack_trigger_payload.get('team_id')}",
         f"Channel: {slack_trigger_payload.get('channel_id')}",
@@ -275,7 +277,12 @@ def slack_channel_monitor_message(
         "and has already been acknowledged with a 👀 reaction — do not acknowledge it again.",
         "Do not use react_to_slack_message for another routine acknowledgement in this passive triage run.",
         "",
+        _durable_preference_guidance(),
+        "",
         "Classify this message and act accordingly:",
+        "- A human explicitly stating a durable presentation/behaviour preference requires a "
+        "visible reply. Follow the durable-preference contract above before the general triage "
+        "branches below.",
         "- Casual chatter, or discussion about an existing alert that does not itself ask for "
         "work: take NO visible action. Do not reply. A message is NOT alert commentary merely "
         "because it arrived near an alert — if a human is asking for something, it belongs in "
@@ -377,6 +384,26 @@ def slack_channel_monitor_message(
         lines.append(f"Permalink: {slack_trigger_payload.get('permalink')}")
     lines.extend(["", f"Message text: {text}"])
     return "\n".join(lines)
+
+
+def _durable_preference_guidance() -> str:
+    return "\n".join(
+        [
+            "Durable preference contract:",
+            "- Never answer a stated durable presentation/behaviour preference with a bare "
+            "promise such as 'Yes, I will.' A durable promise requires a successful concrete "
+            "settings write.",
+            "- The only known writable presentation mapping is a requested time zone: call "
+            "manage_runtime_preferences with action='set', setting='display_timezone', and the "
+            "requested IANA zone. Map ET/Eastern to America/New_York.",
+            "- Only after manage_runtime_preferences returns status='saved', reply with post_slack_reply "
+            "and include its confirmation verbatim. That confirmation names the concrete setting "
+            "and vault_config storage key that changed.",
+            "- If the request has no known writable setting, or the write is denied/fails, say it "
+            "was not saved. For no write target, reply: 'I can do that for this message, but I "
+            "have no way to make it stick — file it?' Never imply persistence.",
+        ]
+    )
 
 
 def _clean(value: Any) -> str:

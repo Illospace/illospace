@@ -18,12 +18,15 @@ from .auth import (
     start_openai_oauth,
 )
 from .memory import async_check_runtime_memory, async_update_runtime_memory
+from .display import async_update_runtime_display
 from .models import async_update_runtime_models
 from .schemas import (
     OpenAIKeyConnectRequest,
     OpenAIOAuthExchangeRequest,
     OpenAIOAuthStartResponse,
     RuntimeConnectionRead,
+    RuntimeDisplayRead,
+    RuntimeDisplayUpdate,
     RuntimeMemoryCheckRead,
     RuntimeMemoryRead,
     RuntimeMemoryUpdate,
@@ -208,6 +211,16 @@ async def save_runtime_voice(
 ) -> RuntimeVoiceRead:
     _require_settings_admin(user)
     return await async_update_runtime_voice(db, user, payload)
+
+
+@router.patch("/display", response_model=RuntimeDisplayRead)
+async def save_runtime_display(
+    payload: RuntimeDisplayUpdate,
+    user: User = Depends(_runtime_user),
+    db: AsyncSession = Depends(get_db),
+) -> RuntimeDisplayRead:
+    _require_settings_admin(user)
+    return await async_update_runtime_display(db, user, payload)
 
 
 @router.get("/update", response_model=RuntimeUpdateRead)

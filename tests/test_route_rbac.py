@@ -196,6 +196,7 @@ async def test_legacy_system_setup_routes_are_removed(client, url):
     [
         ("POST", "/api/runtime-settings/connection/gemini/api-key", {"api_key": "gemini-key"}),
         ("PATCH", "/api/runtime-settings/memory", {"embedder": "local_cpu", "reranker": "weighted"}),
+        ("PATCH", "/api/runtime-settings/display", {"display_timezone": "America/New_York"}),
         ("POST", "/api/runtime-settings/memory/check", None),
     ],
 )
