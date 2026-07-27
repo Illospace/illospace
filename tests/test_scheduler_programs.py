@@ -7,6 +7,8 @@ from hashlib import sha256
 import json
 from types import SimpleNamespace
 
+from brain.app.scheduler import programs as scheduler_programs
+from brain.app.scheduler.catalog import SCHEDULER_CATALOG
 from brain.app.scheduler.programs import (
     SINGLE_COMMAND_PROGRAM_REGISTRY,
     SingleCommandProgram,
@@ -30,54 +32,14 @@ _PINNED_PROJECTION_HASHES = {
         "5c2f2eede89b1fd4cc5cd067116eb62a02444e0152106325ee133fad9f2bee3b"
     ),
 }
+_CATALOG_BY_JOB_KEY = {
+    str(definition["job_key"]): definition for definition in SCHEDULER_CATALOG
+}
 
 
 def _job(program_name: str) -> SimpleNamespace:
-    definitions = {
-        "nightly_sleep": {
-            "job_key": "nightly_sleep",
-            "family": "nightly_sleep",
-            "program_key": "nightly_sleep",
-            "handler_ref": "brain.app.scheduler.programs:nightly_sleep",
-            "default_payload": {
-                "name": "Nightly Sleep",
-                "scheduler_split_steps": True,
-            },
-        },
-        "curiosity_cron": {
-            "job_key": "curiosity_cron",
-            "family": "curiosity_cron",
-            "program_key": "curiosity",
-            "handler_ref": "brain.app.scheduler.programs:curiosity",
-            "default_payload": {"name": "Curiosity Engine"},
-        },
-        "uwear_aws_health_scan": {
-            "job_key": "uwear_aws_health_scan",
-            "family": "uwear_aws_health_scan",
-            "program_key": "uwear_aws_health_scan",
-            "handler_ref": "brain.app.scheduler.programs:uwear_aws_health_scan",
-            "default_payload": {"name": "Uwear AWS Health Scan"},
-        },
-        "uwear_staging_promotion_pr": {
-            "job_key": "uwear_staging_promotion_pr",
-            "family": "uwear_staging_promotion_pr",
-            "program_key": "uwear_staging_promotion_pr",
-            "handler_ref": "brain.app.scheduler.programs:uwear_staging_promotion_pr",
-            "default_payload": {"name": "Uwear Staging Promotion PR"},
-        },
-        "illo_external_heartbeat": {
-            "job_key": "illo_external_heartbeat",
-            "family": "illo_external_heartbeat",
-            "program_key": "illo_external_heartbeat",
-            "handler_ref": "brain.app.scheduler.programs:illo_external_heartbeat",
-            "default_payload": {"name": "Illo External Heartbeat"},
-        },
-    }
-    return SimpleNamespace(
-        **definitions[program_name],
-        handler_kind="scheduler_builtin",
-        timezone="UTC",
-    )
+    definition = _CATALOG_BY_JOB_KEY[program_name]
+    return SimpleNamespace(**{**definition, "timezone": definition.get("timezone", "UTC")})
 
 
 def _projection_bytes(program_name: str) -> bytes:
@@ -102,6 +64,32 @@ def test_existing_scheduler_program_plan_and_specs_match_pinned_projections():
     }
 
     assert actual == _PINNED_PROJECTION_HASHES
+
+
+def test_pinned_program_set_equals_scheduler_catalog():
+    assert set(_PINNED_PROJECTION_HASHES) == set(_CATALOG_BY_JOB_KEY)
+
+
+def test_catalog_programs_do_not_reach_legacy_substring_fallback(monkeypatch):
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("catalog program reached legacy substring fallback")
+
+    monkeypatch.setattr(
+        scheduler_programs,
+        "_build_legacy_scheduler_step_plan",
+        fail_if_called,
+    )
+    monkeypatch.setattr(
+        scheduler_programs,
+        "_get_legacy_step_specs",
+        fail_if_called,
+    )
+
+    run = SimpleNamespace(scheduled_for=_SCHEDULED_FOR)
+    for program_name in _CATALOG_BY_JOB_KEY:
+        job = _job(program_name)
+        build_scheduler_step_plan(job)
+        get_step_specs(job, run)
 
 
 def test_registry_only_registration_drives_plan_and_specs(monkeypatch):
