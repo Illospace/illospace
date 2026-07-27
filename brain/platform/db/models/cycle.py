@@ -49,6 +49,13 @@ class Cycle(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("TRUE"), default=True
     )
+    max_concurrency: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1"), default=1
+    )
+    timeout_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    retry_policy: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
     model_override: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     thinking_override: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     execution_mode: Mapped[str] = mapped_column(
