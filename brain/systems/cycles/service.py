@@ -6,7 +6,7 @@ import asyncio
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from brain.platform.providers.model_policy import EFFORT_TIER_SET, normalize_model_name
 from brain.systems.cortex.events import publish
@@ -446,6 +446,18 @@ async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
         cycles = (await uow.session.scalars(stmt)).all()
         for cycle in cycles:
             scheduled_for = cycle.next_run_at or now
+            active_run_count = int(
+                await uow.session.scalar(
+                    select(func.count())
+                    .select_from(CycleRun)
+                    .where(
+                        CycleRun.cycle_id == cycle.id,
+                        CycleRun.status.not_in(TERMINAL_RUN_STATUSES),
+                    )
+                )
+                or 0
+            )
+            max_concurrency = max(int(cycle.max_concurrency or 1), 1)
             run = CycleRun(
                 cycle_id=cycle.id,
                 scheduled_for=scheduled_for,
@@ -462,6 +474,16 @@ async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
             uow.session.add(run)
             await uow.session.flush()
             await _async_prepare_cycle_run_memory_snapshot(uow.session, cycle, run)
+            if active_run_count >= max_concurrency:
+                await _finalize_cycle_run(
+                    run,
+                    cycle,
+                    status="skipped",
+                    skip_reason="previous_run_active",
+                    session=uow.session,
+                )
+            else:
+                claimed_run_ids.append(run.id)
             next_run_at = compute_next_run_at(
                 cycle.schedule_expr,
                 cycle.timezone,
@@ -470,7 +492,6 @@ async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
             cycle.next_run_at = next_run_at
             if is_one_time_schedule_expr(cycle.schedule_expr) and next_run_at is None:
                 cycle.enabled = False
-            claimed_run_ids.append(run.id)
 
     for run_id in claimed_run_ids:
         await async_execute_cycle_run(run_id)
