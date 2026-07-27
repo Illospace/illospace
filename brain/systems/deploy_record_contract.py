@@ -52,3 +52,14 @@ def without_retired_deploy_fields(
         for key, value in dict(data or {}).items()
         if key not in RETIRED_DEPLOY_FIELDS
     }
+
+
+def record_data_for_serialization(
+    object_key: str | None,
+    data: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Apply deploy-field ownership at every external record boundary."""
+    normalized = dict(data or {})
+    if object_key in deploy_ticket_object_keys():
+        return without_retired_deploy_fields(normalized)
+    return normalized

@@ -624,6 +624,59 @@ def _select_page(rows, stmt):
     return list(rows)[offset : offset + limit]
 
 
+async def test_workspace_record_reads_use_shared_deploy_serialization_boundary():
+    from brain.systems.runs.tool_catalog.handlers import workspace_data
+
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    record = SimpleNamespace(
+        id=2474,
+        domain_id=38,
+        created_at=now,
+        updated_at=now,
+        title="Legacy deploy ticket",
+        data={
+            "fix_pr": "uwear-ai/uwear-backend#1264",
+            "fix_merge_sha": "a" * 40,
+            "verified": True,
+            "verified_at": now.isoformat(),
+            "deploy_state": "staging",
+            "deployed_at": now.isoformat(),
+            "fix_merged_at": now.isoformat(),
+            "promotion_recommended_at": now.isoformat(),
+        },
+        version=3,
+    )
+    domain = SimpleNamespace(id=38, name="Deploy tracker")
+    object_type = SimpleNamespace(key="github_ticket", name="GitHub Ticket")
+
+    class DomainRows(_FakeSession):
+        def execute(self, stmt):
+            return _RowsResult([(record, domain, object_type)])
+
+    payload = {"warnings": [], "sources": {}}
+    await workspace_data._query_domain_records(
+        DomainRows(),
+        payload,
+        start=None,
+        end=None,
+        org_id="org-1",
+        person_ids=[],
+        domain_id=None,
+        object_key=None,
+        search=None,
+        include_archived=False,
+        limit=20,
+    )
+
+    data = payload["sources"]["domain_records"][0]["data"]
+    assert data == {
+        "fix_pr": "uwear-ai/uwear-backend#1264",
+        "fix_merge_sha": "a" * 40,
+        "verified": True,
+        "verified_at": now.isoformat(),
+    }
+
+
 async def test_read_cycles_pages_to_complete_history_and_watermark_is_one_bounded_query(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import workspace_data

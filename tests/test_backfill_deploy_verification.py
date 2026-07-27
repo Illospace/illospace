@@ -123,6 +123,26 @@ async def _legacy_record(session) -> DomainRecord:
     )
 
 
+async def test_cli_explicit_dry_run_matches_default_and_excludes_apply():
+    default = backfill._parse_args(["--org-id", ORG_ID])
+    explicit = backfill._parse_args(
+        ["--org-id", ORG_ID, "--dry-run"]
+    )
+    all_orgs = backfill._parse_args(["--dry-run"])
+
+    assert vars(default) == vars(explicit) == {
+        "org_id": ORG_ID,
+        "apply": False,
+    }
+    assert vars(all_orgs) == {"org_id": None, "apply": False}
+    with pytest.raises(SystemExit):
+        backfill._parse_args(
+            ["--org-id", ORG_ID, "--dry-run", "--apply"]
+        )
+    with pytest.raises(SystemExit):
+        backfill._parse_args(["--apply"])
+
+
 async def test_backfill_dry_run_does_not_upgrade_schema_or_record(session):
     record = await _legacy_record(session)
     before = deepcopy(record.data)
@@ -138,6 +158,71 @@ async def test_backfill_dry_run_does_not_upgrade_schema_or_record(session):
     assert report["applied"] is False
     assert report["would_update"] == 1
     assert report["fields_would_retire"] == 4
+    assert record.data == before
+    assert record.version == version
+    assert "verified" not in {field.key for field in fields}
+    assert all(field.archived_at is None for field in fields)
+
+
+@pytest.mark.parametrize(
+    ("data_patch", "expected_code"),
+    [
+        (
+            {"deploy_state": "unexpected"},
+            "unknown_deploy_state",
+        ),
+        (
+            {"verified": "false"},
+            "malformed_verified_overlay",
+        ),
+        (
+            {"verified": False},
+            "legacy_canonical_conflict",
+        ),
+        (
+            {"verified_at": None},
+            "verified_without_timestamp",
+        ),
+    ],
+)
+async def test_backfill_reports_anomalies_and_aborts_before_any_write(
+    session,
+    data_patch,
+    expected_code,
+):
+    record = await _legacy_record(session)
+    record.data = {**record.data, **data_patch}
+    before = deepcopy(record.data)
+    version = record.version
+
+    dry_run = await backfill.backfill_deploy_verification(
+        session,
+        org_id=ORG_ID,
+    )
+
+    assert dry_run["applied"] is False
+    assert dry_run["aborted"] is False
+    assert dry_run["error_count"] == 1
+    assert dry_run["errors"][0]["code"] == expected_code
+    assert dry_run["errors"][0]["record_id"] == record.id
+    assert dry_run["blocked_updates"] == 1
+    assert dry_run["records"][0]["errors"] == dry_run["errors"]
+
+    apply_report = await backfill.backfill_deploy_verification(
+        session,
+        org_id=ORG_ID,
+        apply=True,
+    )
+    await session.refresh(record)
+    fields = (await session.scalars(select(DomainFieldDefinition))).all()
+
+    assert apply_report["apply_requested"] is True
+    assert apply_report["applied"] is False
+    assert apply_report["aborted"] is True
+    assert apply_report["error_count"] == 1
+    assert apply_report["updated"] == 0
+    assert apply_report["fields_retired"] == 0
+    assert apply_report["schema"] is None
     assert record.data == before
     assert record.version == version
     assert "verified" not in {field.key for field in fields}

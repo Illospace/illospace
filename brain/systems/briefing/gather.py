@@ -679,6 +679,27 @@ async def _deploy_pieces(
             states = dict(result)
             unavailable = getattr(result, "unavailable_refs", {})
             if unavailable:
+                labels_by_ref = {
+                    ref: (
+                        _text(_data(record).get("fix_pr"))
+                        or f"{ref[0]}@{ref[1][:12]}"
+                    )
+                    for record in records
+                    if (ref := _deploy_ref(record)) is not None
+                }
+                affected_labels = [
+                    labels_by_ref.get(
+                        ref,
+                        f"{ref[0]}@{ref[1][:12]}",
+                    )
+                    for ref in unavailable
+                ]
+                visible_labels = affected_labels[:4]
+                affected_summary = ", ".join(visible_labels)
+                if len(affected_labels) > len(visible_labels):
+                    affected_summary += (
+                        f", +{len(affected_labels) - len(visible_labels)} more"
+                    )
                 categories = Counter(
                     str(failure.error_category)
                     for observation in unavailable.values()
@@ -699,6 +720,8 @@ async def _deploy_pieces(
                     "deploy: ancestry unavailable for "
                     f"{len(unavailable)}/{total} fixes"
                 )
+                if affected_summary:
+                    note += f": {affected_summary}"
                 if category_summary:
                     note += f" ({category_summary})"
                 notes.append(note)

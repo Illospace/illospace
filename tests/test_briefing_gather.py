@@ -655,7 +655,8 @@ async def test_deploy_degradation_note_summarizes_per_ref_compare_failures():
     )
 
     assert (
-        "deploy: ancestry unavailable for 1/1 fixes "
+        "deploy: ancestry unavailable for 1/1 fixes: "
+        "uwear-ai/uwear-backend#1264 "
         "(github_http_503×2)"
     ) in result.source_notes
     deploy = next(
@@ -1063,6 +1064,67 @@ async def test_backend_github_read_flattens_pr_and_falls_back_to_exact_issue(mon
     assert await handler.github_read_ref_for_backend(
         repo_slug="uwear/x", number=3, org_id=_ORG
     ) is None
+
+
+async def test_backend_deploy_batch_isolates_token_resolution_by_repository(
+    monkeypatch,
+):
+    from brain.systems import deploy_state as deploy_state_module
+    from brain.systems.runs.tool_catalog.handlers import github as handler
+
+    broken_ref = ("uwear/broken", "b" * 40)
+    healthy_ref = ("uwear/healthy", "a" * 40)
+    resolved_repos = []
+
+    async def fake_candidates(*, repo_slug, **kwargs):
+        resolved_repos.append(repo_slug)
+        assert kwargs["org_id"] == _ORG
+        if repo_slug == broken_ref[0]:
+            raise RuntimeError("repository credential lookup failed")
+        return [
+            {
+                "key_name": "healthy",
+                "token": "healthy-token",
+                "source": "test",
+            }
+        ]
+
+    compared = []
+
+    async def fake_ancestry(repo, sha, branch, *, token=None):
+        compared.append((repo, sha, branch, token))
+        return AncestryObservation(
+            branch=branch,
+            is_ancestor=branch == "main",
+        )
+
+    monkeypatch.setattr(handler, "_github_token_candidates", fake_candidates)
+    monkeypatch.setattr(
+        deploy_state_module,
+        "observe_ancestry",
+        fake_ancestry,
+    )
+
+    batch = await handler.github_deploy_states_for_backend(
+        {
+            1: broken_ref,
+            2: healthy_ref,
+        },
+        org_id=_ORG,
+    )
+
+    assert resolved_repos == [broken_ref[0], healthy_ref[0]]
+    assert batch[1] is None
+    assert batch[2] is DeployState.DEPLOYED
+    assert {item[0] for item in compared} == {healthy_ref[0]}
+    assert {item[3] for item in compared} == {"healthy-token"}
+    failure = batch.observations_by_key[1].failures[0]
+    assert failure.branch == "credentials"
+    assert (
+        failure.error_category
+        == "credential_resolution_runtime_error"
+    )
+    assert list(batch.unavailable_refs) == [broken_ref]
 
 
 def _github_event(*, org_id=_ORG, summary="GitHub issue #81 opened: SEO landing pages"):

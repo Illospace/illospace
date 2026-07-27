@@ -38,8 +38,13 @@ from brain.systems.cortex.project_context.github_promotion import (
 )
 from brain.systems.deploy_state import (
     DeployStateBatch,
+    DeployStateObservation,
     derive_deploy_states,
     observe_deploy_state,
+)
+from brain.systems.deploy_state_github import (
+    AncestryObservation,
+    ancestry_failure,
 )
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
@@ -1598,23 +1603,77 @@ async def github_deploy_states_for_backend(
     user_id: str | None = None,
 ) -> DeployStateBatch[Hashable]:
     """Batch ancestry reads using the backend caller's ordered identities."""
+    normalized_refs = {
+        key: (
+            str(repo or "").strip(),
+            str(sha or "").strip(),
+        )
+        for key, (repo, sha) in refs.items()
+    }
     tokens_by_repo: dict[str, tuple[str | None, ...]] = {}
-    for repo_slug in dict.fromkeys(repo for repo, _sha in refs.values()):
-        candidates = await _github_token_candidates(
-            repo_slug=repo_slug,
-            token_secret_key=None,
-            org_id=org_id,
-            user_id=user_id,
-        )
-        ordered = _ordered_read_candidates(
-            candidates,
-            repo_slug=repo_slug,
-            state=_github_read_state(),
-        )
-        tokens_by_repo[repo_slug] = tuple(
-            candidate.get("token") for candidate in ordered
-        ) or (None,)
-    return await derive_deploy_states(refs, tokens=tokens_by_repo)
+    resolution_failures: dict[str, DeployStateObservation] = {}
+    for repo_slug in dict.fromkeys(
+        repo for repo, _sha in normalized_refs.values()
+    ):
+        try:
+            candidates = await _github_token_candidates(
+                repo_slug=repo_slug,
+                token_secret_key=None,
+                org_id=org_id,
+                user_id=user_id,
+            )
+            ordered = _ordered_read_candidates(
+                candidates,
+                repo_slug=repo_slug,
+                state=_github_read_state(),
+            )
+            tokens_by_repo[repo_slug] = tuple(
+                candidate.get("token") for candidate in ordered
+            ) or (None,)
+        except Exception as exc:  # noqa: BLE001
+            failure = ancestry_failure("credentials", exc)
+            resolution_failures[repo_slug] = DeployStateObservation(
+                state=None,
+                in_staging=None,
+                in_main=None,
+                comparisons=(
+                    AncestryObservation(
+                        branch=failure.branch,
+                        is_ancestor=None,
+                        error_category=(
+                            "credential_resolution_"
+                            f"{failure.error_category}"
+                        ),
+                        status_code=failure.status_code,
+                    ),
+                ),
+            )
+
+    healthy_refs = {
+        key: ref
+        for key, ref in normalized_refs.items()
+        if ref[0] not in resolution_failures
+    }
+    healthy = await derive_deploy_states(
+        healthy_refs,
+        tokens=tokens_by_repo,
+    )
+    observations_by_ref = dict(healthy.observations_by_ref)
+    for ref in dict.fromkeys(normalized_refs.values()):
+        if ref[0] in resolution_failures:
+            observations_by_ref[ref] = resolution_failures[ref[0]]
+    observations_by_key = {
+        key: observations_by_ref[ref]
+        for key, ref in normalized_refs.items()
+    }
+    return DeployStateBatch(
+        {
+            key: observation.state
+            for key, observation in observations_by_key.items()
+        },
+        observations_by_key=observations_by_key,
+        observations_by_ref=observations_by_ref,
+    )
 
 
 __all__ = [
