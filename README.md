@@ -162,6 +162,10 @@ restore, upgrades, logs, and status.
 See [docs/configuration.md](docs/configuration.md) for the production
 configuration contract.
 
+Illo runtime liveness is monitored outside the host by a scheduled GitHub
+Actions deadman. Its independent credentials, public-data boundary, and
+operator test procedure live in [docs/deployment.md](docs/deployment.md#external-illo-deadman).
+
 ## Voice dictation
 
 Composer voice input supports two transcription providers, selectable in

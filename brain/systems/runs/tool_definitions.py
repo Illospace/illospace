@@ -53,6 +53,7 @@ from brain.systems.runs.tool_catalog.definitions.run_support import (
 )
 from brain.systems.runs.tool_catalog.definitions.runtime_management import (
     DEPLOYMENT_TOOLS,
+    RUNTIME_PREFERENCE_TOOLS,
     WORKSPACE_TOOL_TOOLS,
 )
 from brain.systems.runs.tool_catalog.definitions.workspace_surfaces import (
@@ -80,6 +81,7 @@ WORKER_TOOLS = (
     + SESSION_TOOLS
     + [
         CORTEX_VISUAL_REPLY_TOOL,
+        MY_ACTIVITY_TOOL,
         BROWSER_TOOL,
     ]
 )
@@ -102,6 +104,7 @@ COORDINATOR_TOOLS = (
     + SESSION_TOOLS
     + LIFECYCLE_TOOLS
     + DEPLOYMENT_TOOLS
+    + RUNTIME_PREFERENCE_TOOLS
     + WORKSPACE_TOOL_TOOLS
     + WORKER_SPAWN_TOOLS
     + [

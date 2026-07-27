@@ -73,8 +73,6 @@ class AgentRunRequest:
     def normalized_recipe(self) -> RunRecipe:
         if self.recipe is not None:
             return _coerce_enum(RunRecipe, self.recipe, RunRecipe.FAST)
-        if self.normalized_profile == RunProfile.DEEP:
-            return RunRecipe.DEEP
         return RunRecipe.FAST
 
 

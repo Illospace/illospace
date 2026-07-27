@@ -126,7 +126,19 @@ services:
   worker:
     <<: *backend-service
     command: ["python", "-m", "brain.systems.cortex.worker"]
-    stop_grace_period: 24h
+    # Must stay inside the Docker daemon's own shutdown budget (dockerd
+    # --shutdown-timeout, default 15s). The worker used to ask for 24h, which
+    # meant it was still draining when containerd was torn down at host
+    # shutdown: its task was lost, it was recorded Exited(255) instead of
+    # stopped, and the restart policy below never brought it back -- while every
+    # other service did come back and the stack read as healthy (#527).
+    # This does not shorten the deploy-time drain. The graceful handoff in
+    # deploy/scripts/compose-runtime-lib.sh signals with `docker kill -s TERM`,
+    # which ignores stop_grace_period entirely, and bounds the drain itself via
+    # COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS. The grace period only ever
+    # applied to daemon shutdown and to a naive `compose down` / `compose up
+    # --force-recreate`, where 24h was a hang, not a safeguard.
+    stop_grace_period: ${ILLO_WORKER_STOP_GRACE_PERIOD:-10s}
     environment:
       <<: *illo-env
       CORTEX_MAX_CONCURRENT: ${CORTEX_MAX_CONCURRENT:-10}

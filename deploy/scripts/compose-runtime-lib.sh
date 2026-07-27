@@ -90,6 +90,79 @@ container_running() {
   [ "$(docker inspect --format '{{.State.Running}}' "$id" 2>/dev/null || echo false)" = "true" ]
 }
 
+container_restart_policy() {
+  local id="$1"
+  [ -n "$id" ] || return 1
+  docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$id" 2>/dev/null
+}
+
+# The policy the worker is declared with in docker-compose.yml. Everything below
+# treats this as the value a worker container must be left holding, so that a
+# host reboot brings the worker back with the rest of the stack.
+worker_declared_restart_policy() {
+  printf '%s\n' "${COMPOSE_RUNTIME_WORKER_RESTART_POLICY:-unless-stopped}"
+}
+
+WORKER_RESTART_POLICY_SUSPENDED_ID=""
+
+# A worker that is about to be drained must not be resurrected by the daemon the
+# moment it exits: that races the handoff worker and doubles concurrency (#486).
+# Suspending the policy is therefore deliberate — but the suspension is a
+# persistent mutation of the container, so an interrupted deploy (Ctrl-C, SSH
+# drop, dockerd snap refresh, power cut) used to strand the worker at
+# restart=no. The Compose file still read `unless-stopped`, nothing reconciled
+# the drift, and the next reboot silently dropped the worker (#527). The trap
+# makes the window crash-safe.
+suspend_worker_restart_policy() {
+  local id="$1"
+  local existing
+  [ -n "$id" ] || return 0
+  WORKER_RESTART_POLICY_SUSPENDED_ID="$id"
+  # Chain onto whatever EXIT trap the sourcing script already installed instead
+  # of clobbering it -- doctor.sh installs its own cleanup.
+  existing="$(trap -p EXIT | sed -n "s/^trap -- '\(.*\)' EXIT\$/\1/p")"
+  case "$existing" in
+    ""|*restore_worker_restart_policy*)
+      trap 'restore_worker_restart_policy' EXIT
+      ;;
+    *)
+      trap "restore_worker_restart_policy; $existing" EXIT
+      ;;
+  esac
+  trap 'restore_worker_restart_policy' INT TERM HUP
+  docker update --restart=no "$id" >/dev/null 2>&1 || true
+}
+
+restore_worker_restart_policy() {
+  local id="${WORKER_RESTART_POLICY_SUSPENDED_ID:-}"
+  [ -n "$id" ] || return 0
+  WORKER_RESTART_POLICY_SUSPENDED_ID=""
+  docker update --restart="$(worker_declared_restart_policy)" "$id" >/dev/null 2>&1 || true
+}
+
+# Called once the suspended container has been replaced by a fresh one. The
+# replacement already carries the declared policy, and restoring the policy on
+# the outgoing container would arm a second worker to come back on the next
+# reboot -- so drop the suspension without restoring it.
+abandon_worker_restart_policy_suspension() {
+  WORKER_RESTART_POLICY_SUSPENDED_ID=""
+}
+
+# Self-heal a worker stranded by an interruption in an earlier deploy. Drift is
+# invisible to `docker ps` and to the Compose file, so it is only ever found by
+# asking the container directly.
+reconcile_worker_restart_policy() {
+  local id declared policy
+  id="$(worker_container_id)"
+  [ -n "$id" ] || return 0
+  declared="$(worker_declared_restart_policy)"
+  policy="$(container_restart_policy "$id" || true)"
+  [ -n "$policy" ] || return 0
+  [ "$policy" != "$declared" ] || return 0
+  echo "Worker: restart policy had drifted to '${policy}' (declared '${declared}'); repairing it so the worker survives a host reboot." >&2
+  docker update --restart="$declared" "$id" >/dev/null 2>&1 || true
+}
+
 assert_single_running_worker() {
   local count=0 id running_ids running_ids_csv
   if ! running_ids="$(compose ps --status running -q worker 2>/dev/null)"; then
@@ -111,6 +184,57 @@ assert_single_running_worker() {
     echo "Recovery: keep the intended regular worker, stop and remove every extra worker container, then rerun the failed command." >&2
   fi
   return 1
+}
+
+# Services that must be running whenever the stack is up at all. The worker is
+# the dangerous one: it owns AgentRun execution AND the cycle-scheduler thread,
+# so when it alone is missing every outward signal still reads healthy --
+# `docker ps` is green, /api/health returns 200, the dashboard loads -- while
+# Illo cannot do any work. That state has to be asserted explicitly; no probe
+# infers it.
+STACK_REQUIRED_SERVICES="${STACK_REQUIRED_SERVICES:-postgres api web worker scheduler}"
+
+# Distinct exit codes so a monitor can tell an invisible failure from an obvious
+# one: 3 = inert (stack up, required service missing), 4 = fully down.
+STACK_INERT_EXIT_CODE=3
+STACK_DOWN_EXIT_CODE=4
+
+assert_stack_not_inert() {
+  local required="${*:-$STACK_REQUIRED_SERVICES}"
+  local running service missing="" running_count=0 line
+
+  if ! running="$(compose ps --services --status running 2>/dev/null)"; then
+    echo "Stack presence check failed: could not list running Compose services." >&2
+    return 1
+  fi
+
+  while IFS= read -r line; do
+    [ -z "$line" ] || running_count=$((running_count + 1))
+  done <<< "$running"
+
+  if [ "$running_count" -eq 0 ]; then
+    echo "Stack is fully down: no Compose services are running." >&2
+    echo "Recovery: start it with: docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" up -d" >&2
+    return "$STACK_DOWN_EXIT_CODE"
+  fi
+
+  for service in $required; do
+    printf '%s\n' "$running" | grep -qx "$service" && continue
+    missing="${missing:+$missing,}$service"
+  done
+
+  if [ -z "$missing" ]; then
+    return 0
+  fi
+
+  echo "Stack is INERT: ${running_count} service(s) running but required service(s) absent: ${missing}." >&2
+  case ",$missing," in
+    *,worker,*)
+      echo "The worker owns AgentRun execution and the cycle-scheduler thread, so Illo is structurally incapable of doing any work while it is absent -- even though HTTP health checks still pass." >&2
+      ;;
+  esac
+  echo "Recovery: docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" up -d --no-deps ${missing//,/ }" >&2
+  return "$STACK_INERT_EXIT_CODE"
 }
 
 start_worker_handoff() {
@@ -209,10 +333,10 @@ update_worker_after_drain() {
   handoff_id="$(start_worker_handoff)"
   echo "Worker: started handoff worker ${handoff_id:-unknown} for new AgentRuns."
   echo "Worker: ${active_runs} interactive AgentRun(s); signaling existing worker to drain. Affected run ids: $affected_ids."
-  docker update --restart=no "$worker_id" >/dev/null 2>&1 || true
+  suspend_worker_restart_policy "$worker_id"
   docker kill -s TERM "$worker_id" >/dev/null 2>&1 || true
   if ! wait_for_worker_exit "$worker_id"; then
-    docker update --restart=unless-stopped "$worker_id" >/dev/null 2>&1 || true
+    restore_worker_restart_policy
     if [ "${ILLO_COMPOSE_FORCE_WORKER_SWAP:-0}" != "1" ]; then
       remove_worker_handoff_after_drain_timeout "$handoff_id" "$worker_id" || true
       return 1
@@ -221,10 +345,16 @@ update_worker_after_drain() {
     run_details="$(worker_swap_snapshot_details "$snapshot")"
     affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
     echo "FORCED WORKER SWAP: killing old worker; affected run ids: ${affected_ids:-unknown} (id/status: $run_details)." >&2
-    docker update --restart=no "$worker_id" >/dev/null 2>&1 || true
+    suspend_worker_restart_policy "$worker_id"
     docker kill "$worker_id" >/dev/null 2>&1 || true
   fi
-  compose up -d --force-recreate --no-deps worker
+  # Only drop the suspension once a replacement actually exists. If the recreate
+  # failed there is no new worker, so the outgoing container is still the only
+  # one -- leaving the suspension armed lets the trap hand it back its restart
+  # policy instead of stranding it at restart=no.
+  if compose up -d --force-recreate --no-deps worker; then
+    abandon_worker_restart_policy_suspension
+  fi
   if [ -n "$handoff_id" ]; then
     snapshot="$(worker_swap_snapshot)"
     affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
@@ -278,17 +408,20 @@ replace_idle_worker() {
   fi
 
   echo "Worker: no interactive AgentRuns; signaling a graceful replacement."
-  docker update --restart=no "$worker_id" >/dev/null 2>&1 || true
+  suspend_worker_restart_policy "$worker_id"
   docker kill -s TERM "$worker_id" >/dev/null 2>&1 || true
   if ! wait_for_worker_exit "$worker_id"; then
-    docker update --restart=unless-stopped "$worker_id" >/dev/null 2>&1 || true
+    restore_worker_restart_policy
     return 1
   fi
-  compose up -d --force-recreate --no-deps worker
+  if compose up -d --force-recreate --no-deps worker; then
+    abandon_worker_restart_policy_suspension
+  fi
 }
 
 restart_runtime_worker_service() {
   local action snapshot status=0
+  reconcile_worker_restart_policy
   snapshot="$(worker_swap_snapshot)"
   action="$(worker_swap_snapshot_decision "$snapshot")"
   case "$action" in

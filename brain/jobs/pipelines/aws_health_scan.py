@@ -15,12 +15,31 @@ from brain.platform.db.models.org import User
 from brain.platform.db.models.scheduler import SchedulerJob, SchedulerRun
 from brain.platform.db.models.skill_bundle import SkillInstallation
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.runtime_settings import display as runtime_display
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
 SKILL_NAME = "uwear-aws-health-scan"
 RUN_TIMEOUT_SECONDS = 840
 POLL_INTERVAL_SECONDS = 2.0
+
+
+def _timestamp_rendering_contract(
+    display_timezone: str,
+    *,
+    scan_started_at: datetime,
+) -> str:
+    rendered_scan_start = runtime_display.format_display_timestamp(
+        scan_started_at,
+        display_timezone,
+    )
+    return (
+        f"\ndisplay-timezone: {display_timezone}\n"
+        f"scan-started-at: {rendered_scan_start}\n"
+        "timestamp-rendering: Render EVERY timestamp in the final alert in "
+        f"{display_timezone} alongside its source UTC time, never as UTC-only. "
+        "The final Slack posting gate rejects UTC-only timestamp lines."
+    )
 
 
 async def _skill_actor(session, skill_installation_id: int | None) -> User:
@@ -61,6 +80,11 @@ async def spawn_health_scan_run(*, now: datetime | None = None) -> int:
             raise LookupError(f"Skill '{SKILL_NAME}' not found")
 
         actor = await _skill_actor(uow.session, skill.skill_installation_id)
+        display_config = await runtime_display.async_get_runtime_display_config(uow.session)
+        display_instruction = _timestamp_rendering_contract(
+            display_config.display_timezone,
+            scan_started_at=clock,
+        )
         last_success_started_at = await uow.session.scalar(
             select(SchedulerRun.started_at)
             .join(SchedulerJob, SchedulerRun.job_id == SchedulerJob.id)
@@ -80,7 +104,13 @@ async def spawn_health_scan_run(*, now: datetime | None = None) -> int:
                 last_success_started_at = last_success_started_at.astimezone(timezone.utc)
             if last_success_started_at < clock - timedelta(minutes=70):
                 coverage_since = max(last_success_started_at, clock - timedelta(hours=6))
-                coverage_line = f"\ncoverage-since: {coverage_since.isoformat()}"
+                coverage_line = (
+                    "\ncoverage-since: "
+                    + runtime_display.format_display_timestamp(
+                        coverage_since,
+                        display_config.display_timezone,
+                    )
+                )
 
         result = await admit_work(
             uow.session,
@@ -99,7 +129,8 @@ async def spawn_health_scan_run(*, now: datetime | None = None) -> int:
                     "message": (
                         f"/{SKILL_NAME}\n\n"
                         "Execute this skill exactly once. Load and follow its full procedure, "
-                        f"then return its required health verdict and evidence.{coverage_line}"
+                        "then return its required health verdict and evidence."
+                        f"{display_instruction}{coverage_line}"
                     ),
                     "workspace_ref": {"source": "scheduler", "mode": "headless"},
                     "metadata": {
@@ -114,6 +145,8 @@ async def spawn_health_scan_run(*, now: datetime | None = None) -> int:
                         "thinking_tier": skill.thinking_tier,
                         "skill_name": SKILL_NAME,
                         "slash_skill_names": [SKILL_NAME],
+                        "display_timezone": display_config.display_timezone,
+                        "enforce_display_timezone_on_slack": True,
                     },
                 },
                 policy={

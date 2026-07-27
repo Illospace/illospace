@@ -58,6 +58,10 @@ export interface RuntimeSettings {
     reranker_options: RuntimeOption[];
   };
   voice: RuntimeVoiceSettings;
+  display: {
+    scope: 'installation';
+    display_timezone: string;
+  };
   permissions: {
     can_manage_settings: boolean;
   };

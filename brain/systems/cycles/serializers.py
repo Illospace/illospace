@@ -105,6 +105,7 @@ def serialize_cycle(cycle: Cycle) -> dict:
         "schedule_human": safe_humanize_schedule(cycle.schedule_expr, cycle.timezone),
         "timezone": cycle.timezone,
         "enabled": cycle.enabled,
+        "max_concurrency": max(int(getattr(cycle, "max_concurrency", 1) or 1), 1),
         "model_override": cycle.model_override,
         "thinking_override": cycle.thinking_override,
         "execution_mode": REUSABLE_THREAD_EXECUTION_MODE,

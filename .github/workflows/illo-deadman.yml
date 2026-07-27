@@ -1,0 +1,58 @@
+name: Illo External Deadman
+
+on:
+  # Five minutes is GitHub's cron floor, not a timing guarantee. Scheduled runs
+  # are often delayed, so the watcher uses a 12-minute stale threshold to keep
+  # the usual death-to-alert time near 15 minutes without alarming on one delay.
+  # GitHub also disables scheduled workflows after 60 days with no repository
+  # activity; ILLO_DEADMAN_HEALTHCHECK_URL exists to make that silent stop visible.
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      force_stale:
+        description: Exercise the stale-heartbeat alarm path
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: Log the resulting notice without posting or changing state
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: illo-external-deadman
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  watch:
+    name: Check Illo heartbeat
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out watcher
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Evaluate heartbeat and notify
+        # The Slack incoming webhook owns its own non-Illo name/icon. The watcher
+        # intentionally sends no username/icon override and never uses Illo's token.
+        # Slack alarm and recovery delivery is at-least-once: state is persisted
+        # after a successful post so failures cannot silence an incident.
+        # Reposts carry the same outage ID and are recognizable as duplicates.
+        run: python3 -m ops.external_deadman.watcher
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SLACK_DEADMAN_WEBHOOK_URL: ${{ secrets.SLACK_DEADMAN_WEBHOOK_URL }}
+          ILLO_DEADMAN_HEALTHCHECK_URL: ${{ secrets.ILLO_DEADMAN_HEALTHCHECK_URL }}
+          ILLO_DEADMAN_FORCE_STALE: ${{ github.event_name == 'workflow_dispatch' && inputs.force_stale || false }}
+          ILLO_DEADMAN_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}

@@ -2402,6 +2402,8 @@ deploy_usage() {
   echo -e "  ${GREEN}init${NC}       Create deploy/compose/.env and generate secrets"
   echo -e "  ${GREEN}up${NC}         Pull/build images, start the Compose stack, then run doctor"
   echo -e "  ${GREEN}doctor${NC}     Validate server config and running stack health"
+  echo -e "  ${GREEN}inert-check${NC} Fail if the stack is up but an always-on service is absent"
+  echo -e "  ${GREEN}boot-unit${NC}  Install the systemd unit that starts the stack on boot"
   echo -e "  ${GREEN}status${NC}     Show Compose service status"
   echo -e "  ${GREEN}logs${NC}       Show Compose logs (pass -f to follow, service names to filter)"
   echo -e "  ${GREEN}backup${NC}     Write a Postgres backup dump"
@@ -2481,6 +2483,12 @@ deploy_command() {
       ;;
     doctor)
       "$ROOT/deploy/scripts/doctor.sh" "$@"
+      ;;
+    inert-check)
+      "$ROOT/deploy/scripts/inert-stack-check.sh" "$@"
+      ;;
+    boot-unit)
+      "$ROOT/deploy/scripts/install-boot-unit.sh" "$@"
       ;;
     status|ps)
       deploy_require_env_file || return 1

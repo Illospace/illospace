@@ -26,6 +26,7 @@ from brain.systems.slack.provider_alert_posting import post_provider_alert
 from brain.systems.slack.thread_mute import read_thread_post_mute
 from brain.systems.slack.uploads import slack_image_upload_from_data_url
 
+
 def _execution_metadata() -> dict[str, Any]:
     metadata = getattr(_agent_context, "execution_metadata", None)
     return metadata if isinstance(metadata, dict) else {}
@@ -83,6 +84,71 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "n", "off"}:
             return False
     return bool(value)
+
+
+_PERSISTENCE_CLAIM_PATTERNS = (
+    re.compile(r"\b(?:saved|persisted|stored|remembered)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:i|we)\s*(?:'ll|will)\s+(?:always\s+)?"
+        r"(?:remember|display|show|render|use)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:from now on|going forward)\b", re.IGNORECASE),
+)
+_NEGATED_CLAIM_PREFIX = re.compile(
+    r"(?:\bnot|\bnever|\bno|\bnothing was|\bwasn't|\bfailed to|\bunable to|"
+    r"\bcannot|\bcan't|\bcouldn't|\bcould not)(?:\s+\w+){0,2}\s*$",
+    re.IGNORECASE,
+)
+
+
+def _makes_persistence_claim(body: str) -> bool:
+    """Recognize positive durable-setting claims while allowing honest failures."""
+
+    text = str(body or "")
+    for pattern in _PERSISTENCE_CLAIM_PATTERNS:
+        for match in pattern.finditer(text):
+            prefix = text[max(0, match.start() - 24) : match.start()]
+            if _NEGATED_CLAIM_PREFIX.search(prefix):
+                continue
+            return True
+    return False
+
+
+def _current_run_id() -> object:
+    metadata = _execution_metadata()
+    run = getattr(_agent_context, "run", None)
+    return (
+        metadata.get("run_id")
+        or getattr(_agent_context, "run_id", None)
+        or getattr(run, "run_id", None)
+    )
+
+
+async def _has_preference_write_evidence() -> bool:
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.systems.runtime_settings.preferences import (
+        async_has_runtime_preference_write_evidence,
+    )
+
+    org_id = (
+        getattr(_agent_context, "org_id", None)
+        or _execution_metadata().get("org_id")
+    )
+    async with UnitOfWork() as uow:
+        return await async_has_runtime_preference_write_evidence(
+            uow.session,
+            run_id=_current_run_id(),
+            org_id=org_id,
+        )
+
+
+def _enforced_display_timezone() -> str | None:
+    metadata = _execution_metadata()
+    if metadata.get("enforce_display_timezone_on_slack") is not True:
+        return None
+    timezone_name = str(metadata.get("display_timezone") or "").strip()
+    return timezone_name or None
 
 
 _SLACK_EMOJI_NAME_PATTERN = re.compile(r"^[a-z0-9_+\-]{1,80}$")
@@ -394,6 +460,59 @@ async def _handle_post_slack_reply(
     if not text.strip() and image_upload is None:
         return json.dumps({"error": "post_slack_reply requires body or image_data"})
 
+    if _makes_persistence_claim(text):
+        try:
+            write_verified = await _has_preference_write_evidence()
+        except Exception:
+            write_verified = False
+        if not write_verified:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "posted": False,
+                    "error": "persistence_claim_requires_write_receipt",
+                    "detail": (
+                        "A durable-preference confirmation requires a committed "
+                        "manage_runtime_preferences write in this AgentRun."
+                    ),
+                    "retryable": True,
+                }
+            )
+
+    display_timezone = _enforced_display_timezone()
+    if display_timezone:
+        from brain.systems.runtime_settings.display import utc_only_timestamp_lines
+
+        try:
+            invalid_timestamp_lines = utc_only_timestamp_lines(
+                text,
+                display_timezone,
+            )
+        except Exception as exc:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "posted": False,
+                    "error": "display_timezone_validator_unavailable",
+                    "detail": str(exc),
+                    "retryable": True,
+                }
+            )
+        if invalid_timestamp_lines:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "posted": False,
+                    "error": "display_timezone_validation_failed",
+                    "detail": (
+                        "Every UTC timestamp in this AWS health alert must be paired "
+                        f"with its {display_timezone} rendering."
+                    ),
+                    "invalid_lines": list(invalid_timestamp_lines),
+                    "retryable": True,
+                }
+            )
+
     # Coordinator-side generators should apply the same checked-in map while
     # composing summaries.  This posting-path gate is still the authority, so a
     # fresh run cannot ship a generated false-HIGH provider alert.
@@ -632,26 +751,50 @@ async def _handle_post_slack_reply(
     posted_chars = int(response.get("posted_chars", submitted_chars))
     answered_open_asks = 0
     execution_metadata = _execution_metadata()
-    open_ask_context = execution_metadata.get("open_ask")
-    if answers_open_ask and isinstance(open_ask_context, dict):
+    run_id = execution_metadata.get("run_id") or getattr(
+        _agent_context,
+        "run_id",
+        None,
+    )
+    try:
+        run_id = int(run_id) if run_id not in (None, "") else None
+    except (TypeError, ValueError):
+        run_id = None
+    org_id = str(
+        getattr(_agent_context, "org_id", None)
+        or execution_metadata.get("org_id")
+        or ""
+    ).strip()
+    obligation_thread_ts = target_thread_ts
+    if obligation_thread_ts is None and target_channel == trigger_channel_id:
+        obligation_thread_ts = str(
+            trigger.get("thread_ts") or trigger.get("message_ts") or ""
+        ).strip() or None
+    if target_visibility == "public" and obligation_thread_ts and org_id:
         from brain.systems.runs.slack_delivery import (
-            record_origin_run_answer_delivery,
+            DeliveredSlackReply,
+            delivered_message_ts,
+            persist_delivered_slack_answer,
         )
 
-        run_id = execution_metadata.get("run_id") or getattr(
-            _agent_context,
-            "run_id",
-            None,
+        counts = await persist_delivered_slack_answer(
+            DeliveredSlackReply(
+                org_id=org_id,
+                channel_id=target_channel,
+                thread_ts=obligation_thread_ts,
+                answering_run_id=run_id,
+                slack_message_ts=delivered_message_ts(response) or "",
+                answer_text=text,
+                is_answer=answers_open_ask,
+                artifact_kind="slack_image" if image_upload is not None else None,
+                artifact_ref=(
+                    str(image_filename or image_title or "").strip() or None
+                    if image_upload is not None
+                    else None
+                ),
+            )
         )
-        try:
-            run_id = int(run_id) if run_id not in (None, "") else None
-        except (TypeError, ValueError):
-            run_id = None
-        answered_open_asks = await record_origin_run_answer_delivery(
-            origin_run_id=run_id,
-            answer_text=text,
-            slack_response=response,
-        )
+        answered_open_asks = counts.answered_open_asks
     return json.dumps(
         {
             "ok": True,

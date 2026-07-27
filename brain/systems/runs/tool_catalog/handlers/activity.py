@@ -7,13 +7,14 @@ import time
 
 from brain.systems.runs.execution_artifacts import load_execution_artifacts
 from brain.systems.runs.execution_context import _agent_context
+from brain.systems.runs.runtime_activity import load_run_activity
 
 logger = logging.getLogger("agent")
 
 
 async def _handle_my_activity() -> dict:
     """Return the current agent's own activity trace for self-assessment."""
-    run = getattr(_agent_context, "run", None)
+    run_id = getattr(_agent_context, "run_id", None)
     start_time = getattr(_agent_context, "start_time", None)
     reply_contents = getattr(_agent_context, "reply_contents", [])
     tool_calls_log = getattr(_agent_context, "tool_calls_log", [])
@@ -39,21 +40,26 @@ async def _handle_my_activity() -> dict:
         result["reply_summaries"] = replies_summary
     if execution_artifacts:
         result["execution_artifacts"] = execution_artifacts
-    if run is not None:
-        result["tokens_used"] = getattr(run, "total_tokens", 0)
-        child_results = getattr(run, "worker_results", None)
-        if child_results is not None:
-            result["workers_spawned"] = len(child_results)
-        if not result.get("execution_artifacts"):
-            try:
-                execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
-                execution_id = execution_metadata.get("execution_id")
-                if execution_id:
-                    persisted = await load_execution_artifacts(execution_id=execution_id)
-                    if persisted:
-                        result["execution_artifacts"] = persisted
-            except Exception:
-                logger.debug("Failed to load execution artifacts for my_activity", exc_info=True)
+    if run_id is not None:
+        try:
+            result.update(await load_run_activity(int(run_id)))
+        except Exception:
+            logger.warning(
+                "Failed to load durable run activity for my_activity",
+                extra={"run_id": run_id},
+                exc_info=True,
+            )
+            result.update(tokens_used=0, workers_spawned=0)
+    if not result.get("execution_artifacts"):
+        try:
+            execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
+            execution_id = execution_metadata.get("execution_id")
+            if execution_id:
+                persisted = await load_execution_artifacts(execution_id=execution_id)
+                if persisted:
+                    result["execution_artifacts"] = persisted
+        except Exception:
+            logger.debug("Failed to load execution artifacts for my_activity", exc_info=True)
 
     return result
 

@@ -6,9 +6,10 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import select
 
-from brain.app.api.schemas.cycles import CycleRead, CycleRunRead
+from brain.app.api.schemas.cycles import CycleCreate, CycleRead, CycleRunRead
 from brain.systems.cycles import access as cycle_access
 from brain.systems.cycles import execution as cycle_execution
 from brain.systems.cycles import prompts as cycle_prompts
@@ -19,7 +20,7 @@ from brain.systems.cycles.contracts import (
     cycle_result_contract,
 )
 from brain.app.api.routers import cycles as cycles_router
-from brain.platform.db.models.cycle import Cycle, CycleRun
+from brain.platform.db.models.cycle import Cycle, CycleRun, CycleRunEvaluation
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea
@@ -267,7 +268,7 @@ class _RouterCycleSession:
 
 class _ExecuteCycleSession:
     def __init__(self, *, run, cycle, idea, owner=None, expected_run_id=None):
-        self._scalar_values = [run, cycle, idea]
+        self._scalar_values = [run, cycle, run, idea]
         self._owner = owner
         self.added = []
         self.statements = []
@@ -335,6 +336,21 @@ class _AsyncUoW:
         return False
 
 
+class _SharedSessionUnitOfWork:
+    def __init__(self, session):
+        self.session = session
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            await self.session.flush()
+        else:
+            await self.session.rollback()
+        return False
+
+
 class _AsyncExecuteCycleSession(_ExecuteCycleSession):
     async def scalars(self, statement):
         return super().scalars(statement)
@@ -344,6 +360,9 @@ class _AsyncExecuteCycleSession(_ExecuteCycleSession):
 
     async def get(self, model, value):
         return super().get(model, value)
+
+    async def scalar(self, statement):
+        return 0
 
     async def flush(self):
         super().flush()
@@ -586,6 +605,306 @@ def test_cycle_run_model_policy_falls_back_to_live_cycle_without_snapshot():
     }
 
 
+@pytest.fixture
+async def cycle_scheduler_session(
+    async_sqlite_session_factory,
+    sqlite_postgres_ddl_patch,
+):
+    return await async_sqlite_session_factory(
+        [
+            Cycle.__table__,
+            CycleRun.__table__,
+            CycleRunEvaluation.__table__,
+        ]
+    )
+
+
+async def _seed_due_cycle_with_active_run(
+    session,
+    *,
+    max_concurrency=None,
+):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    scheduled_for = now - timedelta(minutes=1)
+    cycle_kwargs = {
+        "id": 8,
+        "user_id": str(uuid4()),
+        "org_id": None,
+        "name": "GitHub Reflex",
+        "prompt": "Review new GitHub activity.",
+        "schedule_expr": "*/15 * * * *",
+        "timezone": "UTC",
+        "enabled": True,
+        "next_run_at": scheduled_for,
+    }
+    if max_concurrency is not None:
+        cycle_kwargs["max_concurrency"] = max_concurrency
+    cycle = Cycle(**cycle_kwargs)
+    active_run = CycleRun(
+        id=80,
+        cycle_id=cycle.id,
+        scheduled_for=now - timedelta(minutes=31),
+        started_at=now - timedelta(minutes=30),
+        status="running",
+        prompt_snapshot=cycle.prompt,
+    )
+    session.add_all([cycle, active_run])
+    await session.flush()
+    return cycle, active_run, scheduled_for
+
+
+@pytest.mark.asyncio
+async def test_due_cycle_with_long_running_previous_run_records_skip_in_ledger(
+    monkeypatch,
+    cycle_scheduler_session,
+):
+    cycle, active_run, scheduled_for = await _seed_due_cycle_with_active_run(
+        cycle_scheduler_session
+    )
+    executed_run_ids = []
+    snapshotted_run_ids = []
+
+    async def fake_recover_stale_runs_once(**_kwargs):
+        return []
+
+    async def fake_prepare_memory_snapshot(_session, _cycle, run):
+        snapshotted_run_ids.append(run.id)
+
+    async def fake_execute_cycle_run(run_id):
+        executed_run_ids.append(run_id)
+
+    monkeypatch.setattr(
+        service,
+        "UnitOfWork",
+        lambda: _SharedSessionUnitOfWork(cycle_scheduler_session),
+    )
+    monkeypatch.setattr(
+        service,
+        "async_recover_stale_cycle_runs_once",
+        fake_recover_stale_runs_once,
+    )
+    monkeypatch.setattr(
+        service,
+        "_async_prepare_cycle_run_memory_snapshot",
+        fake_prepare_memory_snapshot,
+    )
+    monkeypatch.setattr(service, "async_execute_cycle_run", fake_execute_cycle_run)
+
+    claimed_run_ids = await service.async_schedule_due_cycles_once()
+
+    ledger = list(
+        (
+            await cycle_scheduler_session.scalars(
+                select(CycleRun)
+                .where(CycleRun.cycle_id == cycle.id)
+                .order_by(CycleRun.scheduled_for.asc(), CycleRun.id.asc())
+            )
+        ).all()
+    )
+    evaluations = list(
+        (
+            await cycle_scheduler_session.scalars(
+                select(CycleRunEvaluation).where(
+                    CycleRunEvaluation.cycle_id == cycle.id
+                )
+            )
+        ).all()
+    )
+
+    assert cycle.max_concurrency == 1
+    assert cycle.timeout_seconds is None
+    assert cycle.retry_policy == {}
+    assert claimed_run_ids == []
+    assert executed_run_ids == []
+    assert snapshotted_run_ids == []
+    assert len(ledger) == 2
+    assert ledger[0] is active_run
+    assert ledger[0].status == "running"
+    assert service._aware_utc(ledger[1].scheduled_for) == scheduled_for
+    assert ledger[1].status == "skipped"
+    assert ledger[1].skip_reason == "previous_run_active"
+    assert ledger[1].context_snapshot["disposition"] == {
+        "reason": "previous_run_active",
+        "active_run_count": 1,
+        "max_concurrency": 1,
+    }
+    assert ledger[1].completed_at is not None
+    assert evaluations[0].cycle_run_id == ledger[1].id
+    assert evaluations[0].details["skip_reason"] == "previous_run_active"
+
+
+@pytest.mark.asyncio
+async def test_due_cycle_honors_configured_max_concurrency_at_scheduling_time(
+    monkeypatch,
+    cycle_scheduler_session,
+):
+    cycle, active_run, _scheduled_for = await _seed_due_cycle_with_active_run(
+        cycle_scheduler_session,
+        max_concurrency=2,
+    )
+    executed_run_ids = []
+    snapshotted_run_ids = []
+
+    async def fake_recover_stale_runs_once(**_kwargs):
+        return []
+
+    async def fake_prepare_memory_snapshot(_session, _cycle, run):
+        snapshotted_run_ids.append(run.id)
+
+    async def fake_execute_cycle_run(run_id):
+        executed_run_ids.append(run_id)
+
+    monkeypatch.setattr(
+        service,
+        "UnitOfWork",
+        lambda: _SharedSessionUnitOfWork(cycle_scheduler_session),
+    )
+    monkeypatch.setattr(
+        service,
+        "async_recover_stale_cycle_runs_once",
+        fake_recover_stale_runs_once,
+    )
+    monkeypatch.setattr(
+        service,
+        "_async_prepare_cycle_run_memory_snapshot",
+        fake_prepare_memory_snapshot,
+    )
+    monkeypatch.setattr(service, "async_execute_cycle_run", fake_execute_cycle_run)
+
+    claimed_run_ids = await service.async_schedule_due_cycles_once()
+
+    ledger = list(
+        (
+            await cycle_scheduler_session.scalars(
+                select(CycleRun)
+                .where(CycleRun.cycle_id == cycle.id)
+                .order_by(CycleRun.scheduled_for.asc(), CycleRun.id.asc())
+            )
+        ).all()
+    )
+
+    assert len(ledger) == 2
+    assert ledger[0] is active_run
+    assert ledger[1].status == "queued"
+    assert ledger[1].skip_reason is None
+    assert claimed_run_ids == [ledger[1].id]
+    assert executed_run_ids == [ledger[1].id]
+    assert snapshotted_run_ids == [ledger[1].id]
+
+
+@pytest.mark.asyncio
+async def test_stale_queued_recovery_does_not_overlap_running_cycle(
+    monkeypatch,
+    cycle_scheduler_session,
+):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    cycle = Cycle(
+        id=9,
+        user_id=str(uuid4()),
+        org_id=None,
+        name="Recovery overlap guard",
+        prompt="Recover without overlapping.",
+        schedule_expr="*/15 * * * *",
+        timezone="UTC",
+        enabled=True,
+        max_concurrency=1,
+        next_run_at=now + timedelta(minutes=10),
+    )
+    running = CycleRun(
+        id=90,
+        cycle_id=cycle.id,
+        scheduled_for=now - timedelta(minutes=10),
+        started_at=now - timedelta(minutes=9),
+        status="running",
+        prompt_snapshot=cycle.prompt,
+    )
+    stale_queued = CycleRun(
+        id=91,
+        cycle_id=cycle.id,
+        scheduled_for=now - timedelta(minutes=5),
+        status="queued",
+        prompt_snapshot=cycle.prompt,
+    )
+    cycle_scheduler_session.add_all([cycle, running, stale_queued])
+    await cycle_scheduler_session.flush()
+
+    async def fail_admit(*_args, **_kwargs):
+        raise AssertionError("capacity-blocked recovery must not admit another execution")
+
+    monkeypatch.setattr(
+        service,
+        "UnitOfWork",
+        lambda: _SharedSessionUnitOfWork(cycle_scheduler_session),
+    )
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
+
+    recovered = await service.async_recover_stale_cycle_runs_once(
+        stale_after_seconds=60,
+        catchup_window_seconds=24 * 60 * 60,
+    )
+
+    evaluations = list(
+        (
+            await cycle_scheduler_session.scalars(
+                select(CycleRunEvaluation).where(
+                    CycleRunEvaluation.cycle_run_id == stale_queued.id
+                )
+            )
+        ).all()
+    )
+    assert recovered == [stale_queued.id]
+    assert running.status == "running"
+    assert stale_queued.status == "skipped"
+    assert stale_queued.started_at is None
+    assert stale_queued.skip_reason == "previous_run_active"
+    assert stale_queued.context_snapshot["disposition"] == {
+        "reason": "previous_run_active",
+        "active_run_count": 1,
+        "max_concurrency": 1,
+    }
+    assert evaluations[0].details["skip_reason"] == "previous_run_active"
+
+
+@pytest.mark.asyncio
+async def test_manual_cycle_run_does_not_overlap_running_cycle(
+    monkeypatch,
+    cycle_scheduler_session,
+):
+    cycle, running, _scheduled_for = await _seed_due_cycle_with_active_run(
+        cycle_scheduler_session
+    )
+
+    async def fail_prepare_snapshot(*_args, **_kwargs):
+        raise AssertionError("capacity-blocked manual run must not hydrate a snapshot")
+
+    monkeypatch.setattr(
+        service,
+        "UnitOfWork",
+        lambda: _SharedSessionUnitOfWork(cycle_scheduler_session),
+    )
+    monkeypatch.setattr(
+        service,
+        "_async_prepare_cycle_run_memory_snapshot",
+        fail_prepare_snapshot,
+    )
+
+    payload = await service.async_run_cycle_now(
+        cycle.id,
+        run_kind="off_slot_material_alert",
+    )
+
+    assert running.status == "running"
+    assert payload["status"] == "skipped"
+    assert payload["started_at"] is None
+    assert payload["skip_reason"] == "previous_run_active"
+    assert payload["context_snapshot"]["launch_context"]["origin"] == MANUAL_CYCLE_ORIGIN
+    assert payload["context_snapshot"]["disposition"] == {
+        "reason": "previous_run_active",
+        "active_run_count": 1,
+        "max_concurrency": 1,
+    }
+
+
 def _cycle_for_serialization(*, schedule_expr: str, timezone_name: str) -> Cycle:
     now = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
     cycle = Cycle()
@@ -597,6 +916,7 @@ def _cycle_for_serialization(*, schedule_expr: str, timezone_name: str) -> Cycle
     cycle.schedule_expr = schedule_expr
     cycle.timezone = timezone_name
     cycle.enabled = True
+    cycle.max_concurrency = 1
     cycle.model_override = None
     cycle.thinking_override = None
     cycle.execution_mode = "new_idea_per_run"
@@ -609,6 +929,94 @@ def _cycle_for_serialization(*, schedule_expr: str, timezone_name: str) -> Cycle
     cycle.created_at = now
     cycle.updated_at = now
     return cycle
+
+
+def test_cycle_create_and_update_validate_max_concurrency():
+    create = CycleCreate(
+        name="Configurable guard",
+        prompt="Run safely.",
+        schedule_expr="0 9 * * *",
+        timezone="UTC",
+        max_concurrency=3,
+    )
+
+    assert create.max_concurrency == 3
+    assert CycleCreate(
+        name="Default guard",
+        prompt="Run safely.",
+        schedule_expr="0 9 * * *",
+        timezone="UTC",
+    ).max_concurrency == 1
+    with pytest.raises(ValidationError):
+        CycleCreate(
+            name="Invalid guard",
+            prompt="Run safely.",
+            schedule_expr="0 9 * * *",
+            timezone="UTC",
+            max_concurrency=0,
+        )
+    with pytest.raises(ValidationError):
+        cycles_router.CycleUpdate(max_concurrency=0)
+    with pytest.raises(ValidationError):
+        cycles_router.CycleUpdate(max_concurrency=True)
+
+
+@pytest.mark.asyncio
+async def test_cycle_create_persists_and_serializes_max_concurrency(monkeypatch):
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="UTC",
+    )
+    db = _RouterCycleSession(cycle)
+    captured = {}
+
+    async def fake_create_cycle(_db, **kwargs):
+        captured.update(kwargs)
+        cycle.max_concurrency = kwargs["max_concurrency"]
+        return cycle
+
+    monkeypatch.setattr(cycles_router, "command_create_cycle", fake_create_cycle)
+    monkeypatch.setattr(
+        cycles_router,
+        "publish_cycle_change",
+        lambda **_kwargs: None,
+    )
+
+    response = await cycles_router.create_cycle(
+        CycleCreate(
+            name=cycle.name,
+            prompt=cycle.prompt,
+            schedule_expr=cycle.schedule_expr,
+            timezone=cycle.timezone,
+            max_concurrency=3,
+        ),
+        db=db,
+        user={"id": cycle.user_id, "org_id": cycle.org_id},
+    )
+
+    assert captured["max_concurrency"] == 3
+    assert response["max_concurrency"] == 3
+    CycleRead.model_validate(response)
+
+
+@pytest.mark.asyncio
+async def test_cycle_update_persists_and_serializes_max_concurrency():
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="UTC",
+    )
+    db = _RouterCycleSession(cycle)
+
+    response = await cycles_router.update_cycle(
+        cycle.id,
+        cycles_router.CycleUpdate(max_concurrency=4),
+        db=db,
+        user={"id": cycle.user_id, "org_id": None},
+    )
+
+    assert cycle.max_concurrency == 4
+    assert response["max_concurrency"] == 4
+    CycleRead.model_validate(response)
 
 
 
@@ -1100,7 +1508,9 @@ async def test_async_run_cycle_now_uses_native_uow_without_sync_bridges(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_async_run_cycle_now_snapshots_off_slot_material_alert_contract(monkeypatch):
+async def test_async_run_cycle_now_snapshots_off_slot_contract_after_admission(
+    monkeypatch,
+):
     cycle = Cycle()
     cycle.id = 5
     cycle.prompt = "Post one concise material engineering alert"
@@ -1110,12 +1520,21 @@ async def test_async_run_cycle_now_snapshots_off_slot_material_alert_contract(mo
     cycle.timezone = "America/Toronto"
 
     created_runs = []
-    factory = _AsyncUnitOfWorkFactory([
-        _AsyncRunNowCreateSession(cycle, created_runs),
-        _AsyncRunNowLoadSession(created_runs),
-    ])
+    create_session = _AsyncRunNowCreateSession(cycle, created_runs)
+    factory = _AsyncUnitOfWorkFactory(
+        [
+            create_session,
+            _AsyncRunNowLoadSession(created_runs),
+        ]
+    )
 
     async def fake_async_execute_cycle_run(_run_id):
+        created_runs[0].status = "running"
+        await service._async_prepare_cycle_run_memory_snapshot(
+            create_session,
+            cycle,
+            created_runs[0],
+        )
         created_runs[0].status = "completed"
 
     monkeypatch.setattr(service, "UnitOfWork", factory)

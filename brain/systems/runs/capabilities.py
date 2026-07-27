@@ -369,9 +369,14 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         "key": "runtime_self_context",
         "name": "Runtime and Self Context",
         "category": "agent_runtime",
-        "summary": "Illo can inspect its runtime settings, capability registry, and verified source/install context.",
-        "aliases": ("runtime", "self context", "who are you", "where are you installed", "models"),
-        "tools": ("runtime_settings", "read_self_context", "read_capabilities"),
+        "summary": "Illo can inspect its runtime settings, capability registry, and verified source/install context, and can persist supported durable workspace preferences.",
+        "aliases": ("runtime", "self context", "who are you", "where are you installed", "models", "preferences", "timezone"),
+        "tools": (
+            "runtime_settings",
+            "manage_runtime_preferences",
+            "read_self_context",
+            "read_capabilities",
+        ),
     },
     {
         "key": "deployment",

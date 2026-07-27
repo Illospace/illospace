@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fails loudly when the Compose stack is up but a required service is absent --
+# the "healthy but inert" state, where every HTTP probe passes while Illo cannot
+# do any work (#527). Cheap enough for a cron entry or systemd timer, and the
+# exit codes are distinct so an external watcher (#512) can tell an invisible
+# failure from an obvious one.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+COMPOSE_FILE="$ROOT/deploy/compose/docker-compose.yml"
+ENV_FILE="${ILLO_COMPOSE_ENV_FILE:-$ROOT/deploy/compose/.env}"
+
+source "$SCRIPT_DIR/compose-runtime-lib.sh"
+
+usage() {
+  cat <<EOF
+Usage: ./illo deploy inert-check
+       deploy/scripts/inert-stack-check.sh
+
+Asserts that every always-on Compose service is running whenever the stack is up
+at all. The worker is the service this exists for: it owns AgentRun execution and
+the cycle-scheduler thread, so its absence leaves the stack answering health
+checks normally while Illo does nothing.
+
+Required services: $STACK_REQUIRED_SERVICES
+  (override with STACK_REQUIRED_SERVICES="postgres api worker")
+
+Exit codes:
+  0  every required service is running
+  1  the check could not inspect Compose
+  $STACK_INERT_EXIT_CODE  INERT   - stack is up but a required service is absent
+  $STACK_DOWN_EXIT_CODE  DOWN    - no Compose services are running at all
+EOF
+}
+
+case "${1:-}" in
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+  "")
+    ;;
+  *)
+    echo "Unknown argument: $1" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+if [ ! -f "$ENV_FILE" ]; then
+  echo "Missing $ENV_FILE; run ./illo deploy init first." >&2
+  exit 1
+fi
+
+status=0
+assert_stack_not_inert || status=$?
+if [ "$status" -eq 0 ]; then
+  echo "OK:    every required Compose service is running ($STACK_REQUIRED_SERVICES)"
+fi
+exit "$status"

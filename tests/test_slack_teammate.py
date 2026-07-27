@@ -760,7 +760,9 @@ async def test_post_slack_reply_tool_posts_to_triggering_thread(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkeypatch):
+    from brain.platform.db.models.open_ask import ObligationKind
     from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.open_asks import DeliveredSlackReplyCounts
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
 
     class _SlackClient:
@@ -775,15 +777,27 @@ async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkey
         "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
         AsyncMock(return_value=_SlackClient()),
     )
-    recorder = AsyncMock(return_value=1)
+    recorder = AsyncMock(
+        side_effect=[
+            DeliveredSlackReplyCounts(
+                by_kind={
+                    ObligationKind.HUMAN_ASK: 1,
+                    ObligationKind.RUN_DEFERRAL: 1,
+                }
+            ),
+            DeliveredSlackReplyCounts.empty(),
+        ]
+    )
     monkeypatch.setattr(
-        "brain.systems.runs.slack_delivery.record_origin_run_answer_delivery",
+        "brain.systems.runs.slack_delivery.persist_delivered_slack_answer",
         recorder,
     )
     context = {
         "run_id": 9,
+        "org_id": "org-1",
         "execution_metadata": {
             "run_id": 9,
+            "org_id": "org-1",
             "open_ask": {
                 "origin_ref": "slack:T789:C456:1716900000.000100",
             },
@@ -806,7 +820,10 @@ async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkey
         )
     assert answer["answered_open_asks"] == 1
     recorder.assert_awaited_once()
-    assert recorder.await_args.kwargs["origin_run_id"] == 9
+    delivered = recorder.await_args.args[0]
+    assert delivered.answering_run_id == 9
+    assert delivered.thread_ts == "1716900000.000100"
+    assert delivered.is_answer is True
 
     recorder.reset_mock()
     with bind_agent_context(context):
@@ -817,7 +834,10 @@ async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkey
             )
         )
     assert clarification["answered_open_asks"] == 0
-    recorder.assert_not_awaited()
+    recorder.assert_awaited_once()
+    clarification_delivery = recorder.await_args.args[0]
+    assert clarification_delivery.answer_text == "Which repository should own this?"
+    assert clarification_delivery.is_answer is False
 
 
 @pytest.mark.asyncio

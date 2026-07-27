@@ -450,8 +450,7 @@ def _tool_failure_success_issue(
         return None
     state = evidence.tool_failure_state
     failure_count = max(
-        DEFAULT_TOOL_FAILURE_THRESHOLD,
-        int(getattr(state, "consecutive_failures", 0) or 0),
+        1,
         int(getattr(state, "total_failures", 0) or 0),
         sum(1 for item in evidence.tool_results if item.failed),
     )

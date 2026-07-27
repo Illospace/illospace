@@ -131,6 +131,30 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
         "retry_policy": {"max_attempts": 2, "backoff_seconds": 120},
         "misfire_policy": "skip",
     },
+    {
+        "job_key": "illo_external_heartbeat",
+        "family": "illo_external_heartbeat",
+        "program_key": "illo_external_heartbeat",
+        "handler_kind": CATALOG_HANDLER_KIND,
+        "handler_ref": "brain.app.scheduler.programs:illo_external_heartbeat",
+        "cron_expr": "*/5 * * * *",
+        "timezone": "UTC",
+        "default_payload": {
+            "name": "Illo External Heartbeat",
+            "description": "Publish minimal liveness state outside the Illo host",
+        },
+        "task_contract": {
+            "memory_scope": {"visibility": "system"},
+            "allowed_actions": ["scheduler.run"],
+            "output_channel": "scheduler",
+            "success_criteria": ["External heartbeat is published or cleanly skipped"],
+        },
+        "priority": 100,
+        "max_concurrency": 1,
+        "timeout_seconds": 60,
+        "retry_policy": {"max_attempts": 2, "backoff_seconds": 30},
+        "misfire_policy": "skip",
+    },
 )
 
 

@@ -7,6 +7,12 @@ from dataclasses import dataclass
 import logging
 from typing import TYPE_CHECKING, Any
 
+from brain.systems.runs.open_asks import (
+    DeliveredSlackReply,
+    DeliveredSlackReplyCounts,
+    delivered_message_ts,
+    record_delivered_slack_answer,
+)
 from brain.systems.runs.events import run_event
 from brain.systems.runs.status import RunStatus, coerce_run_status
 from brain.systems.runs.store import AsyncAgentRunStore
@@ -176,11 +182,72 @@ async def post_slack_run_message(
     run: Any,
     text: str,
     artifact_id: int | None = None,
+    deferral_condition: str | None = None,
 ) -> dict[str, Any] | None:
     target = slack_response_target(run)
     channel_id = target["channel_id"]
     if not channel_id:
         return None
+    obligation_thread_ts = str(
+        target["thread_ts"]
+        or target["trigger"].get("thread_ts")
+        or target["trigger"].get("message_ts")
+        or ""
+    ).strip()
+    if deferral_condition:
+        from brain.systems.runs.open_asks import record_run_deferral
+        from brain.systems.runs.obligation_notices import (
+            schedule_post_commit_notice_delivery,
+        )
+
+        try:
+            _obligation, notice, created = await record_run_deferral(
+                session,
+                run=run,
+                channel_id=channel_id,
+                thread_ts=obligation_thread_ts,
+                trigger=target["trigger"],
+                deferral_text=text,
+                notice_condition=deferral_condition,
+                post_thread_ts=target["thread_ts"],
+            )
+        except Exception as exc:
+            logger.info(
+                "run_deferral_recording_failed: %s",
+                exc,
+                extra={"run_id": int(run.id), "condition": deferral_condition},
+            )
+            # A promise without a durable obligation is worse than no notice.
+            return None
+        if notice is None:
+            return {
+                "surface": SLACK_SURFACE,
+                "run_id": int(run.id),
+                "artifact_id": artifact_id,
+                "channel_id": channel_id,
+                "thread_ts": target["thread_ts"],
+                "suppressed": True,
+                "reason": "answered_run_deferral",
+                "condition": deferral_condition,
+            }
+        schedule_post_commit_notice_delivery(
+            session,
+            org_id=str(run.org_id),
+            notice_ids=[int(notice.id)],
+        )
+        return {
+            "surface": SLACK_SURFACE,
+            "run_id": int(run.id),
+            "artifact_id": artifact_id,
+            "channel_id": channel_id,
+            "thread_ts": target["thread_ts"],
+            "queued": True,
+            "suppressed": not created,
+            "reason": None if created else "duplicate_run_deferral",
+            "condition": deferral_condition,
+            "notice_id": int(notice.id),
+            "notice_state": str(notice.state),
+        }
     try:
         client = await slack_client_for_run(run)
         if target["thread_ts"]:
@@ -216,21 +283,22 @@ async def post_slack_run_message(
             thread_ts=target["thread_ts"],
         )
         await clear_slack_processing_status(client, target["trigger"])
-        if (
-            coerce_run_status(
-                getattr(run, "status", None),
-                default=RunStatus.FAILED,
-            )
-            == RunStatus.COMPLETED
-        ):
-            from brain.systems.runs.open_asks import mark_origin_run_answer_delivered
-
+        if coerce_run_status(
+            getattr(run, "status", None),
+            default=RunStatus.FAILED,
+        ) == RunStatus.COMPLETED:
             try:
-                await mark_origin_run_answer_delivered(
+                await record_delivered_slack_answer(
                     session,
-                    origin_run_id=int(run.id),
-                    answer_text=text,
-                    slack_response=response,
+                    DeliveredSlackReply(
+                        org_id=str(run.org_id),
+                        channel_id=channel_id,
+                        thread_ts=obligation_thread_ts,
+                        answer_text=text,
+                        answering_run_id=int(run.id),
+                        slack_message_ts=delivered_message_ts(response) or "",
+                        is_answer=True,
+                    ),
                 )
             except Exception as exc:
                 logger.info(
@@ -312,15 +380,12 @@ async def post_open_ask_artifact_reply(
 ) -> dict[str, Any]:
     """Reply to every matching open ask and close only confirmed deliveries."""
 
-    from brain.systems.runs.open_asks import (
-        mark_open_ask_answered,
-        open_asks_for_origin_ref,
-    )
+    from brain.systems.runs.open_asks import open_asks_for_origin_ref
 
     rows = await open_asks_for_origin_ref(
         session,
         origin_ref,
-        for_update=True,
+        for_update=False,
     )
     result: dict[str, Any] = {
         "origin_ref": str(origin_ref),
@@ -402,13 +467,19 @@ async def post_open_ask_artifact_reply(
             _artifact_value(artifact, "url")
             or _artifact_value(artifact, "reference")
         )
-        mark_open_ask_answered(
-            row,
-            answer_text=text,
-            answered_by_run_id=answering_run_id,
-            artifact_kind=artifact_kind,
-            artifact_ref=artifact_ref,
-            slack_response=response,
+        await record_delivered_slack_answer(
+            session,
+            DeliveredSlackReply(
+                org_id=str(row.org_id),
+                channel_id=channel_id,
+                thread_ts=str(row.thread_ts),
+                answer_text=text,
+                answering_run_id=answering_run_id,
+                slack_message_ts=delivered_message_ts(response) or "",
+                is_answer=True,
+                artifact_kind=artifact_kind,
+                artifact_ref=artifact_ref,
+            ),
         )
         result["delivered"] += 1
         result["origin_asks"].append(
@@ -469,47 +540,40 @@ async def deliver_open_ask_artifact_reply(
         }
 
 
-async def record_origin_run_answer_delivery(
-    *,
-    origin_run_id: int | None,
-    answer_text: str,
-    slack_response: Any,
-) -> int:
-    """Close a run's ask after an explicit Slack answer tool confirms delivery."""
+async def persist_delivered_slack_answer(
+    delivered: DeliveredSlackReply,
+) -> DeliveredSlackReplyCounts:
+    """One unit-of-work boundary for explicit replies delivered by a tool."""
 
-    if not origin_run_id:
-        return 0
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
-    from brain.systems.runs.open_asks import mark_origin_run_answer_delivered
 
     try:
         async with UnitOfWork() as uow:
-            rows = await mark_origin_run_answer_delivered(
+            return await record_delivered_slack_answer(
                 uow.session,
-                origin_run_id=int(origin_run_id),
-                answer_text=answer_text,
-                slack_response=slack_response,
+                delivered,
             )
-            return len(rows)
     except Exception as exc:
         logger.info(
-            "open_ask_explicit_answer_recording_failed: %s",
+            "delivered_slack_answer_recording_failed: %s",
             exc,
-            extra={"origin_run_id": origin_run_id},
+            extra={"answering_run_id": delivered.answering_run_id},
         )
-        return 0
+        return DeliveredSlackReplyCounts.empty()
 
 
 __all__ = [
     "OpenAskArtifact",
+    "DeliveredSlackReply",
+    "DeliveredSlackReplyCounts",
     "SLACK_SURFACE",
     "clear_slack_processing_status",
     "deliver_open_ask_artifact_reply",
     "is_slack_origin",
     "open_ask_artifact_message",
+    "persist_delivered_slack_answer",
     "post_open_ask_artifact_reply",
     "post_slack_run_message",
-    "record_origin_run_answer_delivery",
     "record_slack_thread_mute",
     "run_is_headless",
     "slack_client_for_open_ask",

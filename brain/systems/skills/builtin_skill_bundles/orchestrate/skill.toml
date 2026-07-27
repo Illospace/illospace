@@ -1,23 +1,23 @@
 schema_version = 1
 name = "orchestrate"
 display_name = "Orchestrate"
-version = "1.0.0"
-description = "Internal orchestration protocol for multi-deliverable work that needs worker assignments, dependencies, artifact checks, and synthesis."
+version = "2.0.0"
+description = "Delegate independent deliverables with spawn_worker, collect every child result honestly, and verify the final outcome."
 license = "Apache-2.0"
 source = "illo-core"
 visibility = "public"
 
 [routing]
 triggers = [
-  { pattern = "internal orchestration protocol", direction = "for" },
+  { pattern = "spawn_worker", direction = "for" },
   { pattern = "multiple deliverables", direction = "for" },
-  { pattern = "multi-step task", direction = "for" },
   { pattern = "parallel workers", direction = "for" },
-  { pattern = "autonomous run graph", direction = "for" },
+  { pattern = "fan out workers", direction = "for" },
   { pattern = "worker handoff", direction = "for" },
-  { pattern = "run step dependencies", direction = "for" },
+  { pattern = "independent worker scopes", direction = "for" },
   { pattern = "one focused action", direction = "against" },
   { pattern = "direct answer", direction = "against" },
+  { pattern = "one focused debugging loop", direction = "against" },
 ]
 
 [runtime]

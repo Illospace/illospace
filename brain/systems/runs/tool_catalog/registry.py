@@ -22,6 +22,7 @@ from brain.systems.runs.tool_definitions import (
     LIFECYCLE_TOOLS,
     MY_ACTIVITY_TOOL,
     PROJECT_TOOLS,
+    RUNTIME_PREFERENCE_TOOLS,
     SOUL_TOOLS,
     SESSION_TOOLS,
     WORKSPACE_OVERVIEW_SPARSE_GUIDANCE,
@@ -197,6 +198,14 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
             "domains": ["runtime settings", "provider", "auth status", "model routing", "credentials"],
             "scopes": ["narrow"],
         },
+    },
+    "manage_runtime_preferences": {
+        "permission": "manage_runtime",
+        "risk_class": "medium",
+        "side_effect_class": "runtime_configuration",
+        "reversibility": "reversible",
+        "action_manifest": True,
+        "expected_effect": "inspect or persist a supported workspace preference",
     },
     "read_self_context": {
         "permission": "read_runtime",
@@ -827,11 +836,12 @@ def _definition_sources() -> list[tuple[str, tuple[str, ...], list[Mapping[str, 
         ("session", ("coordinator", "worker"), SESSION_TOOLS),
         ("lifecycle", ("coordinator",), LIFECYCLE_TOOLS),
         ("deployment", ("coordinator",), DEPLOYMENT_TOOLS),
+        ("runtime_preferences", ("coordinator",), RUNTIME_PREFERENCE_TOOLS),
         ("workspace_tools", ("coordinator",), WORKSPACE_TOOL_TOOLS),
         ("worker_spawn", ("coordinator",), WORKER_SPAWN_TOOLS),
         ("reply", ("coordinator",), [CORTEX_REPLY_TOOL]),
         ("visual_reply", ("coordinator", "worker"), [CORTEX_VISUAL_REPLY_TOOL]),
-        ("introspection", ("coordinator",), [MY_ACTIVITY_TOOL]),
+        ("introspection", ("coordinator", "worker"), [MY_ACTIVITY_TOOL]),
         ("browser", ("coordinator", "worker"), _BROWSER_TOOLS),
     ]
     try:
@@ -1061,6 +1071,14 @@ def action_policy_for_tool(
     if tool_name in {"manage_cycle", "manage_cron_job"} and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list"}:
         return None
     if tool_name == "manage_cycle" and _arg_at(args_tuple, kwargs_dict, "action", 0) == "usage_summary":
+        return None
+    if tool_name == "manage_runtime_preferences" and _arg_at(
+        args_tuple,
+        kwargs_dict,
+        "action",
+        0,
+        "get",
+    ) == "get":
         return None
     if tool_name == "manage_domain" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "query_records", "get_record", "events"}:
         return None

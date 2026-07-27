@@ -754,14 +754,13 @@ class TestAgentLoop:
     @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
-    def test_identical_tool_failures_open_circuit_after_three_attempts(
+    def test_repeated_tool_failures_disable_only_that_tool_and_run_continues(
         self,
         mock_save,
         mock_load,
         mock_client,
     ):
         from brain.systems.runs.direct_agent import run_agent
-        from brain.systems.runs.direct_loop.loop_control import LoopTerminationReason
 
         client = MagicMock()
         client.messages.create.side_effect = [
@@ -769,32 +768,63 @@ class TestAgentLoop:
                 text=None,
                 stop_reason="tool_use",
                 tool_use={"name": "always_fails", "input": {"value": "same"}},
-            )
-            for _ in range(10)
+            ),
+            self._make_response(
+                text=None,
+                stop_reason="tool_use",
+                tool_use={"name": "always_fails", "input": {"value": "same"}},
+            ),
+            self._make_response(
+                text=None,
+                stop_reason="tool_use",
+                tool_use={"name": "healthy_tool", "input": {}},
+            ),
+            self._make_response("Completed the remaining work in degraded mode."),
         ]
         mock_client.return_value = _mock_llm_client(client)
-        handler = MagicMock(side_effect=RuntimeError("deterministic failure"))
+        failing_handler = MagicMock(
+            side_effect=RuntimeError("deterministic failure")
+        )
+        healthy_handler = MagicMock(return_value={"ok": True})
 
         result = run_agent(
             message="Use the deterministic tool",
-            tools=[{
-                "name": "always_fails",
-                "description": "Always fails for this regression test.",
-                "input_schema": {"type": "object", "properties": {}},
-            }],
-            tool_handlers={"always_fails": handler},
+            tools=[
+                {
+                    "name": "always_fails",
+                    "description": "Always fails for this regression test.",
+                    "input_schema": {"type": "object", "properties": {}},
+                },
+                {
+                    "name": "healthy_tool",
+                    "description": "Completes work that does not need the failed tool.",
+                    "input_schema": {"type": "object", "properties": {}},
+                },
+            ],
+            tool_handlers={
+                "always_fails": failing_handler,
+                "healthy_tool": healthy_handler,
+            },
             persist_session=False,
             max_turns=20,
         )
 
         assert result.success is True
-        assert handler.call_count == 3
-        assert client.messages.create.call_count == 3
-        assert "always_fails" in result.output
-        assert "RuntimeError" in result.output
-        assert "3 consecutive failures" in result.output
-        assert result.termination is not None
-        assert result.termination.reason is LoopTerminationReason.TOOL_FAILURE_CIRCUIT
+        assert result.output == "Completed the remaining work in degraded mode."
+        assert failing_handler.call_count == 2
+        assert healthy_handler.call_count == 1
+        assert client.messages.create.call_count == 4
+        assert result.termination is None
+
+        post_trip_request = client.messages.create.call_args_list[2].kwargs
+        post_trip_tool_names = {
+            tool["name"] for tool in post_trip_request.get("tools", [])
+        }
+        assert "always_fails" not in post_trip_tool_names
+        assert "healthy_tool" in post_trip_tool_names
+        model_context = json.dumps(post_trip_request["messages"])
+        assert "unavailable for the rest of this run" in model_context
+        assert "proceed degraded and record the gap" in model_context
 
     async def test_repeated_brain_encode_is_rejected(self):
         from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState
@@ -2200,7 +2230,7 @@ class TestFinalReplyReview:
         assert result["approved"] is True
         provider.create.assert_called_once()
 
-    def test_three_failed_tool_calls_block_success_claim_without_failure_names(self):
+    def test_zero_success_tool_disablement_blocks_unsupported_success_claim(self):
         from brain.systems.runs.direct_agent import review_candidate_final_reply
         from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
         from brain.systems.runs.direct_loop.final_reply_evidence import (
@@ -2208,6 +2238,9 @@ class TestFinalReplyReview:
             ToolFailureStateEvidence,
             ToolResultEvidence,
         )
+        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+        from brain.systems.runs.direct_loop.tool_execution import ResolvedToolCall
+        from brain.systems.runs.tool_outcomes import ToolOutcome
 
         failures = tuple(
             ToolResultEvidence.capture(
@@ -2216,18 +2249,31 @@ class TestFinalReplyReview:
                 is_error=True,
                 result={"error": "parent_id validation failed"},
             )
-            for _ in range(3)
+            for _ in range(2)
         )
+        policy = LoopControlPolicy(
+            failure_threshold=3,
+            failure_window_calls=10,
+            zero_success_failure_threshold=2,
+        )
+        disablement = None
+        for index in range(2):
+            disablement = policy.observe_tool_result(
+                ResolvedToolCall(
+                    block_id=f"failed-call-{index}",
+                    tool_name="manage_idea",
+                    tool_input={"action": "create"},
+                    result_text="parent_id validation failed",
+                    outcome=ToolOutcome.failed(
+                        message="parent_id validation failed",
+                        category="ToolValidationError",
+                    ),
+                )
+            )
+        assert disablement is not None
         evidence = FinalReplyEvidence(
             tool_results=failures,
-            tool_failure_state=ToolFailureStateEvidence(
-                failure_threshold=3,
-                consecutive_failures=3,
-                total_failures=3,
-                tool_name="manage_idea",
-                error_class="ToolValidationError",
-                termination_reason="tool_failure_circuit",
-            ),
+            tool_failure_state=ToolFailureStateEvidence.from_value(policy),
         )
         provider = MagicMock()
 
@@ -2243,7 +2289,7 @@ class TestFinalReplyReview:
         assert result["status"] == "continue"
         assert result["enforcement"] is FinalReplyEnforcement.BLOCK
         assert "manage_idea" in result["rationale"]
-        assert "3" in result["rationale"]
+        assert "2" in result["rationale"]
         provider.create.assert_not_called()
 
     def test_status_question_allows_done_after_originating_run_completed_with_refs(self):
@@ -3444,95 +3490,6 @@ class TestExecutionArtifacts:
             _agent_context.execution_artifacts = []
             if hasattr(_agent_context, "execution_metadata"):
                 delattr(_agent_context, "execution_metadata")
-
-    async def test_my_activity_includes_execution_artifacts(self):
-        from brain.systems.runs.direct_agent import _handle_my_activity, _agent_context
-
-        class _Run:
-            run_id = 42
-            total_tokens = 0
-            worker_results = []
-
-        _agent_context.run = _Run()
-        _agent_context.start_time = None
-        _agent_context.reply_contents = []
-        _agent_context.tool_calls_log = []
-        _agent_context.execution_artifacts = [{"type": "pr", "number": 123, "url": "https://github.com/x/y/pull/123"}]
-        try:
-            result = await _handle_my_activity()
-            assert result["execution_artifacts"][0]["type"] == "pr"
-            assert result["execution_artifacts"][0]["number"] == 123
-        finally:
-            _agent_context.run = None
-            _agent_context.start_time = None
-            _agent_context.reply_contents = []
-            _agent_context.tool_calls_log = []
-            _agent_context.execution_artifacts = []
-
-    async def test_my_activity_loads_persisted_execution_artifacts_from_execution_id(self):
-        from brain.systems.runs.direct_agent import _handle_my_activity, _agent_context
-
-        class _Run:
-            run_id = 42
-            total_tokens = 0
-            worker_results = []
-
-        _agent_context.run = _Run()
-        _agent_context.start_time = None
-        _agent_context.reply_contents = []
-        _agent_context.tool_calls_log = []
-        _agent_context.execution_artifacts = []
-        _agent_context.execution_metadata = {"execution_id": "exec-123", "run_id": 42}
-        try:
-            with patch(
-                "brain.systems.runs.tool_catalog.handlers.activity.load_execution_artifacts",
-                new=AsyncMock(return_value=[{"type": "commit", "sha": "abc1234", "summary": "Fix provenance"}]),
-            ) as mock_load, patch(
-                "brain.platform.db.repositories.unit_of_work.UnitOfWork",
-                side_effect=AssertionError("my_activity should not load run execution_artifacts"),
-            ):
-                result = await _handle_my_activity()
-
-            assert result["execution_artifacts"] == [{"type": "commit", "sha": "abc1234", "summary": "Fix provenance"}]
-            mock_load.assert_awaited_once_with(execution_id="exec-123")
-        finally:
-            _agent_context.run = None
-            _agent_context.start_time = None
-            _agent_context.reply_contents = []
-            _agent_context.tool_calls_log = []
-            _agent_context.execution_artifacts = []
-            if hasattr(_agent_context, "execution_metadata"):
-                delattr(_agent_context, "execution_metadata")
-
-    async def test_my_activity_does_not_load_persisted_artifacts_without_execution_id(self):
-        from brain.systems.runs.direct_agent import _handle_my_activity, _agent_context
-
-        class _Run:
-            run_id = 42
-            total_tokens = 0
-            worker_results = []
-
-        _agent_context.run = _Run()
-        _agent_context.start_time = None
-        _agent_context.reply_contents = []
-        _agent_context.tool_calls_log = []
-        _agent_context.execution_artifacts = []
-        _agent_context.execution_metadata = {"run_id": "run-123"}
-        try:
-            with patch("brain.systems.runs.tool_catalog.handlers.activity.load_execution_artifacts") as mock_load:
-                result = await _handle_my_activity()
-
-            assert "execution_artifacts" not in result
-            mock_load.assert_not_called()
-        finally:
-            _agent_context.run = None
-            _agent_context.start_time = None
-            _agent_context.reply_contents = []
-            _agent_context.tool_calls_log = []
-            _agent_context.execution_artifacts = []
-            if hasattr(_agent_context, "execution_metadata"):
-                delattr(_agent_context, "execution_metadata")
-
 
 class TestSanitizeToolPairs:
     """Test _sanitize_tool_pairs strips orphaned tool blocks."""

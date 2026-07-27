@@ -79,6 +79,23 @@ def safe_terminal_run_message(
     return DEFAULT_FAILED_RUN_MESSAGE
 
 
+def terminal_run_notice_condition(
+    status: RunStatus | str | None,
+    category: RunFailureCategory | str | None = None,
+) -> str | None:
+    """Return a stable deduplication key for one terminal public condition."""
+
+    normalized_status = (
+        status
+        if isinstance(status, RunStatus)
+        else project_run_status_value(status, RunStatus.FAILED.value)
+    )
+    run_status = coerce_run_status(normalized_status, default=RunStatus.FAILED)
+    if run_status == RunStatus.COMPLETED:
+        return None
+    return f"terminal:{run_status.value}:{coerce_failure_category(category).value}"
+
+
 def public_run_failure(
     status: RunStatus | str | None,
     category: RunFailureCategory | str | None = None,
@@ -113,4 +130,5 @@ __all__ = [
     "failure_category_for_error",
     "public_run_failure",
     "safe_terminal_run_message",
+    "terminal_run_notice_condition",
 ]

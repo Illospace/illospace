@@ -22,6 +22,11 @@ UWEAR_STAGING_PROMOTION_PR_COMMAND = [
     "-m",
     "brain.jobs.pipelines.staging_promotion_pr",
 ]
+ILLO_EXTERNAL_HEARTBEAT_COMMAND = [
+    "python3",
+    "-m",
+    "brain.jobs.pipelines.illo_heartbeat",
+]
 
 
 def _python_one_liner(code: str) -> list[str]:
@@ -489,6 +494,18 @@ def build_scheduler_step_plan(job: SchedulerJob) -> list[dict[str, object]]:
                 "handler_ref": job.handler_ref,
                 "payload": {"program": "uwear_aws_health_scan"},
                 "command": UWEAR_AWS_HEALTH_SCAN_COMMAND,
+            }
+        ]
+
+    if job.program_key == "illo_external_heartbeat" or "illo_external_heartbeat" in identity:
+        return [
+            {
+                "step_key": "illo_external_heartbeat",
+                "sequence_no": 1,
+                "kind": "single",
+                "handler_ref": job.handler_ref,
+                "payload": {"program": "illo_external_heartbeat"},
+                "command": ILLO_EXTERNAL_HEARTBEAT_COMMAND,
             }
         ]
 

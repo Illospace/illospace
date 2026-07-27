@@ -29,6 +29,7 @@ from brain.systems.runs.failures import (
     failure_category_for_error,
     public_run_failure,
     safe_terminal_run_message,
+    terminal_run_notice_condition,
 )
 from brain.systems.runs.interruption import (
     RunInterruption,
@@ -694,6 +695,7 @@ async def _settle_slack_origin_run_async(
     if run_status not in TERMINAL_RUN_STATUSES:
         return None
     artifact_id = None
+    deferral_condition = None
     if run_status == RunStatus.COMPLETED:
         final_answer, artifact_id = await _latest_final_answer_artifact(session, run=run)
         if not final_answer or _run_is_headless(run):
@@ -707,12 +709,14 @@ async def _settle_slack_origin_run_async(
         final_answer = safe_terminal_run_message(run_status, category)
         if not final_answer:
             return None
+        deferral_condition = terminal_run_notice_condition(run_status, category)
 
     return await _post_slack_run_message_async(
         session,
         run=run,
         text=final_answer,
         artifact_id=artifact_id,
+        deferral_condition=deferral_condition,
     )
 
 

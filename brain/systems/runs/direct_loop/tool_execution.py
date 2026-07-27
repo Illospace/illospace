@@ -17,7 +17,11 @@ from brain.platform.async_io import (
     mark_side_effect_started,
 )
 from brain.systems.runs.actions import result_failure_summary
-from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy, LoopTermination
+from brain.systems.runs.direct_loop.loop_control import (
+    LoopControlPolicy,
+    LoopTermination,
+    ToolDisablement,
+)
 from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
 from brain.systems.runs.direct_loop.final_reply_evidence import ToolResultEvidence
 from brain.systems.runs.tool_catalog.metadata import is_write_side_effect_class
@@ -63,9 +67,10 @@ class ResolvedToolCall:
 
 @dataclass(frozen=True)
 class ToolExecutionResult:
-    """Provider-facing results plus the loop policy's typed stop decision."""
+    """Provider-facing results plus distinct continue and stop control edges."""
 
     tool_results: list[dict]
+    tool_disablements: tuple[ToolDisablement, ...]
     termination: LoopTermination | None
 
 
@@ -687,14 +692,16 @@ def execute_tool_calls(
         raise RuntimeError("execute_tool_calls cannot run inside an active event loop; await async_execute_tool_calls")
 
     tool_results: list[dict] = []
+    tool_disablements: list[ToolDisablement] = []
     pending_parallel: list[PendingToolCall] = []
     threadlocal_context = _snapshot_threadlocal_context(agent_context)
     termination = loop_control.termination
 
     def consume_resolved(resolved: ResolvedToolCall) -> None:
-        nonlocal termination
         if termination is None:
-            termination = loop_control.observe_tool_result(resolved)
+            disablement = loop_control.observe_tool_result(resolved)
+            if disablement is not None:
+                tool_disablements.append(disablement)
         emit_resolved_tool_call(
             resolved,
             tool_results,
@@ -704,6 +711,13 @@ def execute_tool_calls(
             tool_call_source,
             agent_context=agent_context,
         )
+
+    def skip_disabled_tool(tool_name: str, block_id: str) -> bool:
+        disablement = loop_control.disabled_tools.get(tool_name)
+        if disablement is None:
+            return False
+        tool_results.append(disablement.skipped_tool_result(block_id))
+        return True
 
     def flush_parallel_batch() -> None:
         nonlocal pending_parallel
@@ -727,6 +741,8 @@ def execute_tool_calls(
 
         if termination is not None:
             tool_results.append(termination.skipped_tool_result(block.id))
+            continue
+        if skip_disabled_tool(tool_name, block.id):
             continue
 
         if tool_name == "brain_encode" and tool_calls_made.count("brain_encode") > 1:
@@ -786,12 +802,16 @@ def execute_tool_calls(
                 if termination is not None:
                     tool_results.append(termination.skipped_tool_result(block.id))
                     continue
+                if skip_disabled_tool(tool_name, block.id):
+                    continue
             pending_parallel.append(request)
             continue
 
         flush_parallel_batch()
         if termination is not None:
             tool_results.append(termination.skipped_tool_result(block.id))
+            continue
+        if skip_disabled_tool(tool_name, block.id):
             continue
         consume_resolved(resolve_tool_call(
             request,
@@ -800,7 +820,11 @@ def execute_tool_calls(
         ))
 
     flush_parallel_batch()
-    return ToolExecutionResult(tool_results=tool_results, termination=termination)
+    return ToolExecutionResult(
+        tool_results=tool_results,
+        tool_disablements=tuple(tool_disablements),
+        termination=termination,
+    )
 
 
 async def async_execute_tool_calls(
@@ -825,14 +849,16 @@ async def async_execute_tool_calls(
 ) -> ToolExecutionResult:
     """Execute all tool calls from async runtime code."""
     tool_results: list[dict] = []
+    tool_disablements: list[ToolDisablement] = []
     pending_parallel: list[PendingToolCall] = []
     threadlocal_context = _snapshot_threadlocal_context(agent_context)
     termination = loop_control.termination
 
     async def consume_resolved(resolved: ResolvedToolCall) -> None:
-        nonlocal termination
         if termination is None:
-            termination = loop_control.observe_tool_result(resolved)
+            disablement = loop_control.observe_tool_result(resolved)
+            if disablement is not None:
+                tool_disablements.append(disablement)
         await async_emit_resolved_tool_call(
             resolved,
             tool_results,
@@ -842,6 +868,13 @@ async def async_execute_tool_calls(
             tool_call_source,
             agent_context=agent_context,
         )
+
+    def skip_disabled_tool(tool_name: str, block_id: str) -> bool:
+        disablement = loop_control.disabled_tools.get(tool_name)
+        if disablement is None:
+            return False
+        tool_results.append(disablement.skipped_tool_result(block_id))
+        return True
 
     async def flush_parallel_batch() -> None:
         nonlocal pending_parallel
@@ -866,6 +899,8 @@ async def async_execute_tool_calls(
 
         if termination is not None:
             tool_results.append(termination.skipped_tool_result(block.id))
+            continue
+        if skip_disabled_tool(tool_name, block.id):
             continue
 
         if tool_name == "brain_encode" and tool_calls_made.count("brain_encode") > 1:
@@ -925,12 +960,16 @@ async def async_execute_tool_calls(
                 if termination is not None:
                     tool_results.append(termination.skipped_tool_result(block.id))
                     continue
+                if skip_disabled_tool(tool_name, block.id):
+                    continue
             pending_parallel.append(request)
             continue
 
         await flush_parallel_batch()
         if termination is not None:
             tool_results.append(termination.skipped_tool_result(block.id))
+            continue
+        if skip_disabled_tool(tool_name, block.id):
             continue
         await consume_resolved(await async_resolve_tool_call(
             request,
@@ -939,4 +978,8 @@ async def async_execute_tool_calls(
         ))
 
     await flush_parallel_batch()
-    return ToolExecutionResult(tool_results=tool_results, termination=termination)
+    return ToolExecutionResult(
+        tool_results=tool_results,
+        tool_disablements=tuple(tool_disablements),
+        termination=termination,
+    )
