@@ -81,15 +81,6 @@ def _resource_workspace_path(resource: dict[str, Any]) -> str | None:
     return _workspace_directory_path(path)
 
 
-def _single_allowed_path(scope: dict[str, Any]) -> str | None:
-    allowed_paths = scope.get("allowed_paths")
-    if isinstance(allowed_paths, list) and len(allowed_paths) == 1:
-        path = allowed_paths[0]
-        if isinstance(path, str) and path.strip():
-            return path.strip()
-    return None
-
-
 def project_runtime_workspace_from_ref(workspace_ref: dict[str, Any]) -> ProjectRuntimeWorkspace:
     """Return the agent-facing workspace set represented by a runtime workspace reference."""
 
@@ -188,42 +179,6 @@ def project_runtime_workspace_from_ref(workspace_ref: dict[str, Any]) -> Project
     )
 
 
-def workspace_root_from_ref(workspace_ref: dict[str, Any]) -> str | None:
-    """Return the concrete workspace root represented by a runtime workspace reference."""
-
-    projected = project_runtime_workspace_from_ref(workspace_ref)
-    if projected.workspace_root:
-        return projected.workspace_root
-
-    for key in _WORKSPACE_ROOT_KEYS:
-        path = _workspace_directory_path(workspace_ref.get(key))
-        if path:
-            return path
-
-    snapshot = workspace_ref.get("project_context_snapshot")
-    if isinstance(snapshot, dict):
-        resources = snapshot.get("resources")
-        if isinstance(resources, list) and len(resources) == 1:
-            resource = resources[0]
-            if isinstance(resource, dict):
-                path = _resource_workspace_path(resource)
-                if path:
-                    return path
-        scope = snapshot.get("permission_scope")
-        if isinstance(scope, dict):
-            path = _workspace_directory_path(_single_allowed_path(scope))
-            if path:
-                return path
-
-    scope = workspace_ref.get("project_context_permission_scope")
-    if isinstance(scope, dict):
-        path = _workspace_directory_path(_single_allowed_path(scope))
-        if path:
-            return path
-
-    return None
-
-
 async def default_run_model(
     *,
     user_id: str | None = None,
@@ -264,5 +219,4 @@ __all__ = [
     "default_run_model",
     "default_run_thinking",
     "project_runtime_workspace_from_ref",
-    "workspace_root_from_ref",
 ]

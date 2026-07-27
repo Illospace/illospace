@@ -93,38 +93,6 @@ def test_interrupted_requeue_transition_is_declared_but_scoped(from_status: RunS
         ensure_run_transition(from_status, RunStatus.QUEUED)
 
 
-async def test_restart_resume_skips_completed_steps_from_persisted_cursor(session_factory):
-    calls: list[str] = []
-
-    class TwoStepRecipe:
-        async def execute(self, runtime: RunRuntime) -> RunRecipeResult:
-            first = await runtime.step("first", lambda: calls.append("first") or "first-result")
-            second = await runtime.step("second", lambda: calls.append("second") or "second-result")
-            return RunRecipeResult(output=f"{first}/{second}")
-
-    session = session_factory()
-    store = AsyncAgentRunStore(session)
-    run = await store.create_run(_run_request(thread_id="thread-1", message="resume me"))
-    await store.set_status(run.id, RunStatus.STARTING)
-    await store.set_status(run.id, RunStatus.RUNNING)
-    await store.start_step(run.id, "first")
-    await store.complete_step(run.id, "first", "first-result")
-    await session.commit()
-    await session.close()
-
-    restarted = session_factory()
-    result = await AsyncAgentRunEngine(restarted, recipes={"fast": TwoStepRecipe()}).resume(run.id)
-    await restarted.commit()
-
-    assert result.status == RunStatus.COMPLETED
-    assert calls == ["second"]
-    row = await restarted.get(AgentRunRow, run.id)
-    assert row is not None
-    assert row.metadata_["cursor"]["completed_steps"]["first"]["result"] == "first-result"
-    assert row.metadata_["cursor"]["completed_steps"]["second"]["result"] == "second-result"
-    assert (await _event_types(restarted, run.id)).count("run.step_skipped") == 1
-
-
 async def test_inline_child_is_atomically_owned_before_parent_executes_it(session_factory):
     session = session_factory()
     store = AsyncAgentRunStore(session)
@@ -1263,26 +1231,6 @@ async def test_run_heartbeat_updates_liveness_without_event_noise(session_factor
     assert row.metadata_["runner_heartbeat"]["reason"] == "runner_running"
     assert row.metadata_["runner_heartbeat"]["at"] == now.isoformat()
     assert await _event_types(session, run.id) == before_events
-
-
-async def test_failed_recipe_records_step_and_run_failure(session_factory):
-    class FailingRecipe:
-        async def execute(self, runtime: RunRuntime) -> RunRecipeResult:
-            await runtime.step("explode", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
-            return RunRecipeResult(output="unreachable")
-
-    session = session_factory()
-    result = await AsyncAgentRunEngine(session, recipes={"fast": FailingRecipe()}).run(
-        _run_request(thread_id="thread-1", message="fail")
-    )
-
-    assert result.status == RunStatus.FAILED
-    events = await _event_types(session, result.id)
-    assert "run.step_failed" in events
-    assert "run.failed" in events
-    row = await session.get(AgentRunRow, result.id)
-    assert row is not None
-    assert row.metadata_["last_failed_step"] == "explode"
 
 
 async def test_runtime_cancel_token_stops_run_after_recipe_returns(session_factory):

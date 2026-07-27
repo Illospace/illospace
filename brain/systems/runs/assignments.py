@@ -41,30 +41,6 @@ class EvidenceRequirement:
     def requirement_id(self) -> str:
         return self.id
 
-    def matches(self, artifact: Any) -> bool:
-        if self.artifact_type and _artifact_type(artifact) != self.artifact_type:
-            return False
-        title = _artifact_text_value(artifact, "title")
-        text = _artifact_text_value(artifact, "text")
-        if any(fragment.lower() not in title.lower() for fragment in self.title_contains):
-            return False
-        if any(fragment.lower() not in text.lower() for fragment in self.text_contains):
-            return False
-        payload = _artifact_payload(artifact)
-        if any(not _payload_matches(payload, key, expected) for key, expected in self.payload_contains.items()):
-            return False
-        if self.uri_required and not _artifact_text_value(artifact, "uri"):
-            return False
-        return True
-
-    def matching_artifacts(self, artifacts: list[Any] | tuple[Any, ...] | Any) -> tuple[Any, ...]:
-        return tuple(artifact for artifact in _artifact_tuple(artifacts) if self.matches(artifact))
-
-    def is_satisfied_by(self, artifacts: list[Any] | tuple[Any, ...] | Any) -> bool:
-        if not self.required:
-            return True
-        return len(self.matching_artifacts(artifacts)) >= self.min_count
-
     def to_payload(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -125,15 +101,6 @@ class AcceptanceCriteria:
 
     def required_evidence(self) -> tuple[EvidenceRequirement, ...]:
         return tuple(requirement for requirement in self.evidence_requirements if requirement.required)
-
-    def missing_evidence(self, artifacts: list[Any] | tuple[Any, ...] | Any) -> tuple[EvidenceRequirement, ...]:
-        return tuple(requirement for requirement in self.required_evidence() if not requirement.is_satisfied_by(artifacts))
-
-    def has_required_evidence(self, artifacts: list[Any] | tuple[Any, ...] | Any) -> bool:
-        return not self.missing_evidence(artifacts)
-
-    def satisfied_by(self, artifacts: list[Any] | tuple[Any, ...] | Any) -> bool:
-        return self.has_required_evidence(artifacts)
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -301,12 +268,6 @@ class WorkerAssignment:
         ]
         return tuple(dict.fromkeys(str(value) for value in values if value))
 
-    def missing_evidence(self, artifacts: list[Any] | tuple[Any, ...] | Any) -> tuple[EvidenceRequirement, ...]:
-        return tuple(requirement for requirement in self.required_evidence() if not requirement.is_satisfied_by(artifacts))
-
-    def has_required_evidence(self, artifacts: list[Any] | tuple[Any, ...] | Any) -> bool:
-        return not self.missing_evidence(artifacts)
-
     def to_payload(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -374,64 +335,6 @@ class WorkerAssignment:
             acceptance_criteria=AcceptanceCriteria.from_payload(criteria_payload),
             metadata=dict(payload.get("metadata") or {}),
         )
-
-
-def _artifact_tuple(artifacts: list[Any] | tuple[Any, ...] | Any) -> tuple[Any, ...]:
-    if artifacts is None:
-        return ()
-    if isinstance(artifacts, (list, tuple)):
-        return tuple(artifacts)
-    return (artifacts,)
-
-
-def _artifact_type(artifact: Any) -> str | None:
-    value = _artifact_value(artifact, "artifact_type")
-    if value is None:
-        value = _artifact_value(artifact, "type")
-    value = getattr(value, "value", value)
-    return _optional_text(value)
-
-
-def _artifact_payload(artifact: Any) -> dict[str, Any]:
-    value = _artifact_value(artifact, "payload")
-    return dict(value) if isinstance(value, Mapping) else {}
-
-
-def _artifact_text_value(artifact: Any, key: str) -> str:
-    return str(_artifact_value(artifact, key) or "")
-
-
-def _artifact_value(artifact: Any, key: str) -> Any:
-    if isinstance(artifact, Mapping):
-        if key in artifact:
-            return artifact.get(key)
-        if key == "artifact_type":
-            return artifact.get("type")
-        return None
-    return getattr(artifact, key, None)
-
-
-def _payload_matches(payload: Mapping[str, Any], key: str, expected: Any) -> bool:
-    actual = _payload_lookup(payload, key)
-    return _value_matches(actual, expected)
-
-
-def _payload_lookup(payload: Mapping[str, Any], key: str) -> Any:
-    current: Any = payload
-    for part in str(key).split("."):
-        if isinstance(current, Mapping) and part in current:
-            current = current[part]
-        else:
-            return None
-    return current
-
-
-def _value_matches(actual: Any, expected: Any) -> bool:
-    if isinstance(expected, (list, tuple, set, frozenset)):
-        if isinstance(actual, (list, tuple, set, frozenset)):
-            return all(item in actual for item in expected)
-        return actual in expected
-    return actual == expected
 
 
 def _dedupe_requirements(requirements: tuple[EvidenceRequirement, ...]) -> tuple[EvidenceRequirement, ...]:

@@ -49,7 +49,6 @@ class _Store:
         self.child_initial_statuses = []
         self.runs = {}
         self.children_by_step = {}
-        self.completed_steps = {}
         self.statuses = {}
         self.session = self
 
@@ -151,46 +150,6 @@ class _Store:
 
     def drain_steering(self, run_id):
         return _AwaitableValue([])
-
-    def step_completed(self, run_id, step_key):
-        return _AwaitableValue(step_key in self.completed_steps.get(run_id, {}))
-
-    def step_result(self, run_id, step_key):
-        return _AwaitableValue(self.completed_steps.get(run_id, {}).get(step_key))
-
-    def start_step(self, run_id, step_key):
-        from brain.systems.runs.events import run_event
-
-        self.append_event(run_event(run_id, "run.step_started", {"step": step_key, "step_key": step_key}, root_run_id=42))
-        return _AwaitableValue(None)
-
-    def complete_step(self, run_id, step_key, result=None):
-        from brain.systems.runs.events import run_event
-
-        self.completed_steps.setdefault(run_id, {})[step_key] = result
-        self.append_event(
-            run_event(
-                run_id,
-                "run.step_completed",
-                {"step": step_key, "step_key": step_key, "result": result},
-                root_run_id=42,
-            )
-        )
-        return _AwaitableValue(result)
-
-    def fail_step(self, run_id, step_key, error):
-        from brain.systems.runs.events import run_event
-
-        self.append_event(
-            run_event(run_id, "run.step_failed", {"step": step_key, "step_key": step_key, "error": error}, root_run_id=42)
-        )
-        return _AwaitableValue(None)
-
-    def skip_step(self, run_id, step_key):
-        from brain.systems.runs.events import run_event
-
-        self.append_event(run_event(run_id, "run.step_skipped", {"step": step_key, "step_key": step_key}, root_run_id=42))
-        return _AwaitableValue(None)
 
     def require_run(self, run_id):
         from brain.systems.runs.status import RunStatus
@@ -1276,38 +1235,9 @@ async def test_runtime_drain_steering_can_use_isolated_durable_drain():
     assert [event.payload["content"] for event in received] == ["Use the smaller repro.", "Focus on setup steps."]
 
 
-def test_workspace_root_from_ref_uses_thread_project_context_snapshot():
-    from brain.systems.runs.recipes.shared import project_runtime_workspace_from_ref, workspace_root_from_ref
+def test_project_runtime_workspace_from_ref_uses_thread_project_context_snapshot():
+    from brain.systems.runs.recipes.shared import project_runtime_workspace_from_ref
 
-    assert workspace_root_from_ref({"workspace_root": "/tmp/direct"}) == "/tmp/direct"
-    assert workspace_root_from_ref(
-        {
-            "project_context_snapshot": {
-                "resources": [{"kind": "repo", "path": "/tmp/ideas/idea-1/project/repo"}],
-            }
-        }
-    ) == "/tmp/ideas/idea-1/project/repo"
-    assert (
-        workspace_root_from_ref(
-            {
-                "workspace_root": "/tmp/ideas/idea-1/uploads/agent.md",
-                "resolved_workspace_root": "/tmp/ideas/idea-1/uploads/agent.md",
-                "project_context_snapshot": {
-                    "resources": [{"kind": "file", "path": "/tmp/ideas/idea-1/uploads/agent.md"}],
-                    "permission_scope": {"allowed_paths": ["/tmp/ideas/idea-1/uploads/agent.md"]},
-                },
-                "project_context_permission_scope": {"allowed_paths": ["/tmp/ideas/idea-1/uploads/agent.md"]},
-            }
-        )
-        is None
-    )
-    assert workspace_root_from_ref(
-        {
-            "project_context_permission_scope": {
-                "allowed_paths": ["/tmp/ideas/idea-1/project/repo"],
-            }
-        }
-    ) == "/tmp/ideas/idea-1/project/repo"
     runtime_workspace = project_runtime_workspace_from_ref(
         {
             "workspaces": [

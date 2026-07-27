@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
-
 def test_worker_assignment_roundtrips_scope_and_builds_tool_scope():
     from brain.systems.runs.assignments import EvidenceRequirement, WorkerAssignment
 
@@ -28,58 +25,6 @@ def test_worker_assignment_roundtrips_scope_and_builds_tool_scope():
     assert tool_scope.allowed_files == ("README.md", "docs/*.md")
     assert WorkerAssignment.from_payload(restored) is restored
     assert WorkerAssignment.from_payload(None, default_id="fallback").id == "fallback"
-
-
-def test_acceptance_criteria_checks_domain_and_row_artifacts():
-    from brain.systems.runs.assignments import AcceptanceCriteria, EvidenceRequirement
-    from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
-
-    criteria = AcceptanceCriteria(
-        evidence_requirements=(
-            EvidenceRequirement(artifact_type="file_observation", payload_contains={"path": "README.md"}),
-            EvidenceRequirement(artifact_type="worker_result", text_contains=("setup",)),
-        )
-    )
-    domain_artifact = AgentRunArtifact(
-        run_id=7,
-        artifact_type=ArtifactType.FILE_OBSERVATION,
-        title="README observation",
-        payload={"path": "README.md"},
-        text="README contents",
-    )
-    row_artifact = SimpleNamespace(
-        run_id=8,
-        artifact_type="worker_result",
-        title="Worker result",
-        payload={"status": "completed"},
-        text="Setup steps verified",
-        uri=None,
-    )
-
-    assert criteria.has_required_evidence((domain_artifact, row_artifact)) is True
-    assert criteria.missing_evidence((domain_artifact,)) == (criteria.evidence_requirements[1],)
-
-
-def test_worker_assignment_reports_missing_required_evidence_from_artifact_rows():
-    from brain.systems.runs.assignments import AcceptanceCriteria, EvidenceRequirement, WorkerAssignment
-
-    assignment = WorkerAssignment(
-        id="verify",
-        objective="Verify outputs",
-        acceptance_criteria=AcceptanceCriteria(
-            evidence_requirements=(
-                EvidenceRequirement(
-                    artifact_type="verifier_evidence",
-                    payload_contains={"passed": True, "details.worker_count": 2},
-                ),
-            )
-        ),
-    )
-    wrong_row = {"artifact_type": "verifier_evidence", "payload": {"passed": False, "details": {"worker_count": 2}}}
-    right_row = {"type": "verifier_evidence", "payload": {"passed": True, "details": {"worker_count": 2}}}
-
-    assert [requirement.id for requirement in assignment.missing_evidence((wrong_row,))] == ["verifier_evidence"]
-    assert assignment.has_required_evidence((right_row,)) is True
 
 
 def test_assignment_from_payload_accepts_nested_scope_and_acceptance_aliases():
