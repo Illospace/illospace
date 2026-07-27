@@ -24,19 +24,21 @@ RUN_TIMEOUT_SECONDS = 840
 POLL_INTERVAL_SECONDS = 2.0
 
 
-def _timestamp_rendering_instruction(display_timezone: str) -> str:
-    timezone_label = "ET" if display_timezone == "America/New_York" else display_timezone
-    example = (
-        " Example: 07-25 09:03 ET (13:03 UTC)."
-        if display_timezone == "America/New_York"
-        else ""
+def _timestamp_rendering_contract(
+    display_timezone: str,
+    *,
+    scan_started_at: datetime,
+) -> str:
+    rendered_scan_start = runtime_display.format_display_timestamp(
+        scan_started_at,
+        display_timezone,
     )
     return (
         f"\ndisplay-timezone: {display_timezone}\n"
+        f"scan-started-at: {rendered_scan_start}\n"
         "timestamp-rendering: Render EVERY timestamp in the final alert in "
-        f"{display_timezone} ({timezone_label}) alongside its source UTC time, never as UTC-only. "
-        f"Use `MM-DD HH:MM {timezone_label} (HH:MM UTC)` so the underlying AWS evidence remains "
-        f"reconcilable.{example}"
+        f"{display_timezone} alongside its source UTC time, never as UTC-only. "
+        "The final Slack posting gate rejects UTC-only timestamp lines."
     )
 
 
@@ -79,8 +81,9 @@ async def spawn_health_scan_run(*, now: datetime | None = None) -> int:
 
         actor = await _skill_actor(uow.session, skill.skill_installation_id)
         display_config = await runtime_display.async_get_runtime_display_config(uow.session)
-        display_instruction = _timestamp_rendering_instruction(
+        display_instruction = _timestamp_rendering_contract(
             display_config.display_timezone,
+            scan_started_at=clock,
         )
         last_success_started_at = await uow.session.scalar(
             select(SchedulerRun.started_at)
@@ -101,7 +104,13 @@ async def spawn_health_scan_run(*, now: datetime | None = None) -> int:
                 last_success_started_at = last_success_started_at.astimezone(timezone.utc)
             if last_success_started_at < clock - timedelta(minutes=70):
                 coverage_since = max(last_success_started_at, clock - timedelta(hours=6))
-                coverage_line = f"\ncoverage-since: {coverage_since.isoformat()}"
+                coverage_line = (
+                    "\ncoverage-since: "
+                    + runtime_display.format_display_timestamp(
+                        coverage_since,
+                        display_config.display_timezone,
+                    )
+                )
 
         result = await admit_work(
             uow.session,
@@ -136,6 +145,8 @@ async def spawn_health_scan_run(*, now: datetime | None = None) -> int:
                         "thinking_tier": skill.thinking_tier,
                         "skill_name": SKILL_NAME,
                         "slash_skill_names": [SKILL_NAME],
+                        "display_timezone": display_config.display_timezone,
+                        "enforce_display_timezone_on_slack": True,
                     },
                 },
                 policy={

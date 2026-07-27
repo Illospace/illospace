@@ -26,6 +26,7 @@ from brain.systems.slack.provider_alert_posting import post_provider_alert
 from brain.systems.slack.thread_mute import read_thread_post_mute
 from brain.systems.slack.uploads import slack_image_upload_from_data_url
 
+
 def _execution_metadata() -> dict[str, Any]:
     metadata = getattr(_agent_context, "execution_metadata", None)
     return metadata if isinstance(metadata, dict) else {}
@@ -83,6 +84,71 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "n", "off"}:
             return False
     return bool(value)
+
+
+_PERSISTENCE_CLAIM_PATTERNS = (
+    re.compile(r"\b(?:saved|persisted|stored|remembered)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:i|we)\s*(?:'ll|will)\s+(?:always\s+)?"
+        r"(?:remember|display|show|render|use)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:from now on|going forward)\b", re.IGNORECASE),
+)
+_NEGATED_CLAIM_PREFIX = re.compile(
+    r"(?:\bnot|\bnever|\bno|\bnothing was|\bwasn't|\bfailed to|\bunable to|"
+    r"\bcannot|\bcan't|\bcouldn't|\bcould not)(?:\s+\w+){0,2}\s*$",
+    re.IGNORECASE,
+)
+
+
+def _makes_persistence_claim(body: str) -> bool:
+    """Recognize positive durable-setting claims while allowing honest failures."""
+
+    text = str(body or "")
+    for pattern in _PERSISTENCE_CLAIM_PATTERNS:
+        for match in pattern.finditer(text):
+            prefix = text[max(0, match.start() - 24) : match.start()]
+            if _NEGATED_CLAIM_PREFIX.search(prefix):
+                continue
+            return True
+    return False
+
+
+def _current_run_id() -> object:
+    metadata = _execution_metadata()
+    run = getattr(_agent_context, "run", None)
+    return (
+        metadata.get("run_id")
+        or getattr(_agent_context, "run_id", None)
+        or getattr(run, "run_id", None)
+    )
+
+
+async def _has_preference_write_evidence() -> bool:
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.systems.runtime_settings.preferences import (
+        async_has_runtime_preference_write_evidence,
+    )
+
+    org_id = (
+        getattr(_agent_context, "org_id", None)
+        or _execution_metadata().get("org_id")
+    )
+    async with UnitOfWork() as uow:
+        return await async_has_runtime_preference_write_evidence(
+            uow.session,
+            run_id=_current_run_id(),
+            org_id=org_id,
+        )
+
+
+def _enforced_display_timezone() -> str | None:
+    metadata = _execution_metadata()
+    if metadata.get("enforce_display_timezone_on_slack") is not True:
+        return None
+    timezone_name = str(metadata.get("display_timezone") or "").strip()
+    return timezone_name or None
 
 
 _SLACK_EMOJI_NAME_PATTERN = re.compile(r"^[a-z0-9_+\-]{1,80}$")
@@ -393,6 +459,59 @@ async def _handle_post_slack_reply(
         return json.dumps({"error": str(exc)})
     if not text.strip() and image_upload is None:
         return json.dumps({"error": "post_slack_reply requires body or image_data"})
+
+    if _makes_persistence_claim(text):
+        try:
+            write_verified = await _has_preference_write_evidence()
+        except Exception:
+            write_verified = False
+        if not write_verified:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "posted": False,
+                    "error": "persistence_claim_requires_write_receipt",
+                    "detail": (
+                        "A durable-preference confirmation requires a committed "
+                        "manage_runtime_preferences write in this AgentRun."
+                    ),
+                    "retryable": True,
+                }
+            )
+
+    display_timezone = _enforced_display_timezone()
+    if display_timezone:
+        from brain.systems.runtime_settings.display import utc_only_timestamp_lines
+
+        try:
+            invalid_timestamp_lines = utc_only_timestamp_lines(
+                text,
+                display_timezone,
+            )
+        except Exception as exc:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "posted": False,
+                    "error": "display_timezone_validator_unavailable",
+                    "detail": str(exc),
+                    "retryable": True,
+                }
+            )
+        if invalid_timestamp_lines:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "posted": False,
+                    "error": "display_timezone_validation_failed",
+                    "detail": (
+                        "Every UTC timestamp in this AWS health alert must be paired "
+                        f"with its {display_timezone} rendering."
+                    ),
+                    "invalid_lines": list(invalid_timestamp_lines),
+                    "retryable": True,
+                }
+            )
 
     # Coordinator-side generators should apply the same checked-in map while
     # composing summaries.  This posting-path gate is still the authority, so a

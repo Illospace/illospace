@@ -390,6 +390,155 @@ def test_channel_monitor_declines_preference_without_write_target():
     assert "Never imply persistence" in run_message
 
 
+@pytest.mark.asyncio
+async def test_preference_claim_gate_requires_committed_same_run_write(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from brain.systems.runs import actions as action_audit
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.composition import _get_tool_handlers
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
+    from brain.systems.runtime_settings import display as display_settings
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
+    stored: dict[str, str] = {}
+    state = {"fail_writes": False, "write_commits": 0}
+    user = SimpleNamespace(
+        id="user1",
+        org_id="org1",
+        role="owner",
+        name="Owner",
+        email="owner@example.com",
+    )
+
+    class _Rows:
+        def all(self):
+            return []
+
+    class _Session:
+        def __init__(self):
+            self.pending: dict[str, str] = {}
+
+        async def get(self, _model, _key):
+            return user
+
+        async def scalars(self, _statement):
+            return _Rows()
+
+    class _UnitOfWork:
+        async def __aenter__(self):
+            self.session = _Session()
+            return self
+
+        async def __aexit__(self, exc_type, _exc, _tb):
+            if exc_type is None and self.session.pending:
+                stored.update(self.session.pending)
+                state["write_commits"] += 1
+            return False
+
+    async def _read(_session, key):
+        return stored.get(key)
+
+    async def _write(session, key, value):
+        if state["fail_writes"]:
+            raise RuntimeError("runtime display write failed")
+        session.pending[key] = value
+
+    class _SlackClient:
+        def __init__(self):
+            self.posts = []
+
+        async def post_message(self, **kwargs):
+            self.posts.append(kwargs)
+            return {"ok": True, "channel": kwargs["channel"], "ts": "1785000000.000001"}
+
+    client = _SlackClient()
+
+    async def _slack_client():
+        return client
+
+    monkeypatch.setattr(
+        "brain.platform.db.repositories.unit_of_work.UnitOfWork",
+        _UnitOfWork,
+    )
+    monkeypatch.setattr(display_settings, "_async_read_runtime_config_value", _read)
+    monkeypatch.setattr(display_settings, "_async_write_runtime_config_value", _write)
+    monkeypatch.setattr(action_audit, "record_action_manifest", lambda _manifest: None)
+    monkeypatch.setattr(
+        action_audit,
+        "complete_action_manifest",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        _slack_client,
+    )
+
+    monitored = _channel_monitor_payload()
+    monitored["text"] = "Please always show these alert times in Eastern."
+    intake = build_slack_work_intake_payload(
+        org_id="org1",
+        authority_user_id="user1",
+        payload=monitored,
+    )
+    metadata = dict(intake["payload"]["metadata"])
+    metadata.update({"run_id": 513, "org_id": "org1"})
+    manage_preferences = _get_tool_handlers()["manage_runtime_preferences"]
+
+    with bind_agent_context(
+        {
+            "user_id": "user1",
+            "org_id": "org1",
+            "execution_metadata": metadata,
+            "slack_trigger": metadata["slack_trigger"],
+        }
+    ):
+        direct = json.loads(
+            await _handle_post_slack_reply(
+                body="Yes, I'll remember to show alert times in Eastern."
+            )
+        )
+        assert direct["error"] == "persistence_claim_requires_write_receipt"
+        assert direct["posted"] is False
+        assert client.posts == []
+
+        state["fail_writes"] = True
+        with pytest.raises(RuntimeError, match="runtime display write failed"):
+            await manage_preferences(
+                action="set",
+                setting="display_timezone",
+                value="Eastern",
+            )
+        failed_confirmation = json.loads(
+            await _handle_post_slack_reply(
+                body="Saved: alerts will render Eastern alongside UTC."
+            )
+        )
+        assert failed_confirmation["error"] == "persistence_claim_requires_write_receipt"
+        assert state["write_commits"] == 0
+        assert client.posts == []
+
+        state["fail_writes"] = False
+        saved = await manage_preferences(
+            action="set",
+            setting="display_timezone",
+            value="Eastern",
+        )
+        assert saved["status"] == "saved"
+        assert saved["write_receipt"]["run_id"] == 513
+        assert state["write_commits"] == 1
+        assert json.loads(stored["runtime_display"])["write_receipts"] == [
+            saved["write_receipt"]
+        ]
+
+        committed_confirmation = json.loads(
+            await _handle_post_slack_reply(body=saved["confirmation"])
+        )
+        assert committed_confirmation["ok"] is True
+        assert len(client.posts) == 1
+
+
 def test_build_payload_for_mention_still_forces_reply():
     from brain.systems.slack.triggers import build_slack_work_intake_payload
 

@@ -166,30 +166,45 @@ async def test_runtime_preference_tool_saves_known_slack_preference_and_names_st
     import json
     from types import SimpleNamespace
 
-    from brain.app.mcp.server import tool_manage_runtime_preferences
     from brain.systems.runtime_settings import display as display_settings
+    from brain.systems.runtime_settings.preferences import (
+        async_manage_runtime_preferences,
+        authenticate_runtime_preference_principal,
+    )
 
     stored: dict[str, str] = {}
-    user = SimpleNamespace(id="user-1", org_id="org-1", role="owner")
+    user = SimpleNamespace(
+        id="user-1",
+        org_id="org-1",
+        role="owner",
+        name="Owner",
+        email="owner@example.com",
+    )
     session = MagicMock()
     session.get = AsyncMock(return_value=user)
-    uow = MagicMock()
-    uow.session = session
-    uow.__aenter__ = AsyncMock(return_value=uow)
-    uow.__aexit__ = AsyncMock(return_value=False)
 
     async def fake_write(_session, key, value):
         stored[key] = value
 
     monkeypatch.setattr(display_settings, "_async_write_runtime_config_value", fake_write)
-    monkeypatch.setattr("brain.app.mcp.server.UnitOfWork", lambda: uow)
+    monkeypatch.setattr(
+        display_settings,
+        "_async_read_runtime_config_value",
+        AsyncMock(side_effect=lambda _session, key: stored.get(key)),
+    )
 
-    result = await tool_manage_runtime_preferences(
+    principal = await authenticate_runtime_preference_principal(
+        session,
+        user_id="user-1",
+        org_id="org-1",
+    )
+    result = await async_manage_runtime_preferences(
+        session,
+        principal=principal,
+        run_id=513,
         action="set",
         setting="display_timezone",
         value="Eastern",
-        user_id="user-1",
-        org_id="org-1",
     )
 
     assert result["status"] == "saved"
@@ -203,33 +218,97 @@ async def test_runtime_preference_tool_saves_known_slack_preference_and_names_st
     assert result["confirmation"].startswith(
         "Saved: alerts will render America/New_York alongside UTC"
     )
-    assert json.loads(stored["runtime_display"]) == {
-        "display_timezone": "America/New_York",
-    }
+    receipt = result["write_receipt"]
+    assert receipt["kind"] == "runtime_preference_write_receipt"
+    assert receipt["run_id"] == 513
+    assert receipt["org_id"] == "org-1"
+    persisted = json.loads(stored["runtime_display"])
+    assert persisted["display_timezone"] == "America/New_York"
+    assert persisted["write_receipts"] == [receipt]
 
 
 @pytest.mark.asyncio
 async def test_runtime_preference_tool_declines_unknown_preference_without_promising(monkeypatch):
-    from brain.app.mcp.server import tool_manage_runtime_preferences
+    from brain.app.api.authorization import human_identity
+    from brain.systems.runtime_settings.preferences import async_manage_runtime_preferences
 
-    uow = MagicMock()
-    uow.session = MagicMock()
-    uow.__aenter__ = AsyncMock(return_value=uow)
-    uow.__aexit__ = AsyncMock(return_value=False)
-    monkeypatch.setattr("brain.app.mcp.server.UnitOfWork", lambda: uow)
-
-    result = await tool_manage_runtime_preferences(
+    principal = human_identity(
+        {
+            "id": "user-1",
+            "org_id": "org-1",
+            "role": "owner",
+            "name": "Owner",
+        }
+    )
+    result = await async_manage_runtime_preferences(
+        MagicMock(),
+        principal=principal,
+        run_id=513,
         action="set",
         setting="alert_tone",
         value="casual",
-        user_id="user-1",
-        org_id="org-1",
     )
 
     assert result["status"] == "unsupported"
     assert result["saved"] is False
     assert "no way to make it stick" in result["detail"]
     assert "display_timezone" in result["supported_settings"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_preference_tool_is_absent_from_unauthenticated_raw_mcp():
+    from brain.app.mcp.server import TOOLS, async_handle_request
+
+    assert "manage_runtime_preferences" not in TOOLS
+    response = await async_handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "manage_runtime_preferences",
+                "arguments": {
+                    "action": "set",
+                    "setting": "display_timezone",
+                    "value": "UTC",
+                    "user_id": "spoofed-owner",
+                    "org_id": "spoofed-org",
+                },
+            },
+        }
+    )
+
+    assert response["result"]["isError"] is True
+    assert "Unknown tool" in response["result"]["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("org_id", [None, "org-2"])
+async def test_runtime_preference_principal_requires_exact_workspace(org_id):
+    from types import SimpleNamespace
+
+    from brain.systems.runtime_settings.preferences import (
+        RuntimePreferenceAccessError,
+        authenticate_runtime_preference_principal,
+    )
+
+    session = MagicMock()
+    session.get = AsyncMock(
+        return_value=SimpleNamespace(
+            id="user-1",
+            org_id="org-1",
+            role="owner",
+            name="Owner",
+            email="owner@example.com",
+        )
+    )
+
+    with pytest.raises(RuntimePreferenceAccessError):
+        await authenticate_runtime_preference_principal(
+            session,
+            user_id="user-1",
+            org_id=org_id,
+        )
 
 
 @pytest.mark.asyncio
