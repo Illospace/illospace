@@ -90,7 +90,11 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
         "timezone": "UTC",
         "default_payload": {
             "name": "Uwear Staging Promotion PR",
-            "description": "Hourly staging-to-main promotion pull request reconciliation",
+            "description": (
+                "Hourly staging-to-main promotion pull request reconciliation; "
+                "wakes the promotion-readiness cycle when the promotable SHA "
+                "pair moves past its last completed evaluation"
+            ),
             "action_manifest": ["create_github_pull_request"],
         },
         "task_contract": {
@@ -98,7 +102,8 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
             "allowed_actions": ["scheduler.run", "create_github_pull_request"],
             "output_channel": "scheduler",
             "success_criteria": [
-                "Each configured repository with staging ahead has one open promotion pull request"
+                "Each configured repository with staging ahead has one open promotion pull request",
+                "The readiness cycle is woken when the promotable SHA pair has moved",
             ],
         },
         "priority": 90,

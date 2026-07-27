@@ -3275,3 +3275,130 @@ def test_cycle_run_model_policy_ignores_live_cycle_when_snapshot_pins_a_model():
     }
 
     assert service._cycle_run_model_policy(cycle, run) == {"thinking": "low"}
+
+
+@pytest.mark.asyncio
+async def test_wake_cycle_now_pulls_next_run_forward(
+    monkeypatch,
+    cycle_scheduler_session,
+):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    cycle = Cycle(
+        id=9,
+        user_id=str(uuid4()),
+        org_id=None,
+        name="Promotion Readiness",
+        prompt="Evaluate promotion readiness.",
+        schedule_expr="0 11 * * 1-5",
+        timezone="America/New_York",
+        enabled=True,
+        next_run_at=now + timedelta(days=1),
+    )
+    cycle_scheduler_session.add(cycle)
+    await cycle_scheduler_session.flush()
+    monkeypatch.setattr(
+        service,
+        "UnitOfWork",
+        lambda: _SharedSessionUnitOfWork(cycle_scheduler_session),
+    )
+
+    disposition = await service.async_wake_cycle_now(name="Promotion Readiness")
+
+    assert disposition == "woken"
+    assert cycle.next_run_at is not None
+    assert cycle.next_run_at <= datetime.now(timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_wake_cycle_now_skips_when_run_in_flight(
+    monkeypatch,
+    cycle_scheduler_session,
+):
+    cycle, _active_run, scheduled_for = await _seed_due_cycle_with_active_run(
+        cycle_scheduler_session
+    )
+    future = datetime.now(timezone.utc) + timedelta(hours=2)
+    cycle.next_run_at = future
+    await cycle_scheduler_session.flush()
+    monkeypatch.setattr(
+        service,
+        "UnitOfWork",
+        lambda: _SharedSessionUnitOfWork(cycle_scheduler_session),
+    )
+
+    disposition = await service.async_wake_cycle_now(name=cycle.name)
+
+    assert disposition == "run_in_flight"
+    assert cycle.next_run_at == future
+
+
+@pytest.mark.asyncio
+async def test_wake_cycle_now_reports_already_pending_and_missing(
+    monkeypatch,
+    cycle_scheduler_session,
+):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    pending = Cycle(
+        id=21,
+        user_id=str(uuid4()),
+        org_id=None,
+        name="Pending Cycle",
+        prompt="p",
+        schedule_expr="0 11 * * *",
+        timezone="UTC",
+        enabled=True,
+        next_run_at=now - timedelta(minutes=5),
+    )
+    disabled = Cycle(
+        id=22,
+        user_id=str(uuid4()),
+        org_id=None,
+        name="Disabled Cycle",
+        prompt="p",
+        schedule_expr="0 11 * * *",
+        timezone="UTC",
+        enabled=False,
+        next_run_at=now + timedelta(hours=1),
+    )
+    cycle_scheduler_session.add_all([pending, disabled])
+    await cycle_scheduler_session.flush()
+    monkeypatch.setattr(
+        service,
+        "UnitOfWork",
+        lambda: _SharedSessionUnitOfWork(cycle_scheduler_session),
+    )
+
+    assert await service.async_wake_cycle_now(name="Pending Cycle") == "already_pending"
+    assert pending.next_run_at == now - timedelta(minutes=5)
+    assert await service.async_wake_cycle_now(name="Disabled Cycle") == "not_found"
+    assert await service.async_wake_cycle_now(name="No Such Cycle") == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_wake_cycle_now_refuses_ambiguous_names(
+    monkeypatch,
+    cycle_scheduler_session,
+):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    for cycle_id in (31, 32):
+        cycle_scheduler_session.add(
+            Cycle(
+                id=cycle_id,
+                user_id=str(uuid4()),
+                org_id=None,
+                name="Twin Cycle",
+                prompt="p",
+                schedule_expr="0 11 * * *",
+                timezone="UTC",
+                enabled=True,
+                next_run_at=now + timedelta(hours=1),
+            )
+        )
+    await cycle_scheduler_session.flush()
+    monkeypatch.setattr(
+        service,
+        "UnitOfWork",
+        lambda: _SharedSessionUnitOfWork(cycle_scheduler_session),
+    )
+
+    assert await service.async_wake_cycle_now(name="Twin Cycle") == "ambiguous"

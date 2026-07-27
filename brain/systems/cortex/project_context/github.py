@@ -586,6 +586,19 @@ async def _async_resolve_repo_ref(
     }
 
 
+async def async_get_repo_branch_head(
+    slug: str,
+    branch: str,
+    *,
+    token: str | None = None,
+) -> str:
+    """Resolve a branch name to its current head commit SHA."""
+
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        resolved = await _async_resolve_repo_ref(client, slug, branch, token=token)
+    return resolved["resolved_ref"]
+
+
 async def async_get_repo_file(
     slug: str,
     path: str,
