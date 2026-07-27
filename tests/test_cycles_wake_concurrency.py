@@ -458,7 +458,12 @@ async def test_wake_against_held_scheduler_claim_yields_one_run(
     cycle = await wake_workspace.add_cycle(
         name=name,
         next_run_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        schedule_expr=EVERY_MINUTE,
+        # Daily, so the backstop the scheduler recomputes is still hours away
+        # when the wake finally gets the row. A minute-granularity cron would
+        # let that backstop fall due first on a slow runner, at which point
+        # already_pending is the honest answer and this test is asserting the
+        # wrong thing rather than catching a regression.
+        schedule_expr="0 11 * * *",
     )
 
     scheduler = asyncio.create_task(service.async_schedule_due_cycles_once(limit=50))
