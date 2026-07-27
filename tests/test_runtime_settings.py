@@ -168,6 +168,7 @@ async def test_runtime_preference_tool_saves_known_slack_preference_and_names_st
 
     from brain.systems.runtime_settings import display as display_settings
     from brain.systems.runtime_settings.preferences import (
+        RuntimePreferencePrincipal,
         async_manage_runtime_preferences,
         authenticate_runtime_preference_principal,
     )
@@ -197,6 +198,11 @@ async def test_runtime_preference_tool_saves_known_slack_preference_and_names_st
         session,
         user_id="user-1",
         org_id="org-1",
+    )
+    assert principal == RuntimePreferencePrincipal(
+        user_id="user-1",
+        org_id="org-1",
+        role="owner",
     )
     result = await async_manage_runtime_preferences(
         session,
@@ -228,17 +234,16 @@ async def test_runtime_preference_tool_saves_known_slack_preference_and_names_st
 
 
 @pytest.mark.asyncio
-async def test_runtime_preference_tool_declines_unknown_preference_without_promising(monkeypatch):
-    from brain.app.api.authorization import human_identity
-    from brain.systems.runtime_settings.preferences import async_manage_runtime_preferences
+async def test_runtime_preference_tool_declines_unknown_preference_without_promising():
+    from brain.systems.runtime_settings.preferences import (
+        RuntimePreferencePrincipal,
+        async_manage_runtime_preferences,
+    )
 
-    principal = human_identity(
-        {
-            "id": "user-1",
-            "org_id": "org-1",
-            "role": "owner",
-            "name": "Owner",
-        }
+    principal = RuntimePreferencePrincipal(
+        user_id="user-1",
+        org_id="org-1",
+        role="owner",
     )
     result = await async_manage_runtime_preferences(
         MagicMock(),
@@ -308,6 +313,32 @@ async def test_runtime_preference_principal_requires_exact_workspace(org_id):
             session,
             user_id="user-1",
             org_id=org_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_preference_principal_requires_owner_or_admin():
+    from types import SimpleNamespace
+
+    from brain.systems.runtime_settings.preferences import (
+        RuntimePreferenceAccessError,
+        authenticate_runtime_preference_principal,
+    )
+
+    session = MagicMock()
+    session.get = AsyncMock(
+        return_value=SimpleNamespace(
+            id="user-1",
+            org_id="org-1",
+            role="member",
+        )
+    )
+
+    with pytest.raises(RuntimePreferenceAccessError, match="owner or admin"):
+        await authenticate_runtime_preference_principal(
+            session,
+            user_id="user-1",
+            org_id="org-1",
         )
 
 

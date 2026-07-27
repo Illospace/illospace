@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.app.api.authorization import PrincipalIdentity, human_identity
 from brain.platform.db.models.agent_run import AgentRunEventRow
 from brain.platform.db.models.org import User
 
@@ -29,12 +29,22 @@ class RuntimePreferenceAccessError(PermissionError):
     pass
 
 
+@dataclass(frozen=True)
+class RuntimePreferencePrincipal:
+    """Authenticated human authority for installation-wide preferences."""
+
+    user_id: str
+    org_id: str
+    role: str
+    principal_type: str = "human"
+
+
 async def authenticate_runtime_preference_principal(
     session: AsyncSession,
     *,
     user_id: object,
     org_id: object,
-) -> PrincipalIdentity:
+) -> RuntimePreferencePrincipal:
     """Resolve trusted AgentRun identity into an authenticated owner/admin principal."""
 
     normalized_user_id = str(user_id or "").strip()
@@ -51,15 +61,10 @@ async def authenticate_runtime_preference_principal(
     role = str(getattr(user, "role", "") or "").strip().lower()
     if role not in {"owner", "admin"}:
         raise RuntimePreferenceAccessError("owner or admin authority is required")
-    return human_identity(
-        {
-            "id": str(user.id),
-            "name": str(getattr(user, "name", "") or ""),
-            "email": str(getattr(user, "email", "") or ""),
-            "role": role,
-            "org_id": normalized_org_id,
-            "org_name": "",
-        }
+    return RuntimePreferencePrincipal(
+        user_id=str(user.id),
+        org_id=normalized_org_id,
+        role=role,
     )
 
 
@@ -76,7 +81,7 @@ def _denied_result(detail: str) -> dict[str, Any]:
 async def async_manage_runtime_preferences(
     session: AsyncSession,
     *,
-    principal: PrincipalIdentity,
+    principal: RuntimePreferencePrincipal,
     run_id: int | None,
     action: str = "get",
     setting: str | None = None,
@@ -87,7 +92,7 @@ async def async_manage_runtime_preferences(
     if (
         principal.principal_type != "human"
         or principal.role not in {"owner", "admin"}
-        or not principal.id
+        or not principal.user_id
         or not principal.org_id
     ):
         return _denied_result("owner or admin authority is required")
@@ -114,8 +119,8 @@ async def async_manage_runtime_preferences(
         receipt = RuntimePreferenceWriteReceipt(
             receipt_id=secrets.token_urlsafe(24),
             run_id=run_id,
-            org_id=str(principal.org_id or ""),
-            actor_user_id=principal.id,
+            org_id=principal.org_id,
+            actor_user_id=principal.user_id,
             setting=DISPLAY_TIMEZONE_SETTING_KEY,
             value=normalized_value,
             recorded_at=datetime.now(timezone.utc).isoformat(),
@@ -266,6 +271,7 @@ async def async_has_runtime_preference_write_evidence(
 
 __all__ = [
     "RuntimePreferenceAccessError",
+    "RuntimePreferencePrincipal",
     "async_has_runtime_preference_write_evidence",
     "async_manage_runtime_preferences",
     "authenticate_runtime_preference_principal",
