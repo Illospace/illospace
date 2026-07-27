@@ -649,7 +649,8 @@ async def async_wake_cycle_now(*, name: str, org_id: str | None = None) -> str:
         ).first()
         if cycle is None or not cycle.enabled or cycle.deleted_at is not None:
             return "not_found"
-        if cycle.next_run_at is not None and cycle.next_run_at <= now:
+        pending_at = _aware_utc(cycle.next_run_at)
+        if pending_at is not None and pending_at <= now:
             return "already_pending"
         active_run_count = await _async_active_cycle_run_count(uow.session, cycle.id)
         if active_run_count > 0:

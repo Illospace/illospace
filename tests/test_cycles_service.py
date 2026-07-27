@@ -3375,6 +3375,56 @@ async def test_wake_cycle_now_reports_already_pending_and_missing(
 
 
 @pytest.mark.asyncio
+async def test_wake_cycle_now_handles_naive_next_run_at_from_the_driver(
+    monkeypatch,
+    cycle_scheduler_session,
+):
+    """Regression: the DB hands back naive datetimes for cycles.next_run_at.
+
+    Assigning an aware value and reading it back through the identity map hides
+    this — the object never round-trips. Expiring forces a real driver load, so
+    the comparison sees what production sees (verified live: repr was
+    `datetime.datetime(2026, 7, 28, 15, 0)`, tzinfo None).
+    """
+    future = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=6)
+    cycle = Cycle(
+        id=41,
+        user_id=str(uuid4()),
+        org_id=None,
+        name="Naive Clock Cycle",
+        prompt="p",
+        schedule_expr="0 11 * * *",
+        timezone="UTC",
+        enabled=True,
+        next_run_at=future,
+    )
+    cycle_scheduler_session.add(cycle)
+    await cycle_scheduler_session.commit()
+    cycle_scheduler_session.expire_all()
+    reloaded = (
+        await cycle_scheduler_session.scalars(select(Cycle).where(Cycle.id == 41))
+    ).one()
+    assert reloaded.next_run_at.tzinfo is None, "fixture must reproduce the naive load"
+    monkeypatch.setattr(
+        service,
+        "UnitOfWork",
+        lambda: _SharedSessionUnitOfWork(cycle_scheduler_session),
+    )
+
+    assert await service.async_wake_cycle_now(name="Naive Clock Cycle") == "woken"
+
+    cycle_scheduler_session.expire_all()
+    woken = (
+        await cycle_scheduler_session.scalars(select(Cycle).where(Cycle.id == 41))
+    ).one()
+    assert _aware_utc_for_test(woken.next_run_at) <= datetime.now(timezone.utc)
+
+
+def _aware_utc_for_test(value):
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+@pytest.mark.asyncio
 async def test_wake_cycle_now_refuses_ambiguous_names(
     monkeypatch,
     cycle_scheduler_session,
