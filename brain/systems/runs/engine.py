@@ -13,7 +13,7 @@ from typing import Any, Protocol
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.systems.runs.context import RunContextLoader
-from brain.systems.runs.domain import AgentRun, AgentRunRequest, ArtifactType, RunProfile, RunRecipe
+from brain.systems.runs.domain import AgentRun, AgentRunRequest
 from brain.systems.runs.events import activity_event, run_event, text_delta_event
 from brain.systems.runs.failures import (
     RunFailureCategory,
@@ -115,7 +115,6 @@ class RunRuntime:
     stream: RunStream
     steering: SteeringInbox
     context_loader: RunContextLoader
-    engine: "AsyncAgentRunEngine | None" = None
     tools: AsyncRunToolExecutor | None = None
     cancel_event: Any | None = None
     durable_steering_drain: Callable[[int], list[SteeringMessage] | Awaitable[list[SteeringMessage]]] | None = None
@@ -150,68 +149,6 @@ class RunRuntime:
                 )
             )
         return [message.content for message in messages]
-
-    async def run_step(self, step_key: str, fn: Callable[[], Any]) -> Any:
-        if await self.store.step_completed(self.run.id, step_key):
-            await self.store.skip_step(self.run.id, step_key)
-            return await self.store.step_result(self.run.id, step_key)
-        await self.store.start_step(self.run.id, step_key)
-        try:
-            result = fn()
-            if inspect.isawaitable(result):
-                result = await result
-        except Exception as exc:
-            await self.store.fail_step(self.run.id, step_key, str(exc))
-            raise
-        return await self.store.complete_step(self.run.id, step_key, result)
-
-    async def step(self, step_key: str, fn: Callable[[], Any]) -> Any:
-        return await self.run_step(step_key, fn)
-
-    async def create_child_run(
-        self,
-        *,
-        recipe: RunRecipe | str,
-        message: str,
-        step_key: str,
-        profile: RunProfile | str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> AgentRun:
-        return await self.store.create_child_run(
-            self.run,
-            initial_status=RunStatus.STARTING,
-            recipe=recipe,
-            message=message,
-            profile=profile or self.request.profile,
-            step_key=step_key,
-            target_ref=self.request.target_ref,
-            workspace_ref=self.request.workspace_ref,
-            model_policy=self.request.model_policy,
-            metadata=metadata,
-        )
-
-    async def run_child(
-        self,
-        *,
-        recipe: RunRecipe | str,
-        message: str,
-        step_key: str,
-        profile: RunProfile | str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> AgentRun:
-        if self.engine is None:
-            raise RuntimeError("RunRuntime cannot execute child runs without an engine")
-        child = await self.create_child_run(
-            recipe=recipe,
-            message=message,
-            step_key=step_key,
-            profile=profile,
-            metadata=metadata,
-        )
-        return await self.engine.run_existing(child.id)
-
-    async def child_output(self, child: AgentRun) -> str:
-        return await self.store.latest_artifact_text(child.id, ArtifactType.FINAL_ANSWER)
 
     def tool_executor(self) -> AsyncRunToolExecutor:
         if self.tools is None:
@@ -322,7 +259,6 @@ class AsyncAgentRunEngine:
             stream=self.stream,
             steering=self.steering,
             context_loader=self.context_loader,
-            engine=self,
             tools=AsyncRunToolExecutor(self.store, stream=self.stream),
             cancel_event=cancel_event,
             durable_steering_drain=self.durable_steering_drain,

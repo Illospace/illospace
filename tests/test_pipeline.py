@@ -50,6 +50,13 @@ async def test_historical_deep_profile_and_scout_recipe_rows_remain_readable(ses
             input_message="Historical deep worker run.",
         ),
         AgentRunRow(
+            thread_id="historical-deep-recipe",
+            profile="deep",
+            recipe="deep",
+            status="completed",
+            input_message="Historical deep recipe run.",
+        ),
+        AgentRunRow(
             thread_id="historical-fast-scout",
             profile="fast",
             recipe="scout",
@@ -68,6 +75,7 @@ async def test_historical_deep_profile_and_scout_recipe_rows_remain_readable(ses
 
     assert [(run.profile, run.recipe) for run in loaded] == [
         (RunProfile.DEEP, RunRecipe.WORKER),
+        (RunProfile.DEEP, RunRecipe.DEEP),
         (RunProfile.FAST, RunRecipe.SCOUT),
     ]
 

@@ -126,15 +126,6 @@ class AcceptanceCriteria:
     def required_evidence(self) -> tuple[EvidenceRequirement, ...]:
         return tuple(requirement for requirement in self.evidence_requirements if requirement.required)
 
-    def missing_evidence(self, artifacts: list[Any] | tuple[Any, ...] | Any) -> tuple[EvidenceRequirement, ...]:
-        return tuple(requirement for requirement in self.required_evidence() if not requirement.is_satisfied_by(artifacts))
-
-    def has_required_evidence(self, artifacts: list[Any] | tuple[Any, ...] | Any) -> bool:
-        return not self.missing_evidence(artifacts)
-
-    def satisfied_by(self, artifacts: list[Any] | tuple[Any, ...] | Any) -> bool:
-        return self.has_required_evidence(artifacts)
-
     def to_payload(self) -> dict[str, Any]:
         return {
             "summary": self.summary,
@@ -300,12 +291,6 @@ class WorkerAssignment:
             if requirement.required and requirement.artifact_type
         ]
         return tuple(dict.fromkeys(str(value) for value in values if value))
-
-    def missing_evidence(self, artifacts: list[Any] | tuple[Any, ...] | Any) -> tuple[EvidenceRequirement, ...]:
-        return tuple(requirement for requirement in self.required_evidence() if not requirement.is_satisfied_by(artifacts))
-
-    def has_required_evidence(self, artifacts: list[Any] | tuple[Any, ...] | Any) -> bool:
-        return not self.missing_evidence(artifacts)
 
     def to_payload(self) -> dict[str, Any]:
         return {

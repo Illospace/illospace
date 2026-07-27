@@ -9,12 +9,27 @@ def test_agent_run_request_normalizes_profile_and_recipe():
     fast = AgentRunRequest(org_id="org-1", thread_id="thread-1", message="Read README")
     deep = AgentRunRequest(org_id="org-1", thread_id="thread-1", message="Build it", profile="deep")
     worker = AgentRunRequest(org_id="org-1", thread_id="thread-1", message="Do slice", recipe="worker")
+    historical_deep = AgentRunRequest(
+        org_id="org-1",
+        thread_id="thread-1",
+        message="Historical deep run",
+        profile="deep",
+        recipe="deep",
+    )
+    historical_scout = AgentRunRequest(
+        org_id="org-1",
+        thread_id="thread-1",
+        message="Historical scout run",
+        recipe="scout",
+    )
 
     assert fast.normalized_profile == RunProfile.FAST
     assert fast.normalized_recipe == RunRecipe.FAST
     assert deep.normalized_profile == RunProfile.DEEP
-    assert deep.normalized_recipe == RunRecipe.DEEP
+    assert deep.normalized_recipe == RunRecipe.FAST
     assert worker.normalized_recipe == RunRecipe.WORKER
+    assert historical_deep.normalized_recipe == RunRecipe.DEEP
+    assert historical_scout.normalized_recipe == RunRecipe.SCOUT
 
 
 def test_agent_run_request_requires_workspace_org_id():
@@ -63,6 +78,7 @@ def test_run_event_and_artifact_helpers_are_run_native():
     assert delta.event_type == "run.text_delta"
     assert artifact.normalized_type == ArtifactType.FINAL_ANSWER
     assert artifact.text == "Done"
+    assert ArtifactType("verifier_evidence") is ArtifactType.VERIFIER_EVIDENCE
 
 
 def test_steering_inbox_appends_guidance_without_canceling():

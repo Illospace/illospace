@@ -684,20 +684,6 @@ class AsyncAgentRunStore:
         )
         await self.session.commit()
 
-    async def child_runs(self, parent_run_id: int) -> list[AgentRunRow]:
-        result = await self.session.scalars(
-            select(AgentRunRow)
-            .where(AgentRunRow.parent_run_id == int(parent_run_id))
-            .order_by(AgentRunRow.id.asc())
-        )
-        return list(result)
-
-    async def get_child_run(self, parent_run_id: int, child_run_id: int) -> AgentRunRow | None:
-        row = await self.get_run(child_run_id)
-        if row is None or row.parent_run_id != int(parent_run_id):
-            return None
-        return row
-
     async def claim_next_run_ids(self, *, limit: int = 1) -> list[int]:
         ids: list[int] = []
         for _ in range(max(0, int(limit))):
@@ -787,77 +773,6 @@ class AsyncAgentRunStore:
         row.metadata_ = metadata
         await self.session.flush()
         return True
-
-    async def cursor_for_run(self, run_id: int) -> dict[str, Any]:
-        metadata = await self.metadata_for_run(run_id)
-        cursor = metadata.get("cursor")
-        return dict(cursor) if isinstance(cursor, dict) else {"completed_steps": {}}
-
-    async def set_cursor(self, run_id: int, cursor: dict[str, Any]) -> dict[str, Any]:
-        metadata = await self.metadata_for_run(run_id)
-        metadata["cursor"] = dict(cursor or {})
-        row = await self.require_run(run_id)
-        row.metadata_ = metadata
-        await self.session.flush()
-        return metadata["cursor"]
-
-    async def start_step(self, run_id: int, step_key: str) -> None:
-        cursor = await self.cursor_for_run(run_id)
-        cursor["current_step"] = step_key
-        await self.set_cursor(run_id, cursor)
-        run = await self.require_run(run_id)
-        await self.append_event(
-            run_event(run_id, "run.step_started", {"step": step_key, "step_key": step_key}, root_run_id=run.root_run_id)
-        )
-
-    async def complete_step(self, run_id: int, step_key: str, result: Any = None) -> Any:
-        cursor = await self.cursor_for_run(run_id)
-        completed = dict(cursor.get("completed_steps") or {})
-        completed[step_key] = {"result": _jsonable(result), "completed_at": datetime.now(timezone.utc).isoformat()}
-        cursor["completed_steps"] = completed
-        if cursor.get("current_step") == step_key:
-            cursor.pop("current_step", None)
-        await self.set_cursor(run_id, cursor)
-        run = await self.require_run(run_id)
-        await self.append_event(
-            run_event(
-                run_id,
-                "run.step_completed",
-                {"step": step_key, "step_key": step_key, "result": _jsonable(result)},
-                root_run_id=run.root_run_id,
-            )
-        )
-        return result
-
-    async def fail_step(self, run_id: int, step_key: str, error: str) -> None:
-        await self.update_metadata(run_id, {"last_failed_step": step_key})
-        run = await self.require_run(run_id)
-        await self.append_event(
-            run_event(
-                run_id,
-                "run.step_failed",
-                {"step": step_key, "step_key": step_key, "error": error},
-                root_run_id=run.root_run_id,
-            )
-        )
-
-    async def skip_step(self, run_id: int, step_key: str) -> None:
-        run = await self.require_run(run_id)
-        await self.append_event(
-            run_event(run_id, "run.step_skipped", {"step": step_key, "step_key": step_key}, root_run_id=run.root_run_id)
-        )
-
-    async def step_result(self, run_id: int, step_key: str) -> Any | None:
-        completed = (await self.cursor_for_run(run_id)).get("completed_steps") or {}
-        if step_key not in completed:
-            return None
-        entry = completed.get(step_key)
-        if isinstance(entry, dict):
-            return entry.get("result")
-        return entry
-
-    async def step_completed(self, run_id: int, step_key: str) -> bool:
-        return step_key in ((await self.cursor_for_run(run_id)).get("completed_steps") or {})
 
     async def set_status(
         self,
@@ -1410,16 +1325,6 @@ __all__ = [
     "ExecutionClaimLost",
     "to_domain",
 ]
-
-
-def _jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, str | int | float | bool):
-        return value
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonable(item) for item in value]
-    return str(value)
 
 
 def _coerce_int(value: Any, *, default: int = 0) -> int:
