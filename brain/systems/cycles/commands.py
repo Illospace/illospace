@@ -33,6 +33,12 @@ class _UnsetCycleField:
 UNSET_CYCLE_FIELD = _UnsetCycleField()
 
 
+def _validated_max_concurrency(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("max_concurrency must be an integer >= 1")
+    return value
+
+
 async def async_create_cycle(
     session,
     *,
@@ -43,6 +49,7 @@ async def async_create_cycle(
     schedule_expr: str | None = None,
     run_at=None,
     enabled: bool = True,
+    max_concurrency: int = 1,
     model_override: str | None = None,
     thinking_override: str | None = None,
     target_idea_id: str | None = None,
@@ -63,6 +70,7 @@ async def async_create_cycle(
         schedule_expr=expr,
         timezone=tz_name,
         enabled=enabled,
+        max_concurrency=_validated_max_concurrency(max_concurrency),
         model_override=validate_model_override(model_override),
         thinking_override=validate_thinking_override(thinking_override),
         execution_mode=canonical_execution_mode(),
@@ -109,6 +117,7 @@ async def async_update_cycle(
     schedule_expr: str | None = None,
     run_at=UNSET_CYCLE_FIELD,
     enabled=UNSET_CYCLE_FIELD,
+    max_concurrency=UNSET_CYCLE_FIELD,
     model_override=UNSET_CYCLE_FIELD,
     thinking_override=UNSET_CYCLE_FIELD,
     target_idea_id=UNSET_CYCLE_FIELD,
@@ -140,6 +149,8 @@ async def async_update_cycle(
     cycle.schedule_expr = next_schedule_expr
     if _is_patch_field_set(enabled) and enabled is not None:
         cycle.enabled = enabled
+    if _is_patch_field_set(max_concurrency):
+        cycle.max_concurrency = _validated_max_concurrency(max_concurrency)
     if _is_patch_field_set(next_model_override):
         cycle.model_override = next_model_override
     if _is_patch_field_set(next_thinking_override):

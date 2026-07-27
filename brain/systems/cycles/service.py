@@ -96,6 +96,7 @@ __all__ = [
     "REUSABLE_THREAD_EXECUTION_MODE",
     "async_add_cycle_guidance",
     "async_add_cycle_output_target",
+    "async_claim_cycle_run",
     "async_execute_cycle_run",
     "async_finalize_cycle_run_from_run",
     "async_recover_stale_cycle_runs_once",
@@ -334,7 +335,6 @@ async def async_run_cycle_now(
         )
         uow.session.add(run)
         await uow.session.flush()
-        await _async_prepare_cycle_run_memory_snapshot(uow.session, cycle, run)
         run_id = run.id
 
     await async_execute_cycle_run(run_id)
@@ -354,6 +354,115 @@ def _agent_run_terminal_cycle_status(agent_run: AgentRun | None) -> str | None:
     if agent_run is None:
         return None
     return RUN_STATUS_TO_CYCLE_RUN_STATUS.get(str(agent_run.status or "").strip().lower())
+
+
+def _cycle_max_concurrency(cycle: Cycle) -> int:
+    return max(int(cycle.max_concurrency or 1), 1)
+
+
+async def _async_active_cycle_run_count(
+    session,
+    cycle_id: int,
+    *,
+    excluding_run_id: int | None = None,
+) -> int:
+    filters = [
+        CycleRun.cycle_id == cycle_id,
+        CycleRun.status.in_(CYCLE_RUN_ACTIVE_STATUSES),
+    ]
+    if excluding_run_id is not None:
+        filters.append(CycleRun.id != excluding_run_id)
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(CycleRun)
+            .where(*filters)
+        )
+        or 0
+    )
+
+
+def _record_capacity_disposition(
+    run: CycleRun,
+    *,
+    active_run_count: int,
+    max_concurrency: int,
+) -> None:
+    context_snapshot = dict(run.context_snapshot or {})
+    context_snapshot["disposition"] = {
+        "reason": "previous_run_active",
+        "active_run_count": active_run_count,
+        "max_concurrency": max_concurrency,
+    }
+    run.context_snapshot = context_snapshot
+
+
+async def async_claim_cycle_run(session, run_id: int) -> tuple[CycleRun, Cycle] | None:
+    """Atomically claim one queued run under its owning Cycle's capacity lock."""
+    result = await session.scalars(
+        select(CycleRun).where(CycleRun.id == run_id)
+    )
+    candidate = result.first()
+    if not candidate or candidate.status != "queued":
+        return None
+
+    result = await session.scalars(
+        select(Cycle).where(Cycle.id == candidate.cycle_id).with_for_update()
+    )
+    cycle = result.first()
+    result = await session.scalars(
+        select(CycleRun)
+        .where(
+            CycleRun.id == run_id,
+            CycleRun.cycle_id == candidate.cycle_id,
+        )
+        .with_for_update()
+    )
+    run = result.first()
+    if not run or run.status != "queued":
+        return None
+
+    if not cycle or cycle.deleted_at is not None:
+        if cycle:
+            await _finalize_cycle_run(
+                run,
+                cycle,
+                status="failed",
+                error="Cycle deleted before run started",
+                session=session,
+            )
+        else:
+            run.status = "failed"
+            run.error = "Cycle deleted before run started"
+            run.completed_at = datetime.now(timezone.utc)
+        await session.flush()
+        return None
+
+    active_run_count = await _async_active_cycle_run_count(
+        session,
+        cycle.id,
+        excluding_run_id=run.id,
+    )
+    max_concurrency = _cycle_max_concurrency(cycle)
+    if active_run_count >= max_concurrency:
+        _record_capacity_disposition(
+            run,
+            active_run_count=active_run_count,
+            max_concurrency=max_concurrency,
+        )
+        await _finalize_cycle_run(
+            run,
+            cycle,
+            status="skipped",
+            skip_reason="previous_run_active",
+            session=session,
+        )
+        await session.flush()
+        return None
+
+    run.status = "running"
+    await session.flush()
+    return run, cycle
 
 
 async def async_recover_stale_cycle_runs_once(
@@ -424,12 +533,12 @@ async def async_recover_stale_cycle_runs_once(
     return executable_run_ids
 
 
-async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
-    claimed_run_ids: list[int] = []
-    now = datetime.now(timezone.utc)
-
-    await async_recover_stale_cycle_runs_once(limit=limit)
-
+async def _async_materialize_due_cycle_runs_once(
+    *,
+    limit: int,
+    now: datetime,
+) -> list[int]:
+    executable_run_ids: list[int] = []
     async with UnitOfWork() as uow:
         stmt = (
             select(Cycle)
@@ -446,18 +555,6 @@ async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
         cycles = (await uow.session.scalars(stmt)).all()
         for cycle in cycles:
             scheduled_for = cycle.next_run_at or now
-            active_run_count = int(
-                await uow.session.scalar(
-                    select(func.count())
-                    .select_from(CycleRun)
-                    .where(
-                        CycleRun.cycle_id == cycle.id,
-                        CycleRun.status.not_in(TERMINAL_RUN_STATUSES),
-                    )
-                )
-                or 0
-            )
-            max_concurrency = max(int(cycle.max_concurrency or 1), 1)
             run = CycleRun(
                 cycle_id=cycle.id,
                 scheduled_for=scheduled_for,
@@ -473,8 +570,18 @@ async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
             )
             uow.session.add(run)
             await uow.session.flush()
-            await _async_prepare_cycle_run_memory_snapshot(uow.session, cycle, run)
+            active_run_count = await _async_active_cycle_run_count(
+                uow.session,
+                cycle.id,
+                excluding_run_id=run.id,
+            )
+            max_concurrency = _cycle_max_concurrency(cycle)
             if active_run_count >= max_concurrency:
+                _record_capacity_disposition(
+                    run,
+                    active_run_count=active_run_count,
+                    max_concurrency=max_concurrency,
+                )
                 await _finalize_cycle_run(
                     run,
                     cycle,
@@ -483,7 +590,12 @@ async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
                     session=uow.session,
                 )
             else:
-                claimed_run_ids.append(run.id)
+                await _async_prepare_cycle_run_memory_snapshot(
+                    uow.session,
+                    cycle,
+                    run,
+                )
+                executable_run_ids.append(run.id)
             next_run_at = compute_next_run_at(
                 cycle.schedule_expr,
                 cycle.timezone,
@@ -493,10 +605,21 @@ async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
             if is_one_time_schedule_expr(cycle.schedule_expr) and next_run_at is None:
                 cycle.enabled = False
 
-    for run_id in claimed_run_ids:
+    return executable_run_ids
+
+
+async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
+    now = datetime.now(timezone.utc)
+    await async_recover_stale_cycle_runs_once(limit=limit)
+    executable_run_ids = await _async_materialize_due_cycle_runs_once(
+        limit=limit,
+        now=now,
+    )
+
+    for run_id in executable_run_ids:
         await async_execute_cycle_run(run_id)
 
-    return claimed_run_ids
+    return executable_run_ids
 
 
 async def async_execute_cycle_run(run_id: int) -> None:
@@ -512,30 +635,10 @@ async def async_execute_cycle_run(run_id: int) -> None:
     agent_run_id = None
 
     async with UnitOfWork() as uow:
-        result = await uow.session.scalars(
-            select(CycleRun).where(CycleRun.id == run_id).with_for_update()
-        )
-        run = result.first()
-        if not run or run.status != "queued":
+        claim = await async_claim_cycle_run(uow.session, run_id)
+        if claim is None:
             return
-        result = await uow.session.scalars(
-            select(Cycle).where(Cycle.id == run.cycle_id).with_for_update()
-        )
-        cycle = result.first()
-        if not cycle or cycle.deleted_at is not None:
-            if cycle:
-                await _finalize_cycle_run(
-                    run,
-                    cycle,
-                    status="failed",
-                    error="Cycle deleted before run started",
-                    session=uow.session,
-                )
-            else:
-                run.status = "failed"
-                run.error = "Cycle deleted before run started"
-                run.completed_at = datetime.now(timezone.utc)
-            return
+        run, cycle = claim
 
         cycle_name = cycle.name
         cycle_user_id = cycle.user_id
@@ -594,7 +697,6 @@ async def async_execute_cycle_run(run_id: int) -> None:
             idea_snapshot = serialize_execution_idea(idea)
         else:
             run.started_at = datetime.now(timezone.utc)
-            run.status = "running"
             run_metadata = _cycle_run_metadata(cycle, run)
             run_message = _cycle_run_message(idea, cycle, run)
             agent_run_id = await _async_admit_cycle_run(

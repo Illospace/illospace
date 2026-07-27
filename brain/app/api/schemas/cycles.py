@@ -12,6 +12,7 @@ class CycleCreate(BaseModel):
     run_at: datetime | None = None
     timezone: str = Field(min_length=1, max_length=64)
     enabled: bool = True
+    max_concurrency: int = Field(default=1, ge=1, strict=True)
     model_override: str | None = None
     thinking_override: str | None = None
     target_idea_id: str | None = None
@@ -26,6 +27,7 @@ class CycleUpdate(BaseModel):
     run_at: datetime | None = None
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
     enabled: bool | None = None
+    max_concurrency: int = Field(default=1, ge=1, strict=True)
     model_override: str | None = None
     thinking_override: str | None = None
     target_idea_id: str | None = None
@@ -48,6 +50,7 @@ class CycleRead(BaseModel):
     schedule_human: str
     timezone: str
     enabled: bool
+    max_concurrency: int
     model_override: str | None = None
     thinking_override: str | None = None
     execution_mode: str
