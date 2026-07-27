@@ -62,10 +62,8 @@ from brain.systems.runs.direct_loop.gates import (
     check_gate_violations as _runtime_check_gate_violations,
 )
 from brain.systems.runs.direct_loop.loop_control import (
-    LoopControlPolicy,
     LoopTermination,
-    _detect_stuck_loop,
-    _inject_nudges,
+    RunControlPolicy,
     resolve_loop_output,
 )
 from brain.systems.runs.direct_loop.request import (
@@ -1237,7 +1235,7 @@ async def _execute_tool_calls_async(
     on_tool_call, run_id, idea_id, tool_call_source: str,
     *,
     max_parallel_tool_calls: int = _MAX_PARALLEL_TOOL_CALLS,
-    loop_control: LoopControlPolicy,
+    loop_control: RunControlPolicy,
 ) -> _ToolExecutionResult:
     """Execute all tool calls from async runtime code."""
     return await _runtime_async_execute_tool_calls(
@@ -1360,6 +1358,7 @@ async def run_agent_async(
             brain=brain_context_preloaded,
             skills=brain_context_preloaded,
         ),
+        loop_control=RunControlPolicy(session_id=session_id),
         operation_type=operation_type,
         metadata=metadata,
     )
@@ -1916,22 +1915,6 @@ async def run_agent_async(
                 break
 
             if response.stop_reason == StopReason.TOOL_USE:
-                # Stuck detection
-                _turn_fingerprints = [
-                    f"{b.name}:{json.dumps(b.input, sort_keys=True)}"
-                    for b in response.content
-                    if hasattr(b, "type") and b.type == ContentBlockType.TOOL_USE
-                ]
-                state.recent_calls.extend(_turn_fingerprints)
-
-                termination = state.loop_control.detect_stuck_loop(
-                    state.recent_calls,
-                    session_id,
-                    state.messages,
-                )
-                if termination is not None:
-                    break
-
                 # Execute tool calls
                 execution = await _execute_tool_calls_async(
                     response, tool_handlers, state.tool_calls_made, state.gates,
@@ -1973,7 +1956,10 @@ async def run_agent_async(
                         )
 
                 if termination is not None:
-                    termination_message = termination.transcript_message()
+                    termination_message = (
+                        termination.transcript_message()
+                        or termination.control_message()
+                    )
                     if termination_message is not None:
                         _append_message_with_archive(
                             state.messages,
@@ -1984,7 +1970,7 @@ async def run_agent_async(
 
                 # Durable reminder (e.g. `cd` non-persistence), sent as its own
                 # message AFTER tool_results — never spliced into tool output.
-                reminder_message = _inject_nudges(state.recent_calls)
+                reminder_message = state.loop_control.reminder_message()
                 if reminder_message is not None:
                     _append_message_with_archive(
                         state.messages,

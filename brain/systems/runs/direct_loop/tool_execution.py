@@ -18,10 +18,10 @@ from brain.platform.async_io import (
 )
 from brain.systems.runs.actions import result_failure_summary
 from brain.systems.runs.direct_loop.loop_control import (
-    LoopControlPolicy,
     LoopTermination,
-    ToolDisablement,
+    RunControlPolicy,
 )
+from brain.systems.runs.direct_loop.tool_failure_policy import ToolDisablement
 from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
 from brain.systems.runs.direct_loop.final_reply_evidence import ToolResultEvidence
 from brain.systems.runs.tool_catalog.metadata import is_write_side_effect_class
@@ -681,7 +681,7 @@ def execute_tool_calls(
     parallel_safe_tool_names: frozenset[str],
     max_parallel_tool_calls: int,
     check_gate_violations: Callable,
-    loop_control: LoopControlPolicy,
+    loop_control: RunControlPolicy,
 ) -> ToolExecutionResult:
     """Execute all tool calls from a provider response."""
     try:
@@ -698,10 +698,12 @@ def execute_tool_calls(
     termination = loop_control.termination
 
     def consume_resolved(resolved: ResolvedToolCall) -> None:
+        nonlocal termination
         if termination is None:
-            disablement = loop_control.observe_tool_result(resolved)
-            if disablement is not None:
-                tool_disablements.append(disablement)
+            decision = loop_control.observe_tool_result(resolved)
+            if decision.disablement is not None:
+                tool_disablements.append(decision.disablement)
+            termination = decision.termination
         emit_resolved_tool_call(
             resolved,
             tool_results,
@@ -845,7 +847,7 @@ async def async_execute_tool_calls(
     parallel_safe_tool_names: frozenset[str],
     max_parallel_tool_calls: int,
     check_gate_violations: Callable,
-    loop_control: LoopControlPolicy,
+    loop_control: RunControlPolicy,
 ) -> ToolExecutionResult:
     """Execute all tool calls from async runtime code."""
     tool_results: list[dict] = []
@@ -855,10 +857,12 @@ async def async_execute_tool_calls(
     termination = loop_control.termination
 
     async def consume_resolved(resolved: ResolvedToolCall) -> None:
+        nonlocal termination
         if termination is None:
-            disablement = loop_control.observe_tool_result(resolved)
-            if disablement is not None:
-                tool_disablements.append(disablement)
+            decision = loop_control.observe_tool_result(resolved)
+            if decision.disablement is not None:
+                tool_disablements.append(decision.disablement)
+            termination = decision.termination
         await async_emit_resolved_tool_call(
             resolved,
             tool_results,

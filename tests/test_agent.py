@@ -828,7 +828,7 @@ class TestAgentLoop:
 
     async def test_repeated_brain_encode_is_rejected(self):
         from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState
-        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+        from brain.systems.runs.direct_loop.loop_control import RunControlPolicy
 
         block = MagicMock()
         block.type = "tool_use"
@@ -851,7 +851,7 @@ class TestAgentLoop:
             None,
             None,
             "runner",
-            loop_control=LoopControlPolicy(),
+            loop_control=RunControlPolicy(),
         )
 
         assert handler.call_count == 0
@@ -861,7 +861,7 @@ class TestAgentLoop:
 
     async def test_failed_brain_encode_is_marked_non_retryable(self):
         from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState
-        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+        from brain.systems.runs.direct_loop.loop_control import RunControlPolicy
 
         block = MagicMock()
         block.type = "tool_use"
@@ -883,7 +883,7 @@ class TestAgentLoop:
             None,
             None,
             "runner",
-            loop_control=LoopControlPolicy(),
+            loop_control=RunControlPolicy(),
         )
 
         results = execution.tool_results
@@ -894,7 +894,7 @@ class TestAgentLoop:
     async def test_execute_tool_calls_supports_async_handlers_inside_running_loop(self):
         from brain.systems.runs.direct_agent import _GateState
         from brain.systems.runs.direct_loop.gates import check_gate_violations
-        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+        from brain.systems.runs.direct_loop.loop_control import RunControlPolicy
         from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
 
         block = MagicMock()
@@ -927,7 +927,7 @@ class TestAgentLoop:
             parallel_safe_tool_names=frozenset(),
             max_parallel_tool_calls=1,
             check_gate_violations=check_gate_violations,
-            loop_control=LoopControlPolicy(),
+            loop_control=RunControlPolicy(),
         )
 
         results = execution.tool_results
@@ -937,7 +937,7 @@ class TestAgentLoop:
     async def test_parallel_safe_tool_batch_overlaps_and_preserves_order(self):
         from brain.systems.runs.direct_agent import _GateState
         from brain.systems.runs.direct_loop.gates import check_gate_violations
-        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+        from brain.systems.runs.direct_loop.loop_control import RunControlPolicy
         from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
 
         block_a = MagicMock()
@@ -991,7 +991,7 @@ class TestAgentLoop:
             parallel_safe_tool_names=frozenset({"read_file", "search_files"}),
             max_parallel_tool_calls=2,
             check_gate_violations=check_gate_violations,
-            loop_control=LoopControlPolicy(),
+            loop_control=RunControlPolicy(),
         )
 
         results = execution.tool_results
@@ -1011,7 +1011,7 @@ class TestAgentLoop:
     async def test_parallel_safe_sync_tool_batch_runs_off_loop(self):
         from brain.systems.runs.direct_agent import _GateState
         from brain.systems.runs.direct_loop.gates import check_gate_violations
-        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+        from brain.systems.runs.direct_loop.loop_control import RunControlPolicy
         from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
 
         blocks = []
@@ -1060,7 +1060,7 @@ class TestAgentLoop:
                 parallel_safe_tool_names=frozenset({"read_file", "search_files"}),
                 max_parallel_tool_calls=2,
                 check_gate_violations=check_gate_violations,
-                loop_control=LoopControlPolicy(),
+                loop_control=RunControlPolicy(),
             )
         finally:
             elapsed = time.perf_counter() - started_at
@@ -1074,7 +1074,7 @@ class TestAgentLoop:
 
     async def test_parallel_safe_tool_batch_propagates_agent_context(self):
         from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState, _agent_context
-        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+        from brain.systems.runs.direct_loop.loop_control import RunControlPolicy
 
         block = MagicMock()
         block.type = "tool_use"
@@ -1104,7 +1104,7 @@ class TestAgentLoop:
                 None,
                 None,
                 "runner",
-                loop_control=LoopControlPolicy(),
+                loop_control=RunControlPolicy(),
             )
         finally:
             for attr in ("user_id", "worker_name"):
@@ -2238,7 +2238,7 @@ class TestFinalReplyReview:
             ToolFailureStateEvidence,
             ToolResultEvidence,
         )
-        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+        from brain.systems.runs.direct_loop.loop_control import RunControlPolicy
         from brain.systems.runs.direct_loop.tool_execution import ResolvedToolCall
         from brain.systems.runs.tool_outcomes import ToolOutcome
 
@@ -2251,7 +2251,7 @@ class TestFinalReplyReview:
             )
             for _ in range(2)
         )
-        policy = LoopControlPolicy(
+        policy = RunControlPolicy(
             failure_threshold=3,
             failure_window_calls=10,
             zero_success_failure_threshold=2,
@@ -2269,7 +2269,7 @@ class TestFinalReplyReview:
                         category="ToolValidationError",
                     ),
                 )
-            )
+            ).disablement
         assert disablement is not None
         evidence = FinalReplyEvidence(
             tool_results=failures,

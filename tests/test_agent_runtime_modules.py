@@ -541,12 +541,12 @@ def test_final_reply_evidence_reads_status_and_tool_failure_state_from_agent_con
         FinalReplyEvidence,
         ToolResultEvidence,
     )
-    from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+    from brain.systems.runs.direct_loop.loop_control import RunControlPolicy
     from brain.systems.runs.direct_loop.tool_execution import ResolvedToolCall
     from brain.systems.runs.status import RunStatus
     from brain.systems.runs.tool_outcomes import ToolOutcome
 
-    loop_control = LoopControlPolicy(
+    loop_control = RunControlPolicy(
         failure_threshold=3,
         zero_success_failure_threshold=2,
     )
