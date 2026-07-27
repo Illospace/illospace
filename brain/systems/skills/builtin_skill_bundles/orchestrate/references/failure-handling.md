@@ -1,9 +1,12 @@
 # Orchestration Failure Handling
 
-Use three outcomes for failed run steps:
+Use four outcomes for failed worker slices:
 
-- retry_step: transient provider/tool/runtime failure, missing temporary dependency, or recoverable verifier glitch.
-- skip_step: optional step only; user value remains intact without it.
-- abort_graph: required dependency, permission, correctness condition, or artifact is missing.
+- retry_slice: transient provider/tool/runtime failure or missing temporary dependency.
+- self_cover_slice: the coordinator can inspect the assigned scope directly.
+- skip_slice: optional work only; user value remains intact without it.
+- stop: a required dependency, permission, correctness condition, or artifact is missing.
 
-Brittle evidence criteria are not automatically task failure. Check whether equivalent evidence proves the user outcome before escalating.
+Queued, running, failed, unmatched, empty, or unread children have not covered
+their slices. Never infer completion from a terminal status without reading the
+result and verifying load-bearing claims.

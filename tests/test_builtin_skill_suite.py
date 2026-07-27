@@ -54,7 +54,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.10.0"
+    assert bundle.manifest.version == "1.11.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -562,17 +562,18 @@ def test_coordinate_owns_routing_before_orchestration():
         "skill_view",
         "memory as stale",
         "single tool",
-        "internal orchestration protocol",
+        "`orchestrate`",
+        "`spawn_worker`",
         "external state",
     ):
         assert expected in procedure
 
 
-def test_orchestrate_is_internal_protocol_not_default_coordinator():
+def test_orchestrate_is_spawn_worker_protocol_not_default_coordinator():
     from brain.systems.skills.builtin import BUILTIN_SKILLS
 
     skill = BUILTIN_SKILLS["orchestrate"]
-    assert "Internal orchestration protocol" in skill["description"]
+    assert "spawn_worker" in skill["description"]
     assert "You are not a general conversation skill" in skill["procedure"]
     assert any(
         trigger.get("direction") == "against"
@@ -580,20 +581,32 @@ def test_orchestrate_is_internal_protocol_not_default_coordinator():
     )
 
 
-def test_orchestrate_keeps_runtime_contract_and_memory_lifecycle():
+def test_orchestrate_keeps_spawn_collection_and_memory_contracts():
     from brain.systems.skills.builtin import BUILTIN_SKILLS
 
     procedure = BUILTIN_SKILLS["orchestrate"]["procedure"]
     for expected in (
         "brain_skills",
-        "AgentRun graph",
+        "spawn_worker",
         "OBJECTIVE",
         "SCOPE",
         "INPUT",
         "OUTPUT",
         "DONE WHEN",
-        "AgentRun graph started",
-        "AgentRun graph completed/failed",
+        "effort",
+        "model",
+        "headless",
+        "join_parent",
+        "tool_policy",
+        "child_run_id",
+        "query_workspace_data sources=['runs']",
+        "520-character",
+        "An unread worker does not count",
+        "allowed_resources",
+        "exec_command",
+        "Worker fan-out started",
+        "Worker fan-out",
+        "completed/failed",
         "session_promote",
         "session_close",
     ):
