@@ -1,7 +1,7 @@
 """Extend the open-ask ledger to carry run deferral obligations.
 
 Revision ID: 0044_open_ask_deferral_obligations
-Revises: 0042_scheduler_failure_rate_guard
+Revises: 0043_cycle_liveness_controls
 Create Date: 2026-07-27
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 revision = "0044_open_ask_deferral_obligations"
-down_revision = "0042_scheduler_failure_rate_guard"
+down_revision = "0043_cycle_liveness_controls"
 branch_labels = None
 depends_on = None
 
