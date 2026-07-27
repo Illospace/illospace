@@ -26,7 +26,6 @@ from brain.systems.deploy_fix_refs import (
     github_repo_from_issue_text,
     normalize_fix_pr_reference,
 )
-from brain.systems.deploy_tracker import ensure_deploy_state_fields
 from brain.systems.user_domains.service import AsyncDomainService
 
 
@@ -86,6 +85,8 @@ async def _domain(session):
                 "fields": [
                     {"key": "title", "field_type": "text", "required": True},
                     {"key": "repo", "field_type": "text"},
+                    {"key": "fix_pr", "field_type": "text"},
+                    {"key": "fix_merge_sha", "field_type": "text"},
                     {
                         "key": "status",
                         "field_type": "enum",
@@ -116,62 +117,53 @@ async def _record(session, domain, *, title, **data):
 
 async def _seed_backfill_records(session) -> dict[str, DomainRecord]:
     domain = await _domain(session)
-    await ensure_deploy_state_fields(session, org_id=ORG_ID)
     records = {
         "canonical": await _record(
             session,
             domain,
             title="Canonical",
-            deploy_state="staging",
             fix_pr=f"{REPO}#1264",
         ),
         "full_url": await _record(
             session,
             domain,
             title="Full URL",
-            deploy_state="prod_pending",
             fix_pr=f"https://github.com/{REPO}/pull/1237",
         ),
         "internal_key": await _record(
             session,
             domain,
             title="Internal key",
-            deploy_state="staging",
             fix_pr=f"github:{REPO}:pr:1178",
         ),
         "invalid_merge_sha": await _record(
             session,
             domain,
             title="Invalid merge SHA",
-            deploy_state="staging",
             fix_pr=f"{REPO}#555",
         ),
         "bare_number": await _record(
             session,
             domain,
             title="github:uwear-ai/uwearaiapp:issue:389",
-            deploy_state="prod_pending",
             fix_pr="591",
         ),
         "no_reference": await _record(
             session,
             domain,
             title="No reference",
-            deploy_state="prod_pending",
             fix_pr="",
         ),
         "deployed": await _record(
             session,
             domain,
             title="Already deployed",
-            deploy_state="deployed",
             fix_pr=f"https://github.com/{REPO}/pull/999",
         ),
         "archived": await _record(
             session,
             domain,
             title="Archived",
-            deploy_state="staging",
             fix_pr=f"https://github.com/{REPO}/pull/777",
         ),
     }
@@ -299,10 +291,7 @@ async def test_backfill_apply_normalizes_enriches_and_stays_in_scope(session):
         "no fix PR reference"
     )
     assert rows_by_id[records["deployed"].id]["sha_found"] is False
-    assert all(
-        call.args != (REPO, 999)
-        for call in github_lookup.await_args_list
-    )
+    assert any(call.args == (REPO, 999) for call in github_lookup.await_args_list)
 
     for name, record in records.items():
         await session.refresh(record)
@@ -312,9 +301,6 @@ async def test_backfill_apply_normalizes_enriches_and_stays_in_scope(session):
             if before_data[name].get(key) != record.data.get(key)
         }
         assert changed_keys <= ALLOWED_PATCH_FIELDS
-        assert record.data.get("deploy_state") == before_data[name].get(
-            "deploy_state"
-        )
     assert records["canonical"].data["fix_merge_sha"] == "a" * 40
     assert records["full_url"].data.get("fix_merge_sha") is None
     assert records["internal_key"].data["fix_merge_sha"] == "c" * 40
@@ -378,19 +364,16 @@ async def test_backfill_apply_is_idempotent(session):
 
 async def test_backfill_validates_every_plan_before_first_write(session, monkeypatch):
     domain = await _domain(session)
-    await ensure_deploy_state_fields(session, org_id=ORG_ID)
     first = await _record(
         session,
         domain,
         title="First",
-        deploy_state="deployed",
         fix_pr=f"https://github.com/{REPO}/pull/1",
     )
     second = await _record(
         session,
         domain,
         title="Second",
-        deploy_state="deployed",
         fix_pr=f"https://github.com/{REPO}/pull/2",
     )
     before = {
@@ -405,7 +388,7 @@ async def test_backfill_validates_every_plan_before_first_write(session, monkeyp
             pull_request_lookup=pull_request_lookup,
         )
         if record.id == second.id:
-            return replace(plan, patch={"deploy_state": "verified"})
+            return replace(plan, patch={"verified": True})
         return plan
 
     monkeypatch.setattr(
@@ -419,7 +402,9 @@ async def test_backfill_validates_every_plan_before_first_write(session, monkeyp
             session,
             org_id=ORG_ID,
             apply=True,
-            pull_request_lookup=AsyncMock(),
+            pull_request_lookup=AsyncMock(
+                return_value={"pull_request": {"merged_at": None}}
+            ),
         )
 
     for record in (first, second):

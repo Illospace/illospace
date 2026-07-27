@@ -15,8 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.launch_handoff import LaunchHandoff
+from brain.platform.provider_alerts import parse_rollbar_alert
 from brain.systems.cortex.thread_links import public_app_base_url
-from brain.systems.deploy_state import parse_rollbar_alert
 
 LAUNCH_HANDOFF_OBJECT_TYPE = "launch_handoff"
 TARGET_CODEX = "codex"

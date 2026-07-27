@@ -40,6 +40,7 @@ from hashlib import sha256
 from typing import Any
 
 from brain.systems.briefing.core import (
+    DEPLOY_EVIDENCE_SOURCE,
     Dossier,
     DossierItem,
     _plural,
@@ -78,7 +79,12 @@ _FLOORS = {
 _TIGHTEN_ORDER = ("narrative", "ask", "decisions", "evidence", "chantier", "headline")
 
 # Sections whose refs read as evidence links in the brief.
-_EVIDENCE_SOURCES = ("github_issue", "github_pr", "deploy_state", "evidence")
+_EVIDENCE_SOURCES = (
+    "github_issue",
+    "github_pr",
+    DEPLOY_EVIDENCE_SOURCE,
+    "evidence",
+)
 UNCLAIMED_LABEL = "unclaimed"
 LAUNCH_URL_PLACEHOLDER = "{launch_url}"
 _LAUNCH_LINE = f"Launch: {LAUNCH_URL_PLACEHOLDER}"

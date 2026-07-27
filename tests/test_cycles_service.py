@@ -874,7 +874,7 @@ def test_on_demand_cycle_launch_exposes_provenance_and_local_anchor():
 
 @pytest.mark.asyncio
 async def test_uwear_coordinator_pre_sweep_harvests_alert_resolution(monkeypatch):
-    import brain.systems.deploy_state_sweep as deploy_sweep
+    import brain.systems.alert_resolution as alert_resolution
 
     calls = []
 
@@ -892,7 +892,11 @@ async def test_uwear_coordinator_pre_sweep_harvests_alert_resolution(monkeypatch
             "errors": [],
         }
 
-    monkeypatch.setattr(deploy_sweep, "run_alert_resolution_harvest", fake_harvest)
+    monkeypatch.setattr(
+        alert_resolution,
+        "run_alert_resolution_harvest",
+        fake_harvest,
+    )
     cycle = Cycle()
     cycle.name = "Uwear Ticket Coordinator Check-ins"
     cycle.org_id = "org-1"
