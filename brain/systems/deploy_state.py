@@ -1,159 +1,273 @@
-"""Pure deploy-state decisions for alert-linked GitHub tickets.
-
-``deploy_state`` describes the latest fix attempt, independently of the
-ticket's workflow status.  This module is the single owner of that axis: Slack
-alert parsing, re-fire classification, promotion recommendations, merge-event
-classification, and mechanical state derivation all live here.  Database,
-GitHub, and Slack wiring supply facts but do not reinterpret them.
-
-Indeterminate infrastructure reads are intentionally represented outside this
-module as ``None``.  Callers must degrade open by leaving persisted state
-unchanged rather than guessing that a fix did or did not ship.
-"""
+"""Read-time deploy state derived from GitHub commit ancestry."""
 
 from __future__ import annotations
 
-import re
-from datetime import datetime, timedelta, timezone
+import asyncio
+from collections.abc import Hashable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Mapping
+from typing import Generic, TypeVar
 
-from brain.platform.provider_alerts import AlertSignature, parse_rollbar_alert
+from brain.systems.deploy_state_github import (
+    AncestryObservation,
+    ancestry_failure,
+    observe_ancestry,
+)
 
 
 class DeployState(StrEnum):
-    """Where the latest fix attempt is in the release lifecycle."""
+    """A determinate observation of a fix merge commit."""
 
+    UNMERGED = "unmerged"
     STAGING = "staging"
-    PROD_PENDING = "prod_pending"
     DEPLOYED = "deployed"
-    VERIFIED = "verified"
 
 
-class LadderAction(StrEnum):
-    """Action for an alert occurrence matched to an existing ticket."""
+@dataclass(frozen=True, slots=True)
+class DeployStateObservation:
+    """The branch-containment facts behind one derived state."""
 
-    NOTE_OCCURRENCE = "note_occurrence"
-    EXPECTED_NOISE = "expected_noise"
-    REOPEN_ESCALATE = "reopen_escalate"
+    state: DeployState | None
+    in_staging: bool | None
+    in_main: bool | None
+    comparisons: tuple[AncestryObservation, ...] = ()
 
+    @property
+    def display_state(self) -> str:
+        return render_deploy_state(self.state)
 
-class RefireSignal(StrEnum):
-    """Additional signal emitted beside the main ladder action."""
+    @property
+    def failures(self) -> tuple[AncestryObservation, ...]:
+        return tuple(item for item in self.comparisons if item.failed)
 
-    RECOMMEND_PROMOTION = "recommend_promotion"
-
-
-class MergeKind(StrEnum):
-    PROMOTION = "promotion"
-    HOTFIX = "hotfix"
-    FIX_TO_STAGING = "fix_to_staging"
-    OTHER = "other"
-
-
-def as_utc_datetime(value: datetime | str | None) -> datetime | None:
-    """Normalize a datetime/ISO value to aware UTC, or return ``None``."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        try:
-            value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+    def failure_payloads(self) -> list[dict[str, str | int]]:
+        payloads: list[dict[str, str | int]] = []
+        for failure in self.failures:
+            payload: dict[str, str | int] = {
+                "branch": failure.branch,
+                "category": str(failure.error_category),
+            }
+            if failure.status_code is not None:
+                payload["status_code"] = failure.status_code
+            if failure.status is not None:
+                payload["status"] = failure.status
+            payloads.append(payload)
+        return payloads
 
 
-def _coerce_deploy_state(value: DeployState | str | None) -> DeployState | None:
-    if value is None or value == "":
-        return None
-    try:
-        return DeployState(value)
-    except (TypeError, ValueError):
-        return None
+_Key = TypeVar("_Key", bound=Hashable)
 
 
-def classify_refire(
+class DeployStateBatch(dict[_Key, DeployState | None], Generic[_Key]):
+    """State mapping with request-scoped observations for unique fix refs."""
+
+    def __init__(
+        self,
+        states: Mapping[_Key, DeployState | None],
+        *,
+        observations_by_key: Mapping[_Key, DeployStateObservation],
+        observations_by_ref: Mapping[tuple[str, str], DeployStateObservation],
+    ) -> None:
+        super().__init__(states)
+        self.observations_by_key = dict(observations_by_key)
+        self.observations_by_ref = dict(observations_by_ref)
+
+    @property
+    def unavailable_refs(
+        self,
+    ) -> dict[tuple[str, str], DeployStateObservation]:
+        return {
+            ref: observation
+            for ref, observation in self.observations_by_ref.items()
+            if observation.state is None and observation.failures
+        }
+
+
+def render_deploy_state(state: DeployState | None) -> str:
+    """Render indeterminate GitHub reads honestly."""
+    return state.value if state is not None else "unknown"
+
+
+def _state_from_ancestry(
     *,
-    deploy_state: DeployState | str | None,
-    ticket_status: str | None,
-    deployed_at: datetime | None,
-    now: datetime,
-    settle: timedelta,
-) -> LadderAction:
-    """Classify an alert re-fire against the latest known fix attempt.
-
-    A merely-staged fix wins over a stale ``Done``: re-firing while the fix
-    awaits promotion is expected noise even when the ticket was closed
-    prematurely — the caller normalizes the invalid status quietly instead of
-    escalating to a builder who has nothing new to act on.
-    """
-    state = _coerce_deploy_state(deploy_state)
-    if state in {DeployState.STAGING, DeployState.PROD_PENDING}:
-        return LadderAction.EXPECTED_NOISE
-    if str(ticket_status or "").casefold() == "done":
-        return LadderAction.REOPEN_ESCALATE
-    if state is DeployState.VERIFIED:
-        return LadderAction.REOPEN_ESCALATE
-    if state is DeployState.DEPLOYED:
-        deployed = as_utc_datetime(deployed_at)
-        current = as_utc_datetime(now)
-        if deployed is not None and current is not None and current < deployed + settle:
-            return LadderAction.EXPECTED_NOISE
-        return LadderAction.REOPEN_ESCALATE
-    return LadderAction.NOTE_OCCURRENCE
-
-
-def promotion_recommendation_signal(
-    *,
-    deploy_state: DeployState | str | None,
-    occurrence_milestone: int | None,
-    promotion_recommended_at: datetime | None,
-    now: datetime,
-) -> RefireSignal | None:
-    """Return the once-per-UTC-day early-promotion signal, when warranted."""
-    if _coerce_deploy_state(deploy_state) is not DeployState.PROD_PENDING:
-        return None
-    if occurrence_milestone is None or occurrence_milestone <= 0:
-        return None
-    current = as_utc_datetime(now)
-    previous = as_utc_datetime(promotion_recommended_at)
-    if current is None:
-        return None
-    if previous is not None and previous.date() == current.date():
-        return None
-    return RefireSignal.RECOMMEND_PROMOTION
-
-
-def classify_merge_event(hints: Mapping[str, object] | None) -> MergeKind:
-    """Classify a merged pull request from normalized webhook hints."""
-    values = hints or {}
-    if values.get("merged") is not True:
-        return MergeKind.OTHER
-    base = str(values.get("base_ref") or "").removeprefix("refs/heads/").casefold()
-    head = str(values.get("head_ref") or "").removeprefix("refs/heads/").casefold()
-    if base == "main" and head == "staging":
-        return MergeKind.PROMOTION
-    if base == "main":
-        return MergeKind.HOTFIX
-    if base == "staging":
-        return MergeKind.FIX_TO_STAGING
-    return MergeKind.OTHER
-
-
-def derive_deploy_state(
-    *,
-    merged: bool | None,
-    base_ref: str | None,
     in_staging: bool | None,
     in_main: bool | None,
 ) -> DeployState | None:
-    """Derive the mechanical state shared by the sweep and agent tool."""
     if in_main is True:
         return DeployState.DEPLOYED
-    if in_staging is True and in_main is False:
-        return DeployState.PROD_PENDING
-    if merged is True and str(base_ref or "").casefold() == "staging":
+    if in_main is None:
+        return None
+    if in_staging is True:
         return DeployState.STAGING
+    if in_staging is False:
+        return DeployState.UNMERGED
     return None
+
+
+def _ordered_tokens(tokens: Sequence[str | None]) -> tuple[str | None, ...]:
+    ordered: list[str | None] = []
+    for token in tokens or (None,):
+        if token not in ordered:
+            ordered.append(token)
+    return tuple(ordered) or (None,)
+
+
+async def _observe_branch(
+    repo: str,
+    sha: str,
+    branch: str,
+    *,
+    token: str | None,
+    comparison_semaphore: asyncio.Semaphore | None,
+) -> AncestryObservation:
+    try:
+        if comparison_semaphore is None:
+            return await observe_ancestry(repo, sha, branch, token=token)
+        async with comparison_semaphore:
+            return await observe_ancestry(repo, sha, branch, token=token)
+    except Exception as exc:
+        # Tests and alternate adapters may fail outside the GitHub helper's
+        # degrade-open boundary. Keep that failure scoped to this fix ref.
+        return ancestry_failure(branch, exc)
+
+
+async def observe_deploy_state(
+    repo: str,
+    sha: str,
+    *,
+    tokens: Sequence[str | None],
+    _comparison_semaphore: asyncio.Semaphore | None = None,
+) -> DeployStateObservation:
+    """Read branch ancestry, retrying ordered identities when indeterminate."""
+    clean_repo = str(repo or "").strip()
+    clean_sha = str(sha or "").strip()
+    if not clean_repo or not clean_sha:
+        return DeployStateObservation(
+            state=None,
+            in_staging=None,
+            in_main=None,
+            comparisons=(
+                AncestryObservation(
+                    branch="reference",
+                    is_ancestor=None,
+                    error_category="invalid_reference",
+                ),
+            ),
+        )
+
+    last = DeployStateObservation(state=None, in_staging=None, in_main=None)
+    comparisons: list[AncestryObservation] = []
+    for token in _ordered_tokens(tokens):
+        staging, main = await asyncio.gather(
+            _observe_branch(
+                clean_repo,
+                clean_sha,
+                "staging",
+                token=token,
+                comparison_semaphore=_comparison_semaphore,
+            ),
+            _observe_branch(
+                clean_repo,
+                clean_sha,
+                "main",
+                token=token,
+                comparison_semaphore=_comparison_semaphore,
+            ),
+        )
+        comparisons.extend((staging, main))
+        last = DeployStateObservation(
+            state=_state_from_ancestry(
+                in_staging=staging.is_ancestor,
+                in_main=main.is_ancestor,
+            ),
+            in_staging=staging.is_ancestor,
+            in_main=main.is_ancestor,
+            comparisons=tuple(comparisons),
+        )
+        if last.state is not None:
+            return last
+    return last
+
+
+async def derive_deploy_state(
+    repo: str,
+    sha: str,
+    *,
+    tokens: Sequence[str | None],
+) -> DeployState | None:
+    """Derive a fix's state from ancestry alone.
+
+    ``None`` means GitHub could not establish enough ancestry facts. Callers
+    must render that as ``"unknown"`` rather than infer a healthy state.
+    """
+    return (await observe_deploy_state(repo, sha, tokens=tokens)).state
+
+
+async def derive_deploy_states(
+    refs: Mapping[_Key, tuple[str, str]] | Iterable[tuple[_Key, str, str]],
+    *,
+    tokens: Sequence[str | None] | Mapping[str, Sequence[str | None]],
+    concurrency: int = 8,
+) -> DeployStateBatch[_Key]:
+    """Derive each unique fix once while bounding actual GitHub compares."""
+    items = (
+        list(refs.items())
+        if isinstance(refs, Mapping)
+        else [(key, (repo, sha)) for key, repo, sha in refs]
+    )
+    normalized_items = [
+        (
+            key,
+            (
+                str(ref[0] or "").strip(),
+                str(ref[1] or "").strip(),
+            ),
+        )
+        for key, ref in items
+    ]
+    unique_refs = tuple(dict.fromkeys(ref for _key, ref in normalized_items))
+    comparison_semaphore = asyncio.Semaphore(max(1, int(concurrency)))
+
+    async def derive_unique(
+        ref: tuple[str, str],
+    ) -> tuple[tuple[str, str], DeployStateObservation]:
+        repo, sha = ref
+        try:
+            repo_tokens = (
+                tokens.get(repo, (None,))
+                if isinstance(tokens, Mapping)
+                else tokens
+            )
+            observation = await observe_deploy_state(
+                repo,
+                sha,
+                tokens=repo_tokens,
+                _comparison_semaphore=comparison_semaphore,
+            )
+        except Exception as exc:
+            observation = DeployStateObservation(
+                state=None,
+                in_staging=None,
+                in_main=None,
+                comparisons=(
+                    ancestry_failure("derive", exc),
+                ),
+            )
+        return ref, observation
+
+    observed_pairs = await asyncio.gather(
+        *(derive_unique(ref) for ref in unique_refs)
+    )
+    observations_by_ref = dict(observed_pairs)
+    observations_by_key = {
+        key: observations_by_ref[ref]
+        for key, ref in normalized_items
+    }
+    return DeployStateBatch(
+        {
+            key: observation.state
+            for key, observation in observations_by_key.items()
+        },
+        observations_by_key=observations_by_key,
+        observations_by_ref=observations_by_ref,
+    )

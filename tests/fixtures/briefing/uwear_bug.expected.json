@@ -9,7 +9,7 @@
         {
           "ref": "domain_record:1238",
           "title": "Maison L. batch 8841 melted hands",
-          "excerpt": "Tracker record for the melted-hands regression. Owner: axel. State: fix merged, prod_pending. Affected: 41 of 96 generations in batch 8841.",
+          "excerpt": "Tracker record for the melted-hands regression. Owner: axel. State: fix merged to staging. Affected: 41 of 96 generations in batch 8841.",
           "truncated": false,
           "omitted_chars": 0
         }
@@ -75,7 +75,7 @@
         {
           "ref": "deploy:uwear-backend#347",
           "title": "Deploy ladder",
-          "excerpt": "merged -> prod_pending. Promotion sweep armed; post-deploy verification will spot-check 6 of 41 rerun generations.",
+          "excerpt": "Current ancestry: staging. Human verification will spot-check 6 of 41 rerun generations after promotion.",
           "truncated": false,
           "omitted_chars": 0
         }
@@ -108,7 +108,7 @@
       ]
     }
   ],
-  "total_chars": 1871,
+  "total_chars": 1858,
   "budget": {
     "total_chars": 4000,
     "source_chars": 900,

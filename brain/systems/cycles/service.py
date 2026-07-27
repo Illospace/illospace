@@ -190,7 +190,7 @@ async def _async_maybe_harvest_alert_resolution(session, cycle: Cycle, run: Cycl
     if cycle.name != _UWEAR_COORDINATOR_CYCLE_NAME:
         return None
     try:
-        from brain.systems.deploy_state_sweep import run_alert_resolution_harvest
+        from brain.systems.alert_resolution import run_alert_resolution_harvest
 
         summary = await run_alert_resolution_harvest(
             session,

@@ -1,7 +1,7 @@
 > On-demand mode playbook for the Uwear engineering triage operating model.
 > Core doc: Enterprise Documentation Domain `37` record `1155` (bundled skill
 > `uwear-engineering-triage`); fetch per its **On-demand Run Modes** section.
-> The core doc's always-on rules — Ownership, Deploy-State Ladder, States,
+> The core doc's always-on rules — Ownership, Deploy State on Read, States,
 > Before Posting gates, Public Output — still govern this mode.
 
 # Chantier Operations
@@ -49,11 +49,11 @@ existing exact item counts and adds the active-chantier count, for example:
 
 Before diffing or composing, re-read the source thread for every tracker record
 carrying `alert_slack_channel` and `alert_slack_thread_ts`; consider human
-replies only. A deploy or named merged/promoted PR advances `deploy_state` to
-`deployed`. A human `c'est fix` / `ça a l'air d'être fix` confirmation advances
-it to `verified`, moves `status` to `Done`, and stores its Slack timestamp in
-`resolution_confirmed_ts`. If a later human reply says the problem still reproduces,
-the later reply wins: keep the record open, clear `deploy_state`, store
+replies only. A deploy or named merged/promoted PR is movement evidence but
+does not persist deploy state. A human `c'est fix` / `ça a l'air d'être fix`
+confirmation sets `verified=true`, moves `status` to `Done`, and stores its
+Slack timestamp in `verified_at` and `resolution_confirmed_ts`. If a later human reply says the problem still reproduces, the later reply wins: keep the
+record open, set `verified=false`, clear `verified_at`, store
 `resolution_reproduced_ts`, and quote the reproduce note and timestamp in
 `progress_note`.
 
@@ -64,7 +64,8 @@ an unchanged open hypothesis.
 
 For each active chantier, read `slug`, `title`, `goal`, `state`, `owner`,
 `refs`, `next_step`, `progress_note`, and `updated_at`. Resolve member refs
-against the deploy-verified current state; do not infer goal completion from a
+against current GitHub ancestry plus the verification overlay; render an
+indeterminate ancestry read as `unknown`. Do not infer goal completion from a
 merged-to-staging PR or from issue/PR counts.
 
 ### Durable snapshot and diff
@@ -158,7 +159,7 @@ On a confirmed match:
    issue body, chantier `refs`, and `progress_note`. Report and retry a partial
    write; never claim attachment from only one surface.
 
-Search/dedup and Deploy-State Ladder checks still happen before filing. An
+Search/dedup and Deploy State on Read checks still happen before filing. An
 existing issue is attached or updated; it is never refiled merely to gain
 chantier membership.
 

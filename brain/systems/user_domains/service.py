@@ -20,6 +20,10 @@ from brain.platform.db.models.domain import (
     DomainRelation,
     DomainRelationType,
 )
+from brain.systems.deploy_record_contract import (
+    deploy_ticket_object_keys,
+    without_retired_deploy_fields,
+)
 
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
@@ -1330,6 +1334,9 @@ class AsyncDomainService:
 
     async def serialize_record(self, record: DomainRecord) -> dict[str, Any]:
         obj = await self.session.get(DomainObjectType, record.object_type_id)
+        data = record.data if isinstance(record.data, dict) else {}
+        if obj is not None and obj.key in deploy_ticket_object_keys():
+            data = without_retired_deploy_fields(data)
         return {
             "id": record.id,
             "org_id": record.org_id,
@@ -1337,7 +1344,7 @@ class AsyncDomainService:
             "object_type_id": record.object_type_id,
             "object_key": obj.key if obj else None,
             "title": record.title,
-            "data": record.data or {},
+            "data": data,
             "version": record.version,
             "archived_at": record.archived_at,
             "created_at": record.created_at,
@@ -1352,6 +1359,8 @@ class AsyncDomainService:
     ) -> dict[str, Any]:
         obj = await self.session.get(DomainObjectType, record.object_type_id)
         data = record.data if isinstance(record.data, dict) else {}
+        if obj is not None and obj.key in deploy_ticket_object_keys():
+            data = without_retired_deploy_fields(data)
         if fields is None:
             projected_data = {
                 key: value

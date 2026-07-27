@@ -145,15 +145,14 @@ class TestNotifyCycleOrchestration:
         assert any("Prod down" in text for _, text in sent)
         assert any("1 item waiting" in text for _, text in sent)
 
-    async def test_verification_is_inert_when_deploy_feature_unset(self, monkeypatch):
+    async def test_resolution_harvest_is_inert_without_session(self, monkeypatch):
         import brain.systems.change_notifications_cycle as cyc
 
-        monkeypatch.delenv("ILLO_DEPLOY_SWEEP_REPOS", raising=False)
         monkeypatch.setattr(cyc, "_load_change_events", lambda *a, **k: _async_value([]))
         monkeypatch.setattr(cyc, "_count_unclaimed", lambda *a, **k: _async_value(0))
 
         result = await cyc.run_notify_cycle(
-            object(), org_id="o", channel_id="C123", post=lambda *a: _async_value(None),
+            None, org_id="o", channel_id="C123", post=lambda *a: _async_value(None),
             deliver_briefs=lambda org: _async_value(None),
         )
         assert result == {
@@ -163,15 +162,14 @@ class TestNotifyCycleOrchestration:
             "unclaimed": 0,
         }
 
-    async def test_verification_is_additive_and_safe(self, monkeypatch):
+    async def test_resolution_harvest_is_additive_and_safe(self, monkeypatch):
         import brain.systems.change_notifications_cycle as cyc
 
-        monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", "o/r")
         monkeypatch.setattr(cyc, "_load_change_events", lambda *a, **k: _async_value([]))
         monkeypatch.setattr(cyc, "_count_unclaimed", lambda *a, **k: _async_value(0))
         monkeypatch.setattr(
             cyc,
-            "_maybe_run_deploy_verification",
+            "_maybe_run_alert_resolution_harvest",
             lambda *a, **k: _async_value({"verified": 2}),
         )
 
@@ -179,7 +177,7 @@ class TestNotifyCycleOrchestration:
             object(), org_id="o", channel_id="C123", post=lambda *a: _async_value(None),
             deliver_briefs=lambda org: _async_value(None),
         )
-        assert result["verification"] == {"verified": 2}
+        assert result["resolution_harvest"] == {"verified": 2}
 
     async def test_brief_delivery_sweep_runs_and_reports(self, monkeypatch):
         """Slice-06 sweep half of the packet-brief outbox: the tick invokes
@@ -428,7 +426,7 @@ async def test_failed_sends_are_contained_and_counted(db_less_session=None):
         for i in range(2)
     ]
     with (
-        patch("brain.systems.change_notifications_cycle._maybe_run_deploy_verification",
+        patch("brain.systems.change_notifications_cycle._maybe_run_alert_resolution_harvest",
               new=AsyncMock(return_value=None)),
         patch("brain.systems.change_notifications_cycle._load_change_events",
               new=AsyncMock(return_value=events)),

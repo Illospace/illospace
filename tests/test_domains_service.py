@@ -2044,6 +2044,71 @@ async def test_serialize_record_compact_defaults_to_short_scalars(session):
     }
 
 
+async def test_deploy_tracker_serialization_hides_retired_stored_state(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="Deploy tracker serialization",
+        objects=[
+            {
+                "key": "github_ticket",
+                "title_field": "title",
+                "fields": [
+                    {
+                        "key": "title",
+                        "field_type": "text",
+                        "required": True,
+                    },
+                    {"key": "fix_pr", "field_type": "text"},
+                    {"key": "fix_merge_sha", "field_type": "text"},
+                    {"key": "verified", "field_type": "boolean"},
+                    {"key": "verified_at", "field_type": "datetime"},
+                    {
+                        "key": "deploy_state",
+                        "field_type": "enum",
+                        "options": ["staging", "verified"],
+                    },
+                    {"key": "deployed_at", "field_type": "datetime"},
+                ],
+            }
+        ],
+    )
+    record = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "github_ticket",
+        data={
+            "title": "Legacy row",
+            "fix_pr": "uwear-ai/uwear-backend#1264",
+            "fix_merge_sha": "a" * 40,
+            "verified": True,
+            "verified_at": "2026-07-27T12:00:00+00:00",
+            "deploy_state": "verified",
+            "deployed_at": "2026-07-27T11:00:00+00:00",
+        },
+    )
+
+    full = await service.serialize_record(record)
+    compact = await service.serialize_record_compact(
+        record,
+        fields=[
+            "deploy_state",
+            "deployed_at",
+            "fix_pr",
+            "verified",
+        ],
+    )
+
+    assert full["data"]["fix_pr"] == "uwear-ai/uwear-backend#1264"
+    assert full["data"]["verified"] is True
+    assert "deploy_state" not in full["data"]
+    assert "deployed_at" not in full["data"]
+    assert compact["data"] == {
+        "fix_pr": "uwear-ai/uwear-backend#1264",
+        "verified": True,
+    }
+
+
 async def test_list_records_supports_oldest_first_order_and_rejects_invalid_order(session):
     service = AsyncDomainService(session)
     domain = await service.create_domain(

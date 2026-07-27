@@ -1,21 +1,14 @@
-"""Deterministic coordination for the deploy-state lifecycle.
-
-The pure axis and ladder live in :mod:`brain.systems.deploy_state`.  This module
-combines deploy-tracker persistence with monitored-alert reads. It never posts
-to Slack and never lets GitHub, Slack, or record conflicts fail a coordinator
-sweep, webhook ingestion, or notification tick.
-"""
+"""Harvest human resolution judgments from monitored-alert Slack threads."""
 
 from __future__ import annotations
 
-import inspect
 import logging
 import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Awaitable, Mapping, Protocol, Sequence
+from typing import Any, Mapping, Sequence
 
 from sqlalchemy import select
 
@@ -26,23 +19,10 @@ from brain.platform.db.models.domain import (
 )
 from brain.platform.db.models.run import AgentRun
 from brain.systems import deploy_fix_refs, deploy_tracker
-from brain.systems.deploy_state import (
-    DeployState,
-    MergeKind,
-    as_utc_datetime,
-    classify_merge_event,
-    derive_deploy_state,
-)
-from brain.systems.deploy_state_config import (
-    deploy_feature_enabled,
-    deploy_quiet_window,
-    deploy_settle_window,
-)
-from brain.systems.deploy_state_github import is_ancestor_of
 from brain.systems.user_domains.service import AsyncDomainService
 
 
-logger = logging.getLogger("illo.deploy_state")
+logger = logging.getLogger("illo.alert_resolution")
 
 _SLACK_THREAD_PAGE_LIMIT = 200
 _SLACK_THREAD_MAX_PAGES = 3
@@ -74,6 +54,10 @@ _MERGE_OR_PROMOTION_RE = re.compile(r"\b(?:merge(?:d|e|ee)?|promot(?:ed|e|ee|ion
 _PR_REFERENCE_RE = re.compile(r"\b(?:pr|pull request)\b|#[1-9][0-9]*\b")
 
 
+class AlertResolutionSchemaError(RuntimeError):
+    """The provisioned tracker schema cannot accept an atomic resolution."""
+
+
 @dataclass(frozen=True, slots=True)
 class AlertThreadSource:
     """A tracker record and its monitored-alert Slack thread provenance."""
@@ -91,30 +75,6 @@ class _ResolutionSignal:
     text: str
     source: AlertThreadSource
     fix_pr: str | None = None
-
-
-class QuietCheck(Protocol):
-    """Replaceable quiet-check seam; a future Rollbar implementation fits here."""
-
-    def __call__(
-        self,
-        *,
-        data: Mapping[str, object],
-        deployed_at: datetime,
-        settle_until: datetime,
-        now: datetime,
-    ) -> bool | None | Awaitable[bool | None]: ...
-
-
-def _parse_datetime(value: object) -> datetime | None:
-    if not isinstance(value, datetime | str):
-        return None
-    return as_utc_datetime(value)
-
-
-def _iso(value: datetime | str | object) -> str | None:
-    parsed = _parse_datetime(value)
-    return parsed.isoformat() if parsed else None
 
 
 def _text(value: object) -> str:
@@ -351,9 +311,15 @@ async def _resolution_patch(
     record: DomainRecord,
     signal: _ResolutionSignal,
     latest_confirmation: _ResolutionSignal | None,
-    latest_deployment: _ResolutionSignal | None,
     latest_fix_pr: str | None,
 ) -> dict[str, object]:
+    """Build one atomic human-resolution patch.
+
+    This extraction intentionally writes the ancestry-era verification
+    contract (``verified``/``verified_at``) instead of the retired stored
+    deploy enum. Every generated key must exist; silently dropping a missing
+    fix reference could close a record without preserving the discovered fix.
+    """
     fields = {
         field.key: field
         for field in await AsyncDomainService(session).list_fields(record.object_type_id)
@@ -372,22 +338,17 @@ async def _resolution_patch(
 
     signal_iso = _slack_ts_iso(signal.message_ts)
     if signal.kind == "verified":
-        patch["deploy_state"] = DeployState.VERIFIED.value
+        patch["verified"] = True
         if signal_iso:
             patch["verified_at"] = signal_iso
-        deployed_iso = _slack_ts_iso(latest_deployment.message_ts) if latest_deployment else None
-        if not data.get("deployed_at") and (deployed_iso or signal_iso):
-            patch["deployed_at"] = deployed_iso or signal_iso
         status = _matching_enum_option(fields.get("status"), "Done")
     elif signal.kind == "deployed":
-        patch.update({"deploy_state": DeployState.DEPLOYED.value, "verified_at": None})
-        if signal_iso:
-            patch["deployed_at"] = signal_iso
+        patch.update({"verified": False, "verified_at": None})
         status = _matching_enum_option(fields.get("status"), "In Review", "In Progress", "Todo")
     else:
         patch.update(
             {
-                "deploy_state": None,
+                "verified": False,
                 "verified_at": None,
                 "resolution_reproduced_ts": signal.message_ts,
             }
@@ -398,7 +359,13 @@ async def _resolution_patch(
     note = deploy_tracker.append_progress_note(data, _resolution_note(signal))
     if note is not None:
         patch["progress_note"] = note
-    return {key: value for key, value in patch.items() if key in fields}
+    missing = set(patch) - set(fields)
+    if missing:
+        raise AlertResolutionSchemaError(
+            "alert resolution schema missing field(s): "
+            + ", ".join(sorted(missing))
+        )
+    return patch
 
 
 async def run_alert_resolution_harvest(
@@ -428,11 +395,8 @@ async def run_alert_resolution_harvest(
         "movements": [],
         "errors": [],
     }
-    if not deploy_feature_enabled():
-        summary["disabled"] = True
-        return summary
     try:
-        summary["fields"] = await deploy_tracker.ensure_deploy_state_fields(
+        summary["fields"] = await deploy_tracker.ensure_alert_resolution_fields(
             session,
             org_id=org_id,
         )
@@ -486,8 +450,6 @@ async def run_alert_resolution_harvest(
         signal = signals[-1]
         confirmations = [item for item in signals if item.kind in {"deployed", "verified"}]
         latest_confirmation = confirmations[-1] if confirmations else None
-        deployments = [item for item in confirmations if item.kind == "deployed"]
-        latest_deployment = deployments[-1] if deployments else None
         latest_fix_pr = next(
             (item.fix_pr for item in reversed(confirmations) if item.fix_pr),
             None,
@@ -501,14 +463,22 @@ async def run_alert_resolution_harvest(
         if _slack_ts_key(signal.message_ts) <= processed_ts:
             summary["skipped"] += 1
             continue
-        patch = await _resolution_patch(
-            session,
-            record=record,
-            signal=signal,
-            latest_confirmation=latest_confirmation,
-            latest_deployment=latest_deployment,
-            latest_fix_pr=latest_fix_pr,
-        )
+        try:
+            patch = await _resolution_patch(
+                session,
+                record=record,
+                signal=signal,
+                latest_confirmation=latest_confirmation,
+                latest_fix_pr=latest_fix_pr,
+            )
+        except Exception as exc:
+            logger.warning(
+                "alert resolution patch rejected for record %s: %s",
+                record.id,
+                exc,
+            )
+            summary["errors"].append(record.id)
+            continue
         if not patch:
             summary["skipped"] += 1
             continue
@@ -532,345 +502,4 @@ async def run_alert_resolution_harvest(
                 "message_ts": signal.message_ts,
             }
         )
-    return summary
-
-
-async def _check_ancestry(
-    repo: str,
-    sha: str,
-    branch: str,
-    tokens: Sequence[str | None],
-) -> bool | None:
-    """Try ordered read identities until ancestry is determinate."""
-    for token in tokens:
-        if token is None:
-            result = await is_ancestor_of(repo, sha, branch)
-        else:
-            result = await is_ancestor_of(repo, sha, branch, token=token)
-        if result is not None:
-            return result
-    return None
-
-
-def _new_summary(kind: MergeKind | str) -> dict:
-    return {
-        "merge_kind": str(kind),
-        "examined": 0,
-        "updated": 0,
-        "deployed": 0,
-        "prod_pending": 0,
-        "staging": 0,
-        "indeterminate": 0,
-        "skipped": 0,
-        "errors": [],
-    }
-
-
-async def _sweep_main_merge(
-    session,
-    *,
-    org_id: str,
-    repo: str,
-    event: Mapping,
-    ancestry_tokens: Sequence[str | None],
-    summary: dict,
-) -> None:
-    kind = classify_merge_event(event)
-    fix_pr = f"{repo}#{event.get('number')}" if kind is MergeKind.HOTFIX and event.get("number") else None
-    records = await deploy_tracker.list_deploy_ticket_records(
-        session,
-        org_id=org_id,
-        states={DeployState.STAGING.value, DeployState.PROD_PENDING.value},
-        fix_pr_prefix=f"{repo}#",
-        fix_pr=fix_pr,
-    )
-    for record in records:
-        summary["examined"] += 1
-        data = record.data or {}
-        sha = str(data.get("fix_merge_sha") or "").strip()
-        if fix_pr and data.get("fix_pr") == fix_pr and event.get("merge_commit_sha"):
-            sha = str(event["merge_commit_sha"])
-        if not sha:
-            summary["skipped"] += 1
-            continue
-        in_main = await _check_ancestry(repo, sha, "main", ancestry_tokens)
-        if in_main is None:
-            summary["indeterminate"] += 1
-            continue
-        patch: dict = {}
-        if in_main:
-            deployed_at = _iso(event.get("merged_at"))
-            if not deployed_at:
-                summary["skipped"] += 1
-                continue
-            patch.update({"deploy_state": DeployState.DEPLOYED.value, "deployed_at": deployed_at})
-            if fix_pr and data.get("fix_pr") == fix_pr:
-                patch.update({"fix_merge_sha": sha, "fix_merged_at": deployed_at})
-            note = deploy_tracker.append_progress_note(
-                data,
-                f"deployed to main at {deployed_at}",
-            )
-            if note is not None:
-                patch["progress_note"] = note
-            bucket = "deployed"
-        elif data.get("deploy_state") == DeployState.STAGING.value:
-            in_staging = await _check_ancestry(repo, sha, "staging", ancestry_tokens)
-            if in_staging is None:
-                summary["indeterminate"] += 1
-                continue
-            if not in_staging:
-                summary["skipped"] += 1
-                continue
-            patch["deploy_state"] = DeployState.PROD_PENDING.value
-            note = deploy_tracker.append_progress_note(
-                data,
-                "fix confirmed on staging; awaiting promotion",
-            )
-            if note is not None:
-                patch["progress_note"] = note
-            bucket = "prod_pending"
-        else:
-            summary["skipped"] += 1
-            continue
-        try:
-            await deploy_tracker.update_deploy_ticket_record(
-                session,
-                record,
-                patch,
-                reason=f"deploy_sweep:{kind.value}",
-            )
-        except Exception as exc:
-            logger.warning("deploy sweep skipped record %s: %s", record.id, exc)
-            summary["errors"].append(record.id)
-            continue
-        summary["updated"] += 1
-        summary[bucket] += 1
-
-
-async def _sweep_staging_merge(
-    session,
-    *,
-    org_id: str,
-    repo: str,
-    event: Mapping,
-    ancestry_tokens: Sequence[str | None],
-    summary: dict,
-) -> None:
-    number = event.get("number")
-    sha = str(event.get("merge_commit_sha") or "").strip()
-    merged_at = _iso(event.get("merged_at"))
-    if not number or not sha or not merged_at:
-        summary["skipped"] += 1
-        return
-    fix_pr = f"{repo}#{number}"
-    records = await deploy_tracker.list_deploy_ticket_records(
-        session,
-        org_id=org_id,
-        fix_pr=fix_pr,
-    )
-    for record in records:
-        summary["examined"] += 1
-        data = record.data or {}
-        in_main = await _check_ancestry(repo, sha, "main", ancestry_tokens)
-        state = derive_deploy_state(
-            merged=True,
-            base_ref="staging",
-            in_staging=True,
-            in_main=in_main,
-        )
-        if state is None:
-            state = DeployState.STAGING
-        patch = {
-            "fix_merge_sha": sha,
-            "fix_merged_at": merged_at,
-            "deploy_state": state.value,
-        }
-        if state is DeployState.DEPLOYED:
-            patch["deployed_at"] = merged_at
-        note = deploy_tracker.append_progress_note(
-            data,
-            f"fix {fix_pr} merged to staging at {merged_at}",
-        )
-        if note is not None:
-            patch["progress_note"] = note
-        try:
-            await deploy_tracker.update_deploy_ticket_record(
-                session,
-                record,
-                patch,
-                reason="deploy_sweep:fix_to_staging",
-            )
-        except Exception as exc:
-            logger.warning("deploy sweep skipped record %s: %s", record.id, exc)
-            summary["errors"].append(record.id)
-            continue
-        summary["updated"] += 1
-        summary[state.value] += 1
-        if in_main is None:
-            summary["indeterminate"] += 1
-
-
-async def run_deploy_sweep(
-    session,
-    *,
-    org_id: str,
-    repo: str,
-    merge_event: Mapping,
-    ancestry_tokens: Sequence[str | None] | None = None,
-) -> dict:
-    """Apply one merged-PR event, returning telemetry and never raising."""
-    kind = classify_merge_event(merge_event)
-    summary = _new_summary(kind)
-    if not deploy_feature_enabled(repo):
-        summary["disabled"] = True
-        return summary
-    try:
-        tokens = tuple(ancestry_tokens or (None,))
-        summary["fields"] = await deploy_tracker.ensure_deploy_state_fields(
-            session,
-            org_id=org_id,
-        )
-        if kind in {MergeKind.PROMOTION, MergeKind.HOTFIX}:
-            await _sweep_main_merge(
-                session,
-                org_id=org_id,
-                repo=repo,
-                event=merge_event,
-                ancestry_tokens=tokens,
-                summary=summary,
-            )
-        elif kind is MergeKind.FIX_TO_STAGING:
-            await _sweep_staging_merge(
-                session,
-                org_id=org_id,
-                repo=repo,
-                event=merge_event,
-                ancestry_tokens=tokens,
-                summary=summary,
-            )
-    except Exception as exc:
-        logger.exception("deploy sweep failed safely for %s", repo)
-        summary["errors"].append(str(exc))
-    return summary
-
-
-def infer_quiet_from_record(
-    *,
-    data: Mapping[str, object],
-    deployed_at: datetime,
-    settle_until: datetime,
-    now: datetime,
-) -> bool | None:
-    """Default quiet check: infer from the last alert occurrence we ingested."""
-    raw_last_seen = data.get("alert_last_seen_at")
-    if raw_last_seen in {None, ""}:
-        return True
-    last_seen = _parse_datetime(raw_last_seen)
-    if last_seen is None:
-        return None
-    return last_seen <= settle_until
-
-
-async def _check_quiet(check: QuietCheck, **kwargs) -> bool | None:
-    result = check(**kwargs)
-    if inspect.isawaitable(result):
-        return await result
-    return result
-
-
-async def run_deploy_verification(
-    session,
-    *,
-    org_id: str,
-    now: datetime,
-    quiet_check: QuietCheck = infer_quiet_from_record,
-) -> dict:
-    """Close only deployed tickets that stayed quiet through the full window."""
-    summary = {
-        "examined": 0,
-        "eligible": 0,
-        "verified": 0,
-        "not_quiet": 0,
-        "indeterminate": 0,
-        "skipped": 0,
-        "errors": [],
-    }
-    if not deploy_feature_enabled():
-        summary["disabled"] = True
-        return summary
-    try:
-        summary["fields"] = await deploy_tracker.ensure_deploy_state_fields(
-            session,
-            org_id=org_id,
-        )
-        records = await deploy_tracker.list_deploy_ticket_records(
-            session,
-            org_id=org_id,
-            states={DeployState.DEPLOYED.value},
-        )
-    except Exception as exc:
-        logger.exception("deploy verification setup failed safely")
-        summary["errors"].append(str(exc))
-        return summary
-
-    current = _parse_datetime(now)
-    if current is None:
-        summary["errors"].append("invalid now")
-        return summary
-    settle = deploy_settle_window()
-    quiet_window = deploy_quiet_window()
-    for record in records:
-        summary["examined"] += 1
-        data = record.data or {}
-        deployed_at = _parse_datetime(data.get("deployed_at"))
-        if deployed_at is None:
-            summary["skipped"] += 1
-            continue
-        settle_until = deployed_at + settle
-        if current < settle_until + quiet_window:
-            summary["skipped"] += 1
-            continue
-        summary["eligible"] += 1
-        try:
-            quiet = await _check_quiet(
-                quiet_check,
-                data=data,
-                deployed_at=deployed_at,
-                settle_until=settle_until,
-                now=current,
-            )
-        except Exception as exc:
-            logger.warning("quiet check failed for record %s: %s", record.id, exc)
-            summary["indeterminate"] += 1
-            continue
-        if quiet is None:
-            summary["indeterminate"] += 1
-            continue
-        if quiet is False:
-            summary["not_quiet"] += 1
-            continue
-        deployed_iso = deployed_at.isoformat()
-        patch = {
-            "deploy_state": DeployState.VERIFIED.value,
-            "verified_at": current.isoformat(),
-            "status": "Done",
-        }
-        note = deploy_tracker.append_progress_note(
-            data,
-            f"verified quiet since deploy at {deployed_iso}",
-        )
-        if note is not None:
-            patch["progress_note"] = note
-        try:
-            await deploy_tracker.update_deploy_ticket_record(
-                session,
-                record,
-                patch,
-                reason="deploy_verification",
-            )
-        except Exception as exc:
-            logger.warning("deploy verification skipped record %s: %s", record.id, exc)
-            summary["errors"].append(record.id)
-            continue
-        summary["verified"] += 1
     return summary
