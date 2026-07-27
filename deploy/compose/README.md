@@ -138,6 +138,14 @@ The unit is generated per host rather than committed, because the Docker unit
 name and binary path differ (a Docker snap install has no `docker.service` at
 all). Inspect it before installing with `./illo deploy boot-unit --print`.
 
+It installs a **user** unit by default when you are not root, so it needs no
+`sudo` — user units start at boot on their own provided the account has
+lingering enabled (the installer turns it on when it can). A user unit cannot
+order itself after a system Docker unit, so it waits for the daemon to accept
+connections instead, bounded by `TimeoutStartSec`. Pass `--system` to install
+into `/etc/systemd/system` and order directly after the Docker unit; that path
+needs root.
+
 Two worker settings interact with shutdown and must stay consistent:
 
 - `stop_grace_period` (default `10s`, override with `ILLO_WORKER_STOP_GRACE_PERIOD`)
