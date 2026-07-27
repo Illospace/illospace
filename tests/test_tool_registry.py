@@ -20,6 +20,23 @@ def test_every_exposed_tool_has_registry_metadata():
     assert exposed <= registered
 
 
+def test_every_registered_tool_declares_an_explicit_side_effect_class():
+    from brain.systems.runs.tool_catalog.registry import _STATIC_METADATA, all_tool_registrations
+
+    assert {
+        name
+        for name in all_tool_registrations()
+        if not _STATIC_METADATA.get(name, {}).get("side_effect_class")
+    } == set()
+
+
+def test_unknown_tool_side_effect_defaults_to_write():
+    from brain.systems.runs.tool_catalog.metadata import ToolSideEffectClass
+    from brain.systems.runs.tool_catalog.registry import side_effect_class_for_tool
+
+    assert side_effect_class_for_tool("not_registered") is ToolSideEffectClass.WRITE
+
+
 def test_registered_tools_have_capability_coverage_or_explicit_exemption():
     from brain.systems.runs.capabilities import (
         CAPABILITY_COVERAGE_EXEMPT_TOOLS,

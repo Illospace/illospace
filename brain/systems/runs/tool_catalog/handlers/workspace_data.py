@@ -721,10 +721,12 @@ async def _query_tool_calls(
     idea_id: str | None,
     search: str | None,
     limit: int,
+    run_id: int | None = None,
 ) -> None:
     from brain.platform.db.models.agent_run import AgentRunEventRow
     from brain.platform.db.models.run import AgentRun
     from brain.platform.db.models.idea import Idea
+    from brain.systems.runs.events import tool_call_write_timing
     from brain.systems.runs.presentation import public_tool_event_payload
 
     stmt = (
@@ -733,12 +735,13 @@ async def _query_tool_calls(
         .outerjoin(Idea, _uuid_text_equals(Idea.id, AgentRun.thread_id))
         .where(AgentRunEventRow.event_type.in_(("run.tool_completed", "run.tool_failed")))
         .order_by(AgentRunEventRow.created_at.desc().nullslast(), AgentRunEventRow.id.desc())
-        .limit(limit)
     )
     stmt = _scope_run(stmt, AgentRun, org_id=org_id, user_id=user_id)
     stmt = _apply_date_bounds(stmt, AgentRunEventRow.created_at, start, end)
     if idea_id:
         stmt = stmt.where(AgentRun.thread_id == idea_id)
+    if run_id is not None:
+        stmt = stmt.where(AgentRun.id == run_id)
     if person_ids:
         stmt = stmt.where(AgentRun.user_id.in_(person_ids))
     text_match = _text_filter(
@@ -749,10 +752,20 @@ async def _query_tool_calls(
     )
     if text_match is not None:
         stmt = stmt.where(text_match)
+    if run_id is None:
+        stmt = stmt.limit(limit)
 
     rows = await _session_execute_all(session, stmt)
+    if run_id is not None:
+        payload["tool_call_summary"] = {
+            "run_id": run_id,
+            **tool_call_write_timing(
+                (event for event, _run, _idea in rows),
+                now=_now_utc(),
+            ),
+        }
     tool_calls = []
-    for event, run, idea in rows:
+    for event, run, idea in rows[:limit]:
         public_event = public_tool_event_payload(event.payload, event.event_type)
         failure = public_event.get("failure") if isinstance(public_event.get("failure"), dict) else None
         tool_calls.append({
@@ -766,6 +779,8 @@ async def _query_tool_calls(
             "run_status": run.status if run else None,
             "tool_name": public_event.get("tool_name"),
             "source": public_event.get("source"),
+            "side_effect": public_event.get("side_effect"),
+            "is_write": public_event.get("is_write"),
             "args": _snippet(public_event.get("args"), 420),
             "result": _snippet(
                 failure.get("message") if failure else public_event.get("result") or public_event.get("result_preview"),
@@ -1656,6 +1671,7 @@ async def _run_tool_calls(session: Any, payload: dict[str, Any], ctx: WorkspaceD
         user_id=ctx.user_id,
         person_ids=ctx.person_ids,
         idea_id=ctx.idea_id,
+        run_id=ctx.run_id,
         search=ctx.search,
         limit=ctx.limit,
     )

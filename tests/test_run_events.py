@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -15,7 +16,11 @@ from brain.systems.runs.event_log import (
     list_run_events_after_for_principal_async,
     run_event_to_message,
 )
-from brain.systems.runs.events import async_record_tool_call
+from brain.systems.runs.events import (
+    async_record_tool_call,
+    tool_call_completed_payload,
+    tool_call_write_timing,
+)
 from brain.systems.cortex.events import run_event_scope
 from brain.platform.db.models.run import RunEvent
 
@@ -109,10 +114,56 @@ async def test_async_record_tool_call_persists_redacted_tool_trace(monkeypatch):
                 "args": {"key": "OPENAI_API_KEY"},
                 "result": "[secret redacted]",
                 "source": "runner:test",
+                "side_effect": "read_only",
+                "is_write": False,
             },
             {"producer": "runner:test"},
         )
     ]
+
+
+def test_tool_call_payload_uses_registry_classes_and_conservative_unknown_fallback():
+    assert tool_call_completed_payload(
+        "idea-1",
+        "read_file",
+        {},
+        "ok",
+    )["side_effect"] == "read_only"
+    assert tool_call_completed_payload(
+        "idea-1",
+        "write_file",
+        {},
+        "ok",
+    )["side_effect"] == "file_write"
+    unknown_payload = tool_call_completed_payload(
+        "idea-1",
+        "not_registered",
+        {},
+        "ok",
+    )
+    assert unknown_payload["side_effect"] == "write"
+    assert unknown_payload["is_write"] is True
+
+
+def test_tool_call_write_timing_uses_stored_typed_metadata():
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    events = [
+        SimpleNamespace(
+            event_type="run.tool_completed",
+            payload={"side_effect": "file_write", "is_write": True},
+            created_at=now - timedelta(seconds=95),
+        ),
+        SimpleNamespace(
+            event_type="run.tool_completed",
+            payload={"side_effect": "read_only", "is_write": False},
+            created_at=now - timedelta(seconds=5),
+        ),
+    ]
+
+    assert tool_call_write_timing(events, now=now) == {
+        "last_write_tool_call_at": (now - timedelta(seconds=95)).isoformat(),
+        "seconds_since_last_write_tool_call": 95,
+    }
 
 
 def test_run_event_to_message_handles_projected_rows_and_replay_flag():
@@ -360,6 +411,8 @@ def test_public_tool_projection_strips_sensitive_url_parts():
     serialized = json.dumps(message)
     assert message["args"]["url"] == "example.com/private/file"
     assert message["tool_display"]["target"] == "example.com/private/file"
+    assert message["side_effect"] == "write"
+    assert message["is_write"] is True
     assert "secret" not in serialized
     assert "abc123" not in serialized
     assert "X-Amz-Signature" not in serialized

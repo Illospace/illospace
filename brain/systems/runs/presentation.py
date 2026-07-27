@@ -14,6 +14,10 @@ from urllib.parse import urlparse
 
 from brain.systems.runs.actions import result_failure_summary
 from brain.systems.runs.failures import failure_category_for_error, public_run_failure
+from brain.systems.runs.tool_catalog.metadata import (
+    coerce_tool_side_effect_class,
+    is_write_side_effect_class,
+)
 
 
 SENSITIVE_ARG_PARTS = {
@@ -70,6 +74,7 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
 
     raw = dict(payload or {})
     tool_name = _text(raw.get("tool_name") or raw.get("tool") or "tool") or "tool"
+    side_effect = coerce_tool_side_effect_class(raw.get("side_effect"))
     args = raw.get("args") if isinstance(raw.get("args"), dict) else {}
     failure_summary = (
         _text(raw.get("error"))
@@ -99,6 +104,8 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
     }
     public["tool_name"] = tool_name
     public["tool"] = tool_name
+    public["side_effect"] = side_effect.value
+    public["is_write"] = is_write_side_effect_class(side_effect)
     public["args"] = public_tool_args(args)
     public["tool_display"] = display
     public["display"] = display

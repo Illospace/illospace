@@ -62,6 +62,7 @@ from brain.systems.runs.cortex.read_models import (
     public_run_debug_event_payload,
     run_stream_payload,
 )
+from brain.systems.runs.events import tool_call_write_timing
 from brain.systems.runs.failures import public_run_failure
 
 
@@ -850,12 +851,16 @@ async def _read_run_get(
                 AgentRunEventRow.event_type.like("run.tool_%"),
             )
             .order_by(AgentRunEventRow.sequence_no.asc(), AgentRunEventRow.id.asc())
-            .limit(limit)
         )
+        tool_events = list((await db.scalars(tool_stmt)).all())
         payload["tool_events"] = [
             _serialize_run_event(event, failure)
-            for event in (await db.scalars(tool_stmt)).all()
+            for event in tool_events[:limit]
         ]
+        payload["tool_call_summary"] = {
+            "run_id": run_id,
+            **tool_call_write_timing(tool_events),
+        }
     if bool(arguments.get("include_artifacts", True)):
         artifact_stmt = (
             select(AgentRunArtifactRow)

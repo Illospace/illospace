@@ -32,7 +32,8 @@ from brain.systems.runs.secret_mounts import (
     resolve_secret_env_mounts,
 )
 from brain.systems.runs.store import AsyncAgentRunStore
-from brain.systems.runs.tool_catalog.metadata import ActionPolicyResult
+from brain.systems.runs.tool_catalog.metadata import ActionPolicyResult, is_write_side_effect_class
+from brain.systems.runs.tool_catalog.registry import side_effect_class_for_tool
 from brain.systems.runs.workspace_tool_runtime import (
     handler_args_with_resolved_workspace_tool_runtime,
     resolve_workspace_tool_runtime,
@@ -618,16 +619,8 @@ def artifact_type_for_tool(tool_name: str) -> ArtifactType:
 
 
 def classify_side_effect(tool_name: str) -> str:
-    name = str(tool_name or "")
-    if name in FILE_OBSERVATION_TOOLS or name.startswith(("brain_", "query_")):
-        return "read"
-    if name in FILE_EDIT_TOOLS:
-        return "write"
-    if name in COMMAND_OUTPUT_TOOLS:
-        return "command"
-    if name in CHAT_MESSAGE_TOOLS:
-        return "chat_message"
-    return "external" if name == "browser" or name.startswith(("web_", "browser_")) else "unknown"
+    """Return the registry side-effect class for event and artifact metadata."""
+    return side_effect_class_for_tool(str(tool_name or "")).value
 
 
 def tool_activity_label(tool_name: str, args: dict[str, Any] | None = None) -> str:
@@ -649,7 +642,7 @@ def enforce_tool_scope(tool_name: str, args: dict[str, Any] | None, scope: ToolS
         raise ToolScopeViolation(f"{tool_name} target is forbidden by worker scope: {target}")
     if scope.allowed_files and not _matches_any(target, scope.allowed_files):
         side_effect = classify_side_effect(tool_name)
-        if side_effect == "write" and scope.require_approval_for_out_of_scope_mutation:
+        if is_write_side_effect_class(side_effect) and scope.require_approval_for_out_of_scope_mutation:
             raise ToolScopeViolation(f"{tool_name} target needs approval outside worker scope: {target}")
         raise ToolScopeViolation(f"{tool_name} target is outside worker scope: {target}")
 
@@ -667,6 +660,7 @@ def _event_payload(
         "args": args,
         "side_effect": classify_side_effect(tool_name),
     }
+    payload["is_write"] = is_write_side_effect_class(payload["side_effect"])
     if result is not None:
         # The stored result is a bounded PREVIEW; entity refs are extracted
         # from the FULL result first, or a big JSON result truncates into an

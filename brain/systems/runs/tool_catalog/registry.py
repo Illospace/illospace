@@ -49,6 +49,7 @@ _BROWSER_TOOLS = [
 _STATIC_METADATA: dict[str, dict[str, Any]] = {
     "brain_recall": {
         "permission": "read_memory",
+        "side_effect_class": "read_only",
         "output_budget_chars": 8_000,
         "context_route": {
             "description": "Search long-term semantic memories. Use for remembered lessons, facts, patterns, and episodes; use read_workspace_* tools for source-of-truth workspace records and current team activity.",
@@ -57,10 +58,26 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
             "empty_result_policy": "fallback_full_pipeline_when_broad",
         },
     },
-    "brain_guardrails": {"permission": "read_memory", "output_budget_chars": 6_000},
-    "brain_skills": {"permission": "read_skills", "output_budget_chars": 6_000},
-    "skill_view": {"permission": "read_skills", "output_budget_chars": 12_000},
-    "skill_asset": {"permission": "read_skills", "output_budget_chars": 12_000},
+    "brain_guardrails": {
+        "permission": "read_memory",
+        "side_effect_class": "read_only",
+        "output_budget_chars": 6_000,
+    },
+    "brain_skills": {
+        "permission": "read_skills",
+        "side_effect_class": "read_only",
+        "output_budget_chars": 6_000,
+    },
+    "skill_view": {
+        "permission": "read_skills",
+        "side_effect_class": "read_only",
+        "output_budget_chars": 12_000,
+    },
+    "skill_asset": {
+        "permission": "read_skills",
+        "side_effect_class": "read_only",
+        "output_budget_chars": 12_000,
+    },
     "manage_skill": {
         "permission": "write_skill",
         "risk_class": "high",
@@ -174,6 +191,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "runtime_settings": {
         "permission": "read_runtime",
+        "side_effect_class": "read_only",
         "context_route": {
             "description": "Inspect active provider, credentials/auth status, runtime model routing, and provider/model mappings for the current user/workspace.",
             "domains": ["runtime settings", "provider", "auth status", "model routing", "credentials"],
@@ -182,6 +200,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "read_self_context": {
         "permission": "read_runtime",
+        "side_effect_class": "read_only",
         "output_budget_chars": 12_000,
         "evidence_emitter": True,
         "context_route": {
@@ -192,6 +211,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "read_capabilities": {
         "permission": "read_runtime",
+        "side_effect_class": "read_only",
         "output_budget_chars": 16_000,
         "evidence_emitter": True,
         "context_route": {
@@ -221,6 +241,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "read_thread_messages": {
         "permission": "read_session",
+        "side_effect_class": "read_only",
         "parallel_safety": "safe",
         "output_budget_chars": 12_000,
         "context_route": {
@@ -231,6 +252,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "query_workspace_data": {
         "permission": "read_activity",
+        "side_effect_class": "read_only",
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
         "context_route": {
@@ -261,6 +283,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "read_workspace_overview": {
         "permission": "read_activity",
+        "side_effect_class": "read_only",
         "output_budget_chars": 22_000,
         "evidence_emitter": True,
         "context_route": {
@@ -276,6 +299,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "read_team_activity": {
         "permission": "read_activity",
+        "side_effect_class": "read_only",
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
         "context_route": {
@@ -286,6 +310,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "read_project_contexts": {
         "permission": "read_activity",
+        "side_effect_class": "read_only",
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
         "context_route": {
@@ -296,6 +321,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "read_team_members": {
         "permission": "read_activity",
+        "side_effect_class": "read_only",
         "output_budget_chars": 14_000,
         "evidence_emitter": True,
         "context_route": {
@@ -306,6 +332,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "read_workspace_records": {
         "permission": "read_activity",
+        "side_effect_class": "read_only",
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
         "context_route": {
@@ -316,6 +343,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "read_cycles": {
         "permission": "read_activity",
+        "side_effect_class": "read_only",
         "output_budget_chars": 14_000,
         "evidence_emitter": True,
         "context_route": {
@@ -326,6 +354,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "read_workspace_apps": {
         "permission": "read_activity",
+        "side_effect_class": "read_only",
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
         "context_route": {
@@ -592,7 +621,12 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "action_manifest": True,
         "expected_effect": "execute shell command",
     },
-    "read_file": {"permission": "read_workspace", "parallel_safety": "safe", "evidence_emitter": True},
+    "read_file": {
+        "permission": "read_workspace",
+        "side_effect_class": "read_only",
+        "parallel_safety": "safe",
+        "evidence_emitter": True,
+    },
     "write_file": {
         "permission": "write_workspace",
         "risk_class": "medium",
@@ -609,8 +643,18 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "action_manifest": True,
         "expected_effect": "edit file contents",
     },
-    "search_files": {"permission": "read_workspace", "parallel_safety": "safe", "evidence_emitter": True},
-    "list_files": {"permission": "read_workspace", "parallel_safety": "safe", "evidence_emitter": True},
+    "search_files": {
+        "permission": "read_workspace",
+        "side_effect_class": "read_only",
+        "parallel_safety": "safe",
+        "evidence_emitter": True,
+    },
+    "list_files": {
+        "permission": "read_workspace",
+        "side_effect_class": "read_only",
+        "parallel_safety": "safe",
+        "evidence_emitter": True,
+    },
     "run_script": {
         "permission": "execute_python",
         "risk_class": "medium",
@@ -651,8 +695,18 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "action_manifest": True,
         "expected_effect": "fetch external URL",
     },
-    "semantic_search": {"permission": "read_workspace", "parallel_safety": "safe", "evidence_emitter": True},
-    "file_summary": {"permission": "read_workspace", "parallel_safety": "safe", "evidence_emitter": True},
+    "semantic_search": {
+        "permission": "read_workspace",
+        "side_effect_class": "read_only",
+        "parallel_safety": "safe",
+        "evidence_emitter": True,
+    },
+    "file_summary": {
+        "permission": "read_workspace",
+        "side_effect_class": "read_only",
+        "parallel_safety": "safe",
+        "evidence_emitter": True,
+    },
     "test_runner": {
         "permission": "execute_tests",
         "risk_class": "medium",
@@ -661,19 +715,36 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "action_manifest": True,
         "expected_effect": "execute test command",
     },
-    "project_context": {"permission": "read_workspace", "parallel_safety": "safe", "evidence_emitter": True},
+    "project_context": {
+        "permission": "read_workspace",
+        "side_effect_class": "read_only",
+        "parallel_safety": "safe",
+        "evidence_emitter": True,
+    },
     "summarize_file_for_task": {
         "permission": "read_workspace",
+        "side_effect_class": "read_only",
         "parallel_safety": "agent_safe",
         "evidence_emitter": True,
     },
     "summarize_files_for_task": {
         "permission": "read_workspace",
+        "side_effect_class": "read_only",
         "parallel_safety": "agent_safe",
         "evidence_emitter": True,
     },
-    "trace_symbol": {"permission": "read_workspace", "parallel_safety": "safe", "evidence_emitter": True},
-    "build_implementation_map": {"permission": "read_workspace", "parallel_safety": "safe", "evidence_emitter": True},
+    "trace_symbol": {
+        "permission": "read_workspace",
+        "side_effect_class": "read_only",
+        "parallel_safety": "safe",
+        "evidence_emitter": True,
+    },
+    "build_implementation_map": {
+        "permission": "read_workspace",
+        "side_effect_class": "read_only",
+        "parallel_safety": "safe",
+        "evidence_emitter": True,
+    },
     "session_write": {
         "permission": "write_session",
         "side_effect_class": "scratchpad",
@@ -681,7 +752,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "action_manifest": True,
         "expected_effect": "write session scratchpad entry",
     },
-    "session_read": {"permission": "read_session"},
+    "session_read": {"permission": "read_session", "side_effect_class": "read_only"},
     "session_append": {
         "permission": "write_session",
         "side_effect_class": "scratchpad",
@@ -689,7 +760,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "action_manifest": True,
         "expected_effect": "append session scratchpad entry",
     },
-    "session_list": {"permission": "read_session"},
+    "session_list": {"permission": "read_session", "side_effect_class": "read_only"},
     "session_promote": {
         "permission": "promote_session",
         "side_effect_class": "scratchpad_lifecycle",
@@ -722,6 +793,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     },
     "my_activity": {
         "permission": "read_activity",
+        "side_effect_class": "read_only",
         "context_route": {
             "description": "Inspect the current agent run's own execution artifacts and provenance when the answer is about this live run/session, not historical workspace activity.",
             "domains": ["current run provenance", "current branch", "current commit", "current PR", "files edited in this run"],
@@ -787,7 +859,7 @@ def _default_registration(
         availability=availability,
         permission=str(metadata.get("permission") or "read"),
         risk_class=str(metadata.get("risk_class") or "low"),
-        side_effect_class=str(metadata.get("side_effect_class") or "read_only"),
+        side_effect_class=str(metadata.get("side_effect_class") or ToolSideEffectClass.WRITE.value),
         reversibility=str(metadata.get("reversibility") or "none"),
         output_budget_chars=int(metadata.get("output_budget_chars") or _DEFAULT_OUTPUT_BUDGET_CHARS),
         parallel_safety=str(metadata.get("parallel_safety") or "serial"),
@@ -874,6 +946,14 @@ def get_tool_registration(name: str) -> ToolRegistration | None:
     """Return a tool registration by name."""
     _ensure_dynamic_registrations()
     return _REGISTRY.get(name)
+
+
+def side_effect_class_for_tool(name: str) -> ToolSideEffectClass:
+    """Return the registry class, conservatively treating unknown tools as writes."""
+    registration = get_tool_registration(name)
+    if registration is None:
+        return ToolSideEffectClass.WRITE
+    return registration.side_effect_class
 
 
 def context_route_registrations() -> dict[str, ToolRegistration]:
