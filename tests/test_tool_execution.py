@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from brain.systems.runs.direct_loop.gates import GateState, check_gate_violations
 from brain.systems.runs.direct_loop.loop_control import (
     LoopControlPolicy,
-    LoopTerminationReason,
     ToolFailureTrigger,
 )
 from brain.systems.runs.tool_outcomes import (
@@ -289,9 +288,9 @@ def test_failure_policy_replay_trips_on_fourth_call_of_interleaved_trace():
 
     assert trip_call_index == 4
     assert trip is not None
-    assert trip.reason is LoopTerminationReason.TOOL_DISABLED
     assert policy.termination is None
     disablement = policy.disabled_tools["check_fix_deploy_state"]
+    assert trip is disablement
     assert disablement.triggers == (ToolFailureTrigger.ROLLING_WINDOW,)
     assert disablement.rolling_failures == 3
     assert disablement.total_successes == 1
@@ -309,9 +308,9 @@ def test_failure_policy_disables_after_two_failures_with_zero_successes():
 
     assert first is None
     assert second is not None
-    assert second.reason is LoopTerminationReason.TOOL_DISABLED
     assert policy.termination is None
     disablement = policy.disabled_tools["check_fix_deploy_state"]
+    assert second is disablement
     assert disablement.triggers == (ToolFailureTrigger.ZERO_SUCCESS,)
     assert disablement.total_failures == 2
     assert disablement.total_successes == 0
@@ -351,7 +350,7 @@ def test_failure_policy_reads_thresholds_from_environment(monkeypatch):
     assert policy.zero_success_failure_threshold == 4
 
 
-async def test_failure_policy_stops_parallel_batch_before_third_attempt():
+async def test_failure_policy_disables_parallel_tool_before_third_attempt():
     attempts = []
 
     async def handler(value):
@@ -372,14 +371,15 @@ async def test_failure_policy_stops_parallel_batch_before_third_attempt():
     assert len(attempts) == 2
     assert len(execution.tool_results) == 4
     assert all(result["is_error"] is True for result in execution.tool_results)
-    assert execution.termination is not None
-    assert execution.termination.reason is LoopTerminationReason.TOOL_DISABLED
-    assert execution.termination.tool_name == "read_file"
-    assert execution.termination.error_class == "RuntimeError"
-    assert execution.termination.consecutive_failures == 2
+    assert execution.termination is None
+    assert len(execution.tool_disablements) == 1
+    disablement = execution.tool_disablements[0]
+    assert disablement.tool_name == "read_file"
+    assert disablement.error_class == "RuntimeError"
+    assert disablement.total_failures == 2
 
 
-def test_failure_policy_stops_typed_result_before_third_attempt():
+def test_failure_policy_disables_typed_result_before_third_attempt():
     attempts = []
     handler_result = ToolHandlerResult(
         value=json.dumps({"error": "invalid tool input"}),
@@ -402,10 +402,66 @@ def test_failure_policy_stops_typed_result_before_third_attempt():
     )
 
     assert len(attempts) == 2
-    assert execution.termination is not None
-    assert execution.termination.reason is LoopTerminationReason.TOOL_DISABLED
-    assert execution.termination.error_class == "ToolValidationError"
-    assert execution.termination.consecutive_failures == 2
+    assert execution.termination is None
+    assert len(execution.tool_disablements) == 1
+    disablement = execution.tool_disablements[0]
+    assert disablement.error_class == "ToolValidationError"
+    assert disablement.total_failures == 2
+
+
+async def test_disablement_skips_only_failed_tool_and_runs_healthy_call_in_same_batch():
+    attempts = []
+
+    async def failing_handler():
+        attempts.append("failing")
+        raise RuntimeError("deterministic failure")
+
+    async def healthy_handler():
+        attempts.append("healthy")
+        return {"ok": True}
+
+    policy = LoopControlPolicy(
+        failure_threshold=3,
+        failure_window_calls=10,
+        zero_success_failure_threshold=2,
+    )
+    assert policy.observe_tool_result(
+        ResolvedToolCall(
+            block_id="prior-failure",
+            tool_name="fragile_tool",
+            tool_input={},
+            result_text="deterministic failure",
+            outcome=ToolOutcome.failed(
+                message="deterministic failure",
+                category="RuntimeError",
+            ),
+        )
+    ) is None
+
+    execution = await _execute_async(
+        _response(
+            ("trips-guard", "fragile_tool", {}),
+            ("skipped-disabled", "fragile_tool", {}),
+            ("healthy-call", "healthy_tool", {}),
+        ),
+        {
+            "fragile_tool": failing_handler,
+            "healthy_tool": healthy_handler,
+        },
+        loop_control=policy,
+    )
+
+    assert attempts == ["failing", "healthy"]
+    assert execution.termination is None
+    assert len(execution.tool_disablements) == 1
+    assert execution.tool_disablements[0].tool_name == "fragile_tool"
+    assert [result["tool_use_id"] for result in execution.tool_results] == [
+        "trips-guard",
+        "skipped-disabled",
+        "healthy-call",
+    ]
+    assert execution.tool_results[1]["is_error"] is True
+    assert json.loads(execution.tool_results[2]["content"]) == {"ok": True}
 
 
 def test_classifier_ignores_legacy_payload_category():

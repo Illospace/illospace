@@ -542,13 +542,27 @@ def test_final_reply_evidence_reads_status_and_tool_failure_state_from_agent_con
         ToolResultEvidence,
     )
     from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+    from brain.systems.runs.direct_loop.tool_execution import ResolvedToolCall
     from brain.systems.runs.status import RunStatus
+    from brain.systems.runs.tool_outcomes import ToolOutcome
 
-    loop_control = LoopControlPolicy(failure_threshold=3)
-    loop_control.consecutive_failures = 3
-    loop_control.total_failures = 3
-    loop_control.consecutive_tool_name = "manage_idea"
-    loop_control.last_error_class = "ToolValidationError"
+    loop_control = LoopControlPolicy(
+        failure_threshold=3,
+        zero_success_failure_threshold=2,
+    )
+    for index in range(2):
+        loop_control.observe_tool_result(
+            ResolvedToolCall(
+                block_id=f"failed-call-{index}",
+                tool_name="manage_idea",
+                tool_input={"action": "create"},
+                result_text="invalid parent",
+                outcome=ToolOutcome.failed(
+                    message="invalid parent",
+                    category="ToolValidationError",
+                ),
+            )
+        )
     context = SimpleNamespace(
         recent_tool_results=[
             ToolResultEvidence.capture(
@@ -557,6 +571,7 @@ def test_final_reply_evidence_reads_status_and_tool_failure_state_from_agent_con
                 is_error=True,
                 result={"error": "invalid parent", "error_class": "ToolValidationError"},
             )
+            for _ in range(2)
         ],
         execution_artifacts=[],
         run=SimpleNamespace(worker_results=[]),
@@ -595,6 +610,7 @@ def test_final_reply_evidence_reads_status_and_tool_failure_state_from_agent_con
     assert evidence.tool_failure_state is not None
     assert evidence.tool_failure_state.threshold_reached is True
     assert evidence.tool_failure_state.tool_name == "manage_idea"
+    assert evidence.tool_failure_state.disabled_tools == ("manage_idea",)
 
 
 def test_final_reply_helpers_parse_json_and_cache_review():

@@ -2230,7 +2230,7 @@ class TestFinalReplyReview:
         assert result["approved"] is True
         provider.create.assert_called_once()
 
-    def test_three_failed_tool_calls_block_success_claim_without_failure_names(self):
+    def test_zero_success_tool_disablement_blocks_unsupported_success_claim(self):
         from brain.systems.runs.direct_agent import review_candidate_final_reply
         from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
         from brain.systems.runs.direct_loop.final_reply_evidence import (
@@ -2238,6 +2238,9 @@ class TestFinalReplyReview:
             ToolFailureStateEvidence,
             ToolResultEvidence,
         )
+        from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+        from brain.systems.runs.direct_loop.tool_execution import ResolvedToolCall
+        from brain.systems.runs.tool_outcomes import ToolOutcome
 
         failures = tuple(
             ToolResultEvidence.capture(
@@ -2246,18 +2249,31 @@ class TestFinalReplyReview:
                 is_error=True,
                 result={"error": "parent_id validation failed"},
             )
-            for _ in range(3)
+            for _ in range(2)
         )
+        policy = LoopControlPolicy(
+            failure_threshold=3,
+            failure_window_calls=10,
+            zero_success_failure_threshold=2,
+        )
+        disablement = None
+        for index in range(2):
+            disablement = policy.observe_tool_result(
+                ResolvedToolCall(
+                    block_id=f"failed-call-{index}",
+                    tool_name="manage_idea",
+                    tool_input={"action": "create"},
+                    result_text="parent_id validation failed",
+                    outcome=ToolOutcome.failed(
+                        message="parent_id validation failed",
+                        category="ToolValidationError",
+                    ),
+                )
+            )
+        assert disablement is not None
         evidence = FinalReplyEvidence(
             tool_results=failures,
-            tool_failure_state=ToolFailureStateEvidence(
-                failure_threshold=3,
-                consecutive_failures=3,
-                total_failures=3,
-                tool_name="manage_idea",
-                error_class="ToolValidationError",
-                termination_reason="tool_failure_circuit",
-            ),
+            tool_failure_state=ToolFailureStateEvidence.from_value(policy),
         )
         provider = MagicMock()
 
@@ -2273,7 +2289,7 @@ class TestFinalReplyReview:
         assert result["status"] == "continue"
         assert result["enforcement"] is FinalReplyEnforcement.BLOCK
         assert "manage_idea" in result["rationale"]
-        assert "3" in result["rationale"]
+        assert "2" in result["rationale"]
         provider.create.assert_not_called()
 
     def test_status_question_allows_done_after_originating_run_completed_with_refs(self):

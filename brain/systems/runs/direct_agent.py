@@ -64,7 +64,6 @@ from brain.systems.runs.direct_loop.gates import (
 from brain.systems.runs.direct_loop.loop_control import (
     LoopControlPolicy,
     LoopTermination,
-    LoopTerminationReason,
     _detect_stuck_loop,
     _inject_nudges,
     resolve_loop_output,
@@ -1387,6 +1386,7 @@ async def run_agent_async(
         "reply_contents": [],
         "tool_calls_log": [],
         "recent_tool_results": [],
+        "loop_control": state.loop_control,
         "final_reply_review": None,
         "artifact_contract_block_count": 0,
     }
@@ -1948,34 +1948,29 @@ async def run_agent_async(
                     raw_archive_messages,
                 )
 
-                if (
-                    termination is not None
-                    and termination.reason is LoopTerminationReason.TOOL_DISABLED
-                ):
-                    disabled_tool = termination.tool_name
-                    disabled_names = (
-                        frozenset({disabled_tool})
-                        if disabled_tool
-                        else frozenset()
+                if execution.tool_disablements:
+                    disabled_names = frozenset(
+                        disablement.tool_name
+                        for disablement in execution.tool_disablements
                     )
                     tools, tool_handlers = _filter_tool_surface(
                         tools,
                         tool_handlers,
                         disabled_names,
                     )
-                    _append_message_with_archive(
-                        state.messages,
-                        {"role": "user", "content": termination.message},
-                        raw_archive_messages,
-                    )
-                    logger.warning(
-                        "Agent %s: disabled tool %s for the remainder of the run "
-                        "(error_class=%s)",
-                        session_id,
-                        disabled_tool,
-                        termination.error_class,
-                    )
-                    termination = None
+                    for disablement in execution.tool_disablements:
+                        _append_message_with_archive(
+                            state.messages,
+                            {"role": "user", "content": disablement.model_note()},
+                            raw_archive_messages,
+                        )
+                        logger.warning(
+                            "Agent %s: disabled tool %s for the remainder of the run "
+                            "(error_class=%s)",
+                            session_id,
+                            disablement.tool_name,
+                            disablement.error_class,
+                        )
 
                 if termination is not None:
                     termination_message = termination.transcript_message()

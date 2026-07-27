@@ -63,11 +63,9 @@ def tool_zero_success_failure_threshold() -> int:
 
 
 class LoopTerminationReason(str, Enum):
-    """Named control edges emitted by the canonical loop-control policy."""
+    """Named reasons the canonical loop-control policy can stop a run."""
 
     STUCK_LOOP = "stuck_loop"
-    TOOL_FAILURE_CIRCUIT = "tool_failure_circuit"
-    TOOL_DISABLED = "tool_disabled"
 
 
 class ToolFailureTrigger(str, Enum):
@@ -147,18 +145,24 @@ class ToolDisablement:
             f"Last error (`{self.error_class}`): {detail}]"
         )
 
+    def skipped_tool_result(self, block_id: str) -> dict:
+        """Pair an unstarted call to this disabled tool without stopping its batch."""
+
+        return {
+            "type": "tool_result",
+            "tool_use_id": block_id,
+            "content": self.model_note(),
+            "is_error": True,
+        }
+
 
 @dataclass(frozen=True)
 class LoopTermination:
-    """Typed edge that stops a tool batch or the whole agent loop."""
+    """Typed explanation of why the agent loop must stop."""
 
     reason: LoopTerminationReason
     message: str
     final_output: str | None = None
-    tool_name: str | None = None
-    error_class: str | None = None
-    consecutive_failures: int = 0
-    total_failures: int = 0
 
     def transcript_message(self) -> dict | None:
         """Return model-authored-looking output only when termination owns it."""
@@ -171,7 +175,7 @@ class LoopTermination:
         }
 
     def skipped_tool_result(self, block_id: str) -> dict:
-        """Pair an unstarted provider tool call after a control edge."""
+        """Pair an unstarted provider tool call after termination has latched."""
 
         return {
             "type": "tool_result",
@@ -194,11 +198,6 @@ class LoopControlPolicy:
     zero_success_failure_threshold: int = field(
         default_factory=tool_zero_success_failure_threshold
     )
-    total_failures: int = 0
-    consecutive_failures: int = 0
-    consecutive_tool_name: str | None = None
-    last_error_class: str | None = None
-    last_error_message: str | None = None
     termination: LoopTermination | None = None
     disabled_tools: dict[str, ToolDisablement] = field(default_factory=dict)
     _tool_failure_windows: dict[str, _ToolFailureWindow] = field(
@@ -242,11 +241,11 @@ class LoopControlPolicy:
             )
         return max(1, min(remaining))
 
-    def observe_tool_result(self, resolved: ResolvedToolCall) -> LoopTermination | None:
+    def observe_tool_result(self, resolved: ResolvedToolCall) -> ToolDisablement | None:
         """Observe one resolved call and emit a one-shot tool-disable edge."""
 
         if self.termination is not None:
-            return self.termination
+            return None
         tool_name = resolved.tool_name or "unknown_tool"
         state = self._tool_failure_windows.setdefault(
             tool_name,
@@ -255,24 +254,10 @@ class LoopControlPolicy:
         failure = resolved.outcome.failure
         if failure is None:
             state.observe(None, window_calls=self.failure_window_calls)
-            self.consecutive_failures = 0
-            self.consecutive_tool_name = None
             return None
 
         error_class = failure.category or DEFAULT_TOOL_FAILURE_CATEGORY
         state.observe(error_class, window_calls=self.failure_window_calls)
-        if (
-            tool_name == self.consecutive_tool_name
-            and error_class == self.last_error_class
-        ):
-            self.consecutive_failures += 1
-        else:
-            self.consecutive_failures = 1
-            self.consecutive_tool_name = tool_name
-
-        self.total_failures += 1
-        self.last_error_class = error_class
-        self.last_error_message = resolved.result_text or ""
         triggers = self._evaluate_failure_triggers(state, error_class)
         if not triggers or tool_name in self.disabled_tools:
             return None
@@ -285,17 +270,10 @@ class LoopControlPolicy:
             total_failures=state.total_failures,
             total_successes=state.total_successes,
             window_calls=self.failure_window_calls,
-            last_error_message=self.last_error_message,
+            last_error_message=resolved.result_text or "",
         )
         self.disabled_tools[tool_name] = disablement
-        return LoopTermination(
-            reason=LoopTerminationReason.TOOL_DISABLED,
-            message=disablement.model_note(),
-            tool_name=tool_name,
-            error_class=error_class,
-            consecutive_failures=self.consecutive_failures,
-            total_failures=self.total_failures,
-        )
+        return disablement
 
     def _evaluate_failure_triggers(
         self,
@@ -313,28 +291,6 @@ class LoopControlPolicy:
         ):
             triggers.append(ToolFailureTrigger.ZERO_SUCCESS)
         return tuple(triggers)
-
-    def _failure_circuit_termination(self) -> LoopTermination:
-        tool_name = self.consecutive_tool_name or "unknown_tool"
-        error_class = self.last_error_class or DEFAULT_TOOL_FAILURE_CATEGORY
-        detail = (self.last_error_message or "No error detail was returned.").strip()
-        if len(detail) > 500:
-            detail = f"{detail[:497]}..."
-        output = (
-            f"I stopped retrying `{tool_name}` after {self.consecutive_failures} consecutive failures "
-            f"with error class `{error_class}`. Last error: {detail} "
-            "I could not complete the tool-dependent part of the request in this run."
-        )
-        return LoopTermination(
-            reason=LoopTerminationReason.TOOL_FAILURE_CIRCUIT,
-            message=output,
-            final_output=output,
-            tool_name=tool_name,
-            error_class=error_class,
-            consecutive_failures=self.consecutive_failures,
-            total_failures=self.total_failures,
-        )
-
 
 def _detect_stuck_loop(
     recent_calls: list[str],
