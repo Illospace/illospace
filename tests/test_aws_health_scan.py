@@ -23,6 +23,15 @@ async def _spawned_message(monkeypatch, *, now: datetime, last_success: datetime
 
     monkeypatch.setattr(aws_health_scan, "UnitOfWork", lambda: uow)
     monkeypatch.setattr(
+        aws_health_scan.runtime_display,
+        "async_get_runtime_display_config",
+        AsyncMock(
+            return_value=aws_health_scan.runtime_display.RuntimeDisplayConfig(
+                display_timezone="America/New_York",
+            )
+        ),
+    )
+    monkeypatch.setattr(
         aws_health_scan,
         "_skill_actor",
         AsyncMock(return_value=SimpleNamespace(id="user-1", org_id="org-1")),
@@ -73,6 +82,28 @@ async def test_pipeline_caps_coverage_since_at_six_hours(monkeypatch):
     )
 
     assert f"coverage-since: {(now - timedelta(hours=6)).isoformat()}" in message
+
+
+@pytest.mark.asyncio
+async def test_six_consecutive_alert_runs_require_et_alongside_utc(monkeypatch):
+    now = datetime(2026, 7, 25, 13, 30, tzinfo=timezone.utc)
+    last_success = now - timedelta(minutes=30)
+
+    messages = [
+        await _spawned_message(
+            monkeypatch,
+            now=now + timedelta(hours=emission),
+            last_success=last_success + timedelta(hours=emission),
+        )
+        for emission in range(6)
+    ]
+
+    assert len(messages) == 6
+    for message in messages:
+        assert "display-timezone: America/New_York" in message
+        assert "Render EVERY timestamp" in message
+        assert "never as UTC-only" in message
+        assert "07-25 09:03 ET (13:03 UTC)" in message
 
 
 @pytest.mark.asyncio

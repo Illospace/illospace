@@ -1775,6 +1775,11 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(data),
     }),
+  updateRuntimeDisplay: (data: { display_timezone: string }) =>
+    fetchJson<RuntimeSettings['display']>('/api/runtime-settings/display', {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
   checkRuntimeMemory: () =>
     fetchJson<any>('/api/runtime-settings/memory/check', { method: 'POST' }),
   createRuntimeVoiceSession: () =>

@@ -127,6 +127,112 @@ async def test_runtime_settings_tool_returns_model_catalogs_and_active_status():
 
 
 @pytest.mark.asyncio
+async def test_runtime_display_defaults_to_eastern_and_persists_in_keyed_store(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from brain.systems.runtime_settings import display as display_settings
+    from brain.systems.runtime_settings.schemas import RuntimeDisplayUpdate
+
+    stored: dict[str, str] = {}
+
+    async def fake_read(_session, key):
+        return stored.get(key)
+
+    async def fake_write(_session, key, value):
+        stored[key] = value
+
+    monkeypatch.setattr(display_settings, "_async_read_runtime_config_value", fake_read)
+    monkeypatch.setattr(display_settings, "_async_write_runtime_config_value", fake_write)
+
+    initial = await display_settings.async_get_runtime_display(MagicMock())
+    assert initial.scope == "installation"
+    assert initial.display_timezone == "America/New_York"
+
+    saved = await display_settings.async_update_runtime_display(
+        MagicMock(),
+        SimpleNamespace(id="user-1", org_id="org-1"),
+        RuntimeDisplayUpdate(display_timezone="UTC"),
+    )
+
+    assert saved.display_timezone == "UTC"
+    assert json.loads(stored["runtime_display"]) == {"display_timezone": "UTC"}
+    reloaded = await display_settings.async_get_runtime_display(MagicMock())
+    assert reloaded.display_timezone == "UTC"
+
+
+@pytest.mark.asyncio
+async def test_runtime_preference_tool_saves_known_slack_preference_and_names_storage(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from brain.app.mcp.server import tool_manage_runtime_preferences
+    from brain.systems.runtime_settings import display as display_settings
+
+    stored: dict[str, str] = {}
+    user = SimpleNamespace(id="user-1", org_id="org-1", role="owner")
+    session = MagicMock()
+    session.get = AsyncMock(return_value=user)
+    uow = MagicMock()
+    uow.session = session
+    uow.__aenter__ = AsyncMock(return_value=uow)
+    uow.__aexit__ = AsyncMock(return_value=False)
+
+    async def fake_write(_session, key, value):
+        stored[key] = value
+
+    monkeypatch.setattr(display_settings, "_async_write_runtime_config_value", fake_write)
+    monkeypatch.setattr("brain.app.mcp.server.UnitOfWork", lambda: uow)
+
+    result = await tool_manage_runtime_preferences(
+        action="set",
+        setting="display_timezone",
+        value="Eastern",
+        user_id="user-1",
+        org_id="org-1",
+    )
+
+    assert result["status"] == "saved"
+    assert result["setting"] == "display_timezone"
+    assert result["value"] == "America/New_York"
+    assert result["storage"] == {
+        "table": "vault_config",
+        "key": "runtime_display",
+        "scope": "installation",
+    }
+    assert result["confirmation"].startswith(
+        "Saved: alerts will render America/New_York alongside UTC"
+    )
+    assert json.loads(stored["runtime_display"]) == {
+        "display_timezone": "America/New_York",
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_preference_tool_declines_unknown_preference_without_promising(monkeypatch):
+    from brain.app.mcp.server import tool_manage_runtime_preferences
+
+    uow = MagicMock()
+    uow.session = MagicMock()
+    uow.__aenter__ = AsyncMock(return_value=uow)
+    uow.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr("brain.app.mcp.server.UnitOfWork", lambda: uow)
+
+    result = await tool_manage_runtime_preferences(
+        action="set",
+        setting="alert_tone",
+        value="casual",
+        user_id="user-1",
+        org_id="org-1",
+    )
+
+    assert result["status"] == "unsupported"
+    assert result["saved"] is False
+    assert "no way to make it stick" in result["detail"]
+    assert "display_timezone" in result["supported_settings"]
+
+
+@pytest.mark.asyncio
 async def test_manage_deployment_tool_requires_authenticated_user():
     import brain.systems.runtime_settings.self_update as self_update
     from brain.app.mcp.server import tool_manage_deployment

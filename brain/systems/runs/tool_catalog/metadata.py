@@ -79,6 +79,7 @@ class ToolSideEffectClass(StrEnum):
     READ_ONLY = "read_only"
     READ_ONLY_EXTERNAL = "read_only_external"
     RUN_SPAWN = "run_spawn"
+    RUNTIME_CONFIGURATION = "runtime_configuration"
     SCRATCHPAD = "scratchpad"
     SCRATCHPAD_LIFECYCLE = "scratchpad_lifecycle"
     SHELL = "shell"

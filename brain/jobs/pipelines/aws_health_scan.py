@@ -15,12 +15,29 @@ from brain.platform.db.models.org import User
 from brain.platform.db.models.scheduler import SchedulerJob, SchedulerRun
 from brain.platform.db.models.skill_bundle import SkillInstallation
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.runtime_settings import display as runtime_display
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
 SKILL_NAME = "uwear-aws-health-scan"
 RUN_TIMEOUT_SECONDS = 840
 POLL_INTERVAL_SECONDS = 2.0
+
+
+def _timestamp_rendering_instruction(display_timezone: str) -> str:
+    timezone_label = "ET" if display_timezone == "America/New_York" else display_timezone
+    example = (
+        " Example: 07-25 09:03 ET (13:03 UTC)."
+        if display_timezone == "America/New_York"
+        else ""
+    )
+    return (
+        f"\ndisplay-timezone: {display_timezone}\n"
+        "timestamp-rendering: Render EVERY timestamp in the final alert in "
+        f"{display_timezone} ({timezone_label}) alongside its source UTC time, never as UTC-only. "
+        f"Use `MM-DD HH:MM {timezone_label} (HH:MM UTC)` so the underlying AWS evidence remains "
+        f"reconcilable.{example}"
+    )
 
 
 async def _skill_actor(session, skill_installation_id: int | None) -> User:
@@ -61,6 +78,10 @@ async def spawn_health_scan_run(*, now: datetime | None = None) -> int:
             raise LookupError(f"Skill '{SKILL_NAME}' not found")
 
         actor = await _skill_actor(uow.session, skill.skill_installation_id)
+        display_config = await runtime_display.async_get_runtime_display_config(uow.session)
+        display_instruction = _timestamp_rendering_instruction(
+            display_config.display_timezone,
+        )
         last_success_started_at = await uow.session.scalar(
             select(SchedulerRun.started_at)
             .join(SchedulerJob, SchedulerRun.job_id == SchedulerJob.id)
@@ -99,7 +120,8 @@ async def spawn_health_scan_run(*, now: datetime | None = None) -> int:
                     "message": (
                         f"/{SKILL_NAME}\n\n"
                         "Execute this skill exactly once. Load and follow its full procedure, "
-                        f"then return its required health verdict and evidence.{coverage_line}"
+                        "then return its required health verdict and evidence."
+                        f"{display_instruction}{coverage_line}"
                     ),
                     "workspace_ref": {"source": "scheduler", "mode": "headless"},
                     "metadata": {

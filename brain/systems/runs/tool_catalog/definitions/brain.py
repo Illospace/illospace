@@ -465,6 +465,39 @@ BRAIN_TOOLS = [
         },
     },
     {
+        "name": "manage_runtime_preferences",
+        "description": (
+            "Inspect or persist an explicitly supported durable workspace preference. Use "
+            "action='set', setting='display_timezone', and an IANA timezone (ET/Eastern are "
+            "accepted as America/New_York) only when a human explicitly asks for a durable "
+            "timezone presentation preference. A successful write returns the exact confirmation "
+            "to give the human. Unsupported settings return an honest no-write response; never "
+            "promise to remember a preference without status='saved'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["get", "set"],
+                    "default": "get",
+                    "description": "Inspect supported preferences or persist one known setting.",
+                },
+                "setting": {
+                    "type": "string",
+                    "description": (
+                        "Concrete setting key. The only writable presentation setting is "
+                        "display_timezone."
+                    ),
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Value for action=set; an IANA timezone or ET/Eastern alias.",
+                },
+            },
+        },
+    },
+    {
         "name": "read_self_context",
         "description": (
             "Read verified identity, source, and runtime self-context for Illo. Use this for "

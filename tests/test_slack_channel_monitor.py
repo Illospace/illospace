@@ -354,6 +354,42 @@ def test_channel_monitor_framing_preserves_alert_thread_provenance_on_tracker_re
     assert "future sweeps can re-read human resolution replies" in run_message
 
 
+def test_channel_monitor_persists_known_timezone_preference_before_confirming():
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
+    monitored = _channel_monitor_payload()
+    monitored["text"] = "Please always show these alert times in Eastern."
+    payload = build_slack_work_intake_payload(
+        org_id="org1",
+        authority_user_id="user1",
+        payload=monitored,
+    )
+
+    run_message = payload["payload"]["run_message"]
+    assert "manage_runtime_preferences with action='set', setting='display_timezone'" in run_message
+    assert "Map ET/Eastern to America/New_York" in run_message
+    assert "Only after manage_runtime_preferences returns status='saved'" in run_message
+    assert "include its confirmation verbatim" in run_message
+    assert "concrete setting" in run_message
+
+
+def test_channel_monitor_declines_preference_without_write_target():
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
+    monitored = _channel_monitor_payload()
+    monitored["text"] = "Always make alerts rhyme."
+    payload = build_slack_work_intake_payload(
+        org_id="org1",
+        authority_user_id="user1",
+        payload=monitored,
+    )
+
+    run_message = payload["payload"]["run_message"]
+    assert "If the request has no known writable setting" in run_message
+    assert "I can do that for this message, but I have no way to make it stick — file it?" in run_message
+    assert "Never imply persistence" in run_message
+
+
 def test_build_payload_for_mention_still_forces_reply():
     from brain.systems.slack.triggers import build_slack_work_intake_payload
 

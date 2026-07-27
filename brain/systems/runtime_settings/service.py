@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.platform.db.models.org import User
 
 from .auth import async_get_openai_connection
+from .display import async_get_runtime_display
 from .memory import async_get_runtime_memory
 from .models import async_get_runtime_models
 from .schemas import RuntimePermissionsRead, RuntimeSettingsRead
@@ -23,5 +24,6 @@ async def async_get_runtime_settings(session: AsyncSession, user: User) -> Runti
         models=await async_get_runtime_models(session, user),
         memory=memory,
         voice=runtime_voice_from_memory(memory, voice_config),
+        display=await async_get_runtime_display(session),
         permissions=RuntimePermissionsRead(can_manage_settings=can_manage_runtime_settings(user)),
     )

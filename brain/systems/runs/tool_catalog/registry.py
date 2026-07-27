@@ -180,6 +180,14 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
             "scopes": ["narrow"],
         },
     },
+    "manage_runtime_preferences": {
+        "permission": "manage_runtime",
+        "risk_class": "medium",
+        "side_effect_class": "runtime_configuration",
+        "reversibility": "reversible",
+        "action_manifest": True,
+        "expected_effect": "inspect or persist a supported workspace preference",
+    },
     "read_self_context": {
         "permission": "read_runtime",
         "output_budget_chars": 12_000,
@@ -981,6 +989,14 @@ def action_policy_for_tool(
     if tool_name in {"manage_cycle", "manage_cron_job"} and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list"}:
         return None
     if tool_name == "manage_cycle" and _arg_at(args_tuple, kwargs_dict, "action", 0) == "usage_summary":
+        return None
+    if tool_name == "manage_runtime_preferences" and _arg_at(
+        args_tuple,
+        kwargs_dict,
+        "action",
+        0,
+        "get",
+    ) == "get":
         return None
     if tool_name == "manage_domain" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "query_records", "get_record", "events"}:
         return None

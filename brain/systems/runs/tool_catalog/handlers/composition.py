@@ -202,6 +202,7 @@ def _get_tool_handlers(
         tool_brain_vault,
         tool_vault_inventory,
         tool_vault_secret_prompt,
+        tool_manage_runtime_preferences,
         tool_runtime_settings,
         tool_manage_deployment,
         tool_manage_runtime_services,
@@ -279,6 +280,15 @@ def _get_tool_handlers(
                 provider=provider,
                 user_id=getattr(_agent_context, "user_id", None),
                 org_id=getattr(_agent_context, "org_id", None),
+            )
+        ),
+        "manage_runtime_preferences": _run_on_event_loop_adapter(
+            lambda action="get", setting=None, value=None: tool_manage_runtime_preferences(
+                user_id=getattr(_agent_context, "user_id", None),
+                org_id=getattr(_agent_context, "org_id", None),
+                action=action,
+                setting=setting,
+                value=value,
             )
         ),
         "read_self_context": _handle_read_self_context,
