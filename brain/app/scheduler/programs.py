@@ -12,16 +12,6 @@ from brain.platform.db.models.scheduler import SchedulerJob, SchedulerRun
 
 DEFAULT_STEP_KIND = "single"
 WRAPPER_STEP_KEY = "nightly_wrapper"
-UWEAR_AWS_HEALTH_SCAN_COMMAND = [
-    "python3",
-    "-m",
-    "brain.jobs.pipelines.aws_health_scan",
-]
-UWEAR_STAGING_PROMOTION_PR_COMMAND = [
-    "python3",
-    "-m",
-    "brain.jobs.pipelines.staging_promotion_pr",
-]
 ILLO_EXTERNAL_HEARTBEAT_COMMAND = [
     "python3",
     "-m",
@@ -61,6 +51,57 @@ class StepSpec:
     step_key: str
     command: list[str]
     description: str = ""
+
+
+@dataclass(frozen=True)
+class SingleCommandProgram:
+    """Canonical metadata shared by both scheduler step representations."""
+
+    command: tuple[str, ...]
+    step_key: str
+    description: str
+
+    def build_step_plan(
+        self,
+        job: SchedulerJob,
+        *,
+        program_key: str,
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "step_key": self.step_key,
+                "sequence_no": 1,
+                "kind": DEFAULT_STEP_KIND,
+                "handler_ref": job.handler_ref,
+                "payload": {"program": program_key},
+                "command": list(self.command),
+            }
+        ]
+
+    def build_step_specs(self) -> list[StepSpec]:
+        return [
+            StepSpec(
+                self.step_key,
+                list(self.command),
+                self.description,
+            )
+        ]
+
+
+# Curiosity and heartbeat retain divergent plan/spec shapes. They stay on the
+# isolated legacy path until changing those public representations is intentional.
+SINGLE_COMMAND_PROGRAM_REGISTRY: dict[str, SingleCommandProgram] = {
+    "uwear_aws_health_scan": SingleCommandProgram(
+        command=("python3", "-m", "brain.jobs.pipelines.aws_health_scan"),
+        step_key="uwear_aws_health_scan",
+        description="Uwear AWS production health scan",
+    ),
+    "uwear_staging_promotion_pr": SingleCommandProgram(
+        command=("python3", "-m", "brain.jobs.pipelines.staging_promotion_pr"),
+        step_key="uwear_staging_promotion_pr",
+        description="Ensure Uwear staging promotion pull requests exist",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -396,32 +437,22 @@ def _job_identity(job: SchedulerJob) -> str:
     )
 
 
-def build_scheduler_step_plan(job: SchedulerJob) -> list[dict[str, object]]:
-    """Return persisted step metadata for a scheduler run."""
-    payload = job.default_payload or {}
-    custom_plan = payload.get("step_plan")
-    if isinstance(custom_plan, list) and custom_plan:
-        plan: list[dict[str, object]] = []
-        for index, step in enumerate(custom_plan, start=1):
-            if not isinstance(step, dict):
-                continue
-            step_key = str(step.get("step_key") or step.get("key") or f"step_{index}")
-            plan.append(
-                {
-                    "step_key": step_key,
-                    "sequence_no": int(step.get("sequence_no") or index),
-                    "kind": str(step.get("kind") or DEFAULT_STEP_KIND),
-                    "handler_ref": step.get("handler_ref") or job.handler_ref,
-                    "payload": step.get("payload") or {},
-                    "command": step.get("command"),
-                    "commands": step.get("commands"),
-                }
-            )
-        if plan:
-            return plan
-
+def _legacy_job_identity_contains(job: SchedulerJob, *fragments: str) -> bool:
+    """Quarantine substring dispatch retained for non-canonical legacy programs."""
     identity = _job_identity(job)
-    if job.program_key == "nightly_sleep" or "nightly" in identity or "sleep" in identity:
+    return any(fragment in identity for fragment in fragments)
+
+
+def _build_legacy_scheduler_step_plan(
+    job: SchedulerJob,
+    payload: dict[str, object],
+) -> list[dict[str, object]]:
+    """Build plans for legacy programs whose plan/spec shapes are not shared."""
+    if job.program_key == "nightly_sleep" or _legacy_job_identity_contains(
+        job,
+        "nightly",
+        "sleep",
+    ):
         if payload.get("scheduler_split_steps"):
             step_keys = _nightly_planned_step_keys(payload)
             return [
@@ -459,7 +490,10 @@ def build_scheduler_step_plan(job: SchedulerJob) -> list[dict[str, object]]:
             }
         ]
 
-    if job.program_key == "curiosity" or "curiosity" in identity:
+    if job.program_key == "curiosity" or _legacy_job_identity_contains(
+        job,
+        "curiosity",
+    ):
         return [
             {
                 "step_key": "curiosity",
@@ -470,34 +504,10 @@ def build_scheduler_step_plan(job: SchedulerJob) -> list[dict[str, object]]:
             }
         ]
 
-    if (
-        job.program_key == "uwear_staging_promotion_pr"
-        or "uwear_staging_promotion_pr" in identity
+    if job.program_key == "illo_external_heartbeat" or _legacy_job_identity_contains(
+        job,
+        "illo_external_heartbeat",
     ):
-        return [
-            {
-                "step_key": "uwear_staging_promotion_pr",
-                "sequence_no": 1,
-                "kind": "single",
-                "handler_ref": job.handler_ref,
-                "payload": {"program": "uwear_staging_promotion_pr"},
-                "command": UWEAR_STAGING_PROMOTION_PR_COMMAND,
-            }
-        ]
-
-    if job.program_key == "uwear_aws_health_scan" or "uwear_aws_health_scan" in identity:
-        return [
-            {
-                "step_key": "uwear_aws_health_scan",
-                "sequence_no": 1,
-                "kind": "single",
-                "handler_ref": job.handler_ref,
-                "payload": {"program": "uwear_aws_health_scan"},
-                "command": UWEAR_AWS_HEALTH_SCAN_COMMAND,
-            }
-        ]
-
-    if job.program_key == "illo_external_heartbeat" or "illo_external_heartbeat" in identity:
         return [
             {
                 "step_key": "illo_external_heartbeat",
@@ -518,6 +528,37 @@ def build_scheduler_step_plan(job: SchedulerJob) -> list[dict[str, object]]:
             "payload": {},
         }
     ]
+
+
+def build_scheduler_step_plan(job: SchedulerJob) -> list[dict[str, object]]:
+    """Return persisted step metadata for a scheduler run."""
+    payload = job.default_payload or {}
+    custom_plan = payload.get("step_plan")
+    if isinstance(custom_plan, list) and custom_plan:
+        plan: list[dict[str, object]] = []
+        for index, step in enumerate(custom_plan, start=1):
+            if not isinstance(step, dict):
+                continue
+            step_key = str(step.get("step_key") or step.get("key") or f"step_{index}")
+            plan.append(
+                {
+                    "step_key": step_key,
+                    "sequence_no": int(step.get("sequence_no") or index),
+                    "kind": str(step.get("kind") or DEFAULT_STEP_KIND),
+                    "handler_ref": step.get("handler_ref") or job.handler_ref,
+                    "payload": step.get("payload") or {},
+                    "command": step.get("command"),
+                    "commands": step.get("commands"),
+                }
+            )
+        if plan:
+            return plan
+
+    definition = SINGLE_COMMAND_PROGRAM_REGISTRY.get(job.program_key)
+    if definition is not None:
+        return definition.build_step_plan(job, program_key=job.program_key)
+
+    return _build_legacy_scheduler_step_plan(job, payload)
 
 
 def _timezone(job: SchedulerJob) -> ZoneInfo:
@@ -557,29 +598,6 @@ def _curiosity_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
     ]
 
 
-def _uwear_aws_health_scan_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
-    return [
-        StepSpec(
-            "uwear_aws_health_scan",
-            UWEAR_AWS_HEALTH_SCAN_COMMAND,
-            "Uwear AWS production health scan",
-        ),
-    ]
-
-
-def _uwear_staging_promotion_pr_steps(
-    job: SchedulerJob,
-    run: SchedulerRun,
-) -> list[StepSpec]:
-    return [
-        StepSpec(
-            "uwear_staging_promotion_pr",
-            UWEAR_STAGING_PROMOTION_PR_COMMAND,
-            "Ensure Uwear staging promotion pull requests exist",
-        ),
-    ]
-
-
 def _fallback_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
     payload = job.default_payload or {}
     command = payload.get("command")
@@ -590,14 +608,17 @@ def _fallback_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
     return [StepSpec("program", ["python3", "-m", job.program_key], "Program fallback")]
 
 
-def get_step_specs(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
-    key = _job_identity(job)
-    if "uwear_staging_promotion_pr" in key:
-        return _uwear_staging_promotion_pr_steps(job, run)
-    if "uwear_aws_health_scan" in key:
-        return _uwear_aws_health_scan_steps(job, run)
-    if "curiosity" in key:
+def _get_legacy_step_specs(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
+    """Return legacy specs whose dispatch or shape predates the shared registry."""
+    if _legacy_job_identity_contains(job, "curiosity"):
         return _curiosity_steps(job, run)
-    if "nightly" in key or "sleep" in key:
+    if _legacy_job_identity_contains(job, "nightly", "sleep"):
         return _nightly_steps(job, run)
     return _fallback_steps(job, run)
+
+
+def get_step_specs(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
+    definition = SINGLE_COMMAND_PROGRAM_REGISTRY.get(job.program_key)
+    if definition is not None:
+        return definition.build_step_specs()
+    return _get_legacy_step_specs(job, run)
