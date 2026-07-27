@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 NOTICE_SWEEP_LIMIT = 10
 STALE_NOTICE_POSTING_GRACE = timedelta(minutes=10)
+OPEN_ASK_UNANSWERED_24H_CONDITION = "open_ask:unanswered:24h"
+OPEN_ASK_UNANSWERED_NOTICE_AFTER = timedelta(hours=24)
 _DESTINATION_READ_LIMIT = 200
 _DESTINATION_MAX_PAGES = 10
 _VISIBILITY_POLL_ATTEMPTS = 5
@@ -571,8 +573,15 @@ async def deliver_pending_obligation_notices(
         moment = now or datetime.now(timezone.utc)
         statement = (
             select(ObligationNotice)
+            .join(OpenAsk, OpenAsk.id == ObligationNotice.obligation_id)
             .where(
-                _claimable_clause(moment - STALE_NOTICE_POSTING_GRACE)
+                _claimable_clause(moment - STALE_NOTICE_POSTING_GRACE),
+                or_(
+                    ObligationNotice.condition
+                    != OPEN_ASK_UNANSWERED_24H_CONDITION,
+                    OpenAsk.opened_at
+                    <= moment - OPEN_ASK_UNANSWERED_NOTICE_AFTER,
+                ),
             )
             .order_by(ObligationNotice.created_at.asc(), ObligationNotice.id.asc())
             .limit(max(1, int(limit)))
@@ -714,6 +723,8 @@ def schedule_post_commit_notice_delivery(
 
 __all__ = [
     "NOTICE_SWEEP_LIMIT",
+    "OPEN_ASK_UNANSWERED_24H_CONDITION",
+    "OPEN_ASK_UNANSWERED_NOTICE_AFTER",
     "STALE_NOTICE_POSTING_GRACE",
     "deliver_pending_obligation_notices",
     "notice_idempotency_key",

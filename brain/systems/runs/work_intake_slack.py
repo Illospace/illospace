@@ -45,6 +45,18 @@ def agent_run_request_for_slack(trigger_payload: dict[str, Any] | Any) -> AgentR
             "final_answer_target_surface": "headless",
             "headless": True,
         }
+    elif metadata.get("contact_form_lead"):
+        # Contact leads must explicitly post their deterministic dossier, but
+        # their run's final answer must not auto-post and accidentally settle
+        # the human owner's still-open follow-up obligation.
+        surface_context = {
+            "originating_surface": SLACK_SURFACE,
+            "triggering_surface": SLACK_SURFACE,
+            "source_surface": SLACK_SURFACE,
+            "required_response_tool": SLACK_REPLY_TOOL,
+            "final_answer_target_surface": "headless",
+            "headless": True,
+        }
     else:
         surface_context = {
             "originating_surface": SLACK_SURFACE,

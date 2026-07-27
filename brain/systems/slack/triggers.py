@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from brain.systems.personality.person_context import normalize_person_context
+from brain.systems.slack.contact_form_leads import (
+    CONTACT_FORM_LEAD_ORIGIN,
+    contact_form_lead_dossier,
+)
 
 SLACK_MESSAGE_ENVELOPE_KIND = "slack_message"
 SLACK_SURFACE = "slack"
@@ -33,6 +37,7 @@ def build_slack_work_intake_payload(
     event_type = slack_event_type(slack_payload)
     target = slack_target(trigger)
     is_monitor = event_type == SLACK_CHANNEL_MESSAGE_ORIGIN
+    is_contact_form_lead = event_type == CONTACT_FORM_LEAD_ORIGIN
     metadata = {
         "origin": "slack_channel_monitor" if is_monitor else "slack_teammate",
         "originating_surface": SLACK_SURFACE,
@@ -51,6 +56,17 @@ def build_slack_work_intake_payload(
         metadata["final_answer_target_surface"] = "headless"
         metadata["execution_profile"] = "fast"
         run_message = slack_channel_monitor_message(slack_payload, trigger)
+    elif is_contact_form_lead:
+        lead = slack_payload.get("contact_form_lead")
+        lead = dict(lead) if isinstance(lead, Mapping) else {}
+        dossier = contact_form_lead_dossier(lead)
+        metadata["contact_form_lead"] = lead
+        metadata["contact_form_lead_dossier"] = dossier
+        metadata["headless"] = True
+        metadata["required_response_tool"] = SLACK_REPLY_TOOL
+        metadata["final_answer_target_surface"] = "headless"
+        metadata["execution_profile"] = "fast"
+        run_message = contact_form_lead_run_message(dossier, trigger)
     else:
         metadata["required_response_tool"] = SLACK_REPLY_TOOL
         metadata["alternative_response_tools"] = [SLACK_REACTION_TOOL]
@@ -134,13 +150,20 @@ def slack_target(slack_trigger_payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def slack_event_type(payload: Mapping[str, Any]) -> str:
     origin = _clean(payload.get("origin"))
-    if origin in {"slack.app_mention", "slack.direct_message", SLACK_CHANNEL_MESSAGE_ORIGIN}:
+    if origin in {
+        "slack.app_mention",
+        "slack.direct_message",
+        SLACK_CHANNEL_MESSAGE_ORIGIN,
+        CONTACT_FORM_LEAD_ORIGIN,
+    }:
         return origin
     event_kind = _clean(payload.get("event_kind"))
     if event_kind == "direct_message":
         return "slack.direct_message"
     if event_kind == "channel_message":
         return SLACK_CHANNEL_MESSAGE_ORIGIN
+    if event_kind == CONTACT_FORM_LEAD_ORIGIN:
+        return CONTACT_FORM_LEAD_ORIGIN
     return "slack.app_mention"
 
 
@@ -162,7 +185,10 @@ def slack_response_target(payload: Mapping[str, Any]) -> dict[str, Any]:
     existing = payload.get("response_target")
     channel_type = _clean(payload.get("channel_type"))
     message_ts = _clean(payload.get("message_ts"))
-    is_monitored_channel = _clean(payload.get("origin")) == SLACK_CHANNEL_MESSAGE_ORIGIN
+    is_monitored_channel = _clean(payload.get("origin")) in {
+        SLACK_CHANNEL_MESSAGE_ORIGIN,
+        CONTACT_FORM_LEAD_ORIGIN,
+    }
     if isinstance(existing, Mapping):
         thread_ts = _response_thread_ts(
             channel_type,
@@ -253,6 +279,34 @@ def slack_run_message(payload: Mapping[str, Any], slack_trigger_payload: Mapping
         lines.append(f"Permalink: {slack_trigger_payload.get('permalink')}")
     lines.extend(["", f"Triggering Slack message: {text}"])
     return "\n".join(lines)
+
+
+def contact_form_lead_run_message(
+    dossier: str,
+    slack_trigger_payload: Mapping[str, Any],
+) -> str:
+    """Require one deterministic intake reply without asserting capabilities."""
+
+    response_target = slack_trigger_payload.get("response_target")
+    response_target = response_target if isinstance(response_target, Mapping) else {}
+    return "\n".join(
+        [
+            "A qualified website contact-form lead arrived in a monitored Slack channel.",
+            "The connector already acknowledged the source message with 👀.",
+            (
+                "Post the exact dossier below once with post_slack_reply in the source "
+                f"thread (channel_id={slack_trigger_payload.get('channel_id')}, "
+                f"thread_ts={response_target.get('thread_ts')}) and set "
+                "answers_open_ask=false."
+            ),
+            (
+                "Do not research, infer, rephrase, or add product claims in this intake "
+                "run. Unknown capability claims must remain marked needs a human answer."
+            ),
+            "",
+            dossier,
+        ]
+    )
 
 
 def slack_channel_monitor_message(
@@ -417,6 +471,7 @@ __all__ = [
     "SLACK_REACTION_TOOL",
     "SLACK_SURFACE",
     "build_slack_work_intake_payload",
+    "contact_form_lead_run_message",
     "slack_channel_monitor_message",
     "slack_event_type",
     "slack_response_target",

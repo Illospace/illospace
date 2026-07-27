@@ -111,12 +111,38 @@ def slack_thread_permalink(trigger: dict[str, Any]) -> str | None:
 def open_ask_context_for_request(request: AgentRunRequest) -> dict[str, Any] | None:
     target_ref, metadata = _request_maps(request)
     trigger = _slack_trigger_for_request(request)
-    if not trigger or metadata.get("slack_monitor") or target_ref.get("headless"):
+    contact_form_lead = metadata.get("contact_form_lead")
+    contact_form_lead = (
+        dict(contact_form_lead)
+        if isinstance(contact_form_lead, dict)
+        else {}
+    )
+    is_contact_form_lead = bool(contact_form_lead)
+    if not trigger or (
+        not is_contact_form_lead
+        and (metadata.get("slack_monitor") or target_ref.get("headless"))
+    ):
         return None
     channel_id = _clean(trigger.get("channel_id"))
     thread_ts = _clean(trigger.get("thread_ts") or trigger.get("message_ts"))
-    requester_slack_id = _clean(trigger.get("slack_user_id"))
-    ask_text = str(trigger.get("text") or "")
+    owner = contact_form_lead.get("owner")
+    owner = dict(owner) if isinstance(owner, dict) else {}
+    requester_slack_id = _clean(
+        owner.get("slack_user_id")
+        if is_contact_form_lead
+        else trigger.get("slack_user_id")
+    )
+    requester_user_id = _clean(
+        owner.get("user_id")
+        if is_contact_form_lead
+        else request.user_id
+    ) or None
+    ask_text = str(
+        contact_form_lead.get("message")
+        if is_contact_form_lead
+        else trigger.get("text")
+        or ""
+    )
     origin_ref = slack_origin_ref(trigger)
     permalink = slack_thread_permalink(trigger)
     if not all(
@@ -131,7 +157,7 @@ def open_ask_context_for_request(request: AgentRunRequest) -> dict[str, Any] | N
         )
     ):
         return None
-    return {
+    context = {
         "org_id": str(request.org_id),
         "channel_id": channel_id,
         "channel_type": _clean(trigger.get("channel_type")) or None,
@@ -139,11 +165,37 @@ def open_ask_context_for_request(request: AgentRunRequest) -> dict[str, Any] | N
         "thread_ts": thread_ts,
         "thread_permalink": permalink,
         "requester_slack_id": requester_slack_id,
-        "requester_user_id": _clean(request.user_id) or None,
+        "requester_user_id": requester_user_id,
         "bot_user_id": _clean(trigger.get("bot_user_id")) or None,
         "ask_text": ask_text,
         "origin_ref": origin_ref,
     }
+    if is_contact_form_lead:
+        from brain.systems.runs.obligation_notices import (
+            OPEN_ASK_UNANSWERED_24H_CONDITION,
+        )
+
+        owner_name = _clean(owner.get("name")) or "Reda"
+        lead_name = _clean(contact_form_lead.get("name")) or "the sender"
+        lead_email = _clean(contact_form_lead.get("email")) or "their contact email"
+        response_target = trigger.get("response_target")
+        response_target = (
+            dict(response_target)
+            if isinstance(response_target, dict)
+            else {}
+        )
+        context["notice"] = {
+            "condition": OPEN_ASK_UNANSWERED_24H_CONDITION,
+            "notice_text": (
+                f"<@{requester_slack_id}> ({owner_name}), this contact-form lead "
+                f"from {lead_name} is still unanswered after 24h. Next action: "
+                "reply in this thread with verified answers, then send them to "
+                f"{lead_email}."
+            ),
+            "post_thread_ts": _clean(response_target.get("thread_ts"))
+            or thread_ts,
+        }
+    return context
 
 
 def annotate_request_with_open_ask(
@@ -253,62 +305,73 @@ async def record_open_ask(
 
     if context is None:
         return None
+    persistence_context = dict(context)
+    notice_config = persistence_context.pop("notice", None)
     opened_at = _aware_utc(now)
     requester_name = await _requester_name(
         session,
-        context["requester_user_id"],
-        context["requester_slack_id"],
+        persistence_context["requester_user_id"],
+        persistence_context["requester_slack_id"],
     )
     row = await _open_ask_for_key(
         session,
-        org_id=context["org_id"],
-        channel_id=context["channel_id"],
-        thread_ts=context["thread_ts"],
-        requester_slack_id=context["requester_slack_id"],
+        org_id=persistence_context["org_id"],
+        channel_id=persistence_context["channel_id"],
+        thread_ts=persistence_context["thread_ts"],
+        requester_slack_id=persistence_context["requester_slack_id"],
         for_update=True,
     )
     if row is not None:
-        if int(row.origin_run_id or 0) == int(run_id):
-            return row
-        return _reopen_ask(
-            row,
-            context=context,
-            run_id=run_id,
-            requester_name=requester_name,
-            opened_at=opened_at,
-        )
-
-    row = OpenAsk(
-        **context,
-        obligation_kind=ObligationKind.HUMAN_ASK,
-        requester_name=requester_name,
-        origin_run_id=int(run_id),
-        status=OPEN_ASK_STATUS,
-        opened_at=opened_at,
-    )
-    try:
-        async with session.begin_nested():
-            session.add(row)
-            await session.flush()
-    except IntegrityError:
-        row = await _open_ask_for_key(
-            session,
-            org_id=context["org_id"],
-            channel_id=context["channel_id"],
-            thread_ts=context["thread_ts"],
-            requester_slack_id=context["requester_slack_id"],
-            for_update=True,
-        )
-        if row is None:
-            raise
         if int(row.origin_run_id or 0) != int(run_id):
             _reopen_ask(
                 row,
-                context=context,
+                context=persistence_context,
                 run_id=run_id,
                 requester_name=requester_name,
                 opened_at=opened_at,
             )
+    else:
+        row = OpenAsk(
+            **persistence_context,
+            obligation_kind=ObligationKind.HUMAN_ASK,
+            requester_name=requester_name,
+            origin_run_id=int(run_id),
+            status=OPEN_ASK_STATUS,
+            opened_at=opened_at,
+        )
+        try:
+            async with session.begin_nested():
+                session.add(row)
+                await session.flush()
+        except IntegrityError:
+            row = await _open_ask_for_key(
+                session,
+                org_id=persistence_context["org_id"],
+                channel_id=persistence_context["channel_id"],
+                thread_ts=persistence_context["thread_ts"],
+                requester_slack_id=persistence_context["requester_slack_id"],
+                for_update=True,
+            )
+            if row is None:
+                raise
+            if int(row.origin_run_id or 0) != int(run_id):
+                _reopen_ask(
+                    row,
+                    context=persistence_context,
+                    run_id=run_id,
+                    requester_name=requester_name,
+                    opened_at=opened_at,
+                )
+    if isinstance(notice_config, dict):
+        from brain.systems.runs.obligation_notices import record_obligation_notice
+
+        await record_obligation_notice(
+            session,
+            obligation=row,
+            condition=str(notice_config.get("condition") or ""),
+            notice_text=str(notice_config.get("notice_text") or ""),
+            post_thread_ts=_clean(notice_config.get("post_thread_ts")) or None,
+        )
     return row
 
 
@@ -554,6 +617,32 @@ def mark_open_ask_answered(
     return row
 
 
+async def _supersede_pending_notices(
+    session: Any,
+    obligation_ids: list[int],
+) -> None:
+    if not obligation_ids:
+        return
+    pending_notices = list(
+        (
+            await session.scalars(
+                select(ObligationNotice)
+                .where(
+                    ObligationNotice.obligation_id.in_(obligation_ids),
+                    ObligationNotice.state == "pending",
+                )
+                .with_for_update()
+            )
+        ).all()
+    )
+    for notice in pending_notices:
+        notice.state = "superseded"
+        notice.claimed_at = None
+        notice.last_error = None
+    if pending_notices:
+        await session.flush()
+
+
 async def record_delivered_slack_answer(
     session: Any,
     delivered: DeliveredSlackReply,
@@ -606,27 +695,77 @@ async def record_delivered_slack_answer(
         except ValueError:
             continue
         by_kind[kind] = int(by_kind.get(kind, 0)) + 1
-    if rows:
-        pending_notices = list(
-            (
-                await session.scalars(
-                    select(ObligationNotice)
-                    .where(
-                        ObligationNotice.obligation_id.in_(
-                            [int(row.id) for row in rows]
-                        ),
-                        ObligationNotice.state == "pending",
-                    )
-                    .with_for_update()
-                )
-            ).all()
-        )
-        for notice in pending_notices:
-            notice.state = "superseded"
-            notice.claimed_at = None
-            notice.last_error = None
-        await session.flush()
+    await _supersede_pending_notices(
+        session,
+        [int(row.id) for row in rows],
+    )
     return DeliveredSlackReplyCounts(by_kind=by_kind)
+
+
+async def record_inbound_slack_owner_answer(
+    session: Any,
+    *,
+    org_id: str,
+    channel_id: str,
+    thread_ts: str,
+    slack_user_id: str,
+    message_ts: str,
+    answer_text: str,
+    required_notice_condition: str,
+    now: datetime | None = None,
+) -> int:
+    """Close owner-routed obligations from a matching human Slack reply.
+
+    The notice condition scopes this to obligation types that explicitly treat
+    the named requester as the answer owner. Ordinary teammate asks are not
+    closed merely because the same teammate adds another message to a thread.
+    """
+
+    normalized = {
+        "org_id": _clean(org_id),
+        "channel_id": _clean(channel_id),
+        "thread_ts": _clean(thread_ts),
+        "slack_user_id": _clean(slack_user_id),
+        "message_ts": _clean(message_ts),
+        "condition": _clean(required_notice_condition),
+    }
+    if not all(normalized.values()):
+        return 0
+    rows = list(
+        (
+            await session.scalars(
+                select(OpenAsk)
+                .join(
+                    ObligationNotice,
+                    ObligationNotice.obligation_id == OpenAsk.id,
+                )
+                .where(
+                    OpenAsk.org_id == normalized["org_id"],
+                    OpenAsk.channel_id == normalized["channel_id"],
+                    OpenAsk.thread_ts == normalized["thread_ts"],
+                    OpenAsk.requester_slack_id
+                    == normalized["slack_user_id"],
+                    OpenAsk.status == OPEN_ASK_STATUS,
+                    ObligationNotice.condition == normalized["condition"],
+                )
+                .order_by(OpenAsk.id.asc())
+                .with_for_update()
+            )
+        ).all()
+    )
+    for row in rows:
+        mark_open_ask_answered(
+            row,
+            answer_text=str(answer_text),
+            answered_by_run_id=None,
+            slack_response={"ts": normalized["message_ts"]},
+            now=now,
+        )
+    await _supersede_pending_notices(
+        session,
+        [int(row.id) for row in rows],
+    )
+    return len(rows)
 
 
 def _age_label(age: timedelta) -> str:
@@ -703,6 +842,7 @@ __all__ = [
     "open_asks_for_origin_ref",
     "open_asks_for_origin_run",
     "record_delivered_slack_answer",
+    "record_inbound_slack_owner_answer",
     "record_open_ask",
     "record_run_deferral",
     "slack_origin_ref",

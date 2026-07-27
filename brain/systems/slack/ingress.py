@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from brain.systems.slack.contact_form_leads import (
+    CONTACT_FORM_LEAD_ORIGIN,
+    parse_contact_form_lead,
+)
+
 SLACK_MESSAGE_ENVELOPE_KIND = "slack_message"
 SLACK_CHANNEL_MESSAGE_ORIGIN = "slack.channel_message"
 MAX_SLACK_TEXT_CHARS = 4000
@@ -24,11 +29,39 @@ def _bounded_text(value: Any, *, limit: int = MAX_SLACK_TEXT_CHARS) -> str:
     return str(value or "")[:limit]
 
 
+def _slack_block_text(blocks: Any) -> str:
+    """Flatten visible Slack block text for shape-based intake classifiers."""
+
+    parts: list[str] = []
+
+    def _collect(value: Any) -> None:
+        if isinstance(value, Mapping):
+            text = value.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+            elif isinstance(text, Mapping):
+                _collect(text)
+            for key in ("fields", "elements"):
+                _collect(value.get(key))
+        elif isinstance(value, list):
+            for item in value:
+                _collect(item)
+
+    _collect(blocks)
+    return _bounded_text("\n".join(parts))
+
+
 def _event_text(event: Mapping[str, Any]) -> str:
     """Surface attachment-only bot alerts without changing ordinary messages."""
     text = _bounded_text(event.get("text"))
+    block_text = _slack_block_text(event.get("blocks"))
     if text.strip():
+        combined = _bounded_text("\n".join(part for part in (text, block_text) if part))
+        if block_text and parse_contact_form_lead(combined) is not None:
+            return combined
         return text
+    if block_text:
+        return block_text
     previews: list[str] = []
     attachments = event.get("attachments")
     if not isinstance(attachments, list):
@@ -96,13 +129,16 @@ def _event_origin(
     bot_user_id: str | None,
     api_app_id: str | None = None,
     monitored_channels: frozenset[str] | set[str] | None = None,
+    is_contact_form_lead: bool = False,
 ) -> str | None:
     event_type = str(event.get("type") or "")
     subtype = str(event.get("subtype") or "")
     channel_type = str(event.get("channel_type") or "")
     text = str(event.get("text") or "")
     channel_id = str(event.get("channel") or "").strip()
-    if subtype in _IGNORED_MESSAGE_SUBTYPES:
+    if subtype in _IGNORED_MESSAGE_SUBTYPES and not (
+        subtype == "bot_message" and is_contact_form_lead
+    ):
         return None
     if _is_own_slack_message(event, bot_user_id=bot_user_id, api_app_id=api_app_id):
         return None
@@ -124,6 +160,8 @@ def _event_origin(
         and monitored_channels
         and channel_id in monitored_channels
     ):
+        if is_contact_form_lead:
+            return CONTACT_FORM_LEAD_ORIGIN
         return SLACK_CHANNEL_MESSAGE_ORIGIN
     return None
 
@@ -131,6 +169,8 @@ def _event_origin(
 def _event_kind(origin: str) -> str:
     if origin == "slack.direct_message":
         return "direct_message"
+    if origin == CONTACT_FORM_LEAD_ORIGIN:
+        return CONTACT_FORM_LEAD_ORIGIN
     if origin == SLACK_CHANNEL_MESSAGE_ORIGIN:
         return "channel_message"
     return "mention"
@@ -189,6 +229,8 @@ def normalize_slack_socket_event(
 
     payload = _socket_payload(socket_payload)
     event = _slack_event(socket_payload)
+    message_text = _event_text(event)
+    contact_form_lead = parse_contact_form_lead(message_text)
     resolved_bot_user_id = _bot_user_id(socket_payload, bot_user_id)
     api_app_id = str(payload.get("api_app_id") or "").strip() or None
     monitored = frozenset(
@@ -199,6 +241,7 @@ def normalize_slack_socket_event(
         bot_user_id=resolved_bot_user_id,
         api_app_id=api_app_id,
         monitored_channels=monitored,
+        is_contact_form_lead=contact_form_lead is not None,
     )
     if origin is None:
         return None
@@ -226,12 +269,12 @@ def normalize_slack_socket_event(
             channel_type,
             thread_ts,
             message_ts,
-            is_monitored_channel=origin == SLACK_CHANNEL_MESSAGE_ORIGIN,
+            is_monitored_channel=origin
+            in {SLACK_CHANNEL_MESSAGE_ORIGIN, CONTACT_FORM_LEAD_ORIGIN},
         ),
         "visibility": "public",
     }
     permalink = str(event.get("permalink") or "").strip() or None
-    message_text = _event_text(event)
     normalized_payload = {
         "event_kind": _event_kind(origin),
         "origin": origin,
@@ -252,6 +295,8 @@ def normalize_slack_socket_event(
         "surface": surface,
         "response_target": response_target,
     }
+    if contact_form_lead is not None:
+        normalized_payload["contact_form_lead"] = contact_form_lead
     return {
         "kind": SLACK_MESSAGE_ENVELOPE_KIND,
         "origin": origin,
