@@ -14,6 +14,10 @@ from brain.platform.db.models.idea import Idea
 from brain.platform.providers.model_policy import EFFORT_TIER_SET
 from brain.systems.cortex.project_context.resolution import resolve_effective_project_context
 from brain.systems.cortex.thread_context import async_build_agent_visible_thread_context
+from brain.systems.runs.direct_targets import (
+    DirectHeadlessTarget,
+    resolve_direct_target,
+)
 from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
 from brain.systems.runs.status_questions import build_status_question_context
@@ -562,31 +566,10 @@ async def _agent_run_request_for_thread_discussion(
     )
 
 
-def _external_agent_headless_thread_id(target: dict[str, Any]) -> str:
-    thread_id = str(target.get("thread_id") or "")
-    if thread_id:
-        return thread_id
-    connection_id = str(target.get("external_agent_connection_id") or "")
-    task_id = str(target.get("external_agent_task_id") or "")
-    if connection_id and task_id:
-        return f"external-agent:{connection_id}:{task_id}"
-    raise ValueError("External agent headless ask requires thread_id or connection/task ids")
-
-
-def _inbound_signal_thread_id(target: dict[str, Any]) -> str:
-    thread_id = str(target.get("thread_id") or "")
-    if thread_id:
-        return thread_id
-    event_id = str(target.get("event_id") or "")
-    if event_id:
-        return f"inbound:{event_id}"
-    raise ValueError("Inbound signal requires event_id or thread_id")
-
-
-def _build_external_agent_headless_request(
+def _build_direct_target_request(
     event: WorkIntakeEvent,
     *,
-    target: dict[str, Any],
+    target: DirectHeadlessTarget,
     metadata: dict[str, Any],
     message: str,
     producer: str,
@@ -597,43 +580,11 @@ def _build_external_agent_headless_request(
     return AgentRunRequest(
         org_id=_event_org_id(event),
         user_id=_event_actor_user_id(event),
-        thread_id=_external_agent_headless_thread_id(target),
+        thread_id=target.thread_id,
         message=message,
         profile=profile,
         recipe=recipe_for_profile(profile, metadata),
-        target_ref=target,
-        workspace_ref=_event_workspace_ref(event),
-        model_policy=_event_model_policy(event, metadata),
-        metadata={
-            **metadata,
-            "event": _event_run_event(event),
-            "priority": priority,
-            "source": event.source,
-            "producer": producer,
-            "idempotency_key": idempotency_key,
-        },
-    )
-
-
-def _build_inbound_signal_request(
-    event: WorkIntakeEvent,
-    *,
-    target: dict[str, Any],
-    metadata: dict[str, Any],
-    message: str,
-    producer: str,
-    idempotency_key: str | None,
-    priority: int,
-) -> AgentRunRequest:
-    profile = profile_from_metadata(metadata)
-    return AgentRunRequest(
-        org_id=_event_org_id(event),
-        user_id=_event_actor_user_id(event),
-        thread_id=_inbound_signal_thread_id(target),
-        message=message,
-        profile=profile,
-        recipe=recipe_for_profile(profile, metadata),
-        target_ref=target,
+        target_ref=dict(target.value),
         workspace_ref=_event_workspace_ref(event),
         model_policy=_event_model_policy(event, metadata),
         metadata={
@@ -819,21 +770,11 @@ async def _build_agent_run_request(
             }
         )
 
-    if target.get("kind") == "external_agent_headless_ask":
-        return _build_external_agent_headless_request(
+    direct_target = resolve_direct_target(target)
+    if direct_target is not None:
+        return _build_direct_target_request(
             event,
-            target=target,
-            metadata=metadata,
-            message=message,
-            producer=producer,
-            idempotency_key=idempotency_key,
-            priority=priority,
-        )
-
-    if target.get("kind") in {"app_report", "inbound_submission"}:
-        return _build_inbound_signal_request(
-            event,
-            target=target,
+            target=direct_target,
             metadata=metadata,
             message=message,
             producer=producer,
