@@ -1,5 +1,6 @@
 """Tests for deployment safety hooks."""
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -551,3 +552,275 @@ def test_safe_deploy_scripts_cannot_restate_worker_swap_status_policy():
     native_adapter = (root / "brain" / "app" / "cli" / "worker_swap_snapshot.py").read_text()
     assert "OPEN_RUN_STATUS_VALUES" in contract
     assert "OPEN_RUN_STATUS_VALUES" in native_adapter
+
+
+def test_compose_worker_survives_a_host_reboot_like_every_other_service():
+    """The worker must come back on boot, and must be able to exit in time to.
+
+    Regression for #527: the worker was the only service that stayed down after a
+    power outage. Its declared policy was already correct -- what stranded it was
+    a 24h stop grace it could never clear inside the daemon's shutdown budget.
+    """
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "deploy" / "compose" / "docker-compose.yml").read_text()
+    services_section = compose.split("services:", 1)[1].rsplit("\nvolumes:", 1)[0]
+    worker_section = services_section.split("  worker:", 1)[1].split("\n  scheduler:", 1)[0]
+    # Assert on directives, not on the prose explaining them.
+    worker_directives = "\n".join(
+        line for line in worker_section.splitlines() if not line.lstrip().startswith("#")
+    )
+    anchor = compose.split("x-backend-service:", 1)[1].split("\nservices:", 1)[0]
+
+    # The worker inherits restart: unless-stopped from the backend anchor and
+    # must never opt out of it the way one-shot migrate does.
+    assert "restart: unless-stopped" in anchor
+    assert "restart:" not in worker_directives
+
+    assert "stop_grace_period: ${ILLO_WORKER_STOP_GRACE_PERIOD:-10s}" in worker_directives
+    assert "24h" not in worker_directives
+
+
+def test_worker_restart_policy_suspension_is_restored_when_a_deploy_is_interrupted(tmp_path):
+    """An interrupted swap must not strand the worker at restart=no (#527)."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    docker_log = tmp_path / "docker.log"
+    script = f'''
+source "{runtime_lib}"
+docker() {{ printf '%s\\n' "$*" >> "{docker_log}"; }}
+suspend_worker_restart_policy stranded-worker
+# Simulate the deploy dying mid-drain: Ctrl-C, SSH drop, dockerd snap refresh.
+exit 130
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 130
+    docker_calls = docker_log.read_text()
+    assert "update --restart=no stranded-worker" in docker_calls
+    assert "update --restart=unless-stopped stranded-worker" in docker_calls
+
+
+def test_worker_restart_policy_is_not_restored_onto_a_replaced_worker(tmp_path):
+    """Restoring the policy on the outgoing container would arm a zombie worker.
+
+    The replacement already carries the declared policy; re-arming the container
+    the handoff just retired would bring a second worker back on the next boot,
+    which is the #486 failure mode one reboot later.
+    """
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    docker_log = tmp_path / "docker.log"
+    script = f'''
+source "{runtime_lib}"
+docker() {{ printf '%s\\n' "$*" >> "{docker_log}"; }}
+compose() {{ :; }}
+worker_container_id() {{ printf 'old-worker\\n'; }}
+worker_swap_snapshot() {{ printf 'snapshot\\n'; }}
+worker_swap_snapshot_decision() {{ printf 'replace\\n'; }}
+wait_for_worker_exit() {{ return 0; }}
+replace_idle_worker
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    docker_calls = docker_log.read_text()
+    assert "update --restart=no old-worker" in docker_calls
+    assert "update --restart=unless-stopped old-worker" not in docker_calls
+
+
+def test_worker_restart_policy_drift_is_repaired_before_a_restart(tmp_path):
+    """A worker already stranded by an earlier interruption must self-heal."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    docker_log = tmp_path / "docker.log"
+    script = f'''
+source "{runtime_lib}"
+worker_container_id() {{ printf 'drifted-worker\\n'; }}
+docker() {{
+  if [ "$1" = "inspect" ]; then printf 'no\\n'; return 0; fi
+  printf '%s\\n' "$*" >> "{docker_log}"
+}}
+reconcile_worker_restart_policy
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "update --restart=unless-stopped drifted-worker" in docker_log.read_text()
+    assert "restart policy had drifted to 'no'" in result.stderr
+    assert "survives a host reboot" in result.stderr
+
+
+def _inert_check_script(runtime_lib: Path, running: str) -> str:
+    return f'''
+source "{runtime_lib}"
+compose() {{
+  if [ "$*" = "ps --services --status running" ]; then
+    printf '{running}'
+  fi
+}}
+assert_stack_not_inert
+'''
+
+
+def test_inert_stack_check_fails_loudly_when_only_the_worker_is_absent():
+    """The healthy-but-inert state: every probe passes, Illo does nothing (#527)."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    running = "postgres\\napi\\nweb\\nscheduler\\n"
+
+    result = subprocess.run(
+        ["bash", "-c", _inert_check_script(runtime_lib, running)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 3
+    assert "Stack is INERT: 4 service(s) running but required service(s) absent: worker." in result.stderr
+    assert "structurally incapable of doing any work" in result.stderr
+    assert "up -d --no-deps worker" in result.stderr
+
+
+def test_inert_stack_check_separates_a_fully_down_stack_from_an_inert_one():
+    """A monitor must be able to tell an invisible failure from an obvious one."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+
+    down = subprocess.run(
+        ["bash", "-c", _inert_check_script(runtime_lib, "")],
+        capture_output=True,
+        text=True,
+    )
+    healthy = subprocess.run(
+        ["bash", "-c", _inert_check_script(runtime_lib, "postgres\\napi\\nweb\\nworker\\nscheduler\\n")],
+        capture_output=True,
+        text=True,
+    )
+
+    assert down.returncode == 4
+    assert "Stack is fully down" in down.stderr
+    assert healthy.returncode == 0
+    assert healthy.stderr == ""
+
+
+def test_inert_stack_check_is_reachable_as_a_standalone_monitor_entrypoint():
+    root = Path(__file__).resolve().parents[1]
+    check = root / "deploy" / "scripts" / "inert-stack-check.sh"
+    launcher = (root / "illo").read_text()
+
+    assert check.exists()
+    content = check.read_text()
+    assert 'source "$SCRIPT_DIR/compose-runtime-lib.sh"' in content
+    assert "assert_stack_not_inert" in content
+    # The entrypoint may document the override, but must not define its own list.
+    assert not re.search(r"^STACK_REQUIRED_SERVICES=", content, flags=re.MULTILINE)
+    assert "deploy/scripts/inert-stack-check.sh" in launcher
+
+
+def test_deploy_doctor_delegates_stack_presence_to_the_shared_invariant():
+    root = Path(__file__).resolve().parents[1]
+    doctor = (root / "deploy" / "scripts" / "doctor.sh").read_text()
+
+    assert 'source "$SCRIPT_DIR/compose-runtime-lib.sh"' in doctor
+    assert "assert_stack_not_inert $DOCTOR_REQUIRED_SERVICES" in doctor
+    # Presence has exactly one owner; doctor only grades health of what is present.
+    assert "service is not running" not in doctor
+    assert "compose() {" not in doctor
+
+
+def test_boot_unit_binds_to_the_docker_unit_that_actually_exists(tmp_path):
+    """A hardcoded docker.service silently fails on a Docker snap host (#527)."""
+    root = Path(__file__).resolve().parents[1]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    systemctl = bin_dir / "systemctl"
+    systemctl.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = list-unit-files ]; then\n"
+        "  if [ \"$2\" = snap.docker.dockerd.service ]; then\n"
+        "    echo 'snap.docker.dockerd.service enabled'\n"
+        "    exit 0\n"
+        "  fi\n"
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    systemctl.chmod(0o755)
+    docker = bin_dir / "docker"
+    docker.write_text("#!/usr/bin/env bash\nexit 0\n")
+    docker.chmod(0o755)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("COMPOSE_PROFILES=slack\n")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["ILLO_COMPOSE_ENV_FILE"] = str(env_file)
+
+    result = subprocess.run(
+        [str(root / "deploy" / "scripts" / "install-boot-unit.sh"), "--print"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    unit = result.stdout
+    assert "Requires=snap.docker.dockerd.service" in unit
+    assert "After=snap.docker.dockerd.service" in unit
+    assert "docker.service" not in unit.replace("snap.docker.dockerd.service", "")
+    assert "Type=oneshot" in unit
+    assert "RemainAfterExit=yes" in unit
+    assert "WantedBy=multi-user.target" in unit
+    exec_start = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
+    # Profile-gated services must be part of the boot reconcile.
+    assert "--profile slack" in exec_start
+    assert exec_start.endswith("up -d")
+    # A reconcile, never a redeploy: force-recreate here would fight a running
+    # handoff, and an ExecStop would tear the stack down on `systemctl stop`.
+    assert "--force-recreate" not in exec_start
+    assert "ExecStop=" not in unit
+
+
+def test_worker_restart_policy_suspension_preserves_an_existing_exit_trap(tmp_path):
+    """doctor.sh sources this lib and installs its own cleanup trap."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    docker_log = tmp_path / "docker.log"
+    script = f'''
+source "{runtime_lib}"
+docker() {{ printf '%s\\n' "$*" >> "{docker_log}"; }}
+caller_cleanup() {{ printf 'caller cleanup ran\\n'; }}
+trap caller_cleanup EXIT
+suspend_worker_restart_policy some-worker
+exit 7
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 7
+    assert "update --restart=unless-stopped some-worker" in docker_log.read_text()
+    assert "caller cleanup ran" in result.stdout
+
+
+def test_worker_restart_policy_is_restored_when_the_replacement_fails_to_start(tmp_path):
+    """A failed recreate leaves the outgoing worker as the only worker.
+
+    Abandoning the suspension there would strand it at restart=no, which is the
+    exact silent-inertness this whole path exists to prevent (#527).
+    """
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    docker_log = tmp_path / "docker.log"
+    script = f'''
+source "{runtime_lib}"
+docker() {{ printf '%s\\n' "$*" >> "{docker_log}"; }}
+compose() {{ return 1; }}
+worker_container_id() {{ printf 'old-worker\\n'; }}
+worker_swap_snapshot() {{ printf 'snapshot\\n'; }}
+worker_swap_snapshot_decision() {{ printf 'replace\\n'; }}
+wait_for_worker_exit() {{ return 0; }}
+replace_idle_worker
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    docker_calls = docker_log.read_text()
+    assert "update --restart=no old-worker" in docker_calls
+    assert "update --restart=unless-stopped old-worker" in docker_calls

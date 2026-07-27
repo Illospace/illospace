@@ -7,6 +7,14 @@ COMPOSE_DIR="$ROOT/deploy/compose"
 COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
 ENV_FILE="${ILLO_COMPOSE_ENV_FILE:-$COMPOSE_DIR/.env}"
 
+# Provides compose() plus the shared stack invariants (assert_stack_not_inert).
+source "$SCRIPT_DIR/compose-runtime-lib.sh"
+
+# Doctor runs after a deploy, so it holds the updater to the same standard as
+# the always-on services; a bare monitor does not (a missing updater does not
+# make Illo inert).
+DOCTOR_REQUIRED_SERVICES="postgres api web worker scheduler updater"
+
 errors=0
 warnings=0
 runtime_checks=1
@@ -161,10 +169,6 @@ else
   warn "runtime checks disabled"
 fi
 
-compose() {
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
-}
-
 if compose config >/dev/null; then
   pass "Compose configuration renders"
 else
@@ -209,23 +213,31 @@ if [ "$runtime_checks" = "0" ]; then
 elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" && compose ps --services --status running >"$tmp_running" 2>/dev/null; then
   running="$(cat "$tmp_running")"
   if printf '%s\n' "$running" | grep -qx api; then
-    for service in postgres api web worker scheduler updater; do
-      if printf '%s\n' "$running" | grep -qx "$service"; then
-        health="$(container_health "$service" || true)"
-        case "$health" in
-          healthy|running)
-            pass "$service service is $health"
-            ;;
-          starting)
-            warn "$service service is still starting"
-            ;;
-          *)
-            fail "$service service health is ${health:-unknown}"
-            ;;
-        esac
-      else
-        fail "$service service is not running"
-      fi
+    # Presence is the shared stack invariant; this loop only grades the health of
+    # services that are present. Keeping one owner for presence means a monitor
+    # and a deploy cannot disagree about whether the stack is inert.
+    inert_status=0
+    assert_stack_not_inert $DOCTOR_REQUIRED_SERVICES || inert_status=$?
+    if [ "$inert_status" -eq 0 ]; then
+      pass "every always-on service is running"
+    else
+      fail "Compose stack is missing an always-on service; see the report above"
+    fi
+
+    for service in $DOCTOR_REQUIRED_SERVICES; do
+      printf '%s\n' "$running" | grep -qx "$service" || continue
+      health="$(container_health "$service" || true)"
+      case "$health" in
+        healthy|running)
+          pass "$service service is $health"
+          ;;
+        starting)
+          warn "$service service is still starting"
+          ;;
+        *)
+          fail "$service service health is ${health:-unknown}"
+          ;;
+      esac
     done
 
     if printf '%s\n' "$running" | grep -qx postgres; then
