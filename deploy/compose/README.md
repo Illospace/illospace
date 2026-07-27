@@ -104,6 +104,52 @@ running stack can see DB-backed credential records:
 ./illo deploy doctor --strict-credentials
 ```
 
+### The healthy-but-inert state
+
+An HTTP probe cannot tell you the stack is working. The `worker` service owns
+both AgentRun execution and the cycle-scheduler thread, so if it alone is
+missing every signal above still passes — `docker ps` is green, both health
+endpoints return 200, the dashboard loads — while Illo does no work at all.
+Presence has to be asserted directly:
+
+```bash
+./illo deploy inert-check
+```
+
+It exits `0` when every always-on service is running, `3` when the stack is up
+but one is absent (inert), and `4` when nothing is running (down). The split
+matters for an external watcher: `3` is the failure nothing else reports.
+`./illo deploy doctor` runs the same assertion.
+
+### Surviving a host reboot
+
+Per-container restart policies are not enough on their own. They are a property
+of a *container*, so anything that mutates or loses that property — an
+interrupted worker swap, a container whose containerd shim died during host
+shutdown — silently drops that service from the next boot. They also ignore
+`depends_on`, so on boot the worker races a cold Postgres. Install the boot unit
+so the whole project is reconciled from its declared spec instead:
+
+```bash
+./illo deploy boot-unit
+```
+
+The unit is generated per host rather than committed, because the Docker unit
+name and binary path differ (a Docker snap install has no `docker.service` at
+all). Inspect it before installing with `./illo deploy boot-unit --print`.
+
+Two worker settings interact with shutdown and must stay consistent:
+
+- `stop_grace_period` (default `10s`, override with `ILLO_WORKER_STOP_GRACE_PERIOD`)
+  must stay inside the Docker daemon's own shutdown budget — `dockerd
+  --shutdown-timeout`, default 15s. Raising it past that reintroduces the bug
+  where the worker is still draining when containerd is torn down, is recorded
+  `Exited(255)` rather than stopped, and never comes back.
+- `ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS` (default `infinity`) bounds the
+  *deploy-time* drain, not shutdown. The graceful handoff signals with `docker
+  kill -s TERM`, which ignores `stop_grace_period` entirely, and enforces its own
+  bound via `COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS`.
+
 ## Operations
 
 Back up Postgres:
