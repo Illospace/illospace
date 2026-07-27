@@ -233,6 +233,47 @@ def _normalize_context_route(value: Any, *, tool_name: str) -> ToolContextRoute 
 
 
 @dataclass(frozen=True)
+class ToolCallIdentitySpec:
+    """Catalog-owned projection from call arguments to a stable target."""
+
+    volatile_fields: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "volatile_fields",
+            _normalize_string_tuple(
+                self.volatile_fields,
+                field_name="identity_spec.volatile_fields",
+                tool_name="identity projection",
+            ),
+        )
+
+    def project(self, tool_input: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in tool_input.items()
+            if key not in self.volatile_fields
+        }
+
+
+def _normalize_identity_spec(
+    value: Any,
+    *,
+    tool_name: str,
+) -> ToolCallIdentitySpec | None:
+    if value is None:
+        return None
+    if isinstance(value, ToolCallIdentitySpec):
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError(f"Tool {tool_name!r} identity_spec must be a mapping")
+    return ToolCallIdentitySpec(
+        volatile_fields=tuple(value.get("volatile_fields") or ()),
+    )
+
+
+@dataclass(frozen=True)
 class ToolRegistration:
     """Single source of truth for a tool's schema and runtime policy metadata."""
 
@@ -255,7 +296,7 @@ class ToolRegistration:
     action_manifest: bool = False
     expected_effect: str | None = None
     context_route: ToolContextRoute | Mapping[str, Any] | None = None
-    semantic_free_text_fields: tuple[str, ...] = ()
+    identity_spec: ToolCallIdentitySpec | Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -309,14 +350,22 @@ class ToolRegistration:
         if self.expected_effect is not None:
             object.__setattr__(self, "expected_effect", str(self.expected_effect))
         object.__setattr__(self, "context_route", _normalize_context_route(self.context_route, tool_name=self.name))
+        identity_spec = _normalize_identity_spec(
+            self.identity_spec,
+            tool_name=self.name,
+        )
+        schema_fields = set((self.schema.get("properties") or {}).keys())
+        if identity_spec is not None:
+            unknown_fields = set(identity_spec.volatile_fields) - schema_fields
+            if unknown_fields:
+                raise ValueError(
+                    f"Tool {self.name!r} identity_spec names unknown fields: "
+                    f"{', '.join(sorted(unknown_fields))}"
+                )
         object.__setattr__(
             self,
-            "semantic_free_text_fields",
-            _normalize_string_tuple(
-                self.semantic_free_text_fields,
-                field_name="semantic_free_text_fields",
-                tool_name=self.name,
-            ),
+            "identity_spec",
+            identity_spec,
         )
 
     def to_permission_payload(self) -> dict[str, Any]:
@@ -334,7 +383,6 @@ class ToolRegistration:
             "action_manifest": self.action_manifest,
             "expected_effect": self.expected_effect,
             "context_route": self.context_route.to_payload() if self.context_route else None,
-            "semantic_free_text_fields": list(self.semantic_free_text_fields),
         }
 
     def to_action_policy(self) -> dict[str, str] | None:

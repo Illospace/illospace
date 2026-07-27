@@ -7,8 +7,8 @@ from dataclasses import asdict
 from types import SimpleNamespace
 
 from brain.systems.runs.direct_loop.gates import GateState, check_gate_violations
-from brain.systems.runs.direct_loop.loop_control import (
-    LoopControlPolicy,
+from brain.systems.runs.direct_loop.loop_control import RunControlPolicy
+from brain.systems.runs.direct_loop.tool_failure_policy import (
     ToolFailureTrigger,
 )
 from brain.systems.runs.tool_outcomes import (
@@ -68,7 +68,7 @@ def _execute_sync(
         parallel_safe_tool_names=parallel_safe_tool_names,
         max_parallel_tool_calls=max_parallel_tool_calls,
         check_gate_violations=check_gate_violations,
-        loop_control=loop_control or LoopControlPolicy(),
+        loop_control=loop_control or RunControlPolicy(),
     )
 
 
@@ -100,7 +100,7 @@ async def _execute_async(
         parallel_safe_tool_names=parallel_safe_tool_names,
         max_parallel_tool_calls=max_parallel_tool_calls,
         check_gate_violations=check_gate_violations,
-        loop_control=loop_control or LoopControlPolicy(),
+        loop_control=loop_control or RunControlPolicy(),
     )
 
 
@@ -265,7 +265,7 @@ def _observed_result(*, failed: bool) -> ResolvedToolCall:
 
 
 def test_failure_policy_replay_trips_on_fourth_call_of_interleaved_trace():
-    policy = LoopControlPolicy(
+    policy = RunControlPolicy(
         failure_threshold=3,
         failure_window_calls=10,
         zero_success_failure_threshold=2,
@@ -281,10 +281,10 @@ def test_failure_policy_replay_trips_on_fourth_call_of_interleaved_trace():
     trip_call_index = None
     trip = None
     for call_index, failed in enumerate(trace, start=1):
-        edge = policy.observe_tool_result(_observed_result(failed=failed))
-        if edge is not None:
+        decision = policy.observe_tool_result(_observed_result(failed=failed))
+        if decision.disablement is not None:
             trip_call_index = call_index
-            trip = edge
+            trip = decision.disablement
             break
 
     assert trip_call_index == 4
@@ -298,7 +298,7 @@ def test_failure_policy_replay_trips_on_fourth_call_of_interleaved_trace():
 
 
 def test_failure_policy_disables_after_two_failures_with_zero_successes():
-    policy = LoopControlPolicy(
+    policy = RunControlPolicy(
         failure_threshold=3,
         failure_window_calls=10,
         zero_success_failure_threshold=2,
@@ -307,35 +307,49 @@ def test_failure_policy_disables_after_two_failures_with_zero_successes():
     first = policy.observe_tool_result(_observed_result(failed=True))
     second = policy.observe_tool_result(_observed_result(failed=True))
 
-    assert first is None
-    assert second is not None
+    assert first.disablement is None
+    assert second.disablement is not None
     assert policy.termination is None
     disablement = policy.disabled_tools["check_fix_deploy_state"]
-    assert second is disablement
+    assert second.disablement is disablement
     assert disablement.triggers == (ToolFailureTrigger.ZERO_SUCCESS,)
     assert disablement.total_failures == 2
     assert disablement.total_successes == 0
-    assert policy.observe_tool_result(_observed_result(failed=True)) is None
+    assert (
+        policy.observe_tool_result(_observed_result(failed=True)).disablement
+        is None
+    )
     assert list(policy.disabled_tools) == ["check_fix_deploy_state"]
 
-    rearmed_policy = LoopControlPolicy(
+    rearmed_policy = RunControlPolicy(
         failure_threshold=3,
         failure_window_calls=10,
         zero_success_failure_threshold=2,
     )
     assert rearmed_policy.disabled_tools == {}
-    assert rearmed_policy.observe_tool_result(_observed_result(failed=True)) is None
+    assert (
+        rearmed_policy.observe_tool_result(
+            _observed_result(failed=True)
+        ).disablement
+        is None
+    )
 
 
 def test_failure_policy_does_not_disable_after_one_failure_then_success():
-    policy = LoopControlPolicy(
+    policy = RunControlPolicy(
         failure_threshold=3,
         failure_window_calls=10,
         zero_success_failure_threshold=2,
     )
 
-    assert policy.observe_tool_result(_observed_result(failed=True)) is None
-    assert policy.observe_tool_result(_observed_result(failed=False)) is None
+    assert (
+        policy.observe_tool_result(_observed_result(failed=True)).disablement
+        is None
+    )
+    assert (
+        policy.observe_tool_result(_observed_result(failed=False)).disablement
+        is None
+    )
     assert policy.disabled_tools == {}
 
 
@@ -344,7 +358,7 @@ def test_failure_policy_reads_thresholds_from_environment(monkeypatch):
     monkeypatch.setenv("AGENT_TOOL_FAILURE_WINDOW_CALLS", "12")
     monkeypatch.setenv("AGENT_TOOL_ZERO_SUCCESS_FAILURE_THRESHOLD", "4")
 
-    policy = LoopControlPolicy()
+    policy = RunControlPolicy()
 
     assert policy.failure_threshold == 5
     assert policy.failure_window_calls == 12
@@ -446,7 +460,7 @@ async def test_disablement_skips_only_failed_tool_and_runs_healthy_call_in_same_
         attempts.append("healthy")
         return {"ok": True}
 
-    policy = LoopControlPolicy(
+    policy = RunControlPolicy(
         failure_threshold=3,
         failure_window_calls=10,
         zero_success_failure_threshold=2,
@@ -462,7 +476,7 @@ async def test_disablement_skips_only_failed_tool_and_runs_healthy_call_in_same_
                 category="RuntimeError",
             ),
         )
-    ) is None
+    ).disablement is None
 
     execution = await _execute_async(
         _response(
@@ -497,7 +511,7 @@ async def test_unchanged_result_termination_skips_later_serial_calls():
         attempts.append(tool_input["query"])
         return {"status": "pending"}
 
-    policy = LoopControlPolicy()
+    policy = RunControlPolicy()
     for index in range(3):
         policy.observe_tool_result(
             ResolvedToolCall(

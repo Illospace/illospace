@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from brain.systems.runs.direct_loop.loop_control import ToolDisablement
+from brain.systems.runs.direct_loop.tool_failure_policy import ToolDisablement
 from brain.systems.runs.status import RunStatus, coerce_run_status
 
 

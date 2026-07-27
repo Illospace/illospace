@@ -33,6 +33,7 @@ from brain.systems.runs.tool_definitions import (
 from brain.systems.runs.tool_catalog.metadata import (
     ActionPolicyResult,
     ToolAvailability,
+    ToolCallIdentitySpec,
     ToolParallelSafety,
     ToolPermission,
     ToolRegistration,
@@ -264,6 +265,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "side_effect_class": "read_only",
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
+        "identity_spec": {"volatile_fields": ("cursor",)},
         "context_route": {
             "description": (
                 "Low-level read-only query over Illospace DB-backed workspace truth: team members, "
@@ -311,6 +313,9 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "side_effect_class": "read_only",
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
+        "identity_spec": {
+            "volatile_fields": ("cursor", "query", "search"),
+        },
         "context_route": {
             "description": "Read recent human and Illo activity across Cortex messages, ideas, runs, tool calls, Domain events, Project Context attachments, apps, and Cycle runs.",
             "domains": ["team activity", "teammate activity", "workspace activity", "recent activity", "what changed", "what Illo did"],
@@ -344,6 +349,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "side_effect_class": "read_only",
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
+        "identity_spec": {"volatile_fields": ("cursor",)},
         "context_route": {
             "description": "Read user-created structured workspace data: Domain schemas, typed records, and Domain audit events.",
             "domains": ["workspace records", "domains", "domain records", "structured data", "trackers", "team database"],
@@ -355,6 +361,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "side_effect_class": "read_only",
         "output_budget_chars": 14_000,
         "evidence_emitter": True,
+        "identity_spec": {"volatile_fields": ("cursor",)},
         "context_route": {
             "description": "Read workspace Cycles and Cycle runs: recurring prompts, schedules, enabled state, last/next run, linked thoughts, and status.",
             "domains": ["cycles", "recurring work", "scheduled work", "check-ins", "automations", "reports"],
@@ -382,6 +389,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         ),
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
+        "identity_spec": {"volatile_fields": ("cursor",)},
     },
     "check_fix_deploy_state": {
         "permission": "read_workspace",
@@ -454,6 +462,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "expected_effect": "list native GitHub sub-issues or look up an issue's parent",
         "output_budget_chars": 18_000,
         "evidence_emitter": True,
+        "identity_spec": {"volatile_fields": ("cursor",)},
     },
     "manage_cycle": {
         "permission": "manage_cycles",
@@ -735,14 +744,16 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "side_effect_class": "read_only",
         "parallel_safety": "agent_safe",
         "evidence_emitter": True,
-        "semantic_free_text_fields": ("question", "focus"),
+        "identity_spec": {
+            "volatile_fields": ("question", "focus"),
+        },
     },
     "summarize_files_for_task": {
         "permission": "read_workspace",
         "side_effect_class": "read_only",
         "parallel_safety": "agent_safe",
         "evidence_emitter": True,
-        "semantic_free_text_fields": ("question",),
+        "identity_spec": {"volatile_fields": ("question",)},
     },
     "trace_symbol": {
         "permission": "read_workspace",
@@ -755,7 +766,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "side_effect_class": "read_only",
         "parallel_safety": "safe",
         "evidence_emitter": True,
-        "semantic_free_text_fields": ("question",),
+        "identity_spec": {"volatile_fields": ("question",)},
     },
     "session_write": {
         "permission": "write_session",
@@ -880,9 +891,7 @@ def _default_registration(
         action_manifest=bool(metadata.get("action_manifest", False)),
         expected_effect=metadata.get("expected_effect"),
         context_route=metadata.get("context_route"),
-        semantic_free_text_fields=tuple(
-            metadata.get("semantic_free_text_fields") or ()
-        ),
+        identity_spec=metadata.get("identity_spec"),
     )
 
 
@@ -923,6 +932,11 @@ def _validate_registry(registrations: Mapping[str, ToolRegistration]) -> None:
             raise ValueError(f"Tool {name!r} has untyped reversibility metadata")
         if not isinstance(registration.parallel_safety, ToolParallelSafety):
             raise ValueError(f"Tool {name!r} has untyped parallel_safety metadata")
+        if (
+            registration.identity_spec is not None
+            and not isinstance(registration.identity_spec, ToolCallIdentitySpec)
+        ):
+            raise ValueError(f"Tool {name!r} has untyped identity_spec metadata")
         if (
             registration.side_effect_class != ToolSideEffectClass.READ_ONLY
             and not registration.expected_effect

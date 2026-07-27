@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -542,12 +541,12 @@ def test_final_reply_evidence_reads_status_and_tool_failure_state_from_agent_con
         FinalReplyEvidence,
         ToolResultEvidence,
     )
-    from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
+    from brain.systems.runs.direct_loop.loop_control import RunControlPolicy
     from brain.systems.runs.direct_loop.tool_execution import ResolvedToolCall
     from brain.systems.runs.status import RunStatus
     from brain.systems.runs.tool_outcomes import ToolOutcome
 
-    loop_control = LoopControlPolicy(
+    loop_control = RunControlPolicy(
         failure_threshold=3,
         zero_success_failure_threshold=2,
     )
@@ -612,241 +611,6 @@ def test_final_reply_evidence_reads_status_and_tool_failure_state_from_agent_con
     assert evidence.tool_failure_state.threshold_reached is True
     assert evidence.tool_failure_state.tool_name == "manage_idea"
     assert evidence.tool_failure_state.disabled_tools == ("manage_idea",)
-
-
-def _resolved_read_call(
-    tool_name: str,
-    tool_input: dict,
-    result: dict,
-    *,
-    block_id: str = "replay",
-):
-    from brain.systems.runs.direct_loop.tool_execution import ResolvedToolCall
-
-    return ResolvedToolCall(
-        block_id=block_id,
-        tool_name=tool_name,
-        tool_input=tool_input,
-        result_text=json.dumps(result, sort_keys=True),
-        result_value=result,
-    )
-
-
-def test_cycle_9_query_paraphrases_collapse_to_one_semantic_signature():
-    from brain.systems.runs.direct_loop.loop_control import (
-        exact_tool_call_fingerprint,
-        semantic_tool_call_fingerprint,
-    )
-
-    queries = [
-        "Promotion readiness workspace evidence during the scheduled review window",
-        "Promotion readiness workspace evidence for scheduled window",
-        (
-            "Promotion readiness workspace evidence in the scheduled review window, "
-            "including relevant thread/Cycle activity"
-        ),
-    ]
-    inputs = [
-        {
-            "query": query,
-            "time_window": "custom",
-            "start_at": "2026-07-01T14:00:00Z",
-            "end_at": "2026-07-01T15:00:00Z",
-            "person": "reviewer@example.com",
-        }
-        for query in queries
-    ]
-
-    exact = {
-        exact_tool_call_fingerprint("read_team_activity", tool_input)
-        for tool_input in inputs
-    }
-    semantic = {
-        semantic_tool_call_fingerprint("read_team_activity", tool_input)
-        for tool_input in inputs
-    }
-
-    assert len(exact) == 3
-    assert len(semantic) == 1
-    assert semantic_tool_call_fingerprint(
-        "read_team_activity",
-        {**inputs[0], "person": "different-reviewer@example.com"},
-    ) not in semantic
-    assert semantic_tool_call_fingerprint(
-        "summarize_file_for_task",
-        {
-            "path": "brain/agent.py",
-            "question": "Where does the loop stop?",
-            "focus": "Termination behavior",
-        },
-    ) == semantic_tool_call_fingerprint(
-        "summarize_file_for_task",
-        {
-            "path": "brain/agent.py",
-            "question": "Explain how this loop exits",
-            "focus": "Control-flow edges",
-        },
-    )
-
-
-def test_semantic_stall_trips_after_ten_calls_add_no_new_key_or_result():
-    from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
-
-    policy = LoopControlPolicy()
-    targets = [f"thread-{index}" for index in range(10)]
-
-    for target in targets:
-        policy.observe_tool_result(
-            _resolved_read_call(
-                "read_team_activity",
-                {"idea_id": target, "query": f"Initial evidence for {target}"},
-                {"items": [{"thread_id": target}]},
-            )
-        )
-    assert policy.termination is None
-
-    for index, target in enumerate(targets, start=1):
-        policy.observe_tool_result(
-            _resolved_read_call(
-                "read_team_activity",
-                {"idea_id": target, "query": f"Paraphrased evidence request {index}"},
-                {"items": [{"thread_id": target}]},
-            )
-        )
-        if index < 10:
-            assert policy.termination is None
-
-    assert policy.termination is not None
-    assert "semantic" in policy.termination.message
-
-
-def test_paginated_reads_with_new_results_do_not_trip_semantic_stall():
-    from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
-
-    policy = LoopControlPolicy()
-    for page in range(20):
-        policy.observe_tool_result(
-            _resolved_read_call(
-                "read_team_activity",
-                {
-                    "query": "Promotion readiness evidence",
-                    "time_window": "week",
-                    "cursor": f"opaque-page-{page}",
-                },
-                {
-                    "items": [{"event_id": page}],
-                    "next_cursor": f"opaque-page-{page + 1}",
-                },
-            )
-        )
-
-    assert policy.termination is None
-
-
-def test_changing_poll_results_suppress_exact_and_semantic_loop_triggers():
-    from brain.systems.runs.direct_loop.loop_control import (
-        LoopControlPolicy,
-        exact_tool_call_fingerprint,
-        semantic_tool_call_fingerprint,
-    )
-
-    policy = LoopControlPolicy()
-    messages = []
-    exact_calls = []
-    semantic_calls = []
-    tool_input = {
-        "action": "pull_request_checks",
-        "repo": "Illospace/illospace",
-        "sha": "abc123",
-    }
-
-    for poll in range(20):
-        exact_calls.append(exact_tool_call_fingerprint("read_github_source", tool_input))
-        semantic_calls.append(
-            semantic_tool_call_fingerprint("read_github_source", tool_input)
-        )
-        assert policy.detect_stuck_loop(
-            exact_calls,
-            "session-changing-poll",
-            messages,
-            semantic_calls=semantic_calls,
-        ) is None
-        policy.observe_tool_result(
-            _resolved_read_call(
-                "read_github_source",
-                tool_input,
-                {"status": "pending", "completed_checks": poll},
-            )
-        )
-
-    assert policy.termination is None
-    assert messages == []
-
-
-def test_unchanged_poll_result_trips_on_fourth_call():
-    from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
-
-    policy = LoopControlPolicy()
-    tool_input = {
-        "action": "pull_request_checks",
-        "repo": "Illospace/illospace",
-        "sha": "abc123",
-    }
-
-    for poll in range(4):
-        policy.observe_tool_result(
-            _resolved_read_call(
-                "read_github_source",
-                tool_input,
-                {"status": "pending"},
-                block_id=f"poll-{poll}",
-            )
-        )
-        if poll < 3:
-            assert policy.termination is None
-
-    assert policy.termination is not None
-    assert "unchanged result" in policy.termination.message
-
-
-def test_structurally_distinct_read_targets_do_not_trip_semantic_stall():
-    from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
-
-    policy = LoopControlPolicy()
-    for index in range(20):
-        policy.observe_tool_result(
-            _resolved_read_call(
-                "read_team_activity",
-                {
-                    "idea_id": f"thread-{index}",
-                    "query": f"Inspect target {index}",
-                    "search": f"ticket {index}",
-                },
-                {"items": []},
-            )
-        )
-
-    assert policy.termination is None
-
-
-def test_semantic_heuristics_do_not_apply_to_write_capable_tools():
-    from brain.systems.runs.direct_loop.loop_control import LoopControlPolicy
-
-    policy = LoopControlPolicy()
-    for index in range(20):
-        policy.observe_tool_result(
-            _resolved_read_call(
-                "manage_cycle",
-                {
-                    "action": "create",
-                    "name": "Review reminder",
-                    "prompt": f"Review wording {index}",
-                },
-                {"ok": True},
-            )
-        )
-
-    assert policy.termination is None
 
 
 def test_final_reply_helpers_parse_json_and_cache_review():
