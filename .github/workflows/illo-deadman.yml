@@ -46,7 +46,10 @@ jobs:
       - name: Evaluate heartbeat and notify
         # The Slack incoming webhook owns its own non-Illo name/icon. The watcher
         # intentionally sends no username/icon override and never uses Illo's token.
-        run: python3 -m brain.jobs.illo_deadman
+        # Slack alarm and recovery delivery is at-least-once: state is persisted
+        # after a successful post so failures cannot silence an incident.
+        # Reposts carry the same outage ID and are recognizable as duplicates.
+        run: python3 -m ops.external_deadman.watcher
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SLACK_DEADMAN_WEBHOOK_URL: ${{ secrets.SLACK_DEADMAN_WEBHOOK_URL }}

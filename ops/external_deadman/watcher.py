@@ -1,4 +1,11 @@
-"""External Illo heartbeat watcher and one-shot alarm state machine."""
+"""Dependency-free external watcher with at-least-once Slack delivery.
+
+Alarm and recovery state is persisted only after Slack accepts the notice. This
+biases failures toward another delivery instead of suppressing the incident:
+if Slack succeeds but the state write fails, the next watcher run reposts the
+notice. Every alarm and its recovery carry the same stable outage ID so an
+operator can recognize those deliveries as belonging to one outage.
+"""
 from __future__ import annotations
 
 import base64
@@ -44,6 +51,7 @@ class Heartbeat:
 class DeadmanState:
     alarmed: bool = False
     missing_since: datetime | None = None
+    outage_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +124,10 @@ def parse_state(payload: dict[str, Any] | None) -> DeadmanState:
     if not isinstance(alarmed, bool):
         raise ValueError("alarmed must be a boolean")
     missing_since = payload.get("missing_since")
+    raw_outage_id = payload.get("outage_id")
+    if raw_outage_id is not None and not isinstance(raw_outage_id, str):
+        raise ValueError("outage_id must be a string or null")
+    outage_id = str(raw_outage_id or "").strip() or None
     return DeadmanState(
         alarmed=alarmed,
         missing_since=(
@@ -123,6 +135,7 @@ def parse_state(payload: dict[str, Any] | None) -> DeadmanState:
             if missing_since
             else None
         ),
+        outage_id=outage_id,
     )
 
 
@@ -130,6 +143,7 @@ def serialize_state(state: DeadmanState) -> dict[str, Any]:
     return {
         "alarmed": state.alarmed,
         "missing_since": _utc_z(state.missing_since) if state.missing_since else None,
+        "outage_id": state.outage_id,
     }
 
 
@@ -139,6 +153,15 @@ def _activity(heartbeat: Heartbeat | None) -> str:
     return f"run {heartbeat.last_run_id} via {heartbeat.last_surface}"
 
 
+def _outage_id(heartbeat: Heartbeat | None, state: DeadmanState) -> str:
+    source = heartbeat.ts if heartbeat is not None else state.missing_since
+    if source is None:
+        return "missing-heartbeat-unknown"
+    prefix = "heartbeat" if heartbeat is not None else "missing-heartbeat"
+    timestamp = _utc(source).strftime("%Y%m%dT%H%M%SZ")
+    return f"{prefix}-{timestamp}"
+
+
 def evaluate_deadman(
     heartbeat: Heartbeat | None,
     state: DeadmanState,
@@ -146,7 +169,7 @@ def evaluate_deadman(
     now: datetime,
     stale_after: timedelta = STALE_AFTER,
 ) -> DeadmanDecision:
-    """Apply fresh/stale/one-shot/recovery transitions without network access."""
+    """Apply fresh/stale/alarm/recovery transitions without network access."""
     clock = _utc(now)
     if stale_after.total_seconds() <= 0:
         raise ValueError("stale_after must be positive")
@@ -162,18 +185,22 @@ def evaluate_deadman(
         last_seen = _utc_z(heartbeat.ts)
 
     if stale and not effective_state.alarmed:
-        next_state = replace(effective_state, alarmed=True)
+        outage_id = _outage_id(heartbeat, effective_state)
+        next_state = replace(effective_state, alarmed=True, outage_id=outage_id)
         message = (
             f":rotating_light: Illo external deadman: no fresh heartbeat; "
-            f"last seen {last_seen}. Last known activity: {_activity(heartbeat)}."
+            f"last seen {last_seen}. Last known activity: {_activity(heartbeat)}. "
+            f"Outage ID: {outage_id}."
         )
         return DeadmanDecision("alarm", message, next_state)
 
     if heartbeat is not None and not stale and effective_state.alarmed:
-        next_state = replace(effective_state, alarmed=False)
+        outage_id = effective_state.outage_id or "legacy-unidentified-outage"
+        next_state = replace(effective_state, alarmed=False, outage_id=None)
         message = (
             f":white_check_mark: Illo external deadman recovery: heartbeat resumed at "
-            f"{_utc_z(heartbeat.ts)}. Last known activity: {_activity(heartbeat)}."
+            f"{_utc_z(heartbeat.ts)}. Last known activity: {_activity(heartbeat)}. "
+            f"Recovered outage ID: {outage_id}."
         )
         return DeadmanDecision("recovery", message, next_state)
 
@@ -405,7 +432,7 @@ def run() -> int:
     slack_webhook = os.getenv("SLACK_DEADMAN_WEBHOOK_URL", "").strip()
     self_monitor_url = os.getenv("ILLO_DEADMAN_HEALTHCHECK_URL", "").strip() or None
     if not dry_run and not github_token:
-        raise WatcherError("GITHUB_TOKEN is required to persist one-shot deadman state")
+        raise WatcherError("GITHUB_TOKEN is required to persist deadman delivery state")
     if not dry_run and not slack_webhook:
         raise WatcherError(
             "SLACK_DEADMAN_WEBHOOK_URL is required even while the heartbeat is fresh"
@@ -446,6 +473,9 @@ def run() -> int:
             print(f"::notice title=Deadman dry-run alarm::{decision.message}")
         return 0
 
+    # Deliberately post before persisting the transition. A Slack failure leaves
+    # the old state for a retry, and a later state-write failure can only cause a
+    # duplicate delivery with the same outage ID, never a silently lost notice.
     if decision.message is not None:
         _post_slack(slack_webhook, decision.message)
     if decision.state != state:

@@ -5,6 +5,7 @@ import asyncio
 import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 import json
 import logging
 from typing import Any
@@ -48,6 +49,34 @@ class HeartbeatActor:
     org_id: str
 
 
+@dataclass(frozen=True)
+class HeartbeatPayload:
+    """The complete public heartbeat document accepted by the write boundary."""
+
+    ts: str
+    last_run_id: int | None
+    last_surface: str
+
+    def as_public_dict(self) -> dict[str, str | int | None]:
+        return {
+            "ts": self.ts,
+            "last_run_id": self.last_run_id,
+            "last_surface": self.last_surface,
+        }
+
+
+class HeartbeatPublishOutcome(StrEnum):
+    PUBLISHED = "published"
+    CONFLICT_SKIPPED = "conflict_skipped"
+
+
+@dataclass(frozen=True)
+class HeartbeatPublishResult:
+    outcome: HeartbeatPublishOutcome
+    attempts: int
+    conflict_status: int | None = None
+
+
 class HeartbeatGitHubError(RuntimeError):
     """A safe GitHub transport error that never includes response bodies."""
 
@@ -85,15 +114,15 @@ def build_heartbeat_payload(
     latest_run: AgentRunRow | Any | None,
     *,
     now: datetime | None = None,
-) -> dict[str, str | int | None]:
+) -> HeartbeatPayload:
     """Build the complete public payload; no other fields may be emitted."""
     clock = now or datetime.now(timezone.utc)
     run_id = getattr(latest_run, "id", None)
-    return {
-        "ts": _utc_z(clock),
-        "last_run_id": int(run_id) if run_id is not None else None,
-        "last_surface": _coarse_surface(latest_run),
-    }
+    return HeartbeatPayload(
+        ts=_utc_z(clock),
+        last_run_id=int(run_id) if run_id is not None else None,
+        last_surface=_coarse_surface(latest_run),
+    )
 
 
 async def _heartbeat_actor() -> HeartbeatActor | None:
@@ -254,8 +283,16 @@ async def _create_orphan_branch(
     )
 
 
-async def publish_heartbeat(payload: dict[str, str | int | None], *, token: str) -> None:
-    content = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
+async def publish_heartbeat(
+    payload: HeartbeatPayload,
+    *,
+    token: str,
+) -> HeartbeatPublishResult:
+    if not isinstance(payload, HeartbeatPayload):
+        raise TypeError("payload must be a HeartbeatPayload")
+    content = (
+        json.dumps(payload.as_public_dict(), sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
     encoded = base64.b64encode(content).decode("ascii")
     file_path = quote(HEARTBEAT_PATH, safe="/")
     ref_path = quote(f"heads/{HEARTBEAT_BRANCH}", safe="/")
@@ -273,10 +310,19 @@ async def publish_heartbeat(payload: dict[str, str | int | None], *, token: str)
             if not ref:
                 try:
                     await _create_orphan_branch(client, token=token, content=content)
-                    return
+                    return HeartbeatPublishResult(
+                        HeartbeatPublishOutcome.PUBLISHED,
+                        attempts=attempt + 1,
+                    )
                 except HeartbeatGitHubError as exc:
-                    if exc.status_code == 422 and attempt < 2:
-                        continue
+                    if exc.status_code == 422:
+                        if attempt < 2:
+                            continue
+                        return HeartbeatPublishResult(
+                            HeartbeatPublishOutcome.CONFLICT_SKIPPED,
+                            attempts=attempt + 1,
+                            conflict_status=exc.status_code,
+                        )
                     raise
 
             _, existing = await _request(
@@ -304,12 +350,21 @@ async def publish_heartbeat(payload: dict[str, str | int | None], *, token: str)
                     operation="updating the heartbeat file",
                     json_payload=body,
                 )
-                return
+                return HeartbeatPublishResult(
+                    HeartbeatPublishOutcome.PUBLISHED,
+                    attempts=attempt + 1,
+                )
             except HeartbeatGitHubError as exc:
-                if exc.status_code in {409, 422} and attempt < 2:
-                    continue
+                if exc.status_code in {409, 422}:
+                    if attempt < 2:
+                        continue
+                    return HeartbeatPublishResult(
+                        HeartbeatPublishOutcome.CONFLICT_SKIPPED,
+                        attempts=attempt + 1,
+                        conflict_status=exc.status_code,
+                    )
                 raise
-    raise HeartbeatGitHubError(409, "updating the heartbeat after retries")
+    raise RuntimeError("Heartbeat publish retry loop ended unexpectedly")
 
 
 async def run_heartbeat(*, now: datetime | None = None) -> dict[str, Any]:
@@ -331,12 +386,21 @@ async def run_heartbeat(*, now: datetime | None = None) -> dict[str, Any]:
         }
 
     payload = build_heartbeat_payload(await _latest_run(), now=now)
-    await publish_heartbeat(payload, token=token)
+    publish_result = await publish_heartbeat(payload, token=token)
+    if publish_result.outcome is HeartbeatPublishOutcome.CONFLICT_SKIPPED:
+        return {
+            "job": "illo_external_heartbeat",
+            "ok": True,
+            "outcome": publish_result.outcome.value,
+            "reason": "GitHub compare-and-swap conflicts exhausted",
+            "attempts": publish_result.attempts,
+            "conflict_status": publish_result.conflict_status,
+        }
     return {
         "job": "illo_external_heartbeat",
         "ok": True,
-        "outcome": "published",
-        "payload": payload,
+        "outcome": publish_result.outcome.value,
+        "payload": payload.as_public_dict(),
     }
 
 

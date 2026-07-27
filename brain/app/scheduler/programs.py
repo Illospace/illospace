@@ -580,19 +580,6 @@ def _uwear_staging_promotion_pr_steps(
     ]
 
 
-def _illo_external_heartbeat_steps(
-    job: SchedulerJob,
-    run: SchedulerRun,
-) -> list[StepSpec]:
-    return [
-        StepSpec(
-            "illo_external_heartbeat",
-            ILLO_EXTERNAL_HEARTBEAT_COMMAND,
-            "Publish Illo's external heartbeat",
-        ),
-    ]
-
-
 def _fallback_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
     payload = job.default_payload or {}
     command = payload.get("command")
@@ -605,8 +592,6 @@ def _fallback_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
 
 def get_step_specs(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
     key = _job_identity(job)
-    if "illo_external_heartbeat" in key:
-        return _illo_external_heartbeat_steps(job, run)
     if "uwear_staging_promotion_pr" in key:
         return _uwear_staging_promotion_pr_steps(job, run)
     if "uwear_aws_health_scan" in key:

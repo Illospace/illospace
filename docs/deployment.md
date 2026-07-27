@@ -107,22 +107,28 @@ contract.
 Runtime liveness must be observed outside Illo's host. The scheduler publishes
 a heartbeat every five minutes to the public orphan branch `ops/heartbeat` in
 `Illospace/illospace`; `.github/workflows/illo-deadman.yml` reads it without
-using the host, its database, or the tailnet. The public heartbeat is deliberately
-limited to this shape:
+using the host, its database, or the tailnet. The dependency-free watcher lives
+at `ops/external_deadman/watcher.py`, outside `brain/jobs/`, because it runs on
+GitHub rather than on Illo. The public heartbeat is deliberately limited to
+this shape:
 
 ```json
 {"ts":"2026-07-27T12:00:00Z","last_run_id":2718,"last_surface":"slack"}
 ```
 
 No credential, customer identifier, thread content, prompt, response, or error
-body belongs in that branch. The branch also carries the watcher's one-shot
-alarm state.
+body belongs in that branch. The branch also carries the watcher's alarm
+delivery state.
 
 The emitter reuses Illo's org-owned GitHub App project binding for
 `illospace/illospace` and mints a repository-scoped installation token with
 `contents:write`. The installed App must have Contents read/write approval.
 There is no separate heartbeat PAT. If the binding or token is unavailable, the
-scheduler job records a clean skip instead of entering a crash loop.
+scheduler job records a clean skip instead of entering a crash loop. If three
+compare-and-swap publish attempts conflict, it records a successful
+`conflict_skipped` outcome with the attempt count and final conflict status; the
+next five-minute heartbeat supersedes that missed write, while a sustained
+failure is escalated by the heartbeat becoming stale.
 
 In the `Illospace/illospace` repository settings, allow Actions workflows read
 and write access, then create these two Actions secrets:
@@ -144,7 +150,14 @@ within about 15 minutes. GitHub disables scheduled workflows after 60 days
 without repository activity; the independent success-ping monitor is what makes
 that silent-stop mode observable.
 
+Slack alarm and recovery notices use at-least-once delivery. The watcher posts
+first, then persists the state transition. If Slack accepts a notice but the
+GitHub state write fails, the next run posts it again; persisting first would
+risk suppressing the only notice when Slack fails. Alarm and recovery messages
+carry the same stable outage ID so operators can recognize a repost as another
+delivery for the existing outage rather than a new outage.
+
 For a non-destructive setup check, run the **Illo External Deadman** workflow
 manually with `force_stale=true` and leave `dry_run=true`. The run must report an
 `alarm` action and a dry-run notice without posting to Slack or changing the
-stored one-shot state.
+stored delivery state.
