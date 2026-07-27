@@ -754,14 +754,13 @@ class TestAgentLoop:
     @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
-    def test_identical_tool_failures_open_circuit_after_three_attempts(
+    def test_repeated_tool_failures_disable_only_that_tool_and_run_continues(
         self,
         mock_save,
         mock_load,
         mock_client,
     ):
         from brain.systems.runs.direct_agent import run_agent
-        from brain.systems.runs.direct_loop.loop_control import LoopTerminationReason
 
         client = MagicMock()
         client.messages.create.side_effect = [
@@ -769,32 +768,63 @@ class TestAgentLoop:
                 text=None,
                 stop_reason="tool_use",
                 tool_use={"name": "always_fails", "input": {"value": "same"}},
-            )
-            for _ in range(10)
+            ),
+            self._make_response(
+                text=None,
+                stop_reason="tool_use",
+                tool_use={"name": "always_fails", "input": {"value": "same"}},
+            ),
+            self._make_response(
+                text=None,
+                stop_reason="tool_use",
+                tool_use={"name": "healthy_tool", "input": {}},
+            ),
+            self._make_response("Completed the remaining work in degraded mode."),
         ]
         mock_client.return_value = _mock_llm_client(client)
-        handler = MagicMock(side_effect=RuntimeError("deterministic failure"))
+        failing_handler = MagicMock(
+            side_effect=RuntimeError("deterministic failure")
+        )
+        healthy_handler = MagicMock(return_value={"ok": True})
 
         result = run_agent(
             message="Use the deterministic tool",
-            tools=[{
-                "name": "always_fails",
-                "description": "Always fails for this regression test.",
-                "input_schema": {"type": "object", "properties": {}},
-            }],
-            tool_handlers={"always_fails": handler},
+            tools=[
+                {
+                    "name": "always_fails",
+                    "description": "Always fails for this regression test.",
+                    "input_schema": {"type": "object", "properties": {}},
+                },
+                {
+                    "name": "healthy_tool",
+                    "description": "Completes work that does not need the failed tool.",
+                    "input_schema": {"type": "object", "properties": {}},
+                },
+            ],
+            tool_handlers={
+                "always_fails": failing_handler,
+                "healthy_tool": healthy_handler,
+            },
             persist_session=False,
             max_turns=20,
         )
 
         assert result.success is True
-        assert handler.call_count == 3
-        assert client.messages.create.call_count == 3
-        assert "always_fails" in result.output
-        assert "RuntimeError" in result.output
-        assert "3 consecutive failures" in result.output
-        assert result.termination is not None
-        assert result.termination.reason is LoopTerminationReason.TOOL_FAILURE_CIRCUIT
+        assert result.output == "Completed the remaining work in degraded mode."
+        assert failing_handler.call_count == 2
+        assert healthy_handler.call_count == 1
+        assert client.messages.create.call_count == 4
+        assert result.termination is None
+
+        post_trip_request = client.messages.create.call_args_list[2].kwargs
+        post_trip_tool_names = {
+            tool["name"] for tool in post_trip_request.get("tools", [])
+        }
+        assert "always_fails" not in post_trip_tool_names
+        assert "healthy_tool" in post_trip_tool_names
+        model_context = json.dumps(post_trip_request["messages"])
+        assert "unavailable for the rest of this run" in model_context
+        assert "proceed degraded and record the gap" in model_context
 
     async def test_repeated_brain_encode_is_rejected(self):
         from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState

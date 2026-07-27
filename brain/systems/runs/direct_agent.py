@@ -64,6 +64,7 @@ from brain.systems.runs.direct_loop.gates import (
 from brain.systems.runs.direct_loop.loop_control import (
     LoopControlPolicy,
     LoopTermination,
+    LoopTerminationReason,
     _detect_stuck_loop,
     _inject_nudges,
     resolve_loop_output,
@@ -251,8 +252,11 @@ def _disabled_tool_names(metadata: dict) -> set[str]:
     return disabled_tool_names_from_metadata(metadata)
 
 
-def _apply_tool_policy(tools: list[dict] | None, tool_handlers: dict | None, metadata: dict) -> tuple[list[dict] | None, dict | None]:
-    disabled = _disabled_tool_names(metadata)
+def _filter_tool_surface(
+    tools: list[dict] | None,
+    tool_handlers: dict | None,
+    disabled: set[str] | frozenset[str],
+) -> tuple[list[dict] | None, dict | None]:
     if not disabled:
         return tools, tool_handlers
     filtered_tools = [
@@ -261,11 +265,27 @@ def _apply_tool_policy(tools: list[dict] | None, tool_handlers: dict | None, met
         if str(tool.get("name") or "").strip() not in disabled
     ]
     filtered_handlers = (
-        {name: handler for name, handler in (tool_handlers or {}).items() if name not in disabled}
+        {
+            name: handler
+            for name, handler in (tool_handlers or {}).items()
+            if name not in disabled
+        }
         if tool_handlers is not None
         else None
     )
     return filtered_tools, filtered_handlers
+
+
+def _apply_tool_policy(
+    tools: list[dict] | None,
+    tool_handlers: dict | None,
+    metadata: dict,
+) -> tuple[list[dict] | None, dict | None]:
+    return _filter_tool_surface(
+        tools,
+        tool_handlers,
+        _disabled_tool_names(metadata),
+    )
 
 
 def _initial_user_content(message: str, metadata: dict) -> str | list[dict]:
@@ -1927,6 +1947,35 @@ async def run_agent_async(
                     {"role": "user", "content": execution.tool_results},
                     raw_archive_messages,
                 )
+
+                if (
+                    termination is not None
+                    and termination.reason is LoopTerminationReason.TOOL_DISABLED
+                ):
+                    disabled_tool = termination.tool_name
+                    disabled_names = (
+                        frozenset({disabled_tool})
+                        if disabled_tool
+                        else frozenset()
+                    )
+                    tools, tool_handlers = _filter_tool_surface(
+                        tools,
+                        tool_handlers,
+                        disabled_names,
+                    )
+                    _append_message_with_archive(
+                        state.messages,
+                        {"role": "user", "content": termination.message},
+                        raw_archive_messages,
+                    )
+                    logger.warning(
+                        "Agent %s: disabled tool %s for the remainder of the run "
+                        "(error_class=%s)",
+                        session_id,
+                        disabled_tool,
+                        termination.error_class,
+                    )
+                    termination = None
 
                 if termination is not None:
                     termination_message = termination.transcript_message()

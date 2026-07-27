@@ -10,6 +10,7 @@ from brain.systems.runs.direct_loop.gates import GateState, check_gate_violation
 from brain.systems.runs.direct_loop.loop_control import (
     LoopControlPolicy,
     LoopTerminationReason,
+    ToolFailureTrigger,
 )
 from brain.systems.runs.tool_outcomes import (
     DEFAULT_TOOL_FAILURE_CATEGORY,
@@ -246,7 +247,111 @@ async def test_batch_helpers_return_resolved_calls_without_observing_policy():
     assert all(isinstance(result, ResolvedToolCall) for result in async_results)
 
 
-async def test_failure_policy_stops_parallel_batch_before_fourth_attempt():
+def _observed_result(*, failed: bool) -> ResolvedToolCall:
+    return ResolvedToolCall(
+        block_id="replay",
+        tool_name="check_fix_deploy_state",
+        tool_input={"repo": "Illospace/illospace"},
+        result_text="deploy-state lookup failed" if failed else '{"ok": true}',
+        outcome=(
+            ToolOutcome.failed(
+                message="deploy-state lookup failed",
+                category="DeployStateError",
+            )
+            if failed
+            else ToolOutcome()
+        ),
+    )
+
+
+def test_failure_policy_replay_trips_on_fourth_call_of_interleaved_trace():
+    policy = LoopControlPolicy(
+        failure_threshold=3,
+        failure_window_calls=10,
+        zero_success_failure_threshold=2,
+    )
+    trace = [
+        outcome == "F"
+        for outcome in ("FSFF" * 6) + "F"
+    ]
+
+    assert trace.count(True) == 19
+    assert trace.count(False) == 6
+
+    trip_call_index = None
+    trip = None
+    for call_index, failed in enumerate(trace, start=1):
+        edge = policy.observe_tool_result(_observed_result(failed=failed))
+        if edge is not None:
+            trip_call_index = call_index
+            trip = edge
+            break
+
+    assert trip_call_index == 4
+    assert trip is not None
+    assert trip.reason is LoopTerminationReason.TOOL_DISABLED
+    assert policy.termination is None
+    disablement = policy.disabled_tools["check_fix_deploy_state"]
+    assert disablement.triggers == (ToolFailureTrigger.ROLLING_WINDOW,)
+    assert disablement.rolling_failures == 3
+    assert disablement.total_successes == 1
+
+
+def test_failure_policy_disables_after_two_failures_with_zero_successes():
+    policy = LoopControlPolicy(
+        failure_threshold=3,
+        failure_window_calls=10,
+        zero_success_failure_threshold=2,
+    )
+
+    first = policy.observe_tool_result(_observed_result(failed=True))
+    second = policy.observe_tool_result(_observed_result(failed=True))
+
+    assert first is None
+    assert second is not None
+    assert second.reason is LoopTerminationReason.TOOL_DISABLED
+    assert policy.termination is None
+    disablement = policy.disabled_tools["check_fix_deploy_state"]
+    assert disablement.triggers == (ToolFailureTrigger.ZERO_SUCCESS,)
+    assert disablement.total_failures == 2
+    assert disablement.total_successes == 0
+    assert policy.observe_tool_result(_observed_result(failed=True)) is None
+    assert list(policy.disabled_tools) == ["check_fix_deploy_state"]
+
+    rearmed_policy = LoopControlPolicy(
+        failure_threshold=3,
+        failure_window_calls=10,
+        zero_success_failure_threshold=2,
+    )
+    assert rearmed_policy.disabled_tools == {}
+    assert rearmed_policy.observe_tool_result(_observed_result(failed=True)) is None
+
+
+def test_failure_policy_does_not_disable_after_one_failure_then_success():
+    policy = LoopControlPolicy(
+        failure_threshold=3,
+        failure_window_calls=10,
+        zero_success_failure_threshold=2,
+    )
+
+    assert policy.observe_tool_result(_observed_result(failed=True)) is None
+    assert policy.observe_tool_result(_observed_result(failed=False)) is None
+    assert policy.disabled_tools == {}
+
+
+def test_failure_policy_reads_thresholds_from_environment(monkeypatch):
+    monkeypatch.setenv("AGENT_TOOL_FAILURE_THRESHOLD", "5")
+    monkeypatch.setenv("AGENT_TOOL_FAILURE_WINDOW_CALLS", "12")
+    monkeypatch.setenv("AGENT_TOOL_ZERO_SUCCESS_FAILURE_THRESHOLD", "4")
+
+    policy = LoopControlPolicy()
+
+    assert policy.failure_threshold == 5
+    assert policy.failure_window_calls == 12
+    assert policy.zero_success_failure_threshold == 4
+
+
+async def test_failure_policy_stops_parallel_batch_before_third_attempt():
     attempts = []
 
     async def handler(value):
@@ -264,17 +369,17 @@ async def test_failure_policy_stops_parallel_batch_before_fourth_attempt():
         max_parallel_tool_calls=4,
     )
 
-    assert len(attempts) == 3
+    assert len(attempts) == 2
     assert len(execution.tool_results) == 4
     assert all(result["is_error"] is True for result in execution.tool_results)
     assert execution.termination is not None
-    assert execution.termination.reason is LoopTerminationReason.TOOL_FAILURE_CIRCUIT
+    assert execution.termination.reason is LoopTerminationReason.TOOL_DISABLED
     assert execution.termination.tool_name == "read_file"
     assert execution.termination.error_class == "RuntimeError"
-    assert execution.termination.consecutive_failures == 3
+    assert execution.termination.consecutive_failures == 2
 
 
-def test_failure_policy_stops_typed_result_before_fourth_attempt():
+def test_failure_policy_stops_typed_result_before_third_attempt():
     attempts = []
     handler_result = ToolHandlerResult(
         value=json.dumps({"error": "invalid tool input"}),
@@ -296,11 +401,11 @@ def test_failure_policy_stops_typed_result_before_fourth_attempt():
         {"manage_idea": handler},
     )
 
-    assert len(attempts) == 3
+    assert len(attempts) == 2
     assert execution.termination is not None
-    assert execution.termination.reason is LoopTerminationReason.TOOL_FAILURE_CIRCUIT
+    assert execution.termination.reason is LoopTerminationReason.TOOL_DISABLED
     assert execution.termination.error_class == "ToolValidationError"
-    assert execution.termination.consecutive_failures == 3
+    assert execution.termination.consecutive_failures == 2
 
 
 def test_classifier_ignores_legacy_payload_category():
