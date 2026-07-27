@@ -87,19 +87,14 @@ class ToolSideEffectClass(StrEnum):
     WORKSPACE_APP_MANAGEMENT = "workspace_app_management"
 
 
-def coerce_tool_side_effect_class(value: ToolSideEffectClass | str | None) -> ToolSideEffectClass:
-    """Normalize event metadata, defaulting missing/invalid values to write."""
-    if isinstance(value, ToolSideEffectClass):
-        return value
-    try:
-        return ToolSideEffectClass(str(value))
-    except (TypeError, ValueError):
-        return ToolSideEffectClass.WRITE
-
-
-def is_write_side_effect_class(value: ToolSideEffectClass | str | None) -> bool:
-    """Return whether a side-effect class may change state."""
-    return coerce_tool_side_effect_class(value) not in {
+def is_write_side_effect_class(value: ToolSideEffectClass | str) -> bool:
+    """Return whether an exact registration side-effect class may change state."""
+    side_effect_class = (
+        value
+        if isinstance(value, ToolSideEffectClass)
+        else ToolSideEffectClass(str(value))
+    )
+    return side_effect_class not in {
         ToolSideEffectClass.READ_ONLY,
         ToolSideEffectClass.READ_ONLY_EXTERNAL,
     }
@@ -250,9 +245,6 @@ class ToolRegistration:
     )
     permission: ToolPermission | str = ToolPermission.READ
     risk_class: ToolRiskClass | str = ToolRiskClass.LOW
-    # Missing classification must never make an unclassified tool look like a
-    # read. Registry entries should declare their precise class; this generic
-    # write class is the conservative boundary fallback.
     side_effect_class: ToolSideEffectClass | str = ToolSideEffectClass.WRITE
     reversibility: ToolReversibility | str = ToolReversibility.NONE
     output_budget_chars: int = 10_000

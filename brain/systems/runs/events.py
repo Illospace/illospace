@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from datetime import datetime, timezone
 from typing import Any
 
 from brain.systems.runs.domain import AgentRunEvent, EventVisibility
 from brain.systems.runs.tool_catalog.metadata import (
     ToolSideEffectClass,
-    coerce_tool_side_effect_class,
     is_write_side_effect_class,
 )
-from brain.systems.runs.tool_catalog.registry import side_effect_class_for_tool
+from brain.systems.runs.tool_catalog.registry import get_tool_registration
 
 
 SECRET_TOOL_NAMES = {"brain_vault", "vault", "secrets"}
@@ -65,6 +62,29 @@ def redact_tool_call_result(tool_name: str, result: Any) -> str:
     return str(result or "")
 
 
+def _event_side_effect(
+    tool_name: str,
+    side_effect: ToolSideEffectClass | str | None,
+) -> tuple[str, bool]:
+    if side_effect is None:
+        registration = get_tool_registration(tool_name)
+        if registration is None:
+            return "unknown", True
+        side_effect_class = registration.side_effect_class
+    elif side_effect == "unknown":
+        return "unknown", True
+    else:
+        side_effect_class = (
+            side_effect
+            if isinstance(side_effect, ToolSideEffectClass)
+            else ToolSideEffectClass(str(side_effect))
+        )
+    return (
+        side_effect_class.value,
+        is_write_side_effect_class(side_effect_class),
+    )
+
+
 def tool_call_completed_payload(
     idea_id: str | None,
     tool_name: str,
@@ -74,19 +94,15 @@ def tool_call_completed_payload(
     source: str = "runner",
     side_effect: ToolSideEffectClass | str | None = None,
 ) -> dict[str, Any]:
-    side_effect_class = (
-        side_effect_class_for_tool(tool_name)
-        if side_effect is None
-        else coerce_tool_side_effect_class(side_effect)
-    )
+    side_effect_value, is_write = _event_side_effect(tool_name, side_effect)
     return {
         "idea_id": idea_id,
         "tool_name": tool_name,
         "args": args or {},
         "result": redact_tool_call_result(tool_name, result),
         "source": source,
-        "side_effect": side_effect_class.value,
-        "is_write": is_write_side_effect_class(side_effect_class),
+        "side_effect": side_effect_value,
+        "is_write": is_write,
     }
 
 
@@ -138,56 +154,6 @@ async def async_record_tool_activity(
     )
 
 
-def tool_call_write_timing(
-    events: Iterable[Any],
-    *,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Summarize the most recent stored write-class completed tool event."""
-    last_write_at: datetime | None = None
-    for event in events:
-        if str(getattr(event, "event_type", "") or "") not in {
-            "run.tool_completed",
-            "run.tool_failed",
-        }:
-            continue
-        payload = getattr(event, "payload", None)
-        payload = payload if isinstance(payload, dict) else {}
-        stored_is_write = payload.get("is_write")
-        is_write = (
-            stored_is_write
-            if isinstance(stored_is_write, bool)
-            else is_write_side_effect_class(payload.get("side_effect"))
-        )
-        called_at = getattr(event, "created_at", None)
-        if not is_write or not isinstance(called_at, datetime):
-            continue
-        if called_at.tzinfo is None:
-            called_at = called_at.replace(tzinfo=timezone.utc)
-        else:
-            called_at = called_at.astimezone(timezone.utc)
-        if last_write_at is None or called_at > last_write_at:
-            last_write_at = called_at
-
-    if last_write_at is None:
-        return {
-            "last_write_tool_call_at": None,
-            "seconds_since_last_write_tool_call": None,
-        }
-    reference = now or datetime.now(timezone.utc)
-    if reference.tzinfo is None:
-        reference = reference.replace(tzinfo=timezone.utc)
-    else:
-        reference = reference.astimezone(timezone.utc)
-    return {
-        "last_write_tool_call_at": last_write_at.isoformat(),
-        "seconds_since_last_write_tool_call": max(
-            0,
-            int((reference - last_write_at).total_seconds()),
-        ),
-    }
-
-
 __all__ = [
     "activity_event",
     "async_record_tool_activity",
@@ -197,5 +163,4 @@ __all__ = [
     "status_changed_event",
     "text_delta_event",
     "tool_call_completed_payload",
-    "tool_call_write_timing",
 ]

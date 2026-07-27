@@ -25,7 +25,6 @@ from brain.systems.runs.tool_catalog.registry import (
     action_policy_for_tool,
     get_tool_registration,
     output_budget_chars_for_tool,
-    side_effect_class_for_tool,
 )
 from brain.systems.runs.tool_outcomes import (
     DEFAULT_TOOL_FAILURE_CATEGORY,
@@ -563,6 +562,7 @@ async def async_emit_resolved_tool_call(
     if run_id and idea_id:
         from brain.systems.runs.events import async_record_tool_call
 
+        registration = get_tool_registration(resolved.tool_name)
         await async_record_tool_call(
             run_id,
             idea_id,
@@ -570,7 +570,11 @@ async def async_emit_resolved_tool_call(
             resolved.tool_input,
             callback_result_text,
             source=tool_call_source,
-            side_effect=side_effect_class_for_tool(resolved.tool_name),
+            side_effect=(
+                registration.side_effect_class
+                if registration is not None
+                else "unknown"
+            ),
         )
 
 

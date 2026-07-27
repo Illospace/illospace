@@ -33,7 +33,7 @@ from brain.systems.runs.secret_mounts import (
 )
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.tool_catalog.metadata import ActionPolicyResult, is_write_side_effect_class
-from brain.systems.runs.tool_catalog.registry import side_effect_class_for_tool
+from brain.systems.runs.tool_catalog.registry import get_tool_registration
 from brain.systems.runs.workspace_tool_runtime import (
     handler_args_with_resolved_workspace_tool_runtime,
     resolve_workspace_tool_runtime,
@@ -620,7 +620,14 @@ def artifact_type_for_tool(tool_name: str) -> ArtifactType:
 
 def classify_side_effect(tool_name: str) -> str:
     """Return the registry side-effect class for event and artifact metadata."""
-    return side_effect_class_for_tool(str(tool_name or "")).value
+    registration = get_tool_registration(str(tool_name or ""))
+    if registration is None:
+        return "unknown"
+    return registration.side_effect_class.value
+
+
+def _classified_side_effect_is_write(side_effect: str) -> bool:
+    return side_effect == "unknown" or is_write_side_effect_class(side_effect)
 
 
 def tool_activity_label(tool_name: str, args: dict[str, Any] | None = None) -> str:
@@ -642,7 +649,7 @@ def enforce_tool_scope(tool_name: str, args: dict[str, Any] | None, scope: ToolS
         raise ToolScopeViolation(f"{tool_name} target is forbidden by worker scope: {target}")
     if scope.allowed_files and not _matches_any(target, scope.allowed_files):
         side_effect = classify_side_effect(tool_name)
-        if is_write_side_effect_class(side_effect) and scope.require_approval_for_out_of_scope_mutation:
+        if _classified_side_effect_is_write(side_effect) and scope.require_approval_for_out_of_scope_mutation:
             raise ToolScopeViolation(f"{tool_name} target needs approval outside worker scope: {target}")
         raise ToolScopeViolation(f"{tool_name} target is outside worker scope: {target}")
 
@@ -660,7 +667,7 @@ def _event_payload(
         "args": args,
         "side_effect": classify_side_effect(tool_name),
     }
-    payload["is_write"] = is_write_side_effect_class(payload["side_effect"])
+    payload["is_write"] = _classified_side_effect_is_write(payload["side_effect"])
     if result is not None:
         # The stored result is a bounded PREVIEW; entity refs are extracted
         # from the FULL result first, or a big JSON result truncates into an

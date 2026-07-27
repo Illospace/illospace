@@ -736,17 +736,27 @@ async def test_hosted_mcp_run_get_returns_tool_events_and_artifacts():
             return self.rows
 
     class RunSession(_AsyncSession):
+        def __init__(self):
+            super().__init__()
+            self.scalar_statements = []
+            self.scalars_statements = []
+
         async def get(self, model, row_id):
             assert row_id == 55
             return run
 
         async def scalars(self, stmt):
             text = str(stmt)
+            self.scalars_statements.append(text)
             if "agent_run_events" in text:
                 return ScalarResult([event])
             if "agent_run_artifacts" in text:
                 return ScalarResult([artifact])
             return ScalarResult([])
+
+        async def scalar(self, stmt):
+            self.scalar_statements.append(str(stmt))
+            return event
 
     session = RunSession()
     with patch(
@@ -786,6 +796,12 @@ async def test_hosted_mcp_run_get_returns_tool_events_and_artifacts():
     }
     assert payload["artifacts"][0]["text"] == "Finished."
     assert "events" not in payload
+    assert any(
+        "LIKE" in statement and "LIMIT" in statement
+        for statement in session.scalars_statements
+    )
+    assert len(session.scalar_statements) == 1
+    assert "LIMIT" in session.scalar_statements[0]
     assert session.order == []
 
 
