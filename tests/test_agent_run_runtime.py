@@ -9,6 +9,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -4996,6 +4997,10 @@ async def test_runner_reports_interruption_run_id_and_requeue_status_to_slack(mo
         return FakeSlackClient()
 
     monkeypatch.setattr(slack_delivery, "slack_client_for_run", fake_client_for_run)
+    monkeypatch.setattr(
+        "brain.systems.runs.open_asks.record_run_deferral",
+        AsyncMock(return_value=(SimpleNamespace(notice_conditions=None), True)),
+    )
 
     class FakeSession:
         async def get(self, _model, run_id):
@@ -5315,6 +5320,10 @@ async def test_runner_replaces_failed_run_artifact_with_typed_safe_message(monke
         return FakeSlackClient()
 
     monkeypatch.setattr(slack_delivery, "slack_client_for_run", fake_client_for_run)
+    monkeypatch.setattr(
+        "brain.systems.runs.open_asks.record_run_deferral",
+        AsyncMock(return_value=(SimpleNamespace(notice_conditions=None), True)),
+    )
 
     session = FakeSession()
     result = await runner._settle_slack_origin_run_async(session, run)
@@ -5431,6 +5440,10 @@ async def test_runner_posts_typed_failure_for_headless_slack_monitor(monkeypatch
         return FakeSlackClient()
 
     monkeypatch.setattr(slack_delivery, "slack_client_for_run", fake_client_for_run)
+    monkeypatch.setattr(
+        "brain.systems.runs.open_asks.record_run_deferral",
+        AsyncMock(return_value=(SimpleNamespace(notice_conditions=None), True)),
+    )
 
     session = FakeSession()
     result = await runner._settle_slack_origin_run_async(session, run)

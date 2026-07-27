@@ -632,21 +632,38 @@ async def _handle_post_slack_reply(
     posted_chars = int(response.get("posted_chars", submitted_chars))
     answered_open_asks = 0
     execution_metadata = _execution_metadata()
+    run_id = execution_metadata.get("run_id") or getattr(
+        _agent_context,
+        "run_id",
+        None,
+    )
+    try:
+        run_id = int(run_id) if run_id not in (None, "") else None
+    except (TypeError, ValueError):
+        run_id = None
+    obligation_thread_ts = target_thread_ts
+    if obligation_thread_ts is None and target_channel == trigger_channel_id:
+        obligation_thread_ts = str(
+            trigger.get("thread_ts") or trigger.get("message_ts") or ""
+        ).strip() or None
+    if target_visibility == "public" and obligation_thread_ts:
+        from brain.systems.runs.slack_delivery import (
+            record_run_deferral_answer_delivery,
+        )
+
+        await record_run_deferral_answer_delivery(
+            origin_run_id=run_id,
+            channel_id=target_channel,
+            thread_ts=obligation_thread_ts,
+            answer_text=text,
+            slack_response=response,
+        )
     open_ask_context = execution_metadata.get("open_ask")
     if answers_open_ask and isinstance(open_ask_context, dict):
         from brain.systems.runs.slack_delivery import (
             record_origin_run_answer_delivery,
         )
 
-        run_id = execution_metadata.get("run_id") or getattr(
-            _agent_context,
-            "run_id",
-            None,
-        )
-        try:
-            run_id = int(run_id) if run_id not in (None, "") else None
-        except (TypeError, ValueError):
-            run_id = None
         answered_open_asks = await record_origin_run_answer_delivery(
             origin_run_id=run_id,
             answer_text=text,

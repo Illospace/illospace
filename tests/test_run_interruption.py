@@ -93,4 +93,5 @@ def test_interruption_presentation_is_not_a_terminal_failure():
         "I was interrupted by a system restart at 17:55 UTC (run 2330); "
         "I've re-queued it and will reply here when it finishes."
     )
+    assert interruption.interruption_notice_condition(result) == "interruption:requeued"
     assert not hasattr(failures, "interrupted_run_message")

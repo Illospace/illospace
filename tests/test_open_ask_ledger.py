@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -95,6 +96,41 @@ async def _admit_originating_ask(session) -> tuple[int, OpenAsk]:
     return int(result.run_id), row
 
 
+async def _create_slack_run(session):
+    from brain.systems.runs.domain import AgentRunRequest
+    from brain.systems.runs.store import AsyncAgentRunStore
+
+    created = await AsyncAgentRunStore(session).create_run(
+        AgentRunRequest(
+            org_id=ORG_ID,
+            user_id=USER_ID,
+            thread_id=ORIGIN_REF,
+            message=ASK_TEXT,
+            target_ref={
+                "kind": "slack_message",
+                "slack_trigger": {
+                    "team_id": "T789",
+                    "channel_id": "CALERTS",
+                    "channel_type": "channel",
+                    "message_ts": "1784741786.046759",
+                    "thread_ts": "1784741786.046759",
+                    "slack_user_id": "UREDA",
+                    "bot_user_id": "BILLO",
+                    "text": ASK_TEXT,
+                    "permalink": THREAD_URL,
+                    "response_target": {
+                        "channel_id": "CALERTS",
+                        "thread_ts": "1784741786.046759",
+                        "visibility": "public",
+                    },
+                },
+            },
+            metadata={"final_answer_target_surface": "slack"},
+        )
+    )
+    return await session.get(AgentRunRow, created.id)
+
+
 @pytest.mark.asyncio
 async def test_2026_07_22_replay_failing_run_then_other_run_files_issue(
     session,
@@ -114,6 +150,7 @@ async def test_2026_07_22_replay_failing_run_then_other_run_files_issue(
     assert ask.origin_ref == ORIGIN_REF
     assert ask.ask_text == ASK_TEXT
     assert ask.origin_run_id == origin_run_id
+    assert ask.obligation_kind == "human_ask"
     assert ask.status == "open"
 
     origin_run = await session.get(AgentRunRow, origin_run_id)
@@ -310,3 +347,106 @@ async def test_overdue_open_ask_is_mandatory_in_next_scheduled_person_recap(
     assert "Reda — unanswered for 2h 7m" in message
     assert ASK_TEXT in message
     assert THREAD_URL in message
+
+
+@pytest.mark.asyncio
+async def test_run_deferral_is_durable_deduplicated_and_closed_only_by_delivery(
+    session,
+    monkeypatch,
+):
+    from brain.systems.runs.failures import terminal_run_notice_condition
+    from brain.systems.runs.open_asks import list_open_ask_stragglers
+    from brain.systems.runs.slack_delivery import post_slack_run_message
+
+    run = await _create_slack_run(session)
+    calls = []
+
+    class FakeSlackClient:
+        async def post_message(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "ok": True,
+                "channel": kwargs["channel"],
+                "ts": f"1784743141.000{len(calls)}",
+            }
+
+        async def set_assistant_status(self, **_kwargs):
+            return {"ok": True}
+
+    monkeypatch.setattr(
+        "brain.systems.runs.slack_delivery.slack_client_for_run",
+        AsyncMock(return_value=FakeSlackClient()),
+    )
+    monkeypatch.setattr(
+        "brain.systems.slack.thread_mute.read_thread_post_mute",
+        AsyncMock(return_value=None),
+    )
+
+    for _ in range(3):
+        result = await post_slack_run_message(
+            session,
+            run=run,
+            text=(
+                f"I was interrupted by a system restart at 17:55 UTC (run {run.id}); "
+                "I've re-queued it and will reply here when it finishes."
+            ),
+            deferral_condition="interruption:requeued",
+        )
+
+    rows = list((await session.scalars(select(OpenAsk))).all())
+    assert len(rows) == 1
+    obligation = rows[0]
+    assert obligation.obligation_kind == "run_deferral"
+    assert obligation.origin_run_id == run.id
+    assert obligation.channel_id == "CALERTS"
+    assert obligation.thread_ts == "1784741786.046759"
+    assert obligation.status == "open"
+    assert result["suppressed"] is True
+    assert result["reason"] == "duplicate_run_deferral"
+    assert len(calls) == 1
+
+    run.status = "failed"
+    failure_condition = terminal_run_notice_condition("failed", "internal")
+    await post_slack_run_message(
+        session,
+        run=run,
+        text="I failed on this and it is still open — I will come back.",
+        deferral_condition=failure_condition,
+    )
+    await post_slack_run_message(
+        session,
+        run=run,
+        text="I failed on this and it is still open — I will come back.",
+        deferral_condition=failure_condition,
+    )
+
+    await session.refresh(obligation)
+    assert obligation.status == "open"
+    assert json.loads(obligation.notice_conditions) == [
+        "interruption:requeued",
+        "terminal:failed:internal",
+    ]
+    assert len(calls) == 2
+    observed_at = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    obligation.opened_at = observed_at - timedelta(hours=2, minutes=7)
+    stragglers = await list_open_ask_stragglers(
+        session,
+        org_id=ORG_ID,
+        now=observed_at,
+    )
+    assert stragglers[0]["obligation_kind"] == "run_deferral"
+    assert stragglers[0]["age"] == "2h 7m"
+
+    run.status = "completed"
+    await post_slack_run_message(
+        session,
+        run=run,
+        text="Done. The customer ticket is now answered.",
+    )
+
+    await session.refresh(obligation)
+    assert obligation.status == "answered"
+    assert obligation.answer_text == "Done. The customer ticket is now answered."
+    assert obligation.answered_by_run_id == run.id
+    assert obligation.delivered_message_ts == "1784743141.0003"
+    assert len(calls) == 3

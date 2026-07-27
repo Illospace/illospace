@@ -780,6 +780,11 @@ async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkey
         "brain.systems.runs.slack_delivery.record_origin_run_answer_delivery",
         recorder,
     )
+    deferral_recorder = AsyncMock(return_value=1)
+    monkeypatch.setattr(
+        "brain.systems.runs.slack_delivery.record_run_deferral_answer_delivery",
+        deferral_recorder,
+    )
     context = {
         "run_id": 9,
         "execution_metadata": {
@@ -807,8 +812,11 @@ async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkey
     assert answer["answered_open_asks"] == 1
     recorder.assert_awaited_once()
     assert recorder.await_args.kwargs["origin_run_id"] == 9
+    deferral_recorder.assert_awaited_once()
+    assert deferral_recorder.await_args.kwargs["thread_ts"] == "1716900000.000100"
 
     recorder.reset_mock()
+    deferral_recorder.reset_mock()
     with bind_agent_context(context):
         clarification = json.loads(
             await _handle_post_slack_reply(
@@ -818,6 +826,7 @@ async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkey
         )
     assert clarification["answered_open_asks"] == 0
     recorder.assert_not_awaited()
+    deferral_recorder.assert_awaited_once()
 
 
 @pytest.mark.asyncio

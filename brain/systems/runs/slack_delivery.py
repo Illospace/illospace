@@ -176,11 +176,51 @@ async def post_slack_run_message(
     run: Any,
     text: str,
     artifact_id: int | None = None,
+    deferral_condition: str | None = None,
 ) -> dict[str, Any] | None:
     target = slack_response_target(run)
     channel_id = target["channel_id"]
     if not channel_id:
         return None
+    obligation_thread_ts = str(
+        target["thread_ts"]
+        or target["trigger"].get("thread_ts")
+        or target["trigger"].get("message_ts")
+        or ""
+    ).strip()
+    deferral_row = None
+    if deferral_condition:
+        from brain.systems.runs.open_asks import record_run_deferral
+
+        try:
+            deferral_row, should_post = await record_run_deferral(
+                session,
+                run=run,
+                channel_id=channel_id,
+                thread_ts=obligation_thread_ts,
+                trigger=target["trigger"],
+                deferral_text=text,
+                notice_condition=deferral_condition,
+            )
+        except Exception as exc:
+            logger.info(
+                "run_deferral_recording_failed: %s",
+                exc,
+                extra={"run_id": int(run.id), "condition": deferral_condition},
+            )
+            # A promise without a durable obligation is worse than no notice.
+            return None
+        if not should_post:
+            return {
+                "surface": SLACK_SURFACE,
+                "run_id": int(run.id),
+                "artifact_id": artifact_id,
+                "channel_id": channel_id,
+                "thread_ts": target["thread_ts"],
+                "suppressed": True,
+                "reason": "duplicate_run_deferral",
+                "condition": deferral_condition,
+            }
     try:
         client = await slack_client_for_run(run)
         if target["thread_ts"]:
@@ -216,14 +256,29 @@ async def post_slack_run_message(
             thread_ts=target["thread_ts"],
         )
         await clear_slack_processing_status(client, target["trigger"])
+        if deferral_row is not None:
+            from brain.systems.runs.open_asks import (
+                delivered_message_ts,
+                mark_run_deferral_notice_delivered,
+            )
+
+            if delivered_message_ts(response):
+                mark_run_deferral_notice_delivered(
+                    deferral_row,
+                    notice_condition=str(deferral_condition),
+                )
         if (
-            coerce_run_status(
+            deferral_row is None
+            and coerce_run_status(
                 getattr(run, "status", None),
                 default=RunStatus.FAILED,
             )
             == RunStatus.COMPLETED
         ):
-            from brain.systems.runs.open_asks import mark_origin_run_answer_delivered
+            from brain.systems.runs.open_asks import (
+                mark_origin_run_answer_delivered,
+                mark_thread_run_deferrals_answered,
+            )
 
             try:
                 await mark_origin_run_answer_delivered(
@@ -232,6 +287,16 @@ async def post_slack_run_message(
                     answer_text=text,
                     slack_response=response,
                 )
+                if obligation_thread_ts:
+                    await mark_thread_run_deferrals_answered(
+                        session,
+                        org_id=str(run.org_id),
+                        channel_id=channel_id,
+                        thread_ts=obligation_thread_ts,
+                        answer_text=text,
+                        answered_by_run_id=int(run.id),
+                        slack_response=response,
+                    )
             except Exception as exc:
                 logger.info(
                     "open_ask_run_answer_recording_failed: %s",
@@ -314,6 +379,7 @@ async def post_open_ask_artifact_reply(
 
     from brain.systems.runs.open_asks import (
         mark_open_ask_answered,
+        mark_thread_run_deferrals_answered,
         open_asks_for_origin_ref,
     )
 
@@ -410,6 +476,15 @@ async def post_open_ask_artifact_reply(
             artifact_ref=artifact_ref,
             slack_response=response,
         )
+        await mark_thread_run_deferrals_answered(
+            session,
+            org_id=str(row.org_id),
+            channel_id=channel_id,
+            thread_ts=str(row.thread_ts),
+            answer_text=text,
+            answered_by_run_id=answering_run_id,
+            slack_response=response,
+        )
         result["delivered"] += 1
         result["origin_asks"].append(
             {
@@ -500,6 +575,46 @@ async def record_origin_run_answer_delivery(
         return 0
 
 
+async def record_run_deferral_answer_delivery(
+    *,
+    origin_run_id: int | None,
+    channel_id: str,
+    thread_ts: str,
+    answer_text: str,
+    slack_response: Any,
+) -> int:
+    """Close run-deferral promises after an explicit Slack reply is delivered."""
+
+    if not origin_run_id or not str(channel_id).strip() or not str(thread_ts).strip():
+        return 0
+    from brain.platform.db.models.agent_run import AgentRunRow
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.systems.runs.open_asks import mark_thread_run_deferrals_answered
+
+    try:
+        async with UnitOfWork() as uow:
+            run = await uow.session.get(AgentRunRow, int(origin_run_id))
+            if run is None or not getattr(run, "org_id", None):
+                return 0
+            rows = await mark_thread_run_deferrals_answered(
+                uow.session,
+                org_id=str(run.org_id),
+                channel_id=str(channel_id),
+                thread_ts=str(thread_ts),
+                answer_text=answer_text,
+                answered_by_run_id=int(origin_run_id),
+                slack_response=slack_response,
+            )
+            return len(rows)
+    except Exception as exc:
+        logger.info(
+            "run_deferral_explicit_answer_recording_failed: %s",
+            exc,
+            extra={"origin_run_id": origin_run_id},
+        )
+        return 0
+
+
 __all__ = [
     "OpenAskArtifact",
     "SLACK_SURFACE",
@@ -510,6 +625,7 @@ __all__ = [
     "post_open_ask_artifact_reply",
     "post_slack_run_message",
     "record_origin_run_answer_delivery",
+    "record_run_deferral_answer_delivery",
     "record_slack_thread_mute",
     "run_is_headless",
     "slack_client_for_open_ask",
