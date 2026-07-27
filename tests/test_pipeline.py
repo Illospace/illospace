@@ -1,4 +1,4 @@
-"""AgentRun graph persistence tests for Deep graph-shaped work."""
+"""AgentRun persistence tests."""
 
 from __future__ import annotations
 
@@ -36,119 +36,97 @@ async def session_factory() -> AsyncIterator[Callable[[], AsyncSession]]:
     await engine.dispose()
 
 
-async def test_deep_graph_shape_is_agent_run_children_and_artifacts(session_factory):
-    from brain.systems.runs.domain import AgentRunArtifact, AgentRunRequest, RunProfile, RunRecipe
-    from brain.systems.runs.store import AsyncAgentRunStore
+async def test_historical_deep_profile_and_scout_recipe_rows_remain_readable(session_factory):
+    from brain.systems.runs.domain import RunProfile, RunRecipe
+    from brain.systems.runs.store import AsyncAgentRunStore, to_domain
 
     session = session_factory()
-    store = AsyncAgentRunStore(session)
-    parent = await store.create_run(
-        AgentRunRequest(
-            org_id="org-1",
-            thread_id="idea-1",
-            message="Investigate, implement, and verify the cleanup.",
-            profile=RunProfile.DEEP,
-            recipe=RunRecipe.DEEP,
-        )
-    )
-
-    investigate = await store.create_child_run(
-        parent,
-        recipe=RunRecipe.WORKER,
-        profile=RunProfile.DEEP,
-        step_key="worker:1:investigate",
-        message="Gather context and evidence.",
-        metadata={
-            "worker_role": "investigate",
-            "worker_scope": {
-                "role": "investigate",
-                "objective": "Gather context and evidence.",
-                "expected_artifacts": ["file_observation", "worker_result"],
-                "risk_level": "low",
-            },
-        },
-    )
-    same_investigate = await store.create_child_run(
-        parent,
-        recipe=RunRecipe.WORKER,
-        profile=RunProfile.DEEP,
-        step_key="worker:1:investigate",
-        message="Gather context and evidence.",
-    )
-    execute = await store.create_child_run(
-        parent,
-        recipe=RunRecipe.WORKER,
-        profile=RunProfile.DEEP,
-        step_key="worker:2:execute",
-        message="Apply the scoped change.",
-        metadata={
-            "worker_role": "execute",
-            "worker_scope": {
-                "role": "execute",
-                "objective": "Apply the scoped change.",
-                "expected_artifacts": ["worker_result"],
-                "risk_level": "medium",
-            },
-        },
-    )
-
-    await store.append_artifact(
-        AgentRunArtifact(
-            run_id=parent.id,
-            root_run_id=parent.root_run_id,
-            artifact_type="deep_plan",
-            title="Deep plan",
-            payload={
-                "workers": [
-                    {"role": "investigate", "child_run_id": investigate.id},
-                    {"role": "execute", "child_run_id": execute.id},
-                ]
-            },
-        )
-    )
-    await store.append_artifact(
-        AgentRunArtifact(
-            run_id=investigate.id,
-            root_run_id=parent.root_run_id,
-            artifact_type="worker_result",
-            title="Investigate result",
-            text="Found the canonical AgentRun surface.",
-            payload={"status": "completed", "evidence": {"artifact_types": ["file_observation"]}},
-        )
-    )
+    rows = [
+        AgentRunRow(
+            thread_id="historical-deep-worker",
+            profile="deep",
+            recipe="worker",
+            status="completed",
+            input_message="Historical deep worker run.",
+        ),
+        AgentRunRow(
+            thread_id="historical-fast-scout",
+            profile="fast",
+            recipe="scout",
+            status="completed",
+            input_message="Historical scout run.",
+        ),
+    ]
+    session.add_all(rows)
     await session.commit()
+    row_ids = [row.id for row in rows]
+    await session.close()
 
-    assert same_investigate.id == investigate.id
-    children = await store.child_runs(parent.id)
-    assert [child.id for child in children] == [investigate.id, execute.id]
-    assert {child.parent_run_id for child in children} == {parent.id}
-    assert {child.root_run_id for child in children} == {parent.id}
-    assert [child.recipe for child in children] == ["worker", "worker"]
-    assert children[0].metadata_["parent_step_key"] == "worker:1:investigate"
-    assert children[0].metadata_["worker_scope"]["role"] == "investigate"
+    async with session_factory() as stored_session:
+        store = AsyncAgentRunStore(stored_session)
+        loaded = [to_domain(await store.require_run(row_id)) for row_id in row_ids]
 
-    child_created_events = (await session.scalars(
-        select(AgentRunEventRow)
-        .where(AgentRunEventRow.run_id == parent.id, AgentRunEventRow.event_type == "run.child_created")
-        .order_by(AgentRunEventRow.sequence_no.asc())
-    )).all()
-    assert [event.payload["child_run_id"] for event in child_created_events] == [investigate.id, execute.id]
+    assert [(run.profile, run.recipe) for run in loaded] == [
+        (RunProfile.DEEP, RunRecipe.WORKER),
+        (RunProfile.FAST, RunRecipe.SCOUT),
+    ]
 
-    parent_artifacts = (await session.scalars(
-        select(AgentRunArtifactRow)
-        .where(AgentRunArtifactRow.run_id == parent.id)
-        .order_by(AgentRunArtifactRow.id.asc())
-    )).all()
-    assert [artifact.artifact_type for artifact in parent_artifacts] == ["deep_plan"]
-    assert parent_artifacts[0].payload["workers"][0]["child_run_id"] == investigate.id
 
-    worker_artifacts = (await session.scalars(
-        select(AgentRunArtifactRow)
-        .where(AgentRunArtifactRow.run_id == investigate.id)
-        .order_by(AgentRunArtifactRow.id.asc())
-    )).all()
-    assert [artifact.artifact_type for artifact in worker_artifacts] == ["worker_result"]
-    assert worker_artifacts[0].text == "Found the canonical AgentRun surface."
+async def test_scout_metadata_is_admitted_as_fast_and_executes_registered_recipe(
+    session_factory,
+    monkeypatch,
+):
+    from brain.systems.runs.domain import RunProfile, RunRecipe
+    from brain.systems.runs.engine import AsyncAgentRunEngine, RunRecipeResult
+    from brain.systems.runs.recipes import default_recipes
+    from brain.systems.runs.recipes.fast import FastRecipe
+    from brain.systems.runs.status import RunStatus
+    from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
+
+    executed_recipes = []
+
+    async def execute_fast(_self, runtime):
+        executed_recipes.append(runtime.request.normalized_recipe)
+        return RunRecipeResult(output="Scout request reached fast.")
+
+    monkeypatch.setattr(FastRecipe, "execute", execute_fast)
+    session = session_factory()
+    admission = await admit_work(
+        session,
+        WorkIntakeEvent(
+            source="chat",
+            event_type="chat.room_message_mention",
+            org_id="org-1",
+            actor={"id": "user-1", "org_id": "org-1", "internal": False},
+            target={"conversation_id": "conv-1"},
+            payload={
+                "message": "Handle this stale scout request.",
+                "metadata": {
+                    "recipe": "scout",
+                    "chat_trigger": {
+                        "conversation_id": "conv-1",
+                        "message_id": 22,
+                    },
+                },
+            },
+        ),
+    )
+
+    assert admission.ok is True
+    row = await session.get(AgentRunRow, admission.run_id)
+    assert row is not None
+    assert (row.profile, row.recipe) == (
+        RunProfile.FAST.value,
+        RunRecipe.FAST.value,
+    )
+
+    completed = await AsyncAgentRunEngine(
+        session,
+        recipes=default_recipes(),
+    ).run_existing(admission.run_id)
+
+    assert completed.status is RunStatus.COMPLETED
+    assert executed_recipes == [RunRecipe.FAST]
 
 
 async def test_child_run_can_use_headless_thread_without_bypassing_store(session_factory):
@@ -187,6 +165,7 @@ async def test_child_run_can_use_headless_thread_without_bypassing_store(session
     await session.commit()
 
     assert same_child.id == child.id
+    assert child.root_run_id == parent.id
     rows = (await session.scalars(select(AgentRunRow).order_by(AgentRunRow.id.asc()))).all()
     assert [row.thread_id for row in rows] == ["idea-1", "headless-worker:1:report"]
     assert rows[1].metadata_["headless"] is True

@@ -227,17 +227,23 @@ def _routing_metadata_source(metadata: dict[str, Any]) -> str:
     return "unknown"
 
 
-def _warn_deep_coercion(metadata: dict[str, Any], *, field: str) -> None:
+def _warn_retired_recipe_coercion(
+    metadata: dict[str, Any],
+    *,
+    field: str,
+    requested_value: str,
+) -> None:
     source = _routing_metadata_source(metadata)
     logger.warning(
-        "Coercing retired deep run %s to fast (source=%s)",
+        "Coercing retired %s run %s to fast (source=%s)",
+        requested_value,
         field,
         source,
         extra={
             "event": "deep_run_coerced",
             "routing_source": source,
             "routing_field": field,
-            "requested_value": "deep",
+            "requested_value": requested_value,
             "coerced_value": "fast",
         },
     )
@@ -257,7 +263,11 @@ def profile_from_metadata(metadata: dict[str, Any] | None) -> RunProfile:
     except Exception:
         return RunProfile.FAST
     if profile is RunProfile.DEEP:
-        _warn_deep_coercion(metadata, field="profile")
+        _warn_retired_recipe_coercion(
+            metadata,
+            field="profile",
+            requested_value=profile.value,
+        )
         return RunProfile.FAST
     return profile
 
@@ -271,12 +281,20 @@ def recipe_for_profile(profile: RunProfile, metadata: dict[str, Any] | None) -> 
         except Exception:
             pass
         else:
-            if recipe is RunRecipe.DEEP:
-                _warn_deep_coercion(metadata, field="recipe")
+            if recipe in {RunRecipe.DEEP, RunRecipe.SCOUT}:
+                _warn_retired_recipe_coercion(
+                    metadata,
+                    field="recipe",
+                    requested_value=recipe.value,
+                )
                 return RunRecipe.FAST
             return recipe
     if profile is RunProfile.DEEP:
-        _warn_deep_coercion(metadata, field="profile")
+        _warn_retired_recipe_coercion(
+            metadata,
+            field="profile",
+            requested_value=profile.value,
+        )
     return RunRecipe.FAST
 
 
