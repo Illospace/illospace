@@ -103,18 +103,24 @@ def _scheduler_health_payload(
     expired_leases: int,
 ) -> dict[str, Any]:
     scoped_jobs = _job_scope(jobs, owner_mode)
-    alerts = [
-        {
-            "type": "repeated_scheduler_job_failure",
-            "job_key": job["job_key"],
-            "consecutive_failures": job["failure_guard"]["consecutive_failures"],
-            "failure_signature": job["failure_guard"]["failure_signature"],
-            "last_error": job["failure_guard"]["last_error"],
-            "alerted_at": job["failure_guard"]["alerted_at"],
-        }
-        for job in scoped_jobs
-        if job["failure_guard"]["alerted_at"] is not None
-    ]
+    alerts = []
+    for job in scoped_jobs:
+        latched_triggers = [
+            trigger
+            for trigger in job["failure_guard"]["triggers"]
+            if trigger["alerted_at"] is not None
+        ]
+        if not latched_triggers:
+            continue
+        alerts.append(
+            {
+                "type": "scheduler_job_failure_guard",
+                "job_key": job["job_key"],
+                "failure_signature": job["failure_guard"]["failure_signature"],
+                "last_error": job["failure_guard"]["last_error"],
+                "triggers": latched_triggers,
+            }
+        )
     paused_jobs = [
         {
             "job_key": job["job_key"],
@@ -180,7 +186,7 @@ def _scheduler_health_payload(
         if alerts:
             health_status = "degraded"
             health_reasons.append(
-                f"{len(alerts)} repeated scheduler job failure alert(s)"
+                f"{len(alerts)} scheduler job failure guard alert(s)"
             )
 
     job_owner_counts = Counter(job["owner_mode"] for job in jobs)
@@ -238,7 +244,7 @@ async def async_scheduler_health_snapshot(
         raise ValueError("now must be timezone-aware")
 
     owner_mode = normalize_owner_mode(owner_mode)
-    jobs = await async_list_scheduler_jobs(session)
+    jobs = await async_list_scheduler_jobs(session, now=now)
     runs = await async_list_scheduler_runs(session, limit=recent_run_limit)
     run_statuses = await _async_count_run_statuses(session, owner_mode)
     active_leases, expired_leases = await _async_count_leases(session, owner_mode, now)

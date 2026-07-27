@@ -15,9 +15,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.scheduler import OWNER_MODE_SCHEDULER, SchedulerJob, SchedulerRun
+from brain.app.scheduler.failure_guard import (
+    FailureGuardEvaluation,
+    async_read_scheduler_failure_guard,
+    scheduler_failure_guard_registry,
+    serialize_failure_guard,
+)
 from brain.app.scheduler.planner import next_run_after
-from brain.app.scheduler.runtime import normalize_owner_mode as _normalize_owner_mode
-from brain.app.scheduler.runtime import normalize_run_status
+from brain.app.scheduler.runtime import (
+    normalize_owner_mode as _normalize_owner_mode,
+    normalize_run_status,
+)
 
 DEFAULT_SCHEDULER_TIMEZONE = os.getenv("SCHEDULER_DEFAULT_TIMEZONE", "America/Toronto")
 CATALOG_HANDLER_KIND = "scheduler_builtin"
@@ -191,7 +199,10 @@ def normalize_owner_mode(owner_mode: str | None, *, default: str = OWNER_MODE_SC
     return _normalize_owner_mode(owner_mode or default)
 
 
-def _serialize_job(job: SchedulerJob) -> dict[str, Any]:
+def _serialize_job(
+    job: SchedulerJob,
+    failure_guard: FailureGuardEvaluation,
+) -> dict[str, Any]:
     return {
         "id": job.id,
         "job_key": job.job_key,
@@ -215,12 +226,7 @@ def _serialize_job(job: SchedulerJob) -> dict[str, Any]:
         "pause_reason": job.pause_reason,
         "last_started_at": job.last_started_at.isoformat() if job.last_started_at else None,
         "last_finished_at": job.last_finished_at.isoformat() if job.last_finished_at else None,
-        "failure_guard": {
-            "failure_signature": job.failure_signature,
-            "consecutive_failures": int(job.consecutive_failure_count or 0),
-            "last_error": job.last_failure_error,
-            "alerted_at": job.failure_alerted_at.isoformat() if job.failure_alerted_at else None,
-        },
+        "failure_guard": serialize_failure_guard(failure_guard),
         "created_at": job.created_at.isoformat() if getattr(job, "created_at", None) else None,
     }
 
@@ -479,11 +485,26 @@ async def async_sync_scheduler_catalog(
     return {"upserted": upserted, "retired": retired}
 
 
-async def async_list_scheduler_jobs(session: AsyncSession) -> list[dict[str, Any]]:
+async def async_list_scheduler_jobs(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    now = now or datetime.now(timezone.utc)
+    registry = scheduler_failure_guard_registry()
     result = await session.scalars(
         select(SchedulerJob).order_by(SchedulerJob.family.asc(), SchedulerJob.id.asc())
     )
-    return [_serialize_job(job) for job in result.all()]
+    jobs = []
+    for job in result.all():
+        failure_guard = await async_read_scheduler_failure_guard(
+            session,
+            job,
+            now=now,
+            registry=registry,
+        )
+        jobs.append(_serialize_job(job, failure_guard))
+    return jobs
 
 
 async def async_list_scheduler_runs(

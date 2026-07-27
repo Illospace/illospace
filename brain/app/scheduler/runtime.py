@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 import os
 from pathlib import Path
 import re
@@ -36,9 +35,6 @@ RUN_STATUS_EXECUTING = "executing"
 
 RETRY_POLICY_DEFAULT_MAX_ATTEMPTS = 2
 RETRY_POLICY_DEFAULT_BACKOFF_SECONDS = 0
-SCHEDULER_FAILURE_ALERT_THRESHOLD_DEFAULT = 3
-SCHEDULER_FAILURE_RATE_THRESHOLD_DEFAULT = 3
-SCHEDULER_FAILURE_RATE_WINDOW_HOURS_DEFAULT = 24
 
 LEASE_TTL_SECONDS = int(os.getenv("SCHEDULER_LEASE_TTL_SECONDS", "7200"))
 
@@ -49,26 +45,6 @@ _OWNER_MODES = {
     OWNER_MODE_MIRROR,
     OWNER_MODE_SCHEDULER,
 }
-
-_FAILURE_MEMORY_ADDRESS_RE = re.compile(r"\b0x[0-9a-f]+\b", re.IGNORECASE)
-_FAILURE_OBJECT_REPR_RE = re.compile(
-    r"<(?P<label>(?:(?:async_)?generator|coroutine) object [^<>\n]+?"
-    r"|[A-Za-z_][\w.]* object) at 0x[0-9a-f]+>",
-    re.IGNORECASE,
-)
-_FAILURE_TASK_ID_RE = re.compile(r"\bTask-\d+\b")
-_FAILURE_UUID_RE = re.compile(
-    r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b",
-    re.IGNORECASE,
-)
-_FAILURE_TIMESTAMP_RE = re.compile(
-    r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
-    r"(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b"
-)
-_FAILURE_RUNTIME_ID_RE = re.compile(
-    r"\b(?P<label>pid|process_id|thread_id)(?P<separator>\s*[:=]\s*)\d+\b",
-    re.IGNORECASE,
-)
 
 
 def trace_id_for_run_id(run_id: int | str | None) -> str | None:
@@ -130,209 +106,6 @@ def normalize_retry_policy(policy: dict[str, Any] | None) -> dict[str, int]:
         "max_attempts": max(1, max_attempts),
         "backoff_seconds": max(0, backoff_seconds),
     }
-
-
-def scheduler_failure_alert_threshold() -> int:
-    """Return the number of identical failures that opens one durable alert."""
-    try:
-        configured = int(
-            os.getenv(
-                "SCHEDULER_FAILURE_ALERT_THRESHOLD",
-                str(SCHEDULER_FAILURE_ALERT_THRESHOLD_DEFAULT),
-            )
-        )
-    except (TypeError, ValueError):
-        configured = SCHEDULER_FAILURE_ALERT_THRESHOLD_DEFAULT
-    return max(1, configured)
-
-
-def scheduler_failure_rate_threshold() -> int:
-    """Return the rolling failure count that opens one durable rate alert."""
-    try:
-        configured = int(
-            os.getenv(
-                "SCHEDULER_FAILURE_RATE_THRESHOLD",
-                str(SCHEDULER_FAILURE_RATE_THRESHOLD_DEFAULT),
-            )
-        )
-    except (TypeError, ValueError):
-        configured = SCHEDULER_FAILURE_RATE_THRESHOLD_DEFAULT
-    return max(1, configured)
-
-
-def scheduler_failure_rate_window_hours() -> int:
-    """Return the rolling failure-rate window in hours."""
-    try:
-        configured = int(
-            os.getenv(
-                "SCHEDULER_FAILURE_RATE_WINDOW_HOURS",
-                str(SCHEDULER_FAILURE_RATE_WINDOW_HOURS_DEFAULT),
-            )
-        )
-    except (TypeError, ValueError):
-        configured = SCHEDULER_FAILURE_RATE_WINDOW_HOURS_DEFAULT
-    return max(1, configured)
-
-
-def normalize_scheduler_failure_identity(failure_identity: str) -> str:
-    """Remove volatile runtime tokens before identifying a failure streak."""
-    normalized = str(failure_identity or "").strip()
-    normalized = _FAILURE_OBJECT_REPR_RE.sub(
-        lambda match: f"<{match.group('label')}>",
-        normalized,
-    )
-    normalized = _FAILURE_MEMORY_ADDRESS_RE.sub("0x<address>", normalized)
-    normalized = _FAILURE_TASK_ID_RE.sub("Task-<id>", normalized)
-    normalized = _FAILURE_UUID_RE.sub("<uuid>", normalized)
-    normalized = _FAILURE_TIMESTAMP_RE.sub("<timestamp>", normalized)
-    normalized = _FAILURE_RUNTIME_ID_RE.sub(
-        lambda match: (
-            f"{match.group('label')}{match.group('separator')}<id>"
-        ),
-        normalized,
-    )
-    return "\n".join(line.rstrip() for line in normalized.splitlines())
-
-
-def scheduler_failure_signature(failure_identity: str) -> str:
-    """Return a stable digest for one normalized scheduler failure class."""
-    normalized = normalize_scheduler_failure_identity(failure_identity)
-    return sha256(normalized.encode("utf-8")).hexdigest()
-
-
-def _scheduler_failure_guard_state(job: SchedulerJob) -> dict[str, Any]:
-    return {
-        "failure_signature": job.failure_signature,
-        "consecutive_failures": int(job.consecutive_failure_count or 0),
-        "last_error": job.last_failure_error,
-        "alerted_at": (
-            job.failure_alerted_at.isoformat() if job.failure_alerted_at else None
-        ),
-        "rate_alerted_at": (
-            job.rate_alerted_at.isoformat() if job.rate_alerted_at else None
-        ),
-    }
-
-
-async def _async_scheduler_failure_rate_count(
-    session: AsyncSession,
-    job_id: int,
-    *,
-    now: datetime,
-    window_hours: int,
-) -> int:
-    return int(
-        await session.scalar(
-            select(func.count())
-            .select_from(SchedulerRun)
-            .where(
-                SchedulerRun.job_id == job_id,
-                SchedulerRun.status == RUN_STATUS_SETTLED_FAILURE,
-                SchedulerRun.started_at
-                > now - timedelta(hours=window_hours),
-            )
-        )
-        or 0
-    )
-
-
-async def async_record_scheduler_job_failure(
-    session: AsyncSession,
-    job: SchedulerJob,
-    *,
-    failure_identity: str,
-    error_text: str,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Persist failure guard state and mark only newly crossed alert edges."""
-    now = _utcnow(now)
-    locked_job = await session.scalar(
-        select(SchedulerJob)
-        .where(SchedulerJob.id == job.id)
-        .with_for_update()
-    )
-    if locked_job is None:
-        raise ValueError(f"Scheduler job {job.id} not found")
-
-    signature = scheduler_failure_signature(failure_identity)
-    if locked_job.failure_signature == signature:
-        locked_job.consecutive_failure_count = int(
-            locked_job.consecutive_failure_count or 0
-        ) + 1
-    else:
-        locked_job.failure_signature = signature
-        locked_job.consecutive_failure_count = 1
-        locked_job.failure_alerted_at = None
-
-    locked_job.last_failure_error = error_text
-    alert_emitted = False
-    if (
-        int(locked_job.consecutive_failure_count or 0)
-        >= scheduler_failure_alert_threshold()
-        and locked_job.failure_alerted_at is None
-    ):
-        locked_job.failure_alerted_at = now
-        alert_emitted = True
-
-    rate_window_hours = scheduler_failure_rate_window_hours()
-    rate_failures = await _async_scheduler_failure_rate_count(
-        session,
-        locked_job.id,
-        now=now,
-        window_hours=rate_window_hours,
-    )
-    rate_alert_latched = False
-    if (
-        rate_failures >= scheduler_failure_rate_threshold()
-        and locked_job.rate_alerted_at is None
-    ):
-        locked_job.rate_alerted_at = now
-        rate_alert_latched = True
-
-    await session.flush()
-    return {
-        **_scheduler_failure_guard_state(locked_job),
-        "alert_emitted": alert_emitted,
-        "rate_failures": rate_failures,
-        "rate_window_hours": rate_window_hours,
-        "rate_alert_latched": rate_alert_latched,
-    }
-
-
-async def async_reset_scheduler_job_failure_guard(
-    session: AsyncSession,
-    job: SchedulerJob,
-    *,
-    now: datetime | None = None,
-) -> None:
-    """Close recovered failure alerts after the job succeeds."""
-    if not any(
-        (
-            job.failure_signature,
-            job.consecutive_failure_count,
-            job.failure_alerted_at,
-            job.last_failure_error,
-            job.rate_alerted_at,
-        )
-    ):
-        return
-
-    if job.rate_alerted_at is not None:
-        now = _utcnow(now)
-        rate_failures = await _async_scheduler_failure_rate_count(
-            session,
-            job.id,
-            now=now,
-            window_hours=scheduler_failure_rate_window_hours(),
-        )
-        if rate_failures < scheduler_failure_rate_threshold():
-            job.rate_alerted_at = None
-
-    job.failure_signature = None
-    job.consecutive_failure_count = 0
-    job.failure_alerted_at = None
-    job.last_failure_error = None
-    await session.flush()
 
 
 def retry_available(job: SchedulerJob, run: SchedulerRun) -> bool:
