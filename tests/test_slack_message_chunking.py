@@ -216,3 +216,26 @@ async def test_post_message_leaves_under_budget_delivery_unchanged():
     assert client.posts == [{"channel": "C_SOFTWARE", "text": body}]
     assert result["chunk_count"] == 1
     assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_post_message_preserves_idempotency_metadata():
+    client = _RecordingSlackClient()
+    metadata = {
+        "event_type": "illo_obligation_notice",
+        "event_payload": {"idempotency_key": "obligation-notice:41:failed"},
+    }
+
+    await client.post_message(
+        channel="C_SOFTWARE",
+        text="I will come back.",
+        metadata=metadata,
+    )
+
+    assert client.posts == [
+        {
+            "channel": "C_SOFTWARE",
+            "text": "I will come back.",
+            "metadata": metadata,
+        }
+    ]

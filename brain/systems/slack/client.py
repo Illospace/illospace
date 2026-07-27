@@ -335,6 +335,7 @@ class SlackWebClient:
         channel: str,
         text: str,
         thread_ts: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         submitted_text = str(text)
         chunks = split_slack_message(submitted_text, SLACK_MESSAGE_TEXT_CHARS)
@@ -345,6 +346,8 @@ class SlackWebClient:
             payload: dict[str, Any] = {"channel": channel, "text": chunk}
             if thread_ts:
                 payload["thread_ts"] = thread_ts
+            if metadata:
+                payload["metadata"] = dict(metadata)
             try:
                 response = await self._post("chat.postMessage", payload)
             except Exception as exc:

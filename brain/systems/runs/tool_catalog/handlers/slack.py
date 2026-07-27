@@ -751,26 +751,50 @@ async def _handle_post_slack_reply(
     posted_chars = int(response.get("posted_chars", submitted_chars))
     answered_open_asks = 0
     execution_metadata = _execution_metadata()
-    open_ask_context = execution_metadata.get("open_ask")
-    if answers_open_ask and isinstance(open_ask_context, dict):
+    run_id = execution_metadata.get("run_id") or getattr(
+        _agent_context,
+        "run_id",
+        None,
+    )
+    try:
+        run_id = int(run_id) if run_id not in (None, "") else None
+    except (TypeError, ValueError):
+        run_id = None
+    org_id = str(
+        getattr(_agent_context, "org_id", None)
+        or execution_metadata.get("org_id")
+        or ""
+    ).strip()
+    obligation_thread_ts = target_thread_ts
+    if obligation_thread_ts is None and target_channel == trigger_channel_id:
+        obligation_thread_ts = str(
+            trigger.get("thread_ts") or trigger.get("message_ts") or ""
+        ).strip() or None
+    if target_visibility == "public" and obligation_thread_ts and org_id:
         from brain.systems.runs.slack_delivery import (
-            record_origin_run_answer_delivery,
+            DeliveredSlackReply,
+            delivered_message_ts,
+            persist_delivered_slack_answer,
         )
 
-        run_id = execution_metadata.get("run_id") or getattr(
-            _agent_context,
-            "run_id",
-            None,
+        counts = await persist_delivered_slack_answer(
+            DeliveredSlackReply(
+                org_id=org_id,
+                channel_id=target_channel,
+                thread_ts=obligation_thread_ts,
+                answering_run_id=run_id,
+                slack_message_ts=delivered_message_ts(response) or "",
+                answer_text=text,
+                is_answer=answers_open_ask,
+                artifact_kind="slack_image" if image_upload is not None else None,
+                artifact_ref=(
+                    str(image_filename or image_title or "").strip() or None
+                    if image_upload is not None
+                    else None
+                ),
+            )
         )
-        try:
-            run_id = int(run_id) if run_id not in (None, "") else None
-        except (TypeError, ValueError):
-            run_id = None
-        answered_open_asks = await record_origin_run_answer_delivery(
-            origin_run_id=run_id,
-            answer_text=text,
-            slack_response=response,
-        )
+        answered_open_asks = counts.answered_open_asks
     return json.dumps(
         {
             "ok": True,

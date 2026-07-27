@@ -88,6 +88,16 @@ def interrupted_run_message(interruption: RunInterruption) -> str:
     )
 
 
+def interruption_notice_condition(interruption: RunInterruption) -> str:
+    """Return the stable public condition used to collapse restart retries."""
+
+    return (
+        "interruption:requeued"
+        if interruption.requeued
+        else "interruption:not_requeued"
+    )
+
+
 async def notify_run_interruption(interruption: RunInterruption) -> dict[str, Any] | None:
     """Notify the originating surface after the interruption commit succeeds."""
 
@@ -101,6 +111,7 @@ async def notify_run_interruption(interruption: RunInterruption) -> dict[str, An
             uow.session,
             run=run,
             text=interrupted_run_message(interruption),
+            deferral_condition=interruption_notice_condition(interruption),
         )
 
 
@@ -154,6 +165,7 @@ __all__ = [
     "RunInterruption",
     "interrupt_and_requeue_run",
     "interrupt_and_requeue_run_ids",
+    "interruption_notice_condition",
     "interrupted_run_message",
     "notify_run_interruption",
     "run_interruption_from_run",

@@ -9,6 +9,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -4155,6 +4156,21 @@ async def test_runner_reports_interruption_run_id_and_requeue_status_to_slack(mo
         return FakeSlackClient()
 
     monkeypatch.setattr(slack_delivery, "slack_client_for_run", fake_client_for_run)
+    deferral_recorder = AsyncMock(
+        return_value=(
+            SimpleNamespace(),
+            SimpleNamespace(id=1, state="pending"),
+            True,
+        )
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.open_asks.record_run_deferral",
+        deferral_recorder,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.obligation_notices.schedule_post_commit_notice_delivery",
+        lambda *_args, **_kwargs: False,
+    )
 
     class FakeSession:
         async def get(self, _model, run_id):
@@ -4181,17 +4197,11 @@ async def test_runner_reports_interruption_run_id_and_requeue_status_to_slack(mo
     )
 
     assert result["surface"] == "slack"
-    assert calls == [
-        {
-            "channel": "C456",
-            "text": (
-                "I was interrupted by a system restart at 17:55 UTC (run 2330); "
-                "I've re-queued it and will reply here when it finishes."
-            ),
-            "thread_ts": None,
-        }
-    ]
-    assert DEFAULT_FAILED_RUN_MESSAGE not in calls[0]["text"]
+    assert result["queued"] is True
+    assert calls == []
+    deferral_text = deferral_recorder.await_args.kwargs["deferral_text"]
+    assert "I've re-queued it and will reply here when it finishes." in deferral_text
+    assert DEFAULT_FAILED_RUN_MESSAGE not in deferral_text
 
 
 async def test_runner_does_not_override_model_authored_slack_reply(monkeypatch):
@@ -4474,20 +4484,32 @@ async def test_runner_replaces_failed_run_artifact_with_typed_safe_message(monke
         return FakeSlackClient()
 
     monkeypatch.setattr(slack_delivery, "slack_client_for_run", fake_client_for_run)
+    deferral_recorder = AsyncMock(
+        return_value=(
+            SimpleNamespace(),
+            SimpleNamespace(id=2, state="pending"),
+            True,
+        )
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.open_asks.record_run_deferral",
+        deferral_recorder,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.obligation_notices.schedule_post_commit_notice_delivery",
+        lambda *_args, **_kwargs: False,
+    )
 
     session = FakeSession()
     result = await runner._settle_slack_origin_run_async(session, run)
 
     assert result["artifact_id"] is None
     assert session.scalar_calls == 0
-    assert calls == [
-        {
-            "channel": "C456",
-            "text": UPSTREAM_FAILED_RUN_MESSAGE,
-            "thread_ts": "1716900000.000100",
-        }
-    ]
-    assert raw_error not in str(calls)
+    assert result["queued"] is True
+    assert calls == []
+    notice_text = deferral_recorder.await_args.kwargs["deferral_text"]
+    assert notice_text == UPSTREAM_FAILED_RUN_MESSAGE
+    assert raw_error not in notice_text
 
 
 async def test_runner_keeps_headless_slack_child_silent(monkeypatch):
@@ -4590,19 +4612,30 @@ async def test_runner_posts_typed_failure_for_headless_slack_monitor(monkeypatch
         return FakeSlackClient()
 
     monkeypatch.setattr(slack_delivery, "slack_client_for_run", fake_client_for_run)
+    deferral_recorder = AsyncMock(
+        return_value=(
+            SimpleNamespace(),
+            SimpleNamespace(id=3, state="pending"),
+            True,
+        )
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.open_asks.record_run_deferral",
+        deferral_recorder,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.obligation_notices.schedule_post_commit_notice_delivery",
+        lambda *_args, **_kwargs: False,
+    )
 
     session = FakeSession()
     result = await runner._settle_slack_origin_run_async(session, run)
 
     assert result["surface"] == "slack"
+    assert result["queued"] is True
     assert session.scalar_calls == 0
-    assert calls == [
-        {
-            "channel": "C456",
-            "text": UPSTREAM_FAILED_RUN_MESSAGE,
-            "thread_ts": "1716900000.000100",
-        }
-    ]
+    assert calls == []
+    assert deferral_recorder.await_args.kwargs["deferral_text"] == UPSTREAM_FAILED_RUN_MESSAGE
 
 
 async def test_runner_does_not_mirror_after_same_run_ai_timeline_tool_message():
