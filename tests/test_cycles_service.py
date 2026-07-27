@@ -3329,7 +3329,9 @@ async def test_wake_cycle_now_skips_when_run_in_flight(
     disposition = await service.async_wake_cycle_now(name=cycle.name)
 
     assert disposition == "run_in_flight"
-    assert cycle.next_run_at == future
+    # The wake re-reads the locked row, and SQLite has no timestamptz, so the
+    # refreshed attribute comes back naive. Same instant, unmoved.
+    assert service._aware_utc(cycle.next_run_at) == future
 
 
 @pytest.mark.asyncio
@@ -3369,7 +3371,7 @@ async def test_wake_cycle_now_reports_already_pending_and_missing(
     )
 
     assert await service.async_wake_cycle_now(name="Pending Cycle") == "already_pending"
-    assert pending.next_run_at == now - timedelta(minutes=5)
+    assert service._aware_utc(pending.next_run_at) == now - timedelta(minutes=5)
     assert await service.async_wake_cycle_now(name="Disabled Cycle") == "not_found"
     assert await service.async_wake_cycle_now(name="No Such Cycle") == "not_found"
 

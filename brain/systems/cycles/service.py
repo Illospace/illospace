@@ -623,7 +623,6 @@ async def async_wake_cycle_now(*, name: str, org_id: str | None = None) -> str:
     Cycle names are not globally unique; pass ``org_id`` to scope the lookup,
     and an ambiguous match refuses to wake anything rather than guessing.
     """
-    now = datetime.now(timezone.utc)
     async with UnitOfWork() as uow:
         filters = [
             Cycle.name == name,
@@ -642,13 +641,24 @@ async def async_wake_cycle_now(*, name: str, org_id: str | None = None) -> str:
         if len(matches) > 1:
             logger.warning("Cycle wake for %r is ambiguous; refusing to wake", name)
             return "ambiguous"
+        # populate_existing is what makes the lock mean anything: the lookup
+        # above already put this row in the identity map, and without it the
+        # ORM hands back that pre-lock copy, so every guard below would be
+        # decided on state a competing writer has since replaced.
         cycle = (
             await uow.session.scalars(
-                select(Cycle).where(Cycle.id == matches[0].id).with_for_update()
+                select(Cycle)
+                .where(Cycle.id == matches[0].id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).first()
         if cycle is None or not cycle.enabled or cycle.deleted_at is not None:
             return "not_found"
+        # Read the clock after the lock, not before: a caller that waited out a
+        # competing wake must judge the slot as of when it holds the row, or it
+        # re-stamps a slot that is already due.
+        now = datetime.now(timezone.utc)
         pending_at = _aware_utc(cycle.next_run_at)
         if pending_at is not None and pending_at <= now:
             return "already_pending"
