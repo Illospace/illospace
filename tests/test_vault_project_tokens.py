@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -480,6 +480,48 @@ async def test_resolve_project_bound_env_tokens_can_filter_to_github_app_only(pa
         "GITHUB_TOKEN": "minted-installation-token",
         "GH_TOKEN": "personal-token",
     }
+
+
+async def test_backfill_can_narrow_github_app_token_to_read_only_pr_access(
+    patch_uow,
+    session,
+    monkeypatch,
+):
+    from brain.systems.vault import async_resolve_project_bound_env_tokens
+
+    github_app = await _secret(
+        session,
+        "GITHUB_APP__ILLO",
+        "github-app-blob",
+        access_level="manual",
+        category="github_app",
+    )
+    await _binding(
+        session,
+        github_app,
+        project_slug="uwear-ai/uwear-backend",
+        env_name="GITHUB_TOKEN",
+    )
+    mint = AsyncMock(return_value="read-only-installation-token")
+    monkeypatch.setattr(
+        "brain.systems.vault.github_app_mint.async_mint_installation_token",
+        mint,
+    )
+
+    env = await async_resolve_project_bound_env_tokens(
+        actor_user_id=OTHER_USER_ID,
+        org_id=ORG_ID,
+        project_slug="uwear-ai/uwear-backend",
+        github_app_only=True,
+        github_app_permissions={"pull_requests": "read"},
+    )
+
+    assert env == {"GITHUB_TOKEN": "read-only-installation-token"}
+    mint.assert_awaited_once_with(
+        "github-app-blob",
+        repositories=["uwear-backend"],
+        permissions={"pull_requests": "read"},
+    )
 
 
 async def test_github_app_binding_mints_one_token_for_cross_repo_operation(

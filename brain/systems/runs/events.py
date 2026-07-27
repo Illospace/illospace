@@ -5,6 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from brain.systems.runs.domain import AgentRunEvent, EventVisibility
+from brain.systems.runs.tool_catalog.metadata import (
+    ToolSideEffectClass,
+    is_write_side_effect_class,
+)
+from brain.systems.runs.tool_catalog.registry import get_tool_registration
 
 
 SECRET_TOOL_NAMES = {"brain_vault", "vault", "secrets"}
@@ -57,6 +62,29 @@ def redact_tool_call_result(tool_name: str, result: Any) -> str:
     return str(result or "")
 
 
+def _event_side_effect(
+    tool_name: str,
+    side_effect: ToolSideEffectClass | str | None,
+) -> tuple[str, bool]:
+    if side_effect is None:
+        registration = get_tool_registration(tool_name)
+        if registration is None:
+            return "unknown", True
+        side_effect_class = registration.side_effect_class
+    elif side_effect == "unknown":
+        return "unknown", True
+    else:
+        side_effect_class = (
+            side_effect
+            if isinstance(side_effect, ToolSideEffectClass)
+            else ToolSideEffectClass(str(side_effect))
+        )
+    return (
+        side_effect_class.value,
+        is_write_side_effect_class(side_effect_class),
+    )
+
+
 def tool_call_completed_payload(
     idea_id: str | None,
     tool_name: str,
@@ -64,13 +92,17 @@ def tool_call_completed_payload(
     result: Any,
     *,
     source: str = "runner",
+    side_effect: ToolSideEffectClass | str | None = None,
 ) -> dict[str, Any]:
+    side_effect_value, is_write = _event_side_effect(tool_name, side_effect)
     return {
         "idea_id": idea_id,
         "tool_name": tool_name,
         "args": args or {},
         "result": redact_tool_call_result(tool_name, result),
         "source": source,
+        "side_effect": side_effect_value,
+        "is_write": is_write,
     }
 
 
@@ -82,6 +114,7 @@ async def async_record_tool_call(
     result: Any,
     *,
     source: str = "runner",
+    side_effect: ToolSideEffectClass | str | None = None,
     **_: Any,
 ) -> None:
     from brain.systems.runs.event_log import async_record_run_event
@@ -89,7 +122,14 @@ async def async_record_tool_call(
     await async_record_run_event(
         int(run_id),
         "run.tool_completed",
-        tool_call_completed_payload(idea_id, tool_name, args, result, source=source),
+        tool_call_completed_payload(
+            idea_id,
+            tool_name,
+            args,
+            result,
+            source=source,
+            side_effect=side_effect,
+        ),
         producer=source or "runner",
     )
 
@@ -103,7 +143,15 @@ async def async_record_tool_activity(
     source: str = "runner",
     **kwargs: Any,
 ) -> None:
-    await async_record_tool_call(run_id, kwargs.get("idea_id"), tool_name, args or {}, result, source=source)
+    await async_record_tool_call(
+        run_id,
+        kwargs.get("idea_id"),
+        tool_name,
+        args or {},
+        result,
+        source=source,
+        side_effect=kwargs.get("side_effect"),
+    )
 
 
 __all__ = [

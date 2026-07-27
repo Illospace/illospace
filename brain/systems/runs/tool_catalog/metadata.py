@@ -83,7 +83,21 @@ class ToolSideEffectClass(StrEnum):
     SCRATCHPAD_LIFECYCLE = "scratchpad_lifecycle"
     SHELL = "shell"
     SKILL_WRITE = "skill_write"
+    WRITE = "write"
     WORKSPACE_APP_MANAGEMENT = "workspace_app_management"
+
+
+def is_write_side_effect_class(value: ToolSideEffectClass | str) -> bool:
+    """Return whether an exact registration side-effect class may change state."""
+    side_effect_class = (
+        value
+        if isinstance(value, ToolSideEffectClass)
+        else ToolSideEffectClass(str(value))
+    )
+    return side_effect_class not in {
+        ToolSideEffectClass.READ_ONLY,
+        ToolSideEffectClass.READ_ONLY_EXTERNAL,
+    }
 
 
 class ToolReversibility(StrEnum):
@@ -231,7 +245,7 @@ class ToolRegistration:
     )
     permission: ToolPermission | str = ToolPermission.READ
     risk_class: ToolRiskClass | str = ToolRiskClass.LOW
-    side_effect_class: ToolSideEffectClass | str = ToolSideEffectClass.READ_ONLY
+    side_effect_class: ToolSideEffectClass | str = ToolSideEffectClass.WRITE
     reversibility: ToolReversibility | str = ToolReversibility.NONE
     output_budget_chars: int = 10_000
     parallel_safety: ToolParallelSafety | str = ToolParallelSafety.SERIAL

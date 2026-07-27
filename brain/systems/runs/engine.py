@@ -327,11 +327,12 @@ class AsyncAgentRunEngine:
             cancel_event=cancel_event,
             durable_steering_drain=self.durable_steering_drain,
         )
-        recipe = self.recipes.get(request.normalized_recipe.value)
+        recipe_name = str(row.recipe)
+        recipe = self.recipes.get(recipe_name)
         if recipe is None:
             return await self.fail(
                 run.id,
-                f"No recipe registered for {request.normalized_recipe.value!r}",
+                f"No recipe registered for {recipe_name!r}",
                 execution_claim=execution_claim,
             )
         try:

@@ -41,12 +41,12 @@ Runtime rules:
 - Prefer the smallest complete action that satisfies the request now, but do not disappear into long work before giving the user a timely model-authored update on the originating surface.
 - Fast should spawn scoped workers. If an independent investigation, implementation slice, verification pass, duplicate search, or bug/blocker report can safely progress in parallel while you continue the user-facing run, use spawn_worker.
 - Use headless=true for internal blocker or bug-report workers that do not need user input and should not create visible thread content.
-- Do not spawn a worker when delegation overhead is larger than doing the step directly, when write scopes would overlap unsafely, or when your final answer depends on a multi-wave verified synthesis.
-- Use Deep when the request needs heavy verification, dependency-ordered worker waves, internal follow-ups, or formal synthesis across worker results.
+- Do not spawn a worker when delegation overhead is larger than doing the step directly or when write scopes would overlap unsafely.
+- When your final answer depends on worker results, set join_parent=true so worker completion queues a continuation; use that continuation to inspect evidence, launch any dependent follow-up work, and synthesize the verified result.
 - Before your first tool call on work that needs inspection, edits, or more than a moment, write one brief task-specific assistant sentence that says what you are about to do.
 - Make that opening natural to the request; do not use canned acknowledgements.
 - Keep progress updates brief and meaningful when work takes more than a moment.
-- Do not simulate a Deep coordinator graph inside Fast. If the request needs parallel workers, long verification, or durable delegation, make that boundary explicit and prepare a clean handoff.
+- Keep dependency-ordered worker waves explicit: launch later workers from a joined continuation after their prerequisites have completed.
 - Before finalizing, apply the Agent Contract. Let SOUL determine the voice and reply shape.
 """
 

@@ -54,46 +54,6 @@ def test_worker_public_output_sinks_do_not_receive_agent_error_directly():
     assert not _contains_direct_error_access(artifact_output)
 
 
-def test_deep_failed_final_answer_is_only_used_as_internal_diagnostic():
-    run_worker = _function("brain/systems/runs/recipes/deep.py", "_run_worker_node")
-    completed_branch = next(
-        node
-        for node in ast.walk(run_worker)
-        if isinstance(node, ast.If)
-        and ast.unparse(node.test) == "status == RunStatus.COMPLETED.value"
-    )
-    raw_output_assignments = [
-        node
-        for node in ast.walk(run_worker)
-        if isinstance(node, ast.Assign)
-        and ast.unparse(node.value) == "raw_output"
-        and any(ast.unparse(target) == "output" for target in node.targets)
-    ]
-
-    assert len(raw_output_assignments) == 1
-    assert raw_output_assignments[0] in list(ast.walk(completed_branch))
-
-    synthesis_rows = _function("brain/systems/runs/recipes/deep.py", "_worker_synthesis_rows")
-    failed_branch = next(
-        node
-        for node in ast.walk(synthesis_rows)
-        if isinstance(node, ast.If)
-        and ast.unparse(node.test) == "status != RunStatus.COMPLETED.value"
-    )
-    failed_assignments = {
-        str(target.slice.value): ast.unparse(node.value)
-        for node in ast.walk(failed_branch)
-        if isinstance(node, ast.Assign)
-        for target in node.targets
-        if isinstance(target, ast.Subscript)
-        and isinstance(target.value, ast.Name)
-        and target.value.id == "row"
-        and isinstance(target.slice, ast.Constant)
-    }
-    assert failed_assignments["output"].replace("'", '"') == 'failure["message"]'
-    assert "include_content=False" in ast.unparse(failed_branch)
-
-
 def test_cli_and_checker_public_error_values_use_safe_failure_projectors():
     cli = _function("brain/app/cli/agent_cli.py", "call_agent")
     returned_error_values = []
@@ -159,11 +119,6 @@ def test_cli_and_checker_public_error_values_use_safe_failure_projectors():
             "brain/systems/runs/recipes/workers.py",
             "execute",
             {"public_run_failure", "worker_result_artifact"},
-        ),
-        (
-            "brain/systems/runs/recipes/deep.py",
-            "_worker_synthesis_rows",
-            {"_public_worker_failure"},
         ),
         (
             "brain/app/cli/agent_cli.py",

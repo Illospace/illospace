@@ -100,7 +100,6 @@ interface LocalPreviewStreamItem {
   started_at?: string;
   completed_at?: string;
   execution_profile?: string;
-  requested_run_profile?: string;
   run_id?: number;
   idea_id?: string;
   thread_id?: string;
@@ -467,14 +466,12 @@ function buildLocalPreviewTextLabThreadStream(
       idea_id: idea.id,
       thread_id: idea.id,
       title: 'Illo text style lab',
-      skill_name: 'Fast',
       status: 'running',
       started_at: runStartedAt,
       model_used: 'preview-model',
       thinking_used: 'high',
       tokens_total: 3420,
       execution_profile: 'fast',
-      requested_run_profile: 'fast',
       last_activity: 'Writing response... (~244 output tokens)',
       work_log: workLog,
       activity_trace: workLog.map((entry) => activityEntry(
@@ -596,7 +593,6 @@ export function buildLocalPreviewThreadStream(
       idea_id: idea.id,
       thread_id: idea.id,
       title: 'Thread timeline preview',
-      skill_name: 'Fast',
       status: runStatus,
       started_at: startedAt,
       completed_at: completedAt,
@@ -605,7 +601,6 @@ export function buildLocalPreviewThreadStream(
       thinking_used: 'medium',
       tokens_total: isWorking ? 1840 : 2412,
       execution_profile: 'fast',
-      requested_run_profile: 'fast',
       last_activity: isWorking ? 'Using exec_command' : 'Completed',
       work_log: workLog,
       activity_trace: activityTrace,
@@ -628,7 +623,7 @@ export function buildLocalPreviewThreadStream(
       id: `${idea.id}:final`,
       role: 'illo',
       content: 'Done. The work log now reads as an ordered timeline while the finished run stays tucked under the minimal Worked for summary.',
-      metadata: { local_preview: true, run_id: runId, execution_profile: 'fast' },
+      metadata: { local_preview: true, run_id: runId },
     });
   }
 
