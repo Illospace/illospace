@@ -608,6 +608,57 @@ async def _async_materialize_due_cycle_runs_once(
     return executable_run_ids
 
 
+async def async_wake_cycle_now(*, name: str, org_id: str | None = None) -> str:
+    """Pull an enabled cycle's next run forward to now, without flooding.
+
+    Event sources (e.g. the staging-promotion detector) use this instead of a
+    native event->cycle binding: the cycle scheduler claims the due slot on its
+    next tick, fires exactly one run, and recomputes ``next_run_at`` onto the
+    future cron grid. A wake therefore never duplicates a scheduled slot — the
+    recompute lands on the next genuine cron boundary, which later fires as
+    the normal backstop run (cycles are contracted to exit cheaply when their
+    inputs are unchanged). Returns a disposition string rather than raising so
+    callers can report the outcome without owning cycle semantics: ``woken`` |
+    ``already_pending`` | ``run_in_flight`` | ``not_found`` | ``ambiguous``.
+    Cycle names are not globally unique; pass ``org_id`` to scope the lookup,
+    and an ambiguous match refuses to wake anything rather than guessing.
+    """
+    now = datetime.now(timezone.utc)
+    async with UnitOfWork() as uow:
+        filters = [
+            Cycle.name == name,
+            Cycle.enabled.is_(True),
+            Cycle.deleted_at.is_(None),
+        ]
+        if org_id is not None:
+            filters.append(Cycle.org_id == org_id)
+        matches = (
+            await uow.session.scalars(
+                select(Cycle).where(*filters).order_by(Cycle.id.asc()).limit(2)
+            )
+        ).all()
+        if not matches:
+            return "not_found"
+        if len(matches) > 1:
+            logger.warning("Cycle wake for %r is ambiguous; refusing to wake", name)
+            return "ambiguous"
+        cycle = (
+            await uow.session.scalars(
+                select(Cycle).where(Cycle.id == matches[0].id).with_for_update()
+            )
+        ).first()
+        if cycle is None or not cycle.enabled or cycle.deleted_at is not None:
+            return "not_found"
+        if cycle.next_run_at is not None and cycle.next_run_at <= now:
+            return "already_pending"
+        active_run_count = await _async_active_cycle_run_count(uow.session, cycle.id)
+        if active_run_count > 0:
+            return "run_in_flight"
+        cycle.next_run_at = now
+        logger.info("Cycle %s (%s) woken by event source", cycle.id, cycle.name)
+    return "woken"
+
+
 async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
     now = datetime.now(timezone.utc)
     await async_recover_stale_cycle_runs_once(limit=limit)
