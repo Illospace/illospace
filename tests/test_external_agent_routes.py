@@ -706,7 +706,11 @@ async def test_hosted_mcp_run_get_returns_tool_events_and_artifacts():
         root_run_id=None,
         sequence_no=3,
         event_type="run.tool_completed",
-        payload={"tool_name": "domain.inspect"},
+        payload={
+            "tool_name": "domain.inspect",
+            "side_effect": "read_only",
+            "is_write": False,
+        },
         producer="agent_runtime",
         visibility="public",
         created_at=now,
@@ -732,17 +736,27 @@ async def test_hosted_mcp_run_get_returns_tool_events_and_artifacts():
             return self.rows
 
     class RunSession(_AsyncSession):
+        def __init__(self):
+            super().__init__()
+            self.scalar_statements = []
+            self.scalars_statements = []
+
         async def get(self, model, row_id):
             assert row_id == 55
             return run
 
         async def scalars(self, stmt):
             text = str(stmt)
+            self.scalars_statements.append(text)
             if "agent_run_events" in text:
                 return ScalarResult([event])
             if "agent_run_artifacts" in text:
                 return ScalarResult([artifact])
             return ScalarResult([])
+
+        async def scalar(self, stmt):
+            self.scalar_statements.append(str(stmt))
+            return event
 
     session = RunSession()
     with patch(
@@ -772,9 +786,22 @@ async def test_hosted_mcp_run_get_returns_tool_events_and_artifacts():
     payload = json.loads(response.json()["result"]["content"][0]["text"])
     assert payload["run"]["run_id"] == 55
     assert payload["tool_events"][0]["payload"]["tool_name"] == "domain.inspect"
+    assert payload["tool_events"][0]["payload"]["side_effect"] == "read_only"
+    assert payload["tool_events"][0]["payload"]["is_write"] is False
     assert payload["tool_events"][0]["payload"]["display"]["status"] == "completed"
+    assert payload["tool_call_summary"] == {
+        "run_id": 55,
+        "last_write_tool_call_at": None,
+        "seconds_since_last_write_tool_call": None,
+    }
     assert payload["artifacts"][0]["text"] == "Finished."
     assert "events" not in payload
+    assert any(
+        "LIKE" in statement and "LIMIT" in statement
+        for statement in session.scalars_statements
+    )
+    assert len(session.scalar_statements) == 1
+    assert "LIMIT" in session.scalar_statements[0]
     assert session.order == []
 
 

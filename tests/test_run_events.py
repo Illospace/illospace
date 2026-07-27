@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -15,7 +16,13 @@ from brain.systems.runs.event_log import (
     list_run_events_after_for_principal_async,
     run_event_to_message,
 )
-from brain.systems.runs.events import async_record_tool_call
+from brain.systems.runs.events import (
+    async_record_tool_call,
+    tool_call_completed_payload,
+)
+from brain.systems.runs.tool_event_read_model import (
+    parse_persisted_tool_side_effect,
+)
 from brain.systems.cortex.events import run_event_scope
 from brain.platform.db.models.run import RunEvent
 
@@ -109,10 +116,62 @@ async def test_async_record_tool_call_persists_redacted_tool_trace(monkeypatch):
                 "args": {"key": "OPENAI_API_KEY"},
                 "result": "[secret redacted]",
                 "source": "runner:test",
+                "side_effect": "read_only",
+                "is_write": False,
             },
             {"producer": "runner:test"},
         )
     ]
+
+
+def test_tool_call_payload_uses_registry_classes_and_conservative_unknown_fallback():
+    assert tool_call_completed_payload(
+        "idea-1",
+        "read_file",
+        {},
+        "ok",
+    )["side_effect"] == "read_only"
+    assert tool_call_completed_payload(
+        "idea-1",
+        "write_file",
+        {},
+        "ok",
+    )["side_effect"] == "file_write"
+    unknown_payload = tool_call_completed_payload(
+        "idea-1",
+        "not_registered",
+        {},
+        "ok",
+    )
+    assert unknown_payload["side_effect"] == "unknown"
+    assert unknown_payload["is_write"] is True
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_side_effect", "expected_is_write"),
+    [
+        ({"side_effect": "read_only"}, "read_only", False),
+        ({"side_effect": "file_write"}, "file_write", True),
+        ({"side_effect": "read"}, "read", False),
+        ({"side_effect": "command"}, "command", True),
+        ({"side_effect": "external"}, "external", True),
+        ({"side_effect": "unknown"}, "unknown", True),
+        ({}, "unknown", True),
+        (None, "unknown", True),
+        ({"side_effect": "typo"}, "unknown", True),
+        ({"side_effect": ["read"]}, "unknown", True),
+        ({"side_effect": "read", "is_write": True}, "read", True),
+    ],
+)
+def test_persisted_tool_side_effect_compatibility_parser(
+    payload,
+    expected_side_effect,
+    expected_is_write,
+):
+    parsed = parse_persisted_tool_side_effect(payload)
+
+    assert parsed.side_effect == expected_side_effect
+    assert parsed.is_write is expected_is_write
 
 
 def test_run_event_to_message_handles_projected_rows_and_replay_flag():
@@ -360,9 +419,26 @@ def test_public_tool_projection_strips_sensitive_url_parts():
     serialized = json.dumps(message)
     assert message["args"]["url"] == "example.com/private/file"
     assert message["tool_display"]["target"] == "example.com/private/file"
+    assert message["side_effect"] == "unknown"
+    assert message["is_write"] is True
     assert "secret" not in serialized
     assert "abc123" not in serialized
     assert "X-Amz-Signature" not in serialized
+
+
+def test_public_tool_projection_keeps_legacy_read_non_write():
+    from brain.systems.runs.presentation import public_tool_event_payload
+
+    message = public_tool_event_payload(
+        {
+            "tool_name": "read_file",
+            "side_effect": "read",
+        },
+        "run.tool_completed",
+    )
+
+    assert message["side_effect"] == "read"
+    assert message["is_write"] is False
 
 
 def test_publish_live_fans_out_without_durable_storage(monkeypatch):

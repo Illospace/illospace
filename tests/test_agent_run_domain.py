@@ -24,6 +24,16 @@ def test_agent_run_request_requires_workspace_org_id():
         AgentRunRequest(thread_id="thread-1", message="Read README", org_id=" ")
 
 
+def test_non_deep_verification_policy_preserves_explicit_metadata_modes():
+    from brain.systems.runs.domain import RunProfile
+    from brain.systems.runs.verification import VerificationMode, verification_mode_for_run
+
+    assert verification_mode_for_run(RunProfile.FAST, {}) is VerificationMode.LIGHTWEIGHT
+    assert verification_mode_for_run(RunProfile.FAST, {"verification": "blocking"}) is VerificationMode.BLOCKING
+    assert verification_mode_for_run(RunProfile.FAST, {"strict": True}) is VerificationMode.BLOCKING
+    assert verification_mode_for_run(RunProfile.FAST, {"verification": "skip"}) is VerificationMode.SKIP
+
+
 def test_run_status_transitions_are_single_source_of_truth():
     from brain.systems.runs.status import RunStatus, RunTransitionError, ensure_run_transition
 
