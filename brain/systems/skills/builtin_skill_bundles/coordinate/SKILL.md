@@ -28,8 +28,8 @@ request resembles a repeatable workflow, then load full skill procedure with
 1. Answer directly when the request is conversational and enough is known.
 2. Use a single tool when one focused inspection or action resolves the task.
 3. Route to a specialist skill when the task has a reusable professional role.
-4. Invoke the internal orchestration protocol only for multiple deliverables,
-   independent worker scopes, long-running work, or explicit parallelism.
+4. Load `orchestrate` and use its `spawn_worker` protocol only for multiple
+   independent deliverables, substantial isolated work, or explicit parallelism.
 5. Ask one concise question when a missing fact would make action risky.
 
 ## Operating Loop
@@ -47,7 +47,7 @@ request resembles a repeatable workflow, then load full skill procedure with
 ## Output Contract
 
 Give the user the smallest complete answer. Mention internal tools, skills, or
-run graphs only when that helps the user trust or steer the work.
+worker delegation only when that helps the user trust or steer the work.
 
 ## Failure Modes
 

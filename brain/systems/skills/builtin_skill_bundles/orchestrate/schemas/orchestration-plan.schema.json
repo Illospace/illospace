@@ -2,38 +2,55 @@
   "type": "object",
   "required": [
     "goal",
-    "steps"
+    "slices"
   ],
   "properties": {
     "goal": {
       "type": "string"
     },
-    "steps": {
+    "slices": {
       "type": "array",
       "items": {
         "type": "object",
         "required": [
           "id",
-          "skill",
           "objective",
-          "scope",
-          "done_when",
-          "evidence"
+          "assigned_slice",
+          "done_when"
         ],
         "properties": {
           "id": {
             "type": "string"
           },
-          "skill": {
+          "role": {
             "type": "string"
           },
           "objective": {
             "type": "string"
           },
-          "scope": {
+          "assigned_slice": {
             "type": "string"
           },
-          "dependencies": {
+          "effort": {
+            "type": "string",
+            "enum": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "headless": {
+            "type": "boolean"
+          },
+          "join_parent": {
+            "type": "boolean"
+          },
+          "allowed_files": {
             "type": "array",
             "items": {
               "type": "string"
@@ -42,11 +59,19 @@
           "done_when": {
             "type": "string"
           },
-          "evidence": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
+          "child_run_id": {
+            "type": "integer"
+          },
+          "collection_status": {
+            "type": "string",
+            "enum": [
+              "not_spawned",
+              "queued",
+              "running",
+              "completed_read",
+              "self_covered",
+              "failed"
+            ]
           }
         }
       }

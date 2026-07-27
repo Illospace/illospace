@@ -253,12 +253,13 @@ class TestOrchestrateSkillProcedure:
     def test_procedure_includes_brain_encode_at_start(self):
         from brain.systems.skills.builtin import BUILTIN_SKILLS
         proc = BUILTIN_SKILLS["orchestrate"]["procedure"]
-        assert "AgentRun graph started" in proc
+        assert "Worker fan-out started" in proc
 
     def test_procedure_includes_brain_encode_at_end(self):
         from brain.systems.skills.builtin import BUILTIN_SKILLS
         proc = BUILTIN_SKILLS["orchestrate"]["procedure"]
-        assert "AgentRun graph completed/failed" in proc
+        assert "Worker fan-out" in proc
+        assert "completed/failed" in proc
 
 
 # -- Harvest Storage Contract Tests -----------------------------------------

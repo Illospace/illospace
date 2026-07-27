@@ -96,20 +96,12 @@ Build the complete picture before forming any opinion. Required sources:
 - At digest run start, read durable rolling-window incidents with
   `manage_slack` `action="open_alert_surges"`.
 
-**Fan out workers — and collect them honestly.** `spawn_worker` is
-fire-and-forget: it returns a queued `child_run_id`; there is no join
-primitive. Spawn scoped read-only workers early (for example, one per repo or
-per source), record each returned `child_run_id` and its assigned slice, and
-continue your own sweep while they run. Each worker's objective must be to END
-with a compact machine-readable summary under ~500 chars (counts, item refs,
-states, CI/blocker flags, staleness — not prose): the parent reads worker
-output as a snippet of the child run's final answer via
-`query_workspace_data` `sources=['runs']`. Before composing, poll that source
-and match your recorded child ids: a slice counts as swept ONLY when its
-worker reached terminal `completed` status AND you read its summary. A queued,
-running, failed, unmatched, or unread worker does not count — cover that slice
-yourself with direct reads instead. Never compose as if a missing slice was
-swept.
+**Fan out workers — and collect them honestly.** Load `orchestrate` and follow
+its complete `spawn_worker` and Honest Collection protocol. Apply it here with
+scoped read-only workers spawned early (for example, one per repo or source)
+while you continue your own sweep. Their compact summaries must carry counts,
+item refs, states, CI/blocker flags, and staleness. Do not compose until every
+delegated slice satisfies the shared collection protocol.
 
 **Sweep for staleness explicitly.** Recency-ordered listings bury untouched
 work in the truncated middle — that is exactly how stale Blocked items
