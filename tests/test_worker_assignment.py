@@ -71,3 +71,59 @@ def test_assignment_keeps_implicit_worker_result_out_of_hard_evidence_checks():
 
     assert [requirement.artifact_type for requirement in assignment.required_evidence()] == ["file_observation"]
     assert assignment.required_artifact_types() == ("worker_result", "file_observation")
+
+
+def test_verify_worker_evidence_enforces_assignment_artifact_requirements():
+    from brain.systems.runs.verification.gates import verify_worker_evidence
+    from brain.systems.runs.verification.policy import VerificationMode
+
+    worker_result = {
+        "run_id": 7,
+        "node_id": "verify",
+        "role": "verify",
+        "status": "completed",
+        "output": "Checked the requested file.",
+        "artifact_count": 1,
+        "assignment": {
+            "evidence_requirements": [
+                {
+                    "artifact_type": "file_observation",
+                    "payload_contains": {"path": "README.md"},
+                }
+            ]
+        },
+    }
+
+    matching = verify_worker_evidence(
+        [
+            {
+                **worker_result,
+                "artifacts": [
+                    {
+                        "artifact_type": "file_observation",
+                        "payload": {"path": "README.md"},
+                    }
+                ],
+            }
+        ],
+        mode=VerificationMode.BLOCKING,
+    )
+    nonmatching = verify_worker_evidence(
+        [
+            {
+                **worker_result,
+                "artifacts": [
+                    {
+                        "artifact_type": "file_observation",
+                        "payload": {"path": "CONTRIBUTING.md"},
+                    }
+                ],
+            }
+        ],
+        mode=VerificationMode.BLOCKING,
+    )
+
+    assert matching.passed is True
+    assert matching.details["missing_required_evidence"] == []
+    assert nonmatching.passed is False
+    assert len(nonmatching.details["missing_required_evidence"]) == 1
