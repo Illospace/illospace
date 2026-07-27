@@ -406,8 +406,17 @@ async def async_claim_cycle_run(session, run_id: int) -> tuple[CycleRun, Cycle] 
     if not candidate or candidate.status != "queued":
         return None
 
+    # Both locking reads need populate_existing, for the same reason the wake
+    # primitive does: the unlocked read above cached this run in the identity
+    # map, and the ORM would hand that copy back rather than the row it just
+    # locked. The Cycle lock guarantees a second executor arrives only after the
+    # first committed — so without the refresh it reads "queued", claims a run
+    # that is already running, and executes it twice.
     result = await session.scalars(
-        select(Cycle).where(Cycle.id == candidate.cycle_id).with_for_update()
+        select(Cycle)
+        .where(Cycle.id == candidate.cycle_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     cycle = result.first()
     result = await session.scalars(
@@ -417,6 +426,7 @@ async def async_claim_cycle_run(session, run_id: int) -> tuple[CycleRun, Cycle] 
             CycleRun.cycle_id == candidate.cycle_id,
         )
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     run = result.first()
     if not run or run.status != "queued":
@@ -641,19 +651,24 @@ async def async_wake_cycle_now(*, name: str, org_id: str | None = None) -> str:
         if len(matches) > 1:
             logger.warning("Cycle wake for %r is ambiguous; refusing to wake", name)
             return "ambiguous"
-        # populate_existing is what makes the lock mean anything: the lookup
-        # above already put this row in the identity map, and without it the
-        # ORM hands back that pre-lock copy, so every guard below would be
+        # Re-apply the selector under the lock, not just the id: the caller
+        # asked for a name, and the row can be renamed, disabled, deleted or
+        # moved between orgs while this wake waits its turn. Postgres
+        # re-evaluates the predicate against the row it waited for, so a row
+        # that stopped matching drops out here instead of being woken anyway.
+        # populate_existing is what makes the lock mean anything at all: the
+        # lookup above already put this row in the identity map, and without it
+        # the ORM hands back that pre-lock copy, so every guard below would be
         # decided on state a competing writer has since replaced.
         cycle = (
             await uow.session.scalars(
                 select(Cycle)
-                .where(Cycle.id == matches[0].id)
+                .where(Cycle.id == matches[0].id, *filters)
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
         ).first()
-        if cycle is None or not cycle.enabled or cycle.deleted_at is not None:
+        if cycle is None:
             return "not_found"
         # Read the clock after the lock, not before: a caller that waited out a
         # competing wake must judge the slot as of when it holds the row, or it
