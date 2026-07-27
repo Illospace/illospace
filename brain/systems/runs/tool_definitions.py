@@ -80,6 +80,7 @@ WORKER_TOOLS = (
     + SESSION_TOOLS
     + [
         CORTEX_VISUAL_REPLY_TOOL,
+        MY_ACTIVITY_TOOL,
         BROWSER_TOOL,
     ]
 )

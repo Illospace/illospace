@@ -831,7 +831,7 @@ def _definition_sources() -> list[tuple[str, tuple[str, ...], list[Mapping[str, 
         ("worker_spawn", ("coordinator",), WORKER_SPAWN_TOOLS),
         ("reply", ("coordinator",), [CORTEX_REPLY_TOOL]),
         ("visual_reply", ("coordinator", "worker"), [CORTEX_VISUAL_REPLY_TOOL]),
-        ("introspection", ("coordinator",), [MY_ACTIVITY_TOOL]),
+        ("introspection", ("coordinator", "worker"), [MY_ACTIVITY_TOOL]),
         ("browser", ("coordinator", "worker"), _BROWSER_TOOLS),
     ]
     try:

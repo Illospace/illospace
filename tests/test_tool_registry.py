@@ -393,6 +393,19 @@ def test_context_route_surface_is_registry_driven():
     assert "workspace setup" in routes["read_workspace_overview"]["domains"]
 
 
+def test_my_activity_is_available_to_workers():
+    from brain.systems.runs.tool_catalog.registry import get_tool_registration
+    from brain.systems.runs.tool_definitions import WORKER_TOOLS
+
+    assert "my_activity" in _names(WORKER_TOOLS)
+    registration = get_tool_registration("my_activity")
+    assert registration is not None
+    assert {role.value for role in registration.availability} == {
+        "coordinator",
+        "worker",
+    }
+
+
 def test_workspace_activity_question_is_not_force_routed():
     # No heuristic forcing remains: "what is X working on" is answered by the model
     # calling read_team_activity voluntarily, not by an end-of-turn forced detour.
