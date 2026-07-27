@@ -661,6 +661,7 @@ async def async_resolve_project_bound_env_tokens(
     project_slugs: list[str] | tuple[str, ...] | set[str] | None = None,
     target_registry_id: int | None = None,
     github_app_only: bool = False,
+    github_app_permissions: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Return env-name/token pairs for matching org project bindings.
 
@@ -668,6 +669,8 @@ async def async_resolve_project_bound_env_tokens(
     down-scoped to their combined repository names. Cross-repository GitHub
     operations can therefore use one installation identity without widening
     its permissions or repository access beyond the supplied bindings.
+    ``github_app_permissions`` lets read-only maintenance callers narrow the
+    minted token below the runtime default.
     """
     if not project_slug and not project_slugs and target_registry_id is None:
         return {}
@@ -757,7 +760,11 @@ async def async_resolve_project_bound_env_tokens(
             env[env_name] = await async_mint_installation_token(
                 decrypted_blob,
                 repositories=repo_names,
-                permissions=DEFAULT_INSTALLATION_PERMISSIONS,
+                permissions=(
+                    github_app_permissions
+                    if github_app_permissions is not None
+                    else DEFAULT_INSTALLATION_PERMISSIONS
+                ),
             )
         finally:
             decrypted_blob = None

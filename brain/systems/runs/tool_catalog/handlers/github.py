@@ -1416,7 +1416,7 @@ async def _handle_list_github_sub_issues(
 
 async def _maybe_ensure_deploy_fields(repo_slug: str) -> None:
     """Lazily provision runtime fields when this env-gated feature is armed."""
-    from brain.systems.deploy_state_sweep import ensure_deploy_state_fields
+    from brain.systems.deploy_tracker import ensure_deploy_state_fields
 
     if not deploy_feature_enabled(repo_slug):
         return
