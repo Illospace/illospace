@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from brain.systems.runs.direct_loop.loop_control import ToolDisablement
 from brain.systems.runs.status import RunStatus, coerce_run_status
 
 
@@ -103,14 +104,13 @@ class ToolResultEvidence:
 
 @dataclass(frozen=True)
 class ToolFailureStateEvidence:
-    """Read-only projection of the direct loop's tool-failure circuit state."""
+    """Read-only projection of tool disablements emitted by the failure guard."""
 
     failure_threshold: int = DEFAULT_TOOL_FAILURE_THRESHOLD
-    consecutive_failures: int = 0
     total_failures: int = 0
     tool_name: str | None = None
     error_class: str | None = None
-    termination_reason: str | None = None
+    disabled_tools: tuple[str, ...] = ()
 
     @classmethod
     def from_value(cls, value: Any) -> "ToolFailureStateEvidence | None":
@@ -121,9 +121,6 @@ class ToolFailureStateEvidence:
                 failure_threshold=_coerce_positive_int(
                     value.get("failure_threshold"),
                     default=DEFAULT_TOOL_FAILURE_THRESHOLD,
-                ),
-                consecutive_failures=_coerce_nonnegative_int(
-                    value.get("consecutive_failures")
                 ),
                 total_failures=_coerce_nonnegative_int(value.get("total_failures")),
                 tool_name=(
@@ -136,61 +133,53 @@ class ToolFailureStateEvidence:
                     if value.get("error_class")
                     else None
                 ),
-                termination_reason=(
-                    str(value.get("termination_reason") or value.get("reason")).strip()
-                    if value.get("termination_reason") or value.get("reason")
-                    else None
-                ),
+                disabled_tools=_coerce_tool_names(value.get("disabled_tools")),
             )
-        termination = getattr(value, "termination", None)
-        if termination is None and getattr(value, "reason", None) is not None:
-            termination = value
-        termination_reason = getattr(termination, "reason", None)
-        if hasattr(termination_reason, "value"):
-            termination_reason = termination_reason.value
-        tool_name = (
-            getattr(termination, "tool_name", None)
-            or getattr(value, "consecutive_tool_name", None)
+        raw_disabled_tools = getattr(value, "disabled_tools", None)
+        disablements = (
+            (value,)
+            if isinstance(value, ToolDisablement)
+            else tuple(
+                item
+                for item in (
+                    raw_disabled_tools.values()
+                    if isinstance(raw_disabled_tools, Mapping)
+                    else ()
+                )
+                if isinstance(item, ToolDisablement)
+            )
         )
-        error_class = (
-            getattr(termination, "error_class", None)
-            or getattr(value, "last_error_class", None)
-        )
+        latest = disablements[-1] if disablements else None
         return cls(
             failure_threshold=_coerce_positive_int(
                 getattr(value, "failure_threshold", None),
                 default=DEFAULT_TOOL_FAILURE_THRESHOLD,
             ),
-            consecutive_failures=_coerce_nonnegative_int(
-                getattr(value, "consecutive_failures", None)
-            ),
             total_failures=_coerce_nonnegative_int(
-                getattr(value, "total_failures", None)
+                latest.total_failures if latest is not None else None
             ),
-            tool_name=str(tool_name).strip() if tool_name else None,
-            error_class=str(error_class).strip() if error_class else None,
-            termination_reason=(
-                str(termination_reason).strip() if termination_reason else None
+            tool_name=latest.tool_name if latest is not None else None,
+            error_class=latest.error_class if latest is not None else None,
+            disabled_tools=tuple(
+                disablement.tool_name for disablement in disablements
             ),
         )
 
     @property
+    def guard_triggered(self) -> bool:
+        return bool(self.disabled_tools)
+
+    @property
     def threshold_reached(self) -> bool:
-        threshold = max(1, int(self.failure_threshold))
-        return bool(
-            self.termination_reason == "tool_failure_circuit"
-            or self.consecutive_failures >= threshold
-            or self.total_failures >= threshold
-        )
+        return self.guard_triggered
 
     def cache_payload(self) -> dict[str, Any]:
         return {
             "failure_threshold": self.failure_threshold,
-            "consecutive_failures": self.consecutive_failures,
             "total_failures": self.total_failures,
             "tool_name": self.tool_name,
             "error_class": self.error_class,
-            "termination_reason": self.termination_reason,
+            "disabled_tools": list(self.disabled_tools),
         }
 
 
@@ -398,6 +387,11 @@ class FinalReplyEvidence:
             else None
         )
         for name in [
+            *(
+                self.tool_failure_state.disabled_tools
+                if self.tool_failure_state is not None
+                else ()
+            ),
             state_name,
             *(item.tool_name for item in self.tool_results if item.failed),
         ]:
@@ -461,6 +455,25 @@ def _coerce_positive_int(value: Any, *, default: int) -> int:
         return max(1, int(default))
 
 
+def _coerce_tool_names(value: Any) -> tuple[str, ...]:
+    if isinstance(value, Mapping):
+        raw_names = list(value)
+    elif isinstance(value, str):
+        raw_names = [value]
+    elif isinstance(value, (list, tuple)):
+        raw_names = list(value)
+    elif isinstance(value, (set, frozenset)):
+        raw_names = sorted(value, key=str)
+    else:
+        raw_names = []
+    names: list[str] = []
+    for value in raw_names:
+        name = str(value or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
 def _find_status_question_mapping(value: Any, *, depth: int = 0) -> Mapping[str, Any] | None:
     if not isinstance(value, Mapping) or depth > 3:
         return None
@@ -496,7 +509,7 @@ def _tool_failure_state_from_context(
     ]
     for candidate in candidates:
         state = ToolFailureStateEvidence.from_value(candidate)
-        if state is not None:
+        if state is not None and state.guard_triggered:
             return state
 
     failures = [item for item in tool_results if item.failed]
@@ -511,11 +524,10 @@ def _tool_failure_state_from_context(
     )
     return ToolFailureStateEvidence(
         failure_threshold=DEFAULT_TOOL_FAILURE_THRESHOLD,
-        consecutive_failures=len(failures) if len(names) == 1 else 0,
         total_failures=len(failures),
         tool_name=next(iter(names)) if len(names) == 1 else None,
         error_class=error_class,
-        termination_reason=None,
+        disabled_tools=(),
     )
 
 
