@@ -755,7 +755,7 @@ def test_boot_unit_binds_to_the_docker_unit_that_actually_exists(tmp_path):
     env["ILLO_COMPOSE_ENV_FILE"] = str(env_file)
 
     result = subprocess.run(
-        [str(root / "deploy" / "scripts" / "install-boot-unit.sh"), "--print"],
+        [str(root / "deploy" / "scripts" / "install-boot-unit.sh"), "--system", "--print"],
         capture_output=True,
         text=True,
         env=env,
@@ -824,3 +824,74 @@ replace_idle_worker
     docker_calls = docker_log.read_text()
     assert "update --restart=no old-worker" in docker_calls
     assert "update --restart=unless-stopped old-worker" in docker_calls
+
+
+def test_boot_unit_falls_back_to_a_user_unit_when_root_is_unavailable(tmp_path):
+    """Installing a system unit needs an interactive sudo password on illo-dev.
+
+    A user unit needs no root and still starts at boot as long as lingering is
+    enabled, so it must not dead-end there (#527).
+    """
+    root = Path(__file__).resolve().parents[1]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text("#!/usr/bin/env bash\nexit 0\n")
+    docker.chmod(0o755)
+    # No Docker system unit at all: a user unit must still be generated.
+    systemctl = bin_dir / "systemctl"
+    systemctl.write_text("#!/usr/bin/env bash\nexit 1\n")
+    systemctl.chmod(0o755)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["ILLO_COMPOSE_ENV_FILE"] = str(env_file)
+
+    result = subprocess.run(
+        [str(root / "deploy" / "scripts" / "install-boot-unit.sh"), "--print"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    unit = result.stdout
+    # A user unit cannot order against a system unit, so it waits for the daemon.
+    assert "Requires=" not in unit
+    assert "ExecStartPre=" in unit
+    assert "docker info" in unit
+    assert "WantedBy=default.target" in unit
+    # The readiness loop must be bounded, unlike the system unit's TimeoutStartSec=0.
+    assert "TimeoutStartSec=900" in unit
+    assert "ExecStop=" not in unit
+
+
+def test_boot_unit_system_scope_still_requires_root_and_orders_after_docker(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("docker", "systemctl"):
+        p = bin_dir / name
+        p.write_text("#!/usr/bin/env bash\nexit 1\n")
+        p.chmod(0o755)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["ILLO_COMPOSE_ENV_FILE"] = str(env_file)
+
+    result = subprocess.run(
+        [str(root / "deploy" / "scripts" / "install-boot-unit.sh"), "--system", "--print"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    # System scope has no Docker unit to bind to here, so it must refuse rather
+    # than emit a unit with an empty Requires=.
+    assert result.returncode == 1
+    assert "--user" in result.stderr
