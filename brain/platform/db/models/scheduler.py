@@ -29,6 +29,7 @@ __all__ = [
     "OWNER_MODE_CRON",
     "OWNER_MODE_MIRROR",
     "OWNER_MODE_SCHEDULER",
+    "SchedulerFailureGuardLatch",
     "SchedulerJob",
     "SchedulerRun",
     "SchedulerLease",
@@ -94,12 +95,6 @@ class SchedulerJob(Base, CreatedAtMixin):
     consecutive_failure_count: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0
     )
-    failure_alerted_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    rate_alerted_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
     last_failure_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
@@ -113,6 +108,23 @@ class SchedulerJob(Base, CreatedAtMixin):
             "misfire_policy IN ('record', 'skip', 'catch_up')",
             name="ck_scheduler_jobs_misfire_policy",
         ),
+    )
+
+
+class SchedulerFailureGuardLatch(Base):
+    """One durable alert latch for one scheduler failure-guard trigger."""
+
+    __tablename__ = "scheduler_failure_guard_latches"
+
+    job_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("scheduler_jobs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    trigger_kind: Mapped[str] = mapped_column(String(40), primary_key=True)
+    alerted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
     )
 
 

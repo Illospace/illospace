@@ -40,6 +40,7 @@ from brain.app.scheduler.programs import (
     nightly_commands_for_step,
 )
 from brain.app.scheduler.runtime import (
+    FailureGuardEvaluation,
     LEASE_TTL_SECONDS,
     RUN_STATUS_CLAIMED,
     RUN_STATUS_PAUSED,
@@ -64,6 +65,7 @@ from brain.app.scheduler.runtime import (
     normalize_retry_policy,
     retry_available,
     retry_available_at,
+    serialize_failure_guard,
     trace_id_for_run_id,
     trace_id_for_scheduler_run_id,
 )
@@ -416,12 +418,14 @@ async def async_deliver_scheduler_failure_alert(
     *,
     job_key: str,
     run_id: int,
-    consecutive_failure_count: int | None = None,
-    rate_failure_count: int | None = None,
-    rate_window_hours: int | None = None,
+    evaluation: FailureGuardEvaluation,
     error_text: str,
 ) -> None:
-    """Post one scheduler failure-guard edge through Illo's Slack client."""
+    """Post all edges crossed by one evaluation as one Slack notification."""
+    crossed_edges = evaluation.crossed_edges
+    if not crossed_edges:
+        raise ValueError("failure-guard alert requires at least one crossed edge")
+
     client = await slack_web_client_from_runtime(
         requested_by="scheduler_failure_alert",
         reason="Deliver a repeated scheduler job failure alert to the team.",
@@ -439,15 +443,20 @@ async def async_deliver_scheduler_failure_alert(
         f"{public_app_base_url()}/api/system/scheduler"
         f"?job_key={quote(job_key, safe='')}&run_id={run_id}"
     )
-    if rate_failure_count is not None:
-        failure_summary = (
-            f"{rate_failure_count} failures in the last "
-            f"{rate_window_hours}h (intermittent)"
-        )
-        alert_title = "Scheduler job intermittent failure"
+    if len(crossed_edges) == 1:
+        alert_title = crossed_edges[0].alert_title
+        failure_summary = crossed_edges[0].alert_summary
     else:
-        failure_summary = f"Consecutive failures: {consecutive_failure_count}"
-        alert_title = "Scheduler job repeated failure"
+        alert_title = "Scheduler job failure guard alert"
+        failure_summary = "\n".join(
+            (
+                "Triggers crossed:",
+                *(
+                    f"- {edge.kind.value}: {edge.alert_summary}"
+                    for edge in crossed_edges
+                ),
+            )
+        )
     await client.post_message(
         channel=channel,
         text=(
@@ -478,60 +487,35 @@ async def _async_apply_failure_guard(
     )
     run.result_summary = {
         **(run.result_summary or {}),
-        "failure_guard": guard,
+        "failure_guard": serialize_failure_guard(guard),
     }
-    if guard["alert_emitted"]:
-        rate_alert_note = (
-            " (rolling edge also crossed and was folded into this single "
-            "delivered alert)"
-            if guard["rate_alert_latched"]
-            else ""
+    crossed_edges = guard.crossed_edges
+    if crossed_edges:
+        alert_title = (
+            crossed_edges[0].alert_title
+            if len(crossed_edges) == 1
+            else "Scheduler job combined failure guard"
         )
         logger.error(
-            "Scheduler job repeated failure alert%s: job_key=%s run_id=%s "
-            "consecutive_failures=%s failure_signature=%s error=%s",
-            rate_alert_note,
+            "%s alert: job_key=%s run_id=%s crossed_triggers=%s "
+            "failure_signature=%s error=%s",
+            alert_title,
             job.job_key,
             run.id,
-            guard["consecutive_failures"],
-            guard["failure_signature"],
+            ",".join(edge.kind.value for edge in crossed_edges),
+            guard.failure_signature,
             error_text,
         )
         try:
             await async_deliver_scheduler_failure_alert(
                 job_key=job.job_key,
                 run_id=run.id,
-                consecutive_failure_count=guard["consecutive_failures"],
+                evaluation=guard,
                 error_text=error_text,
             )
         except Exception:
             logger.exception(
-                "Scheduler job repeated failure Slack delivery failed: "
-                "job_key=%s run_id=%s",
-                job.job_key,
-                run.id,
-            )
-    elif guard["rate_alert_latched"]:
-        logger.error(
-            "Scheduler job intermittent failure alert: job_key=%s run_id=%s "
-            "rate_failures=%s rate_window_hours=%s error=%s",
-            job.job_key,
-            run.id,
-            guard["rate_failures"],
-            guard["rate_window_hours"],
-            error_text,
-        )
-        try:
-            await async_deliver_scheduler_failure_alert(
-                job_key=job.job_key,
-                run_id=run.id,
-                rate_failure_count=guard["rate_failures"],
-                rate_window_hours=guard["rate_window_hours"],
-                error_text=error_text,
-            )
-        except Exception:
-            logger.exception(
-                "Scheduler job intermittent failure Slack delivery failed: "
+                "Scheduler job failure-guard Slack delivery failed: "
                 "job_key=%s run_id=%s",
                 job.job_key,
                 run.id,

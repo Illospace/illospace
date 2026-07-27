@@ -8,6 +8,7 @@ import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -47,6 +48,9 @@ from brain.app.scheduler.programs import (
     nightly_meta_evolution_command,
 )
 from brain.app.scheduler.runtime import (
+    FailureGuardEdge,
+    FailureGuardEvaluation,
+    FailureGuardTriggerKind,
     RUN_STATUS_EXPIRED,
     RUN_STATUS_SETTLED_SUCCESS,
     RUN_STATUS_SHELVED,
@@ -55,8 +59,15 @@ from brain.app.scheduler.runtime import (
     async_reclaim_expired_leases,
     async_update_run_step,
     scheduler_failure_signature,
+    serialize_failure_guard,
 )
-from brain.platform.db.models.scheduler import SchedulerJob, SchedulerLease, SchedulerRun, SchedulerRunStep
+from brain.platform.db.models.scheduler import (
+    SchedulerFailureGuardLatch,
+    SchedulerJob,
+    SchedulerLease,
+    SchedulerRun,
+    SchedulerRunStep,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -98,6 +109,7 @@ async def session(async_sqlite_session_factory):
     return await async_sqlite_session_factory(
         [
             SchedulerJob.__table__,
+            SchedulerFailureGuardLatch.__table__,
             SchedulerRun.__table__,
             SchedulerLease.__table__,
             SchedulerRunStep.__table__,
@@ -131,6 +143,24 @@ def _make_scheduler_job(**overrides):
     }
     defaults.update(overrides)
     return SchedulerJob(**defaults)
+
+
+def _guard_trigger(guard: dict[str, Any], kind: str) -> dict[str, Any]:
+    triggers = guard["triggers"]
+    assert isinstance(triggers, list)
+    return next(trigger for trigger in triggers if trigger["kind"] == kind)
+
+
+async def _guard_latches(
+    session,
+    job: SchedulerJob,
+) -> dict[str, SchedulerFailureGuardLatch]:
+    result = await session.scalars(
+        select(SchedulerFailureGuardLatch).where(
+            SchedulerFailureGuardLatch.job_id == job.id
+        )
+    )
+    return {latch.trigger_kind: latch for latch in result.all()}
 
 
 async def test_sync_scheduler_catalog_seeds_scheduler_jobs_without_cron_table(session):
@@ -1399,10 +1429,26 @@ async def test_scheduler_failure_alert_uses_vault_first_slack_client(monkeypatch
         fake_client_from_runtime,
     )
 
+    evaluation = FailureGuardEvaluation(
+        failure_signature="signature",
+        last_error="RuntimeError: failed",
+        edges=(
+            FailureGuardEdge(
+                kind=FailureGuardTriggerKind.CONSECUTIVE,
+                count=3,
+                threshold=3,
+                window_hours=None,
+                alerted_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+                crossed=True,
+                alert_title="Scheduler job repeated failure",
+                alert_summary="Consecutive failures: 3",
+            ),
+        ),
+    )
     await scheduler_executor.async_deliver_scheduler_failure_alert(
         job_key="nightly_sleep",
         run_id=42,
-        consecutive_failure_count=3,
+        evaluation=evaluation,
         error_text="RuntimeError: failed\nvolatile traceback details",
     )
 
@@ -1445,11 +1491,26 @@ async def test_scheduler_failure_rate_alert_uses_intermittent_message(monkeypatc
         fake_client_from_runtime,
     )
 
+    evaluation = FailureGuardEvaluation(
+        failure_signature="signature",
+        last_error="TimeoutError: health scan timed out",
+        edges=(
+            FailureGuardEdge(
+                kind=FailureGuardTriggerKind.ROLLING_WINDOW,
+                count=3,
+                threshold=3,
+                window_hours=24,
+                alerted_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+                crossed=True,
+                alert_title="Scheduler job intermittent failure",
+                alert_summary="3 failures in the last 24h (intermittent)",
+            ),
+        ),
+    )
     await scheduler_executor.async_deliver_scheduler_failure_alert(
         job_key="uwear_aws_health_scan",
         run_id=84,
-        rate_failure_count=3,
-        rate_window_hours=24,
+        evaluation=evaluation,
         error_text="TimeoutError: health scan timed out\ntraceback details",
     )
 
@@ -1460,6 +1521,74 @@ async def test_scheduler_failure_rate_alert_uses_intermittent_message(monkeypatc
             "Job key: uwear_aws_health_scan\n"
             "3 failures in the last 24h (intermittent)\n"
             "Error: TimeoutError: health scan timed out\n"
+            "Job: <https://illo.example.com/api/system/scheduler"
+            "?job_key=uwear_aws_health_scan&run_id=84|open scheduler state>"
+        ),
+    }
+
+
+async def test_scheduler_failure_alert_combines_simultaneous_crossings(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class FakeSlackClient:
+        async def post_message(self, *, channel, text):
+            calls["post"] = {"channel": channel, "text": text}
+            return {"ok": True, "message": {"text": text}}
+
+    async def fake_client_from_runtime(*, requested_by, reason):
+        return FakeSlackClient()
+
+    monkeypatch.setenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "C_ALERTS")
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
+    monkeypatch.setattr(
+        scheduler_executor,
+        "slack_web_client_from_runtime",
+        fake_client_from_runtime,
+    )
+    alerted_at = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    evaluation = FailureGuardEvaluation(
+        failure_signature="signature",
+        last_error="RuntimeError: health scan failed",
+        edges=(
+            FailureGuardEdge(
+                kind=FailureGuardTriggerKind.CONSECUTIVE,
+                count=3,
+                threshold=3,
+                window_hours=None,
+                alerted_at=alerted_at,
+                crossed=True,
+                alert_title="Scheduler job repeated failure",
+                alert_summary="Consecutive failures: 3",
+            ),
+            FailureGuardEdge(
+                kind=FailureGuardTriggerKind.ROLLING_WINDOW,
+                count=3,
+                threshold=3,
+                window_hours=24,
+                alerted_at=alerted_at,
+                crossed=True,
+                alert_title="Scheduler job intermittent failure",
+                alert_summary="3 failures in the last 24h (intermittent)",
+            ),
+        ),
+    )
+
+    await scheduler_executor.async_deliver_scheduler_failure_alert(
+        job_key="uwear_aws_health_scan",
+        run_id=84,
+        evaluation=evaluation,
+        error_text="RuntimeError: health scan failed",
+    )
+
+    assert calls["post"] == {
+        "channel": "C_ALERTS",
+        "text": (
+            "Scheduler job failure guard alert\n"
+            "Job key: uwear_aws_health_scan\n"
+            "Triggers crossed:\n"
+            "- consecutive: Consecutive failures: 3\n"
+            "- rolling_window: 3 failures in the last 24h (intermittent)\n"
+            "Error: RuntimeError: health scan failed\n"
             "Job: <https://illo.example.com/api/system/scheduler"
             "?job_key=uwear_aws_health_scan&run_id=84|open scheduler state>"
         ),
@@ -1510,7 +1639,11 @@ async def test_repeated_heuristic_review_failure_emits_one_durable_alert(session
             now=datetime(2026, 4, 21, 3, minute, tzinfo=timezone.utc),
         )
         await session.refresh(job)
-        alert_timestamps.append(job.failure_alerted_at)
+        latches = await _guard_latches(session, job)
+        consecutive_latch = latches.get("consecutive")
+        alert_timestamps.append(
+            consecutive_latch.alerted_at if consecutive_latch else None
+        )
         assert failed.status == "retryable"
 
     alerts = [record for record in caplog.records if record.getMessage().startswith("Scheduler job repeated failure alert")]
@@ -1526,20 +1659,31 @@ async def test_repeated_heuristic_review_failure_emits_one_durable_alert(session
     assert alert_timestamps[:2] == [None, None]
     assert alert_timestamps[2] is not None
     assert alert_timestamps[3] == alert_timestamps[2]
-    slack_sender.assert_awaited_once_with(
-        job_key="nightly_sleep",
-        run_id=run.id,
-        consecutive_failure_count=3,
-        error_text=failure_text,
-    )
+    slack_sender.assert_awaited_once()
+    delivery = slack_sender.await_args.kwargs
+    assert delivery["job_key"] == "nightly_sleep"
+    assert delivery["run_id"] == run.id
+    assert delivery["error_text"] == failure_text
+    delivered_guard = serialize_failure_guard(delivery["evaluation"])
+    delivered_consecutive = _guard_trigger(delivered_guard, "consecutive")
+    assert delivered_consecutive["count"] == 3
+    assert delivered_consecutive["crossed"] is True
     assert snapshot["alerts"] == [
         {
-            "type": "repeated_scheduler_job_failure",
+            "type": "scheduler_job_failure_guard",
             "job_key": "nightly_sleep",
-            "consecutive_failures": 4,
             "failure_signature": job.failure_signature,
             "last_error": failure_text,
-            "alerted_at": alert_timestamps[2].isoformat(),
+            "triggers": [
+                {
+                    "kind": "consecutive",
+                    "count": 4,
+                    "threshold": 3,
+                    "window_hours": None,
+                    "alerted_at": alert_timestamps[2].isoformat(),
+                    "crossed": False,
+                }
+            ],
         }
     ]
 
@@ -1571,7 +1715,69 @@ async def test_repeated_heuristic_review_failure_emits_one_durable_alert(session
     )
     assert job.consecutive_failure_count == 0
     assert job.failure_signature is None
-    assert job.failure_alerted_at is None
+    assert await _guard_latches(session, job) == {}
+
+
+async def test_consecutive_latch_rearms_when_failure_signature_changes(
+    session,
+    monkeypatch,
+):
+    monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "1")
+    monkeypatch.setenv("SCHEDULER_FAILURE_RATE_THRESHOLD", "99")
+    slack_sender = AsyncMock()
+    monkeypatch.setattr(
+        scheduler_executor,
+        "async_deliver_scheduler_failure_alert",
+        slack_sender,
+    )
+    job = _make_scheduler_job()
+    session.add(job)
+    await session.flush()
+    base = datetime(2026, 4, 21, tzinfo=timezone.utc)
+
+    async def fail(hour: int, error_text: str) -> SchedulerRun:
+        started_at = base + timedelta(hours=hour)
+        run = SchedulerRun(
+            job_id=job.id,
+            scheduled_for=started_at,
+            window_start=started_at,
+            window_end=started_at + timedelta(hours=1),
+            status="settled_failure",
+            idempotency_key=f"signature-change:{hour}",
+            started_at=started_at,
+            finished_at=started_at,
+        )
+        session.add(run)
+        await session.flush()
+        await scheduler_executor._async_apply_failure_guard(
+            session,
+            job,
+            run,
+            failure_key="health_scan",
+            error_text=error_text,
+            now=started_at,
+        )
+        return run
+
+    first = await fail(0, "RuntimeError: first failure")
+    first_alerted_at = (
+        await _guard_latches(session, job)
+    )["consecutive"].alerted_at
+    second = await fail(1, "TimeoutError: different failure")
+    second_alerted_at = (
+        await _guard_latches(session, job)
+    )["consecutive"].alerted_at
+
+    assert _guard_trigger(
+        first.result_summary["failure_guard"],
+        "consecutive",
+    )["crossed"] is True
+    assert _guard_trigger(
+        second.result_summary["failure_guard"],
+        "consecutive",
+    )["crossed"] is True
+    assert second_alerted_at > first_alerted_at
+    assert slack_sender.await_count == 2
 
 
 async def test_intermittent_failures_emit_one_rate_alert_until_window_recovers(
@@ -1629,28 +1835,45 @@ async def test_intermittent_failures_emit_one_rate_alert_until_window_recovers(
     await add_run("settled_success", 3)
     threshold_run = await add_run("settled_failure", 4)
 
-    assert threshold_run.result_summary["failure_guard"]["rate_failures"] == 3
-    assert threshold_run.result_summary["failure_guard"]["rate_alert_latched"] is True
-    first_rate_alerted_at = job.rate_alerted_at
-    assert first_rate_alerted_at is not None
-    slack_sender.assert_awaited_once_with(
-        job_key="nightly_sleep",
-        run_id=threshold_run.id,
-        rate_failure_count=3,
-        rate_window_hours=24,
-        error_text="RuntimeError: failed at hour 4",
+    threshold_rate = _guard_trigger(
+        threshold_run.result_summary["failure_guard"],
+        "rolling_window",
     )
+    assert threshold_rate["count"] == 3
+    assert threshold_rate["crossed"] is True
+    first_rate_alerted_at = (
+        await _guard_latches(session, job)
+    )["rolling_window"].alerted_at
+    assert first_rate_alerted_at is not None
+    slack_sender.assert_awaited_once()
+    first_delivery = slack_sender.await_args.kwargs
+    assert first_delivery["job_key"] == "nightly_sleep"
+    assert first_delivery["run_id"] == threshold_run.id
+    assert first_delivery["error_text"] == "RuntimeError: failed at hour 4"
+    delivered_rate = _guard_trigger(
+        serialize_failure_guard(first_delivery["evaluation"]),
+        "rolling_window",
+    )
+    assert delivered_rate["count"] == 3
+    assert delivered_rate["window_hours"] == 24
+    assert delivered_rate["crossed"] is True
 
     await add_run("settled_success", 5)
     extra_failure = await add_run("settled_failure", 6)
 
-    assert extra_failure.result_summary["failure_guard"]["rate_failures"] == 4
-    assert extra_failure.result_summary["failure_guard"]["rate_alert_latched"] is False
-    assert job.rate_alerted_at == first_rate_alerted_at
+    extra_rate = _guard_trigger(
+        extra_failure.result_summary["failure_guard"],
+        "rolling_window",
+    )
+    assert extra_rate["count"] == 4
+    assert extra_rate["crossed"] is False
+    assert (
+        await _guard_latches(session, job)
+    )["rolling_window"].alerted_at == first_rate_alerted_at
     assert slack_sender.await_count == 1
 
     await add_run("settled_success", 31)
-    assert job.rate_alerted_at is None
+    assert "rolling_window" not in await _guard_latches(session, job)
 
     await add_run("settled_failure", 32)
     await add_run("settled_success", 33)
@@ -1658,16 +1881,21 @@ async def test_intermittent_failures_emit_one_rate_alert_until_window_recovers(
     await add_run("settled_success", 35)
     rearmed_run = await add_run("settled_failure", 36)
 
-    assert rearmed_run.result_summary["failure_guard"]["rate_failures"] == 3
-    assert rearmed_run.result_summary["failure_guard"]["rate_alert_latched"] is True
+    rearmed_rate = _guard_trigger(
+        rearmed_run.result_summary["failure_guard"],
+        "rolling_window",
+    )
+    assert rearmed_rate["count"] == 3
+    assert rearmed_rate["crossed"] is True
     assert slack_sender.await_count == 2
-    assert slack_sender.await_args_list[-1].kwargs == {
-        "job_key": "nightly_sleep",
-        "run_id": rearmed_run.id,
-        "rate_failure_count": 3,
-        "rate_window_hours": 24,
-        "error_text": "RuntimeError: failed at hour 36",
-    }
+    last_delivery = slack_sender.await_args_list[-1].kwargs
+    assert last_delivery["job_key"] == "nightly_sleep"
+    assert last_delivery["run_id"] == rearmed_run.id
+    assert last_delivery["error_text"] == "RuntimeError: failed at hour 36"
+    assert _guard_trigger(
+        serialize_failure_guard(last_delivery["evaluation"]),
+        "rolling_window",
+    )["crossed"] is True
 
 
 async def test_consecutive_and_rate_edges_coexist_without_duplicate_delivery(
@@ -1716,20 +1944,42 @@ async def test_consecutive_and_rate_edges_coexist_without_duplicate_delivery(
 
     assert threshold_run is not None
     guard = threshold_run.result_summary["failure_guard"]
-    assert guard["alert_emitted"] is True
-    assert guard["rate_alert_latched"] is True
-    assert job.failure_alerted_at is not None
-    assert job.rate_alerted_at is not None
-    assert (
-        "rolling edge also crossed and was folded into this single delivered alert"
-        in caplog.text
+    assert _guard_trigger(guard, "consecutive")["crossed"] is True
+    assert _guard_trigger(guard, "rolling_window")["crossed"] is True
+    assert set(await _guard_latches(session, job)) == {
+        "consecutive",
+        "rolling_window",
+    }
+    assert "Scheduler job combined failure guard alert" in caplog.text
+
+    slack_sender.assert_awaited_once()
+    delivery = slack_sender.await_args.kwargs
+    assert delivery["job_key"] == "nightly_sleep"
+    assert delivery["run_id"] == threshold_run.id
+    assert delivery["error_text"] == "RuntimeError: health scan failed"
+    delivered_guard = serialize_failure_guard(delivery["evaluation"])
+    assert [
+        trigger["kind"]
+        for trigger in delivered_guard["triggers"]
+        if trigger["crossed"]
+    ] == ["consecutive", "rolling_window"]
+
+    snapshot = await async_scheduler_health_snapshot(
+        session,
+        now=base + timedelta(hours=2),
     )
-    slack_sender.assert_awaited_once_with(
-        job_key="nightly_sleep",
-        run_id=threshold_run.id,
-        consecutive_failure_count=3,
-        error_text="RuntimeError: health scan failed",
+    catalog_guard = snapshot["jobs"][0]["failure_guard"]
+    assert [trigger["kind"] for trigger in catalog_guard["triggers"]] == [
+        "consecutive",
+        "rolling_window",
+    ]
+    assert all(
+        trigger["crossed"] is False
+        for trigger in catalog_guard["triggers"]
     )
+    assert [
+        trigger["kind"] for trigger in snapshot["alerts"][0]["triggers"]
+    ] == ["consecutive", "rolling_window"]
 
 
 async def test_retry_policy_backoff_controls_automatic_reclaim(session):

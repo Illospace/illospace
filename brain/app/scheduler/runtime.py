@@ -1,13 +1,15 @@
 """Scheduler run, lease, and step helpers."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 from hashlib import sha256
 import os
 from pathlib import Path
 import re
 import socket
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from brain.kernel.common.time import ensure_utc
 
@@ -18,6 +20,7 @@ from brain.platform.db.models.scheduler import (
     OWNER_MODE_CRON,
     OWNER_MODE_MIRROR,
     OWNER_MODE_SCHEDULER,
+    SchedulerFailureGuardLatch,
     SchedulerJob,
     SchedulerLease,
     SchedulerRun,
@@ -69,6 +72,67 @@ _FAILURE_RUNTIME_ID_RE = re.compile(
     r"\b(?P<label>pid|process_id|thread_id)(?P<separator>\s*[:=]\s*)\d+\b",
     re.IGNORECASE,
 )
+
+
+class FailureGuardTriggerKind(StrEnum):
+    """Stable persistence and payload discriminator for a guard trigger."""
+
+    CONSECUTIVE = "consecutive"
+    ROLLING_WINDOW = "rolling_window"
+
+
+FailureGuardCounter = Callable[
+    [AsyncSession, SchedulerJob, datetime, int | None],
+    Awaitable[int],
+]
+
+
+@dataclass(frozen=True)
+class FailureGuardTriggerPolicy:
+    """Configuration and behavior owned by one failure-guard trigger."""
+
+    kind: FailureGuardTriggerKind
+    threshold: int
+    window_hours: int | None
+    counter: FailureGuardCounter
+    reset_on_signature_change: bool
+    reset_on_success: bool
+    alert_title: str
+    alert_summary_template: str
+
+
+@dataclass(frozen=True)
+class FailureGuardPolicy:
+    """All configured failure triggers evaluated under one scheduler-job lock."""
+
+    triggers: tuple[FailureGuardTriggerPolicy, ...]
+
+
+@dataclass(frozen=True)
+class FailureGuardEdge:
+    """The current state and crossing result for one configured trigger."""
+
+    kind: FailureGuardTriggerKind
+    count: int
+    threshold: int
+    window_hours: int | None
+    alerted_at: datetime | None
+    crossed: bool
+    alert_title: str
+    alert_summary: str
+
+
+@dataclass(frozen=True)
+class FailureGuardEvaluation:
+    """Failure state plus every configured trigger edge from one evaluation."""
+
+    failure_signature: str | None
+    last_error: str | None
+    edges: tuple[FailureGuardEdge, ...]
+
+    @property
+    def crossed_edges(self) -> tuple[FailureGuardEdge, ...]:
+        return tuple(edge for edge in self.edges if edge.crossed)
 
 
 def trace_id_for_run_id(run_id: int | str | None) -> str | None:
@@ -132,45 +196,11 @@ def normalize_retry_policy(policy: dict[str, Any] | None) -> dict[str, int]:
     }
 
 
-def scheduler_failure_alert_threshold() -> int:
-    """Return the number of identical failures that opens one durable alert."""
+def _positive_int_setting(name: str, default: int) -> int:
     try:
-        configured = int(
-            os.getenv(
-                "SCHEDULER_FAILURE_ALERT_THRESHOLD",
-                str(SCHEDULER_FAILURE_ALERT_THRESHOLD_DEFAULT),
-            )
-        )
+        configured = int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
-        configured = SCHEDULER_FAILURE_ALERT_THRESHOLD_DEFAULT
-    return max(1, configured)
-
-
-def scheduler_failure_rate_threshold() -> int:
-    """Return the rolling failure count that opens one durable rate alert."""
-    try:
-        configured = int(
-            os.getenv(
-                "SCHEDULER_FAILURE_RATE_THRESHOLD",
-                str(SCHEDULER_FAILURE_RATE_THRESHOLD_DEFAULT),
-            )
-        )
-    except (TypeError, ValueError):
-        configured = SCHEDULER_FAILURE_RATE_THRESHOLD_DEFAULT
-    return max(1, configured)
-
-
-def scheduler_failure_rate_window_hours() -> int:
-    """Return the rolling failure-rate window in hours."""
-    try:
-        configured = int(
-            os.getenv(
-                "SCHEDULER_FAILURE_RATE_WINDOW_HOURS",
-                str(SCHEDULER_FAILURE_RATE_WINDOW_HOURS_DEFAULT),
-            )
-        )
-    except (TypeError, ValueError):
-        configured = SCHEDULER_FAILURE_RATE_WINDOW_HOURS_DEFAULT
+        configured = default
     return max(1, configured)
 
 
@@ -200,39 +230,192 @@ def scheduler_failure_signature(failure_identity: str) -> str:
     return sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _scheduler_failure_guard_state(job: SchedulerJob) -> dict[str, Any]:
-    return {
-        "failure_signature": job.failure_signature,
-        "consecutive_failures": int(job.consecutive_failure_count or 0),
-        "last_error": job.last_failure_error,
-        "alerted_at": (
-            job.failure_alerted_at.isoformat() if job.failure_alerted_at else None
-        ),
-        "rate_alerted_at": (
-            job.rate_alerted_at.isoformat() if job.rate_alerted_at else None
-        ),
-    }
-
-
 async def _async_scheduler_failure_rate_count(
     session: AsyncSession,
-    job_id: int,
-    *,
+    job: SchedulerJob,
     now: datetime,
-    window_hours: int,
+    window_hours: int | None,
 ) -> int:
+    if window_hours is None:
+        raise ValueError("rolling-window trigger requires window_hours")
     return int(
         await session.scalar(
             select(func.count())
             .select_from(SchedulerRun)
             .where(
-                SchedulerRun.job_id == job_id,
+                SchedulerRun.job_id == job.id,
                 SchedulerRun.status == RUN_STATUS_SETTLED_FAILURE,
                 SchedulerRun.started_at
                 > now - timedelta(hours=window_hours),
             )
         )
         or 0
+    )
+
+
+async def _async_consecutive_failure_count(
+    session: AsyncSession,
+    job: SchedulerJob,
+    now: datetime,
+    window_hours: int | None,
+) -> int:
+    del session, now, window_hours
+    return int(job.consecutive_failure_count or 0)
+
+
+def scheduler_failure_guard_policy() -> FailureGuardPolicy:
+    """Load every failure-guard trigger and its settings as one policy."""
+    return FailureGuardPolicy(
+        triggers=(
+            FailureGuardTriggerPolicy(
+                kind=FailureGuardTriggerKind.CONSECUTIVE,
+                threshold=_positive_int_setting(
+                    "SCHEDULER_FAILURE_ALERT_THRESHOLD",
+                    SCHEDULER_FAILURE_ALERT_THRESHOLD_DEFAULT,
+                ),
+                window_hours=None,
+                counter=_async_consecutive_failure_count,
+                reset_on_signature_change=True,
+                reset_on_success=True,
+                alert_title="Scheduler job repeated failure",
+                alert_summary_template="Consecutive failures: {count}",
+            ),
+            FailureGuardTriggerPolicy(
+                kind=FailureGuardTriggerKind.ROLLING_WINDOW,
+                threshold=_positive_int_setting(
+                    "SCHEDULER_FAILURE_RATE_THRESHOLD",
+                    SCHEDULER_FAILURE_RATE_THRESHOLD_DEFAULT,
+                ),
+                window_hours=_positive_int_setting(
+                    "SCHEDULER_FAILURE_RATE_WINDOW_HOURS",
+                    SCHEDULER_FAILURE_RATE_WINDOW_HOURS_DEFAULT,
+                ),
+                counter=_async_scheduler_failure_rate_count,
+                reset_on_signature_change=False,
+                reset_on_success=False,
+                alert_title="Scheduler job intermittent failure",
+                alert_summary_template=(
+                    "{count} failures in the last {window_hours}h (intermittent)"
+                ),
+            ),
+        )
+    )
+
+
+def serialize_failure_guard(
+    evaluation: FailureGuardEvaluation,
+) -> dict[str, Any]:
+    """Return the canonical public failure-guard payload."""
+    return {
+        "failure_signature": evaluation.failure_signature,
+        "last_error": evaluation.last_error,
+        "triggers": [
+            {
+                "kind": edge.kind.value,
+                "count": edge.count,
+                "threshold": edge.threshold,
+                "window_hours": edge.window_hours,
+                "alerted_at": (
+                    edge.alerted_at.isoformat() if edge.alerted_at else None
+                ),
+                "crossed": edge.crossed,
+            }
+            for edge in evaluation.edges
+        ],
+    }
+
+
+async def _async_failure_guard_latches(
+    session: AsyncSession,
+    job_id: int,
+) -> dict[FailureGuardTriggerKind, SchedulerFailureGuardLatch]:
+    result = await session.scalars(
+        select(SchedulerFailureGuardLatch).where(
+            SchedulerFailureGuardLatch.job_id == job_id
+        )
+    )
+    latches: dict[FailureGuardTriggerKind, SchedulerFailureGuardLatch] = {}
+    for latch in result.all():
+        try:
+            kind = FailureGuardTriggerKind(latch.trigger_kind)
+        except ValueError:
+            continue
+        latches[kind] = latch
+    return latches
+
+
+async def _async_evaluate_failure_guard_triggers(
+    session: AsyncSession,
+    job: SchedulerJob,
+    *,
+    now: datetime,
+    policy: FailureGuardPolicy,
+    latches: dict[FailureGuardTriggerKind, SchedulerFailureGuardLatch],
+    persist_crossings: bool,
+) -> FailureGuardEvaluation:
+    edges: list[FailureGuardEdge] = []
+    for trigger in policy.triggers:
+        count = await trigger.counter(
+            session,
+            job,
+            now,
+            trigger.window_hours,
+        )
+        latch = latches.get(trigger.kind)
+        crossed = (
+            persist_crossings
+            and count >= trigger.threshold
+            and latch is None
+        )
+        if crossed:
+            latch = SchedulerFailureGuardLatch(
+                job_id=job.id,
+                trigger_kind=trigger.kind.value,
+                alerted_at=now,
+            )
+            session.add(latch)
+            latches[trigger.kind] = latch
+        edges.append(
+            FailureGuardEdge(
+                kind=trigger.kind,
+                count=count,
+                threshold=trigger.threshold,
+                window_hours=trigger.window_hours,
+                alerted_at=latch.alerted_at if latch is not None else None,
+                crossed=crossed,
+                alert_title=trigger.alert_title,
+                alert_summary=trigger.alert_summary_template.format(
+                    count=count,
+                    threshold=trigger.threshold,
+                    window_hours=trigger.window_hours,
+                ),
+            )
+        )
+    return FailureGuardEvaluation(
+        failure_signature=job.failure_signature,
+        last_error=job.last_failure_error,
+        edges=tuple(edges),
+    )
+
+
+async def async_read_scheduler_failure_guard(
+    session: AsyncSession,
+    job: SchedulerJob,
+    *,
+    now: datetime | None = None,
+    policy: FailureGuardPolicy | None = None,
+) -> FailureGuardEvaluation:
+    """Read every configured trigger through the canonical evaluation path."""
+    now = _utcnow(now)
+    policy = policy or scheduler_failure_guard_policy()
+    latches = await _async_failure_guard_latches(session, job.id)
+    return await _async_evaluate_failure_guard_triggers(
+        session,
+        job,
+        now=now,
+        policy=policy,
+        latches=latches,
+        persist_crossings=False,
     )
 
 
@@ -243,9 +426,10 @@ async def async_record_scheduler_job_failure(
     failure_identity: str,
     error_text: str,
     now: datetime | None = None,
-) -> dict[str, Any]:
-    """Persist failure guard state and mark only newly crossed alert edges."""
+) -> FailureGuardEvaluation:
+    """Persist failure state and evaluate every trigger under one job lock."""
     now = _utcnow(now)
+    policy = scheduler_failure_guard_policy()
     locked_job = await session.scalar(
         select(SchedulerJob)
         .where(SchedulerJob.id == job.id)
@@ -254,6 +438,7 @@ async def async_record_scheduler_job_failure(
     if locked_job is None:
         raise ValueError(f"Scheduler job {job.id} not found")
 
+    latches = await _async_failure_guard_latches(session, locked_job.id)
     signature = scheduler_failure_signature(failure_identity)
     if locked_job.failure_signature == signature:
         locked_job.consecutive_failure_count = int(
@@ -262,41 +447,29 @@ async def async_record_scheduler_job_failure(
     else:
         locked_job.failure_signature = signature
         locked_job.consecutive_failure_count = 1
-        locked_job.failure_alerted_at = None
+        reset_latch = False
+        for trigger in policy.triggers:
+            latch = latches.get(trigger.kind)
+            if latch is None or not trigger.reset_on_signature_change:
+                continue
+            await session.delete(latch)
+            del latches[trigger.kind]
+            reset_latch = True
+        if reset_latch:
+            await session.flush()
 
     locked_job.last_failure_error = error_text
-    alert_emitted = False
-    if (
-        int(locked_job.consecutive_failure_count or 0)
-        >= scheduler_failure_alert_threshold()
-        and locked_job.failure_alerted_at is None
-    ):
-        locked_job.failure_alerted_at = now
-        alert_emitted = True
-
-    rate_window_hours = scheduler_failure_rate_window_hours()
-    rate_failures = await _async_scheduler_failure_rate_count(
+    evaluation = await _async_evaluate_failure_guard_triggers(
         session,
-        locked_job.id,
+        locked_job,
         now=now,
-        window_hours=rate_window_hours,
+        policy=policy,
+        latches=latches,
+        persist_crossings=True,
     )
-    rate_alert_latched = False
-    if (
-        rate_failures >= scheduler_failure_rate_threshold()
-        and locked_job.rate_alerted_at is None
-    ):
-        locked_job.rate_alerted_at = now
-        rate_alert_latched = True
 
     await session.flush()
-    return {
-        **_scheduler_failure_guard_state(locked_job),
-        "alert_emitted": alert_emitted,
-        "rate_failures": rate_failures,
-        "rate_window_hours": rate_window_hours,
-        "rate_alert_latched": rate_alert_latched,
-    }
+    return evaluation
 
 
 async def async_reset_scheduler_job_failure_guard(
@@ -306,32 +479,33 @@ async def async_reset_scheduler_job_failure_guard(
     now: datetime | None = None,
 ) -> None:
     """Close recovered failure alerts after the job succeeds."""
-    if not any(
-        (
-            job.failure_signature,
-            job.consecutive_failure_count,
-            job.failure_alerted_at,
-            job.last_failure_error,
-            job.rate_alerted_at,
-        )
-    ):
-        return
+    now = _utcnow(now)
+    policy = scheduler_failure_guard_policy()
+    locked_job = await session.scalar(
+        select(SchedulerJob)
+        .where(SchedulerJob.id == job.id)
+        .with_for_update()
+    )
+    if locked_job is None:
+        raise ValueError(f"Scheduler job {job.id} not found")
 
-    if job.rate_alerted_at is not None:
-        now = _utcnow(now)
-        rate_failures = await _async_scheduler_failure_rate_count(
+    latches = await _async_failure_guard_latches(session, locked_job.id)
+    for trigger in policy.triggers:
+        latch = latches.get(trigger.kind)
+        if latch is None:
+            continue
+        count = await trigger.counter(
             session,
-            job.id,
-            now=now,
-            window_hours=scheduler_failure_rate_window_hours(),
+            locked_job,
+            now,
+            trigger.window_hours,
         )
-        if rate_failures < scheduler_failure_rate_threshold():
-            job.rate_alerted_at = None
+        if trigger.reset_on_success or count < trigger.threshold:
+            await session.delete(latch)
 
-    job.failure_signature = None
-    job.consecutive_failure_count = 0
-    job.failure_alerted_at = None
-    job.last_failure_error = None
+    locked_job.failure_signature = None
+    locked_job.consecutive_failure_count = 0
+    locked_job.last_failure_error = None
     await session.flush()
 
 
