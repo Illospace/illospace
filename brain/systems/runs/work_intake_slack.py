@@ -35,9 +35,9 @@ def agent_run_request_for_slack(trigger_payload: dict[str, Any] | Any) -> AgentR
         payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
     )
     slack_trigger = dict(metadata.get("slack_trigger") or payload.get("slack") or {})
-    if metadata.get("slack_monitor"):
-        # Passive channel monitoring runs headless: no forced response tool and no
-        # auto-settled Slack post. Illo replies only if it calls post_slack_reply.
+    if metadata.get("headless"):
+        # Every typed monitored intake runs headless. Its policy may require an
+        # explicit response tool, but final-answer settlement never auto-posts.
         surface_context = {
             "originating_surface": SLACK_SURFACE,
             "triggering_surface": SLACK_SURFACE,
@@ -45,18 +45,11 @@ def agent_run_request_for_slack(trigger_payload: dict[str, Any] | Any) -> AgentR
             "final_answer_target_surface": "headless",
             "headless": True,
         }
-    elif metadata.get("contact_form_lead"):
-        # Contact leads must explicitly post their deterministic dossier, but
-        # their run's final answer must not auto-post and accidentally settle
-        # the human owner's still-open follow-up obligation.
-        surface_context = {
-            "originating_surface": SLACK_SURFACE,
-            "triggering_surface": SLACK_SURFACE,
-            "source_surface": SLACK_SURFACE,
-            "required_response_tool": SLACK_REPLY_TOOL,
-            "final_answer_target_surface": "headless",
-            "headless": True,
-        }
+        required_response_tool = str(
+            metadata.get("required_response_tool") or ""
+        ).strip()
+        if required_response_tool:
+            surface_context["required_response_tool"] = required_response_tool
     else:
         surface_context = {
             "originating_surface": SLACK_SURFACE,

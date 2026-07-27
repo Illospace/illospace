@@ -85,6 +85,11 @@ def _lead_admission_event():
                 "thread_ts": THREAD_TS,
                 "visibility": "public",
             },
+            "obligation_requester": {
+                "name": "Aline Athaydes",
+                "slack_user_id": "B_CONTACT_FORM",
+                "user_id": None,
+            },
             "contact_form_lead": {
                 "name": "Aline Athaydes",
                 "email": "aline@madamedusk.com",
@@ -107,8 +112,10 @@ async def test_unanswered_contact_form_lead_resurfaces_once_to_owner_after_24h(
     session,
 ):
     from brain.systems.runs.obligation_notices import (
-        OPEN_ASK_UNANSWERED_24H_CONDITION,
         deliver_pending_obligation_notices,
+    )
+    from brain.systems.runs.obligation_specs import (
+        obligation_spec_from_metadata,
     )
     from brain.systems.runs.work_intake import admit_work
 
@@ -124,10 +131,14 @@ async def test_unanswered_contact_form_lead_resurfaces_once_to_owner_after_24h(
     obligation.opened_at = opened_at
     await session.commit()
 
-    assert obligation.requester_name == "Reda"
-    assert obligation.requester_slack_id == "UREDA"
+    spec = obligation_spec_from_metadata(run.metadata_["obligation_spec"])
+    assert spec is not None
+    assert spec.answerer.name == "Reda"
+    assert spec.answerer.slack_user_id == "UREDA"
+    assert obligation.requester_name == "Aline Athaydes"
+    assert obligation.requester_slack_id == "B_CONTACT_FORM"
     assert obligation.status == "open"
-    assert notice.condition == OPEN_ASK_UNANSWERED_24H_CONDITION
+    assert notice.condition == spec.condition
     assert notice.state == "pending"
 
     class _SessionLease:
@@ -180,10 +191,11 @@ async def test_owner_reply_answers_contact_lead_and_suppresses_24h_resurface(
     session,
 ):
     from brain.systems.runs.obligation_notices import (
-        OPEN_ASK_UNANSWERED_24H_CONDITION,
         deliver_pending_obligation_notices,
     )
-    from brain.systems.runs.open_asks import record_inbound_slack_owner_answer
+    from brain.systems.runs.open_asks import (
+        record_inbound_slack_obligation_answer,
+    )
     from brain.systems.runs.work_intake import admit_work
 
     admitted = await admit_work(session, _lead_admission_event())
@@ -192,7 +204,20 @@ async def test_owner_reply_answers_contact_lead_and_suppresses_24h_resurface(
     opened_at = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
     obligation.opened_at = opened_at
 
-    answered = await record_inbound_slack_owner_answer(
+    ignored = await record_inbound_slack_obligation_answer(
+        session,
+        org_id=ORG_ID,
+        channel_id="CALERTS",
+        thread_ts=THREAD_TS,
+        slack_user_id="B_CONTACT_FORM",
+        message_ts="1785150200.000250",
+        answer_text="The requester posted another source message.",
+        now=opened_at + timedelta(minutes=10),
+    )
+    assert ignored == 0
+    assert obligation.status == "open"
+
+    answered = await record_inbound_slack_obligation_answer(
         session,
         org_id=ORG_ID,
         channel_id="CALERTS",
@@ -200,7 +225,6 @@ async def test_owner_reply_answers_contact_lead_and_suppresses_24h_resurface(
         slack_user_id="UREDA",
         message_ts="1785150300.000300",
         answer_text="I replied to Aline with the verified capability answers.",
-        required_notice_condition=OPEN_ASK_UNANSWERED_24H_CONDITION,
         now=opened_at + timedelta(minutes=15),
     )
     await session.commit()

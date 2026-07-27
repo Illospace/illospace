@@ -24,13 +24,10 @@ from brain.systems.slack.client import (
     slack_app_token_from_env,
     slack_bot_token_from_env,
 )
-from brain.systems.slack.contact_form_leads import (
-    CONTACT_FORM_LEAD_ORIGIN,
-    attach_contact_form_lead_owner,
-)
-from brain.systems.slack.ingress import (
-    SLACK_CHANNEL_MESSAGE_ORIGIN,
-    normalize_slack_socket_event,
+from brain.systems.slack.ingress import normalize_slack_socket_event
+from brain.systems.slack.monitored_intakes import (
+    enrich_monitored_intake,
+    is_monitored_intake,
 )
 from brain.systems.slack.monitors import monitored_channel_ids
 
@@ -325,27 +322,22 @@ async def process_socket_payload(
     )
     if envelope is None:
         return {"ack": ack, "ignored": True}
-    if envelope.get("origin") == CONTACT_FORM_LEAD_ORIGIN:
-        attach_contact_form_lead_owner(envelope, connection)
+    monitored_intake = is_monitored_intake(envelope)
     existing_run_for_message = await _has_slack_run_for_envelope(session, connection, envelope)
-    await _record_contact_form_owner_reply(
+    await _record_inbound_obligation_reply(
         session,
         connection=connection,
         envelope=envelope,
     )
-    if envelope.get("origin") in {
-        SLACK_CHANNEL_MESSAGE_ORIGIN,
-        CONTACT_FORM_LEAD_ORIGIN,
-    }:
+    if monitored_intake:
         # Reflex acknowledgement: leave a 👀 on every observed message so the
         # channel knows Illo has seen it, independent of whether the ensuing
         # triage run decides to reply.
         await _acknowledge_monitored_message(config, envelope)
-    if envelope.get("origin") == SLACK_CHANNEL_MESSAGE_ORIGIN:
-        await _handle_monitored_provider_alert(
+        await enrich_monitored_intake(
+            envelope,
             connection=connection,
-            config=config,
-            envelope=envelope,
+            bot_token=config.bot_token,
         )
     inbound = await submit_inbound_envelope(
         session,
@@ -357,8 +349,7 @@ async def process_socket_payload(
         },
     )
     if (
-        envelope.get("origin")
-        not in {SLACK_CHANNEL_MESSAGE_ORIGIN, CONTACT_FORM_LEAD_ORIGIN}
+        not monitored_intake
         and not existing_run_for_message
         and _admitted_slack_run(inbound)
     ):
@@ -366,13 +357,13 @@ async def process_socket_payload(
     return {"ack": ack, "ignored": False, "inbound": inbound}
 
 
-async def _record_contact_form_owner_reply(
+async def _record_inbound_obligation_reply(
     session: Any,
     *,
     connection: ExternalAgentConnectionRow | Mapping[str, Any],
     envelope: Mapping[str, Any],
 ) -> None:
-    """Settle a contact-lead obligation when its named owner replies."""
+    """Settle any typed obligation whose policy accepts this Slack reply."""
 
     if session is None:
         return
@@ -392,14 +383,11 @@ async def _record_contact_form_owner_reply(
     if not org_id or not channel_id:
         return
     try:
-        from brain.systems.runs.obligation_notices import (
-            OPEN_ASK_UNANSWERED_24H_CONDITION,
-        )
         from brain.systems.runs.open_asks import (
-            record_inbound_slack_owner_answer,
+            record_inbound_slack_obligation_answer,
         )
 
-        await record_inbound_slack_owner_answer(
+        await record_inbound_slack_obligation_answer(
             session,
             org_id=org_id,
             channel_id=channel_id,
@@ -407,65 +395,9 @@ async def _record_contact_form_owner_reply(
             slack_user_id=slack_user_id,
             message_ts=message_ts,
             answer_text=str(payload.get("text") or ""),
-            required_notice_condition=OPEN_ASK_UNANSWERED_24H_CONDITION,
         )
     except Exception as exc:
-        logger.exception("contact_form_owner_reply_recording_failed: %s", exc)
-
-
-def _slack_message_datetime(message_ts: str) -> datetime | None:
-    try:
-        return datetime.fromtimestamp(float(message_ts), tz=timezone.utc)
-    except (TypeError, ValueError, OSError):
-        return None
-
-
-async def _handle_monitored_provider_alert(
-    *,
-    connection: ExternalAgentConnectionRow | Mapping[str, Any],
-    config: SlackConnectorConfig,
-    envelope: dict[str, Any],
-) -> None:
-    """Record Rollbar alert identity before the corresponding triage run starts."""
-
-    from brain.systems.slack.provider_alert_surge import (
-        handle_provider_alert_ingest_durable,
-    )
-
-    payload = dict(envelope.get("payload") or {})
-    org_id = _connection_org_id(connection)
-    channel_id = str(payload.get("channel_id") or "").strip()
-    message_ts = str(payload.get("message_ts") or "").strip()
-    text = str(payload.get("text") or "")
-    if not org_id or not channel_id or not message_ts:
-        return
-    try:
-        result = await handle_provider_alert_ingest_durable(
-            SlackWebClient(config.bot_token),
-            org_id=org_id,
-            channel_id=channel_id,
-            message_ts=message_ts,
-            text=text,
-            occurred_at=_slack_message_datetime(message_ts),
-        )
-    except Exception as exc:
-        logger.exception("provider_alert_ingest_failed: %s", exc)
-        return
-    if result is None:
-        return
-    payload["provider_alert"] = {
-        "service": result.alert.service,
-        "subsystem": result.alert.subsystem,
-        "external_id": result.alert.external_id,
-        "tracked_signature": result.alert.signature,
-        "signature_title": result.alert.signature_title,
-        "occurrence_milestone": result.alert.occurrence_milestone,
-        "is_new_error": result.alert.is_new_error,
-        "surge_open": result.surge is not None,
-        "material_posted": result.material_posted,
-        "material_post_error": result.material_post_error,
-    }
-    envelope["payload"] = payload
+        logger.exception("inbound_obligation_reply_recording_failed: %s", exc)
 
 
 def _connection_org_id(connection: ExternalAgentConnectionRow | Mapping[str, Any]) -> str | None:

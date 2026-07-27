@@ -17,15 +17,17 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
+from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.open_ask import ObligationNotice, OpenAsk
+from brain.systems.runs.obligation_specs import (
+    obligation_spec_from_metadata,
+)
 
 
 logger = logging.getLogger(__name__)
 
 NOTICE_SWEEP_LIMIT = 10
 STALE_NOTICE_POSTING_GRACE = timedelta(minutes=10)
-OPEN_ASK_UNANSWERED_24H_CONDITION = "open_ask:unanswered:24h"
-OPEN_ASK_UNANSWERED_NOTICE_AFTER = timedelta(hours=24)
 _DESTINATION_READ_LIMIT = 200
 _DESTINATION_MAX_PAGES = 10
 _VISIBILITY_POLL_ATTEMPTS = 5
@@ -229,6 +231,34 @@ def _snapshot(row: ObligationNotice) -> dict[str, Any]:
         "attempts": int(row.attempts or 0),
         "claimed_at": row.claimed_at,
     }
+
+
+def _notice_is_due(
+    row: ObligationNotice,
+    *,
+    opened_at: datetime,
+    run_metadata: Any,
+    now: datetime,
+) -> bool:
+    """Apply the typed notice delay stored with the originating run."""
+
+    if str(row.state) == "posting":
+        return True
+    metadata = run_metadata if isinstance(run_metadata, dict) else {}
+    spec = obligation_spec_from_metadata(metadata.get("obligation_spec"))
+    if spec is None:
+        return True
+    if spec.condition != str(row.condition):
+        logger.warning(
+            "obligation notice %s does not match its typed spec",
+            row.id,
+        )
+        return False
+    normalized_opened_at = _utc(opened_at)
+    normalized_now = _utc(now)
+    if normalized_opened_at is None or normalized_now is None:
+        return False
+    return normalized_opened_at + spec.notice_after <= normalized_now
 
 
 def _claimable_clause(cutoff: datetime):
@@ -572,19 +602,20 @@ async def deliver_pending_obligation_notices(
             return summary
         moment = now or datetime.now(timezone.utc)
         statement = (
-            select(ObligationNotice)
+            select(
+                ObligationNotice,
+                OpenAsk.opened_at,
+                AgentRunRow.metadata_,
+            )
             .join(OpenAsk, OpenAsk.id == ObligationNotice.obligation_id)
+            .outerjoin(
+                AgentRunRow,
+                AgentRunRow.id == OpenAsk.origin_run_id,
+            )
             .where(
                 _claimable_clause(moment - STALE_NOTICE_POSTING_GRACE),
-                or_(
-                    ObligationNotice.condition
-                    != OPEN_ASK_UNANSWERED_24H_CONDITION,
-                    OpenAsk.opened_at
-                    <= moment - OPEN_ASK_UNANSWERED_NOTICE_AFTER,
-                ),
             )
             .order_by(ObligationNotice.created_at.asc(), ObligationNotice.id.asc())
-            .limit(max(1, int(limit)))
             .execution_options(populate_existing=True)
         )
         if org_id:
@@ -596,8 +627,16 @@ async def deliver_pending_obligation_notices(
         async with factory() as session:
             candidates = [
                 _snapshot(row)
-                for row in (await session.execute(statement)).scalars().all()
-            ]
+                for row, opened_at, run_metadata in (
+                    await session.execute(statement)
+                ).all()
+                if _notice_is_due(
+                    row,
+                    opened_at=opened_at,
+                    run_metadata=run_metadata,
+                    now=moment,
+                )
+            ][: max(1, int(limit))]
         summary["selected"] = len(candidates)
         for item in candidates:
             try:
@@ -723,8 +762,6 @@ def schedule_post_commit_notice_delivery(
 
 __all__ = [
     "NOTICE_SWEEP_LIMIT",
-    "OPEN_ASK_UNANSWERED_24H_CONDITION",
-    "OPEN_ASK_UNANSWERED_NOTICE_AFTER",
     "STALE_NOTICE_POSTING_GRACE",
     "deliver_pending_obligation_notices",
     "notice_idempotency_key",
