@@ -12,8 +12,8 @@ import pytest
 from sqlalchemy import select
 
 import brain.app.scheduler.executor as scheduler_executor
+import brain.app.scheduler.failure_guard as scheduler_failure_guard
 from brain.app.scheduler.daemon import (
-    _scheduler_health_payload,
     async_scheduler_health_snapshot,
 )
 from brain.app.scheduler.failure_guard import (
@@ -21,12 +21,9 @@ from brain.app.scheduler.failure_guard import (
     ROLLING_WINDOW_TRIGGER_KIND,
     FailureGuardEdge,
     FailureGuardEvaluation,
-    FailureGuardRegistry,
     FailureGuardResetEvent,
     FailureGuardTriggerKind,
     FailureGuardTriggerResult,
-    async_record_scheduler_job_failure,
-    scheduler_failure_guard_registry,
     scheduler_failure_signature,
     serialize_failure_guard,
 )
@@ -738,7 +735,7 @@ class _RuntimeDurationTrigger:
         return event == "success"
 
 
-async def test_third_trigger_flows_through_engine_serializer_health_and_delivery(
+async def test_third_trigger_flows_through_production_apply_health_delivery_and_reset(
     session,
     monkeypatch,
 ):
@@ -753,53 +750,31 @@ async def test_third_trigger_flows_through_engine_serializer_health_and_delivery
     )
     session.add(job)
     await session.flush()
-
-    registry = FailureGuardRegistry(
-        triggers=(
-            *scheduler_failure_guard_registry().triggers,
-            _RuntimeDurationTrigger(minimum_runtime_minutes=30),
-        )
+    run = SchedulerRun(
+        job_id=job.id,
+        scheduled_for=base,
+        window_start=base,
+        window_end=base + timedelta(hours=1),
+        status="settled_failure",
+        idempotency_key="runtime-duration-proof",
+        started_at=base,
+        finished_at=base,
     )
-    evaluation = await async_record_scheduler_job_failure(
-        session,
-        job,
-        failure_identity="worker exceeded runtime",
-        error_text="TimeoutError: worker still running",
-        now=base,
-        registry=registry,
-    )
-    serialized = serialize_failure_guard(evaluation)
-    duration = _guard_trigger(serialized, "runtime_duration")
+    session.add(run)
+    await session.flush()
 
-    assert duration == {
-        "kind": "runtime_duration",
-        "elapsed_minutes": 47,
-        "minimum_runtime_minutes": 30,
-        "measurement": "job_runtime",
-        "alerted_at": base.isoformat(),
-        "crossed": True,
-    }
-
-    health = _scheduler_health_payload(
-        owner_mode="scheduler",
-        now=base,
-        jobs=[
-            {
-                "job_key": job.job_key,
-                "family": job.family,
-                "owner_mode": job.owner_mode,
-                "enabled": job.enabled,
-                "pause_reason": job.pause_reason,
-                "next_run_at": job.next_run_at.isoformat(),
-                "failure_guard": serialized,
-            }
-        ],
-        runs=[],
-        run_statuses={},
-        active_leases=0,
-        expired_leases=0,
+    monkeypatch.setattr(
+        scheduler_failure_guard,
+        "_FAILURE_GUARD_TRIGGER_PROVIDERS",
+        (
+            *scheduler_failure_guard._FAILURE_GUARD_TRIGGER_PROVIDERS,
+            lambda: _RuntimeDurationTrigger(minimum_runtime_minutes=30),
+        ),
     )
-    assert health["alerts"][0]["triggers"] == [duration]
+    assert [
+        str(trigger.kind)
+        for trigger in scheduler_failure_guard.scheduler_failure_guard_registry().triggers
+    ] == ["consecutive", "rolling_window", "runtime_duration"]
 
     calls: dict[str, str] = {}
 
@@ -817,13 +792,61 @@ async def test_third_trigger_flows_through_engine_serializer_health_and_delivery
         "slack_web_client_from_runtime",
         fake_client_from_runtime,
     )
-    await scheduler_executor.async_deliver_scheduler_failure_alert(
-        job_key=job.job_key,
-        run_id=99,
-        evaluation=evaluation,
+    await scheduler_executor._async_apply_failure_guard(
+        session,
+        job,
+        run,
+        failure_key="runtime_duration",
         error_text="TimeoutError: worker still running",
+        now=base,
     )
+    serialized = run.result_summary["failure_guard"]
+    duration = _guard_trigger(serialized, "runtime_duration")
 
+    assert duration == {
+        "kind": "runtime_duration",
+        "elapsed_minutes": 47,
+        "minimum_runtime_minutes": 30,
+        "measurement": "job_runtime",
+        "alerted_at": base.isoformat(),
+        "crossed": True,
+    }
     assert calls["channel"] == "C_ALERTS"
     assert "Scheduler job exceeded expected runtime" in calls["text"]
     assert "Runtime reached 47 minutes (limit 30)" in calls["text"]
+
+    health = await async_scheduler_health_snapshot(
+        session,
+        now=base,
+    )
+    catalog_duration = _guard_trigger(
+        health["jobs"][0]["failure_guard"],
+        "runtime_duration",
+    )
+    assert catalog_duration == {
+        **duration,
+        "alerted_at": base.replace(tzinfo=None).isoformat(),
+        "crossed": False,
+    }
+    assert health["alerts"][0]["triggers"] == [catalog_duration]
+
+    await scheduler_executor.async_reset_scheduler_job_failure_guard(
+        session,
+        job,
+        now=base + timedelta(minutes=1),
+    )
+    assert "runtime_duration" not in await _guard_latches(session, job)
+    reset_health = await async_scheduler_health_snapshot(
+        session,
+        now=base + timedelta(minutes=1),
+    )
+    assert reset_health["alerts"] == []
+    assert _guard_trigger(
+        reset_health["jobs"][0]["failure_guard"],
+        "runtime_duration",
+    ) == {
+        **duration,
+        "elapsed_minutes": 48,
+        "alerted_at": None,
+        "crossed": False,
+    }

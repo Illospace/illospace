@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 import os
 import re
-from typing import Any, Literal, Mapping, NewType, Protocol
+from typing import Any, Callable, Literal, Mapping, NewType, Protocol
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -251,6 +251,15 @@ class RollingWindowFailuresTrigger:
         return not (await self.evaluate(session, job, now)).active
 
 
+_FAILURE_GUARD_TRIGGER_PROVIDERS: tuple[
+    Callable[[], FailureGuardTrigger],
+    ...,
+] = (
+    ConsecutiveFailuresTrigger.from_settings,
+    RollingWindowFailuresTrigger.from_settings,
+)
+
+
 def _positive_int_setting(name: str, default: int) -> int:
     try:
         configured = int(os.getenv(name, str(default)))
@@ -262,9 +271,9 @@ def _positive_int_setting(name: str, default: int) -> int:
 def scheduler_failure_guard_registry() -> FailureGuardRegistry:
     """Load the configured registry of independently owned triggers."""
     return FailureGuardRegistry(
-        triggers=(
-            ConsecutiveFailuresTrigger.from_settings(),
-            RollingWindowFailuresTrigger.from_settings(),
+        triggers=tuple(
+            provide_trigger()
+            for provide_trigger in _FAILURE_GUARD_TRIGGER_PROVIDERS
         )
     )
 
