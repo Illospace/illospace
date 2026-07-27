@@ -490,6 +490,50 @@ async def test_disablement_skips_only_failed_tool_and_runs_healthy_call_in_same_
     assert json.loads(execution.tool_results[2]["content"]) == {"ok": True}
 
 
+async def test_unchanged_result_termination_skips_later_serial_calls():
+    attempts = []
+
+    async def pending_handler(**tool_input):
+        attempts.append(tool_input["query"])
+        return {"status": "pending"}
+
+    policy = LoopControlPolicy()
+    for index in range(3):
+        policy.observe_tool_result(
+            ResolvedToolCall(
+                block_id=f"prior-{index}",
+                tool_name="read_team_activity",
+                tool_input={"time_window": "week", "query": f"prior wording {index}"},
+                result_text='{"status": "pending"}',
+                result_value={"status": "pending"},
+            )
+        )
+    assert policy.termination is None
+
+    execution = await _execute_async(
+        _response(
+            (
+                "trips-loop",
+                "read_team_activity",
+                {"time_window": "week", "query": "another paraphrase"},
+            ),
+            (
+                "skipped-after-loop",
+                "read_team_activity",
+                {"time_window": "week", "query": "one more paraphrase"},
+            ),
+        ),
+        {"read_team_activity": pending_handler},
+        loop_control=policy,
+    )
+
+    assert attempts == ["another paraphrase"]
+    assert execution.termination is policy.termination
+    assert execution.termination is not None
+    assert execution.tool_results[1]["is_error"] is True
+    assert "unchanged result" in execution.tool_results[1]["content"]
+
+
 def test_classifier_ignores_legacy_payload_category():
     outcome = classify_tool_result({
         "error": "invalid tool input",

@@ -698,10 +698,12 @@ def execute_tool_calls(
     termination = loop_control.termination
 
     def consume_resolved(resolved: ResolvedToolCall) -> None:
+        nonlocal termination
         if termination is None:
             disablement = loop_control.observe_tool_result(resolved)
             if disablement is not None:
                 tool_disablements.append(disablement)
+            termination = loop_control.termination
         emit_resolved_tool_call(
             resolved,
             tool_results,
@@ -855,10 +857,12 @@ async def async_execute_tool_calls(
     termination = loop_control.termination
 
     async def consume_resolved(resolved: ResolvedToolCall) -> None:
+        nonlocal termination
         if termination is None:
             disablement = loop_control.observe_tool_result(resolved)
             if disablement is not None:
                 tool_disablements.append(disablement)
+            termination = loop_control.termination
         await async_emit_resolved_tool_call(
             resolved,
             tool_results,

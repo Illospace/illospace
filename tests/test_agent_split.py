@@ -337,6 +337,7 @@ class TestRuntimeExtractionContracts:
         assert isinstance(state.loop_control, LoopControlPolicy)
         assert state.loop_control.termination is None
         assert state.recent_calls == ["read_file:{}"]
+        assert state.recent_semantic_calls == []
         assert state.tool_calls_made == ["read_file"]
         assert state.operation_type == "worker"
         assert state.metadata == {"role": "worker"}
@@ -350,7 +351,17 @@ class TestRuntimeExtractionContracts:
         assert agent_inject_nudges is _inject_nudges
 
         messages = []
-        assert _detect_stuck_loop(["read_file:{}"] * 5, "session-1", messages)
+        exact_return = "read_team_activity:{\"query\": \"original\"}"
+        trace = [
+            exact_return,
+            "read_team_activity:{\"query\": \"paraphrase one\"}",
+            "read_team_activity:{\"query\": \"paraphrase two\"}",
+            exact_return,
+            exact_return,
+            exact_return,
+            exact_return,
+        ]
+        assert _detect_stuck_loop(trace, "session-1", messages)
         # The fabricated stuck message must not masquerade as model output.
         assert messages[-1]["role"] == "user"
         assert "stuck in a loop" in messages[-1]["content"][0]["text"]

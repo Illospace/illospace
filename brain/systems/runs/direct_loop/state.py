@@ -18,6 +18,7 @@ class AgentLoopState:
     gates: GateState = field(default_factory=GateState)
     tokens: TokenAccumulator = field(default_factory=TokenAccumulator)
     recent_calls: list[str] = field(default_factory=list)
+    recent_semantic_calls: list[str] = field(default_factory=list)
     tool_calls_made: list[str] = field(default_factory=list)
     loop_control: LoopControlPolicy = field(default_factory=LoopControlPolicy)
     provider: Any | None = None

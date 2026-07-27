@@ -255,6 +255,7 @@ class ToolRegistration:
     action_manifest: bool = False
     expected_effect: str | None = None
     context_route: ToolContextRoute | Mapping[str, Any] | None = None
+    semantic_free_text_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -308,6 +309,15 @@ class ToolRegistration:
         if self.expected_effect is not None:
             object.__setattr__(self, "expected_effect", str(self.expected_effect))
         object.__setattr__(self, "context_route", _normalize_context_route(self.context_route, tool_name=self.name))
+        object.__setattr__(
+            self,
+            "semantic_free_text_fields",
+            _normalize_string_tuple(
+                self.semantic_free_text_fields,
+                field_name="semantic_free_text_fields",
+                tool_name=self.name,
+            ),
+        )
 
     def to_permission_payload(self) -> dict[str, Any]:
         """Return compact metadata suitable for context packs."""
@@ -324,6 +334,7 @@ class ToolRegistration:
             "action_manifest": self.action_manifest,
             "expected_effect": self.expected_effect,
             "context_route": self.context_route.to_payload() if self.context_route else None,
+            "semantic_free_text_fields": list(self.semantic_free_text_fields),
         }
 
     def to_action_policy(self) -> dict[str, str] | None:

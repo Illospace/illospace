@@ -66,7 +66,9 @@ from brain.systems.runs.direct_loop.loop_control import (
     LoopTermination,
     _detect_stuck_loop,
     _inject_nudges,
+    exact_tool_call_fingerprint,
     resolve_loop_output,
+    semantic_tool_call_fingerprint,
 )
 from brain.systems.runs.direct_loop.request import (
     apply_anthropic_cache_breakpoint as _runtime_apply_anthropic_cache_breakpoint,
@@ -1917,17 +1919,25 @@ async def run_agent_async(
 
             if response.stop_reason == StopReason.TOOL_USE:
                 # Stuck detection
-                _turn_fingerprints = [
-                    f"{b.name}:{json.dumps(b.input, sort_keys=True)}"
+                _turn_tool_calls = [
+                    (b.name, b.input)
                     for b in response.content
                     if hasattr(b, "type") and b.type == ContentBlockType.TOOL_USE
                 ]
-                state.recent_calls.extend(_turn_fingerprints)
+                state.recent_calls.extend(
+                    exact_tool_call_fingerprint(name, tool_input)
+                    for name, tool_input in _turn_tool_calls
+                )
+                state.recent_semantic_calls.extend(
+                    semantic_tool_call_fingerprint(name, tool_input)
+                    for name, tool_input in _turn_tool_calls
+                )
 
                 termination = state.loop_control.detect_stuck_loop(
                     state.recent_calls,
                     session_id,
                     state.messages,
+                    semantic_calls=state.recent_semantic_calls,
                 )
                 if termination is not None:
                     break
@@ -1973,7 +1983,10 @@ async def run_agent_async(
                         )
 
                 if termination is not None:
-                    termination_message = termination.transcript_message()
+                    termination_message = (
+                        termination.transcript_message()
+                        or termination.control_message()
+                    )
                     if termination_message is not None:
                         _append_message_with_archive(
                             state.messages,

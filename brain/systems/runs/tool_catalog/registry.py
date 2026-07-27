@@ -735,12 +735,14 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "side_effect_class": "read_only",
         "parallel_safety": "agent_safe",
         "evidence_emitter": True,
+        "semantic_free_text_fields": ("question", "focus"),
     },
     "summarize_files_for_task": {
         "permission": "read_workspace",
         "side_effect_class": "read_only",
         "parallel_safety": "agent_safe",
         "evidence_emitter": True,
+        "semantic_free_text_fields": ("question",),
     },
     "trace_symbol": {
         "permission": "read_workspace",
@@ -753,6 +755,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "side_effect_class": "read_only",
         "parallel_safety": "safe",
         "evidence_emitter": True,
+        "semantic_free_text_fields": ("question",),
     },
     "session_write": {
         "permission": "write_session",
@@ -877,6 +880,9 @@ def _default_registration(
         action_manifest=bool(metadata.get("action_manifest", False)),
         expected_effect=metadata.get("expected_effect"),
         context_route=metadata.get("context_route"),
+        semantic_free_text_fields=tuple(
+            metadata.get("semantic_free_text_fields") or ()
+        ),
     )
 
 
