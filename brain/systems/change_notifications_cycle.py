@@ -219,6 +219,24 @@ async def _deliver_pending_briefs_safely(org_id) -> dict | None:
         return None
 
 
+async def _deliver_pending_obligation_notices_safely(org_id) -> dict | None:
+    """Guaranteed sweep for committed run-deferral notice outbox rows."""
+
+    import logging
+
+    try:
+        from brain.systems.runs.obligation_notices import (
+            deliver_pending_obligation_notices,
+        )
+
+        return await deliver_pending_obligation_notices(org_id=str(org_id))
+    except Exception:  # noqa: BLE001
+        logging.getLogger("illo.notify").exception(
+            "obligation notice delivery sweep failed safely"
+        )
+        return None
+
+
 async def _default_post(channel_id, text) -> None:
     from brain.systems.slack.client import slack_web_client_from_runtime
 
@@ -273,6 +291,7 @@ async def run_notify_cycle(
     # After the refresh: a supersede may have just moved a pending brief to
     # its new revision, and this sweep should send THAT one.
     deliveries = None
+    notice_deliveries = None
     if session is not None:
         try:
             deliveries = await (deliver_briefs or _deliver_pending_briefs_safely)(org_id)
@@ -280,6 +299,19 @@ async def run_notify_cycle(
             import logging
 
             logging.getLogger("illo.notify").exception("brief delivery sweep failed safely")
+        # Test and specialist callers may inject only the packet sweep. The
+        # production path owns both transactional outboxes.
+        if deliver_briefs is None:
+            try:
+                notice_deliveries = await _deliver_pending_obligation_notices_safely(
+                    org_id
+                )
+            except Exception:  # noqa: BLE001
+                import logging
+
+                logging.getLogger("illo.notify").exception(
+                    "obligation notice delivery sweep failed safely"
+                )
     unclaimed = await _count_unclaimed(session, org_id)
     outbound = render_outbound(events, unclaimed_count=unclaimed, urgent_terms=urgent_terms)
 
@@ -319,4 +351,6 @@ async def run_notify_cycle(
         summary["verification"] = verification
     if deliveries and deliveries.get("selected"):
         summary["brief_deliveries"] = deliveries
+    if notice_deliveries and notice_deliveries.get("selected"):
+        summary["obligation_notice_deliveries"] = notice_deliveries
     return summary

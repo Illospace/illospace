@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-import json
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from brain.platform.db.models.open_ask import OpenAsk
+from brain.platform.db.models.open_ask import (
+    ObligationKind,
+    ObligationNotice,
+    OpenAsk,
+)
 from brain.platform.db.models.org import User
 from brain.systems.runs.domain import AgentRunRequest
 
@@ -18,8 +21,40 @@ from brain.systems.runs.domain import AgentRunRequest
 OPEN_ASK_STATUS = "open"
 ANSWERED_ASK_STATUS = "answered"
 OPEN_ASK_STRAGGLER_AFTER = timedelta(hours=1)
-HUMAN_ASK_OBLIGATION = "human_ask"
-RUN_DEFERRAL_OBLIGATION = "run_deferral"
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveredSlackReply:
+    """Confirmed Slack delivery facts used to settle matching obligations."""
+
+    org_id: str
+    channel_id: str
+    thread_ts: str
+    answering_run_id: int | None
+    slack_message_ts: str
+    answer_text: str
+    is_answer: bool
+    artifact_kind: str | None = None
+    artifact_ref: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveredSlackReplyCounts:
+    """Settlement counts grouped by the ledger's canonical obligation kind."""
+
+    by_kind: dict[ObligationKind, int]
+
+    @classmethod
+    def empty(cls) -> DeliveredSlackReplyCounts:
+        return cls(by_kind={kind: 0 for kind in ObligationKind})
+
+    @property
+    def answered_open_asks(self) -> int:
+        return int(self.by_kind.get(ObligationKind.HUMAN_ASK, 0))
+
+    @property
+    def total(self) -> int:
+        return sum(int(value) for value in self.by_kind.values())
 
 
 def _clean(value: Any) -> str:
@@ -159,7 +194,7 @@ async def _open_ask_for_key(
     for_update: bool = False,
 ) -> OpenAsk | None:
     statement = select(OpenAsk).where(
-        OpenAsk.obligation_kind == HUMAN_ASK_OBLIGATION,
+        OpenAsk.obligation_kind == ObligationKind.HUMAN_ASK,
         OpenAsk.org_id == org_id,
         OpenAsk.channel_id == channel_id,
         OpenAsk.thread_ts == thread_ts,
@@ -245,7 +280,7 @@ async def record_open_ask(
 
     row = OpenAsk(
         **context,
-        obligation_kind=HUMAN_ASK_OBLIGATION,
+        obligation_kind=ObligationKind.HUMAN_ASK,
         requester_name=requester_name,
         origin_run_id=int(run_id),
         status=OPEN_ASK_STATUS,
@@ -290,7 +325,7 @@ async def open_asks_for_origin_ref(
         select(OpenAsk)
         .where(
             OpenAsk.origin_ref == normalized,
-            OpenAsk.obligation_kind == HUMAN_ASK_OBLIGATION,
+            OpenAsk.obligation_kind == ObligationKind.HUMAN_ASK,
             OpenAsk.status == OPEN_ASK_STATUS,
         )
         .order_by(OpenAsk.opened_at.asc(), OpenAsk.id.asc())
@@ -310,7 +345,7 @@ async def open_asks_for_origin_run(
         select(OpenAsk)
         .where(
             OpenAsk.origin_run_id == int(origin_run_id),
-            OpenAsk.obligation_kind == HUMAN_ASK_OBLIGATION,
+            OpenAsk.obligation_kind == ObligationKind.HUMAN_ASK,
             OpenAsk.status == OPEN_ASK_STATUS,
         )
         .order_by(OpenAsk.id.asc())
@@ -318,19 +353,6 @@ async def open_asks_for_origin_run(
     if for_update:
         statement = statement.with_for_update()
     return list((await session.scalars(statement)).all())
-
-
-def _notice_conditions(row: OpenAsk) -> list[str]:
-    raw = _clean(row.notice_conditions)
-    if not raw:
-        return []
-    try:
-        values = json.loads(raw)
-    except (TypeError, ValueError):
-        return []
-    if not isinstance(values, list):
-        return []
-    return [_clean(value) for value in values if _clean(value)]
 
 
 def _run_context_maps(run: Any):
@@ -387,7 +409,7 @@ async def _run_deferral_for_key(
     for_update: bool = False,
 ) -> OpenAsk | None:
     statement = select(OpenAsk).where(
-        OpenAsk.obligation_kind == RUN_DEFERRAL_OBLIGATION,
+        OpenAsk.obligation_kind == ObligationKind.RUN_DEFERRAL,
         OpenAsk.org_id == org_id,
         OpenAsk.channel_id == channel_id,
         OpenAsk.thread_ts == thread_ts,
@@ -407,9 +429,10 @@ async def record_run_deferral(
     trigger: dict[str, Any],
     deferral_text: str,
     notice_condition: str,
+    post_thread_ts: str | None,
     now: datetime | None = None,
-) -> tuple[OpenAsk, bool]:
-    """Persist one run-owned promise and reserve an unseen notice condition."""
+) -> tuple[OpenAsk, Any | None, bool]:
+    """Persist one run-owned promise and its condition-specific outbox row."""
 
     key = _run_deferral_key(
         run=run,
@@ -431,13 +454,6 @@ async def record_run_deferral(
         for_update=True,
     )
     if row is None:
-        actual_requester_slack_id = _clean(trigger.get("slack_user_id"))
-        requester_user_id = _clean(getattr(run, "user_id", None)) or None
-        requester_name = await _requester_name(
-            session,
-            requester_user_id,
-            actual_requester_slack_id or f"run-{run_id}",
-        )
         permalink = slack_thread_permalink(
             {
                 **trigger,
@@ -446,7 +462,7 @@ async def record_run_deferral(
             }
         )
         row = OpenAsk(
-            obligation_kind=RUN_DEFERRAL_OBLIGATION,
+            obligation_kind=ObligationKind.RUN_DEFERRAL,
             org_id=org_id,
             channel_id=normalized_channel,
             channel_type=_clean(trigger.get("channel_type")) or None,
@@ -454,11 +470,9 @@ async def record_run_deferral(
             thread_ts=normalized_thread,
             thread_permalink=permalink
             or f"https://app.slack.com/client/unknown/{normalized_channel}",
-            # The legacy human-ask uniqueness key remains untouched. Run ownership
-            # makes this synthetic requester stable and collision-free.
-            requester_slack_id=f"illo-run-{run_id}",
-            requester_user_id=requester_user_id,
-            requester_name=requester_name,
+            requester_slack_id=None,
+            requester_user_id=None,
+            requester_name=None,
             bot_user_id=_clean(trigger.get("bot_user_id")) or None,
             ask_text=str(
                 trigger.get("text")
@@ -490,49 +504,21 @@ async def record_run_deferral(
             )
             if row is None:
                 raise
-    condition_was_delivered = condition in _notice_conditions(row)
-    if row.status != OPEN_ASK_STATUS and not condition_was_delivered:
-        _reopen_obligation(row, opened_at=_aware_utc(now))
-    return row, not condition_was_delivered
+    # Answered obligations are terminal. A later failure condition on the same
+    # run cannot resurrect the promise or emit a contradictory new notice.
+    if row.status == ANSWERED_ASK_STATUS:
+        return row, None, False
 
+    from brain.systems.runs.obligation_notices import record_obligation_notice
 
-def mark_run_deferral_notice_delivered(
-    row: OpenAsk,
-    *,
-    notice_condition: str,
-) -> OpenAsk:
-    """Remember a delivered condition so retries do not re-post it."""
-
-    condition = _clean(notice_condition)
-    conditions = _notice_conditions(row)
-    if condition and condition not in conditions:
-        conditions.append(condition)
-        row.notice_conditions = json.dumps(conditions, separators=(",", ":"))
-    return row
-
-
-async def open_run_deferrals_for_thread(
-    session: Any,
-    *,
-    org_id: str,
-    channel_id: str,
-    thread_ts: str,
-    for_update: bool = False,
-) -> list[OpenAsk]:
-    statement = (
-        select(OpenAsk)
-        .where(
-            OpenAsk.obligation_kind == RUN_DEFERRAL_OBLIGATION,
-            OpenAsk.org_id == str(org_id),
-            OpenAsk.channel_id == str(channel_id),
-            OpenAsk.thread_ts == str(thread_ts),
-            OpenAsk.status == OPEN_ASK_STATUS,
-        )
-        .order_by(OpenAsk.opened_at.asc(), OpenAsk.id.asc())
+    notice, created = await record_obligation_notice(
+        session,
+        obligation=row,
+        condition=condition,
+        notice_text=deferral_text,
+        post_thread_ts=post_thread_ts,
     )
-    if for_update:
-        statement = statement.with_for_update()
-    return list((await session.scalars(statement)).all())
+    return row, notice, created
 
 
 def delivered_message_ts(response: Any) -> str | None:
@@ -568,74 +554,79 @@ def mark_open_ask_answered(
     return row
 
 
-async def mark_origin_run_answer_delivered(
+async def record_delivered_slack_answer(
     session: Any,
+    delivered: DeliveredSlackReply,
     *,
-    origin_run_id: int,
-    answer_text: str,
-    slack_response: Any,
     now: datetime | None = None,
-) -> list[OpenAsk]:
-    human_asks = await open_asks_for_origin_run(
-        session,
-        origin_run_id,
-        for_update=True,
-    )
-    run_deferrals = list(
+) -> DeliveredSlackReplyCounts:
+    """Match and close every obligation answered by one confirmed Slack reply."""
+
+    counts = DeliveredSlackReplyCounts.empty()
+    message_ts = _clean(delivered.slack_message_ts)
+    if not message_ts:
+        raise ValueError("delivered Slack answers require a confirmed message timestamp")
+    if not delivered.is_answer:
+        return counts
+    org_id = _clean(delivered.org_id)
+    channel_id = _clean(delivered.channel_id)
+    thread_ts = _clean(delivered.thread_ts)
+    if not all((org_id, channel_id, thread_ts)):
+        raise ValueError("delivered Slack answers require org, channel, and thread")
+
+    rows = list(
         (
             await session.scalars(
                 select(OpenAsk)
                 .where(
-                    OpenAsk.obligation_kind == RUN_DEFERRAL_OBLIGATION,
-                    OpenAsk.origin_run_id == int(origin_run_id),
+                    OpenAsk.org_id == org_id,
+                    OpenAsk.channel_id == channel_id,
+                    OpenAsk.thread_ts == thread_ts,
                     OpenAsk.status == OPEN_ASK_STATUS,
                 )
+                .order_by(OpenAsk.id.asc())
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).all()
     )
-    for row in [*human_asks, *run_deferrals]:
-        mark_open_ask_answered(
-            row,
-            answer_text=answer_text,
-            answered_by_run_id=origin_run_id,
-            slack_response=slack_response,
-            now=now,
-        )
-    # Preserve the existing caller contract: this count is human asks answered,
-    # even though the same delivered reply also closes run deferrals.
-    return human_asks
-
-
-async def mark_thread_run_deferrals_answered(
-    session: Any,
-    *,
-    org_id: str,
-    channel_id: str,
-    thread_ts: str,
-    answer_text: str,
-    answered_by_run_id: int | None,
-    slack_response: Any,
-    now: datetime | None = None,
-) -> list[OpenAsk]:
-    """Close every run deferral owed in the thread after confirmed delivery."""
-
-    rows = await open_run_deferrals_for_thread(
-        session,
-        org_id=org_id,
-        channel_id=channel_id,
-        thread_ts=thread_ts,
-        for_update=True,
-    )
+    by_kind = dict(counts.by_kind)
     for row in rows:
         mark_open_ask_answered(
             row,
-            answer_text=answer_text,
-            answered_by_run_id=answered_by_run_id,
-            slack_response=slack_response,
+            answer_text=delivered.answer_text,
+            answered_by_run_id=delivered.answering_run_id,
+            artifact_kind=delivered.artifact_kind,
+            artifact_ref=delivered.artifact_ref,
+            slack_response={"ts": message_ts},
             now=now,
         )
-    return rows
+        try:
+            kind = ObligationKind(str(row.obligation_kind))
+        except ValueError:
+            continue
+        by_kind[kind] = int(by_kind.get(kind, 0)) + 1
+    if rows:
+        pending_notices = list(
+            (
+                await session.scalars(
+                    select(ObligationNotice)
+                    .where(
+                        ObligationNotice.obligation_id.in_(
+                            [int(row.id) for row in rows]
+                        ),
+                        ObligationNotice.state == "pending",
+                    )
+                    .with_for_update()
+                )
+            ).all()
+        )
+        for notice in pending_notices:
+            notice.state = "superseded"
+            notice.claimed_at = None
+            notice.last_error = None
+        await session.flush()
+    return DeliveredSlackReplyCounts(by_kind=by_kind)
 
 
 def _age_label(age: timedelta) -> str:
@@ -667,7 +658,7 @@ async def list_open_ask_stragglers(
                     OpenAsk.opened_at < cutoff,
                 )
                 .order_by(
-                    OpenAsk.requester_name.asc(),
+                    OpenAsk.obligation_kind.asc(),
                     OpenAsk.opened_at.asc(),
                     OpenAsk.id.asc(),
                 )
@@ -678,7 +669,12 @@ async def list_open_ask_stragglers(
         {
             "id": row.id,
             "obligation_kind": row.obligation_kind,
-            "requester_name": row.requester_name or f"<@{row.requester_slack_id}>",
+            "owner_label": row.owner_label,
+            "requester_name": (
+                row.owner_label
+                if row.obligation_kind == ObligationKind.HUMAN_ASK
+                else None
+            ),
             "requester_slack_id": row.requester_slack_id,
             "ask_text": row.ask_text,
             "origin_ref": row.origin_ref,
@@ -695,21 +691,18 @@ async def list_open_ask_stragglers(
 
 __all__ = [
     "ANSWERED_ASK_STATUS",
-    "HUMAN_ASK_OBLIGATION",
+    "DeliveredSlackReply",
+    "DeliveredSlackReplyCounts",
     "OPEN_ASK_STATUS",
     "OPEN_ASK_STRAGGLER_AFTER",
-    "RUN_DEFERRAL_OBLIGATION",
     "annotate_request_with_open_ask",
     "delivered_message_ts",
     "list_open_ask_stragglers",
     "mark_open_ask_answered",
-    "mark_origin_run_answer_delivered",
-    "mark_run_deferral_notice_delivered",
-    "mark_thread_run_deferrals_answered",
     "open_ask_context_for_request",
     "open_asks_for_origin_ref",
     "open_asks_for_origin_run",
-    "open_run_deferrals_for_thread",
+    "record_delivered_slack_answer",
     "record_open_ask",
     "record_run_deferral",
     "slack_origin_ref",

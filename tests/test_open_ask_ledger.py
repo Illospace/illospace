@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
 
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
-from brain.platform.db.models.open_ask import OpenAsk
+from brain.platform.db.models.open_ask import ObligationNotice, OpenAsk
 from brain.platform.db.models.org import Org, User
 
 
@@ -55,6 +54,7 @@ async def session(async_sqlite_session_factory):
             AgentRunRow.__table__,
             AgentRunEventRow.__table__,
             OpenAsk.__table__,
+            ObligationNotice.__table__,
         ],
     )
     db.add(Org(id=ORG_ID, name="Test Org", slug="test-org"))
@@ -343,7 +343,7 @@ async def test_overdue_open_ask_is_mandatory_in_next_scheduled_person_recap(
     assert stragglers == cycle_run.context_snapshot["open_ask_stragglers"]
     assert stragglers[0]["age"] == "2h 7m"
     assert "MANDATORY OPEN-ASK LEDGER" in message
-    assert "Under each requester's Per-person recap" in message
+    assert "Under each obligation owner's recap" in message
     assert "Reda — unanswered for 2h 7m" in message
     assert ASK_TEXT in message
     assert THREAD_URL in message
@@ -356,6 +356,9 @@ async def test_run_deferral_is_durable_deduplicated_and_closed_only_by_delivery(
 ):
     from brain.systems.runs.failures import terminal_run_notice_condition
     from brain.systems.runs.open_asks import list_open_ask_stragglers
+    from brain.systems.runs.obligation_notices import (
+        deliver_pending_obligation_notices,
+    )
     from brain.systems.runs.slack_delivery import post_slack_run_message
 
     run = await _create_slack_run(session)
@@ -378,6 +381,10 @@ async def test_run_deferral_is_durable_deduplicated_and_closed_only_by_delivery(
         AsyncMock(return_value=FakeSlackClient()),
     )
     monkeypatch.setattr(
+        "brain.systems.runs.obligation_notices.schedule_post_commit_notice_delivery",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
         "brain.systems.slack.thread_mute.read_thread_post_mute",
         AsyncMock(return_value=None),
     )
@@ -394,15 +401,51 @@ async def test_run_deferral_is_durable_deduplicated_and_closed_only_by_delivery(
         )
 
     rows = list((await session.scalars(select(OpenAsk))).all())
+    notices = list((await session.scalars(select(ObligationNotice))).all())
     assert len(rows) == 1
+    assert len(notices) == 1
     obligation = rows[0]
+    interruption_notice = notices[0]
     assert obligation.obligation_kind == "run_deferral"
     assert obligation.origin_run_id == run.id
+    assert obligation.requester_slack_id is None
+    assert obligation.owner_label == f"Illo run {run.id}"
     assert obligation.channel_id == "CALERTS"
     assert obligation.thread_ts == "1784741786.046759"
     assert obligation.status == "open"
     assert result["suppressed"] is True
     assert result["reason"] == "duplicate_run_deferral"
+    assert interruption_notice.condition == "interruption:requeued"
+    assert interruption_notice.state == "pending"
+    assert calls == []
+
+    class _SessionLease:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    async def poster(*, channel, text, thread_ts, idempotency_key):
+        assert idempotency_key.startswith(
+            f"obligation-notice:{obligation.id}:"
+        )
+        return await FakeSlackClient().post_message(
+            channel=channel,
+            text=text,
+            thread_ts=thread_ts,
+        )
+
+    await session.commit()
+    summary = await deliver_pending_obligation_notices(
+        org_id=ORG_ID,
+        session_factory=lambda: _SessionLease(),
+        poster=poster,
+    )
+    await session.refresh(interruption_notice)
+    assert summary["delivered"] == 1
+    assert interruption_notice.state == "delivered"
+    assert interruption_notice.delivered_message_ts == "1784743141.0001"
     assert len(calls) == 1
 
     run.status = "failed"
@@ -421,11 +464,27 @@ async def test_run_deferral_is_durable_deduplicated_and_closed_only_by_delivery(
     )
 
     await session.refresh(obligation)
+    notices = list(
+        (
+            await session.scalars(
+                select(ObligationNotice).order_by(ObligationNotice.id)
+            )
+        ).all()
+    )
     assert obligation.status == "open"
-    assert json.loads(obligation.notice_conditions) == [
+    assert [notice.condition for notice in notices] == [
         "interruption:requeued",
         "terminal:failed:internal",
     ]
+    assert [notice.state for notice in notices] == ["delivered", "pending"]
+    assert len(calls) == 1
+    await session.commit()
+    summary = await deliver_pending_obligation_notices(
+        org_id=ORG_ID,
+        session_factory=lambda: _SessionLease(),
+        poster=poster,
+    )
+    assert summary["delivered"] == 1
     assert len(calls) == 2
     observed_at = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
     obligation.opened_at = observed_at - timedelta(hours=2, minutes=7)
@@ -450,3 +509,272 @@ async def test_run_deferral_is_durable_deduplicated_and_closed_only_by_delivery(
     assert obligation.answered_by_run_id == run.id
     assert obligation.delivered_message_ts == "1784743141.0003"
     assert len(calls) == 3
+
+    # Answered is terminal: a later unseen condition cannot resurrect the row
+    # or create a contradictory "I will come back" notice.
+    await post_slack_run_message(
+        session,
+        run=run,
+        text="A late failure retry must stay silent.",
+        deferral_condition="terminal:failed:verification",
+    )
+    await session.refresh(obligation)
+    assert obligation.status == "answered"
+    assert len(list((await session.scalars(select(ObligationNotice))).all())) == 2
+
+
+@pytest.mark.asyncio
+async def test_uncommitted_deferral_never_reaches_slack_when_outer_transaction_fails(
+    session,
+    monkeypatch,
+):
+    from brain.systems.runs.slack_delivery import post_slack_run_message
+
+    run = await _create_slack_run(session)
+    slack_post = AsyncMock(side_effect=AssertionError("Slack must be post-commit"))
+    monkeypatch.setattr(
+        "brain.systems.runs.slack_delivery.slack_client_for_run",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                post_message=slack_post,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.obligation_notices.schedule_post_commit_notice_delivery",
+        lambda *_args, **_kwargs: False,
+    )
+
+    result = await post_slack_run_message(
+        session,
+        run=run,
+        text="I was interrupted; I will come back.",
+        deferral_condition="interruption:requeued",
+    )
+    assert result["queued"] is True
+    assert slack_post.await_count == 0
+
+    # Model the enclosing unit-of-work commit failure.
+    await session.rollback()
+    assert list((await session.scalars(select(OpenAsk))).all()) == []
+    assert list((await session.scalars(select(ObligationNotice))).all()) == []
+    assert slack_post.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_clarification_reply_does_not_close_run_deferral(session):
+    from brain.systems.runs.open_asks import (
+        DeliveredSlackReply,
+        record_delivered_slack_answer,
+        record_run_deferral,
+    )
+
+    run = await _create_slack_run(session)
+    obligation, _notice, _created = await record_run_deferral(
+        session,
+        run=run,
+        channel_id="CALERTS",
+        thread_ts="1784741786.046759",
+        trigger=run.target_ref["slack_trigger"],
+        deferral_text="I will come back.",
+        notice_condition="interruption:requeued",
+        post_thread_ts="1784741786.046759",
+    )
+
+    counts = await record_delivered_slack_answer(
+        session,
+        DeliveredSlackReply(
+            org_id=ORG_ID,
+            channel_id="CALERTS",
+            thread_ts="1784741786.046759",
+            answering_run_id=run.id,
+            slack_message_ts="1784743141.000100",
+            answer_text="Which repository should own this?",
+            is_answer=False,
+        ),
+    )
+
+    assert counts.total == 0
+    assert counts.answered_open_asks == 0
+    assert obligation.status == "open"
+    assert obligation.answer_text is None
+
+
+@pytest.mark.asyncio
+async def test_stale_notice_claim_is_disambiguated_before_any_resend(session):
+    from brain.systems.runs.open_asks import record_run_deferral
+    from brain.systems.runs.obligation_notices import (
+        STALE_NOTICE_POSTING_GRACE,
+        deliver_pending_obligation_notices,
+    )
+
+    run = await _create_slack_run(session)
+    _obligation, notice, _created = await record_run_deferral(
+        session,
+        run=run,
+        channel_id="CALERTS",
+        thread_ts="1784741786.046759",
+        trigger=run.target_ref["slack_trigger"],
+        deferral_text="I was interrupted; I will come back.",
+        notice_condition="interruption:requeued",
+        post_thread_ts="1784741786.046759",
+    )
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    notice.state = "posting"
+    notice.attempts = 1
+    notice.claimed_at = now - STALE_NOTICE_POSTING_GRACE - timedelta(minutes=1)
+    await session.commit()
+
+    class _SessionLease:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    poster = AsyncMock()
+    reader = AsyncMock(
+        return_value={
+            "messages": [
+                {
+                    "user": "BILLO",
+                    "text": notice.notice_text,
+                    "ts": "1784743141.000100",
+                    "metadata": {
+                        "event_type": "illo_obligation_notice",
+                        "event_payload": {
+                            "idempotency_key": notice.idempotency_key,
+                        },
+                    },
+                }
+            ],
+            "complete": True,
+        }
+    )
+    summary = await deliver_pending_obligation_notices(
+        org_id=ORG_ID,
+        session_factory=lambda: _SessionLease(),
+        poster=poster,
+        destination_reader=reader,
+        now=now,
+    )
+
+    await session.refresh(notice)
+    assert summary["already_delivered"] == 1
+    assert notice.state == "delivered"
+    assert notice.delivered_message_ts == "1784743141.000100"
+    reader.assert_awaited_once()
+    poster.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_answer_supersedes_a_stale_notice_proven_absent(session):
+    from brain.systems.runs.open_asks import (
+        DeliveredSlackReply,
+        record_delivered_slack_answer,
+        record_run_deferral,
+    )
+    from brain.systems.runs.obligation_notices import (
+        STALE_NOTICE_POSTING_GRACE,
+        deliver_pending_obligation_notices,
+    )
+
+    run = await _create_slack_run(session)
+    _obligation, notice, _created = await record_run_deferral(
+        session,
+        run=run,
+        channel_id="CALERTS",
+        thread_ts="1784741786.046759",
+        trigger=run.target_ref["slack_trigger"],
+        deferral_text="I was interrupted; I will come back.",
+        notice_condition="interruption:requeued",
+        post_thread_ts="1784741786.046759",
+    )
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    notice.state = "posting"
+    notice.attempts = 1
+    notice.claimed_at = now - STALE_NOTICE_POSTING_GRACE - timedelta(minutes=1)
+    await record_delivered_slack_answer(
+        session,
+        DeliveredSlackReply(
+            org_id=ORG_ID,
+            channel_id="CALERTS",
+            thread_ts="1784741786.046759",
+            answering_run_id=run.id,
+            slack_message_ts="1784743141.000100",
+            answer_text="Done.",
+            is_answer=True,
+        ),
+    )
+    await session.commit()
+
+    class _SessionLease:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    poster = AsyncMock()
+    summary = await deliver_pending_obligation_notices(
+        org_id=ORG_ID,
+        session_factory=lambda: _SessionLease(),
+        poster=poster,
+        destination_reader=AsyncMock(
+            return_value={"messages": [], "complete": True}
+        ),
+        now=now,
+    )
+
+    await session.refresh(notice)
+    assert summary["superseded"] == 1
+    assert notice.state == "superseded"
+    poster.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delivered_answer_returns_kind_counts_and_closes_all_matching_kinds(
+    session,
+):
+    from brain.platform.db.models.open_ask import ObligationKind
+    from brain.systems.runs.open_asks import (
+        DeliveredSlackReply,
+        record_delivered_slack_answer,
+        record_run_deferral,
+    )
+
+    run_id, human_ask = await _admit_originating_ask(session)
+    run = await session.get(AgentRunRow, run_id)
+    deferral, notice, _created = await record_run_deferral(
+        session,
+        run=run,
+        channel_id="CALERTS",
+        thread_ts="1784741786.046759",
+        trigger=run.target_ref["slack_trigger"],
+        deferral_text="I will come back.",
+        notice_condition="terminal:failed:internal",
+        post_thread_ts="1784741786.046759",
+    )
+
+    counts = await record_delivered_slack_answer(
+        session,
+        DeliveredSlackReply(
+            org_id=ORG_ID,
+            channel_id="CALERTS",
+            thread_ts="1784741786.046759",
+            answering_run_id=run_id,
+            slack_message_ts="1784743141.000100",
+            answer_text="Issue #1221 is filed.",
+            is_answer=True,
+        ),
+    )
+
+    assert counts.by_kind == {
+        ObligationKind.HUMAN_ASK: 1,
+        ObligationKind.RUN_DEFERRAL: 1,
+    }
+    assert counts.answered_open_asks == 1
+    assert counts.total == 2
+    assert human_ask.status == "answered"
+    assert deferral.status == "answered"
+    assert notice.state == "superseded"
