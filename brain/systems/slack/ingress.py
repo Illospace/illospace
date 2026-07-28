@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from brain.systems.slack.monitored_intakes import (
+    MonitoredIntakeMatch,
+    enrich_monitored_intake_payload,
+    recognize_monitored_intake,
+    slack_response_thread_ts,
+    visible_slack_content,
+)
+
 SLACK_MESSAGE_ENVELOPE_KIND = "slack_message"
-SLACK_CHANNEL_MESSAGE_ORIGIN = "slack.channel_message"
 MAX_SLACK_TEXT_CHARS = 4000
-MAX_SLACK_ATTACHMENT_PREVIEW_CHARS = 500
-MAX_SLACK_ATTACHMENT_PREVIEWS = 2
 
 _IGNORED_MESSAGE_SUBTYPES = {
     "bot_message",
@@ -22,28 +27,6 @@ _IGNORED_MESSAGE_SUBTYPES = {
 
 def _bounded_text(value: Any, *, limit: int = MAX_SLACK_TEXT_CHARS) -> str:
     return str(value or "")[:limit]
-
-
-def _event_text(event: Mapping[str, Any]) -> str:
-    """Surface attachment-only bot alerts without changing ordinary messages."""
-    text = _bounded_text(event.get("text"))
-    if text.strip():
-        return text
-    previews: list[str] = []
-    attachments = event.get("attachments")
-    if not isinstance(attachments, list):
-        return text
-    for attachment in attachments[:MAX_SLACK_ATTACHMENT_PREVIEWS]:
-        if not isinstance(attachment, Mapping):
-            continue
-        preview = attachment.get("fallback") or attachment.get("title")
-        bounded = _bounded_text(
-            preview,
-            limit=MAX_SLACK_ATTACHMENT_PREVIEW_CHARS,
-        ).strip()
-        if bounded:
-            previews.append(bounded)
-    return _bounded_text("\n".join(previews))
 
 
 def _socket_payload(socket_payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -96,13 +79,21 @@ def _event_origin(
     bot_user_id: str | None,
     api_app_id: str | None = None,
     monitored_channels: frozenset[str] | set[str] | None = None,
+    monitored_intake: MonitoredIntakeMatch | None = None,
 ) -> str | None:
     event_type = str(event.get("type") or "")
     subtype = str(event.get("subtype") or "")
     channel_type = str(event.get("channel_type") or "")
     text = str(event.get("text") or "")
     channel_id = str(event.get("channel") or "").strip()
-    if subtype in _IGNORED_MESSAGE_SUBTYPES:
+    if (
+        subtype in _IGNORED_MESSAGE_SUBTYPES
+        and (
+            monitored_intake is None
+            or subtype
+            not in monitored_intake.policy.allowed_ignored_subtypes
+        )
+    ):
         return None
     if _is_own_slack_message(event, bot_user_id=bot_user_id, api_app_id=api_app_id):
         return None
@@ -124,15 +115,23 @@ def _event_origin(
         and monitored_channels
         and channel_id in monitored_channels
     ):
-        return SLACK_CHANNEL_MESSAGE_ORIGIN
+        if monitored_intake is None:
+            return None
+        return monitored_intake.policy.origin
     return None
 
 
-def _event_kind(origin: str) -> str:
+def _event_kind(
+    origin: str,
+    monitored_intake: MonitoredIntakeMatch | None,
+) -> str:
     if origin == "slack.direct_message":
         return "direct_message"
-    if origin == SLACK_CHANNEL_MESSAGE_ORIGIN:
-        return "channel_message"
+    if (
+        monitored_intake is not None
+        and origin == monitored_intake.policy.origin
+    ):
+        return monitored_intake.policy.event_kind
     return "mention"
 
 
@@ -142,35 +141,6 @@ def _surface(channel_type: str, thread_ts: str, message_ts: str) -> str:
     if thread_ts and thread_ts != message_ts:
         return "slack_thread"
     return "slack_channel"
-
-
-def _response_thread_ts(
-    channel_type: str,
-    thread_ts: str,
-    message_ts: str,
-    *,
-    is_monitored_channel: bool = False,
-) -> str | None:
-    """Return the Slack thread timestamp Illo should use for its visible reply.
-
-    Slack uses ``thread_ts=message_ts`` to create a thread under a top-level
-    message. That made top-level mentions look like Illo could only answer in
-    threads. The response target should only carry a thread when the user invoked
-    Illo from an existing Slack thread. DMs should stay as normal DM messages.
-
-    Monitored-channel triage is the deliberate exception: a reply to an alert
-    threads *under the original alert* (its ``thread_ts`` or ``message_ts``) so
-    the alert and Illo's response stay attached, instead of landing as a detached
-    top-level message that fragments the follow-up.
-    """
-
-    if channel_type == "im":
-        return None
-    if is_monitored_channel:
-        return thread_ts or message_ts or None
-    if thread_ts and thread_ts != message_ts:
-        return thread_ts
-    return None
 
 
 def normalize_slack_socket_event(
@@ -189,6 +159,8 @@ def normalize_slack_socket_event(
 
     payload = _socket_payload(socket_payload)
     event = _slack_event(socket_payload)
+    visible_content = visible_slack_content(event)
+    monitored_intake = recognize_monitored_intake(event, visible_content)
     resolved_bot_user_id = _bot_user_id(socket_payload, bot_user_id)
     api_app_id = str(payload.get("api_app_id") or "").strip() or None
     monitored = frozenset(
@@ -199,9 +171,15 @@ def normalize_slack_socket_event(
         bot_user_id=resolved_bot_user_id,
         api_app_id=api_app_id,
         monitored_channels=monitored,
+        monitored_intake=monitored_intake,
     )
     if origin is None:
         return None
+    message_text = (
+        monitored_intake.text
+        if origin == monitored_intake.policy.origin
+        else visible_content.message_text
+    )
 
     team_id = str(payload.get("team_id") or event.get("team") or "").strip()
     enterprise_id = str(payload.get("enterprise_id") or event.get("enterprise") or "").strip() or None
@@ -222,18 +200,17 @@ def normalize_slack_socket_event(
     surface = _surface(channel_type, thread_ts, message_ts)
     response_target = {
         "channel_id": channel_id,
-        "thread_ts": _response_thread_ts(
+        "thread_ts": slack_response_thread_ts(
             channel_type,
             thread_ts,
             message_ts,
-            is_monitored_channel=origin == SLACK_CHANNEL_MESSAGE_ORIGIN,
+            is_monitored=origin == monitored_intake.policy.origin,
         ),
         "visibility": "public",
     }
     permalink = str(event.get("permalink") or "").strip() or None
-    message_text = _event_text(event)
     normalized_payload = {
-        "event_kind": _event_kind(origin),
+        "event_kind": _event_kind(origin, monitored_intake),
         "origin": origin,
         "team_id": team_id,
         "enterprise_id": enterprise_id,
@@ -252,6 +229,11 @@ def normalize_slack_socket_event(
         "surface": surface,
         "response_target": response_target,
     }
+    if origin == monitored_intake.policy.origin:
+        enrich_monitored_intake_payload(
+            normalized_payload,
+            monitored_intake,
+        )
     return {
         "kind": SLACK_MESSAGE_ENVELOPE_KIND,
         "origin": origin,

@@ -644,9 +644,8 @@ def test_surge_claim_ttl_uses_small_default_when_omitted(tmp_path):
 
 @pytest.mark.asyncio
 async def test_monitored_connector_records_alert_before_run_admission(monkeypatch):
-    from brain.systems.slack.connector import (
-        SlackConnectorConfig,
-        _handle_monitored_provider_alert,
+    from brain.systems.slack.monitored_intakes import (
+        enrich_monitored_intake,
     )
 
     captured: dict[str, Any] = {}
@@ -673,7 +672,10 @@ async def test_monitored_connector_records_alert_before_run_admission(monkeypatc
         _handle,
     )
     envelope = {
+        "origin": "slack.channel_message",
         "payload": {
+            "origin": "slack.channel_message",
+            "event_kind": "channel_message",
             "channel_id": ALERTS_CHANNEL_ID,
             "message_ts": "1784643000.000000",
             "text": _rollbar_alert(
@@ -683,10 +685,10 @@ async def test_monitored_connector_records_alert_before_run_admission(monkeypatc
             ),
         }
     }
-    await _handle_monitored_provider_alert(
+    await enrich_monitored_intake(
+        envelope,
         connection={"org_id": ORG_ID},
-        config=SlackConnectorConfig(bot_token="xoxb-test", app_token="xapp-test"),
-        envelope=envelope,
+        bot_token="xoxb-test",
     )
 
     assert captured["org_id"] == ORG_ID

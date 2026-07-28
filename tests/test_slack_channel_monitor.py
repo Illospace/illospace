@@ -7,54 +7,19 @@ reflex reaction, headless triage run framing (no forced reply), and the
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-
-def _socket_mode_channel_message(**event_overrides):
-    """A Socket Mode ``message`` event posted to a channel (no @-mention)."""
-
-    event = {
-        "type": "message",
-        "user": "U123",
-        "text": "Payments API is throwing 500s in prod",
-        "ts": "1716900000.000200",
-        "event_ts": "1716900000.000200",
-        "channel": "C_ALERTS",
-        "channel_type": "channel",
-    }
-    event.update(event_overrides)
-    return {
-        "type": "events_api",
-        "envelope_id": "env-2",
-        "payload": {
-            "team_id": "T789",
-            "api_app_id": "A111",
-            "event_id": "Ev333",
-            "event_time": 1716900000,
-            "event": event,
-            "authorizations": [{"team_id": "T789", "user_id": "BILLO", "is_bot": True}],
-        },
-    }
-
-
-def _channel_monitor_payload() -> dict[str, Any]:
-    """A normalized Slack payload for a monitored-channel message."""
-
-    return {
-        "origin": "slack.channel_message",
-        "event_kind": "channel_message",
-        "team_id": "T789",
-        "channel_id": "C_ALERTS",
-        "channel_name": "alerts",
-        "channel_type": "channel",
-        "message_ts": "1716900000.000200",
-        "thread_ts": "1716900000.000200",
-        "slack_user_id": "U123",
-        "text": "Payments API 500s in prod",
-        "response_target": {"channel_id": "C_ALERTS", "thread_ts": None, "visibility": "public"},
-    }
+from tests.slack_monitor_fixtures import (
+    FakeSlackConnection as _FakeConnection,
+    FakeSlackSession as _FakeSession,
+    channel_monitor_payload as _channel_monitor_payload,
+    patch_slack_connector as _patch_connector,
+    socket_mode_channel_message as _socket_mode_channel_message,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -181,6 +146,38 @@ def test_monitored_channel_admits_third_party_bot_alert():
 
     assert envelope is not None
     assert envelope["origin"] == "slack.channel_message"
+
+
+def test_rollbar_alert_in_same_monitored_channel_remains_byte_identical():
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    envelope = normalize_slack_socket_event(
+        _socket_mode_channel_message(
+            user="",
+            bot_id="B_ROLLBAR",
+            app_id="A_ROLLBAR",
+            text="Rollbar: #2206 100th error: ClientError 400 INVALID_ARGUMENT",
+        ),
+        bot_user_id="BILLO",
+        monitored_channels={"C_ALERTS"},
+    )
+
+    serialized = (
+        json.dumps(
+            envelope,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode()
+    baseline = (
+        Path(__file__).parent
+        / "fixtures"
+        / "slack"
+        / "rollbar_alert_origin_main.json"
+    ).read_bytes()
+    assert serialized == baseline
 
 
 def test_attachment_only_bot_alert_surfaces_fallback_into_monitor_prompt():
@@ -660,49 +657,6 @@ async def test_add_reaction_posts_normalized_eyes(monkeypatch):
 # --------------------------------------------------------------------------- #
 # Connector: the reflex reaction fires only for monitored channel messages      #
 # --------------------------------------------------------------------------- #
-
-
-class _FakeConnection:
-    def __init__(self, metadata=None, org_id="org1"):
-        self.id = "conn1"
-        self.org_id = org_id
-        self.agent_kind = "slack"
-        self.transport = "slack_socket_mode"
-        self.metadata_ = dict(metadata or {})
-
-
-class _FakeSession:
-    def __init__(self, connection):
-        self._connection = connection
-
-    async def get(self, _model, _id):
-        return self._connection
-
-    async def flush(self):
-        return None
-
-
-def _patch_connector(monkeypatch):
-    from brain.systems.slack import connector as connector_module
-
-    reactions: list[tuple[str, str, str]] = []
-    submitted: list[dict[str, Any]] = []
-
-    class _FakeClient:
-        def __init__(self, token):
-            self.token = token
-
-        async def add_reaction(self, *, channel, timestamp, name):
-            reactions.append((channel, timestamp, name))
-            return {"ok": True}
-
-    async def _fake_submit(session, *, connection, envelope, ingress_context):
-        submitted.append(envelope)
-        return {"status": "processed"}
-
-    monkeypatch.setattr(connector_module, "SlackWebClient", _FakeClient)
-    monkeypatch.setattr(connector_module, "submit_inbound_envelope", _fake_submit)
-    return connector_module, reactions, submitted
 
 
 @pytest.mark.asyncio
