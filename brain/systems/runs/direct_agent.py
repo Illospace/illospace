@@ -123,8 +123,9 @@ from brain.systems.runs.routing_metadata import (
     routing_metadata_with_effective,
 )
 from brain.systems.runs.direct_loop.run_budget_notice import (
-    budget_notices_seen,
+    load_budget_notices_sent,
     load_due_budget_notices,
+    record_budget_notice_sent,
 )
 from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
@@ -1522,10 +1523,7 @@ async def run_agent_async(
         loaded_messages, stored_system = (
             await _maybe_await(load_session(session_id)) if persist_session else ([], None)
         )
-        run_budget_notices_sent = budget_notices_seen(
-            loaded_messages,
-            run_id=run_id,
-        )
+        run_budget_notices_sent = await load_budget_notices_sent(run_id)
         if stored_system and not system_prompt:
             system_prompt = stored_system
         raw_archive_messages = copy.deepcopy(loaded_messages) if persist_session else None
@@ -1607,14 +1605,14 @@ async def run_agent_async(
                 raw_archive_messages.append(copy.deepcopy(state.messages[-1]))
             for notice in await load_due_budget_notices(
                 run_id=run_id,
-                tool_calls_log=getattr(_agent_context, "tool_calls_log", []),
                 sent=run_budget_notices_sent,
             ):
-                _append_message_with_archive(
-                    state.messages,
-                    notice.message,
-                    raw_archive_messages,
-                )
+                if await record_budget_notice_sent(run_id=int(run_id), notice=notice):
+                    _append_message_with_archive(
+                        state.messages,
+                        notice.message,
+                        raw_archive_messages,
+                    )
                 run_budget_notices_sent.add(notice.key)
             state.messages = _sanitize_tool_pairs(state.messages, session_id)
             compaction = _compact_active_context(

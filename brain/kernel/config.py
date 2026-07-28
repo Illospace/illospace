@@ -9,6 +9,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from brain.kernel.common.env import env_float, env_int
+
 # ---------------------------------------------------------------------------
 # Resolve .env (if python-dotenv available)
 # ---------------------------------------------------------------------------
@@ -64,34 +66,21 @@ BRAIN_LOG_DIR = Path(os.getenv("BRAIN_LOG_DIR", PRIVATE_HOME / "logs"))
 # ---------------------------------------------------------------------------
 # Agent runtime
 # ---------------------------------------------------------------------------
-# About 33 near-limit 150K-token requests: well beyond an ordinary run, while
-# still catching a sustained large-context loop before it can consume 45 minutes.
+# Unvalidated estimate: 33 near-limit requests * 150K budget tokens = 4.95M,
+# rounded to 5M. The budget metric includes uncached input/output plus cache
+# reads/writes; see cumulative_run_budget_tokens() in runtime_activity.py.
 _DEFAULT_AGENT_RUN_CUMULATIVE_TOKEN_BUDGET = 5_000_000
-try:
-    AGENT_RUN_CUMULATIVE_TOKEN_BUDGET = max(
-        0,
-        int(
-            os.getenv(
-                "AGENT_RUN_CUMULATIVE_TOKEN_BUDGET",
-                str(_DEFAULT_AGENT_RUN_CUMULATIVE_TOKEN_BUDGET),
-            )
-        ),
-    )
-except (TypeError, ValueError):
-    AGENT_RUN_CUMULATIVE_TOKEN_BUDGET = (
-        _DEFAULT_AGENT_RUN_CUMULATIVE_TOKEN_BUDGET
-    )
+AGENT_RUN_CUMULATIVE_TOKEN_BUDGET = env_int(
+    "AGENT_RUN_CUMULATIVE_TOKEN_BUDGET",
+    _DEFAULT_AGENT_RUN_CUMULATIVE_TOKEN_BUDGET,
+    minimum=0,
+)
 
 _DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION = 2 / 3
-try:
-    AGENT_RUN_BUDGET_NOTICE_FRACTION = float(
-        os.getenv(
-            "AGENT_RUN_BUDGET_NOTICE_FRACTION",
-            str(_DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION),
-        )
-    )
-except (TypeError, ValueError):
-    AGENT_RUN_BUDGET_NOTICE_FRACTION = _DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION
+AGENT_RUN_BUDGET_NOTICE_FRACTION = env_float(
+    "AGENT_RUN_BUDGET_NOTICE_FRACTION",
+    _DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION,
+)
 if not 0 < AGENT_RUN_BUDGET_NOTICE_FRACTION < 1:
     AGENT_RUN_BUDGET_NOTICE_FRACTION = _DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION
 
