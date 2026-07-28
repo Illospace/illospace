@@ -149,8 +149,9 @@ WORKER_RESTART_POLICY_SUSPENDED_ID=""
 # persistent mutation of the container, so an interrupted deploy (Ctrl-C, SSH
 # drop, dockerd snap refresh, power cut) used to strand the worker at
 # restart=no. The Compose file still read `unless-stopped`, nothing reconciled
-# the drift, and the next reboot silently dropped the worker (#527). The trap
-# makes the window crash-safe.
+# the drift, and the next reboot silently dropped the worker (#527). The traps
+# restore the policy after catchable interruptions; reconcile_worker_restart_policy
+# repairs persistent drift after SIGKILL, power loss, or other untrappable failures.
 suspend_worker_restart_policy() {
   local id="$1"
   local existing
@@ -167,8 +168,11 @@ suspend_worker_restart_policy() {
       trap "restore_worker_restart_policy; $existing" EXIT
       ;;
   esac
-  trap 'restore_worker_restart_policy' INT TERM HUP
-  docker update --restart=no "$id" >/dev/null 2>&1 || true
+  trap 'trap - INT; restore_worker_restart_policy; kill -s INT "$$"' INT
+  trap 'trap - TERM; restore_worker_restart_policy; kill -s TERM "$$"' TERM
+  trap 'trap - HUP; restore_worker_restart_policy; kill -s HUP "$$"' HUP
+  # Every caller signals or kills the worker next, so suspension is mandatory.
+  docker update --restart=no "$id" >/dev/null || exit 1
 }
 
 restore_worker_restart_policy() {
