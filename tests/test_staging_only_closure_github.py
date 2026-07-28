@@ -1,0 +1,147 @@
+"""GitHub client-boundary coverage for staging-only closure reads."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from brain.systems.cortex.project_context.github import (
+    GithubFixingPullRequest,
+    GithubIssueClosure,
+    async_get_issue_closure_info,
+)
+from brain.systems.deploy_state import DeployStateBatch
+from brain.systems.staging_only_closure import BackendClosureGithubClient
+
+
+@pytest.mark.asyncio
+async def test_issue_closure_read_resolves_closer_and_fixing_pr_deploy_facts():
+    issue = {
+        "number": 1281,
+        "title": "PostgreSQL deadlock",
+        "state": "closed",
+        "closed_at": "2026-07-27T09:08:19Z",
+        "closed_by": {"login": "uwear-claw"},
+    }
+    graphql = {
+        "data": {
+            "repository": {
+                "issue": {
+                    "closedByPullRequestsReferences": {
+                        "nodes": [
+                            {
+                                "number": 1305,
+                                "baseRefName": "staging",
+                                "mergedAt": "2026-07-27T09:01:00Z",
+                                "mergeCommit": {"oid": "a" * 40},
+                                "repository": {
+                                    "nameWithOwner": "uwear-ai/uwear-backend"
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=[issue, graphql]),
+    ) as request:
+        result = await async_get_issue_closure_info(
+            "uwear-ai/uwear-backend",
+            1281,
+            token="read-token",
+        )
+
+    assert result == GithubIssueClosure(
+        repo="uwear-ai/uwear-backend",
+        number=1281,
+        title="PostgreSQL deadlock",
+        state="closed",
+        closed_at=datetime(2026, 7, 27, 9, 8, 19, tzinfo=timezone.utc),
+        closed_by="uwear-claw",
+        fixing_pull_requests=(
+            GithubFixingPullRequest(
+                repo="uwear-ai/uwear-backend",
+                number=1305,
+                base_ref_name="staging",
+                merge_commit_sha="a" * 40,
+                merged_at=datetime(2026, 7, 27, 9, 1, tzinfo=timezone.utc),
+            ),
+        ),
+    )
+    assert [call.args[1:3] for call in request.await_args_list] == [
+        ("GET", "/repos/uwear-ai/uwear-backend/issues/1281"),
+        ("POST", "/graphql"),
+    ]
+    assert request.await_args_list[1].kwargs["token"] == "read-token"
+
+
+@pytest.mark.asyncio
+async def test_backend_adapter_uses_shared_closure_and_deploy_state_reads(monkeypatch):
+    import brain.systems.runs.tool_catalog.handlers.github as handler
+
+    closure_read = AsyncMock(
+        return_value=GithubIssueClosure(
+            repo="uwear-ai/uwear-backend",
+            number=1281,
+            title="PostgreSQL deadlock",
+            state="closed",
+            closed_at=datetime(2026, 7, 27, 9, 8, 19, tzinfo=timezone.utc),
+            closed_by="uwear-claw",
+            fixing_pull_requests=(
+                GithubFixingPullRequest(
+                    repo="uwear-ai/uwear-backend",
+                    number=1305,
+                    base_ref_name="staging",
+                    merge_commit_sha="a" * 40,
+                    merged_at=datetime(2026, 7, 27, 9, 1, tzinfo=timezone.utc),
+                ),
+            ),
+        )
+    )
+    expected_batch = DeployStateBatch(
+        {},
+        observations_by_key={},
+        observations_by_ref={},
+    )
+    deploy_read = AsyncMock(return_value=expected_batch)
+    monkeypatch.setattr(
+        handler,
+        "github_issue_closure_for_backend",
+        closure_read,
+    )
+    monkeypatch.setattr(
+        handler,
+        "github_deploy_states_for_backend",
+        deploy_read,
+    )
+    client = BackendClosureGithubClient(org_id="org-1", user_id="user-1")
+
+    closure = await client.get_issue_closure(
+        repo="uwear-ai/uwear-backend",
+        issue_number=1281,
+    )
+    batch = await client.derive_deploy_states(
+        {"key": ("uwear-ai/uwear-backend", "a" * 40)}
+    )
+
+    assert closure is not None
+    assert closure.fixing_pull_requests[0].base_ref_name == "staging"
+    assert closure.fixing_pull_requests[0].merge_commit_sha == "a" * 40
+    assert batch is expected_batch
+    closure_read.assert_awaited_once_with(
+        repo_slug="uwear-ai/uwear-backend",
+        issue_number=1281,
+        org_id="org-1",
+        user_id="user-1",
+    )
+    deploy_read.assert_awaited_once_with(
+        {"key": ("uwear-ai/uwear-backend", "a" * 40)},
+        org_id="org-1",
+        user_id="user-1",
+    )

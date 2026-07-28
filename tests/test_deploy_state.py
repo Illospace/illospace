@@ -8,6 +8,7 @@ import pytest
 
 from brain.systems.deploy_state import (
     DeployState,
+    DeployStateObservation,
     derive_deploy_state,
     observe_deploy_state,
     render_deploy_state,
@@ -90,3 +91,26 @@ async def test_indeterminate_identity_falls_through_to_next_token():
 
 def test_indeterminate_state_renders_unknown():
     assert render_deploy_state(None) == "unknown"
+
+
+def test_observation_exposes_latest_branch_ancestry_result_for_callers():
+    observation = DeployStateObservation(
+        state=DeployState.STAGING,
+        in_staging=True,
+        in_main=False,
+        comparisons=(
+            AncestryObservation(
+                branch="main",
+                is_ancestor=None,
+                error_category="github_http_404",
+            ),
+            AncestryObservation(
+                branch="main",
+                is_ancestor=False,
+                status="diverged",
+            ),
+        ),
+    )
+
+    assert observation.branch_ancestry_result("main") == "diverged (not contained)"
+    assert observation.branch_ancestry_result("production") == "unknown"

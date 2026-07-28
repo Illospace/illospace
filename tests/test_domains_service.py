@@ -2066,7 +2066,12 @@ async def test_deploy_tracker_serialization_hides_retired_stored_state(session):
                     {
                         "key": "deploy_state",
                         "field_type": "enum",
-                        "options": ["staging", "verified"],
+                        "options": ["staging", "verified", "prod_pending"],
+                    },
+                    {
+                        "key": "production_gate",
+                        "field_type": "enum",
+                        "options": ["prod_pending"],
                     },
                     {"key": "deployed_at", "field_type": "datetime"},
                 ],
@@ -2107,6 +2112,23 @@ async def test_deploy_tracker_serialization_hides_retired_stored_state(session):
         "fix_pr": "uwear-ai/uwear-backend#1264",
         "verified": True,
     }
+
+    production_pending = await service.create_record(
+        ORG_ID,
+        domain.id,
+        "github_ticket",
+        data={
+            "title": "Closed before promotion",
+            "fix_pr": "uwear-ai/uwear-backend#1305",
+            "fix_merge_sha": "b" * 40,
+            "deploy_state": "prod_pending",
+            "production_gate": "prod_pending",
+        },
+    )
+    production_pending_full = await service.serialize_record(production_pending)
+
+    assert "deploy_state" not in production_pending_full["data"]
+    assert production_pending_full["data"]["production_gate"] == "prod_pending"
 
 
 async def test_list_records_supports_oldest_first_order_and_rejects_invalid_order(session):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import binascii
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -54,11 +55,65 @@ query GetIssueParent($issueId: ID!) {
 }
 """.strip()
 
+GITHUB_ISSUE_CLOSING_PULL_REQUESTS_QUERY = """
+query GetIssueClosingPullRequests(
+  $owner: String!,
+  $name: String!,
+  $number: Int!
+) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      closedByPullRequestsReferences(first: 50) {
+        nodes {
+          number
+          baseRefName
+          mergedAt
+          mergeCommit {
+            oid
+          }
+          repository {
+            nameWithOwner
+          }
+        }
+      }
+    }
+  }
+}
+""".strip()
+
 
 @dataclass
 class GitHubConnectorError(Exception):
     status_code: int
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class GithubFixingPullRequest:
+    """One valid merged PR GitHub identifies as closing an issue."""
+
+    repo: str
+    number: int
+    base_ref_name: str
+    merge_commit_sha: str
+    merged_at: datetime | None = None
+
+    @property
+    def canonical_ref(self) -> str:
+        return f"{self.repo}#{self.number}"
+
+
+@dataclass(frozen=True, slots=True)
+class GithubIssueClosure:
+    """Normalized issue-closure facts returned by the GitHub read boundary."""
+
+    repo: str
+    number: int
+    title: str
+    state: str
+    closed_at: datetime | None
+    closed_by: str | None
+    fixing_pull_requests: tuple[GithubFixingPullRequest, ...]
 
 
 def parse_github_repo_slug(value: str) -> str | None:
@@ -1408,6 +1463,140 @@ async def async_get_issue(
         len(" ".join(str((issue or {}).get("body") or "").split())) if isinstance(issue, dict) else 0
     )
     return {"repo": slug, "issue": payload}
+
+
+async def async_get_issue_closure_info(
+    slug: str,
+    issue_number: int,
+    *,
+    token: str | None = None,
+) -> GithubIssueClosure:
+    """Read an issue closure and the PRs GitHub identifies as closing it."""
+
+    owner, repo = slug.split("/", 1)
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        issue = await _async_request(
+            client,
+            "GET",
+            f"/repos/{owner}/{repo}/issues/{issue_number}",
+            token=token,
+        )
+        linked = await _async_request(
+            client,
+            "POST",
+            "/graphql",
+            token=token,
+            json={
+                "query": GITHUB_ISSUE_CLOSING_PULL_REQUESTS_QUERY,
+                "variables": {
+                    "owner": owner,
+                    "name": repo,
+                    "number": int(issue_number),
+                },
+            },
+        )
+    errors = linked.get("errors") if isinstance(linked, dict) else None
+    if isinstance(errors, list) and errors:
+        messages = [
+            str(error.get("message") or "Unknown GraphQL error")
+            for error in errors
+            if isinstance(error, dict)
+        ]
+        raise GitHubConnectorError(
+            status_code=502,
+            message=(
+                "GitHub closing-PR lookup failed: "
+                + ("; ".join(messages) or "unknown error")
+            ),
+        )
+    data = linked.get("data") if isinstance(linked, dict) else None
+    repository = data.get("repository") if isinstance(data, dict) else None
+    issue_node = (
+        repository.get("issue")
+        if isinstance(repository, dict)
+        else None
+    )
+    connection = (
+        issue_node.get("closedByPullRequestsReferences")
+        if isinstance(issue_node, dict)
+        else None
+    )
+    nodes = connection.get("nodes") if isinstance(connection, dict) else None
+    if not isinstance(nodes, list):
+        raise GitHubConnectorError(
+            status_code=502,
+            message=(
+                f"GitHub closing-PR lookup for {slug}#{issue_number} "
+                "returned an invalid connection."
+            ),
+        )
+
+    issue_data = issue if isinstance(issue, dict) else {}
+    closer = issue_data.get("closed_by")
+    fixing_pull_requests: list[GithubFixingPullRequest] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        try:
+            number = int(node.get("number"))
+        except (TypeError, ValueError):
+            continue
+        merge_commit = node.get("mergeCommit")
+        merge_sha = (
+            str(merge_commit.get("oid") or "").strip()
+            if isinstance(merge_commit, dict)
+            else ""
+        )
+        if number < 1 or not merge_sha:
+            continue
+        repository = node.get("repository")
+        fixing_pull_requests.append(
+            GithubFixingPullRequest(
+                repo=(
+                    str(repository.get("nameWithOwner") or "").strip()
+                    if isinstance(repository, dict)
+                    else ""
+                )
+                or slug,
+                number=number,
+                base_ref_name=str(node.get("baseRefName") or "").strip(),
+                merge_commit_sha=merge_sha,
+                merged_at=_github_datetime(node.get("mergedAt")),
+            )
+        )
+    try:
+        closure_number = int(issue_data.get("number") or issue_number)
+    except (TypeError, ValueError):
+        closure_number = int(issue_number)
+    return GithubIssueClosure(
+        repo=slug,
+        number=closure_number,
+        title=str(issue_data.get("title") or "").strip(),
+        state=str(issue_data.get("state") or "").strip(),
+        closed_at=_github_datetime(issue_data.get("closed_at")),
+        closed_by=(
+            str(closer.get("login") or "").strip() or None
+            if isinstance(closer, dict)
+            else None
+        ),
+        fixing_pull_requests=tuple(fixing_pull_requests),
+    )
+
+
+def _github_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _issue_reference(slug: str, issue_number: int) -> dict[str, Any]:

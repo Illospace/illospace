@@ -182,30 +182,6 @@ def _cycle_run_model_policy(cycle: Cycle, run: CycleRun) -> dict[str, str]:
     return policy
 
 
-async def _async_maybe_harvest_alert_resolution(session, cycle: Cycle, run: CycleRun) -> dict | None:
-    """Refresh alert-sourced tracker outcomes before the Uwear digest sweep.
-
-    The delegated harvester calls only Slack's thread-read API. Failures are
-    recorded as degraded pre-sweep evidence and never block the cycle launch.
-    """
-    if cycle.name != _UWEAR_COORDINATOR_CYCLE_NAME:
-        return None
-    try:
-        from brain.systems.alert_resolution import run_alert_resolution_harvest
-
-        summary = await run_alert_resolution_harvest(
-            session,
-            org_id=str(cycle.org_id),
-        )
-    except Exception as exc:  # noqa: BLE001 - scheduled sweep must degrade safely
-        logger.exception("coordinator alert-resolution harvest failed safely")
-        summary = {"errors": [str(exc)], "updated": 0, "movements": []}
-    context_snapshot = dict(run.context_snapshot or {})
-    context_snapshot["alert_resolution_harvest"] = summary
-    run.context_snapshot = context_snapshot
-    return summary
-
-
 async def _async_attach_open_ask_stragglers(
     session,
     cycle: Cycle,
@@ -724,10 +700,15 @@ async def async_execute_cycle_run(run_id: int) -> None:
         cycle.execution_mode = REUSABLE_THREAD_EXECUTION_MODE
         cycle.reopen_archived = True
 
-        # Refresh alert-sourced tracker outcomes before the coordinator composes
-        # its digest. No-op for every other cycle (name-gated) and degrades its
-        # own Slack/DB errors, so it never breaks a cycle launch.
-        await _async_maybe_harvest_alert_resolution(uow.session, cycle, run)
+        from brain.systems.tracker_maintenance import (
+            maybe_run_tracker_maintenance,
+        )
+
+        await maybe_run_tracker_maintenance(
+            uow.session,
+            cycle=cycle,
+            run=run,
+        )
 
         target = await async_resolve_cycle_execution_target(
             uow.session,

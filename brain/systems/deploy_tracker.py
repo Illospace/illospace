@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 from sqlalchemy import select
 
 from brain.platform.db.models.domain import (
     Domain,
+    DomainFieldDefinition,
     DomainObjectType,
     DomainRecord,
 )
@@ -53,6 +55,25 @@ ALERT_RESOLUTION_FIELD_DEFINITIONS: tuple[dict, ...] = (
     },
 )
 
+PRODUCTION_GATE_FIELD = "production_gate"
+PRODUCTION_GATE_PENDING = "prod_pending"
+PRODUCTION_GATE_FIELD_DEFINITIONS: tuple[dict, ...] = (
+    {
+        "key": PRODUCTION_GATE_FIELD,
+        "name": "Production Gate",
+        "field_type": "enum",
+        "options": [PRODUCTION_GATE_PENDING],
+    },
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DeployTrackerTransition:
+    """Outcome of one canonical tracker workflow transition."""
+
+    changed: bool
+    progress_added: bool = False
+
 
 def append_progress_note(data: Mapping[str, object], line: str) -> str | None:
     """Append one line using the tracker progress-note convention."""
@@ -62,39 +83,104 @@ def append_progress_note(data: Mapping[str, object], line: str) -> str | None:
     return f"{current}\n{line}".lstrip()
 
 
+def append_progress_note_once(
+    data: Mapping[str, object],
+    line: str,
+) -> tuple[str | None, bool]:
+    """Append a progress line idempotently using the tracker convention."""
+
+    if "progress_note" not in data:
+        return None, False
+    current = str(data.get("progress_note") or "").rstrip()
+    if line in current:
+        return current, False
+    return f"{current}\n{line}".lstrip(), True
+
+
 async def _ensure_fields(
     session,
     *,
     org_id: str,
     definitions: tuple[dict, ...],
+    domain_id: int | None = None,
+    domain_slug: str | None = None,
 ) -> dict:
-    object_types = (
-        await session.scalars(
-            select(DomainObjectType)
-            .join(Domain, Domain.id == DomainObjectType.domain_id)
-            .where(
-                Domain.org_id == str(org_id),
-                Domain.archived_at.is_(None),
-                DomainObjectType.key.in_(deploy_ticket_object_keys()),
-                DomainObjectType.archived_at.is_(None),
-            )
-            .order_by(DomainObjectType.id)
+    stmt = (
+        select(DomainObjectType)
+        .join(Domain, Domain.id == DomainObjectType.domain_id)
+        .where(
+            Domain.org_id == str(org_id),
+            Domain.archived_at.is_(None),
+            DomainObjectType.key.in_(deploy_ticket_object_keys()),
+            DomainObjectType.archived_at.is_(None),
         )
+    )
+    if domain_id is not None:
+        stmt = stmt.where(Domain.id == int(domain_id))
+    if domain_slug is not None:
+        stmt = stmt.where(Domain.slug == str(domain_slug))
+    object_types = (
+        await session.scalars(stmt.order_by(DomainObjectType.id))
     ).all()
     service = AsyncDomainService(session)
     added = 0
+    changed = 0
     for object_type in object_types:
         existing = {
-            field.key
-            for field in await service.list_fields(object_type.id)
+            field.key: field
+            for field in (
+                await session.scalars(
+                    select(DomainFieldDefinition)
+                    .where(
+                        DomainFieldDefinition.object_type_id == object_type.id,
+                        DomainFieldDefinition.key.in_(
+                            definition["key"] for definition in definitions
+                        ),
+                    )
+                    .order_by(DomainFieldDefinition.id)
+                )
+            ).all()
         }
         for payload in definitions:
-            if payload["key"] in existing:
+            key = str(payload["key"])
+            field = existing.get(key)
+            if field is None:
+                field = await service.add_field_definition(
+                    object_type,
+                    dict(payload),
+                    emit_event=False,
+                )
+                existing[key] = field
+                added += 1
                 continue
-            await service.add_field_definition(object_type, dict(payload), emit_event=False)
-            existing.add(str(payload["key"]))
-            added += 1
-    return {"object_types": len(object_types), "fields_added": added}
+            desired_options = list(field.options or [])
+            for option in payload.get("options") or []:
+                option = str(option)
+                if option not in desired_options:
+                    desired_options.append(option)
+            desired_type = str(payload["field_type"])
+            desired_required = bool(payload.get("required", False))
+            desired_name = str(payload.get("name") or field.name)
+            if (
+                field.archived_at is not None
+                or field.field_type != desired_type
+                or field.required != desired_required
+                or field.name != desired_name
+                or list(field.options or []) != desired_options
+            ):
+                field.archived_at = None
+                field.field_type = desired_type
+                field.required = desired_required
+                field.name = desired_name
+                field.options = desired_options
+                changed += 1
+    if changed:
+        await session.flush()
+    return {
+        "object_types": len(object_types),
+        "fields_added": added,
+        "fields_changed": changed,
+    }
 
 
 async def ensure_deploy_verification_fields(session, *, org_id: str) -> dict:
@@ -126,6 +212,49 @@ async def ensure_alert_resolution_fields(session, *, org_id: str) -> dict:
             verification["fields_added"]
             + resolution["fields_added"]
         ),
+        "fields_changed": (
+            verification["fields_changed"]
+            + resolution["fields_changed"]
+        ),
+    }
+
+
+async def ensure_production_gate_fields(
+    session,
+    *,
+    org_id: str,
+    domain_id: int | None = None,
+    domain_slug: str | None = None,
+) -> dict:
+    """Provision or reconcile the distinct production-gate workflow field."""
+
+    verification = await _ensure_fields(
+        session,
+        org_id=org_id,
+        definitions=DEPLOY_VERIFICATION_FIELD_DEFINITIONS,
+        domain_id=domain_id,
+        domain_slug=domain_slug,
+    )
+    gate = await _ensure_fields(
+        session,
+        org_id=org_id,
+        definitions=PRODUCTION_GATE_FIELD_DEFINITIONS,
+        domain_id=domain_id,
+        domain_slug=domain_slug,
+    )
+    return {
+        "object_types": max(
+            verification["object_types"],
+            gate["object_types"],
+        ),
+        "fields_added": (
+            verification["fields_added"]
+            + gate["fields_added"]
+        ),
+        "fields_changed": (
+            verification["fields_changed"]
+            + gate["fields_changed"]
+        ),
     }
 
 
@@ -134,6 +263,8 @@ async def list_deploy_ticket_records(
     *,
     org_id: str,
     include_archived: bool = False,
+    domain_id: int | None = None,
+    domain_slug: str | None = None,
 ) -> list[DomainRecord]:
     """Select tracker records for read-time enrichment or maintenance."""
     stmt = (
@@ -147,6 +278,10 @@ async def list_deploy_ticket_records(
             DomainObjectType.archived_at.is_(None),
         )
     )
+    if domain_id is not None:
+        stmt = stmt.where(Domain.id == int(domain_id))
+    if domain_slug is not None:
+        stmt = stmt.where(Domain.slug == str(domain_slug))
     if not include_archived:
         stmt = stmt.where(DomainRecord.archived_at.is_(None))
     return list((await session.scalars(stmt.order_by(DomainRecord.id))).all())
@@ -170,3 +305,77 @@ async def update_deploy_ticket_record(
             actor_kind="system",
             reason=reason,
         )
+
+
+async def mark_prod_pending(
+    session,
+    record: DomainRecord,
+    *,
+    fix_pr: str,
+    fix_merge_sha: str,
+    progress_lines: Sequence[str],
+    reason: str,
+) -> DeployTrackerTransition:
+    """Move a closed tracker issue back behind the production gate."""
+
+    data = dict(record.data or {})
+    progress_added = False
+    note: str | None = None
+    note_data: Mapping[str, object] = data
+    for line in progress_lines:
+        note, added = append_progress_note_once(note_data, line)
+        progress_added = progress_added or added
+        if note is not None:
+            note_data = {**data, "progress_note": note}
+    patch: dict[str, object] = {
+        "status": "In Review",
+        PRODUCTION_GATE_FIELD: PRODUCTION_GATE_PENDING,
+        "fix_pr": fix_pr,
+        "fix_merge_sha": fix_merge_sha,
+    }
+    if note is not None:
+        patch["progress_note"] = note
+    if all(data.get(key) == value for key, value in patch.items()):
+        return DeployTrackerTransition(
+            changed=False,
+            progress_added=progress_added,
+        )
+    await update_deploy_ticket_record(
+        session,
+        record,
+        patch,
+        reason=reason,
+    )
+    return DeployTrackerTransition(
+        changed=True,
+        progress_added=progress_added,
+    )
+
+
+async def mark_deployed(
+    session,
+    record: DomainRecord,
+    *,
+    fix_pr: str,
+    fix_merge_sha: str,
+    reason: str,
+) -> DeployTrackerTransition:
+    """Complete a closed tracker issue whose fix is contained by production."""
+
+    data = dict(record.data or {})
+    patch: dict[str, object] = {
+        "status": "Done",
+        "fix_pr": fix_pr,
+        "fix_merge_sha": fix_merge_sha,
+    }
+    if PRODUCTION_GATE_FIELD in data:
+        patch[PRODUCTION_GATE_FIELD] = None
+    if all(data.get(key) == value for key, value in patch.items()):
+        return DeployTrackerTransition(changed=False)
+    await update_deploy_ticket_record(
+        session,
+        record,
+        patch,
+        reason=reason,
+    )
+    return DeployTrackerTransition(changed=True)

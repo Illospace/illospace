@@ -20,8 +20,9 @@ DEPLOY_EVIDENCE_FIELDS = frozenset(
     }
 )
 
-# These fields belonged to the retired persisted deploy-state model.  They are
-# hidden at read boundaries until the re-runnable backfill removes them.
+# These fields belonged to the retired persisted deploy-state model. They are
+# hidden unconditionally at read boundaries until the re-runnable backfill
+# removes them.
 RETIRED_DEPLOY_FIELDS = frozenset(
     {
         "deploy_state",
@@ -47,11 +48,13 @@ def without_retired_deploy_fields(
     data: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """Return externally safe tracker data without retired stored state."""
-    return {
+    normalized = dict(data or {})
+    safe = {
         key: value
-        for key, value in dict(data or {}).items()
+        for key, value in normalized.items()
         if key not in RETIRED_DEPLOY_FIELDS
     }
+    return safe
 
 
 def record_data_for_serialization(
