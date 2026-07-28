@@ -355,6 +355,10 @@ def _label_payloads(labels: Any) -> list[dict[str, Any]]:
 
 
 def _issue_payload(issue: dict[str, Any]) -> dict[str, Any]:
+    raw_body = str(issue.get("body") or "")
+    compact_body = _compact_body(raw_body)
+    normalized_body_chars = len(" ".join(raw_body.split()))
+    pull_request = issue.get("pull_request") if isinstance(issue.get("pull_request"), dict) else {}
     return {
         "type": "pull_request" if issue.get("pull_request") else "issue",
         "id": issue.get("id"),
@@ -374,7 +378,10 @@ def _issue_payload(issue: dict[str, Any]) -> dict[str, Any]:
         "created_at": issue.get("created_at"),
         "updated_at": issue.get("updated_at"),
         "closed_at": issue.get("closed_at"),
-        "body": _compact_body(issue.get("body")),
+        "body": compact_body,
+        "body_total_chars": normalized_body_chars,
+        "body_truncated": normalized_body_chars > len(compact_body or ""),
+        "merged_at": pull_request.get("merged_at"),
     }
 
 

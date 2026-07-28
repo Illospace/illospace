@@ -55,6 +55,7 @@ from brain.systems.runs.tool_catalog.handlers.github import (
     _handle_remove_github_sub_issue,
     _handle_update_github_issue,
 )
+from brain.systems.runs.tool_catalog.handlers.knowledge import _handle_search_knowledge
 from brain.systems.runs.tool_catalog.handlers.ideas import _handle_manage_idea
 from brain.systems.runs.tool_catalog.handlers.launch_handoffs import _handle_create_launch_handoff
 from brain.systems.runs.tool_catalog.handlers.projects import _handle_manage_project
@@ -341,6 +342,10 @@ def _get_tool_handlers(
         "read_github_source": _private_async_adapter(
             "_handle_read_github_source",
             _handle_read_github_source,
+        ),
+        "search_knowledge": _private_async_adapter(
+            "_handle_search_knowledge",
+            _handle_search_knowledge,
         ),
         "create_github_issue": _private_async_adapter(
             "_handle_create_github_issue",
