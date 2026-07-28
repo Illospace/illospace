@@ -190,6 +190,14 @@ def custom_capability_manifests(*containers: Mapping[str, Any] | None) -> list[C
 
 _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
     {
+        "key": "knowledge_index",
+        "name": "Knowledge Index",
+        "category": "core_workspace",
+        "summary": "Illo can search a hybrid source-backed index of company documentation and work with canonical provenance.",
+        "aliases": ("knowledge", "company knowledge", "knowledge base", "decisions", "historical context"),
+        "tools": ("search_knowledge",),
+    },
+    {
         "key": "workspace_context",
         "name": "Workspace Context",
         "category": "core_workspace",

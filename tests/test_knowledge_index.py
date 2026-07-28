@@ -1,0 +1,488 @@
+"""Behavioral tests for the source-backed Illo Knowledge index."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import numpy as np
+import pytest
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
+from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler
+
+from brain.app.api.auth import get_current_user
+from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.main import app
+from brain.kernel.config import KNOWLEDGE_EMBEDDING_DIM
+from brain.platform.db.models.domain import Domain, DomainObjectType, DomainRecord
+from brain.platform.db.models.knowledge import (
+    KnowledgeItem,
+    KnowledgeItemEmbedding,
+    KnowledgeSyncState,
+)
+from brain.systems.knowledge.connectors.base import KnowledgeDraft
+from brain.systems.knowledge.connectors.domain_records import DomainRecordsConnector
+from brain.systems.knowledge.search import reciprocal_rank_fusion, search_knowledge
+from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS, sync_connector
+from brain.systems.external_agents import service as external_agents
+from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
+
+
+_ORG_ID = "11111111-1111-4111-8111-111111111111"
+
+
+class _StubConnector:
+    def __init__(
+        self,
+        *,
+        source_key: str,
+        drafts: list[KnowledgeDraft],
+        new_cursor: dict | None = None,
+    ):
+        self.source_key = source_key
+        self.drafts = drafts
+        self.new_cursor = dict(new_cursor or {})
+        self.seen_cursors: list[dict] = []
+
+    async def enumerate_changed(self, session, cursor):
+        del session
+        self.seen_cursors.append(dict(cursor))
+        return list(self.drafts), dict(self.new_cursor)
+
+
+class _McpAsyncSession:
+    def __init__(self):
+        self.sync_session = MagicMock()
+
+    async def run_sync(self, fn):
+        return fn(self.sync_session)
+
+    async def commit(self):
+        return None
+
+    async def rollback(self):
+        return None
+
+    async def close(self):
+        return None
+
+
+def _mcp_principal() -> external_agents.AgentBridgePrincipal:
+    return external_agents.AgentBridgePrincipal(
+        connection_id="conn-1",
+        org_id="org-1",
+        owner_user_id="user-1",
+        token_id="token-1",
+        scopes=frozenset(external_agents.DEFAULT_BRIDGE_SCOPES),
+        connection_display_name="Hermes",
+        agent_kind="hermes",
+    )
+
+
+async def _mcp_request(*, session: _McpAsyncSession, request_id: int, arguments: dict):
+    overrides = dict(app.dependency_overrides)
+    app.dependency_overrides[get_db] = lambda: session
+    app.dependency_overrides[get_current_user] = lambda: {
+        "id": "user-1",
+        "org_id": "org-1",
+        "role": "member",
+    }
+    app.dependency_overrides[rate_limit] = lambda: None
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/mcp",
+                headers={"Authorization": "Bearer bridge-token"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "illo_read",
+                        "arguments": arguments,
+                    },
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(overrides)
+
+
+def _runtime_config() -> EmbeddingRuntimeConfig:
+    return EmbeddingRuntimeConfig(
+        backend="api",
+        provider="gemini",
+        api_model="test-knowledge-embedding",
+        cpu_model="unused",
+        dimensions=KNOWLEDGE_EMBEDDING_DIM,
+        api_key="test-key",
+    )
+
+
+def _unit_vector(axis: int = 0) -> np.ndarray:
+    vector = np.zeros(KNOWLEDGE_EMBEDDING_DIM, dtype=np.float32)
+    vector[axis] = 1.0
+    return vector
+
+
+@pytest.fixture
+def embedding_runtime(monkeypatch):
+    from brain.systems.memory import embeddings as embedding_client
+    from brain.systems.runtime_settings import memory as runtime_settings
+
+    runtime = _runtime_config()
+
+    async def fake_runtime_config(session, *, include_secret=True):
+        del session, include_secret
+        return runtime
+
+    monkeypatch.setattr(
+        runtime_settings,
+        "async_get_embedding_runtime_config",
+        fake_runtime_config,
+    )
+    monkeypatch.setattr(
+        embedding_client,
+        "embed_document",
+        lambda text, runtime_config=None: _unit_vector(),
+    )
+    monkeypatch.setattr(
+        embedding_client,
+        "embed_query",
+        lambda text, runtime_config=None: _unit_vector(),
+    )
+    return runtime
+
+
+@pytest.fixture
+async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
+    del sqlite_postgres_ddl_patch
+    SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "VARCHAR(36)"
+    SQLiteTypeCompiler.visit_VECTOR = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_Vector = lambda self, type_, **kw: "TEXT"
+    return await async_sqlite_session_factory(
+        [
+            Domain.__table__,
+            DomainObjectType.__table__,
+            DomainRecord.__table__,
+            KnowledgeItem.__table__,
+            KnowledgeItemEmbedding.__table__,
+            KnowledgeSyncState.__table__,
+        ]
+    )
+
+
+async def test_sync_connector_upsert_is_idempotent_by_digest(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    draft = KnowledgeDraft(
+        source="stub",
+        kind="record",
+        source_ref="stub:1",
+        title="Stable knowledge",
+        summary="The same source content should only be embedded once.",
+        raw_text="stable source body",
+    )
+    connector = _StubConnector(
+        source_key="stub",
+        drafts=[draft],
+        new_cursor={"position": 1},
+    )
+
+    first = await sync_connector(session, connector)
+    second = await sync_connector(session, connector)
+
+    assert first.stats == {
+        "ingested": 1,
+        "skipped": 0,
+        "failed": 0,
+        "truncated": 0,
+    }
+    assert second.stats == {
+        "ingested": 0,
+        "skipped": 1,
+        "failed": 0,
+        "truncated": 0,
+    }
+    assert connector.seen_cursors == [{}, {"position": 1}]
+    assert await session.scalar(select(func.count()).select_from(KnowledgeItem)) == 1
+    assert (
+        await session.scalar(
+            select(func.count()).select_from(KnowledgeItemEmbedding)
+        )
+        == 1
+    )
+
+
+async def test_domain_records_connector_advances_and_resumes_watermark_with_id_tiebreaker(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    updated_at = datetime(2026, 7, 15, 12, 30, tzinfo=timezone.utc)
+    created_at = datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            Domain(
+                id=1,
+                org_id=_ORG_ID,
+                slug="knowledge-notes",
+                name="Knowledge Notes",
+                created_at=created_at,
+                updated_at=updated_at,
+            ),
+            DomainObjectType(
+                id=1,
+                domain_id=1,
+                key="note",
+                name="Note",
+                created_at=created_at,
+                updated_at=updated_at,
+            ),
+            *[
+                DomainRecord(
+                    id=record_id,
+                    org_id=_ORG_ID,
+                    domain_id=1,
+                    object_type_id=1,
+                    title=f"Note {record_id}",
+                    data={"body": f"Body {record_id}"},
+                    search_text=f"note body {record_id}",
+                    version=1,
+                    created_at=created_at,
+                    updated_at=updated_at,
+                )
+                for record_id in (1, 2, 3)
+            ],
+        ]
+    )
+    await session.flush()
+    connector = DomainRecordsConnector(max_items=2)
+
+    first = await sync_connector(session, connector)
+    first_refs = list(
+        (
+            await session.scalars(
+                select(KnowledgeItem.source_ref).order_by(KnowledgeItem.source_ref)
+            )
+        ).all()
+    )
+    second = await sync_connector(session, connector)
+
+    assert first_refs == ["domain_record:1", "domain_record:2"]
+    assert first.cursor == {"updated_at": updated_at.isoformat(), "id": 2}
+    assert first.stats["ingested"] == 2
+    assert second.cursor == {"updated_at": updated_at.isoformat(), "id": 3}
+    assert second.stats["ingested"] == 1
+    assert list(
+        (
+            await session.scalars(
+                select(KnowledgeItem.source_ref).order_by(KnowledgeItem.source_ref)
+            )
+        ).all()
+    ) == ["domain_record:1", "domain_record:2", "domain_record:3"]
+
+
+def test_reciprocal_rank_fusion_uses_recency_as_weight_not_candidate_gate():
+    lexical = [1, 2]
+    semantic = [2, 3]
+    candidate_union = set(lexical) | set(semantic)
+
+    ordered, debug = reciprocal_rank_fusion(
+        {
+            "lexical": lexical,
+            "semantic": semantic,
+            "recency": [3],
+        }
+    )
+
+    assert ordered[0] == 2
+    assert set(ordered) == candidate_union
+    assert 1 in ordered
+    assert "recency" not in debug[1]["channels"]
+
+
+async def test_embedding_failures_degrade_to_lexical_ingest_and_search(
+    session,
+    embedding_runtime,
+    monkeypatch,
+):
+    del embedding_runtime
+    from brain.systems.memory import embeddings as embedding_client
+
+    def fail_document_embedding(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("document embedding offline")
+
+    monkeypatch.setattr(
+        embedding_client,
+        "embed_document",
+        fail_document_embedding,
+    )
+    connector = _StubConnector(
+        source_key="degraded",
+        drafts=[
+            KnowledgeDraft(
+                source="degraded",
+                kind="record",
+                source_ref="degraded:1",
+                title="Lexical lighthouse",
+                summary="This row survives an embedding outage.",
+                raw_text="lexical lighthouse fallback",
+            )
+        ],
+    )
+
+    sync_result = await sync_connector(session, connector)
+    item = await session.scalar(
+        select(KnowledgeItem).where(KnowledgeItem.source_ref == "degraded:1")
+    )
+
+    assert sync_result.status == "degraded"
+    assert sync_result.stats == {
+        "ingested": 1,
+        "skipped": 0,
+        "failed": 1,
+        "truncated": 0,
+    }
+    assert item is not None
+    assert "lexical lighthouse" in item.search_text.casefold()
+
+    def fail_query_embedding(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("query embedding offline")
+
+    monkeypatch.setattr(
+        embedding_client,
+        "embed_query",
+        fail_query_embedding,
+    )
+    search_result = await search_knowledge(session, "lexical lighthouse")
+
+    assert search_result["semantic_available"] is False
+    assert search_result["semantic_degraded_reason"] == "query embedding offline"
+    assert [result["source_ref"] for result in search_result["results"]] == [
+        "degraded:1"
+    ]
+
+
+async def test_agent_mcp_exposes_and_dispatches_knowledge_search():
+    from brain.app.api.routers import agent_mcp
+
+    assert "knowledge.search" in agent_mcp.READ_CAPABILITIES
+    assert agent_mcp.READ_CAPABILITIES["knowledge.search"]["arguments"] == {
+        "query": "string",
+        "sources": "string[]",
+        "kinds": "string[]",
+        "limit": "integer",
+    }
+
+    expected = {
+        "query": "roadmap",
+        "semantic_available": True,
+        "results": [{"source_ref": "github:illo/brain#42"}],
+    }
+    session = _McpAsyncSession()
+    captured: dict[str, object] = {}
+
+    async def fake_search_knowledge(db, query, *, sources, kinds, limit):
+        captured.update(
+            {
+                "db": db,
+                "query": query,
+                "sources": sources,
+                "kinds": kinds,
+                "limit": limit,
+            }
+        )
+        return expected
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_mcp_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp.search_knowledge",
+        new=AsyncMock(side_effect=fake_search_knowledge),
+    ):
+        catalog_response = await _mcp_request(
+            session=session,
+            request_id=13,
+            arguments={"capability": "capabilities"},
+        )
+        search_response = await _mcp_request(
+            session=session,
+            request_id=14,
+            arguments={
+                "capability": "knowledge.search",
+                "arguments": {
+                    "query": "roadmap",
+                    "sources": ["github", "domain_records"],
+                    "kinds": ["issue"],
+                    "limit": 7,
+                },
+            },
+        )
+
+    assert catalog_response.status_code == 200
+    catalog = json.loads(catalog_response.json()["result"]["content"][0]["text"])
+    assert "knowledge.search" in {
+        capability["name"] for capability in catalog["capabilities"]
+    }
+    assert search_response.status_code == 200
+    assert json.loads(search_response.json()["result"]["content"][0]["text"]) == expected
+    assert captured == {
+        "db": session,
+        "query": "roadmap",
+        "sources": ["github", "domain_records"],
+        "kinds": ["issue"],
+        "limit": 7,
+    }
+
+
+async def test_sync_connector_accounts_for_truncated_raw_text(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    raw_text = "x" * (RAW_TEXT_MAX_CHARS + 17)
+    connector = _StubConnector(
+        source_key="truncation",
+        drafts=[
+            KnowledgeDraft(
+                source="truncation",
+                kind="record",
+                source_ref="truncation:1",
+                title="Oversized source",
+                summary="A source body larger than the storage bound.",
+                raw_text=raw_text,
+                extra={"origin": "test"},
+            )
+        ],
+    )
+
+    result = await sync_connector(session, connector)
+    item = await session.scalar(
+        select(KnowledgeItem).where(KnowledgeItem.source_ref == "truncation:1")
+    )
+    state = await session.get(KnowledgeSyncState, "truncation")
+
+    assert result.stats == {
+        "ingested": 1,
+        "skipped": 0,
+        "failed": 0,
+        "truncated": 1,
+    }
+    assert item is not None
+    assert len(item.raw_text) == RAW_TEXT_MAX_CHARS
+    assert item.extra == {
+        "origin": "test",
+        "raw_text_truncated": True,
+        "raw_text_total_chars": len(raw_text),
+    }
+    assert state is not None
+    assert state.last_stats == result.stats

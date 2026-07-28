@@ -90,6 +90,11 @@ class SingleCommandProgram:
 
 # Programs whose plan and StepSpec projections share one representation.
 SINGLE_COMMAND_PROGRAM_REGISTRY: dict[str, SingleCommandProgram] = {
+    "knowledge_index_sync": SingleCommandProgram(
+        command=("python3", "-m", "brain.jobs.pipelines.knowledge_index_sync"),
+        step_key="knowledge_index_sync",
+        description="Incrementally sync the Illo knowledge index",
+    ),
     "uwear_aws_health_scan": SingleCommandProgram(
         command=("python3", "-m", "brain.jobs.pipelines.aws_health_scan"),
         step_key="uwear_aws_health_scan",

@@ -20,6 +20,7 @@ from brain.app.scheduler.programs import (
 
 _SCHEDULED_FOR = datetime(2026, 7, 27, 3, 0, tzinfo=timezone.utc)
 _PINNED_PROJECTION_HASHES = {
+    "knowledge_index_sync": "7b180172f289f6769ef024b425a8978ee4f4c14c78e57fe98e94e7c151c7d4c6",
     "nightly_sleep": "0cb9173b9e0b71a094063bb867d644304f4c8b996fec6c9d1656b31dde060ee0",
     "curiosity_cron": "326e1c241800e49721978238c967c423e1ce1133030ca1223c77bb3f44a8519d",
     "uwear_aws_health_scan": (

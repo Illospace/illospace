@@ -17,6 +17,7 @@ from brain.systems.runs.tool_definitions import (
     DOMAIN_TOOLS,
     EXEC_TOOLS,
     GITHUB_TOOLS,
+    KNOWLEDGE_TOOLS,
     INBOUND_TOOLS,
     LAUNCH_HANDOFF_TOOLS,
     LIFECYCLE_TOOLS,
@@ -49,6 +50,19 @@ _BROWSER_TOOLS = [
 ]
 
 _STATIC_METADATA: dict[str, dict[str, Any]] = {
+    "search_knowledge": {
+        "permission": "read_workspace",
+        "side_effect_class": "read_only",
+        "reversibility": "none",
+        "parallel_safety": "agent_safe",
+        "output_budget_chars": 18_000,
+        "evidence_emitter": True,
+        "context_route": {
+            "description": "Search distilled company knowledge across source systems with provenance back to each canonical record.",
+            "domains": ["company knowledge", "decisions", "issues", "pull requests", "documentation"],
+            "scopes": ["narrow", "broad"],
+        },
+    },
     "brain_recall": {
         "permission": "read_memory",
         "side_effect_class": "read_only",
@@ -846,6 +860,7 @@ def _definition_sources() -> list[tuple[str, tuple[str, ...], list[Mapping[str, 
         ("projects", ("coordinator", "worker"), PROJECT_TOOLS),
         ("workspace_apps", ("coordinator", "worker"), WORKSPACE_APP_TOOLS),
         ("github", ("coordinator", "worker"), GITHUB_TOOLS),
+        ("knowledge", ("coordinator", "worker"), KNOWLEDGE_TOOLS),
         ("execution", ("coordinator", "worker"), EXEC_TOOLS),
         ("session", ("coordinator", "worker"), SESSION_TOOLS),
         ("lifecycle", ("coordinator",), LIFECYCLE_TOOLS),
