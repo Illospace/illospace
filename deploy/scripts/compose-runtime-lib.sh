@@ -142,6 +142,7 @@ worker_declared_restart_policy() {
 }
 
 WORKER_RESTART_POLICY_SUSPENDED_ID=""
+WORKER_RESTART_POLICY_RESTORE_TRAP_INSTALLED=""
 
 # A worker that is about to be drained must not be resurrected by the daemon the
 # moment it exits: that races the handoff worker and doubles concurrency (#486).
@@ -159,17 +160,15 @@ suspend_worker_restart_policy() {
   WORKER_RESTART_POLICY_SUSPENDED_ID="$id"
   # Chain onto whatever EXIT trap the sourcing script already installed instead
   # of clobbering it -- doctor.sh installs its own cleanup.
-  existing="$(trap -p EXIT | sed -n "s/^trap -- '\(.*\)' EXIT\$/\1/p")"
-  case "$existing" in
-    "")
+  if [ "${WORKER_RESTART_POLICY_RESTORE_TRAP_INSTALLED:-}" != "1" ]; then
+    existing="$(trap -p EXIT | sed -n "s/^trap -- '\(.*\)' EXIT\$/\1/p")"
+    if [ -z "$existing" ]; then
       trap 'restore_worker_restart_policy' EXIT
-      ;;
-    *restore_worker_restart_policy*)
-      ;;
-    *)
+    else
       trap "restore_worker_restart_policy; $existing" EXIT
-      ;;
-  esac
+    fi
+    WORKER_RESTART_POLICY_RESTORE_TRAP_INSTALLED="1"
+  fi
   trap 'trap - INT; restore_worker_restart_policy; kill -s INT "$$"' INT
   trap 'trap - TERM; restore_worker_restart_policy; kill -s TERM "$$"' TERM
   trap 'trap - HUP; restore_worker_restart_policy; kill -s HUP "$$"' HUP

@@ -872,6 +872,26 @@ exit 7
     assert "caller cleanup ran" in result.stdout
 
 
+def test_worker_restart_policy_suspension_does_not_infer_exit_trap_ownership_from_text(tmp_path):
+    """A caller trap may mention the restore function without invoking it."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    docker_log = tmp_path / "docker.log"
+    script = f'''
+source "{runtime_lib}"
+docker() {{ printf '%s\\n' "$*" >> "{docker_log}"; }}
+trap 'printf "caller cleanup mentions restore_worker_restart_policy\\n"' EXIT
+suspend_worker_restart_policy some-worker
+exit 7
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 7
+    docker_calls = docker_log.read_text()
+    assert docker_calls.count("update --restart=unless-stopped some-worker") == 1
+    assert result.stdout == "caller cleanup mentions restore_worker_restart_policy\n"
+
+
 def test_repeated_worker_restart_policy_suspension_preserves_an_existing_exit_trap(tmp_path):
     """A second suspension must not discard the caller's chained cleanup."""
     runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
