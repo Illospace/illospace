@@ -20,10 +20,9 @@ DEPLOY_EVIDENCE_FIELDS = frozenset(
     }
 )
 
-# These fields belonged to the retired persisted deploy-state model.  They are
-# hidden at read boundaries until the re-runnable backfill removes them.  The
-# one exception is ``deploy_state=prod_pending``: that is a closure-workflow
-# marker, not a claim about branch ancestry.
+# These fields belonged to the retired persisted deploy-state model. They are
+# hidden unconditionally at read boundaries until the re-runnable backfill
+# removes them.
 RETIRED_DEPLOY_FIELDS = frozenset(
     {
         "deploy_state",
@@ -55,8 +54,6 @@ def without_retired_deploy_fields(
         for key, value in normalized.items()
         if key not in RETIRED_DEPLOY_FIELDS
     }
-    if str(normalized.get("deploy_state") or "").strip() == "prod_pending":
-        safe["deploy_state"] = "prod_pending"
     return safe
 
 

@@ -27,6 +27,10 @@ from brain.systems.deploy_state import (
     DeployStateObservation,
 )
 from brain.systems.deploy_state_github import AncestryObservation
+from brain.systems.deploy_tracker import (
+    PRODUCTION_GATE_FIELD,
+    PRODUCTION_GATE_PENDING,
+)
 from brain.systems.staging_only_closure import (
     FixingPullRequest,
     IssueClosure,
@@ -100,9 +104,9 @@ async def _tracker(session):
                         "options": ["Todo", "In Progress", "In Review", "Done"],
                     },
                     {
-                        "key": "deploy_state",
+                        "key": PRODUCTION_GATE_FIELD,
                         "field_type": "enum",
-                        "options": ["prod_pending"],
+                        "options": [PRODUCTION_GATE_PENDING],
                     },
                     {"key": "fix_pr", "field_type": "text"},
                     {"key": "fix_merge_sha", "field_type": "text"},
@@ -338,7 +342,8 @@ async def test_nonproduction_closure_returns_tracker_to_prod_pending_review(
         record_id,
     )
     assert reread.data["status"] == "In Review"
-    assert reread.data["deploy_state"] == "prod_pending"
+    assert reread.data[PRODUCTION_GATE_FIELD] == PRODUCTION_GATE_PENDING
+    assert "deploy_state" not in reread.data
     assert reread.data["assignee"] == "Axel"
     assert reread.data["fix_pr"] == f"{REPO}#1305"
     assert reread.data["fix_merge_sha"] == "a" * 40
@@ -356,7 +361,11 @@ async def test_main_merged_closure_goes_done_without_software_message(session):
         number=1290,
         title="Generation-result QA failures",
     )
-    record.data = {**record.data, "status": "In Review"}
+    record.data = {
+        **record.data,
+        "status": "In Review",
+        PRODUCTION_GATE_FIELD: PRODUCTION_GATE_PENDING,
+    }
     await session.flush()
     pr = FixingPullRequest(
         repo=REPO,
@@ -406,6 +415,7 @@ async def test_main_merged_closure_goes_done_without_software_message(session):
         record_id,
     )
     assert reread.data["status"] == "Done"
+    assert reread.data[PRODUCTION_GATE_FIELD] is None
     assert slack.posts == []
 
 
@@ -626,14 +636,27 @@ async def test_fixture_replay_reproduces_nine_flags_and_live_prod_escalation(ses
 
 
 @pytest.mark.asyncio
-async def test_sweep_revives_archived_prod_pending_field_without_migration(session):
+async def test_sweep_reconciles_production_gate_without_reviving_deploy_state(session):
     domain = await _tracker(session)
     service = AsyncDomainService(session)
     object_type = await service.get_object_type(domain.id, "github_ticket")
-    deploy_field = next(
+    production_gate = next(
         field
         for field in await service.list_fields(object_type.id)
-        if field.key == "deploy_state"
+        if field.key == PRODUCTION_GATE_FIELD
+    )
+    production_gate.field_type = "text"
+    production_gate.options = []
+    production_gate.archived_at = CLOSED_AT - timedelta(days=1)
+    deploy_field = await service.add_field_definition(
+        object_type,
+        {
+            "key": "deploy_state",
+            "name": "Retired Deploy State",
+            "field_type": "enum",
+            "options": ["staging", "deployed", "prod_pending"],
+        },
+        emit_event=False,
     )
     deploy_field.options = ["staging", "deployed"]
     deploy_field.archived_at = CLOSED_AT - timedelta(days=1)
@@ -680,11 +703,16 @@ async def test_sweep_revives_archived_prod_pending_field_without_migration(sessi
         now=CLOSED_AT,
     )
 
+    await session.refresh(production_gate)
     await session.refresh(deploy_field)
     await session.refresh(record)
-    assert deploy_field.archived_at is None
-    assert "prod_pending" in deploy_field.options
-    assert record.data["deploy_state"] == "prod_pending"
+    assert production_gate.archived_at is None
+    assert production_gate.field_type == "enum"
+    assert PRODUCTION_GATE_PENDING in production_gate.options
+    assert deploy_field.archived_at is not None
+    assert PRODUCTION_GATE_PENDING not in deploy_field.options
+    assert record.data[PRODUCTION_GATE_FIELD] == PRODUCTION_GATE_PENDING
+    assert "deploy_state" not in record.data
 
 
 @pytest.mark.asyncio

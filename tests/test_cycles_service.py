@@ -1281,13 +1281,17 @@ def test_on_demand_cycle_launch_exposes_provenance_and_local_anchor():
 
 
 @pytest.mark.asyncio
-async def test_uwear_coordinator_pre_sweep_harvests_alert_resolution(monkeypatch):
+async def test_uwear_coordinator_runs_one_ordered_tracker_maintenance_pipeline(
+    monkeypatch,
+):
     import brain.systems.alert_resolution as alert_resolution
+    import brain.systems.staging_only_closure as staging_only_closure
+    from brain.systems.tracker_maintenance import maybe_run_tracker_maintenance
 
     calls = []
 
     async def fake_harvest(session, *, org_id):
-        calls.append((session, org_id))
+        calls.append(("alert_resolution_harvest", session, org_id))
         return {
             "updated": 1,
             "movements": [
@@ -1300,37 +1304,8 @@ async def test_uwear_coordinator_pre_sweep_harvests_alert_resolution(monkeypatch
             "errors": [],
         }
 
-    monkeypatch.setattr(
-        alert_resolution,
-        "run_alert_resolution_harvest",
-        fake_harvest,
-    )
-    cycle = Cycle()
-    cycle.name = "Uwear Ticket Coordinator Check-ins"
-    cycle.org_id = "org-1"
-    run = CycleRun()
-    run.context_snapshot = {"launch_context": {"origin": "cycle_scheduler"}}
-    fake_session = object()
-
-    summary = await service._async_maybe_harvest_alert_resolution(
-        fake_session,
-        cycle,
-        run,
-    )
-
-    assert calls == [(fake_session, "org-1")]
-    assert summary["movements"][0]["record_id"] == 1131
-    assert run.context_snapshot["alert_resolution_harvest"] == summary
-
-
-@pytest.mark.asyncio
-async def test_uwear_coordinator_pre_sweep_detects_staging_only_closures(monkeypatch):
-    import brain.systems.staging_only_closure as staging_only_closure
-
-    calls = []
-
     async def fake_sweep(session, *, org_id):
-        calls.append((session, org_id))
+        calls.append(("production_gate_reconciliation", session, org_id))
         return {
             "updated": 9,
             "flagged": 9,
@@ -1338,6 +1313,11 @@ async def test_uwear_coordinator_pre_sweep_detects_staging_only_closures(monkeyp
             "errors": [],
         }
 
+    monkeypatch.setattr(
+        alert_resolution,
+        "run_alert_resolution_harvest",
+        fake_harvest,
+    )
     monkeypatch.setattr(
         staging_only_closure,
         "run_staging_only_closure_sweep",
@@ -1350,15 +1330,89 @@ async def test_uwear_coordinator_pre_sweep_detects_staging_only_closures(monkeyp
     run.context_snapshot = {"launch_context": {"origin": "cycle_scheduler"}}
     fake_session = object()
 
-    summary = await service._async_maybe_detect_staging_only_closures(
+    summaries = await maybe_run_tracker_maintenance(
         fake_session,
-        cycle,
-        run,
+        cycle=cycle,
+        run=run,
     )
 
-    assert calls == [(fake_session, "org-1")]
-    assert summary["flagged"] == 9
-    assert run.context_snapshot["staging_only_closure_sweep"] == summary
+    assert calls == [
+        ("alert_resolution_harvest", fake_session, "org-1"),
+        ("production_gate_reconciliation", fake_session, "org-1"),
+    ]
+    assert list(summaries) == [
+        "alert_resolution_harvest",
+        "production_gate_reconciliation",
+    ]
+    assert summaries["alert_resolution_harvest"]["movements"][0][
+        "record_id"
+    ] == 1131
+    assert summaries["production_gate_reconciliation"]["flagged"] == 9
+    assert run.context_snapshot["tracker_maintenance"] == summaries
+
+
+@pytest.mark.asyncio
+async def test_tracker_maintenance_pipeline_isolates_steps_and_owns_name_gate(
+    monkeypatch,
+):
+    import brain.systems.alert_resolution as alert_resolution
+    import brain.systems.staging_only_closure as staging_only_closure
+    from brain.systems.tracker_maintenance import maybe_run_tracker_maintenance
+
+    calls = []
+
+    async def failed_harvest(session, *, org_id):
+        calls.append("alert")
+        raise RuntimeError("Slack read unavailable")
+
+    async def healthy_sweep(session, *, org_id):
+        calls.append("production_gate")
+        return {"updated": 2, "flagged": 2, "errors": []}
+
+    monkeypatch.setattr(
+        alert_resolution,
+        "run_alert_resolution_harvest",
+        failed_harvest,
+    )
+    monkeypatch.setattr(
+        staging_only_closure,
+        "run_staging_only_closure_sweep",
+        healthy_sweep,
+    )
+    cycle = Cycle()
+    cycle.name = "Uwear Ticket Coordinator Check-ins"
+    cycle.org_id = "org-1"
+    run = CycleRun()
+    run.context_snapshot = {}
+
+    summaries = await maybe_run_tracker_maintenance(
+        object(),
+        cycle=cycle,
+        run=run,
+    )
+
+    assert calls == ["alert", "production_gate"]
+    assert summaries["alert_resolution_harvest"] == {
+        "updated": 0,
+        "movements": [],
+        "errors": ["Slack read unavailable"],
+    }
+    assert summaries["production_gate_reconciliation"]["updated"] == 2
+
+    unrelated = Cycle()
+    unrelated.name = "Another Cycle"
+    unrelated.org_id = "org-1"
+    unrelated_run = CycleRun()
+    unrelated_run.context_snapshot = {}
+    assert (
+        await maybe_run_tracker_maintenance(
+            object(),
+            cycle=unrelated,
+            run=unrelated_run,
+        )
+        is None
+    )
+    assert unrelated_run.context_snapshot == {}
 
 
 def test_coordinator_launch_prompt_maps_declared_contract_to_visible_sections():

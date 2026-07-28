@@ -10,6 +10,7 @@ from typing import Any, Hashable, Mapping
 from brain.kernel.common.pagination import InvalidPageToken
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
+    GithubIssueClosure,
     async_add_repo_issue_comment,
     async_add_repo_sub_issue,
     async_create_repo_issue,
@@ -1603,7 +1604,7 @@ async def github_issue_closure_for_backend(
     issue_number: int,
     org_id: str,
     user_id: str | None = None,
-) -> dict[str, Any] | None:
+) -> GithubIssueClosure | None:
     """Read one issue's closure/closing-PR facts with backend identities."""
 
     candidates = await _github_token_candidates(
