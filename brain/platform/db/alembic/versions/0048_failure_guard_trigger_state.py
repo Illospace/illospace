@@ -1,7 +1,7 @@
 """Move failure-guard trigger state out of owners and alert latches.
 
-Revision ID: 0047_failure_guard_trigger_state
-Revises: 0046_cycle_failure_guard
+Revision ID: 0048_failure_guard_trigger_state
+Revises: 0047_knowledge_index
 Create Date: 2026-07-28
 """
 
@@ -14,8 +14,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
 
-revision = "0047_failure_guard_trigger_state"
-down_revision = "0046_cycle_failure_guard"
+revision = "0048_failure_guard_trigger_state"
+down_revision = "0047_knowledge_index"
 branch_labels = None
 depends_on = None
 

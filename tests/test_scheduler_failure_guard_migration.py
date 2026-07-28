@@ -195,7 +195,7 @@ def test_failure_guard_downgrade_rejects_unrepresentable_trigger(monkeypatch):
 
 def test_trigger_state_migration_backfills_and_round_trips(monkeypatch):
     migration = importlib.import_module(
-        "brain.platform.db.alembic.versions.0047_failure_guard_trigger_state"
+        "brain.platform.db.alembic.versions.0048_failure_guard_trigger_state"
     )
     engine = sa.create_engine("sqlite://")
 
