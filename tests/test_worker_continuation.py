@@ -95,6 +95,7 @@ async def _worker(
     step: str,
     role: str,
     join_parent: bool | None,
+    shard: str | None = None,
 ):
     metadata = {
         "origin": "spawn_worker",
@@ -103,6 +104,8 @@ async def _worker(
     }
     if join_parent is not None:
         metadata["join_parent"] = join_parent
+    if shard:
+        metadata["shard"] = shard
     child = await store.create_child_run(
         anchor,
         recipe=RunRecipe.WORKER,
@@ -173,6 +176,12 @@ async def test_all_children_terminal_queues_one_generic_continuation_on_parent_t
         "completed_fanout_run_id": anchor.id,
         "worker_run_ids": [reader.id, verifier.id],
     }
+    assert continuation.metadata_["evidence_health"] == {
+        "status": "ok",
+        "completeness": "complete",
+        "worker_shards": ["repository reader", "independent verifier"],
+    }
+    assert "Evidence health: ok" in continuation.input_message
     assert "Reader found the relevant contract." in continuation.input_message
     assert "Verifier confirmed the contract." in continuation.input_message
 
@@ -196,6 +205,99 @@ async def test_all_children_terminal_queues_one_generic_continuation_on_parent_t
     assert events[0].payload["continuation_run_id"] == continuation.id
 
 
+async def test_failed_spawned_reader_marks_parent_and_continuation_evidence_degraded(
+    async_sqlite_session_factory,
+    sqlite_postgres_ddl_patch,
+):
+    session = await _session(async_sqlite_session_factory, sqlite_postgres_ddl_patch)
+    store = AsyncAgentRunStore(session)
+    anchor = await _anchor(store)
+    failed_reader = await _worker(
+        store,
+        anchor,
+        step="github-reader",
+        role="GitHub reader",
+        join_parent=True,
+        shard="github:Illospace/illospace",
+    )
+    healthy_reader = await _worker(
+        store,
+        anchor,
+        step="domain-reader",
+        role="Domain reader",
+        join_parent=True,
+        shard="domain:engineering-tickets",
+    )
+    engine = AsyncAgentRunEngine(session, recipes={})
+
+    await engine.fail(
+        failed_reader.id,
+        "upstream_provider_error: overloaded_error",
+        failure_category="upstream",
+    )
+    await engine.complete(
+        healthy_reader.id,
+        output="Domain evidence completed.",
+    )
+
+    refreshed_anchor = await session.get(AgentRunRow, anchor.id)
+    health = refreshed_anchor.metadata_["evidence_health"]
+    assert health["status"] == "degraded"
+    assert health["completeness"] == "unavailable"
+    assert health["missing_shards"] == ["github:Illospace/illospace"]
+    assert health["failures"] == [
+        {
+            "kind": "worker_tool_failure",
+            "tool": "spawn_worker",
+            "child_run_id": failed_reader.id,
+            "worker_run_id": failed_reader.id,
+            "worker_role": "GitHub reader",
+            "shard": "github:Illospace/illospace",
+            "stage": "worker_execution",
+            "status": "failed",
+            "error": (
+                "I hit a temporary upstream problem on this and it is still open "
+                "— I will come back."
+            ),
+            "failure_category": "upstream",
+        }
+    ]
+
+    continuation = (await _generic_continuations(session))[0]
+    assert continuation.metadata_["evidence_health"] == health
+    assert "Evidence health: degraded" in continuation.input_message
+    assert "github:Illospace/illospace" in continuation.input_message
+    assert "Do not report a normal sweep" in continuation.input_message
+
+
+async def test_non_spawn_worker_child_failure_does_not_change_parent_evidence_health(
+    async_sqlite_session_factory,
+    sqlite_postgres_ddl_patch,
+):
+    session = await _session(async_sqlite_session_factory, sqlite_postgres_ddl_patch)
+    store = AsyncAgentRunStore(session)
+    anchor = await _anchor(store)
+    ordinary_child = await store.create_child_run(
+        anchor,
+        recipe=RunRecipe.FAST,
+        message="Run an ordinary child task.",
+        step_key="ordinary-child",
+        metadata={"origin": "scheduler"},
+        initial_status=RunStatus.STARTING,
+    )
+    await store.set_status(ordinary_child.id, RunStatus.RUNNING)
+
+    await AsyncAgentRunEngine(session, recipes={}).fail(
+        ordinary_child.id,
+        "ordinary internal failure",
+        failure_category="internal",
+    )
+
+    refreshed_anchor = await session.get(AgentRunRow, anchor.id)
+    assert "evidence_health" not in refreshed_anchor.metadata_
+    assert await _generic_continuations(session) == []
+
+
 async def test_generic_continuation_waits_for_terminal_parent(
     async_sqlite_session_factory,
     sqlite_postgres_ddl_patch,
@@ -214,11 +316,15 @@ async def test_generic_continuation_waits_for_terminal_parent(
 
     await engine.complete(worker.id, output="Worker finished before its parent.")
     assert await _generic_continuations(session) == []
+    assert "evidence_health" not in (
+        (await session.get(AgentRunRow, anchor.id)).metadata_
+    )
 
     await engine.complete(anchor.id, output="Parent has now reached terminal state.")
     continuations = await _generic_continuations(session)
     assert len(continuations) == 1
     assert "Worker finished before its parent." in continuations[0].input_message
+    assert continuations[0].metadata_["evidence_health"]["status"] == "ok"
 
 
 async def test_spawn_worker_without_join_flag_remains_fire_and_forget(

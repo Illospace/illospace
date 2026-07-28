@@ -122,7 +122,11 @@ from brain.systems.runs.routing_metadata import (
     effective_routing_snapshot,
     routing_metadata_with_effective,
 )
-from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
+from brain.systems.runs.tool_catalog.metadata import is_write_side_effect_class
+from brain.systems.runs.tool_catalog.registry import (
+    get_tool_registration,
+    parallel_safe_tool_names,
+)
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
 from brain.systems import sessions as _session_store
 from brain.systems.context.window_policy import (
@@ -1172,6 +1176,35 @@ _API_RETRY_DELAYS = (2, 5, 10)
 _PROVIDER_ERROR_TEXT_RETRY_DELAYS = (1,)
 
 
+def _spawn_worker_provider_text_retry_allowed(
+    metadata: dict[str, Any],
+    *,
+    tool_call_source: str,
+    tool_calls_made: list[str],
+) -> bool:
+    """Retry only spawned workers whose completed tool calls are read-only."""
+
+    provenance = metadata.get("execution_provenance")
+    if not isinstance(provenance, dict):
+        provenance = {}
+    is_spawned_worker = (
+        tool_call_source == "worker"
+        and (
+            provenance.get("spawned_by_tool") is True
+            or str(provenance.get("origin") or "") == "spawn_worker"
+        )
+    )
+    if not is_spawned_worker:
+        return False
+    for tool_name in tool_calls_made:
+        registration = get_tool_registration(tool_name)
+        if registration is None or is_write_side_effect_class(
+            registration.side_effect_class
+        ):
+            return False
+    return True
+
+
 async def _api_call_with_retry_async(
     provider, request: LLMRequest, llm, cancel_event, on_stream_activity, on_stream_delta,
     session_id: str, turn: int, tokens: _TokenAccumulator,
@@ -1650,11 +1683,24 @@ async def run_agent_async(
             overflow_retry_used = False
             provider_error_text_attempt = 0
             detected_provider_error = None
+            retry_provider_error_text = (
+                scheduled_result_contract
+                or _spawn_worker_provider_text_retry_allowed(
+                    metadata,
+                    tool_call_source=tool_call_source,
+                    tool_calls_made=state.tool_calls_made,
+                )
+            )
             while True:
                 try:
-                    # Scheduled Cycles settle through the contract gate; withholding live text
-                    # deltas keeps an upstream error body from becoming a public interim answer.
-                    visible_stream_delta = None if scheduled_result_contract else on_stream_delta
+                    # Withhold retry-eligible text until the response is classified so
+                    # an upstream error body cannot become a public interim answer.
+                    attempt_deltas: list[str] = []
+                    visible_stream_delta = on_stream_delta
+                    if scheduled_result_contract:
+                        visible_stream_delta = None
+                    elif retry_provider_error_text and on_stream_delta:
+                        visible_stream_delta = attempt_deltas.append
                     response = await _api_call_with_retry_async(
                         state.provider, request, llm, cancel_event, on_stream_activity, visible_stream_delta,
                         session_id, turn, state.tokens, start_time, state.tool_calls_made, _call_start,
@@ -1663,11 +1709,13 @@ async def run_agent_async(
                         [{"role": "assistant", "content": _content_to_dicts(response.content)}]
                     ).strip()
                     detected_provider_error = (
-                        provider_error_kind(response_text) if scheduled_result_contract else None
+                        provider_error_kind(response_text)
+                        if retry_provider_error_text
+                        else None
                     )
                     if detected_provider_error:
                         logger.error(
-                            "Agent %s turn %d: Cycle provider error text blocked "
+                            "Agent %s turn %d: provider error text blocked "
                             "(kind=%s, attempt=%d/%d): %s",
                             session_id,
                             turn,
@@ -1687,6 +1735,9 @@ async def run_agent_async(
                             await asyncio.sleep(max(0.0, float(delay)))
                             _call_start = time.time()
                             continue
+                    elif attempt_deltas and on_stream_delta:
+                        for delta in attempt_deltas:
+                            await _call_optional_async(on_stream_delta, delta)
                     break
                 except Exception as exc:
                     fallback = fallback_model_for(model)

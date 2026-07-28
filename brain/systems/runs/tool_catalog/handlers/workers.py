@@ -17,8 +17,12 @@ from brain.platform.providers.model_policy import (
     async_get_default_model,
     async_get_default_thinking,
 )
+from brain.systems.cycles.auth_preflight import (
+    async_preflight_run_external_auth,
+)
 from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.domain import RunRecipe
+from brain.systems.runs.evidence_health import record_parent_evidence_failures
 from brain.systems.runs.events import run_event
 from brain.systems.runs.execution_context import _agent_context
 from brain.systems.runs.routing_metadata import effective_routing_snapshot
@@ -346,6 +350,24 @@ def _assignment_payload(
     }
 
 
+def _assignment_shard(
+    assignment: WorkerAssignment,
+    *,
+    idempotency_key: str | None,
+) -> str:
+    metadata = assignment.metadata if isinstance(assignment.metadata, Mapping) else {}
+    for source in (metadata, assignment.to_payload()):
+        for key in ("shard", "repo", "source", "resource_id"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    if len(assignment.allowed_resources) == 1:
+        return str(assignment.allowed_resources[0])
+    if idempotency_key:
+        return assignment.id
+    return assignment.role
+
+
 async def _handle_spawn_worker(
     objective: str,
     role: str = "worker",
@@ -416,6 +438,10 @@ async def _handle_spawn_worker(
         "spawned_by_run_id": parent_run_id,
         "headless": bool(headless),
         "worker_role": assignment.role,
+        "worker_shard": _assignment_shard(
+            assignment,
+            idempotency_key=idempotency_key,
+        ),
         "worker_assignment": assignment.to_payload(),
         "parent_node_id": assignment.id,
         "tool_policy": merged_tool_policy,
@@ -449,6 +475,54 @@ async def _handle_spawn_worker(
             effort_overridden=effort_override is not None,
         )
         worker_metadata["routing"] = inherited_routing
+        existing_child_lookup = getattr(store, "child_run_for_step", None)
+        existing_child = (
+            await existing_child_lookup(parent.id, step_key)
+            if callable(existing_child_lookup)
+            else None
+        )
+        if existing_child is None:
+            preflight = await async_preflight_run_external_auth(
+                uow.session,
+                user_id=parent.user_id,
+                org_id=parent.org_id,
+                model=str(child_policy["model"]),
+                subject="spawn_worker",
+            )
+            if preflight.blocked:
+                shard = str(worker_metadata["worker_shard"])
+                failure = {
+                    "kind": "worker_tool_failure",
+                    "tool": "spawn_worker",
+                    "worker_role": assignment.role,
+                    "shard": shard,
+                    "stage": "worker_admission",
+                    "status": "auth_blocked",
+                    "configuration_error": preflight.error_code,
+                    "provider": preflight.provider,
+                    "credential": preflight.credential,
+                    "error": preflight.visible_message,
+                }
+                await record_parent_evidence_failures(
+                    uow.session,
+                    parent=parent,
+                    failures=[failure],
+                )
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "status": "auth_blocked",
+                        "error": preflight.visible_message,
+                        "error_code": preflight.error_code,
+                        "configuration_error": preflight.error_code,
+                        "provider": preflight.provider,
+                        "credential": preflight.credential,
+                        "parent_run_id": parent_run_id,
+                        "shard": shard,
+                        "worker_slot_consumed": False,
+                    },
+                    default=str,
+                )
         child, created = await store.create_child_run_with_result(
             parent,
             recipe=RunRecipe.WORKER,

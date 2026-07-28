@@ -6,6 +6,10 @@ import json
 import logging
 from typing import Any
 
+from brain.platform.integrations.provider_error_sentinel import (
+    provider_error_kind,
+    safe_provider_error_sentinel,
+)
 from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.context import compact_project_reference
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
@@ -225,12 +229,29 @@ class WorkerRecipe(BaseRunRecipe):
                 effort=str(thinking),
             )
             output = str(getattr(result, "output", "") or "").strip()
-            status = RunStatus.COMPLETED if getattr(result, "success", False) else RunStatus.FAILED
+            detected_provider_error = (
+                provider_error_kind(output)
+                if getattr(result, "success", False)
+                else None
+            )
+            status = (
+                RunStatus.COMPLETED
+                if getattr(result, "success", False) and not detected_provider_error
+                else RunStatus.FAILED
+            )
             error = None
             failure_category = None
             failure = None
             if status == RunStatus.FAILED:
-                error = str(getattr(result, "error", None) or output or "worker_recipe_failed")
+                error = (
+                    safe_provider_error_sentinel(detected_provider_error)
+                    if detected_provider_error
+                    else str(
+                        getattr(result, "error", None)
+                        or output
+                        or "worker_recipe_failed"
+                    )
+                )
                 failure_category = failure_category_for_error(error)
                 failure = public_run_failure(status, failure_category)
                 output = ""

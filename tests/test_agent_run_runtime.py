@@ -1675,9 +1675,12 @@ async def _captured_spawn_worker(
     child_model_policy=None,
     execution_metadata=None,
     created_here=True,
+    preflight_result=None,
     **spawn_kwargs,
 ):
+    from brain.systems.cycles.auth_preflight import CycleAuthPreflightResult
     from brain.systems.runs.domain import RunProfile, RunRecipe
+    from brain.systems.runs.evidence_health import evidence_health_with_failure
     from brain.systems.runs.execution_context import bind_agent_context
     import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
 
@@ -1690,6 +1693,7 @@ async def _captured_spawn_worker(
         target_ref={"kind": "cortex_idea", "idea_id": "idea-1"},
         workspace_ref={"workspace_root": "/tmp/work"},
         model_policy=dict(parent_model_policy),
+        metadata_={},
     )
     captured = {}
     events = []
@@ -1735,6 +1739,33 @@ async def _captured_spawn_worker(
 
     monkeypatch.setattr(worker_handlers, "UnitOfWork", _Uow)
     monkeypatch.setattr(worker_handlers, "AsyncAgentRunStore", _Store)
+
+    async def fake_preflight(*_args, **_kwargs):
+        return preflight_result or CycleAuthPreflightResult(
+            status="passed",
+            provider="openai",
+            model="openai/gpt-5.6-sol",
+        )
+
+    async def fake_record_parent_failures(_session, *, parent, failures):
+        health = parent.metadata_.get("evidence_health")
+        for failure in failures:
+            health, _ = evidence_health_with_failure(health, failure)
+        parent.metadata_["evidence_health"] = health
+        captured["admission_failures"] = list(failures)
+        captured["parent_evidence_health"] = dict(health)
+        return list(failures)
+
+    monkeypatch.setattr(
+        worker_handlers,
+        "async_preflight_run_external_auth",
+        fake_preflight,
+    )
+    monkeypatch.setattr(
+        worker_handlers,
+        "record_parent_evidence_failures",
+        fake_record_parent_failures,
+    )
 
     with bind_agent_context(
         run=SimpleNamespace(id=parent.id),
@@ -1910,6 +1941,86 @@ async def test_spawn_worker_bare_provider_resolves_provider_default_and_transpor
         "provider": "anthropic",
         "auth_mode": None,
     }
+
+
+async def test_spawn_worker_auth_preflight_rejects_missing_provider_credential_before_child_creation(
+    monkeypatch,
+):
+    from brain.systems.cycles.auth_preflight import CycleAuthPreflightResult
+
+    blocked = CycleAuthPreflightResult(
+        status="auth_blocked",
+        provider="anthropic",
+        model="anthropic/claude-sonnet-4-6",
+        credential="Anthropic API key",
+        error_code="provider_credential_unavailable",
+        repair_action="Add an Anthropic API key in Settings > Access.",
+        visible_message=(
+            "spawn_worker auth blocked: the Anthropic API key is not configured."
+        ),
+    )
+
+    payload, captured, events = await _captured_spawn_worker(
+        monkeypatch,
+        parent_model_policy={
+            "model": "openai/gpt-5.6-sol",
+            "thinking": "high",
+        },
+        preflight_result=blocked,
+        model="anthropic",
+        metadata={"shard": "github:Illospace/illospace"},
+    )
+
+    assert payload == {
+        "ok": False,
+        "status": "auth_blocked",
+        "error": blocked.visible_message,
+        "error_code": "provider_credential_unavailable",
+        "configuration_error": "provider_credential_unavailable",
+        "provider": "anthropic",
+        "credential": "Anthropic API key",
+        "parent_run_id": 42,
+        "shard": "github:Illospace/illospace",
+        "worker_slot_consumed": False,
+    }
+    assert "model_policy" not in captured
+    assert captured["parent_evidence_health"]["status"] == "degraded"
+    assert captured["parent_evidence_health"]["missing_shards"] == [
+        "github:Illospace/illospace"
+    ]
+    assert captured["admission_failures"][0]["stage"] == "worker_admission"
+    assert events == []
+
+
+async def test_shared_auth_preflight_names_missing_anthropic_configuration(
+    monkeypatch,
+):
+    from brain.systems.cycles import auth_preflight
+
+    async def missing_credential(**_kwargs):
+        raise RuntimeError(
+            "No API key found for anthropic. Add one in Settings."
+        )
+
+    monkeypatch.setattr(
+        auth_preflight,
+        "async_resolve_llm_client",
+        missing_credential,
+    )
+
+    result = await auth_preflight.async_preflight_run_external_auth(
+        object(),
+        user_id="user-1",
+        org_id="org-1",
+        model="anthropic/claude-sonnet-4-6",
+        subject="spawn_worker",
+    )
+
+    assert result.status == "auth_blocked"
+    assert result.error_code == "provider_credential_unavailable"
+    assert result.credential == "Anthropic API key"
+    assert "Anthropic API key" in result.visible_message
+    assert "Settings > Access" in result.visible_message
 
 
 @pytest.mark.parametrize(
@@ -3632,6 +3743,40 @@ async def test_worker_recipe_keeps_failed_provider_diagnostics_internal(monkeypa
     assert raw_error not in json.dumps(result.artifacts[0].payload)
 
 
+async def test_worker_recipe_treats_exhausted_provider_text_retry_as_upstream_failure(
+    monkeypatch,
+):
+    from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+    from brain.systems.runs.recipes.workers import WorkerRecipe
+
+    async def fake_invoke(_spec):
+        return SimpleNamespace(
+            output="upstream_provider_error: overloaded_error",
+            success=True,
+            error=None,
+        )
+
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.workers.build_agent_tools",
+        lambda _role: [],
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.workers.build_tool_handlers",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.workers.invoke_direct_agent_async",
+        fake_invoke,
+    )
+
+    result = await WorkerRecipe().execute(_runtime("worker"))
+
+    assert result.status.value == "failed"
+    assert result.error == "upstream_provider_error: overloaded_error"
+    assert result.final_output == UPSTREAM_FAILED_RUN_MESSAGE
+    assert result.artifacts[0].payload["failure"]["category"] == "upstream"
+
+
 async def test_worker_recipe_buffers_partial_deltas_until_success_is_known(monkeypatch):
     from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
     from brain.systems.runs.recipes.workers import WorkerRecipe
@@ -3669,7 +3814,11 @@ async def test_worker_recipe_keeps_unexpected_exception_internal(monkeypatch):
 
     raw_error = "provider exploded with private diagnostic"
 
+    calls = 0
+
     async def fake_invoke(_spec):
+        nonlocal calls
+        calls += 1
         raise RuntimeError(raw_error)
 
     monkeypatch.setattr("brain.systems.runs.recipes.workers.build_agent_tools", lambda _role: [])
@@ -3684,6 +3833,7 @@ async def test_worker_recipe_keeps_unexpected_exception_internal(monkeypatch):
     assert result.artifacts[0].text == DEFAULT_FAILED_RUN_MESSAGE
     assert raw_error not in json.dumps(runtime.stream.messages)
     assert raw_error not in json.dumps(result.artifacts[0].payload)
+    assert calls == 1
 
 
 async def test_worker_recipe_propagates_headless_tool_policy(monkeypatch):

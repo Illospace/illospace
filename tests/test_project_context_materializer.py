@@ -1524,7 +1524,10 @@ async def test_spawned_reader_materialization_issue_degrades_parent_cycle_eviden
     )
     mark_failed = AsyncMock(return_value=None)
     monkeypatch.setattr(runner, "UnitOfWork", lambda: FakeUow())
-    monkeypatch.setattr(runner, "AsyncAgentRunStore", FakeStore)
+    monkeypatch.setattr(
+        "brain.systems.runs.evidence_health.AsyncAgentRunStore",
+        FakeStore,
+    )
     monkeypatch.setattr(runner, "_async_record_project_activity", AsyncMock())
     monkeypatch.setattr(runner, "materialize_project_context_workspaces", AsyncMock(return_value=result))
     monkeypatch.setattr(runner, "_mark_run_failed_after_runner_error_async", mark_failed)

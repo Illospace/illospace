@@ -13,6 +13,19 @@ _PROVIDER_ERROR_KINDS = (
     "rate_limit_error",
 )
 _PROVIDER_ERROR_KIND_VALUES = frozenset((*_PROVIDER_ERROR_KINDS, "provider_error"))
+_PROVIDER_ERROR_ALIASES = {
+    "server_is_overloaded": "overloaded_error",
+    "service_unavailable_error": "server_error",
+}
+_TRANSIENT_PROVIDER_STATUS_RE = re.compile(
+    r"\b(?:(?:http(?:\s+status)?|status(?:\s+code)?)\s*)?"
+    r"(?:500|502|503|504|529)\b",
+    re.IGNORECASE,
+)
+_PROVIDER_ERROR_CONTEXT_RE = re.compile(
+    r"\b(?:api|error|failed|http|provider|server|service|unavailable|upstream)\b",
+    re.IGNORECASE,
+)
 
 
 def provider_error_kind(
@@ -32,9 +45,17 @@ def provider_error_kind(
     if normalized.startswith(PROVIDER_ERROR_SENTINEL_PREFIX):
         sentinel_kind = normalized.removeprefix(PROVIDER_ERROR_SENTINEL_PREFIX).strip()
         return sentinel_kind if sentinel_kind in _PROVIDER_ERROR_KIND_VALUES else "provider_error"
+    for alias, kind in _PROVIDER_ERROR_ALIASES.items():
+        if re.search(rf"\b{re.escape(alias)}\b", normalized):
+            return kind
     for kind in _PROVIDER_ERROR_KINDS:
         if re.search(rf"\b{re.escape(kind)}\b", normalized):
             return kind
+    if (
+        _TRANSIENT_PROVIDER_STATUS_RE.search(normalized)
+        and _PROVIDER_ERROR_CONTEXT_RE.search(normalized)
+    ):
+        return "server_error"
     if "help.openai.com" in normalized:
         return "provider_error"
     if text:
@@ -45,9 +66,17 @@ def provider_error_kind(
     exception_text = str(provider_exception or "").strip().lower()
     if not exception_text:
         return None
+    for alias, kind in _PROVIDER_ERROR_ALIASES.items():
+        if re.search(rf"\b{re.escape(alias)}\b", exception_text):
+            return kind
     for kind in _PROVIDER_ERROR_KINDS:
         if re.search(rf"\b{re.escape(kind)}\b", exception_text):
             return kind
+    if (
+        _TRANSIENT_PROVIDER_STATUS_RE.search(exception_text)
+        and _PROVIDER_ERROR_CONTEXT_RE.search(exception_text)
+    ):
+        return "server_error"
     return "provider_error"
 
 
