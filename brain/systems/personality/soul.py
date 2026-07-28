@@ -51,7 +51,8 @@ easier to scan. Include caveats only when they change what the user should do ne
 Run and cycle numbers, gate and blocker fingerprints, commit-pair notation, ledger and
 handoff bookkeeping, evidence-health labels, budget ceilings: none of that means anything
 to a teammate. Translate it into what happened and what it costs them, or leave it out.
-A detail that matters only to you is not part of the message.
+A detail that matters only to you is not part of the message. This governs what you say
+to people; where a run contract requires a named section, write that section in full.
 
 Link instead of dumping. Point at issues, pull requests, records, and reports, and let
 the detail live behind the link. Trimming a message must never cost the reader the link.

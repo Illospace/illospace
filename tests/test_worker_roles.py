@@ -79,6 +79,13 @@ class TestWorkerScope:
         assert "brain/systems/runs/store.py" in prompt
 
     def test_worker_prompt_carries_the_soul_only_when_a_person_reads_the_result(self):
+        """Shapes here mirror production intake, not convenient hand-built dicts.
+
+        A headless worker inherits its parent's visible target_ref verbatim
+        (handlers/workers.py spawn_worker), so surface keys alone cannot decide
+        this; only the headless flag and the "headless" sentinel can.
+        """
+
         from brain.systems.runs.assignments import WorkerAssignment
         from brain.systems.runs.recipes.workers import build_worker_prompt
 
@@ -89,17 +96,36 @@ class TestWorkerScope:
             risk_level="low",
         )
 
-        headless = build_worker_prompt(
-            assignment,
-            target_ref={"kind": "test"},
-            workspace_ref={"workspace_root": "/tmp/work"},
-        )
-        user_facing = build_worker_prompt(
-            assignment,
-            target_ref={"kind": "test", "required_response_tool": "post_slack_reply"},
-            workspace_ref={"workspace_root": "/tmp/work"},
-        )
+        def prompt_for(*, target_ref, metadata):
+            return build_worker_prompt(
+                assignment,
+                target_ref=target_ref,
+                workspace_ref={"workspace_root": "/tmp/work"},
+                metadata=metadata,
+            )
 
-        assert "Agent Soul" not in headless
-        assert "Agent Soul" in user_facing
-        assert "You are a teammate writing to people" in user_facing
+        slack_target = {
+            "kind": "slack",
+            "originating_surface": "slack",
+            "required_response_tool": "post_slack_reply",
+            "final_answer_target_surface": "slack",
+        }
+
+        # Slack-origin worker a teammate reads.
+        assert "Agent Soul" in prompt_for(target_ref=slack_target, metadata={})
+        # Same inherited target_ref, but spawned headless: reports to its parent.
+        assert "Agent Soul" not in prompt_for(
+            target_ref=slack_target, metadata={"headless": True}
+        )
+        # Monitored intakes carry surface hints while nobody reads the result.
+        assert "Agent Soul" not in prompt_for(
+            target_ref={"kind": "slack", "final_answer_target_surface": "headless"},
+            metadata={},
+        )
+        # Native chat puts the response tool in metadata only, never target_ref.
+        chat = prompt_for(
+            target_ref={"kind": "chat"},
+            metadata={"required_response_tool": "post_chat_message"},
+        )
+        assert "Agent Soul" in chat
+        assert "You are a teammate writing to people" in chat
