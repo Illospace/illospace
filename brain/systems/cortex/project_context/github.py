@@ -354,9 +354,9 @@ def _label_payloads(labels: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _issue_payload(issue: dict[str, Any]) -> dict[str, Any]:
+def _issue_payload(issue: dict[str, Any], *, body_limit: int = 1000) -> dict[str, Any]:
     raw_body = str(issue.get("body") or "")
-    compact_body = _compact_body(raw_body)
+    compact_body = _compact_body(raw_body, limit=body_limit)
     normalized_body_chars = len(" ".join(raw_body.split()))
     pull_request = issue.get("pull_request") if isinstance(issue.get("pull_request"), dict) else {}
     return {
@@ -1240,6 +1240,7 @@ async def async_list_repo_issues(
     include_pull_requests: bool = False,
     limit: int = 30,
     cursor: str | None = None,
+    body_limit: int = 1000,
 ) -> dict[str, Any]:
     owner, repo = slug.split("/", 1)
     max_items = max(1, min(int(limit or 30), GITHUB_ITEM_LIMIT))
@@ -1290,7 +1291,11 @@ async def async_list_repo_issues(
     return {
         "repo": slug,
         "state": params["state"],
-        "issues": [_issue_payload(item) for item in selected if isinstance(item, dict)],
+        "issues": [
+            _issue_payload(item, body_limit=body_limit)
+            for item in selected
+            if isinstance(item, dict)
+        ],
         "included_pull_requests": include_pull_requests,
         "truncated": next_position is not None,
         "next_page": encode_page_token(page_kind, next_position) if next_position else None,
