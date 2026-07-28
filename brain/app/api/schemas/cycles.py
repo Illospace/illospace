@@ -60,6 +60,10 @@ class CycleRead(BaseModel):
     last_run_at: datetime | None = None
     last_status: str | None = None
     last_error: str | None = None
+    failure_signature: str | None = None
+    consecutive_failure_count: int = 0
+    failure_alerted_at: datetime | None = None
+    last_failure_error: str | None = None
     created_at: datetime
     updated_at: datetime
 

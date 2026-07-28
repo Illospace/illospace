@@ -82,7 +82,9 @@ RuntimeError: worker=<Worker object at 0x8e23cd01> coroutine=<coroutine object r
     assert scheduler_failure_signature(first) == scheduler_failure_signature(second)
 
 
-async def test_scheduler_failure_alert_uses_vault_first_slack_client(monkeypatch):
+async def test_scheduler_failure_alert_bytes_are_unchanged_through_shared_delivery(
+    monkeypatch,
+):
     calls: dict[str, object] = {}
 
     class FakeSlackClient:

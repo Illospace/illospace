@@ -94,6 +94,10 @@ LEGACY_SYNC_TEST_HARNESSES = {
         "sqlalchemy_create_engine",
         "sync_session_method_call",
     },
+    "tests/test_cycle_failure_guard.py": {
+        "sqlalchemy_create_engine",
+        "sync_session_method_call",
+    },
     "tests/test_exception_ping_gate.py": {
         "sqlalchemy_create_engine",
         "sync_session_method_call",

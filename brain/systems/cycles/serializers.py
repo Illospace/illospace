@@ -115,6 +115,14 @@ def serialize_cycle(cycle: Cycle) -> dict:
         "last_run_at": cycle.last_run_at,
         "last_status": cycle.last_status,
         "last_error": cycle.last_error,
+        "failure_signature": string_or_none(
+            getattr(cycle, "failure_signature", None)
+        ),
+        "consecutive_failure_count": int(
+            getattr(cycle, "consecutive_failure_count", 0) or 0
+        ),
+        "failure_alerted_at": getattr(cycle, "failure_alerted_at", None),
+        "last_failure_error": getattr(cycle, "last_failure_error", None),
         "created_at": created_at,
         "updated_at": updated_at,
     }

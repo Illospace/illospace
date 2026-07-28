@@ -191,6 +191,9 @@ class _AsyncFakeSession(_FakeSession):
     async def scalars(self, statement):
         return super().scalars(statement)
 
+    async def scalar(self, statement):
+        return self._cycle
+
     async def flush(self):
         return None
 
@@ -269,6 +272,7 @@ class _RouterCycleSession:
 class _ExecuteCycleSession:
     def __init__(self, *, run, cycle, idea, owner=None, expected_run_id=None):
         self._scalar_values = [run, cycle, run, idea]
+        self._cycle = cycle
         self._owner = owner
         self.added = []
         self.statements = []
@@ -362,6 +366,8 @@ class _AsyncExecuteCycleSession(_ExecuteCycleSession):
         return super().get(model, value)
 
     async def scalar(self, statement):
+        if "FROM cycles" in str(statement):
+            return self._cycle
         return 0
 
     async def flush(self):
@@ -426,6 +432,20 @@ class _RecoverStaleSession:
             return self._cycles.get(value)
         if model is AgentRun:
             return self._agent_runs.get(value)
+        return None
+
+    async def scalar(self, statement):
+        params = statement.compile().params
+        return next(
+            (
+                cycle
+                for cycle_id, cycle in self._cycles.items()
+                if cycle_id in params.values()
+            ),
+            None,
+        )
+
+    async def flush(self):
         return None
 
     def add(self, value):
@@ -1813,9 +1833,18 @@ async def test_execute_cycle_run_auth_blocks_expired_codex_before_agent_admissio
         raise AssertionError("agent admission should not run after auth preflight blocks")
 
     published = []
+    failure_alerts = []
+
+    async def capture_failure_alert(**kwargs):
+        failure_alerts.append(kwargs)
+
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
     monkeypatch.setattr("brain.platform.integrations.llm._async_resolve_key_from_db", fake_resolve_key)
     monkeypatch.setattr("brain.platform.integrations.llm.refresh_codex_access_token", fake_refresh)
+    monkeypatch.setattr(
+        "brain.systems.cycles.failure_guard.async_deliver_failure_alert",
+        capture_failure_alert,
+    )
     monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
     monkeypatch.setattr(service, "publish", lambda event, payload: published.append((event, payload)))
 
@@ -1832,6 +1861,17 @@ async def test_execute_cycle_run_auth_blocks_expired_codex_before_agent_admissio
     assert "token expired and refresh failed" not in run.error
     assert run.context_snapshot["auth_preflight"]["status"] == "auth_blocked"
     assert run.context_snapshot["auth_preflight"]["credential"] == "OpenAI Codex / ChatGPT"
+    assert cycle.consecutive_failure_count == 1
+    assert cycle.failure_alerted_at is not None
+    assert len(failure_alerts) == 1
+    assert failure_alerts[0]["subject"].identity == "Scheduled Codex check (#5)"
+    assert failure_alerts[0]["evaluation"].crossed_edges[
+        0
+    ].alert_title == "Cycle authentication blocked"
+    assert (
+        "reconnect OpenAI in Settings > Access"
+        in failure_alerts[0]["evaluation"].crossed_edges[0].alert_summary
+    )
 
     thread_msg = next(item for item in session.added if item.__class__.__name__ == "IdeaThread")
     assert thread_msg.role == "illo"
