@@ -46,6 +46,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0026_packet_brief_deliveries.py",
     # Downgrade removes the normalized latch table after restoring its representable columns.
     "0045_scheduler_failure_guard_latches.py",
+    # Downgrade removes only the cycle guard tables introduced by this migration.
+    "0046_cycle_failure_guard.py",
 }
 
 

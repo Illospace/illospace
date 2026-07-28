@@ -8,10 +8,38 @@ from uuid import uuid4
 import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.schema import CreateTable
 
-from brain.platform.db.models.cycle import Cycle, CycleRun, CycleRunEvaluation
+from brain.platform.db.models.cycle import (
+    Cycle,
+    CycleFailureGuardLatch,
+    CycleFailureGuardObservation,
+    CycleRun,
+    CycleRunEvaluation,
+)
 from brain.systems.cycles import memory as cycle_memory
-import brain.systems.failure_guard as shared_failure_guard
+import brain.systems.cycles.cycle_failure_guard as cycle_failure_guard
+from brain.systems.cycles.status import CYCLE_RUN_TERMINAL_STATUSES
+
+
+FAILURE_GUARD_TABLES = (
+    Cycle.__table__,
+    CycleRun.__table__,
+    CycleFailureGuardLatch.__table__,
+    CycleFailureGuardObservation.__table__,
+    CycleRunEvaluation.__table__,
+)
+
+
+async def _cycle_latches(session, cycle_id: int):
+    result = await session.scalars(
+        select(CycleFailureGuardLatch).where(
+            CycleFailureGuardLatch.cycle_id == cycle_id
+        )
+    )
+    return {latch.trigger_kind: latch for latch in result.all()}
 
 
 def test_cycle_model_exposes_failure_guard_state():
@@ -19,8 +47,33 @@ def test_cycle_model_exposes_failure_guard_state():
 
     assert columns["failure_signature"].type.length == 64
     assert columns["consecutive_failure_count"].nullable is False
-    assert columns["failure_alerted_at"].nullable is True
     assert columns["last_failure_error"].nullable is True
+    assert "failure_alerted_at" not in columns
+    assert [
+        column.name
+        for column in CycleFailureGuardLatch.__table__.primary_key.columns
+    ] == ["cycle_id", "trigger_kind"]
+    assert [
+        column.name
+        for column in CycleFailureGuardObservation.__table__.primary_key.columns
+    ] == ["cycle_run_id"]
+
+
+def test_cycle_terminal_policy_is_total_for_canonical_terminal_statuses():
+    assert (
+        set(cycle_failure_guard.CYCLE_TERMINAL_POLICIES)
+        == CYCLE_RUN_TERMINAL_STATUSES
+    )
+    assert {
+        status: policy.action
+        for status, policy in cycle_failure_guard.CYCLE_TERMINAL_POLICIES.items()
+    } == {
+        "completed": cycle_failure_guard.CycleTerminalAction.RESET,
+        "failed": cycle_failure_guard.CycleTerminalAction.RECORD_FAILURE,
+        "skipped": cycle_failure_guard.CycleTerminalAction.IGNORE,
+        "degraded": cycle_failure_guard.CycleTerminalAction.RECORD_FAILURE,
+        "auth_blocked": cycle_failure_guard.CycleTerminalAction.RECORD_FAILURE,
+    }
 
 
 def test_cycle_failure_guard_migration_round_trips(monkeypatch):
@@ -31,6 +84,9 @@ def test_cycle_failure_guard_migration_round_trips(monkeypatch):
 
     with engine.begin() as connection:
         connection.execute(sa.text("CREATE TABLE cycles (id INTEGER PRIMARY KEY)"))
+        connection.execute(
+            sa.text("CREATE TABLE cycle_runs (id INTEGER PRIMARY KEY)")
+        )
         operations = Operations(MigrationContext.configure(connection))
         monkeypatch.setattr(migration, "op", operations)
 
@@ -45,16 +101,32 @@ def test_cycle_failure_guard_migration_round_trips(monkeypatch):
             "id",
             "failure_signature",
             "consecutive_failure_count",
-            "failure_alerted_at",
             "last_failure_error",
         }
         assert columns["consecutive_failure_count"]["nullable"] is False
+        assert {
+            column["name"]
+            for column in sa.inspect(connection).get_columns(
+                "cycle_failure_guard_latches"
+            )
+        } == {"cycle_id", "trigger_kind", "alerted_at"}
+        assert {
+            column["name"]
+            for column in sa.inspect(connection).get_columns(
+                "cycle_failure_guard_observations"
+            )
+        } == {"cycle_run_id", "observed_at"}
 
+        migration.downgrade()
         migration.downgrade()
         assert {
             column["name"]
             for column in sa.inspect(connection).get_columns("cycles")
         } == {"id"}
+        assert {
+            "cycle_failure_guard_latches",
+            "cycle_failure_guard_observations",
+        }.isdisjoint(sa.inspect(connection).get_table_names())
 
 
 async def test_terminal_cycle_failures_post_one_named_alert_without_prompt_cooperation(
@@ -62,13 +134,7 @@ async def test_terminal_cycle_failures_post_one_named_alert_without_prompt_coope
     sqlite_postgres_ddl_patch,
     monkeypatch,
 ):
-    session = await async_sqlite_session_factory(
-        [
-            Cycle.__table__,
-            CycleRun.__table__,
-            CycleRunEvaluation.__table__,
-        ]
-    )
+    session = await async_sqlite_session_factory(FAILURE_GUARD_TABLES)
     cycle = Cycle(
         id=2,
         user_id=str(uuid4()),
@@ -93,15 +159,15 @@ async def test_terminal_cycle_failures_post_one_named_alert_without_prompt_coope
             return {"ok": True, "message": {"text": text}}
 
     async def fake_client_from_runtime(*, requested_by, reason):
-        assert requested_by == "scheduler_failure_alert"
-        assert reason == "Deliver a repeated scheduler job failure alert to the team."
+        assert requested_by == "cycle_failure_alert"
+        assert reason == "Deliver a repeated cycle failure alert to the team."
         return FakeSlackClient()
 
-    monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "3")
-    monkeypatch.setenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "#alerts")
+    monkeypatch.setenv("CYCLE_FAILURE_ALERT_THRESHOLD", "3")
+    monkeypatch.setenv("ILLO_CYCLE_FAILURE_ALERT_CHANNEL", "#alerts")
     monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
     monkeypatch.setattr(
-        shared_failure_guard,
+        cycle_failure_guard,
         "slack_web_client_from_runtime",
         fake_client_from_runtime,
     )
@@ -126,7 +192,7 @@ async def test_terminal_cycle_failures_post_one_named_alert_without_prompt_coope
         )
 
     assert cycle.consecutive_failure_count == 3
-    assert cycle.failure_alerted_at is not None
+    assert (await _cycle_latches(session, cycle.id))["consecutive"].alerted_at
     assert cycle.last_failure_error == "RuntimeError: coordinator stopped"
     assert calls == [
         {
@@ -149,13 +215,7 @@ async def test_auth_blocked_alerts_with_reconnect_action_then_completion_resets(
     sqlite_postgres_ddl_patch,
     monkeypatch,
 ):
-    session = await async_sqlite_session_factory(
-        [
-            Cycle.__table__,
-            CycleRun.__table__,
-            CycleRunEvaluation.__table__,
-        ]
-    )
+    session = await async_sqlite_session_factory(FAILURE_GUARD_TABLES)
     cycle = Cycle(
         id=7,
         user_id=str(uuid4()),
@@ -185,10 +245,10 @@ async def test_auth_blocked_alerts_with_reconnect_action_then_completion_resets(
     async def fake_client_from_runtime(*, requested_by, reason):
         return FakeSlackClient()
 
-    monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "99")
-    monkeypatch.setenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "C_ALERTS")
+    monkeypatch.setenv("CYCLE_FAILURE_ALERT_THRESHOLD", "99")
+    monkeypatch.setenv("ILLO_CYCLE_FAILURE_ALERT_CHANNEL", "C_ALERTS")
     monkeypatch.setattr(
-        shared_failure_guard,
+        cycle_failure_guard,
         "slack_web_client_from_runtime",
         fake_client_from_runtime,
     )
@@ -204,7 +264,9 @@ async def test_auth_blocked_alerts_with_reconnect_action_then_completion_resets(
         error=blocked_error,
     )
     first_count = cycle.consecutive_failure_count
-    first_alerted_at = cycle.failure_alerted_at
+    first_alerted_at = (
+        await _cycle_latches(session, cycle.id)
+    )["consecutive"].alerted_at
 
     await cycle_memory.finalize_cycle_run(
         blocked_run,
@@ -216,7 +278,9 @@ async def test_auth_blocked_alerts_with_reconnect_action_then_completion_resets(
 
     assert first_count == 1
     assert cycle.consecutive_failure_count == first_count
-    assert cycle.failure_alerted_at == first_alerted_at
+    assert (
+        await _cycle_latches(session, cycle.id)
+    )["consecutive"].alerted_at == first_alerted_at
     assert len(calls) == 1
     assert calls[0]["channel"] == "C_ALERTS"
     assert calls[0]["text"].startswith(
@@ -244,7 +308,7 @@ async def test_auth_blocked_alerts_with_reconnect_action_then_completion_resets(
 
     assert cycle.failure_signature is None
     assert cycle.consecutive_failure_count == 0
-    assert cycle.failure_alerted_at is None
+    assert await _cycle_latches(session, cycle.id) == {}
     assert cycle.last_failure_error is None
     assert len(calls) == 1
 
@@ -254,13 +318,7 @@ async def test_cycle_two_production_outcome_sequence_crosses_the_guard(
     sqlite_postgres_ddl_patch,
     monkeypatch,
 ):
-    session = await async_sqlite_session_factory(
-        [
-            Cycle.__table__,
-            CycleRun.__table__,
-            CycleRunEvaluation.__table__,
-        ]
-    )
+    session = await async_sqlite_session_factory(FAILURE_GUARD_TABLES)
     cycle = Cycle(
         id=2,
         user_id=str(uuid4()),
@@ -285,10 +343,10 @@ async def test_cycle_two_production_outcome_sequence_crosses_the_guard(
     async def fake_client_from_runtime(*, requested_by, reason):
         return FakeSlackClient()
 
-    monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "3")
-    monkeypatch.setenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "C_ALERTS")
+    monkeypatch.setenv("CYCLE_FAILURE_ALERT_THRESHOLD", "3")
+    monkeypatch.setenv("ILLO_CYCLE_FAILURE_ALERT_CHANNEL", "C_ALERTS")
     monkeypatch.setattr(
-        shared_failure_guard,
+        cycle_failure_guard,
         "slack_web_client_from_runtime",
         fake_client_from_runtime,
     )
@@ -331,3 +389,75 @@ async def test_cycle_two_production_outcome_sequence_crosses_the_guard(
     assert delivered
     assert any(text.startswith("Cycle repeated failure") for text in delivered)
     assert any(text.startswith("Cycle authentication blocked") for text in delivered)
+
+
+async def test_terminal_observation_claim_is_idempotent_across_two_sessions(
+    tmp_path,
+    sqlite_postgres_ddl_patch,
+    monkeypatch,
+):
+    monkeypatch.setenv("CYCLE_FAILURE_ALERT_THRESHOLD", "99")
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'cycle-guard.db'}",
+        echo=False,
+    )
+    async with engine.begin() as connection:
+        for table in FAILURE_GUARD_TABLES:
+            await connection.execute(CreateTable(table, if_not_exists=True))
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    scheduled_for = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+
+    try:
+        async with factory() as first_session:
+            cycle = Cycle(
+                id=41,
+                user_id=str(uuid4()),
+                org_id=None,
+                name="Two-worker cycle",
+                prompt="Prove terminal idempotency.",
+                schedule_expr="0 * * * *",
+                timezone="UTC",
+                enabled=True,
+            )
+            run = CycleRun(
+                id=73,
+                cycle_id=cycle.id,
+                scheduled_for=scheduled_for,
+                status="running",
+                prompt_snapshot=cycle.prompt,
+            )
+            first_session.add_all([cycle, run])
+            await first_session.commit()
+            await cycle_memory.finalize_cycle_run(
+                run,
+                cycle,
+                session=first_session,
+                status="failed",
+                error="RuntimeError: one terminal outcome",
+            )
+            await first_session.commit()
+
+        async with factory() as second_session:
+            second_cycle = await second_session.get(Cycle, 41)
+            second_run = await second_session.get(CycleRun, 73)
+            assert second_cycle is not None
+            assert second_run is not None
+            await cycle_memory.finalize_cycle_run(
+                second_run,
+                second_cycle,
+                session=second_session,
+                status="failed",
+                error="RuntimeError: one terminal outcome",
+            )
+            await second_session.commit()
+            await second_session.refresh(second_cycle)
+
+            observation_count = await second_session.scalar(
+                select(func.count()).select_from(
+                    CycleFailureGuardObservation
+                )
+            )
+            assert observation_count == 1
+            assert second_cycle.consecutive_failure_count == 1
+    finally:
+        await engine.dispose()

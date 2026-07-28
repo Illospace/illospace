@@ -22,6 +22,8 @@ EXPECTED_TABLES = {
     "consolidation_runs",
     "cortex_events",
     "cycle_guidance",
+    "cycle_failure_guard_latches",
+    "cycle_failure_guard_observations",
     "cycle_output_targets",
     "cycle_revisions",
     "cycle_run_evaluations",

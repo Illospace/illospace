@@ -31,13 +31,18 @@ from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.slack.client import slack_web_client_from_runtime
 from brain.app.scheduler.catalog import normalize_owner_mode
 from brain.app.scheduler.contracts import validate_scheduler_run_contract
-from brain.app.scheduler.failure_guard import (
-    FailureAlertSubject,
-    FailureGuardEvaluation,
-    async_deliver_failure_alert,
+from brain.app.scheduler.scheduler_failure_guard import (
     async_record_scheduler_job_failure,
     async_reset_scheduler_job_failure_guard,
+)
+from brain.systems.failure_guard.core import (
+    FailureGuardEvaluation,
     serialize_failure_guard,
+)
+from brain.systems.failure_guard.slack_delivery import (
+    FailureAlertSubject,
+    SlackFailureAlertPolicy,
+    async_deliver_failure_alert,
 )
 from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.programs import (
@@ -398,6 +403,17 @@ async def async_deliver_scheduler_failure_alert(
 ) -> None:
     """Preserve the scheduler card contract through the shared delivery path."""
     await async_deliver_failure_alert(
+        policy=SlackFailureAlertPolicy(
+            provide_client=slack_web_client_from_runtime,
+            requested_by="scheduler_failure_alert",
+            reason="Deliver a repeated scheduler job failure alert to the team.",
+            channel=(
+                os.getenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "").strip()
+                or "#alerts"
+            ),
+            unknown_error_text="Unknown scheduler failure",
+            combined_alert_title="Scheduler job failure guard alert",
+        ),
         subject=FailureAlertSubject(
             identity_label="Job key",
             identity=job_key,
@@ -407,11 +423,9 @@ async def async_deliver_scheduler_failure_alert(
                 f"?job_key={quote(job_key, safe='')}&run_id={run_id}"
             ),
             link_label="open scheduler state",
-            combined_alert_title="Scheduler job failure guard alert",
         ),
         evaluation=evaluation,
         error_text=error_text,
-        client_factory=slack_web_client_from_runtime,
     )
 
 

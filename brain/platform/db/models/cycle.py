@@ -12,6 +12,8 @@ from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin
 
 __all__ = [
     "Cycle",
+    "CycleFailureGuardLatch",
+    "CycleFailureGuardObservation",
     "CycleRevision",
     "CycleGuidance",
     "CycleOutputTarget",
@@ -80,9 +82,6 @@ class Cycle(Base, TimestampMixin):
     consecutive_failure_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0"), default=0
     )
-    failure_alerted_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
     last_failure_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     degradation_state: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
@@ -92,6 +91,23 @@ class Cycle(Base, TimestampMixin):
     )
     deleted_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
+    )
+
+
+class CycleFailureGuardLatch(Base):
+    """One durable alert latch for one cycle failure-guard trigger."""
+
+    __tablename__ = "cycle_failure_guard_latches"
+
+    cycle_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("cycles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    trigger_kind: Mapped[str] = mapped_column(String(40), primary_key=True)
+    alerted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
     )
 
 
@@ -226,6 +242,22 @@ class CycleRun(Base, CreatedAtMixin):
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
     )
     self_review_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class CycleFailureGuardObservation(Base):
+    """The unique claim that one cycle run's terminal outcome was processed."""
+
+    __tablename__ = "cycle_failure_guard_observations"
+
+    cycle_run_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("cycle_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
 
 
 class CycleRunEvaluation(Base, CreatedAtMixin):

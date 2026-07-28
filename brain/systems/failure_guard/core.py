@@ -1,16 +1,13 @@
-"""Shared failure-guard evaluation, latching, serialization, and delivery."""
+"""Neutral failure observation, edge evaluation, and latch persistence."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
-import os
 import re
-from typing import Any, Awaitable, Callable, Literal, Mapping, NewType, Protocol
+from typing import Any, Literal, Mapping, NewType, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from brain.systems.slack.client import slack_web_client_from_runtime
 
 
 FailureGuardTriggerKind = NewType("FailureGuardTriggerKind", str)
@@ -41,13 +38,28 @@ _FAILURE_RUNTIME_ID_RE = re.compile(
 )
 
 
-def positive_int_setting(name: str, default: int) -> int:
-    """Load a positive integer setting with one shared fallback rule."""
-    try:
-        configured = int(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        configured = default
-    return max(1, configured)
+@dataclass(frozen=True)
+class FailureObservation:
+    """Typed data describing one failure before guard state is changed."""
+
+    classification: str
+    signature_input: str
+    error_text: str
+    alert_threshold: int
+    alert_class: str
+    operator_action: str | None
+
+    def __post_init__(self) -> None:
+        if not self.classification.strip():
+            raise ValueError("failure classification must not be empty")
+        if not self.signature_input.strip():
+            raise ValueError("failure signature input must not be empty")
+        if self.alert_threshold < 1:
+            raise ValueError("failure alert threshold must be positive")
+        if not self.alert_class.strip():
+            raise ValueError("failure alert class must not be empty")
+        if self.operator_action is not None and not self.operator_action.strip():
+            raise ValueError("failure operator action must not be empty")
 
 
 @dataclass(frozen=True)
@@ -69,7 +81,7 @@ class FailureGuardTriggerResult:
 
 
 class FailureGuardSubject(Protocol):
-    """Mutable failure state shared by every guarded subject."""
+    """Mutable state required by every guarded subject."""
 
     id: int
     failure_signature: str | None
@@ -87,6 +99,8 @@ class FailureGuardTrigger(Protocol):
         session: AsyncSession,
         subject: FailureGuardSubject,
         now: datetime,
+        *,
+        observation: FailureObservation | None = None,
     ) -> FailureGuardTriggerResult:
         """Evaluate the trigger and construct its public/alert details."""
 
@@ -116,19 +130,31 @@ class FailureGuardRegistry:
 
 
 class FailureGuardLatch(Protocol):
-    """The alert timestamp needed by the generic edge evaluator."""
+    """The alert timestamp required by the neutral edge evaluator."""
 
     alerted_at: datetime
 
 
-FailureGuardCreateLatch = Callable[
-    [FailureGuardTriggerKind, datetime],
-    Awaitable[FailureGuardLatch],
-]
-FailureGuardDeleteLatch = Callable[
-    [FailureGuardTriggerKind, FailureGuardLatch],
-    Awaitable[None],
-]
+class FailureGuardStore(Protocol):
+    """Persistence boundary shared by every failure-guard adapter."""
+
+    async def load_latches(
+        self,
+    ) -> Mapping[FailureGuardTriggerKind, FailureGuardLatch]:
+        """Return all persisted trigger latches for one guarded subject."""
+
+    async def create_latch(
+        self,
+        trigger_kind: FailureGuardTriggerKind,
+        alerted_at: datetime,
+    ) -> FailureGuardLatch:
+        """Persist and return one trigger latch."""
+
+    async def delete_latch(
+        self,
+        trigger_kind: FailureGuardTriggerKind,
+    ) -> None:
+        """Delete one trigger latch when present."""
 
 
 @dataclass(frozen=True)
@@ -154,18 +180,6 @@ class FailureGuardEvaluation:
     @property
     def crossed_edges(self) -> tuple[FailureGuardEdge, ...]:
         return tuple(edge for edge in self.edges if edge.crossed)
-
-
-@dataclass(frozen=True)
-class FailureAlertSubject:
-    """Presentation fields for one guarded subject's Slack card."""
-
-    identity_label: str
-    identity: str
-    url_label: str
-    url: str
-    link_label: str
-    combined_alert_title: str
 
 
 def normalize_failure_identity(failure_identity: str) -> str:
@@ -213,107 +227,28 @@ def serialize_failure_guard(
     }
 
 
-async def _resolve_failure_alert_channel(client: Any, configured: str) -> str:
-    channel = str(configured or "").strip()
-    if not channel.startswith("#"):
-        return channel
-
-    target_name = channel.removeprefix("#")
-    cursor: str | None = None
-    seen_cursors: set[str] = set()
-    while True:
-        response = await client.conversations_list(
-            types="public_channel,private_channel",
-            limit=200,
-            cursor=cursor,
-            exclude_archived=True,
-        )
-        for candidate in response.get("channels") or []:
-            if not isinstance(candidate, dict):
-                continue
-            if str(candidate.get("name") or "") == target_name:
-                return str(candidate.get("id") or channel)
-        metadata = response.get("response_metadata")
-        metadata = metadata if isinstance(metadata, dict) else {}
-        next_cursor = str(metadata.get("next_cursor") or "").strip()
-        if not next_cursor or next_cursor in seen_cursors:
-            return channel
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
-
-
-async def async_deliver_failure_alert(
-    *,
-    subject: FailureAlertSubject,
-    evaluation: FailureGuardEvaluation,
-    error_text: str,
-    client_factory: Callable[..., Awaitable[Any]] | None = None,
-) -> None:
-    """Post all edges crossed by one evaluation as one Slack notification."""
-    crossed_edges = evaluation.crossed_edges
-    if not crossed_edges:
-        raise ValueError("failure-guard alert requires at least one crossed edge")
-
-    provide_client = client_factory or slack_web_client_from_runtime
-    client = await provide_client(
-        requested_by="scheduler_failure_alert",
-        reason="Deliver a repeated scheduler job failure alert to the team.",
-    )
-    configured_channel = (
-        os.getenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "").strip()
-        or "#alerts"
-    )
-    channel = await _resolve_failure_alert_channel(client, configured_channel)
-    first_error_line = next(
-        (line.strip() for line in str(error_text or "").splitlines() if line.strip()),
-        "Unknown scheduler failure",
-    )
-    if len(crossed_edges) == 1:
-        alert_title = crossed_edges[0].alert_title
-        failure_summary = crossed_edges[0].alert_summary
-    else:
-        alert_title = subject.combined_alert_title
-        failure_summary = "\n".join(
-            (
-                "Triggers crossed:",
-                *(
-                    f"- {edge.kind}: {edge.alert_summary}"
-                    for edge in crossed_edges
-                ),
-            )
-        )
-    await client.post_message(
-        channel=channel,
-        text=(
-            f"{alert_title}\n"
-            f"{subject.identity_label}: {subject.identity}\n"
-            f"{failure_summary}\n"
-            f"Error: {first_error_line}\n"
-            f"{subject.url_label}: <{subject.url}|{subject.link_label}>"
-        ),
-    )
-
-
-async def async_evaluate_failure_guard(
+async def _async_evaluate_edges(
     session: AsyncSession,
     subject: FailureGuardSubject,
     *,
     now: datetime,
     registry: FailureGuardRegistry,
     latches: dict[FailureGuardTriggerKind, FailureGuardLatch],
-    persist_crossings: bool,
-    create_latch: FailureGuardCreateLatch | None = None,
+    store: FailureGuardStore | None,
+    observation: FailureObservation | None,
 ) -> FailureGuardEvaluation:
-    """Evaluate every registered trigger against one subject state."""
     edges: list[FailureGuardEdge] = []
     for trigger in registry.triggers:
-        result = await trigger.evaluate(session, subject, now)
+        result = await trigger.evaluate(
+            session,
+            subject,
+            now,
+            observation=observation,
+        )
         latch = latches.get(trigger.kind)
-        crossed = persist_crossings and result.active and latch is None
+        crossed = store is not None and result.active and latch is None
         if crossed:
-            if create_latch is None:
-                raise ValueError("persisted failure-guard evaluation needs a latch writer")
-            latch = await create_latch(trigger.kind, now)
+            latch = await store.create_latch(trigger.kind, now)
             latches[trigger.kind] = latch
         edges.append(
             FailureGuardEdge(
@@ -332,20 +267,39 @@ async def async_evaluate_failure_guard(
     )
 
 
+async def async_read_failure_guard(
+    session: AsyncSession,
+    subject: FailureGuardSubject,
+    *,
+    now: datetime,
+    registry: FailureGuardRegistry,
+    store: FailureGuardStore,
+) -> FailureGuardEvaluation:
+    """Evaluate current trigger state without creating new latches."""
+    latches = dict(await store.load_latches())
+    return await _async_evaluate_edges(
+        session,
+        subject,
+        now=now,
+        registry=registry,
+        latches=latches,
+        store=None,
+        observation=None,
+    )
+
+
 async def async_record_failure(
     session: AsyncSession,
     subject: FailureGuardSubject,
     *,
-    failure_identity: str,
-    error_text: str,
+    observation: FailureObservation,
     now: datetime,
     registry: FailureGuardRegistry,
-    latches: dict[FailureGuardTriggerKind, FailureGuardLatch],
-    create_latch: FailureGuardCreateLatch,
-    delete_latch: FailureGuardDeleteLatch,
+    store: FailureGuardStore,
 ) -> FailureGuardEvaluation:
-    """Update one locked subject and evaluate all trigger edges once."""
-    signature = failure_signature(failure_identity)
+    """Update one locked subject and persist trigger crossings once."""
+    latches = dict(await store.load_latches())
+    signature = failure_signature(observation.signature_input)
     if subject.failure_signature == signature:
         subject.consecutive_failure_count = int(
             subject.consecutive_failure_count or 0
@@ -355,29 +309,28 @@ async def async_record_failure(
         subject.consecutive_failure_count = 1
         reset_latch = False
         for trigger in registry.triggers:
-            latch = latches.get(trigger.kind)
-            if latch is None or not await trigger.should_reset(
+            if trigger.kind not in latches or not await trigger.should_reset(
                 session,
                 subject,
                 now,
                 event="signature_change",
             ):
                 continue
-            await delete_latch(trigger.kind, latch)
+            await store.delete_latch(trigger.kind)
             del latches[trigger.kind]
             reset_latch = True
         if reset_latch:
             await session.flush()
 
-    subject.last_failure_error = error_text
-    evaluation = await async_evaluate_failure_guard(
+    subject.last_failure_error = observation.error_text
+    evaluation = await _async_evaluate_edges(
         session,
         subject,
         now=now,
         registry=registry,
         latches=latches,
-        persist_crossings=True,
-        create_latch=create_latch,
+        store=store,
+        observation=observation,
     )
     await session.flush()
     return evaluation
@@ -389,13 +342,12 @@ async def async_reset_failure_guard(
     *,
     now: datetime,
     registry: FailureGuardRegistry,
-    latches: dict[FailureGuardTriggerKind, FailureGuardLatch],
-    delete_latch: FailureGuardDeleteLatch,
+    store: FailureGuardStore,
 ) -> None:
     """Reset one locked subject after a successful terminal outcome."""
+    latches = dict(await store.load_latches())
     for trigger in registry.triggers:
-        latch = latches.get(trigger.kind)
-        if latch is None:
+        if trigger.kind not in latches:
             continue
         if await trigger.should_reset(
             session,
@@ -403,7 +355,7 @@ async def async_reset_failure_guard(
             now,
             event="success",
         ):
-            await delete_latch(trigger.kind, latch)
+            await store.delete_latch(trigger.kind)
 
     subject.failure_signature = None
     subject.consecutive_failure_count = 0

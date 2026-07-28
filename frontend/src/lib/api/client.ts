@@ -385,10 +385,6 @@ export interface CycleRead {
   last_run_at: string | null;
   last_status: string | null;
   last_error: string | null;
-  failure_signature: string | null;
-  consecutive_failure_count: number;
-  failure_alerted_at: string | null;
-  last_failure_error: string | null;
   created_at: string;
   updated_at: string;
 }

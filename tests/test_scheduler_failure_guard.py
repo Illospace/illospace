@@ -12,11 +12,11 @@ import pytest
 from sqlalchemy import select
 
 import brain.app.scheduler.executor as scheduler_executor
-import brain.app.scheduler.failure_guard as scheduler_failure_guard
+import brain.app.scheduler.scheduler_failure_guard as scheduler_failure_guard
 from brain.app.scheduler.daemon import (
     async_scheduler_health_snapshot,
 )
-from brain.app.scheduler.failure_guard import (
+from brain.systems.failure_guard.core import (
     CONSECUTIVE_TRIGGER_KIND,
     ROLLING_WINDOW_TRIGGER_KIND,
     FailureGuardEdge,
@@ -24,9 +24,9 @@ from brain.app.scheduler.failure_guard import (
     FailureGuardResetEvent,
     FailureGuardTriggerKind,
     FailureGuardTriggerResult,
-    scheduler_failure_signature,
     serialize_failure_guard,
 )
+from brain.app.scheduler.scheduler_failure_guard import scheduler_failure_signature
 from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.programs import nightly_heuristic_review_command
 from brain.app.scheduler.runtime import RUN_STATUS_SETTLED_SUCCESS
@@ -704,8 +704,10 @@ class _RuntimeDurationTrigger:
         session,
         job: SchedulerJob,
         now: datetime,
+        *,
+        observation=None,
     ) -> FailureGuardTriggerResult:
-        del session
+        del session, observation
         assert job.last_started_at is not None
         started_at = job.last_started_at
         if started_at.tzinfo is None:
