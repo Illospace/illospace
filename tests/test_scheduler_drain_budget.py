@@ -46,15 +46,19 @@ def _due_job(job_key: str, *, priority: int) -> SchedulerJob:
     )
 
 
-async def test_budget_overrun_returns_and_sibling_runs_on_next_drain(session):
+async def test_drain_budget_bounds_admission_not_in_flight_execution(session):
     blocker = _due_job("blocking_job", priority=200)
+    blocker.timeout_seconds = 60
     sibling = _due_job("sibling_job", priority=100)
     session.add_all([blocker, sibling])
     await session.flush()
 
+    runner_timeouts = []
+
     async def runner(command, **_kwargs):
+        runner_timeouts.append(_kwargs["timeout_seconds"])
         if command == ["blocking_job"]:
-            await asyncio.Event().wait()
+            await asyncio.sleep(0.3)
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     now = datetime(2026, 7, 28, 19, 30, tzinfo=timezone.utc)
@@ -63,23 +67,30 @@ async def test_budget_overrun_returns_and_sibling_runs_on_next_drain(session):
             session,
             max_runs=2,
             runner=runner,
-            execution_budget_seconds=0.05,
+            execution_budget_seconds=0.25,
             now=now,
         ),
-        timeout=0.5,
+        timeout=1.5,
     )
 
     assert first["executed"] == 1
     assert first["budget_exhausted"] is True
-    assert first["budget_overrun"]["job_id"] == blocker.id
     assert first["results"] == [
         {
-            "run_id": first["budget_overrun"]["run_id"],
+            "run_id": first["results"][0]["run_id"],
             "job_id": blocker.id,
-            "status": "settled_failure",
-            "error_text": "Scheduler drain execution budget of 0.05s exceeded",
+            "status": "settled_success",
+            "error_text": None,
         }
     ]
+    assert runner_timeouts == [blocker.timeout_seconds]
+
+    sibling_run = await session.scalar(
+        select(SchedulerRun).where(SchedulerRun.job_id == sibling.id)
+    )
+    assert sibling_run is not None
+    assert sibling_run.status == "recorded"
+    assert sibling_run.lease_id is None
 
     second = await async_drain_scheduler(
         session,
@@ -94,10 +105,7 @@ async def test_budget_overrun_returns_and_sibling_runs_on_next_drain(session):
     assert second["results"][0]["status"] == "settled_success"
     assert "budget_exhausted" not in second
 
-    sibling_run = await session.scalar(
-        select(SchedulerRun).where(SchedulerRun.job_id == sibling.id)
-    )
-    assert sibling_run is not None
+    await session.refresh(sibling_run)
     assert sibling_run.status == "settled_success"
 
 

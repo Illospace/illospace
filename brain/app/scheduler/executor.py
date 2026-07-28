@@ -121,10 +121,6 @@ _SUCCESS_HANDLER_STATUSES = {"ok", "recorded", "skipped", "success", "succeeded"
 _BLOCKED_HANDLER_STATUSES = {"blocked"}
 
 
-class SchedulerDrainBudgetExceeded(TimeoutError):
-    """Raised after an in-flight scheduler command exhausts its drain budget."""
-
-
 def _utcnow(now: datetime | None = None) -> datetime:
     return ensure_utc(now)
 
@@ -601,7 +597,6 @@ async def _async_run_step(
     runner: Runner,
     now: datetime,
     resume: bool,
-    execution_deadline: float | None = None,
 ) -> dict[str, Any]:
     if step.status == RUN_STATUS_SETTLED_SUCCESS and resume:
         return {"ok": True, "step_key": step.step_key, "skipped": True, "results": []}
@@ -638,34 +633,12 @@ async def _async_run_step(
     dispatched_agent_run_id: int | None = None
     for command in commands:
         try:
-            runner_call = _call_runner(
+            proc = await _call_runner(
                 runner,
                 command,
                 env=env,
                 timeout_seconds=job.timeout_seconds,
             )
-            if execution_deadline is None:
-                proc = await runner_call
-            else:
-                remaining = execution_deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    runner_call.close()
-                    raise SchedulerDrainBudgetExceeded
-                runner_task = asyncio.create_task(runner_call)
-                done, _pending = await asyncio.wait(
-                    (runner_task,),
-                    timeout=remaining,
-                )
-                if not done:
-                    runner_task.cancel()
-                    try:
-                        await runner_task
-                    except asyncio.CancelledError:
-                        pass
-                    raise SchedulerDrainBudgetExceeded
-                proc = runner_task.result()
-        except SchedulerDrainBudgetExceeded:
-            raise
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
             results.append(
@@ -732,7 +705,6 @@ async def async_run_scheduler_run(
     runner: Runner = _async_run_command,
     resume: bool = True,
     now: datetime | None = None,
-    execution_deadline: float | None = None,
 ) -> SchedulerRun:
     now = _utcnow(now)
     run = await session.get(SchedulerRun, run_id)
@@ -806,7 +778,6 @@ async def async_run_scheduler_run(
             runner=runner,
             now=now,
             resume=resume,
-            execution_deadline=execution_deadline,
         )
         step_results.append(result)
         if not result["ok"]:
@@ -1344,60 +1315,6 @@ async def async_reconcile_scheduler_agent_runs(
     return reconciled
 
 
-async def _async_finish_drain_budget_overrun(
-    session: AsyncSession,
-    run: SchedulerRun,
-    *,
-    budget_seconds: float,
-    now: datetime,
-) -> str:
-    error_text = (
-        f"Scheduler drain execution budget of {budget_seconds:g}s exceeded"
-    )
-    step = await session.scalar(
-        select(SchedulerRunStep)
-        .where(
-            SchedulerRunStep.run_id == run.id,
-            SchedulerRunStep.status == RUN_STATUS_RUNNING,
-        )
-        .order_by(SchedulerRunStep.sequence_no.desc())
-        .limit(1)
-    )
-    if step is not None:
-        await async_update_run_step(
-            session,
-            step,
-            status=RUN_STATUS_SETTLED_FAILURE,
-            finished_at=now,
-            result_summary={
-                **(step.result_summary or {}),
-                "drain_budget_exceeded": True,
-                "budget_seconds": budget_seconds,
-            },
-            error_text=error_text,
-        )
-    await async_finish_run(
-        session,
-        run,
-        status=RUN_STATUS_SETTLED_FAILURE,
-        result_summary={
-            **(run.result_summary or {}),
-            "drain_budget_exceeded": True,
-            "budget_seconds": budget_seconds,
-        },
-        error_text=error_text,
-        now=now,
-    )
-    logger.error(
-        "Scheduler drain execution budget exceeded: run_id=%s job_id=%s "
-        "budget_seconds=%s",
-        run.id,
-        run.job_id,
-        budget_seconds,
-    )
-    return error_text
-
-
 async def async_drain_scheduler(
     session: AsyncSession,
     *,
@@ -1411,7 +1328,7 @@ async def async_drain_scheduler(
     allowed_owner_modes: tuple[str, ...] | None = None,
     execution_budget_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Execute due runs within one bounded scheduler-tick budget."""
+    """Start due runs within one bounded scheduler-tick admission budget."""
     now = _utcnow(now)
     modes = allowed_owner_modes or (normalize_owner_mode(owner_mode),)
     budget_seconds = (
@@ -1422,8 +1339,7 @@ async def async_drain_scheduler(
     if budget_seconds <= 0:
         raise ValueError("execution_budget_seconds must be greater than zero")
     loop = asyncio.get_running_loop()
-    started_at = loop.time()
-    execution_deadline = started_at + budget_seconds
+    admission_deadline = loop.time() + budget_seconds
 
     await async_reconcile_scheduler_agent_runs(session, now=now)
 
@@ -1437,9 +1353,8 @@ async def async_drain_scheduler(
     results: list[dict[str, Any]] = []
     executed = 0
     budget_exhausted = False
-    budget_overrun: dict[str, Any] | None = None
     while executed < max_runs:
-        if loop.time() >= execution_deadline:
+        if loop.time() >= admission_deadline:
             budget_exhausted = True
             break
         candidate = await async_claim_next_due_run(
@@ -1453,40 +1368,14 @@ async def async_drain_scheduler(
         if candidate is None:
             break
         run, _lease = candidate
-        try:
-            await async_run_scheduler_run(
-                session,
-                run.id,
-                owner_id=owner_id,
-                runner=runner,
-                resume=resume,
-                now=now,
-                execution_deadline=execution_deadline,
-            )
-        except SchedulerDrainBudgetExceeded:
-            error_text = await _async_finish_drain_budget_overrun(
-                session,
-                run,
-                budget_seconds=budget_seconds,
-                now=now,
-            )
-            budget_exhausted = True
-            budget_overrun = {
-                "run_id": run.id,
-                "job_id": run.job_id,
-                "budget_seconds": budget_seconds,
-                "elapsed_seconds": round(loop.time() - started_at, 3),
-            }
-            results.append(
-                {
-                    "run_id": run.id,
-                    "job_id": run.job_id,
-                    "status": run.status,
-                    "error_text": error_text,
-                }
-            )
-            executed += 1
-            break
+        await async_run_scheduler_run(
+            session,
+            run.id,
+            owner_id=owner_id,
+            runner=runner,
+            resume=resume,
+            now=now,
+        )
         results.append(
             {
                 "run_id": run.id,
@@ -1500,6 +1389,4 @@ async def async_drain_scheduler(
     result = {"ok": True, "executed": executed, "results": results}
     if budget_exhausted:
         result["budget_exhausted"] = True
-        if budget_overrun is not None:
-            result["budget_overrun"] = budget_overrun
     return result
