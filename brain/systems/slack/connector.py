@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ from sqlalchemy import select
 from brain.platform.async_io import async_http_client
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
+from brain.platform.db.models.inbound import InboundEventRow
 from brain.platform.db.models.org import User
 from brain.systems.inbound.service import submit_inbound_envelope
 from brain.systems.slack.client import (
@@ -357,6 +359,228 @@ async def process_socket_payload(
     return {"ack": ack, "ignored": False, "inbound": inbound}
 
 
+async def process_slack_history_message(
+    session,
+    *,
+    connection: ExternalAgentConnectionRow,
+    message: Mapping[str, Any],
+    channel_id: str,
+    config: SlackConnectorConfig,
+    client: Any,
+    gap_start: datetime,
+) -> dict[str, Any]:
+    """Replay one history message through the normal Slack inbound owners."""
+
+    event = dict(message)
+    event.setdefault("type", "message")
+    event.setdefault("channel", str(channel_id))
+    event.setdefault("channel_type", "channel")
+    socket_payload = {
+        "payload": {
+            "team_id": config.team_id,
+            "event_time": int(_slack_timestamp(event.get("ts"))),
+            "event": event,
+        }
+    }
+    envelope = normalize_slack_socket_event(
+        socket_payload,
+        bot_user_id=config.bot_user_id,
+        monitored_channels=monitored_channel_ids(connection),
+    )
+    if envelope is None:
+        return {"ignored": True, "acked": False}
+
+    existing = await _has_inbound_event_for_envelope(
+        session,
+        connection,
+        envelope,
+    )
+    # History has no Socket Mode transport ack. A visible reaction is the
+    # catch-up acknowledgement for every actionable monitored message,
+    # including an explicit human @Illo mention.
+    acknowledged = await _acknowledge_monitored_message(
+        config,
+        envelope,
+        client=client,
+    )
+    if existing is None and is_monitored_intake(envelope):
+        await enrich_monitored_intake(
+            envelope,
+            connection=connection,
+            bot_token=config.bot_token,
+        )
+    inbound = await submit_inbound_envelope(
+        session,
+        connection=connection,
+        envelope=envelope,
+        ingress_context={
+            "transport": "slack_history_catch_up",
+            "gap_start": gap_start.isoformat(),
+        },
+    )
+    return {
+        "ignored": False,
+        "acked": acknowledged,
+        "inbound": inbound,
+    }
+
+
+async def backfill_monitored_slack_history(
+    session,
+    *,
+    gap_start: datetime,
+    now: datetime,
+    client_factory=None,
+    max_pages_per_channel: int = 100,
+) -> dict[str, Any]:
+    """Backfill every configured monitored channel from one cold-start gap."""
+
+    connections = (
+        await session.scalars(
+            select(ExternalAgentConnectionRow)
+            .where(
+                ExternalAgentConnectionRow.agent_kind == "slack",
+                ExternalAgentConnectionRow.transport == "slack_socket_mode",
+                ExternalAgentConnectionRow.disabled_at.is_(None),
+            )
+            .order_by(ExternalAgentConnectionRow.created_at.asc())
+        )
+    ).all()
+    summary: dict[str, Any] = {
+        "connections": 0,
+        "channels": 0,
+        "messages_read": 0,
+        "ingested": 0,
+        "deduplicated": 0,
+        "acked": 0,
+        "ignored": 0,
+        "errors": [],
+    }
+    for connection in connections:
+        channel_ids = sorted(monitored_channel_ids(connection))
+        if not channel_ids:
+            continue
+        summary["connections"] += 1
+        try:
+            if client_factory is None:
+                from brain.systems.slack.client import slack_web_client_from_runtime
+
+                client = await slack_web_client_from_runtime(
+                    requested_by="scheduler_cold_start_reconciliation",
+                    reason="Backfill monitored Slack channels across a scheduler outage.",
+                )
+            else:
+                client = await client_factory(connection)
+        except Exception as exc:  # noqa: BLE001 - isolate one Slack connection
+            summary["errors"].append(f"connection:{connection.id}:{exc}")
+            continue
+
+        slack_metadata = dict((connection.metadata_ or {}).get("slack") or {})
+        config = SlackConnectorConfig(
+            bot_token=str(getattr(client, "bot_token", "") or ""),
+            app_token="",
+            org_id=str(connection.org_id),
+            owner_user_id=str(connection.owner_user_id),
+            team_id=(
+                str(slack_metadata.get("team_id") or connection.remote_agent_id or "")
+                or None
+            ),
+            bot_user_id=str(slack_metadata.get("bot_user_id") or "") or None,
+        )
+        for channel_id in channel_ids:
+            summary["channels"] += 1
+            try:
+                messages = await _read_history_window(
+                    client,
+                    channel_id=channel_id,
+                    gap_start=gap_start,
+                    now=now,
+                    max_pages=max_pages_per_channel,
+                )
+            except Exception as exc:  # noqa: BLE001 - continue other channels
+                summary["errors"].append(f"channel:{channel_id}:{exc}")
+                continue
+            summary["messages_read"] += len(messages)
+            for message in messages:
+                try:
+                    result = await process_slack_history_message(
+                        session,
+                        connection=connection,
+                        message=message,
+                        channel_id=channel_id,
+                        config=config,
+                        client=client,
+                        gap_start=gap_start,
+                    )
+                except Exception as exc:  # noqa: BLE001 - isolate one message
+                    summary["errors"].append(
+                        f"message:{channel_id}:{message.get('ts')}:{exc}"
+                    )
+                    continue
+                if result["ignored"]:
+                    summary["ignored"] += 1
+                    continue
+                summary["acked"] += int(bool(result["acked"]))
+                if result["inbound"].get("idempotent_replay"):
+                    summary["deduplicated"] += 1
+                else:
+                    summary["ingested"] += 1
+    return summary
+
+
+async def _read_history_window(
+    client: Any,
+    *,
+    channel_id: str,
+    gap_start: datetime,
+    now: datetime,
+    max_pages: int,
+) -> list[dict[str, Any]]:
+    oldest = f"{gap_start.timestamp():.6f}"
+    latest = f"{now.timestamp():.6f}"
+    cursor: str | None = None
+    messages_by_ts: dict[str, dict[str, Any]] = {}
+    for _page in range(max(1, int(max_pages))):
+        payload = await client.conversation_history(
+            channel=channel_id,
+            limit=200,
+            oldest=oldest,
+            latest=latest,
+            cursor=cursor,
+        )
+        for raw_message in payload.get("messages") or []:
+            if not isinstance(raw_message, Mapping):
+                continue
+            message = dict(raw_message)
+            message_ts = str(message.get("ts") or "").strip()
+            if (
+                message_ts
+                and _slack_timestamp(oldest)
+                <= _slack_timestamp(message_ts)
+                <= _slack_timestamp(latest)
+            ):
+                messages_by_ts[message_ts] = message
+        metadata = payload.get("response_metadata")
+        metadata = metadata if isinstance(metadata, Mapping) else {}
+        next_cursor = str(metadata.get("next_cursor") or "").strip()
+        if not next_cursor:
+            return [
+                messages_by_ts[key]
+                for key in sorted(messages_by_ts, key=_slack_timestamp)
+            ]
+        cursor = next_cursor
+    raise RuntimeError(
+        f"history exceeded {max_pages} pages; refusing a partial backfill"
+    )
+
+
+def _slack_timestamp(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value or "0"))
+    except (InvalidOperation, ValueError):
+        return Decimal(0)
+
+
 async def _record_inbound_obligation_reply(
     session: Any,
     *,
@@ -434,6 +658,31 @@ async def _has_slack_run_for_envelope(
     return (await session.scalar(stmt)) is not None
 
 
+async def _has_inbound_event_for_envelope(
+    session,
+    connection: ExternalAgentConnectionRow | Mapping[str, Any],
+    envelope: Mapping[str, Any],
+) -> InboundEventRow | None:
+    if not callable(getattr(session, "scalar", None)):
+        return None
+    connection_id = (
+        str(connection.get("id") or "").strip()
+        if isinstance(connection, Mapping)
+        else str(getattr(connection, "id", "") or "").strip()
+    )
+    key = _envelope_idempotency_key(envelope)
+    if not connection_id or not key:
+        return None
+    return await session.scalar(
+        select(InboundEventRow)
+        .where(
+            InboundEventRow.connection_id == connection_id,
+            InboundEventRow.idempotency_key == key,
+        )
+        .limit(1)
+    )
+
+
 def _admitted_slack_run(inbound: Mapping[str, Any]) -> bool:
     if inbound.get("idempotent_replay"):
         return False
@@ -462,7 +711,9 @@ async def _set_processing_status(config: SlackConnectorConfig, envelope: Mapping
 async def _acknowledge_monitored_message(
     config: SlackConnectorConfig,
     envelope: Mapping[str, Any],
-) -> None:
+    *,
+    client: Any | None = None,
+) -> bool:
     """Add the 👀 reaction to an observed monitored-channel message.
 
     Best-effort: a missing ``reactions:write`` scope or an already-present
@@ -473,16 +724,22 @@ async def _acknowledge_monitored_message(
     channel_id = str(payload.get("channel_id") or "").strip()
     message_ts = str(payload.get("message_ts") or "").strip()
     if not channel_id or not message_ts:
-        return
+        return False
     try:
-        client = SlackWebClient(config.bot_token)
-        await client.add_reaction(channel=channel_id, timestamp=message_ts, name="eyes")
+        active_client = client or SlackWebClient(config.bot_token)
+        await active_client.add_reaction(
+            channel=channel_id,
+            timestamp=message_ts,
+            name="eyes",
+        )
+        return True
     except SlackApiError as exc:
         if exc.error == "already_reacted":
-            return
+            return True
         logger.info("slack_monitor_reaction_failed: %s", exc)
     except Exception as exc:
         logger.info("slack_monitor_reaction_failed: %s", exc)
+    return False
 
 
 async def open_socket_mode_url(config: SlackConnectorConfig) -> str:

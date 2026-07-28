@@ -255,6 +255,11 @@ async def test_scheduler_daemon_startup_syncs_catalog_before_snapshot(session):
     result = await async_scheduler_daemon_startup(session, now=now, timezone_name="UTC")
 
     assert result["ok"] is True
+    assert result["cold_start"] == {
+        "triggered": False,
+        "reason": "no_successful_run",
+        "threshold_seconds": 3600,
+    }
     assert result["catalog"] == {"upserted": 5, "retired": 0}
     assert result["snapshot"]["summary"]["jobs_total"] == 5
     assert result["snapshot"]["summary"]["jobs_enabled"] == 5

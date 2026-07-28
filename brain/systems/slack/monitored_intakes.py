@@ -457,6 +457,7 @@ MONITORED_INTAKE_POLICIES: tuple[MonitoredIntakePolicy, ...] = (
         render=_render_channel_message,
         routing=_channel_message_routing,
         obligation=_no_obligation,
+        allowed_ignored_subtypes=frozenset({"bot_message"}),
     ),
 )
 

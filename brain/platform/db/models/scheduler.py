@@ -29,12 +29,83 @@ __all__ = [
     "OWNER_MODE_CRON",
     "OWNER_MODE_MIRROR",
     "OWNER_MODE_SCHEDULER",
+    "SchedulerColdStartReconciliation",
     "SchedulerFailureGuardLatch",
     "SchedulerJob",
     "SchedulerRun",
     "SchedulerLease",
     "SchedulerRunStep",
 ]
+
+
+class SchedulerColdStartReconciliation(Base, CreatedAtMixin):
+    """Durable receipt for one scheduler-owned cold-start gap pass."""
+
+    __tablename__ = "scheduler_cold_start_reconciliations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'completed', 'degraded')",
+            name="ck_scheduler_cold_start_reconciliations_status",
+        ),
+        CheckConstraint(
+            "notice_state IN ('pending', 'posting', 'posted', 'failed')",
+            name="ck_scheduler_cold_start_reconciliations_notice_state",
+        ),
+        UniqueConstraint(
+            "gap_started_at",
+            name="uq_scheduler_cold_start_reconciliations_gap",
+        ),
+        UniqueConstraint(
+            "notice_marker",
+            name="uq_scheduler_cold_start_reconciliations_notice_marker",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    gap_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    reconciled_through: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'running'"),
+        default="running",
+    )
+    lane_results: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    notice_state: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'pending'"),
+        default="pending",
+    )
+    notice_marker: Mapped[str] = mapped_column(String(80), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    notice_posted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    notice_message_ts: Mapped[Optional[str]] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class SchedulerJob(Base, CreatedAtMixin):

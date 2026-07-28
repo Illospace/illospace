@@ -101,6 +101,7 @@ __all__ = [
     "async_finalize_cycle_run_from_run",
     "async_recover_stale_cycle_runs_once",
     "async_record_cycle_revision",
+    "async_catch_up_missed_cycle_slots",
     "async_remove_cycle_output_target",
     "async_run_cycle_now",
     "async_schedule_due_cycles_once",
@@ -592,6 +593,95 @@ async def _async_materialize_due_cycle_runs_once(
                 cycle.enabled = False
 
     return executable_run_ids
+
+
+async def async_catch_up_missed_cycle_slots(
+    session,
+    *,
+    gap_start: datetime,
+    now: datetime,
+    max_slots_per_cycle: int = 1000,
+) -> dict[str, object]:
+    """Advance overdue Cycle slots through one cold-start catch-up window.
+
+    The cold-start owner supplies the one authoritative gap. This Cycle-owned
+    operation enumerates the slots that belong to it and advances
+    ``next_run_at`` without materializing ``CycleRun`` rows, so the normal
+    scheduler cannot replay missed digests after the catch-up notice.
+    """
+
+    gap_start = _aware_utc(gap_start)
+    now = _aware_utc(now)
+    if gap_start is None or now is None:
+        raise ValueError("gap_start and now are required")
+    if gap_start > now:
+        raise ValueError("gap_start must not be after now")
+    # Cron schedules are minute-granular. A slot in the current minute is the
+    # normal slot cadence should resume with, not a missed digest to suppress.
+    catch_up_before = now.replace(second=0, microsecond=0)
+
+    cycles = (
+        await session.scalars(
+            select(Cycle)
+            .where(
+                Cycle.deleted_at.is_(None),
+                Cycle.enabled.is_(True),
+                Cycle.next_run_at.is_not(None),
+                Cycle.next_run_at < catch_up_before,
+            )
+            .order_by(Cycle.next_run_at.asc(), Cycle.id.asc())
+            .with_for_update()
+        )
+    ).all()
+    missed_slots: list[dict[str, object]] = []
+    advanced = 0
+    errors: list[str] = []
+    limit = max(1, int(max_slots_per_cycle))
+
+    for cycle in cycles:
+        scheduled_for = _aware_utc(cycle.next_run_at)
+        seen = 0
+        try:
+            while scheduled_for is not None and scheduled_for < catch_up_before:
+                if seen >= limit:
+                    raise RuntimeError(
+                        f"more than {limit} overdue slots; refusing an unbounded advance"
+                    )
+                if scheduled_for >= gap_start:
+                    missed_slots.append(
+                        {
+                            "cycle_id": cycle.id,
+                            "cycle_name": cycle.name,
+                            "scheduled_for": scheduled_for.isoformat(),
+                            "timezone": cycle.timezone,
+                        }
+                    )
+                seen += 1
+                next_run_at = compute_next_run_at(
+                    cycle.schedule_expr,
+                    cycle.timezone,
+                    from_dt=scheduled_for,
+                )
+                if next_run_at is not None and _aware_utc(next_run_at) <= scheduled_for:
+                    raise RuntimeError("schedule did not advance")
+                scheduled_for = _aware_utc(next_run_at)
+        except Exception as exc:  # noqa: BLE001 - isolate one malformed Cycle
+            errors.append(f"cycle:{cycle.id}:{exc}")
+            continue
+
+        cycle.next_run_at = scheduled_for
+        if is_one_time_schedule_expr(cycle.schedule_expr) and scheduled_for is None:
+            cycle.enabled = False
+        advanced += 1
+
+    await session.flush()
+    return {
+        "cycles_examined": len(cycles),
+        "cycles_advanced": advanced,
+        "missed_slots": missed_slots,
+        "missed_slot_count": len(missed_slots),
+        "errors": errors,
+    }
 
 
 async def async_wake_cycle_now(*, name: str, org_id: str | None = None) -> str:

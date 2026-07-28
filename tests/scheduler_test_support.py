@@ -8,7 +8,10 @@ from datetime import datetime, timezone
 
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
 
+from brain.platform.db.models.agent_run import AgentRunRow
+from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.scheduler import (
+    SchedulerColdStartReconciliation,
     SchedulerFailureGuardLatch,
     SchedulerJob,
     SchedulerLease,
@@ -22,6 +25,7 @@ def _patch_sqlite_for_pg_types() -> None:
         SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
     if not hasattr(SQLiteTypeCompiler, "visit_ARRAY"):
         SQLiteTypeCompiler.visit_ARRAY = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "TEXT"
 
     original = SQLiteDDLCompiler.get_column_default_string
     if getattr(original, "_scheduler_test_patch", False):
@@ -56,6 +60,10 @@ async def make_scheduler_test_session(async_sqlite_session_factory):
     _register_sqlite_adapters()
     return await async_sqlite_session_factory(
         [
+            AgentRunRow.__table__,
+            Cycle.__table__,
+            CycleRun.__table__,
+            SchedulerColdStartReconciliation.__table__,
             SchedulerJob.__table__,
             SchedulerFailureGuardLatch.__table__,
             SchedulerRun.__table__,

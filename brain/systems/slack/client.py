@@ -587,15 +587,22 @@ class SlackWebClient:
         *,
         channel: str,
         limit: int = 50,
+        oldest: str | None = None,
         latest: str | None = None,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "channel": channel,
             "limit": max(1, min(int(limit or 50), 200)),
         }
+        if oldest:
+            payload["oldest"] = oldest
+            payload["inclusive"] = True
         if latest:
             payload["latest"] = latest
             payload["inclusive"] = True
+        if cursor:
+            payload["cursor"] = cursor
         return await self._post("conversations.history", payload)
 
     async def conversations_list(

@@ -1,0 +1,608 @@
+"""Acceptance coverage for scheduler cold-start gap reconciliation."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+import importlib
+import re
+from unittest.mock import AsyncMock
+
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+import pytest
+import sqlalchemy as sa
+from sqlalchemy import func, select
+from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
+
+import brain.app.scheduler.cold_start as cold_start
+from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
+from brain.platform.db.models.cycle import Cycle, CycleRun
+from brain.platform.db.models.domain import Domain, DomainObjectType, DomainRecord
+from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
+from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundEventRow
+from brain.platform.db.models.open_ask import OpenAsk
+from brain.platform.db.models.org import Org, User
+from brain.platform.db.models.scheduler import SchedulerColdStartReconciliation
+from brain.systems.cycles.service import async_catch_up_missed_cycle_slots
+from brain.systems.inbound.service import submit_inbound_envelope
+from brain.systems.slack.client import SlackApiError
+from brain.systems.slack.connector import backfill_monitored_slack_history
+from brain.systems.slack.ingress import normalize_slack_socket_event
+
+
+ORG_ID = "11111111-1111-4111-8111-111111111111"
+USER_ID = "22222222-2222-4222-8222-222222222222"
+CONNECTION_ID = "33333333-3333-4333-8333-333333333333"
+
+
+def test_cold_start_receipt_migration_round_trips(monkeypatch):
+    migration = importlib.import_module(
+        "brain.platform.db.alembic.versions.0047_scheduler_cold_start_reconciliation"
+    )
+    engine = sa.create_engine("sqlite://")
+
+    with engine.begin() as connection:
+        operations = Operations(MigrationContext.configure(connection))
+        monkeypatch.setattr(migration, "op", operations)
+
+        migration.upgrade()
+        migration.upgrade()
+
+        columns = {
+            column["name"]
+            for column in sa.inspect(connection).get_columns(
+                "scheduler_cold_start_reconciliations"
+            )
+        }
+        assert columns == {
+            "id",
+            "gap_started_at",
+            "reconciled_through",
+            "status",
+            "lane_results",
+            "notice_state",
+            "notice_marker",
+            "claimed_at",
+            "completed_at",
+            "notice_posted_at",
+            "notice_message_ts",
+            "last_error",
+            "created_at",
+        }
+
+        migration.downgrade()
+        migration.downgrade()
+        assert (
+            "scheduler_cold_start_reconciliations"
+            not in sa.inspect(connection).get_table_names()
+        )
+
+
+def _patch_sqlite_for_models() -> None:
+    if not hasattr(SQLiteTypeCompiler, "visit_JSONB"):
+        SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_BIGINT = lambda self, type_, **kw: "INTEGER"
+
+    original = SQLiteDDLCompiler.get_column_default_string
+    if getattr(original, "_cold_start_patch", False):
+        return
+
+    def patched(self, column, **kw):
+        result = original(self, column, **kw)
+        if result:
+            result = re.sub(r"::jsonb", "", result)
+            result = result.replace("NOW()", "CURRENT_TIMESTAMP")
+            result = result.replace("TRUE", "1").replace("FALSE", "0")
+        return result
+
+    patched._cold_start_patch = True
+    SQLiteDDLCompiler.get_column_default_string = patched
+
+
+@pytest.fixture
+async def receipt_session(async_sqlite_session_factory):
+    _patch_sqlite_for_models()
+    return await async_sqlite_session_factory(
+        [SchedulerColdStartReconciliation.__table__]
+    )
+
+
+class _NoticeClient:
+    def __init__(self):
+        self.posts: list[dict] = []
+
+    async def conversations_list(self, **_kwargs):
+        return {
+            "channels": [{"id": "C_SOFTWARE", "name": "4_software"}],
+            "response_metadata": {"next_cursor": ""},
+        }
+
+    async def conversation_history(self, **_kwargs):
+        return {"messages": [], "response_metadata": {"next_cursor": ""}}
+
+    async def post_message(self, **kwargs):
+        self.posts.append(kwargs)
+        return {"ok": True, "ts": "1785261600.000001"}
+
+
+class _AmbiguousNoticeClient(_NoticeClient):
+    def __init__(self):
+        super().__init__()
+        self.messages: list[dict] = []
+        self.attempts = 0
+
+    async def conversation_history(self, **_kwargs):
+        return {
+            "messages": list(self.messages),
+            "response_metadata": {"next_cursor": ""},
+        }
+
+    async def post_message(self, **kwargs):
+        self.attempts += 1
+        self.messages.append(
+            {
+                "text": kwargs["text"],
+                "ts": "1785261600.000001",
+            }
+        )
+        raise TimeoutError("response lost after Slack accepted the message")
+
+
+@pytest.mark.asyncio
+async def test_long_gap_runs_once_posts_one_notice_and_second_pass_is_noop(
+    receipt_session,
+    monkeypatch,
+):
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    gap_start = now - timedelta(hours=2, minutes=5)
+    calls: list[str] = []
+    notice = _NoticeClient()
+
+    async def last_success(_session):
+        return gap_start
+
+    async def slack_lane(*_args, **_kwargs):
+        calls.append("slack")
+        return {
+            "ingested": 2,
+            "deduplicated": 1,
+            "acked": 2,
+            "errors": [],
+        }
+
+    async def cycle_lane(*_args, **_kwargs):
+        calls.append("cycles")
+        return {
+            "missed_slots": [
+                {
+                    "cycle_id": 7,
+                    "cycle_name": "Uwear digest",
+                    "scheduled_for": "2026-07-27T12:00:00+00:00",
+                    "timezone": "America/Toronto",
+                }
+            ],
+            "missed_slot_count": 1,
+            "errors": [],
+        }
+
+    async def tracker_lane(*_args, **_kwargs):
+        calls.append("tracker")
+        return {
+            "orgs": 1,
+            "summaries": {
+                ORG_ID: {
+                    "production_gate_reconciliation": {
+                        "updated": 1,
+                        "flagged": 1,
+                        "errors": [],
+                    }
+                }
+            },
+        }
+
+    monkeypatch.setattr(cold_start, "_last_successful_completion", last_success)
+    monkeypatch.setattr(cold_start, "backfill_monitored_slack_history", slack_lane)
+    monkeypatch.setattr(cold_start, "async_catch_up_missed_cycle_slots", cycle_lane)
+    monkeypatch.setattr(cold_start, "run_cold_start_tracker_maintenance", tracker_lane)
+
+    first = await cold_start.reconcile_cold_start_gap(
+        receipt_session,
+        now=now,
+        notice_client=notice,
+    )
+    second = await cold_start.reconcile_cold_start_gap(
+        receipt_session,
+        now=now + timedelta(minutes=1),
+        notice_client=notice,
+    )
+
+    assert first["status"] == "completed"
+    assert first["idempotent_replay"] is False
+    assert second["idempotent_replay"] is True
+    assert calls == ["slack", "cycles", "tracker"]
+    assert len(notice.posts) == 1
+    posted = notice.posts[0]
+    assert posted["channel"] == "C_SOFTWARE"
+    assert "2h 5m" in posted["text"]
+    assert "Uwear digest" in posted["text"]
+    assert "not replayed" in posted["text"]
+    assert len(posted["text"]) < 4000
+    assert (
+        await receipt_session.scalar(
+            select(func.count()).select_from(SchedulerColdStartReconciliation)
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_short_gap_keeps_startup_behavior_unchanged(
+    receipt_session,
+    monkeypatch,
+):
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    notice = _NoticeClient()
+    lane = AsyncMock(side_effect=AssertionError("cold-start lane must not run"))
+    monkeypatch.setattr(
+        cold_start,
+        "_last_successful_completion",
+        AsyncMock(return_value=now - timedelta(minutes=5)),
+    )
+    monkeypatch.setattr(cold_start, "backfill_monitored_slack_history", lane)
+    monkeypatch.setattr(cold_start, "async_catch_up_missed_cycle_slots", lane)
+    monkeypatch.setattr(cold_start, "run_cold_start_tracker_maintenance", lane)
+
+    result = await cold_start.reconcile_cold_start_gap(
+        receipt_session,
+        now=now,
+        notice_client=notice,
+    )
+
+    assert result["triggered"] is False
+    assert result["reason"] == "below_threshold"
+    assert lane.await_count == 0
+    assert notice.posts == []
+    assert (
+        await receipt_session.scalar(
+            select(func.count()).select_from(SchedulerColdStartReconciliation)
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_slack_lane_does_not_block_tracker_cycles_or_notice(
+    receipt_session,
+    monkeypatch,
+):
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    gap_start = now - timedelta(hours=3)
+    calls: list[str] = []
+    notice = _NoticeClient()
+
+    monkeypatch.setattr(
+        cold_start,
+        "_last_successful_completion",
+        AsyncMock(return_value=gap_start),
+    )
+
+    async def failed_slack(*_args, **_kwargs):
+        calls.append("slack")
+        raise RuntimeError("Slack history unavailable")
+
+    async def healthy_cycles(*_args, **_kwargs):
+        calls.append("cycles")
+        return {"missed_slots": [], "errors": []}
+
+    async def healthy_tracker(*_args, **_kwargs):
+        calls.append("tracker")
+        return {"orgs": 0, "summaries": {}}
+
+    monkeypatch.setattr(cold_start, "backfill_monitored_slack_history", failed_slack)
+    monkeypatch.setattr(cold_start, "async_catch_up_missed_cycle_slots", healthy_cycles)
+    monkeypatch.setattr(cold_start, "run_cold_start_tracker_maintenance", healthy_tracker)
+
+    result = await cold_start.reconcile_cold_start_gap(
+        receipt_session,
+        now=now,
+        notice_client=notice,
+    )
+
+    assert result["status"] == "degraded"
+    assert calls == ["slack", "cycles", "tracker"]
+    assert len(notice.posts) == 1
+    assert "Slack backfill: FAILED/DEGRADED" in notice.posts[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_notice_send_is_found_in_history_before_retry(
+    receipt_session,
+    monkeypatch,
+):
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    gap_start = now - timedelta(hours=2)
+    notice = _AmbiguousNoticeClient()
+    monkeypatch.setattr(
+        cold_start,
+        "_last_successful_completion",
+        AsyncMock(return_value=gap_start),
+    )
+    monkeypatch.setattr(
+        cold_start,
+        "backfill_monitored_slack_history",
+        AsyncMock(return_value={"errors": []}),
+    )
+    monkeypatch.setattr(
+        cold_start,
+        "async_catch_up_missed_cycle_slots",
+        AsyncMock(return_value={"missed_slots": [], "errors": []}),
+    )
+    monkeypatch.setattr(
+        cold_start,
+        "run_cold_start_tracker_maintenance",
+        AsyncMock(return_value={"orgs": 0, "summaries": {}}),
+    )
+
+    first = await cold_start.reconcile_cold_start_gap(
+        receipt_session,
+        now=now,
+        notice_client=notice,
+    )
+    second = await cold_start.reconcile_cold_start_gap(
+        receipt_session,
+        now=now + timedelta(minutes=1),
+        notice_client=notice,
+    )
+
+    assert first["notice"]["state"] == "posting"
+    assert second["notice"]["state"] == "posted"
+    assert notice.attempts == 1
+    assert len(notice.messages) == 1
+
+
+@pytest.fixture
+async def cycle_session(async_sqlite_session_factory):
+    _patch_sqlite_for_models()
+    return await async_sqlite_session_factory(
+        [Cycle.__table__, CycleRun.__table__]
+    )
+
+
+@pytest.mark.asyncio
+async def test_cycle_catch_up_names_four_slots_and_materializes_no_missed_digest(
+    cycle_session,
+):
+    cycle = Cycle(
+        user_id=USER_ID,
+        name="Uwear digest",
+        prompt="Publish the digest.",
+        schedule_expr="0 8,13,18 * * *",
+        timezone="America/Toronto",
+        next_run_at=datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc),
+        enabled=True,
+        retry_policy={},
+        degradation_state={},
+        exception_ping_state={},
+    )
+    cycle_session.add(cycle)
+    await cycle_session.flush()
+
+    result = await async_catch_up_missed_cycle_slots(
+        cycle_session,
+        gap_start=datetime(2026, 7, 25, 19, 44, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc),
+    )
+    replay = await async_catch_up_missed_cycle_slots(
+        cycle_session,
+        gap_start=datetime(2026, 7, 25, 19, 44, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["missed_slot_count"] == 4
+    assert [slot["scheduled_for"] for slot in result["missed_slots"]] == [
+        "2026-07-26T12:00:00+00:00",
+        "2026-07-26T17:00:00+00:00",
+        "2026-07-26T22:00:00+00:00",
+        "2026-07-27T12:00:00+00:00",
+    ]
+    assert cycle.next_run_at == datetime(2026, 7, 27, 17, 0, tzinfo=timezone.utc)
+    assert replay["missed_slot_count"] == 0
+    assert replay["cycles_advanced"] == 0
+    assert (
+        await cycle_session.scalar(select(func.count()).select_from(CycleRun))
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_cycle_catch_up_leaves_current_minute_for_normal_cadence(
+    cycle_session,
+):
+    current_slot = datetime(2026, 7, 27, 17, 0, tzinfo=timezone.utc)
+    cycle = Cycle(
+        user_id=USER_ID,
+        name="Current digest",
+        prompt="Publish the current digest.",
+        schedule_expr="0 8,13,18 * * *",
+        timezone="America/Toronto",
+        next_run_at=current_slot,
+        enabled=True,
+        retry_policy={},
+        degradation_state={},
+        exception_ping_state={},
+    )
+    cycle_session.add(cycle)
+    await cycle_session.flush()
+
+    result = await async_catch_up_missed_cycle_slots(
+        cycle_session,
+        gap_start=current_slot - timedelta(hours=2),
+        now=current_slot + timedelta(seconds=30),
+    )
+
+    assert result["missed_slot_count"] == 0
+    assert cycle.next_run_at == current_slot
+
+
+@pytest.fixture
+async def slack_session(async_sqlite_session_factory):
+    _patch_sqlite_for_models()
+    return await async_sqlite_session_factory(
+        [
+            Org.__table__,
+            User.__table__,
+            Domain.__table__,
+            DomainObjectType.__table__,
+            DomainRecord.__table__,
+            ExternalAgentConnectionRow.__table__,
+            AgentRunRow.__table__,
+            AgentRunEventRow.__table__,
+            OpenAsk.__table__,
+            InboundEventRow.__table__,
+            InboundDecisionReceiptRow.__table__,
+        ]
+    )
+
+
+async def _seed_slack_connection(session) -> ExternalAgentConnectionRow:
+    session.add(Org(id=ORG_ID, name="Test Org", slug="test-org"))
+    session.add(
+        User(
+            id=USER_ID,
+            org_id=ORG_ID,
+            name="Reda",
+            email="reda@example.com",
+        )
+    )
+    connection = ExternalAgentConnectionRow(
+        id=CONNECTION_ID,
+        org_id=ORG_ID,
+        owner_user_id=USER_ID,
+        display_name="Slack",
+        agent_kind="slack",
+        transport="slack_socket_mode",
+        status="online",
+        remote_agent_id="T789",
+        remote_agent_card={},
+        capabilities={"slack": {"socket_mode": True}},
+        auth_metadata={},
+        metadata_={
+            "slack": {
+                "team_id": "T789",
+                "bot_user_id": "BILLO",
+                "monitored_channels": ["C_ALERTS"],
+            }
+        },
+    )
+    session.add(connection)
+    await session.flush()
+    return connection
+
+
+def _history_mention() -> dict:
+    return {
+        "type": "message",
+        "user": "U123",
+        "text": "<@BILLO> please triage this",
+        "ts": "1785150300.000200",
+    }
+
+
+class _HistoryClient:
+    bot_token = "xoxb-test"
+
+    def __init__(self):
+        self.reactions: set[tuple[str, str, str]] = set()
+
+    async def conversation_history(self, **_kwargs):
+        return {
+            "messages": [
+                _history_mention(),
+                {
+                    "type": "message",
+                    "subtype": "bot_message",
+                    "bot_id": "B_ROLLBAR",
+                    "app_id": "A_ROLLBAR",
+                    "text": "Rollbar: PROD #2323 100th error: DeadlockDetected",
+                    "ts": "1785149400.000100",
+                },
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+
+    async def add_reaction(self, *, channel, timestamp, name):
+        key = (channel, timestamp, name)
+        if key in self.reactions:
+            raise SlackApiError("already_reacted")
+        self.reactions.add(key)
+        return {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_slack_history_backfill_ingests_alert_and_mention_with_partial_dedup(
+    slack_session,
+    monkeypatch,
+):
+    import brain.systems.slack.connector as connector
+
+    connection = await _seed_slack_connection(slack_session)
+    mention_envelope = normalize_slack_socket_event(
+        {
+            "payload": {
+                "team_id": "T789",
+                "event": {
+                    **_history_mention(),
+                    "channel": "C_ALERTS",
+                    "channel_type": "channel",
+                },
+            }
+        },
+        bot_user_id="BILLO",
+        monitored_channels={"C_ALERTS"},
+    )
+    assert mention_envelope is not None
+    await submit_inbound_envelope(
+        slack_session,
+        connection=connection,
+        envelope=mention_envelope,
+        ingress_context={"transport": "slack_socket_mode"},
+    )
+
+    monkeypatch.setattr(
+        connector,
+        "enrich_monitored_intake",
+        AsyncMock(return_value=None),
+    )
+    client = _HistoryClient()
+
+    async def client_factory(_connection):
+        return client
+
+    first = await backfill_monitored_slack_history(
+        slack_session,
+        gap_start=datetime(2026, 7, 27, 0, 0, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 28, 0, 0, tzinfo=timezone.utc),
+        client_factory=client_factory,
+    )
+    second = await backfill_monitored_slack_history(
+        slack_session,
+        gap_start=datetime(2026, 7, 27, 0, 0, tzinfo=timezone.utc),
+        now=datetime(2026, 7, 28, 0, 0, tzinfo=timezone.utc),
+        client_factory=client_factory,
+    )
+
+    assert first["ingested"] == 1
+    assert first["deduplicated"] == 1
+    assert first["acked"] == 2
+    assert second["ingested"] == 0
+    assert second["deduplicated"] == 2
+    assert len(client.reactions) == 2
+    assert (
+        await slack_session.scalar(select(func.count()).select_from(InboundEventRow))
+        == 2
+    )
+    assert (
+        await slack_session.scalar(select(func.count()).select_from(AgentRunRow))
+        == 2
+    )

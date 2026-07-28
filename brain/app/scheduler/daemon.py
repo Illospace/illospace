@@ -272,6 +272,18 @@ async def async_scheduler_daemon_startup(
         raise ValueError("now must be timezone-aware")
 
     owner_mode = normalize_owner_mode(owner_mode)
+    try:
+        from brain.app.scheduler.cold_start import reconcile_cold_start_gap
+
+        cold_start = await reconcile_cold_start_gap(session, now=now)
+    except Exception as exc:  # noqa: BLE001 - startup reconciliation is fail-open
+        logger.exception("Scheduler cold-start reconciliation failed safely")
+        await session.rollback()
+        cold_start = {
+            "triggered": False,
+            "reason": "reconciliation_failed",
+            "error": str(exc),
+        }
     catalog = await async_sync_scheduler_catalog(
         session,
         owner_mode=owner_mode,
@@ -295,6 +307,7 @@ async def async_scheduler_daemon_startup(
     return {
         "ok": True,
         "owner_mode": owner_mode,
+        "cold_start": cold_start,
         "catalog": catalog,
         "snapshot": snapshot,
     }

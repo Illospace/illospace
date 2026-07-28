@@ -773,6 +773,64 @@ async def test_runtime_sweep_resolves_and_posts_to_software_channel(session, mon
 
 
 @pytest.mark.asyncio
+async def test_cold_start_sweep_updates_staging_closure_without_side_notice(session):
+    domain = await _tracker(session)
+    record = await _tracked_issue(
+        session,
+        domain,
+        number=1281,
+        title="PostgreSQL deadlock",
+    )
+    pr = FixingPullRequest(
+        repo=REPO,
+        number=1305,
+        base_ref_name="staging",
+        merge_commit_sha="a" * 40,
+        merged_at=CLOSED_AT,
+    )
+    key = (REPO, 1281, 1305)
+    slack = _Slack()
+
+    summary = await run_staging_only_closure_sweep(
+        session,
+        org_id=ORG_ID,
+        github=_Github(
+            IssueClosure(
+                repo=REPO,
+                number=1281,
+                title=record.title,
+                state="closed",
+                closed_at=CLOSED_AT,
+                closed_by="uwear-claw",
+                fixing_pull_requests=(pr,),
+            ),
+            _deploy_batch(
+                key,
+                repo=REPO,
+                sha=pr.merge_commit_sha,
+                state=DeployState.STAGING,
+                in_staging=True,
+                in_main=False,
+                main_status="diverged",
+            ),
+        ),
+        slack=slack,
+        notify=False,
+        now=CLOSED_AT,
+    )
+
+    await session.refresh(record)
+    assert summary["updated"] == 1
+    assert summary["flagged"] == 1
+    assert summary["messages_posted"] == 0
+    assert record.data["status"] == "In Review"
+    assert record.data[PRODUCTION_GATE_FIELD] == PRODUCTION_GATE_PENDING
+    assert record.data["fix_merge_sha"] == pr.merge_commit_sha
+    assert "deploy_state" not in record.data
+    assert slack.posts == []
+
+
+@pytest.mark.asyncio
 async def test_recent_stored_alert_occurrence_raises_finding_severity(session):
     domain = await _tracker(session)
     record = await _tracked_issue(
