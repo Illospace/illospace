@@ -343,7 +343,16 @@ def checkpoint_message(checkpoint: CompactionCheckpoint, *, omitted_count: int) 
     }
 
 
-def compact_session_messages_with_checkpoint(
+@dataclass(frozen=True)
+class CompactionPlan:
+    """Canonical prompt and token estimate produced by checkpoint compaction."""
+
+    messages: list[dict]
+    report: CompactionReport
+    estimated_tokens: int
+
+
+def plan_session_compaction(
     messages: list[dict],
     *,
     token_limit: int,
@@ -358,25 +367,29 @@ def compact_session_messages_with_checkpoint(
     force: bool = False,
     emergency: bool = False,
     semantic_compactor: SemanticCompactor | None = None,
-) -> tuple[list[dict], CompactionReport]:
-    """Compact a transcript using a structured state checkpoint."""
+) -> CompactionPlan:
+    """Build the canonical checkpointed prompt used by admission and execution."""
     original_tokens = estimate_session_tokens(messages, system=system, tools=tools)
     if not force and (token_limit <= 0 or original_tokens <= token_limit):
-        return list(messages), CompactionReport(
-            original_count=len(messages),
-            kept_count=len(messages),
-            omitted_count=0,
-            summary="No compaction required.",
-            strategy="semantic_checkpoint",
-            provenance={
-                "session_id": session_id,
-                "phase": phase,
-                "token_limit": token_limit,
-                "target_tokens": target_tokens,
-                "original_estimated_tokens": original_tokens,
-                "final_estimated_tokens": original_tokens,
-                "summary_source": "none",
-            },
+        return CompactionPlan(
+            messages=list(messages),
+            estimated_tokens=original_tokens,
+            report=CompactionReport(
+                original_count=len(messages),
+                kept_count=len(messages),
+                omitted_count=0,
+                summary="No compaction required.",
+                strategy="semantic_checkpoint",
+                provenance={
+                    "session_id": session_id,
+                    "phase": phase,
+                    "token_limit": token_limit,
+                    "target_tokens": target_tokens,
+                    "original_estimated_tokens": original_tokens,
+                    "final_estimated_tokens": original_tokens,
+                    "summary_source": "none",
+                },
+            ),
         )
 
     target = int(target_tokens or max(1, token_limit * 7 // 10))
@@ -443,32 +456,40 @@ def compact_session_messages_with_checkpoint(
             break
 
     if best_report is None:
-        return list(messages), CompactionReport(
-            original_count=len(messages),
-            kept_count=len(messages),
-            omitted_count=0,
-            summary="No safe transcript messages were eligible for checkpoint compaction.",
-            strategy="emergency_checkpoint_unavailable" if emergency else "checkpoint_unavailable",
-            provenance={
-                "session_id": session_id,
-                "phase": phase,
-                "token_limit": token_limit,
-                "target_tokens": target,
-                "original_estimated_tokens": original_tokens,
-                "final_estimated_tokens": original_tokens,
-                "force": force,
-                "emergency": emergency,
-            },
+        return CompactionPlan(
+            messages=list(messages),
+            estimated_tokens=original_tokens,
+            report=CompactionReport(
+                original_count=len(messages),
+                kept_count=len(messages),
+                omitted_count=0,
+                summary="No safe transcript messages were eligible for checkpoint compaction.",
+                strategy="emergency_checkpoint_unavailable" if emergency else "checkpoint_unavailable",
+                provenance={
+                    "session_id": session_id,
+                    "phase": phase,
+                    "token_limit": token_limit,
+                    "target_tokens": target,
+                    "original_estimated_tokens": original_tokens,
+                    "final_estimated_tokens": original_tokens,
+                    "force": force,
+                    "emergency": emergency,
+                },
+            ),
         )
 
-    return best_messages, CompactionReport(
-        original_count=best_report.original_count,
-        kept_count=best_report.kept_count,
-        omitted_count=best_report.omitted_count,
-        summary=best_report.summary,
-        strategy=best_report.strategy,
-        provenance={
-            **dict(best_report.provenance or {}),
-            "final_estimated_tokens": best_tokens,
-        },
+    return CompactionPlan(
+        messages=best_messages,
+        estimated_tokens=best_tokens,
+        report=CompactionReport(
+            original_count=best_report.original_count,
+            kept_count=best_report.kept_count,
+            omitted_count=best_report.omitted_count,
+            summary=best_report.summary,
+            strategy=best_report.strategy,
+            provenance={
+                **dict(best_report.provenance or {}),
+                "final_estimated_tokens": best_tokens,
+            },
+        ),
     )

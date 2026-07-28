@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.systems.runs.context import RunContextLoader
 from brain.systems.runs.domain import AgentRun, AgentRunRequest
 from brain.systems.runs.events import activity_event, run_event, text_delta_event
+from brain.systems.runs.execution_failure import RunExecutionFailure
 from brain.systems.runs.failures import (
     RunFailureCategory,
     coerce_failure_category,
@@ -276,12 +277,7 @@ class AsyncAgentRunEngine:
             if inspect.isawaitable(result):
                 result = await result
         except Exception as exc:
-            return await self.fail(
-                run.id,
-                str(exc),
-                failure_category=failure_category_for_error(exc),
-                execution_claim=execution_claim,
-            )
+            raise RunExecutionFailure.capture(run.id, exc) from exc
         for artifact in result.artifacts:
             await self.store.append_artifact(artifact)
         if await cancel_event_is_set(cancel_event):

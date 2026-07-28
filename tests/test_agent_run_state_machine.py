@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -932,6 +932,249 @@ async def test_runner_setup_failure_never_persists_diagnostic_as_public_output(
     assert [artifact.text for artifact in artifacts] == [UPSTREAM_FAILED_RUN_MESSAGE]
     assert [event.payload for event in text_events] == [{"text": UPSTREAM_FAILED_RUN_MESSAGE}]
     assert all(raw_diagnostic not in str(value) for value in (artifacts, text_events))
+
+
+async def test_engine_preserves_original_flush_exception_for_uow_owner(
+    session_factory,
+):
+    from brain.systems.runs.execution_failure import RunExecutionFailure
+
+    session = session_factory()
+    armed = {"value": False}
+    raised = {"value": False}
+
+    def fail_first_armed_flush(_session, _flush_context, _instances):
+        if armed["value"] and not raised["value"]:
+            raised["value"] = True
+            raise RuntimeError("original flush exploded")
+
+    event.listen(session.sync_session, "before_flush", fail_first_armed_flush)
+
+    class FlushFailureRecipe:
+        async def execute(self, runtime: RunRuntime) -> RunRecipeResult:
+            armed["value"] = True
+            await runtime.activity("Trigger the failing flush")
+            raise AssertionError("the injected flush must fail")
+
+    try:
+        with pytest.raises(RunExecutionFailure) as captured:
+            await AsyncAgentRunEngine(
+                session,
+                recipes={"fast": FlushFailureRecipe()},
+            ).run(_run_request(thread_id="thread-1", message="flush failure"))
+    finally:
+        event.remove(session.sync_session, "before_flush", fail_first_armed_flush)
+
+    failure = captured.value
+
+    assert isinstance(failure.original, RuntimeError)
+    assert str(failure.original) == "original flush exploded"
+    assert str(failure) == (
+        "run_execution_failed: RuntimeError: original flush exploded"
+    )
+    assert "PendingRollbackError" not in str(failure)
+
+
+def test_run_execution_failure_survives_a_cleanup_exception():
+    from brain.systems.runs.execution_failure import RunExecutionFailure
+
+    primary = RunExecutionFailure(42, RuntimeError("primary exploded"))
+    try:
+        raise primary
+    except RunExecutionFailure:
+        try:
+            raise RuntimeError("cleanup exploded")
+        except RuntimeError as cleanup:
+            captured = RunExecutionFailure.capture(42, cleanup)
+
+    assert captured is primary
+
+
+async def test_runner_commit_failure_rolls_back_then_settles_in_fresh_uow(
+    monkeypatch,
+    session_factory,
+):
+    from contextlib import asynccontextmanager
+
+    from brain.systems.runs.cortex import runner
+
+    setup_session = session_factory()
+    store = AsyncAgentRunStore(setup_session)
+    run = await store.create_run(
+        _run_request(thread_id="thread-commit-failure", message="commit failure")
+    )
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+    await setup_session.commit()
+    await setup_session.close()
+
+    opened_uows = 0
+
+    class CommitAwareUoW:
+        def __init__(self):
+            nonlocal opened_uows
+            self.index = opened_uows
+            opened_uows += 1
+            self.session = session_factory()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, _exc, _tb):
+            try:
+                if exc_type is not None:
+                    await self.session.rollback()
+                elif self.index == 0:
+                    await self.session.rollback()
+                    raise RuntimeError("commit exploded")
+                else:
+                    await self.session.commit()
+            finally:
+                await self.session.close()
+
+    class CompletingEngine:
+        def __init__(self, session):
+            self.session = session
+
+        async def run_existing(self, run_id):
+            row = await self.session.get(AgentRunRow, int(run_id))
+            assert row is not None
+            row.status = RunStatus.COMPLETED.value
+            return SimpleNamespace(status=RunStatus.COMPLETED)
+
+    @asynccontextmanager
+    async def heartbeat(_run_id):
+        yield
+
+    async def materialize(_run_id):
+        return True, None
+
+    async def no_settlement(_session, _run_id):
+        return None
+
+    async def no_cycle_finalization(*_args, **_kwargs):
+        return None
+
+    async def no_contract_gate(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(runner, "_unit_of_work_factory", lambda: CommitAwareUoW)
+    monkeypatch.setattr(runner, "_engine_for_session", lambda session: CompletingEngine(session))
+    monkeypatch.setattr(runner, "_run_heartbeat_async", heartbeat)
+    monkeypatch.setattr(runner, "_async_materialize_project_context", materialize)
+    monkeypatch.setattr(runner, "_settle_terminal_root_run_async", no_settlement)
+    monkeypatch.setattr(runner, "_finalize_cycle_run_if_needed_async", no_cycle_finalization)
+    monkeypatch.setattr(
+        "brain.systems.cycles.contract_gate.async_prepare_cycle_run_visible_finalization",
+        no_contract_gate,
+    )
+
+    processed = await runner._process_claimed_run_async(run.id)
+
+    inspection_session = session_factory()
+    row = await inspection_session.get(AgentRunRow, run.id)
+    failed_event = (
+        await inspection_session.scalars(
+            select(AgentRunEventRow).where(
+                AgentRunEventRow.run_id == run.id,
+                AgentRunEventRow.event_type == "run.failed",
+            )
+        )
+    ).one()
+    await inspection_session.close()
+
+    assert processed is False
+    assert opened_uows == 2
+    assert row is not None
+    assert row.status == RunStatus.FAILED.value
+    assert failed_event.payload["error"] == (
+        "run_execution_failed: RuntimeError: commit exploded"
+    )
+
+
+async def test_oversized_system_admission_error_reaches_run_failed_event(
+    monkeypatch,
+    caplog,
+    session_factory,
+):
+    from brain.systems.runs import direct_agent
+
+    class FakeProvider:
+        def __init__(self):
+            self.requests = []
+
+        def is_api_error(self, exc):
+            return False
+
+        def is_retryable_error(self, exc):
+            return False
+
+        def create(self, request):
+            self.requests.append(request)
+            raise AssertionError("admission failure must happen before provider sampling")
+
+    provider = FakeProvider()
+    monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", "4096")
+    monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "500")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_OUTPUT_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_REASONING_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_TOOL_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_SAFETY_MARGIN_TOKENS", "0")
+    monkeypatch.setattr(direct_agent, "get_provider", lambda _provider_name, _client: provider)
+    resolved_llm = SimpleNamespace(
+        provider="openai",
+        client=object(),
+        source="test",
+        auth_mode="api_key",
+        is_oauth=False,
+        token_prefix="test-token",
+        build_request_headers=lambda **_kwargs: {},
+    )
+
+    class OversizedSystemRecipe:
+        async def execute(self, _runtime: RunRuntime) -> RunRecipeResult:
+            agent_result = await direct_agent.run_agent_async(
+                "start",
+                system_prompt="oversized " + ("x" * 4000),
+                session_id="oversized-event",
+                model="openai/gpt-5.5",
+                thinking="low",
+                tools=[{"name": "read_file"}, {"name": "search_files"}],
+                tool_handlers={},
+                max_turns=20,
+                persist_session=False,
+                cache_system_prompt=False,
+                resolved_llm=resolved_llm,
+            )
+            return RunRecipeResult(
+                error=agent_result.error,
+                status=RunStatus.FAILED,
+            )
+
+    session = session_factory()
+    with caplog.at_level("ERROR", logger="agent"):
+        result = await AsyncAgentRunEngine(
+            session,
+            recipes={"fast": OversizedSystemRecipe()},
+        ).run(_run_request(thread_id="thread-1", message="oversized system"))
+
+    failed_event = (
+        await session.scalars(
+            select(AgentRunEventRow).where(
+                AgentRunEventRow.run_id == result.id,
+                AgentRunEventRow.event_type == "run.failed",
+            )
+        )
+    ).one()
+    error = failed_event.payload["error"]
+
+    assert result.status == RunStatus.FAILED
+    assert error.startswith("context_floor_exceeds_budget:")
+    assert "floor=" in error
+    assert "ceiling=500" in error
+    assert "tools=2" in error
+    assert error in caplog.text
+    assert provider.requests == []
 
 
 async def test_interactive_slack_transport_failure_never_persists_raw_error_as_final_answer(
