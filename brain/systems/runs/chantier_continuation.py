@@ -18,12 +18,12 @@ from brain.platform.db.models.agent_run import (
 )
 from brain.systems.runs.domain import ArtifactType
 from brain.systems.runs.evidence_health import (
-    evidence_health_for_completed_fanout,
-    record_parent_evidence_failures,
+    WorkerEvidenceReceipt,
+    record_terminal_worker_evidence,
+    worker_evidence_receipt_for_run,
 )
 from brain.systems.runs.events import run_event
-from brain.systems.runs.failures import safe_terminal_run_message
-from brain.systems.runs.status import TERMINAL_RUN_STATUSES, RunStatus, coerce_run_status
+from brain.systems.runs.status import TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.work_intake import (
     AGENT_RUN_CONTINUATION_TARGET,
@@ -106,7 +106,8 @@ async def queue_chantier_continuation_for_terminal_run(
         )
 
     child_results = await _child_results(session, workers)
-    evidence_health = _anchor_evidence_health(anchor)
+    evidence_receipt = worker_evidence_receipt_for_run(anchor)
+    evidence_health = evidence_receipt.to_payload()
     idempotency_key = f"chantier:continuation:{anchor.id}"
     target = _continuation_target(scope.source_run, scope=scope, fanout_run_id=anchor.id)
     admission = await admit_work(
@@ -127,7 +128,7 @@ async def queue_chantier_continuation_for_terminal_run(
                     scope=scope,
                     fanout_run_id=anchor.id,
                     child_results=child_results,
-                    evidence_health=evidence_health,
+                    evidence_receipt=evidence_receipt,
                 ),
                 "workspace_ref": dict(scope.source_run.workspace_ref or {}),
                 "metadata": _continuation_metadata(
@@ -182,7 +183,8 @@ async def _queue_generic_continuation(
         return await _existing_generic_continuation_run_id(session, anchor.id)
 
     child_results = await _child_results(session, workers)
-    evidence_health = _anchor_evidence_health(anchor)
+    evidence_receipt = worker_evidence_receipt_for_run(anchor)
+    evidence_health = evidence_receipt.to_payload()
     idempotency_key = f"worker:continuation:{anchor.id}"
     admission = await admit_work(
         session,
@@ -201,7 +203,7 @@ async def _queue_generic_continuation(
                 "message": _generic_continuation_message(
                     anchor=anchor,
                     child_results=child_results,
-                    evidence_health=evidence_health,
+                    evidence_receipt=evidence_receipt,
                 ),
                 "workspace_ref": dict(anchor.workspace_ref or {}),
                 "model_policy": dict(anchor.model_policy or {}),
@@ -296,74 +298,6 @@ def _wants_generic_continuation(workers: list[AgentRunRow]) -> bool:
     )
 
 
-def _anchor_evidence_health(anchor: AgentRunRow) -> dict[str, Any]:
-    metadata = anchor.metadata_ if isinstance(anchor.metadata_, dict) else {}
-    health = metadata.get("evidence_health")
-    return dict(health) if isinstance(health, dict) else {}
-
-
-def _worker_shard(worker: AgentRunRow) -> str:
-    metadata = worker.metadata_ if isinstance(worker.metadata_, dict) else {}
-    assignment = (
-        metadata.get("worker_assignment")
-        if isinstance(metadata.get("worker_assignment"), dict)
-        else {}
-    )
-    assignment_metadata = (
-        assignment.get("metadata")
-        if isinstance(assignment.get("metadata"), dict)
-        else {}
-    )
-    for source in (metadata, assignment_metadata, assignment):
-        for key in (
-            "worker_shard",
-            "shard",
-            "repo",
-            "source",
-            "resource_id",
-        ):
-            value = str(source.get(key) or "").strip()
-            if value:
-                return value
-    allowed_resources = assignment.get("allowed_resources")
-    if isinstance(allowed_resources, list) and len(allowed_resources) == 1:
-        value = str(allowed_resources[0] or "").strip()
-        if value:
-            return value
-    return (
-        str(assignment.get("id") or metadata.get("parent_node_id") or "").strip()
-        or str(metadata.get("worker_role") or f"worker-{worker.id}").strip()
-    )
-
-
-def _terminal_worker_failure(worker: AgentRunRow) -> dict[str, Any] | None:
-    status = coerce_run_status(worker.status)
-    if status == RunStatus.COMPLETED or status not in TERMINAL_RUN_STATUSES:
-        return None
-    metadata = worker.metadata_ if isinstance(worker.metadata_, dict) else {}
-    failure_metadata = (
-        metadata.get("failure")
-        if isinstance(metadata.get("failure"), dict)
-        else {}
-    )
-    category = str(failure_metadata.get("category") or "").strip() or None
-    shard = _worker_shard(worker)
-    failure: dict[str, Any] = {
-        "kind": "worker_tool_failure",
-        "tool": "spawn_worker",
-        "child_run_id": int(worker.id),
-        "worker_run_id": int(worker.id),
-        "worker_role": str(metadata.get("worker_role") or "worker"),
-        "shard": shard,
-        "stage": "worker_execution",
-        "status": status.value,
-        "error": safe_terminal_run_message(status, category),
-    }
-    if category:
-        failure["failure_category"] = category
-    return failure
-
-
 async def _record_fanout_evidence_health(
     session: AsyncSession,
     *,
@@ -372,35 +306,12 @@ async def _record_fanout_evidence_health(
     anchor_terminal: bool,
     all_workers_terminal: bool,
 ) -> None:
-    existing_health = _anchor_evidence_health(anchor)
-    already_recorded_worker_ids = {
-        int(item.get("worker_run_id") or item.get("child_run_id"))
-        for item in existing_health.get("failures") or []
-        if isinstance(item, dict)
-        and str(item.get("worker_run_id") or item.get("child_run_id") or "").isdigit()
-    }
-    failures = [
-        failure
-        for worker in workers
-        if int(worker.id) not in already_recorded_worker_ids
-        and (failure := _terminal_worker_failure(worker)) is not None
-    ]
-    if failures:
-        await record_parent_evidence_failures(
-            session,
-            parent=anchor,
-            failures=failures,
-        )
-        return
-    if not anchor_terminal or not all_workers_terminal:
-        return
-    metadata = anchor.metadata_ if isinstance(anchor.metadata_, dict) else {}
-    next_metadata = dict(metadata)
-    next_metadata["evidence_health"] = evidence_health_for_completed_fanout(
-        metadata.get("evidence_health"),
-        worker_shards=[_worker_shard(worker) for worker in workers],
+    await record_terminal_worker_evidence(
+        session,
+        parent_run_id=int(anchor.id),
+        workers=workers,
+        fanout_complete=anchor_terminal and all_workers_terminal,
     )
-    anchor.metadata_ = next_metadata
 
 
 async def _resolve_chantier_scope(
@@ -639,7 +550,7 @@ def _continuation_message(
     scope: ChantierScope,
     fanout_run_id: int,
     child_results: list[dict[str, Any]],
-    evidence_health: dict[str, Any],
+    evidence_receipt: WorkerEvidenceReceipt,
 ) -> str:
     lines = [
         "Automated chantier continuation: the worker fan-out has reached its terminal barrier.",
@@ -649,7 +560,7 @@ def _continuation_message(
         f"Anchor thread: {scope.source_run.thread_id}",
         f"Completed fan-out run: {fanout_run_id}",
         "",
-        *_evidence_health_message_lines(evidence_health),
+        *_evidence_health_message_lines(evidence_receipt),
         "Consume every durable worker result below. Fold the evidence into the chantier record "
         "and continue the loop: decide the next step, ask any genuinely blocking questions on "
         "the anchor surface, and delegate distinct follow-up work when warranted. Do not wait "
@@ -670,7 +581,7 @@ def _generic_continuation_message(
     *,
     anchor: AgentRunRow,
     child_results: list[dict[str, Any]],
-    evidence_health: dict[str, Any],
+    evidence_receipt: WorkerEvidenceReceipt,
 ) -> str:
     lines = [
         "Automated worker continuation: the worker fan-out has reached its terminal barrier.",
@@ -679,7 +590,7 @@ def _generic_continuation_message(
         f"Anchor thread: {anchor.thread_id}",
         f"Completed fan-out run: {anchor.id}",
         "",
-        *_evidence_health_message_lines(evidence_health),
+        *_evidence_health_message_lines(evidence_receipt),
         "Consume every durable worker result below. Synthesize their evidence, continue the "
         "parent thread's work, and decide the next step. Ask genuinely blocking questions on "
         "the parent surface when needed. Do not wait for a human nudge merely because the "
@@ -697,16 +608,11 @@ def _generic_continuation_message(
 
 
 def _evidence_health_message_lines(
-    evidence_health: Mapping[str, Any],
+    evidence_receipt: WorkerEvidenceReceipt,
 ) -> list[str]:
-    if evidence_health.get("status") != "degraded":
+    if not evidence_receipt.degraded:
         return ["Evidence health: ok; every spawned worker shard completed.", ""]
-    missing_shards = [
-        str(shard).strip()
-        for shard in evidence_health.get("missing_shards") or []
-        if str(shard).strip()
-    ]
-    named = ", ".join(missing_shards) or "unknown worker shard"
+    named = ", ".join(evidence_receipt.missing_shards) or "unknown worker shard"
     return [
         f"Evidence health: degraded; missing worker shard(s): {named}.",
         "Do not report a normal sweep or infer absence from those missing shards.",

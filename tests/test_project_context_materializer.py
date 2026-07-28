@@ -1485,8 +1485,12 @@ async def test_spawned_reader_materialization_issue_degrades_parent_cycle_eviden
         context_snapshot={"evidence_health": {"status": "pending", "expected_checks": ["github"]}},
     )
 
+    lock_order = []
+
     class FakeSession:
         async def get(self, _model, object_id, **_kwargs):
+            if _kwargs.get("with_for_update"):
+                lock_order.append((_model.__name__, object_id))
             return {49: child, 42: parent, 12: cycle_run}.get(object_id)
 
     class FakeUow:
@@ -1547,10 +1551,11 @@ async def test_spawned_reader_materialization_issue_degrades_parent_cycle_eviden
         "child_run_id": 49,
         "worker_run_id": 49,
         "worker_role": "repo_reader",
-        "repo": "example-org/missing-repo",
+        "shard": "example-org/missing-repo",
         "stage": "project_context_materialization",
         "error": error,
     }
+    assert lock_order == [("AgentRunRow", 42), ("CycleRun", 12)]
     assert [(event.run_id, event.event_type, event.payload) for event in events] == [
         (42, "run.worker_failed", failure)
     ]

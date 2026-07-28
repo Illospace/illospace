@@ -43,7 +43,6 @@ from brain.platform.async_io import run_blocking
 from brain.platform.integrations.providers import get_provider
 from brain.platform.integrations.providers import ContentBlockType, LLMRequest, MessageRole, StopReason
 from brain.platform.integrations.provider_error_sentinel import (
-    provider_error_kind,
     safe_provider_error_sentinel,
 )
 from brain.platform.providers.model_policy import (
@@ -90,6 +89,7 @@ from brain.systems.runs.direct_loop.context_recovery import (
 )
 from brain.systems.runs.direct_loop.retry import (
     async_api_call_with_retry as _runtime_async_api_call_with_retry,
+    response_text_retry_decision,
 )
 from brain.systems.runs.direct_loop.model_fallback import (
     fallback_model_for,
@@ -122,11 +122,7 @@ from brain.systems.runs.routing_metadata import (
     effective_routing_snapshot,
     routing_metadata_with_effective,
 )
-from brain.systems.runs.tool_catalog.metadata import is_write_side_effect_class
-from brain.systems.runs.tool_catalog.registry import (
-    get_tool_registration,
-    parallel_safe_tool_names,
-)
+from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
 from brain.systems import sessions as _session_store
 from brain.systems.context.window_policy import (
@@ -1176,35 +1172,6 @@ _API_RETRY_DELAYS = (2, 5, 10)
 _PROVIDER_ERROR_TEXT_RETRY_DELAYS = (1,)
 
 
-def _spawn_worker_provider_text_retry_allowed(
-    metadata: dict[str, Any],
-    *,
-    tool_call_source: str,
-    tool_calls_made: list[str],
-) -> bool:
-    """Retry only spawned workers whose completed tool calls are read-only."""
-
-    provenance = metadata.get("execution_provenance")
-    if not isinstance(provenance, dict):
-        provenance = {}
-    is_spawned_worker = (
-        tool_call_source == "worker"
-        and (
-            provenance.get("spawned_by_tool") is True
-            or str(provenance.get("origin") or "") == "spawn_worker"
-        )
-    )
-    if not is_spawned_worker:
-        return False
-    for tool_name in tool_calls_made:
-        registration = get_tool_registration(tool_name)
-        if registration is None or is_write_side_effect_class(
-            registration.side_effect_class
-        ):
-            return False
-    return True
-
-
 async def _api_call_with_retry_async(
     provider, request: LLMRequest, llm, cancel_event, on_stream_activity, on_stream_delta,
     session_id: str, turn: int, tokens: _TokenAccumulator,
@@ -1683,13 +1650,12 @@ async def run_agent_async(
             overflow_retry_used = False
             provider_error_text_attempt = 0
             detected_provider_error = None
-            retry_provider_error_text = (
-                scheduled_result_contract
-                or _spawn_worker_provider_text_retry_allowed(
-                    metadata,
-                    tool_call_source=tool_call_source,
-                    tool_calls_made=state.tool_calls_made,
-                )
+            response_text_policy = response_text_retry_decision(
+                "",
+                scheduled_result_contract=scheduled_result_contract,
+                metadata=metadata,
+                tool_call_source=tool_call_source,
+                tool_calls_made=state.tool_calls_made,
             )
             while True:
                 try:
@@ -1699,7 +1665,7 @@ async def run_agent_async(
                     visible_stream_delta = on_stream_delta
                     if scheduled_result_contract:
                         visible_stream_delta = None
-                    elif retry_provider_error_text and on_stream_delta:
+                    elif response_text_policy.withhold_stream and on_stream_delta:
                         visible_stream_delta = attempt_deltas.append
                     response = await _api_call_with_retry_async(
                         state.provider, request, llm, cancel_event, on_stream_activity, visible_stream_delta,
@@ -1708,10 +1674,15 @@ async def run_agent_async(
                     response_text = _extract_text(
                         [{"role": "assistant", "content": _content_to_dicts(response.content)}]
                     ).strip()
+                    response_text_decision = response_text_retry_decision(
+                        response_text,
+                        scheduled_result_contract=scheduled_result_contract,
+                        metadata=metadata,
+                        tool_call_source=tool_call_source,
+                        tool_calls_made=state.tool_calls_made,
+                    )
                     detected_provider_error = (
-                        provider_error_kind(response_text)
-                        if retry_provider_error_text
-                        else None
+                        response_text_decision.provider_error_kind
                     )
                     if detected_provider_error:
                         logger.error(
@@ -1724,7 +1695,11 @@ async def run_agent_async(
                             len(_PROVIDER_ERROR_TEXT_RETRY_DELAYS) + 1,
                             response_text,
                         )
-                        if provider_error_text_attempt < len(_PROVIDER_ERROR_TEXT_RETRY_DELAYS):
+                        if (
+                            response_text_decision.should_retry
+                            and provider_error_text_attempt
+                            < len(_PROVIDER_ERROR_TEXT_RETRY_DELAYS)
+                        ):
                             delay = _PROVIDER_ERROR_TEXT_RETRY_DELAYS[provider_error_text_attempt]
                             provider_error_text_attempt += 1
                             if on_stream_activity:

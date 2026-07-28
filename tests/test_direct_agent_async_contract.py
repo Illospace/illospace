@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 
 class _FakeLLM:
     provider = "anthropic"
@@ -40,6 +42,77 @@ def test_provider_error_classifier_recognizes_transient_aliases_and_contextual_5
     assert provider_error_kind("service_unavailable_error") == "server_error"
     assert provider_error_kind("provider HTTP 503 unavailable") == "server_error"
     assert provider_error_kind("Reader counted 500 matching files.") is None
+    assert (
+        provider_error_kind("", provider_exception="server_is_overloaded")
+        == "overloaded_error"
+    )
+    assert (
+        provider_error_kind("", provider_exception="provider HTTP 503 unavailable")
+        == "server_error"
+    )
+
+
+@pytest.mark.parametrize("spawned", [False, True], ids=["non_spawned", "spawned"])
+@pytest.mark.parametrize(
+    ("tools", "history_safety"),
+    [
+        (["read_file"], "read_only"),
+        (["write_file"], "write"),
+        (["unregistered_test_tool"], "unknown"),
+    ],
+    ids=["read_only_history", "write_history", "unknown_history"],
+)
+@pytest.mark.parametrize(
+    ("response_text", "expected_kind", "transient"),
+    [
+        ("provider HTTP 503 unavailable", "server_error", True),
+        (
+            "Contact help.openai.com with request ID req-non-retryable.",
+            "provider_error",
+            False,
+        ),
+        ("Cycle run degraded: mission_contract_failed.", None, False),
+    ],
+    ids=["retryable_text", "non_retryable_text", "internal_failure"],
+)
+def test_response_text_retry_decision_matrix(
+    *,
+    spawned,
+    tools,
+    history_safety,
+    response_text,
+    expected_kind,
+    transient,
+):
+    from brain.systems.runs.direct_loop.retry import (
+        response_text_retry_decision,
+    )
+
+    decision = response_text_retry_decision(
+        response_text,
+        scheduled_result_contract=False,
+        metadata={
+            "execution_provenance": (
+                {"origin": "spawn_worker", "spawned_by_tool": True}
+                if spawned
+                else {"origin": "slack_teammate"}
+            )
+        },
+        tool_call_source="worker" if spawned else "coordinator",
+        tool_calls_made=tools,
+    )
+
+    assert tools
+    assert decision.spawned_worker is spawned
+    assert decision.tool_history_safety == history_safety
+    assert decision.inspect_response is spawned
+    assert decision.withhold_stream is spawned
+    assert decision.provider_error_kind == (
+        expected_kind if spawned else None
+    )
+    assert decision.should_retry is (
+        spawned and history_safety == "read_only" and transient
+    )
 
 
 async def test_scheduled_cycle_retries_provider_error_text_before_returning_safe_sentinel(

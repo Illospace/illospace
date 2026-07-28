@@ -11,18 +11,24 @@ from typing import Any
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.effort import EFFORT_TIERS, EFFORT_TIER_SET
+from brain.platform.integrations.provider_auth_preflight import (
+    ProviderAuthPreflightResult,
+    async_probe_provider_auth,
+    skipped_provider_auth_preflight,
+)
 from brain.platform.providers.model_policy import (
     DEFAULT_PROVIDER_MODELS,
     PROVIDER_MODEL_OPTIONS,
     async_get_default_model,
     async_get_default_thinking,
-)
-from brain.systems.cycles.auth_preflight import (
-    async_preflight_run_external_auth,
+    infer_provider_from_model,
 )
 from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.domain import RunRecipe
-from brain.systems.runs.evidence_health import record_parent_evidence_failures
+from brain.systems.runs.evidence_health import (
+    WorkerEvidenceFailure,
+    record_parent_evidence_failures,
+)
 from brain.systems.runs.events import run_event
 from brain.systems.runs.execution_context import _agent_context
 from brain.systems.runs.routing_metadata import effective_routing_snapshot
@@ -50,6 +56,61 @@ _MATERIALIZED_PROJECT_CONTEXT_KEYS = frozenset({
     "workspace_root",
     "workspaces",
 })
+_SPAWN_WORKER_AUTH_PROVIDERS = frozenset({"anthropic", "openai"})
+
+
+def _with_spawn_worker_auth_presentation(
+    result: ProviderAuthPreflightResult,
+) -> ProviderAuthPreflightResult:
+    if not result.blocked:
+        return result
+
+    credential = result.credential or "provider"
+    if credential == "Anthropic API key":
+        repair_action = (
+            "Add an Anthropic API key in Settings > Access, then retry the run."
+        )
+        detail = f"the {credential} is not configured"
+    elif credential == "OpenAI runtime":
+        repair_action = (
+            "Add an OpenAI API key in Settings > Access, then retry the run."
+        )
+        detail = f"the {credential} credential is unavailable"
+    else:
+        repair_action = (
+            "Reconnect OpenAI in Settings > Access by signing in to Codex / ChatGPT again, "
+            "then retry the run."
+        )
+        detail = (
+            f"the {credential} credential is unavailable or could not be refreshed"
+        )
+    return result.with_presentation(
+        repair_action=repair_action,
+        visible_message=f"spawn_worker auth blocked: {detail}. {repair_action}",
+    )
+
+
+async def _preflight_spawn_worker_auth(
+    session: Any,
+    *,
+    user_id: str | None,
+    org_id: str | None,
+    model: str,
+) -> ProviderAuthPreflightResult:
+    provider = infer_provider_from_model(model)
+    if provider not in _SPAWN_WORKER_AUTH_PROVIDERS:
+        return skipped_provider_auth_preflight(
+            provider=provider,
+            model=model,
+        )
+    result = await async_probe_provider_auth(
+        session,
+        user_id=user_id,
+        org_id=org_id,
+        provider=provider,
+        model=model,
+    )
+    return _with_spawn_worker_auth_presentation(result)
 
 
 def _current_agent_value(name: str) -> Any:
@@ -482,30 +543,28 @@ async def _handle_spawn_worker(
             else None
         )
         if existing_child is None:
-            preflight = await async_preflight_run_external_auth(
+            preflight = await _preflight_spawn_worker_auth(
                 uow.session,
                 user_id=parent.user_id,
                 org_id=parent.org_id,
                 model=str(child_policy["model"]),
-                subject="spawn_worker",
             )
             if preflight.blocked:
                 shard = str(worker_metadata["worker_shard"])
-                failure = {
-                    "kind": "worker_tool_failure",
-                    "tool": "spawn_worker",
-                    "worker_role": assignment.role,
-                    "shard": shard,
-                    "stage": "worker_admission",
-                    "status": "auth_blocked",
-                    "configuration_error": preflight.error_code,
-                    "provider": preflight.provider,
-                    "credential": preflight.credential,
-                    "error": preflight.visible_message,
-                }
+                failure = WorkerEvidenceFailure.for_admission(
+                    worker_role=assignment.role,
+                    shard=shard,
+                    configuration_error=preflight.error_code,
+                    provider=preflight.provider,
+                    credential=preflight.credential,
+                    error=(
+                        preflight.visible_message
+                        or "spawn_worker provider authentication is unavailable."
+                    ),
+                )
                 await record_parent_evidence_failures(
                     uow.session,
-                    parent=parent,
+                    parent_run_id=int(parent.id),
                     failures=[failure],
                 )
                 return json.dumps(

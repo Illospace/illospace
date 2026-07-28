@@ -1678,9 +1678,11 @@ async def _captured_spawn_worker(
     preflight_result=None,
     **spawn_kwargs,
 ):
-    from brain.systems.cycles.auth_preflight import CycleAuthPreflightResult
+    from brain.platform.integrations.provider_auth_preflight import (
+        ProviderAuthPreflightResult,
+    )
     from brain.systems.runs.domain import RunProfile, RunRecipe
-    from brain.systems.runs.evidence_health import evidence_health_with_failure
+    from brain.systems.runs.evidence_health import WorkerEvidenceReceipt
     from brain.systems.runs.execution_context import bind_agent_context
     import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
 
@@ -1741,24 +1743,35 @@ async def _captured_spawn_worker(
     monkeypatch.setattr(worker_handlers, "AsyncAgentRunStore", _Store)
 
     async def fake_preflight(*_args, **_kwargs):
-        return preflight_result or CycleAuthPreflightResult(
+        return preflight_result or ProviderAuthPreflightResult(
             status="passed",
             provider="openai",
             model="openai/gpt-5.6-sol",
         )
 
-    async def fake_record_parent_failures(_session, *, parent, failures):
-        health = parent.metadata_.get("evidence_health")
-        for failure in failures:
-            health, _ = evidence_health_with_failure(health, failure)
+    async def fake_record_parent_failures(
+        _session,
+        *,
+        parent_run_id,
+        failures,
+    ):
+        assert parent_run_id == parent.id
+        receipt = WorkerEvidenceReceipt.from_payload(
+            parent.metadata_.get("evidence_health")
+        )
+        receipt, added = receipt.with_failures(failures)
+        health = receipt.to_payload()
         parent.metadata_["evidence_health"] = health
-        captured["admission_failures"] = list(failures)
-        captured["parent_evidence_health"] = dict(health)
+        captured["admission_failures"] = [
+            failure.to_payload() for failure in failures
+        ]
+        captured["parent_evidence_health"] = health
+        return added
         return list(failures)
 
     monkeypatch.setattr(
         worker_handlers,
-        "async_preflight_run_external_auth",
+        "_preflight_spawn_worker_auth",
         fake_preflight,
     )
     monkeypatch.setattr(
@@ -1946,9 +1959,11 @@ async def test_spawn_worker_bare_provider_resolves_provider_default_and_transpor
 async def test_spawn_worker_auth_preflight_rejects_missing_provider_credential_before_child_creation(
     monkeypatch,
 ):
-    from brain.systems.cycles.auth_preflight import CycleAuthPreflightResult
+    from brain.platform.integrations.provider_auth_preflight import (
+        ProviderAuthPreflightResult,
+    )
 
-    blocked = CycleAuthPreflightResult(
+    blocked = ProviderAuthPreflightResult(
         status="auth_blocked",
         provider="anthropic",
         model="anthropic/claude-sonnet-4-6",
@@ -1992,10 +2007,10 @@ async def test_spawn_worker_auth_preflight_rejects_missing_provider_credential_b
     assert events == []
 
 
-async def test_shared_auth_preflight_names_missing_anthropic_configuration(
+async def test_neutral_auth_probe_names_missing_anthropic_configuration(
     monkeypatch,
 ):
-    from brain.systems.cycles import auth_preflight
+    from brain.platform.integrations import provider_auth_preflight
 
     async def missing_credential(**_kwargs):
         raise RuntimeError(
@@ -2003,24 +2018,97 @@ async def test_shared_auth_preflight_names_missing_anthropic_configuration(
         )
 
     monkeypatch.setattr(
-        auth_preflight,
+        provider_auth_preflight,
         "async_resolve_llm_client",
         missing_credential,
     )
 
-    result = await auth_preflight.async_preflight_run_external_auth(
+    result = await provider_auth_preflight.async_probe_provider_auth(
         object(),
         user_id="user-1",
         org_id="org-1",
+        provider="anthropic",
         model="anthropic/claude-sonnet-4-6",
-        subject="spawn_worker",
     )
 
     assert result.status == "auth_blocked"
     assert result.error_code == "provider_credential_unavailable"
     assert result.credential == "Anthropic API key"
-    assert "Anthropic API key" in result.visible_message
-    assert "Settings > Access" in result.visible_message
+    assert result.visible_message is None
+    assert result.repair_action is None
+
+
+async def test_spawn_worker_auth_policy_probes_anthropic_and_owns_wording(
+    monkeypatch,
+):
+    from brain.platform.integrations.provider_auth_preflight import (
+        ProviderAuthPreflightResult,
+    )
+    import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
+
+    captured = {}
+
+    async def blocked_probe(_session, **kwargs):
+        captured.update(kwargs)
+        return ProviderAuthPreflightResult(
+            status="auth_blocked",
+            provider="anthropic",
+            model=kwargs["model"],
+            credential="Anthropic API key",
+            error_code="provider_credential_unavailable",
+        )
+
+    monkeypatch.setattr(
+        worker_handlers,
+        "async_probe_provider_auth",
+        blocked_probe,
+    )
+
+    result = await worker_handlers._preflight_spawn_worker_auth(
+        object(),
+        user_id="user-1",
+        org_id="org-1",
+        model="anthropic/claude-sonnet-4-6",
+    )
+
+    assert captured == {
+        "user_id": "user-1",
+        "org_id": "org-1",
+        "provider": "anthropic",
+        "model": "anthropic/claude-sonnet-4-6",
+    }
+    assert result.blocked is True
+    assert result.repair_action == (
+        "Add an Anthropic API key in Settings > Access, then retry the run."
+    )
+    assert result.visible_message.startswith(
+        "spawn_worker auth blocked: the Anthropic API key is not configured."
+    )
+
+
+async def test_cycle_auth_policy_skips_anthropic_without_probing(monkeypatch):
+    from brain.systems.cycles import auth_preflight
+
+    async def unexpected_probe(*_args, **_kwargs):
+        raise AssertionError("Cycle policy must remain OpenAI-only")
+
+    monkeypatch.setattr(
+        auth_preflight,
+        "async_probe_provider_auth",
+        unexpected_probe,
+    )
+
+    result = await auth_preflight.async_preflight_cycle_external_auth(
+        object(),
+        cycle=SimpleNamespace(
+            user_id="user-1",
+            org_id="org-1",
+            model_override="anthropic/claude-sonnet-4-6",
+        ),
+    )
+
+    assert result.status == "skipped"
+    assert result.provider == "anthropic"
 
 
 @pytest.mark.parametrize(

@@ -23,7 +23,10 @@ from brain.kernel import config as brain_config
 from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, PROCESSING_RUN_STATUS_VALUES
 from brain.systems.cortex.status import PROTECTED_IDEA_STATUSES
 from brain.systems.runs.engine import AsyncAgentRunEngine
-from brain.systems.runs.evidence_health import record_parent_evidence_failures
+from brain.systems.runs.evidence_health import (
+    materialization_failures_for_worker,
+    record_parent_evidence_failures,
+)
 from brain.systems.runs.events import activity_event, run_event
 from brain.systems.runs.execution_failure import RunExecutionFailure
 from brain.systems.runs.failures import (
@@ -798,90 +801,18 @@ def _run_has_project_context(run: AgentRunRow | None) -> bool:
     return False
 
 
-def _spawned_worker_materialization_failures(
-    run: AgentRunRow,
-    result: Any,
-) -> list[dict[str, Any]]:
-    raw_metadata = getattr(run, "metadata_", None)
-    metadata = dict(raw_metadata or {}) if isinstance(raw_metadata, dict) else {}
-    parent_run_id = getattr(run, "parent_run_id", None)
-    if parent_run_id is None or not (
-        metadata.get("spawned_by_tool") is True or metadata.get("origin") == "spawn_worker"
-    ):
-        return []
-
-    errors = [
-        str(item)
-        for item in [
-            *(getattr(result, "errors", []) or []),
-            *(getattr(result, "warnings", []) or []),
-        ]
-        if str(item).strip()
-    ]
-    failed_resources = [
-        dict(item)
-        for item in [
-            *(getattr(result, "failed_resources", []) or []),
-            *(getattr(result, "degraded_resources", []) or []),
-        ]
-        if isinstance(item, dict)
-    ]
-    if not failed_resources:
-        raw_target_ref = getattr(run, "target_ref", None)
-        target_ref = raw_target_ref if isinstance(raw_target_ref, dict) else {}
-        snapshot = target_ref.get("project_context_snapshot")
-        resources = snapshot.get("resources") if isinstance(snapshot, dict) else []
-        failed_resources = [dict(item) for item in resources or [] if isinstance(item, dict)][:1]
-    if not failed_resources:
-        failed_resources = [{}]
-
-    failures: list[dict[str, Any]] = []
-    for index, resource in enumerate(failed_resources):
-        repo = (
-            str(resource.get("repo") or resource.get("name") or "unknown").strip()
-            or "unknown"
-        )
-        if index < len(errors):
-            fallback_error = errors[index]
-        elif errors:
-            fallback_error = errors[0]
-        else:
-            fallback_error = "Project Context materialization failed."
-        error = str(resource.get("error") or fallback_error)
-        failures.append(
-            {
-                "kind": "worker_tool_failure",
-                "tool": "spawn_worker",
-                "child_run_id": int(run.id),
-                "worker_run_id": int(run.id),
-                "worker_role": str(metadata.get("worker_role") or "worker"),
-                "repo": repo,
-                "stage": "project_context_materialization",
-                "error": error,
-            }
-        )
-    return failures
-
-
 async def _record_spawned_worker_materialization_failure(
     session: Any,
     run: AgentRunRow,
     result: Any,
 ) -> None:
-    failures = _spawned_worker_materialization_failures(run, result)
+    failures = materialization_failures_for_worker(run, result)
     if not failures or run.parent_run_id is None:
         return
 
-    parent = await session.get(
-        AgentRunRow,
-        int(run.parent_run_id),
-        with_for_update=True,
-    )
-    if parent is None:
-        return
     await record_parent_evidence_failures(
         session,
-        parent=parent,
+        parent_run_id=int(run.parent_run_id),
         failures=failures,
     )
 

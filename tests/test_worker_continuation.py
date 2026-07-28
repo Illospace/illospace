@@ -23,9 +23,45 @@ from brain.systems.runs.chantier_continuation import (
 )
 from brain.systems.runs.domain import AgentRunRequest, RunRecipe
 from brain.systems.runs.engine import AsyncAgentRunEngine
+from brain.systems.runs.evidence_health import (
+    WorkerEvidenceFailure,
+    WorkerEvidenceReceipt,
+)
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.tool_catalog.definitions.workers import WORKER_SPAWN_TOOLS
+
+
+def test_worker_evidence_receipt_deduplicates_by_full_canonical_identity():
+    execution_failure = WorkerEvidenceFailure(
+        worker_run_id=49,
+        worker_role="GitHub reader",
+        shard="github:Illospace/illospace",
+        stage="worker_execution",
+        status="failed",
+        error="The worker failed.",
+    )
+    distinct_failure_for_same_worker = WorkerEvidenceFailure(
+        worker_run_id=49,
+        worker_role="GitHub reader",
+        shard="github:Illospace/illospace",
+        stage="project_context_materialization",
+        error="The repository could not be materialized.",
+    )
+
+    receipt, first_added = WorkerEvidenceReceipt().with_failures(
+        [execution_failure]
+    )
+    receipt, replay_added = receipt.with_failures(
+        [execution_failure, distinct_failure_for_same_worker]
+    )
+
+    assert first_added == (execution_failure,)
+    assert replay_added == (distinct_failure_for_same_worker,)
+    assert receipt.failures == (
+        execution_failure,
+        distinct_failure_for_same_worker,
+    )
 
 
 async def _session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
