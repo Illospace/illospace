@@ -170,7 +170,7 @@ process_request() {
 
   if [ "$exit_code" -eq 0 ]; then
     if [ -f "$WORKER_DRAIN_TIMEOUT_FILE" ]; then
-      write_status "idle" "Illospace update completed; active AgentRuns are still draining on the old worker while new runs use a handoff worker." "$requested_at" "$requested_by" "$exit_code"
+      write_status "idle" "Illospace update completed, but the old worker would not drain: it was force-replaced, and the AgentRuns it was holding are requeued by the stale-run reaper. Affected run ids: $(jq -r '.affected_run_ids // "unknown"' "$WORKER_DRAIN_TIMEOUT_FILE" 2>/dev/null || echo unknown)." "$requested_at" "$requested_by" "$exit_code"
     else
       write_status "idle" "Illospace update completed." "$requested_at" "$requested_by" "$exit_code"
     fi
