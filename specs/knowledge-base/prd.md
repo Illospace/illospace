@@ -25,10 +25,10 @@ projects/bundles object. See north-star.md.
 scoping — it collides with both `Domain`/`DomainRecord` (user data spaces) and
 `TaskDomain` (brain/systems/task_domain.py).
 
-## Schema (migration `0046_knowledge_index`)
+## Schema (migration `0047_knowledge_index`)
 
-New file `brain/platform/db/alembic/versions/0046_knowledge_index.py`,
-`down_revision = "0045_scheduler_failure_guard_latches"`. Follow the defensive
+New file `brain/platform/db/alembic/versions/0047_knowledge_index.py`,
+`down_revision = "0046_cycle_failure_guard"`. Follow the defensive
 idempotency style of `0011`/`0029` (`_table_exists`, drop-index-if-exists).
 After writing it, `alembic heads` MUST show exactly one head.
 
@@ -146,8 +146,10 @@ daemon startup — no migration, no manual activation.
 
 Three channels over non-archived items, fused:
 
-1. **Lexical**: trigram similarity on `search_text` (Postgres `similarity()` /
-   `%` operator), top-K ranked list. SQLite/test fallback: Python term-overlap
+1. **Lexical**: trigram `word_similarity()` of the query against `search_text`
+   (`%>` operator — best-matching-substring semantics, so short queries match
+   inside long blobs; plain `similarity()` is length-sensitive and starves
+   exact-token matches in long docs), top-K ranked list. SQLite/test fallback: Python term-overlap
    scoring reusing the `_query_terms`/`_lexical_relevance` approach from
    `repositories/reconstructive_memory.py:404`.
 2. **Semantic**: `embed_query` → cosine via
@@ -181,7 +183,7 @@ caller's job: follow `source_ref` to the canonical system for the full thing.
 
 ## Slice 1 — deliverables checklist
 
-- [ ] Migration `0046_knowledge_index` (+ `alembic heads` == 1)
+- [ ] Migration `0047_knowledge_index` (+ `alembic heads` == 1)
 - [ ] `models/knowledge.py` (3 tables, guarded pgvector, trgm index)
 - [ ] `brain/systems/knowledge/`: base protocol, pipeline service, search
 - [ ] Connectors: `domain_records`, `github`

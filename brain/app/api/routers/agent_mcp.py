@@ -56,6 +56,7 @@ from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.results import read_inbound_submission_result
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
+from brain.systems.knowledge.search import search_knowledge
 from brain.systems.runs.cortex.read_models import (
     public_failed_run_artifact,
     public_failure_for_run,
@@ -510,6 +511,15 @@ async def _tool_submit(
 
 
 READ_CAPABILITIES: dict[str, dict[str, Any]] = {
+    "knowledge.search": {
+        "description": "Search the source-backed Illo Knowledge index with hybrid recall and canonical provenance.",
+        "arguments": {
+            "query": "string",
+            "sources": "string[]",
+            "kinds": "string[]",
+            "limit": "integer",
+        },
+    },
     "workspace.search": {
         "description": "Search the Illo workspace for related Project Contexts, ideas, threads, and shared work.",
         "arguments": {"query": "string", "limit": "integer"},
@@ -915,6 +925,18 @@ async def _tool_read(
             db,
             principal,
             query=_required_capability_string(capability_arguments, "query", capability=capability),
+            limit=int(capability_arguments.get("limit") or 10),
+        )
+    if capability == "knowledge.search":
+        return await search_knowledge(
+            db,
+            _required_capability_string(
+                capability_arguments,
+                "query",
+                capability=capability,
+            ),
+            sources=_clean_string_list(capability_arguments.get("sources")),
+            kinds=_clean_string_list(capability_arguments.get("kinds")),
             limit=int(capability_arguments.get("limit") or 10),
         )
     if capability == "project_contexts.search":
