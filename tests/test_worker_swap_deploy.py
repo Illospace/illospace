@@ -23,12 +23,21 @@ def _simulator(
     handoff_starts: bool = True,
     recreate_succeeds: bool = True,
     survives_kill: bool = False,
+    stub_drain_wait: bool = True,
+    handoff_dies_after_ticks: int | None = None,
+    handoff_state_unknown: bool = False,
+    drain_timeout_seconds: int = 1,
 ) -> str:
     """Build a bash script whose `docker`/`compose` mutate simulated containers.
 
     A container is running while `$state/<id>.running` exists. A hard kill stops
     it, `docker rm` removes it, and `compose up --force-recreate` swaps the
     service container for a new id. Handoff ids carry Compose's one-off label.
+
+    With `stub_drain_wait=False` the real `wait_for_worker_exit` runs, with
+    `sleep` replaced by a tick counter so the loop is instantaneous. The worker
+    it waits on never drains, so the only way the wait can end is the condition
+    under test.
     """
 
     state.mkdir(parents=True, exist_ok=True)
@@ -37,9 +46,25 @@ def _simulator(
     return f'''
 export STATE="{state}"
 export SURVIVES_KILL={"1" if survives_kill else "0"}
+export HANDOFF_DIES_AFTER_TICKS={-1 if handoff_dies_after_ticks is None else handoff_dies_after_ticks}
+export HANDOFF_STATE_UNKNOWN={"1" if handoff_state_unknown else "0"}
 COMPOSE_RUNTIME_HANDOFF_REAP_TIMEOUT_SECONDS=0
-COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS=1
+COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS={drain_timeout_seconds}
 source "{RUNTIME_LIB}"
+
+ticks() {{ cat "$STATE/ticks" 2>/dev/null || printf '0\\n'; }}
+
+{'' if stub_drain_wait else '''
+sleep() {
+  local n
+  n=$(( $(ticks) + 1 ))
+  printf '%s\\n' "$n" > "$STATE/ticks"
+  if [ "$HANDOFF_DIES_AFTER_TICKS" -ge 0 ] && [ "$n" -ge "$HANDOFF_DIES_AFTER_TICKS" ]; then
+    rm -f "$STATE/handoff-1.running"
+  fi
+  return 0
+}
+'''}
 
 log() {{ printf '%s\\n' "$*" >> "$STATE/calls.log"; }}
 
@@ -55,6 +80,11 @@ docker() {{
     inspect)
       case "$*" in
         *State.Running*)
+          # A snap dockerd restart answers nothing at all, which is not the same
+          # answer as "not running".
+          case "${{!#}}" in
+            handoff-*) [ "$HANDOFF_STATE_UNKNOWN" = "1" ] && return 1 ;;
+          esac
           [ -f "$STATE/${{!#}}.running" ] && printf 'true\\n' || printf 'false\\n'
           ;;
         *oneoff*)
@@ -75,7 +105,7 @@ docker() {{
         rm -f "$STATE/$id.running"
       fi
       ;;
-    rm) rm -f "$STATE/${{!#}}.running" ;;
+    rm) rm -f "$STATE/${{!#}}.running" "$STATE/${{!#}}.stopped" ;;
     update) : ;;
   esac
   return 0
@@ -84,10 +114,19 @@ docker() {{
 compose() {{
   log "compose $*"
   case "$*" in
-    "ps -q worker"|"ps --all -q worker"|"ps --status running -q worker")
+    "ps -q worker"|"ps --status running -q worker")
       for f in "$STATE"/*.running; do
         [ -e "$f" ] || continue
         basename "$f" .running
+      done
+      ;;
+    # `--all` also lists the exited handoff containers an interrupted deploy left
+    # behind -- the whole reason `worker_container_id` has to filter one-offs.
+    "ps --all -q worker")
+      for f in "$STATE"/*.running "$STATE"/*.stopped; do
+        [ -e "$f" ] || continue
+        name="$(basename "$f")"
+        printf '%s\\n' "${{name%.*}}"
       done
       ;;
     "up -d --force-recreate --no-deps worker")
@@ -108,7 +147,7 @@ start_worker_handoff() {{
 
 # The drain never completes: the worker is wedged on an in-flight run, which is
 # what run 2896 did on illo-dev for 65 minutes.
-wait_for_worker_exit() {{ [ ! -f "$STATE/$1.running" ]; }}
+{'wait_for_worker_exit() { [ ! -f "$STATE/$1.running" ]; }' if stub_drain_wait else ''}
 
 {body}
 echo "STATUS=$?"
@@ -202,6 +241,129 @@ def test_worker_container_id_ignores_leftover_handoff_containers(tmp_path):
     result = _run(script)
 
     assert "SERVICE=worker-1" in result.stdout
+
+
+def test_the_drain_wait_ends_when_the_handoff_worker_dies(tmp_path):
+    """Regression for the illo-dev outage of 2026-07-28 (6caa36d, i.e. #544 itself).
+
+    The handoff came up, passed the one-shot liveness check, claimed runs for 14
+    minutes, then exited 1 on its own `queue stalled; exiting for restart`
+    supervisor -- a contract a `compose run` container (restart=no) can never
+    honour. The drain wait watched only the clock, whose deadline was 24h away,
+    so nothing claimed an AgentRun for 2h16m.
+    """
+
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        body=': > "$STATE/handoff-1.running"\nwait_for_worker_exit worker-1 handoff-1',
+        stub_drain_wait=False,
+        handoff_dies_after_ticks=1,
+        # A deadline far beyond any tick this test performs: the wait must end on
+        # the lost cover, never because the clock happened to run out.
+        drain_timeout_seconds=86400,
+    )
+    result = _run(script)
+
+    assert "STATUS=2" in result.stdout
+    assert "stopped after" in result.stderr
+    assert "NOTHING is claiming AgentRuns" in result.stderr
+    assert "restart=no" in result.stderr
+    # The worker it was draining is untouched by the wait itself.
+    assert (state / "worker-1.running").exists()
+
+
+def test_an_unanswered_handoff_inspect_does_not_end_the_drain_wait(tmp_path):
+    """dockerd here is a snap that restarts itself, taking every inspect with it.
+
+    "docker did not answer" must never be read as "the handoff is gone", or a
+    60-second daemon refresh force-replaces a perfectly healthy worker.
+    """
+
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        # The handoff stays up; only the answers stop coming. The worker drains
+        # normally after a few ticks, which is the only way out of this wait.
+        body=(
+            ': > "$STATE/handoff-1.running"\n'
+            'sleep() { local n; n=$(( $(ticks) + 1 )); printf "%s\\n" "$n" > "$STATE/ticks"; '
+            '[ "$n" -ge 4 ] && rm -f "$STATE/worker-1.running"; return 0; }\n'
+            "wait_for_worker_exit worker-1 handoff-1"
+        ),
+        stub_drain_wait=False,
+        handoff_state_unknown=True,
+        drain_timeout_seconds=86400,
+    )
+    result = _run(script)
+
+    assert "STATUS=0" in result.stdout
+    assert "NOTHING is claiming AgentRuns" not in result.stderr
+
+
+def test_a_single_missed_handoff_observation_does_not_end_the_drain_wait(tmp_path):
+    """A handoff Docker is restarting reads as stopped for an instant."""
+
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        body=(
+            ': > "$STATE/handoff-1.running"\n'
+            'sleep() { local n; n=$(( $(ticks) + 1 )); printf "%s\\n" "$n" > "$STATE/ticks"; '
+            'case "$n" in 1) rm -f "$STATE/handoff-1.running" ;; '
+            '2) : > "$STATE/handoff-1.running" ;; '
+            '4) rm -f "$STATE/worker-1.running" ;; esac; return 0; }\n'
+            "wait_for_worker_exit worker-1 handoff-1"
+        ),
+        stub_drain_wait=False,
+        drain_timeout_seconds=86400,
+    )
+    result = _run(script)
+
+    assert "STATUS=0" in result.stdout
+    assert "NOTHING is claiming AgentRuns" not in result.stderr
+
+
+def test_a_lost_handoff_force_replaces_the_drained_worker(tmp_path):
+    """End to end: losing the cover escalates instead of waiting out the deadline."""
+
+    state = tmp_path / "s"
+    result = _run(
+        _simulator(
+            state,
+            body="update_worker_after_drain 2896:running",
+            stub_drain_wait=False,
+            handoff_dies_after_ticks=1,
+            drain_timeout_seconds=86400,
+        )
+    )
+
+    assert "STATUS=0" in result.stdout
+    assert result.stdout.split("RUNNING=")[1].strip() == "worker-2"
+    assert "FORCED WORKER SWAP" in result.stderr
+    assert "handoff worker handoff-1 stopped" in result.stderr
+    # The banner must not promise cover that is exactly what died.
+    assert "keeps claiming new AgentRuns" not in result.stderr
+
+
+def test_stopped_handoff_containers_are_removed_before_a_new_one_starts(tmp_path):
+    """illo-dev still carried the Exited(1) handoff from the outage.
+
+    A running handoff is another claimer and is deliberately left alone --
+    deleting a claimer is the #486 outage.
+    """
+
+    state = tmp_path / "s"
+    state.mkdir(parents=True)
+    (state / "handoff-old.stopped").write_text("1")
+    (state / "handoff-live.running").write_text("1")
+    result = _run(_simulator(state, body="reap_stopped_worker_handoffs"))
+
+    calls = _calls(state)
+    assert "rm -f handoff-old" in calls
+    assert "rm -f handoff-live" not in calls
+    # The real service container is never a reaping candidate.
+    assert "rm -f worker-1" not in calls
 
 
 def test_the_idle_path_fails_loudly_when_the_replacement_cannot_start(tmp_path):

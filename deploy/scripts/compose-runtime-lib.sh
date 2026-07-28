@@ -111,6 +111,23 @@ container_running() {
   [ "$(docker inspect --format '{{.State.Running}}' "$id" 2>/dev/null || echo false)" = "true" ]
 }
 
+# `container_running` folds "docker says no" and "docker did not answer" into the
+# same false. That is safe where a missing answer should stop the deploy, but not
+# where it force-replaces a worker: dockerd here is a snap that restarts itself
+# without warning, and during that window every inspect fails for ~60s. So this
+# reports the three states separately -- 0 running, 1 definitively not running,
+# 2 unknown -- and callers that destroy things must treat 2 as "keep waiting".
+container_running_known() {
+  local id="$1" state
+  [ -n "$id" ] || return 2
+  state="$(docker inspect --format '{{.State.Running}}' "$id" 2>/dev/null)" || return 2
+  case "$state" in
+    true) return 0 ;;
+    false) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 container_restart_policy() {
   local id="$1"
   [ -n "$id" ] || return 1
@@ -258,7 +275,25 @@ assert_stack_not_inert() {
   return "$STACK_INERT_EXIT_CODE"
 }
 
+# A deploy that dies mid-swap leaves its `compose run` handoff container behind.
+# #544 already had to teach `worker_container_id` to ignore them, because two ids
+# on one line made every downstream `docker kill "$worker_id"` address neither --
+# but nothing ever removed them, so they accumulate. A stopped one is pure
+# debris. A RUNNING one is left alone on purpose: it is another claimer, and
+# deleting a claimer is the #486 outage.
+reap_stopped_worker_handoffs() {
+  local id
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    container_is_oneoff "$id" || continue
+    container_running "$id" && continue
+    echo "Worker: removing stopped handoff container $id left behind by an earlier deploy." >&2
+    docker rm -f "$id" >/dev/null 2>&1 || true
+  done < <(compose ps --all -q worker 2>/dev/null || true)
+}
+
 start_worker_handoff() {
+  reap_stopped_worker_handoffs
   compose run \
     -d \
     --no-deps \
@@ -267,27 +302,48 @@ start_worker_handoff() {
     worker
 }
 
+# The status distinguishes the escalations for whoever reads the file later.
+# Both existing callers already passed one; the parameter was simply dropped on
+# the floor, so every record claimed "worker_draining" even after a forced swap.
 record_worker_drain_timeout() {
   local snapshot="$1"
+  local status="${2:-worker_draining}"
   local details ids
   [ -n "${COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_FILE:-}" ] || return 0
   details="$(worker_swap_snapshot_details "$snapshot")"
   ids="$(worker_swap_snapshot_run_ids "$snapshot")"
   mkdir -p "$(dirname "$COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_FILE")" 2>/dev/null || true
-  printf '{"status":"worker_draining","updated_at":"%s","affected_run_ids":"%s","affected_runs":"%s"}\n' \
-    "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$ids" "$details" \
+  printf '{"status":"%s","updated_at":"%s","affected_run_ids":"%s","affected_runs":"%s"}\n' \
+    "$status" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$ids" "$details" \
     > "$COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_FILE" 2>/dev/null || true
 }
 
+# Waits for the outgoing worker to drain, and -- when a handoff worker is
+# covering for it -- for that cover to still exist.
+#
+# Watching only the clock is what turned the 2026-07-28 illo-dev deploy into a
+# 2h16m outage. The handoff came up, passed the one-shot liveness check, claimed
+# runs for 14 minutes, then exited 1 on its own `queue stalled; exiting for
+# restart` supervisor. That contract is honoured for `illospace-worker-1`
+# (`restart: unless-stopped`) and structurally cannot be for a handoff:
+# `compose run` containers are always created with `restart=no`, so "exiting for
+# restart" means exiting for good. From that moment nothing claimed -- and this
+# loop happily kept waiting, because the only thing it looked at was whether the
+# drained worker had exited, against a deadline 24h away by default.
+#
+# So the wait now ends on either condition, and the caller escalates for both:
+#   1 = the drain deadline passed          2 = the cover is gone
 wait_for_worker_exit() {
   local id="$1"
+  local handoff_id="${2:-}"
   local wait_seconds="${COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS:-86400}"
   local started_at="$SECONDS"
   local deadline=$((started_at + wait_seconds))
   local wait_iterations=0
   local consecutive_zero_checks=0
+  local handoff_missing_checks=0
   local hint_printed=0
-  local active_runs affected_runs affected_ids elapsed snapshot
+  local active_runs affected_runs affected_ids elapsed snapshot handoff_state
   while container_running "$id"; do
     if [ "$SECONDS" -ge "$deadline" ]; then
       snapshot="$(worker_swap_snapshot)"
@@ -296,6 +352,27 @@ wait_for_worker_exit() {
       echo "Worker did not drain within ${wait_seconds}s. Affected run ids: ${affected_ids:-unknown} (id/status: $affected_runs)." >&2
       record_worker_drain_timeout "$snapshot"
       return 1
+    fi
+    if [ -n "$handoff_id" ]; then
+      handoff_state=0
+      container_running_known "$handoff_id" || handoff_state=$?
+      case "$handoff_state" in
+        0) handoff_missing_checks=0 ;;
+        1)
+          # Two consecutive definite answers, because a handoff that Docker is
+          # restarting reads as stopped for an instant and is not lost.
+          handoff_missing_checks=$((handoff_missing_checks + 1))
+          if [ "$handoff_missing_checks" -ge 2 ]; then
+            elapsed=$((SECONDS - started_at))
+            echo "Worker: handoff worker $handoff_id stopped after ${elapsed}s while worker $id was still draining, so NOTHING is claiming AgentRuns." >&2
+            echo "Worker: a handoff is a \`compose run\` container and therefore has restart=no, so it does not come back on its own -- not even from the worker's own 'exiting for restart' supervisor. Ending the drain wait now instead of holding zero capacity until the ${wait_seconds}s deadline." >&2
+            return 2
+          fi
+          ;;
+        # Unknown: dockerd is a snap here and restarts itself without warning, so
+        # an unanswered inspect must never authorise force-replacing a worker.
+        *) ;;
+      esac
     fi
     sleep 5
     wait_iterations=$((wait_iterations + 1))
@@ -332,19 +409,31 @@ wait_for_worker_exit() {
 # stack lands back on the single Compose-managed worker that owns the cycle
 # scheduler and the restart policy. Runs the killed worker was holding are
 # recovered by the stale-run reaper.
+#
+# The same escalation covers the other way the wait can end -- the handoff dying
+# first -- but the two must not print the same thing. Announcing that the handoff
+# "keeps claiming" when the handoff is precisely what died is how an operator
+# reads a total outage as a routine slow drain.
 escalate_worker_swap_after_drain_timeout() {
   local worker_id="$1"
   local handoff_id="$2"
   local wait_seconds="$3"
+  local drain_status="${4:-1}"
   local snapshot affected_ids run_details
 
   snapshot="$(worker_swap_snapshot)"
   affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
   run_details="$(worker_swap_snapshot_details "$snapshot")"
 
-  echo "FORCED WORKER SWAP: worker $worker_id did not drain within ${wait_seconds}s and will never claim another AgentRun; replacing it rather than keeping a worker that cannot work. Open run ids: ${affected_ids:-unknown} (id/status: $run_details)." >&2
-  echo "Worker: handoff worker ${handoff_id:-none} keeps claiming new AgentRuns until the replacement is up. Runs interrupted here are requeued by the stale-run reaper." >&2
-  record_worker_drain_timeout "$snapshot" "worker_swap_forced"
+  if [ "$drain_status" = "2" ]; then
+    echo "FORCED WORKER SWAP: handoff worker ${handoff_id:-none} stopped while worker $worker_id was still draining, so nothing is claiming AgentRuns right now; replacing the drained worker immediately rather than waiting out the remaining ${wait_seconds}s deadline. Open run ids: ${affected_ids:-unknown} (id/status: $run_details)." >&2
+    echo "Worker: capacity is already zero, so this escalation IS the recovery -- it is not a precaution. Runs interrupted here are requeued by the stale-run reaper." >&2
+    record_worker_drain_timeout "$snapshot" "worker_handoff_lost"
+  else
+    echo "FORCED WORKER SWAP: worker $worker_id did not drain within ${wait_seconds}s and will never claim another AgentRun; replacing it rather than keeping a worker that cannot work. Open run ids: ${affected_ids:-unknown} (id/status: $run_details)." >&2
+    echo "Worker: handoff worker ${handoff_id:-none} keeps claiming new AgentRuns until the replacement is up. Runs interrupted here are requeued by the stale-run reaper." >&2
+    record_worker_drain_timeout "$snapshot" "worker_swap_forced"
+  fi
 
   suspend_worker_restart_policy "$worker_id"
   docker kill "$worker_id" >/dev/null 2>&1 || true
@@ -359,7 +448,7 @@ escalate_worker_swap_after_drain_timeout() {
 update_worker_after_drain() {
   local snapshot="$1"
   local already_reported="${2:-}"
-  local active_runs affected_ids worker_id handoff_id run_details replacement_id
+  local active_runs affected_ids worker_id handoff_id run_details replacement_id drain_status
   active_runs="$(worker_swap_snapshot_count "$snapshot")"
   affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
   run_details="$(worker_swap_snapshot_details "$snapshot")"
@@ -389,9 +478,11 @@ update_worker_after_drain() {
   echo "Worker: ${active_runs} interactive AgentRun(s); signaling existing worker to drain. Affected run ids: $affected_ids."
   suspend_worker_restart_policy "$worker_id"
   docker kill -s TERM "$worker_id" >/dev/null 2>&1 || true
-  if ! wait_for_worker_exit "$worker_id"; then
+  drain_status=0
+  wait_for_worker_exit "$worker_id" "$handoff_id" || drain_status=$?
+  if [ "$drain_status" -ne 0 ]; then
     escalate_worker_swap_after_drain_timeout \
-      "$worker_id" "$handoff_id" "${COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS:-86400}" || return 1
+      "$worker_id" "$handoff_id" "${COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS:-86400}" "$drain_status" || return 1
   fi
   # Only drop the suspension once a replacement actually exists. If the recreate
   # failed there is no new worker, so the outgoing container is still the only
@@ -465,7 +556,9 @@ replace_idle_worker() {
   echo "Worker: no interactive AgentRuns; signaling a graceful replacement."
   suspend_worker_restart_policy "$worker_id"
   docker kill -s TERM "$worker_id" >/dev/null 2>&1 || true
-  if ! wait_for_worker_exit "$worker_id"; then
+  # No handoff exists on this path, so there is no cover to watch: only the clock
+  # can end this wait.
+  if ! wait_for_worker_exit "$worker_id" ""; then
     # Returning here would leave a container that is running, healthy-looking and
     # permanently unable to claim -- and this path has no handoff worker to cover
     # for it. There are no interactive runs to protect, so nothing weighs against
