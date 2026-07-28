@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import func, select
@@ -53,6 +54,7 @@ from brain.app.scheduler.runtime import (
 from brain.platform.db.models.scheduler import (
     SchedulerJob,
     SchedulerLease,
+    SchedulerLivenessCheckpoint,
     SchedulerRun,
     SchedulerRunStep,
 )
@@ -288,13 +290,43 @@ async def test_scheduler_daemon_startup_syncs_catalog_before_snapshot(session):
     assert result["ok"] is True
     assert result["cold_start"] == {
         "triggered": False,
-        "reason": "no_successful_run",
+        "reason": "no_liveness_checkpoint",
+        "checkpoint_at": now.isoformat(),
         "threshold_seconds": 3600,
     }
     assert result["catalog"] == {"upserted": 6, "retired": 0}
     assert result["snapshot"]["summary"]["jobs_total"] == 6
     assert result["snapshot"]["summary"]["jobs_enabled"] == 6
     assert all(job["next_run_at"] > now.isoformat() for job in result["snapshot"]["jobs"])
+
+
+async def test_scheduler_daemon_startup_passes_configured_cold_start_threshold(
+    session,
+    monkeypatch,
+):
+    import brain.app.scheduler.cold_start as cold_start
+
+    now = datetime(2026, 4, 21, 0, 0, tzinfo=timezone.utc)
+    reconcile = AsyncMock(
+        return_value={
+            "triggered": False,
+            "reason": "below_threshold",
+        }
+    )
+    monkeypatch.setattr(cold_start, "reconcile_cold_start_gap", reconcile)
+
+    await async_scheduler_daemon_startup(
+        session,
+        now=now,
+        timezone_name="UTC",
+        cold_start_gap_threshold=timedelta(minutes=17),
+    )
+
+    reconcile.assert_awaited_once_with(
+        session,
+        now=now,
+        threshold=timedelta(minutes=17),
+    )
 
 
 async def test_due_run_materialization_records_scheduler_jobs(session):
@@ -1070,6 +1102,19 @@ async def test_scheduler_daemon_tick_executes_due_scheduler_job(session):
     assert run is not None
     assert run.status == "settled_success"
     assert run.finished_at is not None
+    checkpoint = await session.get(
+        SchedulerLivenessCheckpoint,
+        "scheduler_connector",
+    )
+    assert checkpoint is not None
+    assert checkpoint.last_heartbeat_at.replace(tzinfo=timezone.utc) == datetime(
+        2026,
+        4,
+        21,
+        3,
+        1,
+        tzinfo=timezone.utc,
+    )
 
 
 async def test_scheduler_daemon_tick_emits_new_failure_once_without_historical_snapshot(session):

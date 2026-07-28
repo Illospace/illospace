@@ -324,18 +324,61 @@ async def process_socket_payload(
     )
     if envelope is None:
         return {"ack": ack, "ignored": True}
+    processed = await process_normalized_slack_envelope(
+        session,
+        connection=connection,
+        envelope=envelope,
+        config=config,
+        ingress_context={
+            "transport": "slack_socket_mode",
+            "envelope_id": ack.get("envelope_id"),
+        },
+        acknowledge_all=False,
+        set_processing_status=True,
+    )
+    return {
+        "ack": ack,
+        "ignored": False,
+        "inbound": processed["inbound"],
+    }
+
+
+async def process_normalized_slack_envelope(
+    session,
+    *,
+    connection: ExternalAgentConnectionRow | Mapping[str, Any],
+    envelope: Mapping[str, Any],
+    config: SlackConnectorConfig,
+    ingress_context: Mapping[str, Any],
+    acknowledge_all: bool,
+    acknowledgement_client: Any | None = None,
+    set_processing_status: bool = False,
+) -> dict[str, Any]:
+    """Run every Slack ingress adapter through one normalized-envelope owner."""
+
     monitored_intake = is_monitored_intake(envelope)
     existing_run_for_message = await _has_slack_run_for_envelope(session, connection, envelope)
+    existing_inbound = await _has_inbound_event_for_envelope(
+        session,
+        connection,
+        envelope,
+    )
     await _record_inbound_obligation_reply(
         session,
         connection=connection,
         envelope=envelope,
     )
-    if monitored_intake:
+    acknowledged = False
+    if monitored_intake or acknowledge_all:
         # Reflex acknowledgement: leave a 👀 on every observed message so the
         # channel knows Illo has seen it, independent of whether the ensuing
         # triage run decides to reply.
-        await _acknowledge_monitored_message(config, envelope)
+        acknowledged = await _acknowledge_monitored_message(
+            config,
+            envelope,
+            client=acknowledgement_client,
+        )
+    if monitored_intake and existing_inbound is None:
         await enrich_monitored_intake(
             envelope,
             connection=connection,
@@ -345,18 +388,19 @@ async def process_socket_payload(
         session,
         connection=connection,
         envelope=envelope,
-        ingress_context={
-            "transport": "slack_socket_mode",
-            "envelope_id": ack.get("envelope_id"),
-        },
+        ingress_context=dict(ingress_context),
     )
     if (
-        not monitored_intake
+        set_processing_status
+        and not monitored_intake
         and not existing_run_for_message
         and _admitted_slack_run(inbound)
     ):
         await _set_processing_status(config, envelope)
-    return {"ack": ack, "ignored": False, "inbound": inbound}
+    return {
+        "acknowledged": acknowledged,
+        "inbound": inbound,
+    }
 
 
 async def process_slack_history_message(
@@ -389,39 +433,24 @@ async def process_slack_history_message(
     )
     if envelope is None:
         return {"ignored": True, "acked": False}
-
-    existing = await _has_inbound_event_for_envelope(
-        session,
-        connection,
-        envelope,
-    )
-    # History has no Socket Mode transport ack. A visible reaction is the
-    # catch-up acknowledgement for every actionable monitored message,
-    # including an explicit human @Illo mention.
-    acknowledged = await _acknowledge_monitored_message(
-        config,
-        envelope,
-        client=client,
-    )
-    if existing is None and is_monitored_intake(envelope):
-        await enrich_monitored_intake(
-            envelope,
-            connection=connection,
-            bot_token=config.bot_token,
-        )
-    inbound = await submit_inbound_envelope(
+    processed = await process_normalized_slack_envelope(
         session,
         connection=connection,
         envelope=envelope,
+        config=config,
         ingress_context={
             "transport": "slack_history_catch_up",
             "gap_start": gap_start.isoformat(),
         },
+        # History has no Socket Mode transport ack. The visible reaction is
+        # the catch-up acknowledgement, including for an explicit @Illo reply.
+        acknowledge_all=True,
+        acknowledgement_client=client,
     )
     return {
         "ignored": False,
-        "acked": acknowledged,
-        "inbound": inbound,
+        "acked": processed["acknowledged"],
+        "inbound": processed["inbound"],
     }
 
 
@@ -923,6 +952,7 @@ __all__ = [
     "SlackConnectorConfig",
     "ensure_slack_connection",
     "ensure_slack_connection_for_config",
+    "process_normalized_slack_envelope",
     "socket_mode_ack",
     "process_socket_payload",
     "resolve_slack_connection_identity",

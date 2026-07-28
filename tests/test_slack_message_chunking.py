@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import pytest
@@ -239,3 +240,18 @@ async def test_post_message_preserves_idempotency_metadata():
             "metadata": metadata,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_post_message_propagates_stable_client_message_ids():
+    client = _RecordingSlackClient()
+    client_msg_id = "0f7d34df-aac7-50ce-a7d7-7251c3588caa"
+
+    await client.post_message(
+        channel="C_SOFTWARE",
+        text="Exactly one catch-up notice.",
+        client_msg_id=client_msg_id,
+    )
+
+    assert client.posts[0]["client_msg_id"] == client_msg_id
+    assert uuid.UUID(client.posts[0]["client_msg_id"])

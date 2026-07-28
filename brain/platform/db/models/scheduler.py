@@ -30,6 +30,7 @@ __all__ = [
     "OWNER_MODE_MIRROR",
     "OWNER_MODE_SCHEDULER",
     "SchedulerColdStartReconciliation",
+    "SchedulerLivenessCheckpoint",
     "SchedulerFailureGuardLatch",
     "SchedulerJob",
     "SchedulerRun",
@@ -39,7 +40,7 @@ __all__ = [
 
 
 class SchedulerColdStartReconciliation(Base, CreatedAtMixin):
-    """Durable receipt for one scheduler-owned cold-start gap pass."""
+    """Durable receipt for one explicit scheduler cold-start window."""
 
     __tablename__ = "scheduler_cold_start_reconciliations"
     __table_args__ = (
@@ -53,11 +54,16 @@ class SchedulerColdStartReconciliation(Base, CreatedAtMixin):
         ),
         UniqueConstraint(
             "gap_started_at",
-            name="uq_scheduler_cold_start_reconciliations_gap",
+            "reconciled_through",
+            name="uq_scheduler_cold_start_reconciliations_window",
         ),
         UniqueConstraint(
             "notice_marker",
             name="uq_scheduler_cold_start_reconciliations_notice_marker",
+        ),
+        UniqueConstraint(
+            "notice_client_msg_id",
+            name="uq_scheduler_cold_start_reconciliations_client_msg_id",
         ),
     )
 
@@ -93,6 +99,12 @@ class SchedulerColdStartReconciliation(Base, CreatedAtMixin):
         DateTime(timezone=True),
         nullable=False,
     )
+    claim_generation: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("1"),
+        default=1,
+    )
     completed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -105,7 +117,20 @@ class SchedulerColdStartReconciliation(Base, CreatedAtMixin):
         String(40),
         nullable=True,
     )
+    notice_client_msg_id: Mapped[str] = mapped_column(String(36), nullable=False)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class SchedulerLivenessCheckpoint(Base, CreatedAtMixin):
+    """Latest scheduler heartbeat used as the next cold-start cursor."""
+
+    __tablename__ = "scheduler_liveness_checkpoints"
+
+    checkpoint_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
 
 
 class SchedulerJob(Base, CreatedAtMixin):

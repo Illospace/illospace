@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import uuid
 from typing import Any, Literal, NamedTuple
 
 from brain.platform.async_io import async_http_client
@@ -336,6 +337,7 @@ class SlackWebClient:
         text: str,
         thread_ts: str | None = None,
         metadata: dict[str, Any] | None = None,
+        client_msg_id: str | None = None,
     ) -> dict[str, Any]:
         submitted_text = str(text)
         chunks = split_slack_message(submitted_text, SLACK_MESSAGE_TEXT_CHARS)
@@ -348,6 +350,17 @@ class SlackWebClient:
                 payload["thread_ts"] = thread_ts
             if metadata:
                 payload["metadata"] = dict(metadata)
+            if client_msg_id:
+                payload["client_msg_id"] = (
+                    str(client_msg_id)
+                    if index == 0
+                    else str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"{client_msg_id}:continuation:{index}",
+                        )
+                    )
+                )
             try:
                 response = await self._post("chat.postMessage", payload)
             except Exception as exc:

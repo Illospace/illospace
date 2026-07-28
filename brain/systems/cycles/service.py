@@ -101,7 +101,7 @@ __all__ = [
     "async_finalize_cycle_run_from_run",
     "async_recover_stale_cycle_runs_once",
     "async_record_cycle_revision",
-    "async_catch_up_missed_cycle_slots",
+    "async_advance_cycle_schedule_past_gap",
     "async_remove_cycle_output_target",
     "async_run_cycle_now",
     "async_schedule_due_cycles_once",
@@ -520,6 +520,31 @@ async def async_recover_stale_cycle_runs_once(
     return executable_run_ids
 
 
+def _advance_cycle_schedule(
+    cycle: Cycle,
+    *,
+    from_dt: datetime,
+) -> datetime | None:
+    """Move one Cycle onto its next schedule slot."""
+
+    scheduled_for = _aware_utc(from_dt)
+    if scheduled_for is None:
+        raise ValueError("from_dt is required")
+    next_run_at = _aware_utc(
+        compute_next_run_at(
+            cycle.schedule_expr,
+            cycle.timezone,
+            from_dt=scheduled_for,
+        )
+    )
+    if next_run_at is not None and next_run_at <= scheduled_for:
+        raise RuntimeError("schedule did not advance")
+    cycle.next_run_at = next_run_at
+    if is_one_time_schedule_expr(cycle.schedule_expr) and next_run_at is None:
+        cycle.enabled = False
+    return next_run_at
+
+
 async def _async_materialize_due_cycle_runs_once(
     *,
     limit: int,
@@ -583,31 +608,23 @@ async def _async_materialize_due_cycle_runs_once(
                     run,
                 )
                 executable_run_ids.append(run.id)
-            next_run_at = compute_next_run_at(
-                cycle.schedule_expr,
-                cycle.timezone,
-                from_dt=scheduled_for,
-            )
-            cycle.next_run_at = next_run_at
-            if is_one_time_schedule_expr(cycle.schedule_expr) and next_run_at is None:
-                cycle.enabled = False
+            _advance_cycle_schedule(cycle, from_dt=scheduled_for)
 
     return executable_run_ids
 
 
-async def async_catch_up_missed_cycle_slots(
+async def async_advance_cycle_schedule_past_gap(
     session,
     *,
     gap_start: datetime,
     now: datetime,
     max_slots_per_cycle: int = 1000,
 ) -> dict[str, object]:
-    """Advance overdue Cycle slots through one cold-start catch-up window.
+    """Advance Cycle schedules past a cold-start gap without replaying slots.
 
     The cold-start owner supplies the one authoritative gap. This Cycle-owned
-    operation enumerates the slots that belong to it and advances
-    ``next_run_at`` without materializing ``CycleRun`` rows, so the normal
-    scheduler cannot replay missed digests after the catch-up notice.
+    operation lists the suppressed slots for the one catch-up notice, then
+    advances ``next_run_at`` beyond the gap without creating ``CycleRun`` rows.
     """
 
     gap_start = _aware_utc(gap_start)
@@ -640,6 +657,8 @@ async def async_catch_up_missed_cycle_slots(
 
     for cycle in cycles:
         scheduled_for = _aware_utc(cycle.next_run_at)
+        original_next_run_at = cycle.next_run_at
+        original_enabled = cycle.enabled
         seen = 0
         try:
             while scheduled_for is not None and scheduled_for < catch_up_before:
@@ -657,21 +676,16 @@ async def async_catch_up_missed_cycle_slots(
                         }
                     )
                 seen += 1
-                next_run_at = compute_next_run_at(
-                    cycle.schedule_expr,
-                    cycle.timezone,
+                scheduled_for = _advance_cycle_schedule(
+                    cycle,
                     from_dt=scheduled_for,
                 )
-                if next_run_at is not None and _aware_utc(next_run_at) <= scheduled_for:
-                    raise RuntimeError("schedule did not advance")
-                scheduled_for = _aware_utc(next_run_at)
         except Exception as exc:  # noqa: BLE001 - isolate one malformed Cycle
+            cycle.next_run_at = original_next_run_at
+            cycle.enabled = original_enabled
             errors.append(f"cycle:{cycle.id}:{exc}")
             continue
 
-        cycle.next_run_at = scheduled_for
-        if is_one_time_schedule_expr(cycle.schedule_expr) and scheduled_for is None:
-            cycle.enabled = False
         advanced += 1
 
     await session.flush()

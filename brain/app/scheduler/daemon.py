@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, select
@@ -265,6 +265,7 @@ async def async_scheduler_daemon_startup(
     owner_mode: str = OWNER_MODE_SCHEDULER,
     timezone_name: str = DEFAULT_SCHEDULER_TIMEZONE,
     now: datetime | None = None,
+    cold_start_gap_threshold: timedelta | None = None,
 ) -> dict[str, Any]:
     """Synchronize the built-in catalog before the daemon starts draining work."""
     now = now or _utc_now()
@@ -273,9 +274,20 @@ async def async_scheduler_daemon_startup(
 
     owner_mode = normalize_owner_mode(owner_mode)
     try:
-        from brain.app.scheduler.cold_start import reconcile_cold_start_gap
+        from brain.app.scheduler.cold_start import (
+            DEFAULT_COLD_START_GAP_THRESHOLD,
+            reconcile_cold_start_gap,
+        )
 
-        cold_start = await reconcile_cold_start_gap(session, now=now)
+        cold_start = await reconcile_cold_start_gap(
+            session,
+            now=now,
+            threshold=(
+                cold_start_gap_threshold
+                if cold_start_gap_threshold is not None
+                else DEFAULT_COLD_START_GAP_THRESHOLD
+            ),
+        )
     except Exception as exc:  # noqa: BLE001 - startup reconciliation is fail-open
         logger.exception("Scheduler cold-start reconciliation failed safely")
         await session.rollback()
@@ -337,6 +349,9 @@ async def async_scheduler_daemon_tick(
         resume=resume,
         now=now,
     )
+    from brain.app.scheduler.cold_start import record_scheduler_liveness_checkpoint
+
+    await record_scheduler_liveness_checkpoint(session, now=now)
     await session.flush()
     return {
         "ok": True,

@@ -15,6 +15,7 @@ from brain.platform.db.models.scheduler import (
     SchedulerFailureGuardLatch,
     SchedulerJob,
     SchedulerLease,
+    SchedulerLivenessCheckpoint,
     SchedulerRun,
     SchedulerRunStep,
 )
@@ -64,6 +65,7 @@ async def make_scheduler_test_session(async_sqlite_session_factory):
             Cycle.__table__,
             CycleRun.__table__,
             SchedulerColdStartReconciliation.__table__,
+            SchedulerLivenessCheckpoint.__table__,
             SchedulerJob.__table__,
             SchedulerFailureGuardLatch.__table__,
             SchedulerRun.__table__,
