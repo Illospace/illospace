@@ -1607,7 +1607,6 @@ async def run_agent_async(
                 raw_archive_messages.append(copy.deepcopy(state.messages[-1]))
             for notice in await load_due_budget_notices(
                 run_id=run_id,
-                budget=context_policy.budget.to_payload(),
                 tool_calls_log=getattr(_agent_context, "tool_calls_log", []),
                 sent=run_budget_notices_sent,
             ):

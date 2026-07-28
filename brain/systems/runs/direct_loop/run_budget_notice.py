@@ -62,9 +62,19 @@ def budget_notices_seen(
     return seen
 
 
-def _budget_ceiling(budget: Mapping[str, Any]) -> int:
+def _cumulative_run_token_budget() -> int:
     try:
-        return max(0, int(budget.get("auto_compact_threshold_tokens") or 0))
+        return max(
+            0,
+            int(
+                getattr(
+                    config,
+                    "AGENT_RUN_CUMULATIVE_TOKEN_BUDGET",
+                    0,
+                )
+                or 0
+            ),
+        )
     except (TypeError, ValueError):
         return 0
 
@@ -107,7 +117,6 @@ def _notice(
 async def load_due_budget_notices(
     *,
     run_id: int | None,
-    budget: Mapping[str, Any],
     tool_calls_log: Sequence[str],
     sent: Collection[str],
 ) -> tuple[RunBudgetNotice, ...]:
@@ -115,7 +124,9 @@ async def load_due_budget_notices(
 
     if run_id is None:
         return ()
-    ceiling_tokens = _budget_ceiling(budget)
+    if {SOFT_NOTICE_KEY, CEILING_NOTICE_KEY}.issubset(sent):
+        return ()
+    ceiling_tokens = _cumulative_run_token_budget()
     if ceiling_tokens <= 0:
         return ()
 

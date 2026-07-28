@@ -233,6 +233,7 @@ def test_agent_pushes_soft_and_ceiling_budget_notices_once_without_activity_tool
     from brain.kernel import config
     from brain.systems.runs import direct_agent
 
+    monkeypatch.setattr(config, "AGENT_RUN_CUMULATIVE_TOKEN_BUDGET", 1500)
     monkeypatch.setattr(config, "AGENT_RUN_BUDGET_NOTICE_FRACTION", 0.5)
     monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", "2000")
     monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "1500")
@@ -261,7 +262,6 @@ def test_agent_pushes_soft_and_ceiling_budget_notices_once_without_activity_tool
         {"tokens_used": 0, "workers_spawned": 0},
         {"tokens_used": 750, "workers_spawned": 0},
         {"tokens_used": 1500, "workers_spawned": 0},
-        {"tokens_used": 1700, "workers_spawned": 0},
     ])
 
     with patch.object(
@@ -296,7 +296,7 @@ def test_agent_pushes_soft_and_ceiling_budget_notices_once_without_activity_tool
         )
 
     assert result.success
-    assert load_activity.await_count == 4
+    assert load_activity.await_count == 3
     assert all(call.args == (42,) for call in load_activity.await_args_list)
     final_context = json.dumps(request_messages[-1])
     assert final_context.count("[System run budget notice: soft; run_id=42]") == 1
@@ -310,12 +310,13 @@ def test_agent_pushes_soft_and_ceiling_budget_notices_once_without_activity_tool
     assert "my_activity" not in final_context
 
 
-def test_agent_below_budget_leaves_model_context_byte_for_byte_unchanged(
+def test_cumulative_usage_above_context_compaction_but_below_run_budget_gets_no_notice(
     monkeypatch,
 ):
     from brain.kernel import config
     from brain.systems.runs import direct_agent
 
+    monkeypatch.setattr(config, "AGENT_RUN_CUMULATIVE_TOKEN_BUDGET", 10_000)
     monkeypatch.setattr(config, "AGENT_RUN_BUDGET_NOTICE_FRACTION", 0.5)
     monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", "2000")
     monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "1500")
@@ -333,7 +334,7 @@ def test_agent_below_budget_leaves_model_context_byte_for_byte_unchanged(
 
     client.messages.create.side_effect = create
     load_activity = AsyncMock(
-        return_value={"tokens_used": 749, "workers_spawned": 0},
+        return_value={"tokens_used": 1600, "workers_spawned": 0},
     )
 
     with patch.object(
@@ -360,6 +361,70 @@ def test_agent_below_budget_leaves_model_context_byte_for_byte_unchanged(
 
     assert result.success
     assert request_messages == [[{"role": "user", "content": "Do a short task"}]]
+    load_activity.assert_awaited_once_with(42)
+
+
+@pytest.mark.parametrize("run_budget", [None, 0, -1])
+async def test_unconfigured_run_budget_skips_notices_and_ledger_read(
+    monkeypatch,
+    run_budget,
+):
+    from brain.kernel import config
+    from brain.systems.runs.direct_loop.run_budget_notice import (
+        load_due_budget_notices,
+    )
+
+    monkeypatch.setattr(config, "AGENT_RUN_CUMULATIVE_TOKEN_BUDGET", run_budget)
+    load_activity = AsyncMock()
+
+    with patch(
+        "brain.systems.runs.direct_loop.run_budget_notice.load_run_activity",
+        new=load_activity,
+    ):
+        notices = await load_due_budget_notices(
+            run_id=42,
+            tool_calls_log=[],
+            sent=set(),
+        )
+
+    assert notices == ()
+    load_activity.assert_not_awaited()
+
+
+async def test_reloaded_run_with_both_budget_notices_skips_ledger_read(monkeypatch):
+    from brain.kernel import config
+    from brain.systems.runs.direct_loop.run_budget_notice import (
+        budget_notices_seen,
+        load_due_budget_notices,
+    )
+
+    monkeypatch.setattr(config, "AGENT_RUN_CUMULATIVE_TOKEN_BUDGET", 1500)
+    loaded_messages = [
+        {
+            "role": "user",
+            "content": "[System run budget notice: soft; run_id=42] prior notice",
+        },
+        {
+            "role": "user",
+            "content": "[System run budget notice: ceiling; run_id=42] prior notice",
+        },
+    ]
+    sent = budget_notices_seen(loaded_messages, run_id=42)
+    load_activity = AsyncMock()
+
+    with patch(
+        "brain.systems.runs.direct_loop.run_budget_notice.load_run_activity",
+        new=load_activity,
+    ):
+        notices = await load_due_budget_notices(
+            run_id=42,
+            tool_calls_log=[],
+            sent=sent,
+        )
+
+    assert sent == {"soft", "ceiling"}
+    assert notices == ()
+    load_activity.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

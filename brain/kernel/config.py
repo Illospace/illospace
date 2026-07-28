@@ -64,6 +64,24 @@ BRAIN_LOG_DIR = Path(os.getenv("BRAIN_LOG_DIR", PRIVATE_HOME / "logs"))
 # ---------------------------------------------------------------------------
 # Agent runtime
 # ---------------------------------------------------------------------------
+# About 33 near-limit 150K-token requests: well beyond an ordinary run, while
+# still catching a sustained large-context loop before it can consume 45 minutes.
+_DEFAULT_AGENT_RUN_CUMULATIVE_TOKEN_BUDGET = 5_000_000
+try:
+    AGENT_RUN_CUMULATIVE_TOKEN_BUDGET = max(
+        0,
+        int(
+            os.getenv(
+                "AGENT_RUN_CUMULATIVE_TOKEN_BUDGET",
+                str(_DEFAULT_AGENT_RUN_CUMULATIVE_TOKEN_BUDGET),
+            )
+        ),
+    )
+except (TypeError, ValueError):
+    AGENT_RUN_CUMULATIVE_TOKEN_BUDGET = (
+        _DEFAULT_AGENT_RUN_CUMULATIVE_TOKEN_BUDGET
+    )
+
 _DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION = 2 / 3
 try:
     AGENT_RUN_BUDGET_NOTICE_FRACTION = float(
