@@ -55,3 +55,20 @@ worker_swap_snapshot_details() {
 worker_swap_snapshot_report() {
   worker_swap_snapshot_field "$1" report
 }
+
+worker_lifecycle_phase_validate() {
+  worker_swap_contract lifecycle-validate "$1" >/dev/null 2>&1
+}
+
+# Permissive by design: starting and unknown observations may keep a
+# non-destructive wait in progress. This predicate never authorizes a signal or
+# container removal.
+worker_lifecycle_phase_may_proceed() {
+  worker_swap_contract lifecycle-may-proceed "$1" >/dev/null 2>&1
+}
+
+# Strict by design: only positive evidence that the worker is claiming may
+# cover a destructive step against another worker.
+worker_lifecycle_phase_is_claiming() {
+  worker_swap_contract lifecycle-is-claiming "$1" >/dev/null 2>&1
+}

@@ -9,6 +9,10 @@ import os
 import signal
 import time
 
+from brain.contracts.worker_swap import (
+    WorkerLifecyclePhase,
+    publish_worker_lifecycle_phase,
+)
 from brain.systems.runs.cortex.queue_health import QueueStallMonitor, queued_backlog_health_snapshot_async
 from brain.systems.runs.cortex.runner import (
     DrainResult,
@@ -35,10 +39,20 @@ _running = True
 _terminate_process = os._exit
 
 
+def _publish_worker_lifecycle_phase(phase: WorkerLifecyclePhase) -> None:
+    try:
+        publish_worker_lifecycle_phase(phase)
+    except Exception:
+        # Losing the signal must not itself take claiming capacity down. Deploy
+        # treats an unreadable phase as unknown and refuses destructive steps.
+        logger.exception("could not publish worker lifecycle phase %s", phase.value)
+
+
 def _signal_handler(signum, _frame):
     global _running
     logger.info("received %s, draining agent-run worker", signal.Signals(signum).name)
     _running = False
+    _publish_worker_lifecycle_phase(WorkerLifecyclePhase.DRAINING)
     request_runner_stop()
 
 
@@ -153,14 +167,22 @@ def main() -> None:
     exit_code = 0
     cycle_scheduler_enabled = False
     try:
+        _publish_worker_lifecycle_phase(WorkerLifecyclePhase.STARTING)
         logger.info("starting agent-run worker")
         _require_embedding_backend_ready()
+        if not _running:
+            return
         cycle_scheduler_enabled = _cycle_scheduler_enabled()
         if cycle_scheduler_enabled:
             start_cycle_scheduler()
         else:
             logger.info("cycle scheduler disabled for this worker")
+        if not _running:
+            return
         start_runner()
+        if not _running:
+            return
+        _publish_worker_lifecycle_phase(WorkerLifecyclePhase.CLAIMING)
         last_healthy = time.monotonic()
         health_grace_seconds = _runner_health_grace_seconds()
         queue_stall_monitor = QueueStallMonitor(
@@ -218,15 +240,21 @@ def main() -> None:
         exit_code = 1
         raise
     finally:
-        drain_result = stop_runner(
-            drain_timeout_seconds=_shutdown_drain_timeout_seconds()
-        )
-        _recover_timed_out_runs(drain_result)
-        if cycle_scheduler_enabled:
-            stop_cycle_scheduler()
-        logger.info("agent-run worker stopped")
-        logging.shutdown()
-        _terminate_process(exit_code)
+        try:
+            drain_result = stop_runner(
+                drain_timeout_seconds=_shutdown_drain_timeout_seconds()
+            )
+            _recover_timed_out_runs(drain_result)
+            if cycle_scheduler_enabled:
+                stop_cycle_scheduler()
+        except BaseException:
+            logger.exception("agent-run worker shutdown failed")
+            exit_code = 1
+        finally:
+            _publish_worker_lifecycle_phase(WorkerLifecyclePhase.STOPPED)
+            logger.info("agent-run worker stopped")
+            logging.shutdown()
+            _terminate_process(exit_code)
 
 
 if __name__ == "__main__":

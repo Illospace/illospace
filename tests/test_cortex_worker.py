@@ -173,11 +173,12 @@ def test_worker_term_path_calls_terminate_process_with_zero(monkeypatch):
 
     calls = []
 
-    monkeypatch.setattr(worker, "_running", False)
+    monkeypatch.setattr(worker, "_running", True)
     monkeypatch.setattr(worker, "_require_embedding_backend_ready", lambda: None)
     monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: True)
     monkeypatch.setattr(worker, "start_cycle_scheduler", lambda: None)
-    monkeypatch.setattr(worker, "start_runner", lambda: None)
+    monkeypatch.setattr(worker, "start_runner", lambda: setattr(worker, "_running", False))
+    monkeypatch.setattr(worker, "_publish_worker_lifecycle_phase", lambda _phase: None)
     monkeypatch.setattr(
         worker,
         "stop_runner",
@@ -195,6 +196,96 @@ def test_worker_term_path_calls_terminate_process_with_zero(monkeypatch):
         "logging.shutdown",
         ("terminate", 0),
     ]
+
+
+def test_worker_publishes_starting_then_claiming_then_stopped(monkeypatch):
+    from brain.contracts.worker_swap import WorkerLifecyclePhase
+    from brain.systems.cortex import worker
+
+    phases = []
+    terminate_calls = []
+
+    def require_embedding_backend_ready():
+        assert phases == [WorkerLifecyclePhase.STARTING]
+
+    def start_runner():
+        assert phases == [WorkerLifecyclePhase.STARTING]
+
+    def stop_after_first_poll(_seconds):
+        worker._running = False
+
+    monkeypatch.setattr(worker, "_running", True)
+    monkeypatch.setattr(worker, "_publish_worker_lifecycle_phase", phases.append)
+    monkeypatch.setattr(
+        worker,
+        "_require_embedding_backend_ready",
+        require_embedding_backend_ready,
+    )
+    monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: False)
+    monkeypatch.setattr(worker, "start_runner", start_runner)
+    monkeypatch.setattr(
+        worker,
+        "runner_health_snapshot",
+        lambda: {"runner_running": True},
+    )
+    monkeypatch.setattr(
+        worker.QueueStallMonitor,
+        "should_check",
+        lambda _self, *, now: False,
+    )
+    monkeypatch.setattr(worker.time, "sleep", stop_after_first_poll)
+    monkeypatch.setattr(
+        worker,
+        "stop_runner",
+        lambda **_kwargs: worker.DrainResult(),
+    )
+    monkeypatch.setattr(worker.logging, "shutdown", lambda: None)
+    monkeypatch.setattr(worker, "_terminate_process", terminate_calls.append)
+
+    worker.main()
+
+    assert phases == [
+        WorkerLifecyclePhase.STARTING,
+        WorkerLifecyclePhase.CLAIMING,
+        WorkerLifecyclePhase.STOPPED,
+    ]
+    assert terminate_calls == [0]
+
+
+def test_worker_sigterm_during_startup_never_publishes_claiming(monkeypatch):
+    from brain.contracts.worker_swap import WorkerLifecyclePhase
+    from brain.systems.cortex import worker
+
+    phases = []
+    terminate_calls = []
+
+    def interrupt_embedding_startup():
+        worker._signal_handler(signal.SIGTERM, None)
+
+    monkeypatch.setattr(worker, "_running", True)
+    monkeypatch.setattr(worker, "_publish_worker_lifecycle_phase", phases.append)
+    monkeypatch.setattr(worker, "request_runner_stop", lambda: None)
+    monkeypatch.setattr(
+        worker,
+        "_require_embedding_backend_ready",
+        interrupt_embedding_startup,
+    )
+    monkeypatch.setattr(
+        worker,
+        "stop_runner",
+        lambda **_kwargs: worker.DrainResult(),
+    )
+    monkeypatch.setattr(worker.logging, "shutdown", lambda: None)
+    monkeypatch.setattr(worker, "_terminate_process", terminate_calls.append)
+
+    worker.main()
+
+    assert phases == [
+        WorkerLifecyclePhase.STARTING,
+        WorkerLifecyclePhase.DRAINING,
+        WorkerLifecyclePhase.STOPPED,
+    ]
+    assert terminate_calls == [0]
 
 
 def test_worker_entry_point_recovers_timed_out_runs(monkeypatch, caplog):
@@ -226,17 +317,26 @@ def test_worker_entry_point_recovers_timed_out_runs(monkeypatch, caplog):
 
 
 def test_signal_handler_requests_runner_stop(monkeypatch):
+    from brain.contracts.worker_swap import WorkerLifecyclePhase
     from brain.systems.cortex import worker
 
-    request_stop_calls = []
+    calls = []
     previous_running = worker._running
-    monkeypatch.setattr(worker, "request_runner_stop", lambda: request_stop_calls.append(True))
+    monkeypatch.setattr(
+        worker,
+        "_publish_worker_lifecycle_phase",
+        lambda phase: calls.append(("phase", phase)),
+    )
+    monkeypatch.setattr(worker, "request_runner_stop", lambda: calls.append(("stop", True)))
     try:
         worker._running = True
 
         worker._signal_handler(signal.SIGTERM, None)
 
         assert worker._running is False
-        assert request_stop_calls == [True]
+        assert calls == [
+            ("phase", WorkerLifecyclePhase.DRAINING),
+            ("stop", True),
+        ]
     finally:
         worker._running = previous_running

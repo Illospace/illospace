@@ -21,7 +21,9 @@ def _simulator(
     *,
     body: str,
     handoff_starts: bool = True,
+    handoff_phase: str | None = "claiming",
     recreate_succeeds: bool = True,
+    replacement_phase: str | None = "claiming",
     survives_kill: bool = False,
     stub_drain_wait: bool = True,
     handoff_dies_after_ticks: int | None = None,
@@ -50,6 +52,7 @@ export HANDOFF_DIES_AFTER_TICKS={-1 if handoff_dies_after_ticks is None else han
 export HANDOFF_STATE_UNKNOWN={"1" if handoff_state_unknown else "0"}
 COMPOSE_RUNTIME_HANDOFF_REAP_TIMEOUT_SECONDS=0
 COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS={drain_timeout_seconds}
+COMPOSE_RUNTIME_WORKER_CLAIMING_TIMEOUT_SECONDS=0
 source "{RUNTIME_LIB}"
 
 ticks() {{ cat "$STATE/ticks" 2>/dev/null || printf '0\\n'; }}
@@ -96,6 +99,11 @@ docker() {{
         *RestartPolicy*) printf 'unless-stopped\\n' ;;
       esac
       ;;
+    exec)
+      local id="$2"
+      [ -f "$STATE/$id.phase" ] || return 1
+      cat "$STATE/$id.phase"
+      ;;
     kill)
       local id="${{!#}}"
       if [ "$2" = "-s" ]; then
@@ -103,9 +111,13 @@ docker() {{
       else
         [ "$SURVIVES_KILL" = "1" ] && return 0
         rm -f "$STATE/$id.running"
+        rm -f "$STATE/$id.phase"
       fi
       ;;
-    rm) rm -f "$STATE/${{!#}}.running" "$STATE/${{!#}}.stopped" ;;
+    rm)
+      rm -f "$STATE/${{!#}}.running" "$STATE/${{!#}}.stopped"
+      rm -f "$STATE/${{!#}}.phase"
+      ;;
     update) : ;;
   esac
   return 0
@@ -136,13 +148,14 @@ compose() {{
         rm -f "$f"
       done
       : > "$STATE/worker-2.running"
+      {"printf '%s\\n' " + repr(replacement_phase) + " > \"$STATE/worker-2.phase\"" if replacement_phase is not None else ":"}
       ;;
   esac
   return 0
 }}
 
 start_worker_handoff() {{
-  {': > "$STATE/handoff-1.running"; printf "handoff-1\\n"' if handoff_starts else 'printf "\\n"'}
+  {': > "$STATE/handoff-1.running"; ' + ("printf '%s\\n' " + repr(handoff_phase) + " > \"$STATE/handoff-1.phase\"; " if handoff_phase is not None else "") + 'printf "handoff-1\\n"' if handoff_starts else 'printf "\\n"'}
 }}
 
 # The drain never completes: the worker is wedged on an in-flight run, which is
@@ -211,6 +224,78 @@ def test_the_worker_is_not_drained_when_no_handoff_worker_came_up(tmp_path):
     assert "refusing to drain worker worker-1" in result.stderr
     assert "still claiming; nothing was interrupted" in result.stderr
     assert (state / "worker-1.running").exists()
+
+
+def test_a_starting_handoff_does_not_authorize_draining_the_last_claimer(tmp_path):
+    state = tmp_path / "s"
+    result = _run(
+        _simulator(
+            state,
+            body="update_worker_after_drain 2896:running",
+            handoff_phase="starting",
+        )
+    )
+
+    assert "STATUS=1" in result.stdout
+    assert "kill -s TERM worker-1" not in _calls(state)
+    assert "not confirmed claiming" in result.stderr
+    assert (state / "worker-1.running").exists()
+
+
+def test_an_unknown_handoff_phase_does_not_authorize_drain_or_removal(tmp_path):
+    state = tmp_path / "s"
+    result = _run(
+        _simulator(
+            state,
+            body="update_worker_after_drain 2896:running",
+            handoff_phase=None,
+        )
+    )
+
+    calls = _calls(state)
+    assert "STATUS=1" in result.stdout
+    assert "kill -s TERM worker-1" not in calls
+    assert "rm -f handoff-1" not in calls
+    assert "last lifecycle phase: unknown" in result.stderr
+    assert (state / "worker-1.running").exists()
+    assert (state / "handoff-1.running").exists()
+
+
+def test_a_starting_replacement_does_not_authorize_handoff_removal(tmp_path):
+    state = tmp_path / "s"
+    result = _run(
+        _simulator(
+            state,
+            body="update_worker_after_drain 2896:running",
+            replacement_phase="starting",
+        )
+    )
+
+    calls = _calls(state)
+    assert "STATUS=1" in result.stdout
+    assert "kill -s TERM worker-1" in calls
+    assert "kill -s TERM handoff-1" not in calls
+    assert "rm -f handoff-1" not in calls
+    assert "replacement worker worker-2 is not confirmed claiming" in result.stderr
+    assert (state / "handoff-1.running").exists()
+
+
+def test_an_unknown_replacement_phase_never_authorizes_handoff_removal(tmp_path):
+    state = tmp_path / "s"
+    result = _run(
+        _simulator(
+            state,
+            body="update_worker_after_drain 2896:running",
+            replacement_phase=None,
+        )
+    )
+
+    calls = _calls(state)
+    assert "STATUS=1" in result.stdout
+    assert "kill -s TERM handoff-1" not in calls
+    assert "rm -f handoff-1" not in calls
+    assert "last lifecycle phase: unknown" in result.stderr
+    assert (state / "handoff-1.running").exists()
 
 
 def test_a_worker_that_survives_sigkill_stops_the_swap(tmp_path):

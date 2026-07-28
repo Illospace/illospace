@@ -3,12 +3,19 @@
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
+from brain.contracts import worker_swap as worker_swap_contract
 from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
 from brain.contracts.worker_swap import (
+    WorkerLifecyclePhase,
     WorkerSwapDecision,
     parse_worker_swap_snapshot,
+    publish_worker_lifecycle_phase,
+    read_worker_lifecycle_phase,
+    worker_lifecycle_is_claiming,
+    worker_lifecycle_may_proceed,
     worker_swap_rows_sql,
     worker_swap_snapshot,
 )
@@ -486,6 +493,58 @@ def test_worker_swap_snapshot_derives_decision_and_presentation_from_canonical_p
     assert parsed.details == "2327:paused,2330:running,2331:queued"
     for status in OPEN_RUN_STATUS_VALUES:
         assert repr(status) in worker_swap_rows_sql()
+
+
+def test_worker_lifecycle_phase_is_published_outside_the_worker_process(
+    tmp_path, monkeypatch
+):
+    assert worker_swap_contract.WORKER_LIFECYCLE_PHASE_PATH == Path(
+        "/tmp/illo-worker-lifecycle-phase"
+    )
+    phase_path = tmp_path / "worker-lifecycle-phase"
+    monkeypatch.setattr(
+        worker_swap_contract,
+        "WORKER_LIFECYCLE_PHASE_PATH",
+        phase_path,
+    )
+
+    assert read_worker_lifecycle_phase() is None
+    for phase in WorkerLifecyclePhase:
+        publish_worker_lifecycle_phase(phase)
+        assert phase_path.read_text() == f"{phase.value}\n"
+        assert read_worker_lifecycle_phase() is phase
+
+
+def test_worker_lifecycle_contract_is_import_safe():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import brain.contracts.worker_swap; "
+                "assert 'brain.app' not in sys.modules; "
+                "assert 'brain.systems' not in sys.modules; "
+                "assert 'brain.platform' not in sys.modules"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_worker_lifecycle_uses_distinct_permissive_and_destructive_predicates():
+    for phase in (None, "unknown", WorkerLifecyclePhase.STARTING):
+        assert worker_lifecycle_may_proceed(phase) is True
+        assert worker_lifecycle_is_claiming(phase) is False
+
+    assert worker_lifecycle_may_proceed(WorkerLifecyclePhase.CLAIMING) is True
+    assert worker_lifecycle_is_claiming(WorkerLifecyclePhase.CLAIMING) is True
+
+    for phase in (WorkerLifecyclePhase.DRAINING, WorkerLifecyclePhase.STOPPED):
+        assert worker_lifecycle_may_proceed(phase) is False
+        assert worker_lifecycle_is_claiming(phase) is False
 
 
 def test_safe_deploy_scripts_cannot_restate_worker_swap_status_policy():
