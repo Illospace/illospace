@@ -22,6 +22,7 @@ from brain.systems.cortex.project_context.github import (
     parse_github_repo_slug,
 )
 from brain.systems.knowledge.connectors.base import KnowledgeDraft
+from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS
 from brain.systems.vault import async_resolve_project_bound_env_tokens
 
 
@@ -253,6 +254,10 @@ class GitHubConnector:
                 include_pull_requests=True,
                 limit=remaining,
                 cursor=state.get("next_page"),
+                # Project-context reads compact bodies to 1000 chars for LLM
+                # budgets; an index wants the whole body and bounds it once,
+                # in the pipeline, at RAW_TEXT_MAX_CHARS.
+                body_limit=RAW_TEXT_MAX_CHARS,
             )
             issues = [item for item in payload.get("issues") or [] if isinstance(item, Mapping)]
             for issue in issues:
