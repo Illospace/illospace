@@ -41,6 +41,32 @@ class _ScalarRows:
         return list(self.rows)
 
 
+def _stub_spawn_worker_auth_preflight(monkeypatch, worker_handlers):
+    """Pin the spawn admission preflight to `passed`.
+
+    Tests that exercise the store path must not depend on whether the machine
+    running them happens to have a provider credential: without this, the probe
+    falls back to ambient env keys, so the handler takes the happy path on a
+    developer laptop and the auth_blocked path on credential-free CI.
+    """
+    from brain.platform.integrations.provider_auth_preflight import (
+        ProviderAuthPreflightResult,
+    )
+
+    async def passed_preflight(_session, *, model, **_kwargs):
+        return ProviderAuthPreflightResult(
+            status="passed",
+            provider="openai",
+            model=model,
+        )
+
+    monkeypatch.setattr(
+        worker_handlers,
+        "_preflight_spawn_worker_auth",
+        passed_preflight,
+    )
+
+
 class _Store:
     def __init__(self):
         self.events = []
@@ -2236,6 +2262,7 @@ async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monke
 
     monkeypatch.setattr(worker_handlers, "UnitOfWork", _Uow)
     monkeypatch.setattr(worker_handlers, "AsyncAgentRunStore", _Store)
+    _stub_spawn_worker_auth_preflight(monkeypatch, worker_handlers)
 
     with bind_agent_context(
         run=SimpleNamespace(id=parent.id),
@@ -2332,6 +2359,7 @@ async def test_spawn_worker_handler_prefers_runtime_run_id_over_stale_context(mo
 
     monkeypatch.setattr(worker_handlers, "UnitOfWork", _Uow)
     monkeypatch.setattr(worker_handlers, "AsyncAgentRunStore", _Store)
+    _stub_spawn_worker_auth_preflight(monkeypatch, worker_handlers)
 
     with bind_agent_context(run=stale_parent):
         payload = json.loads(
