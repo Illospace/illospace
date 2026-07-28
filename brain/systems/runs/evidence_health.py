@@ -6,6 +6,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from sqlalchemy import select
+
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.cycle import CycleRun
 from brain.systems.runs.events import run_event
@@ -41,11 +43,13 @@ _RECEIPT_PAYLOAD_KEYS = frozenset(
         "status",
         "completeness",
         "failures",
+        "failure_identities",
         "failure_count",
         "missing_shards",
         "worker_shards",
     }
 )
+FailureIdentity = tuple[int | None, str, str, str | None]
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -71,6 +75,21 @@ def _unique_text(values: Sequence[Any]) -> tuple[str, ...]:
             for value in values
             if (normalized := _text(value)) is not None
         )
+    )
+
+
+def _failure_identity(value: Any) -> FailureIdentity | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    shard = _text(value[1])
+    stage = _text(value[2])
+    if shard is None or stage is None:
+        return None
+    return (
+        _run_id(value[0]),
+        shard,
+        stage,
+        _text(value[3]),
     )
 
 
@@ -132,7 +151,7 @@ class WorkerEvidenceFailure:
     details: Mapping[str, Any] = field(default_factory=dict)
 
     @property
-    def identity(self) -> tuple[Any, ...]:
+    def identity(self) -> FailureIdentity:
         return (
             self.worker_run_id,
             self.shard,
@@ -244,6 +263,7 @@ class WorkerEvidenceReceipt:
     status: str | None = None
     completeness: str | None = None
     failures: tuple[WorkerEvidenceFailure, ...] = ()
+    failure_identities: tuple[FailureIdentity, ...] = ()
     worker_shards: tuple[str, ...] = ()
     details: Mapping[str, Any] = field(default_factory=dict)
 
@@ -255,10 +275,23 @@ class WorkerEvidenceReceipt:
             for item in source.get("failures") or []
             if isinstance(item, Mapping)
         )
+        stored_identities = tuple(
+            identity
+            for item in source.get("failure_identities") or []
+            if (identity := _failure_identity(item)) is not None
+        )
         return cls(
             status=_text(source.get("status")),
             completeness=_text(source.get("completeness")),
             failures=failures,
+            failure_identities=tuple(
+                dict.fromkeys(
+                    (
+                        *(failure.identity for failure in failures),
+                        *stored_identities,
+                    )
+                )
+            ),
             worker_shards=_unique_text(source.get("worker_shards") or []),
             details={
                 str(key): value
@@ -280,19 +313,29 @@ class WorkerEvidenceReceipt:
         failures: Sequence[WorkerEvidenceFailure],
     ) -> tuple[WorkerEvidenceReceipt, tuple[WorkerEvidenceFailure, ...]]:
         current = list(self.failures)
-        identities = {failure.identity for failure in current}
+        canonical_identities = list(
+            dict.fromkeys(
+                (
+                    *(failure.identity for failure in current),
+                    *self.failure_identities,
+                )
+            )
+        )
+        identities = set(canonical_identities)
         added: list[WorkerEvidenceFailure] = []
         for failure in failures:
             if failure.identity in identities:
                 continue
             identities.add(failure.identity)
+            canonical_identities.append(failure.identity)
             current.append(failure)
             added.append(failure)
         return (
             WorkerEvidenceReceipt(
                 status="degraded",
                 completeness="unavailable",
-                failures=tuple(current[:20]),
+                failures=tuple(current),
+                failure_identities=tuple(canonical_identities),
                 worker_shards=self.worker_shards,
                 details=self.details,
             ),
@@ -306,22 +349,35 @@ class WorkerEvidenceReceipt:
             status="ok",
             completeness="complete",
             failures=self.failures,
+            failure_identities=self.failure_identities,
             worker_shards=_unique_text(worker_shards)[:20],
             details=self.details,
         )
 
     def to_payload(self) -> dict[str, Any]:
         payload = dict(self.details)
+        identities = tuple(
+            dict.fromkeys(
+                (
+                    *(failure.identity for failure in self.failures),
+                    *self.failure_identities,
+                )
+            )
+        )
         if self.status is not None:
             payload["status"] = self.status
         if self.completeness is not None:
             payload["completeness"] = self.completeness
         if self.failures:
             payload["failures"] = [
-                failure.to_payload() for failure in self.failures
+                failure.to_payload() for failure in self.failures[:20]
             ]
-            payload["failure_count"] = len(self.failures)
+            payload["failure_count"] = len(identities)
             payload["missing_shards"] = list(self.missing_shards)
+        if len(identities) > min(len(self.failures), 20):
+            payload["failure_identities"] = [
+                list(identity) for identity in identities
+            ]
         if self.worker_shards:
             payload["worker_shards"] = list(self.worker_shards)
         return payload
@@ -395,11 +451,13 @@ def materialization_failures_for_worker(
 
 
 async def _lock_parent_run(session: Any, parent_run_id: int) -> AgentRunRow | None:
-    return await session.get(
-        AgentRunRow,
-        int(parent_run_id),
-        with_for_update=True,
+    rows = await session.scalars(
+        select(AgentRunRow)
+        .where(AgentRunRow.id == int(parent_run_id))
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
+    return rows.one_or_none()
 
 
 async def _lock_cycle_run(
@@ -415,11 +473,13 @@ async def _lock_cycle_run(
         normalized_id = int(cycle_run_id)
     except (TypeError, ValueError):
         return None
-    return await session.get(
-        CycleRun,
-        normalized_id,
-        with_for_update=True,
+    rows = await session.scalars(
+        select(CycleRun)
+        .where(CycleRun.id == normalized_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
+    return rows.one_or_none()
 
 
 async def _persist_parent_evidence_receipt(

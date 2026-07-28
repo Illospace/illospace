@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
@@ -14,6 +15,7 @@ from brain.platform.db.models.agent_run import (
     AgentRunEventRow,
     AgentRunRow,
 )
+from brain.platform.db.models.cycle import CycleRun
 from brain.systems.runs.chantier_continuation import (
     CONTINUATION_QUEUED_EVENT,
     GENERIC_CONTINUATION_QUEUED_EVENT,
@@ -26,6 +28,7 @@ from brain.systems.runs.engine import AsyncAgentRunEngine
 from brain.systems.runs.evidence_health import (
     WorkerEvidenceFailure,
     WorkerEvidenceReceipt,
+    record_parent_evidence_failures,
 )
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
@@ -62,6 +65,31 @@ def test_worker_evidence_receipt_deduplicates_by_full_canonical_identity():
         execution_failure,
         distinct_failure_for_same_worker,
     )
+
+
+def test_worker_evidence_receipt_keeps_identity_past_presentation_limit():
+    failures = tuple(
+        WorkerEvidenceFailure(
+            worker_run_id=worker_id,
+            worker_role="repository reader",
+            shard=f"github:example/repo-{worker_id}",
+            stage="worker_execution",
+            status="failed",
+            error="The worker failed.",
+        )
+        for worker_id in range(1, 22)
+    )
+
+    receipt, added = WorkerEvidenceReceipt().with_failures(failures)
+    payload = receipt.to_payload()
+    replayed = WorkerEvidenceReceipt.from_payload(payload)
+    replayed, replay_added = replayed.with_failures([failures[20]])
+
+    assert added == failures
+    assert len(payload["failures"]) == 20
+    assert payload["failure_count"] == 21
+    assert replay_added == ()
+    assert replayed.to_payload()["failure_count"] == 21
 
 
 async def _session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
@@ -560,3 +588,107 @@ async def test_fanout_anchor_lock_uses_select_for_update():
     )
     assert "WHERE agent_runs.id = 482" in sql
     assert sql.rstrip().endswith("FOR UPDATE")
+
+
+async def test_evidence_locks_refresh_preloaded_parent_and_cycle_after_concurrent_commit(
+    tmp_path,
+    sqlite_postgres_ddl_patch,
+):
+    database = tmp_path / "evidence-lock-freshness.sqlite3"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        for table in (
+            AgentRunRow.__table__,
+            AgentRunEventRow.__table__,
+            CycleRun.__table__,
+        ):
+            await connection.execute(CreateTable(table, if_not_exists=True))
+
+    try:
+        async with factory() as setup_session:
+            cycle_run = CycleRun(
+                cycle_id=7,
+                scheduled_for=datetime.now(UTC),
+                status="running",
+                prompt_snapshot="Inspect the repository.",
+                context_snapshot={
+                    "evidence_health": {"status": "pending"},
+                    "setup_cycle_marker": True,
+                },
+            )
+            setup_session.add(cycle_run)
+            await setup_session.flush()
+            anchor = await _anchor(
+                AsyncAgentRunStore(setup_session),
+                metadata={
+                    "source": "cycle",
+                    "cycle_run_id": cycle_run.id,
+                    "evidence_health": {"status": "pending"},
+                    "setup_parent_marker": True,
+                },
+            )
+            await setup_session.commit()
+            parent_run_id = anchor.id
+            cycle_run_id = cycle_run.id
+
+        async with factory() as stale_session:
+            stale_parent = await stale_session.get(AgentRunRow, parent_run_id)
+            stale_cycle = await stale_session.get(CycleRun, cycle_run_id)
+            assert "concurrent_parent_marker" not in stale_parent.metadata_
+            assert "concurrent_cycle_marker" not in stale_cycle.context_snapshot
+
+            async with factory() as writer_session:
+                writer_parent = await writer_session.get(
+                    AgentRunRow,
+                    parent_run_id,
+                )
+                writer_parent.metadata_ = {
+                    **writer_parent.metadata_,
+                    "concurrent_parent_marker": "committed while lock waited",
+                }
+                writer_cycle = await writer_session.get(CycleRun, cycle_run_id)
+                writer_cycle.context_snapshot = {
+                    **writer_cycle.context_snapshot,
+                    "concurrent_cycle_marker": "committed while lock waited",
+                }
+                await writer_session.commit()
+
+            failure = WorkerEvidenceFailure(
+                worker_run_id=49,
+                worker_role="repository reader",
+                shard="github:example/repository",
+                stage="worker_execution",
+                status="failed",
+                error="The worker failed.",
+            )
+            await record_parent_evidence_failures(
+                stale_session,
+                parent_run_id=parent_run_id,
+                failures=[failure],
+            )
+            await stale_session.commit()
+
+        async with factory() as inspection_session:
+            persisted_parent = await inspection_session.get(
+                AgentRunRow,
+                parent_run_id,
+            )
+            persisted_cycle = await inspection_session.get(
+                CycleRun,
+                cycle_run_id,
+            )
+            assert persisted_parent.metadata_["concurrent_parent_marker"] == (
+                "committed while lock waited"
+            )
+            assert persisted_cycle.context_snapshot[
+                "concurrent_cycle_marker"
+            ] == "committed while lock waited"
+            assert persisted_parent.metadata_["evidence_health"][
+                "failure_count"
+            ] == 1
+            assert persisted_cycle.context_snapshot["evidence_health"][
+                "failure_count"
+            ] == 1
+    finally:
+        await engine.dispose()
