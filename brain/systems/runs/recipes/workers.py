@@ -28,8 +28,12 @@ from brain.systems.runs.token_usage import (
     async_summarize_run_usage_in_savepoint,
     usage_totals_payload,
 )
+from brain.systems.personality import soul_prompt_section
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
-from brain.systems.runs.recipes.surface_guidance import response_surface_guidance
+from brain.systems.runs.recipes.surface_guidance import (
+    has_user_visible_surface,
+    response_surface_guidance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -313,8 +317,16 @@ def build_worker_prompt(
         if workspace_ref:
             context_parts.append("Workspace:\n" + compact_project_reference(workspace_ref))
         context_block = "\n\n".join(context_parts)
+    # A headless worker reports to its parent run and needs no identity. One that
+    # inherited a response surface writes text a person reads, so it needs the voice.
+    soul_section = (
+        soul_prompt_section()
+        if has_user_visible_surface(target_ref=target_ref, metadata=metadata)
+        else ""
+    )
     return (
-        WORKER_AGENT_INSTRUCTIONS
+        (f"{soul_section}\n\n" if soul_section else "")
+        + WORKER_AGENT_INSTRUCTIONS
         + "\n\n"
         + response_surface_guidance(target_ref=target_ref, metadata=metadata)
         + _json_block("Worker Assignment", assignment.to_payload())

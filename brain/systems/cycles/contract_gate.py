@@ -16,6 +16,7 @@ from brain.platform.integrations.provider_error_sentinel import (
 )
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.cycle import Cycle, CycleRun
+from brain.systems.personality import soul_prompt_section
 
 logger = logging.getLogger(__name__)
 
@@ -464,13 +465,17 @@ def _repair_prompt(
         if append_only
         else "Candidate visible answer"
     )
+    soul_section = soul_prompt_section()
     return [
         {
             "role": "system",
             "content": (
-                "You are repairing one scheduled Cycle final answer before it becomes visible. "
+                (f"{soul_section}\n\n" if soul_section else "")
+                + "You are repairing one scheduled Cycle final answer before it becomes visible. "
                 "Use only the supplied mission, result contract, evidence packet, and candidate. "
                 f"Do not claim fresh tool access. {repair_instruction} "
+                "The repaired text is read by a teammate, so write it in the voice the Soul "
+                "above describes. "
                 "If evidence is insufficient, say evidence_health=degraded and name the gap."
             ),
         },

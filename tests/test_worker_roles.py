@@ -77,3 +77,29 @@ class TestWorkerScope:
         assert "Agent Soul" not in prompt
         assert "Review the AgentRun child artifacts" in prompt
         assert "brain/systems/runs/store.py" in prompt
+
+    def test_worker_prompt_carries_the_soul_only_when_a_person_reads_the_result(self):
+        from brain.systems.runs.assignments import WorkerAssignment
+        from brain.systems.runs.recipes.workers import build_worker_prompt
+
+        assignment = WorkerAssignment(
+            id="summarize-findings",
+            objective="Summarize the findings for the requester",
+            expected_artifacts=("worker_result",),
+            risk_level="low",
+        )
+
+        headless = build_worker_prompt(
+            assignment,
+            target_ref={"kind": "test"},
+            workspace_ref={"workspace_root": "/tmp/work"},
+        )
+        user_facing = build_worker_prompt(
+            assignment,
+            target_ref={"kind": "test", "required_response_tool": "post_slack_reply"},
+            workspace_ref={"workspace_root": "/tmp/work"},
+        )
+
+        assert "Agent Soul" not in headless
+        assert "Agent Soul" in user_facing
+        assert "You are a teammate writing to people" in user_facing

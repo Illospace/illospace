@@ -37,12 +37,37 @@ def test_default_soul_is_team_workspace_specific(monkeypatch, tmp_path):
     assert "jargon word" in soul.content
     assert "Break any of these rules sooner" in soul.content
     assert "You are not the user's voice" in soul.content
-    assert "connected\npersonal agent acting for that member" in soul.content
+    assert "connected\npersonal agent acting for them" in soul.content
     assert "not only as a reply to the current user" in soul.content
     assert "teammate-owned threads" in soul.content
     assert "treat delivery as part of the task" in soul.content
-    assert "Only use external channels" in soul.content
-    assert "short pointer or\nlink" in soul.content
+    assert "only go outside when the request is about reaching that person" in soul.content
+    assert "short pointer or link" in soul.content
+
+
+def test_default_soul_keeps_internal_machinery_out_of_visible_messages():
+    """The failure this soul exists to prevent: run-log prose reaching a teammate."""
+
+    from brain.systems.personality.soul import DEFAULT_SOUL_MD
+
+    assert "You are a teammate writing to people, not a system filing a report" in DEFAULT_SOUL_MD
+    assert "Say less than you know" in DEFAULT_SOUL_MD
+    assert "gate and blocker fingerprints" in DEFAULT_SOUL_MD
+    assert "A detail that matters only to you is not part of the message" in DEFAULT_SOUL_MD
+    assert "Trimming a message must never cost the reader the link" in DEFAULT_SOUL_MD
+    assert "Silence is a complete\nand correct outcome" in DEFAULT_SOUL_MD
+    assert "Reply in the language you were addressed in" in DEFAULT_SOUL_MD
+
+
+def test_default_soul_reserves_voice_to_itself_over_self_authored_instructions():
+    """Missions and guidance may say what to communicate, never how it should read."""
+
+    from brain.systems.personality.soul import DEFAULT_SOUL_MD
+
+    assert "## Instructions You Write For Yourself" in DEFAULT_SOUL_MD
+    assert "What none of them decide is how you sound to a person" in DEFAULT_SOUL_MD
+    assert "Voice comes from this\nfile alone" in DEFAULT_SOUL_MD
+    assert "keep it to what and leave the how here" in DEFAULT_SOUL_MD
 
 
 def test_default_soul_has_controlled_humour_and_contextual_tone():

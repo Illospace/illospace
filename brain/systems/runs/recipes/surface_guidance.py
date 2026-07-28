@@ -53,6 +53,20 @@ def response_surface_guidance(
     return "\n".join(lines)
 
 
+def has_user_visible_surface(
+    *,
+    target_ref: Mapping[str, Any] | None,
+    metadata: Mapping[str, Any] | None,
+) -> bool:
+    """True when this run's output is written for a person rather than a parent run."""
+
+    containers = (dict(target_ref or {}), dict(metadata or {}))
+    return bool(
+        _first_text(containers, ("required_response_tool", "final_answer_target_surface"))
+        or _first_string_list(containers, ("alternative_response_tools",))
+    )
+
+
 def _first_text(containers: tuple[Mapping[str, Any], ...], keys: tuple[str, ...]) -> str:
     for container in containers:
         if not isinstance(container, Mapping):
@@ -81,4 +95,4 @@ def _first_string_list(
     return []
 
 
-__all__ = ["response_surface_guidance"]
+__all__ = ["response_surface_guidance", "has_user_visible_surface"]
