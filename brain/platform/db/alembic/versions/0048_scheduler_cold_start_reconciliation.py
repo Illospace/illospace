@@ -84,7 +84,7 @@ def upgrade() -> None:
                 nullable=False,
             ),
             sa.CheckConstraint(
-                "status IN ('running', 'completed', 'degraded')",
+                "status IN ('pending', 'running', 'completed', 'degraded', 'failed')",
                 name="ck_scheduler_cold_start_reconciliations_status",
             ),
             sa.CheckConstraint(
@@ -111,6 +111,7 @@ def upgrade() -> None:
             _CHECKPOINT_TABLE,
             sa.Column("checkpoint_key", sa.String(length=80), nullable=False),
             sa.Column("last_heartbeat_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("last_reconciled_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column(
                 "created_at",
                 sa.DateTime(timezone=True),

@@ -249,7 +249,7 @@ async def test_post_message_propagates_stable_client_message_ids():
 
     await client.post_message(
         channel="C_SOFTWARE",
-        text="Exactly one catch-up notice.",
+        text="Cold-start catch-up notice.",
         client_msg_id=client_msg_id,
     )
 

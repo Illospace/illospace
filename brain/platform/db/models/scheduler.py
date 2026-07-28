@@ -45,7 +45,7 @@ class SchedulerColdStartReconciliation(Base, CreatedAtMixin):
     __tablename__ = "scheduler_cold_start_reconciliations"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('running', 'completed', 'degraded')",
+            "status IN ('pending', 'running', 'completed', 'degraded', 'failed')",
             name="ck_scheduler_cold_start_reconciliations_status",
         ),
         CheckConstraint(
@@ -122,12 +122,16 @@ class SchedulerColdStartReconciliation(Base, CreatedAtMixin):
 
 
 class SchedulerLivenessCheckpoint(Base, CreatedAtMixin):
-    """Latest scheduler heartbeat used as the next cold-start cursor."""
+    """Scheduler liveness plus the successfully reconciled outage watermark."""
 
     __tablename__ = "scheduler_liveness_checkpoints"
 
     checkpoint_key: Mapped[str] = mapped_column(String(80), primary_key=True)
     last_heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    last_reconciled_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
     )

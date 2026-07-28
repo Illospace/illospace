@@ -1,13 +1,14 @@
 """Scheduler daemon and operational health helpers."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from brain.platform.db.models.scheduler import (
     OWNER_MODE_SCHEDULER,
@@ -23,6 +24,7 @@ from brain.app.scheduler.catalog import (
     normalize_owner_mode,
 )
 from brain.app.scheduler.executor import async_drain_scheduler
+from brain.app.scheduler.cold_start import record_scheduler_liveness_checkpoint
 from brain.app.scheduler.runtime import (
     RUN_STATUS_SHELVED,
     async_reclaim_expired_leases,
@@ -30,10 +32,52 @@ from brain.app.scheduler.runtime import (
 )
 
 logger = logging.getLogger(__name__)
+SCHEDULER_HEARTBEAT_INTERVAL = timedelta(seconds=15)
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class _SchedulerLivenessHeartbeat:
+    """Refresh liveness on an independent session while a tick is in flight."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session_factory = (
+            async_sessionmaker(
+                bind=session.bind,
+                class_=AsyncSession,
+                expire_on_commit=False,
+            )
+            if session.bind is not None
+            else None
+        )
+        self._task: asyncio.Task[None] | None = None
+
+    async def __aenter__(self) -> _SchedulerLivenessHeartbeat:
+        if self._session_factory is not None:
+            self._task = asyncio.create_task(self._run())
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        if self._task is None:
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+
+    async def _run(self) -> None:
+        while True:
+            await asyncio.sleep(SCHEDULER_HEARTBEAT_INTERVAL.total_seconds())
+            if self._session_factory is None:
+                return
+            try:
+                async with self._session_factory() as heartbeat_session:
+                    await record_scheduler_liveness_checkpoint(heartbeat_session)
+            except Exception:  # noqa: BLE001 - liveness retries on the next cadence
+                logger.exception("Scheduler liveness heartbeat failed safely")
 
 
 def _as_utc(dt_text: str | None) -> datetime | None:
@@ -340,18 +384,17 @@ async def async_scheduler_daemon_tick(
         raise ValueError("now must be timezone-aware")
 
     owner_mode = normalize_owner_mode(owner_mode)
-    reclaimed = await async_reclaim_expired_leases(session, now=now)
-    drain = await async_drain_scheduler(
-        session,
-        owner_mode=owner_mode,
-        job_key=job_key,
-        max_runs=max_runs,
-        resume=resume,
-        now=now,
-    )
-    from brain.app.scheduler.cold_start import record_scheduler_liveness_checkpoint
-
     await record_scheduler_liveness_checkpoint(session, now=now)
+    async with _SchedulerLivenessHeartbeat(session):
+        reclaimed = await async_reclaim_expired_leases(session, now=now)
+        drain = await async_drain_scheduler(
+            session,
+            owner_mode=owner_mode,
+            job_key=job_key,
+            max_runs=max_runs,
+            resume=resume,
+            now=now,
+        )
     await session.flush()
     return {
         "ok": True,

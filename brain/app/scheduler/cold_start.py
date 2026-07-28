@@ -10,10 +10,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from brain.platform.db.models.agent_run import AgentRunRow
+from brain.platform.db.models.cycle import CycleRun
 from brain.platform.db.models.scheduler import (
     SchedulerColdStartReconciliation,
     SchedulerLivenessCheckpoint,
@@ -33,12 +35,18 @@ DEFAULT_COLD_START_GAP_THRESHOLD = timedelta(minutes=60)
 ACTIVE_CLAIM_WINDOW = timedelta(minutes=30)
 CLAIM_HEARTBEAT_INTERVAL = timedelta(minutes=5)
 LIVENESS_CHECKPOINT_KEY = "scheduler_connector"
+MAX_RECONCILIATION_ATTEMPTS = 3
 NOTICE_TEXT_LIMIT = 3900
 NOTICE_HISTORY_MAX_PAGES = 20
+RECONCILIATION_LANES = ("slack", "cycles", "tracker")
 
 
 class ClaimSuperseded(RuntimeError):
     """The receipt claim generation no longer authorizes work."""
+
+
+class NoticeDeliveryCommitFailed(ClaimSuperseded):
+    """Slack accepted a notice whose local delivered-state commit was fenced."""
 
 
 def _utc_now() -> datetime:
@@ -79,6 +87,14 @@ async def scheduler_liveness_checkpoint(session) -> datetime | None:
     return _utc(checkpoint.last_heartbeat_at) if checkpoint is not None else None
 
 
+async def scheduler_reconciliation_checkpoint(session) -> datetime | None:
+    checkpoint = await session.get(
+        SchedulerLivenessCheckpoint,
+        LIVENESS_CHECKPOINT_KEY,
+    )
+    return _utc(checkpoint.last_reconciled_at) if checkpoint is not None else None
+
+
 async def record_scheduler_liveness_checkpoint(
     session,
     *,
@@ -97,6 +113,7 @@ async def record_scheduler_liveness_checkpoint(
         checkpoint = SchedulerLivenessCheckpoint(
             checkpoint_key=LIVENESS_CHECKPOINT_KEY,
             last_heartbeat_at=heartbeat_at,
+            last_reconciled_at=heartbeat_at,
         )
         try:
             async with session.begin_nested():
@@ -117,6 +134,29 @@ async def record_scheduler_liveness_checkpoint(
     return _utc(checkpoint.last_heartbeat_at) or heartbeat_at
 
 
+async def _last_successful_workload_completion(session) -> datetime | None:
+    """Retain the pre-checkpoint cold-start signal as a first-boot fallback."""
+
+    cycle_completion = await session.scalar(
+        select(func.max(CycleRun.completed_at)).where(
+            CycleRun.status == "completed",
+            CycleRun.completed_at.is_not(None),
+        )
+    )
+    agent_completion = await session.scalar(
+        select(func.max(AgentRunRow.completed_at)).where(
+            AgentRunRow.status == "completed",
+            AgentRunRow.completed_at.is_not(None),
+        )
+    )
+    completions = [
+        completion
+        for completion in (_utc(cycle_completion), _utc(agent_completion))
+        if completion is not None
+    ]
+    return max(completions, default=None)
+
+
 async def _receipt_for_window(
     session,
     *,
@@ -133,13 +173,69 @@ async def _receipt_for_window(
     )
 
 
+async def _ensure_pending_receipt(
+    session,
+    *,
+    gap_start: datetime,
+    gap_end: datetime,
+    captured_at: datetime,
+) -> SchedulerColdStartReconciliation:
+    receipt = await _receipt_for_window(
+        session,
+        gap_start=gap_start,
+        gap_end=gap_end,
+    )
+    if receipt is not None:
+        return receipt
+    receipt = SchedulerColdStartReconciliation(
+        gap_started_at=gap_start,
+        reconciled_through=gap_end,
+        status="pending",
+        lane_results={},
+        notice_state="pending",
+        notice_marker=_notice_marker(gap_start, gap_end),
+        notice_client_msg_id=_notice_client_msg_id(gap_start, gap_end),
+        claimed_at=captured_at,
+        claim_generation=0,
+    )
+    try:
+        async with session.begin_nested():
+            session.add(receipt)
+            await session.flush()
+    except IntegrityError:
+        receipt = await _receipt_for_window(
+            session,
+            gap_start=gap_start,
+            gap_end=gap_end,
+        )
+        if receipt is None:
+            raise
+    await session.commit()
+    return receipt
+
+
+async def _next_uncaptured_gap_start(
+    session,
+    *,
+    checkpoint_at: datetime,
+) -> datetime:
+    latest_receipt_end = await session.scalar(
+        select(func.max(SchedulerColdStartReconciliation.reconciled_through)).where(
+            SchedulerColdStartReconciliation.gap_started_at >= checkpoint_at,
+        )
+    )
+    return max(checkpoint_at, _utc(latest_receipt_end) or checkpoint_at)
+
+
 async def _unfinished_receipt(
     session,
 ) -> SchedulerColdStartReconciliation | None:
     return await session.scalar(
         select(SchedulerColdStartReconciliation)
         .where(
-            SchedulerColdStartReconciliation.status.in_({"running", "degraded"})
+            SchedulerColdStartReconciliation.status.in_(
+                {"pending", "running", "degraded"}
+            )
         )
         .order_by(
             SchedulerColdStartReconciliation.gap_started_at.asc(),
@@ -204,11 +300,45 @@ async def _claim_receipt(
         return receipt, 1
 
     observed_generation = int(receipt.claim_generation)
+    claimed_at_current = _utc(receipt.claimed_at) or claimed_at
+    claim_is_stale = claimed_at_current <= claimed_at - ACTIVE_CLAIM_WINDOW
+    if receipt.status in {"completed", "failed"}:
+        return receipt, None
+    if observed_generation >= MAX_RECONCILIATION_ATTEMPTS:
+        if receipt.status != "running" or claim_is_stale:
+            terminal = await session.execute(
+                update(SchedulerColdStartReconciliation)
+                .where(
+                    SchedulerColdStartReconciliation.id == receipt.id,
+                    SchedulerColdStartReconciliation.claim_generation
+                    == observed_generation,
+                    SchedulerColdStartReconciliation.status.in_(
+                        {"pending", "running", "degraded"}
+                    ),
+                )
+                .values(
+                    status="failed",
+                    completed_at=claimed_at,
+                    last_error=(
+                        "cold-start reconciliation retry budget exhausted "
+                        f"after {observed_generation} attempt(s)"
+                    ),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            await session.commit()
+            if terminal.rowcount == 1:
+                return await _refresh_receipt(session, receipt.id), None
+        return await _refresh_receipt(session, receipt.id), None
+
     claim = await session.execute(
         update(SchedulerColdStartReconciliation)
         .where(
             SchedulerColdStartReconciliation.id == receipt.id,
             SchedulerColdStartReconciliation.claim_generation == observed_generation,
+            SchedulerColdStartReconciliation.status.in_(
+                {"pending", "running", "degraded"}
+            ),
             or_(
                 SchedulerColdStartReconciliation.status != "running",
                 SchedulerColdStartReconciliation.claimed_at
@@ -349,6 +479,71 @@ def _has_errors(value: Any) -> bool:
     return False
 
 
+def _lanes_succeeded(receipt: SchedulerColdStartReconciliation) -> bool:
+    lane_results = dict(receipt.lane_results or {})
+    return all(
+        isinstance(lane_results.get(name), Mapping)
+        and lane_results[name].get("status") == "succeeded"
+        for name in RECONCILIATION_LANES
+    )
+
+
+def _failure_summary(receipt: SchedulerColdStartReconciliation) -> str:
+    failed_lanes = [
+        name
+        for name in RECONCILIATION_LANES
+        if not isinstance(dict(receipt.lane_results or {}).get(name), Mapping)
+        or dict(receipt.lane_results or {})[name].get("status") != "succeeded"
+    ]
+    reasons = []
+    if failed_lanes:
+        reasons.append(f"failed lanes: {', '.join(failed_lanes)}")
+    if receipt.notice_state != "posted":
+        reasons.append(f"notice state: {receipt.notice_state}")
+    detail = "; ".join(reasons) or "unknown reconciliation failure"
+    return (
+        "cold-start reconciliation retry budget exhausted "
+        f"after {receipt.claim_generation} attempt(s): {detail}"
+    )
+
+
+async def _advance_reconciliation_checkpoint(
+    session,
+    *,
+    receipt: SchedulerColdStartReconciliation,
+) -> datetime | None:
+    """Advance only across a successfully reconciled window with no older hole."""
+
+    if not _lanes_succeeded(receipt):
+        return await scheduler_reconciliation_checkpoint(session)
+    checkpoint = await session.get(
+        SchedulerLivenessCheckpoint,
+        LIVENESS_CHECKPOINT_KEY,
+        populate_existing=True,
+    )
+    if checkpoint is None:
+        raise RuntimeError("scheduler liveness checkpoint disappeared")
+    current = _utc(checkpoint.last_reconciled_at)
+    target = _utc(receipt.reconciled_through)
+    if current is None or target is None or target <= current:
+        return current
+    blocker = await session.scalar(
+        select(SchedulerColdStartReconciliation.id)
+        .where(
+            SchedulerColdStartReconciliation.id != receipt.id,
+            SchedulerColdStartReconciliation.status != "completed",
+            SchedulerColdStartReconciliation.gap_started_at < target,
+            SchedulerColdStartReconciliation.reconciled_through > current,
+        )
+        .limit(1)
+    )
+    if blocker is not None:
+        return current
+    checkpoint.last_reconciled_at = target
+    await session.commit()
+    return target
+
+
 async def _run_lane(
     session,
     receipt: SchedulerColdStartReconciliation,
@@ -446,7 +641,7 @@ def render_cold_start_notice(
     lane_results: Mapping[str, Any],
     marker: str,
 ) -> str:
-    """Render one bounded Slack message for the complete catch-up pass."""
+    """Render a bounded Slack message for the complete catch-up pass."""
 
     slack_status, slack = _lane_result(lane_results, "slack")
     cycles_status, cycles = _lane_result(lane_results, "cycles")
@@ -547,6 +742,8 @@ async def _deliver_notice(
     now: datetime,
     client: Any | None,
 ) -> dict[str, Any]:
+    """Deliver at most once with a live claim; supersession dedup is best effort."""
+
     receipt = await _refresh_receipt(session, receipt.id)
     if receipt.notice_state == "posted":
         return {"status": "posted", "already_posted": True}
@@ -556,7 +753,7 @@ async def _deliver_notice(
 
             client = await slack_web_client_from_runtime(
                 requested_by="scheduler_cold_start_reconciliation",
-                reason="Post the one scheduler cold-start catch-up notice.",
+                reason="Post the scheduler cold-start catch-up notice.",
             )
         channel_id = await resolve_slack_channel(client, SOFTWARE_CHANNEL)
     except Exception as exc:
@@ -604,12 +801,23 @@ async def _deliver_notice(
             "last_error": None,
         },
     )
+    receipt_id = receipt.id
     text = render_cold_start_notice(
         gap_start=_utc(receipt.gap_started_at) or now,
         now=_utc(receipt.reconciled_through) or now,
         lane_results=dict(receipt.lane_results or {}),
         marker=receipt.notice_marker,
     )
+    claim_is_current = await _heartbeat_claim(
+        session,
+        receipt_id=receipt_id,
+        claim_generation=claim_generation,
+    )
+    if not claim_is_current:
+        raise ClaimSuperseded(
+            f"cold-start receipt {receipt_id} claim {claim_generation} "
+            "was superseded before Slack delivery"
+        )
     try:
         response = await client.post_message(
             channel=channel_id,
@@ -617,11 +825,11 @@ async def _deliver_notice(
             client_msg_id=receipt.notice_client_msg_id,
         )
     except Exception as exc:
-        # A retry uses the same Slack client_msg_id. History is useful evidence,
-        # but Slack's idempotency key closes the accepted-send/history-lag gap.
+        # History plus a stable client_msg_id provide best-effort deduplication.
+        # Slack does not document deduplication semantics or a retention window.
         await _fenced_receipt_update(
             session,
-            receipt_id=receipt.id,
+            receipt_id=receipt_id,
             claim_generation=claim_generation,
             values={
                 "claimed_at": _utc_now(),
@@ -629,18 +837,32 @@ async def _deliver_notice(
             },
         )
         raise
-    await _fenced_receipt_update(
-        session,
-        receipt_id=receipt.id,
-        claim_generation=claim_generation,
-        values={
-            "claimed_at": _utc_now(),
-            "notice_state": "posted",
-            "notice_posted_at": now,
-            "notice_message_ts": str(response.get("ts") or "") or None,
-            "last_error": None,
-        },
-    )
+    try:
+        await _fenced_receipt_update(
+            session,
+            receipt_id=receipt_id,
+            claim_generation=claim_generation,
+            values={
+                "claimed_at": _utc_now(),
+                "notice_state": "posted",
+                "notice_posted_at": now,
+                "notice_message_ts": str(response.get("ts") or "") or None,
+                "last_error": None,
+            },
+        )
+    except ClaimSuperseded as exc:
+        logger.error(
+            "Slack accepted cold-start notice for receipt %s, but claim %s "
+            "was superseded before delivered state committed; a retry must "
+            "disambiguate delivery from history and the stable client_msg_id",
+            receipt_id,
+            claim_generation,
+        )
+        raise NoticeDeliveryCommitFailed(
+            f"Slack may already have delivered the notice for cold-start receipt "
+            f"{receipt_id}; claim {claim_generation} was superseded before the "
+            "local posted-state commit"
+        ) from exc
     return {
         "status": "posted",
         "already_posted": False,
@@ -661,12 +883,18 @@ def _receipt_result(
         "receipt_id": receipt.id,
         "status": receipt.status,
         "claim_generation": receipt.claim_generation,
+        "retry": {
+            "attempts": receipt.claim_generation,
+            "max_attempts": MAX_RECONCILIATION_ATTEMPTS,
+            "exhausted": receipt.status == "failed",
+        },
         "gap_start": gap_start.isoformat(),
         "gap_end": (_utc(receipt.reconciled_through) or now).isoformat(),
         "gap_seconds": int(
             ((_utc(receipt.reconciled_through) or now) - gap_start).total_seconds()
         ),
         "lane_results": dict(receipt.lane_results or {}),
+        "last_error": receipt.last_error,
         "notice": {
             "state": receipt.notice_state,
             "posted_at": (
@@ -752,6 +980,11 @@ async def _execute_claimed_receipt(
             isinstance(lane, Mapping) and lane.get("status") == "failed"
             for lane in dict(receipt.lane_results or {}).values()
         )
+        completed = not lane_failed and receipt.notice_state == "posted"
+        retry_exhausted = (
+            not completed
+            and claim_generation >= MAX_RECONCILIATION_ATTEMPTS
+        )
         receipt = await _fenced_receipt_update(
             session=session,
             receipt_id=receipt.id,
@@ -760,8 +993,15 @@ async def _execute_claimed_receipt(
                 "completed_at": now,
                 "status": (
                     "completed"
-                    if not lane_failed and receipt.notice_state == "posted"
+                    if completed
+                    else "failed"
+                    if retry_exhausted
                     else "degraded"
+                ),
+                "last_error": (
+                    _failure_summary(receipt)
+                    if retry_exhausted
+                    else receipt.last_error
                 ),
             },
         )
@@ -775,13 +1015,41 @@ async def reconcile_cold_start_gap(
     threshold: timedelta = DEFAULT_COLD_START_GAP_THRESHOLD,
     notice_client: Any | None = None,
 ) -> dict[str, Any]:
-    """Reconcile one liveness-checkpoint window before cadence resumes."""
+    """Capture a detected outage and service the oldest retryable receipt."""
 
     now = _utc(now or _utc_now())
     if now is None:
         raise ValueError("now is required")
     if threshold.total_seconds() < 0:
         raise ValueError("threshold must not be negative")
+
+    checkpoint_at = await scheduler_liveness_checkpoint(session)
+    fallback_used = False
+    if checkpoint_at is None:
+        checkpoint_at = await _last_successful_workload_completion(session)
+        if checkpoint_at is None:
+            await record_scheduler_liveness_checkpoint(session, now=now)
+            return {
+                "triggered": False,
+                "reason": "no_liveness_checkpoint",
+                "checkpoint_at": now.isoformat(),
+                "threshold_seconds": int(threshold.total_seconds()),
+            }
+        fallback_used = True
+        await record_scheduler_liveness_checkpoint(session, now=checkpoint_at)
+
+    capture_start = await _next_uncaptured_gap_start(
+        session,
+        checkpoint_at=checkpoint_at,
+    )
+    captured = None
+    if now - capture_start > threshold:
+        captured = await _ensure_pending_receipt(
+            session,
+            gap_start=capture_start,
+            gap_end=now,
+            captured_at=now,
+        )
 
     unfinished = await _unfinished_receipt(session)
     if unfinished is not None:
@@ -794,12 +1062,16 @@ async def reconcile_cold_start_gap(
             claimed_at=now,
         )
         if claim_generation is None:
-            return _receipt_result(
+            result = _receipt_result(
                 receipt,
                 gap_start=gap_start,
                 now=now,
                 idempotent_replay=True,
             )
+            if captured is not None and captured.id != receipt.id:
+                result["captured_receipt_id"] = captured.id
+            result["fallback_to_workload"] = fallback_used
+            return result
         try:
             receipt = await _execute_claimed_receipt(
                 session,
@@ -810,98 +1082,55 @@ async def reconcile_cold_start_gap(
             )
         except ClaimSuperseded:
             receipt = await _refresh_receipt(session, receipt.id)
-            return _receipt_result(
+            result = _receipt_result(
                 receipt,
                 gap_start=gap_start,
                 now=now,
                 idempotent_replay=True,
             )
-        await record_scheduler_liveness_checkpoint(session, now=now)
-        return _receipt_result(
+            if captured is not None and captured.id != receipt.id:
+                result["captured_receipt_id"] = captured.id
+            result["fallback_to_workload"] = fallback_used
+            return result
+        reconciled_at = await _advance_reconciliation_checkpoint(
+            session,
+            receipt=receipt,
+        )
+        result = _receipt_result(
             receipt,
             gap_start=gap_start,
             now=now,
             idempotent_replay=False,
         )
+        result["reconciliation_checkpoint_at"] = (
+            reconciled_at.isoformat() if reconciled_at is not None else None
+        )
+        if captured is not None and captured.id != receipt.id:
+            result["captured_receipt_id"] = captured.id
+        result["fallback_to_workload"] = fallback_used
+        return result
 
-    gap_start = await scheduler_liveness_checkpoint(session)
-    if gap_start is None:
-        await record_scheduler_liveness_checkpoint(session, now=now)
-        return {
-            "triggered": False,
-            "reason": "no_liveness_checkpoint",
-            "checkpoint_at": now.isoformat(),
-            "threshold_seconds": int(threshold.total_seconds()),
-        }
-
-    gap = now - gap_start
+    gap = now - capture_start
     if gap <= threshold:
         await record_scheduler_liveness_checkpoint(session, now=now)
         return {
             "triggered": False,
             "reason": "below_threshold",
-            "gap_start": gap_start.isoformat(),
+            "gap_start": capture_start.isoformat(),
             "gap_end": now.isoformat(),
             "gap_seconds": int(gap.total_seconds()),
             "threshold_seconds": int(threshold.total_seconds()),
+            "fallback_to_workload": fallback_used,
         }
-
-    existing = await _receipt_for_window(
-        session,
-        gap_start=gap_start,
-        gap_end=now,
-    )
-    if existing is not None and existing.status == "completed":
-        await record_scheduler_liveness_checkpoint(session, now=now)
-        return _receipt_result(
-            existing,
-            gap_start=gap_start,
-            now=now,
-            idempotent_replay=True,
-        )
-
-    receipt, claim_generation = await _claim_receipt(
-        session,
-        gap_start=gap_start,
-        gap_end=now,
-        claimed_at=now,
-    )
-    if claim_generation is None:
-        return _receipt_result(
-            receipt,
-            gap_start=gap_start,
-            now=now,
-            idempotent_replay=True,
-        )
-    try:
-        receipt = await _execute_claimed_receipt(
-            session,
-            receipt=receipt,
-            claim_generation=claim_generation,
-            now=now,
-            notice_client=notice_client,
-        )
-    except ClaimSuperseded:
-        receipt = await _refresh_receipt(session, receipt.id)
-        return _receipt_result(
-            receipt,
-            gap_start=gap_start,
-            now=now,
-            idempotent_replay=True,
-        )
-    await record_scheduler_liveness_checkpoint(session, now=now)
-    return _receipt_result(
-        receipt,
-        gap_start=gap_start,
-        now=now,
-        idempotent_replay=False,
-    )
+    raise RuntimeError("detected cold-start gap was not captured")
 
 
 __all__ = [
     "DEFAULT_COLD_START_GAP_THRESHOLD",
+    "MAX_RECONCILIATION_ATTEMPTS",
     "record_scheduler_liveness_checkpoint",
     "reconcile_cold_start_gap",
     "render_cold_start_notice",
     "scheduler_liveness_checkpoint",
+    "scheduler_reconciliation_checkpoint",
 ]

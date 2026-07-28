@@ -1117,6 +1117,48 @@ async def test_scheduler_daemon_tick_executes_due_scheduler_job(session):
     )
 
 
+async def test_scheduler_daemon_tick_refreshes_liveness_during_long_work(
+    session,
+    monkeypatch,
+):
+    import brain.app.scheduler.daemon as scheduler_daemon
+
+    now = datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        scheduler_daemon,
+        "SCHEDULER_HEARTBEAT_INTERVAL",
+        timedelta(milliseconds=10),
+    )
+    monkeypatch.setattr(
+        scheduler_daemon,
+        "async_reclaim_expired_leases",
+        AsyncMock(return_value=[]),
+    )
+    heartbeat_times: list[datetime] = []
+
+    async def record_heartbeat(_session, *, now=None):
+        heartbeat_times.append(now or scheduler_daemon._utc_now())
+        return heartbeat_times[-1]
+
+    monkeypatch.setattr(
+        scheduler_daemon,
+        "record_scheduler_liveness_checkpoint",
+        record_heartbeat,
+    )
+
+    async def slow_drain(*_args, **_kwargs):
+        await asyncio.sleep(0.06)
+        return {"executed": 0, "runs": []}
+
+    monkeypatch.setattr(scheduler_daemon, "async_drain_scheduler", slow_drain)
+
+    await async_scheduler_daemon_tick(session, now=now)
+
+    assert heartbeat_times[0] == now
+    assert len(heartbeat_times) >= 2
+    assert any(heartbeat_at > now for heartbeat_at in heartbeat_times[1:])
+
+
 async def test_scheduler_daemon_tick_emits_new_failure_once_without_historical_snapshot(session):
     job = _make_scheduler_job(
         job_key="scheduler_tick_failure",

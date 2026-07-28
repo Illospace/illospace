@@ -623,7 +623,7 @@ async def async_advance_cycle_schedule_past_gap(
     """Advance Cycle schedules past a cold-start gap without replaying slots.
 
     The cold-start owner supplies the one authoritative gap. This Cycle-owned
-    operation lists the suppressed slots for the one catch-up notice, then
+    operation lists the suppressed slots for the catch-up notice, then
     advances ``next_run_at`` beyond the gap without creating ``CycleRun`` rows.
     """
 

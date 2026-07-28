@@ -11,7 +11,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 import pytest
 import sqlalchemy as sa
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
 
 import brain.app.scheduler.cold_start as cold_start
@@ -31,6 +31,7 @@ from brain.systems.inbound.service import submit_inbound_envelope
 from brain.systems.slack.client import SlackApiError
 from brain.systems.slack.connector import backfill_monitored_slack_history
 from brain.systems.slack.ingress import normalize_slack_socket_event
+from tests.scheduler_test_support import make_scheduler_test_session
 
 
 ORG_ID = "11111111-1111-4111-8111-111111111111"
@@ -83,6 +84,7 @@ def test_cold_start_receipt_migration_round_trips(monkeypatch):
         assert checkpoint_columns == {
             "checkpoint_key",
             "last_heartbeat_at",
+            "last_reconciled_at",
             "created_at",
         }
 
@@ -124,6 +126,11 @@ async def receipt_session(async_sqlite_session_factory):
             SchedulerLivenessCheckpoint.__table__,
         ]
     )
+
+
+@pytest.fixture
+async def workload_session(async_sqlite_session_factory):
+    return await make_scheduler_test_session(async_sqlite_session_factory)
 
 
 class _NoticeClient:
@@ -480,6 +487,202 @@ async def test_failed_slack_lane_does_not_block_tracker_cycles_or_notice(
 
 
 @pytest.mark.asyncio
+async def test_permanent_lane_failure_exhausts_retry_budget_and_stays_terminal(
+    receipt_session,
+    monkeypatch,
+):
+    gap_start = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+    gap_end = gap_start + timedelta(hours=2)
+    notice = _NoticeClient()
+    slack = AsyncMock(side_effect=RuntimeError("Slack history unavailable"))
+    await cold_start.record_scheduler_liveness_checkpoint(
+        receipt_session,
+        now=gap_start,
+    )
+    monkeypatch.setattr(cold_start, "backfill_monitored_slack_history", slack)
+    monkeypatch.setattr(
+        cold_start,
+        "async_advance_cycle_schedule_past_gap",
+        AsyncMock(return_value={"missed_slots": [], "errors": []}),
+    )
+    monkeypatch.setattr(
+        cold_start,
+        "run_cold_start_tracker_maintenance",
+        AsyncMock(return_value={"orgs": 0, "summaries": {}}),
+    )
+
+    attempts = [
+        await cold_start.reconcile_cold_start_gap(
+            receipt_session,
+            now=gap_end + timedelta(minutes=offset),
+            notice_client=notice,
+        )
+        for offset in range(4)
+    ]
+    receipt = await receipt_session.scalar(
+        select(SchedulerColdStartReconciliation)
+    )
+    checkpoint = await receipt_session.get(
+        SchedulerLivenessCheckpoint,
+        cold_start.LIVENESS_CHECKPOINT_KEY,
+        populate_existing=True,
+    )
+
+    assert [result["status"] for result in attempts[:3]] == [
+        "degraded",
+        "degraded",
+        "failed",
+    ]
+    assert attempts[2]["retry"] == {
+        "attempts": 3,
+        "max_attempts": 3,
+        "exhausted": True,
+    }
+    assert attempts[3]["triggered"] is False
+    assert slack.await_count == cold_start.MAX_RECONCILIATION_ATTEMPTS
+    assert receipt is not None
+    assert receipt.status == "failed"
+    assert "retry budget exhausted" in (receipt.last_error or "")
+    assert checkpoint is not None
+    assert checkpoint.last_reconciled_at.replace(tzinfo=timezone.utc) == gap_start
+
+
+@pytest.mark.asyncio
+async def test_old_degraded_receipt_captures_and_preserves_new_outage_window(
+    receipt_session,
+    monkeypatch,
+):
+    first_start = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+    first_end = first_start + timedelta(hours=2)
+    second_start = first_end + timedelta(hours=2)
+    second_end = second_start + timedelta(hours=2)
+    windows: list[tuple[datetime, datetime]] = []
+    fail_first = True
+
+    async def slack_lane(*_args, gap_start, now, **_kwargs):
+        nonlocal fail_first
+        windows.append((gap_start, now))
+        if fail_first:
+            fail_first = False
+            raise RuntimeError("temporary Slack outage")
+        return {"errors": []}
+
+    await cold_start.record_scheduler_liveness_checkpoint(
+        receipt_session,
+        now=first_start,
+    )
+    monkeypatch.setattr(cold_start, "backfill_monitored_slack_history", slack_lane)
+    monkeypatch.setattr(
+        cold_start,
+        "async_advance_cycle_schedule_past_gap",
+        AsyncMock(return_value={"missed_slots": [], "errors": []}),
+    )
+    monkeypatch.setattr(
+        cold_start,
+        "run_cold_start_tracker_maintenance",
+        AsyncMock(return_value={"orgs": 0, "summaries": {}}),
+    )
+    notice = _NoticeClient()
+
+    first = await cold_start.reconcile_cold_start_gap(
+        receipt_session,
+        now=first_end,
+        notice_client=notice,
+    )
+    assert first["status"] == "degraded"
+    await cold_start.record_scheduler_liveness_checkpoint(
+        receipt_session,
+        now=second_start,
+    )
+
+    retried = await cold_start.reconcile_cold_start_gap(
+        receipt_session,
+        now=second_end,
+        notice_client=notice,
+    )
+    pending = await receipt_session.get(
+        SchedulerColdStartReconciliation,
+        retried["captured_receipt_id"],
+        populate_existing=True,
+    )
+
+    assert retried["status"] == "completed"
+    assert pending is not None
+    assert pending.status == "pending"
+    assert pending.gap_started_at.replace(tzinfo=timezone.utc) == second_start
+    assert pending.reconciled_through.replace(tzinfo=timezone.utc) == second_end
+    assert retried["reconciliation_checkpoint_at"] == first_end.isoformat()
+
+    reconciled = await cold_start.reconcile_cold_start_gap(
+        receipt_session,
+        now=second_end + timedelta(minutes=1),
+        notice_client=notice,
+    )
+
+    assert reconciled["receipt_id"] == pending.id
+    assert reconciled["status"] == "completed"
+    assert reconciled["gap_start"] == second_start.isoformat()
+    assert reconciled["gap_end"] == second_end.isoformat()
+    assert windows == [
+        (first_start, first_end),
+        (first_start, first_end),
+        (second_start, second_end),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_missing_checkpoint_falls_back_to_successful_workload(
+    workload_session,
+    monkeypatch,
+):
+    now = datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc)
+    gap_start = now - timedelta(hours=2)
+    workload_session.add(
+        AgentRunRow(
+            thread_id="cold-start-fallback",
+            profile="default",
+            recipe="test",
+            status="completed",
+            input_message="Historical completed workload",
+            target_ref={},
+            workspace_ref={},
+            model_policy={},
+            metadata_={},
+            completed_at=gap_start,
+        )
+    )
+    await workload_session.commit()
+    slack = AsyncMock(return_value={"errors": []})
+    monkeypatch.setattr(cold_start, "backfill_monitored_slack_history", slack)
+    monkeypatch.setattr(
+        cold_start,
+        "async_advance_cycle_schedule_past_gap",
+        AsyncMock(return_value={"missed_slots": [], "errors": []}),
+    )
+    monkeypatch.setattr(
+        cold_start,
+        "run_cold_start_tracker_maintenance",
+        AsyncMock(return_value={"orgs": 0, "summaries": {}}),
+    )
+
+    result = await cold_start.reconcile_cold_start_gap(
+        workload_session,
+        now=now,
+        notice_client=_NoticeClient(),
+    )
+
+    assert result["triggered"] is True
+    assert result["fallback_to_workload"] is True
+    assert result["gap_start"] == gap_start.isoformat()
+    assert result["status"] == "completed"
+    slack.assert_awaited_once_with(
+        workload_session,
+        gap_start=gap_start,
+        now=now,
+    )
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_notice_send_is_found_in_history_before_retry(
     receipt_session,
     monkeypatch,
@@ -528,7 +731,7 @@ async def test_ambiguous_notice_send_is_found_in_history_before_retry(
 
 
 @pytest.mark.asyncio
-async def test_notice_client_message_id_deduplicates_when_history_lags(
+async def test_notice_reuses_stable_client_message_id_when_history_lags(
     receipt_session,
     monkeypatch,
 ):
@@ -619,6 +822,118 @@ async def test_claim_heartbeat_blocks_reclaim_and_fence_blocks_stale_sender(
             client=notice,
         )
     assert notice.posts == []
+
+
+@pytest.mark.asyncio
+async def test_notice_claim_is_revalidated_after_posting_cas_before_slack_send(
+    receipt_session,
+    monkeypatch,
+):
+    gap_start = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+    gap_end = gap_start + timedelta(hours=2)
+    receipt, generation = await cold_start._claim_receipt(
+        receipt_session,
+        gap_start=gap_start,
+        gap_end=gap_end,
+        claimed_at=gap_end,
+    )
+    assert generation == 1
+    original_heartbeat = cold_start._heartbeat_claim
+
+    async def supersede_before_revalidation(
+        heartbeat_session,
+        *,
+        receipt_id,
+        claim_generation,
+        now=None,
+    ):
+        del now
+        await heartbeat_session.execute(
+            update(SchedulerColdStartReconciliation)
+            .where(
+                SchedulerColdStartReconciliation.id == receipt_id,
+                SchedulerColdStartReconciliation.claim_generation
+                == claim_generation,
+            )
+            .values(
+                claim_generation=claim_generation + 1,
+                claimed_at=gap_end,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await heartbeat_session.commit()
+        return await original_heartbeat(
+            heartbeat_session,
+            receipt_id=receipt_id,
+            claim_generation=claim_generation,
+        )
+
+    monkeypatch.setattr(
+        cold_start,
+        "_heartbeat_claim",
+        supersede_before_revalidation,
+    )
+    notice = _NoticeClient()
+
+    with pytest.raises(cold_start.ClaimSuperseded):
+        await cold_start._deliver_notice(
+            receipt_session,
+            receipt,
+            claim_generation=generation,
+            now=gap_end,
+            client=notice,
+        )
+
+    assert notice.posts == []
+
+
+@pytest.mark.asyncio
+async def test_notice_post_commit_supersession_reports_possible_delivery(
+    receipt_session,
+):
+    gap_start = datetime(2026, 7, 27, 10, 0, tzinfo=timezone.utc)
+    gap_end = gap_start + timedelta(hours=2)
+    receipt, generation = await cold_start._claim_receipt(
+        receipt_session,
+        gap_start=gap_start,
+        gap_end=gap_end,
+        claimed_at=gap_end,
+    )
+    assert generation == 1
+
+    class SupersedingNoticeClient(_NoticeClient):
+        async def post_message(self, **kwargs):
+            self.posts.append(kwargs)
+            await receipt_session.execute(
+                update(SchedulerColdStartReconciliation)
+                .where(
+                    SchedulerColdStartReconciliation.id == receipt.id,
+                    SchedulerColdStartReconciliation.claim_generation == generation,
+                )
+                .values(
+                    claim_generation=generation + 1,
+                    claimed_at=gap_end,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            await receipt_session.commit()
+            return {"ok": True, "ts": "1785261600.000001"}
+
+    notice = SupersedingNoticeClient()
+
+    with pytest.raises(
+        cold_start.NoticeDeliveryCommitFailed,
+        match="may already have delivered",
+    ):
+        await cold_start._deliver_notice(
+            receipt_session,
+            receipt,
+            claim_generation=generation,
+            now=gap_end,
+            client=notice,
+        )
+
+    assert len(notice.posts) == 1
 
 
 @pytest.fixture
