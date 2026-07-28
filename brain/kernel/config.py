@@ -62,6 +62,22 @@ AGENT_SOUL_PATH = Path(os.getenv("AGENT_SOUL_PATH", AGENT_CONTEXT_DIR / "SOUL.md
 BRAIN_LOG_DIR = Path(os.getenv("BRAIN_LOG_DIR", PRIVATE_HOME / "logs"))
 
 # ---------------------------------------------------------------------------
+# Agent runtime
+# ---------------------------------------------------------------------------
+_DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION = 2 / 3
+try:
+    AGENT_RUN_BUDGET_NOTICE_FRACTION = float(
+        os.getenv(
+            "AGENT_RUN_BUDGET_NOTICE_FRACTION",
+            str(_DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION),
+        )
+    )
+except (TypeError, ValueError):
+    AGENT_RUN_BUDGET_NOTICE_FRACTION = _DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION
+if not 0 < AGENT_RUN_BUDGET_NOTICE_FRACTION < 1:
+    AGENT_RUN_BUDGET_NOTICE_FRACTION = _DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION
+
+# ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
 DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
