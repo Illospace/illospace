@@ -20,7 +20,13 @@ from brain.systems.cycles.contracts import (
     cycle_result_contract,
 )
 from brain.app.api.routers import cycles as cycles_router
-from brain.platform.db.models.cycle import Cycle, CycleRun, CycleRunEvaluation
+from brain.platform.db.models.cycle import (
+    Cycle,
+    CycleFailureGuardLatch,
+    CycleFailureGuardObservation,
+    CycleRun,
+    CycleRunEvaluation,
+)
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea
@@ -184,6 +190,14 @@ class _FakeSession:
             self._artifacts.append(value)
 
 
+class _AsyncNestedTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class _AsyncFakeSession(_FakeSession):
     async def get(self, model, value):
         return super().get(model, value)
@@ -191,8 +205,14 @@ class _AsyncFakeSession(_FakeSession):
     async def scalars(self, statement):
         return super().scalars(statement)
 
+    async def scalar(self, statement):
+        return self._cycle
+
     async def flush(self):
         return None
+
+    def begin_nested(self):
+        return _AsyncNestedTransaction()
 
 
 class _ScalarResult:
@@ -269,6 +289,7 @@ class _RouterCycleSession:
 class _ExecuteCycleSession:
     def __init__(self, *, run, cycle, idea, owner=None, expected_run_id=None):
         self._scalar_values = [run, cycle, run, idea]
+        self._cycle = cycle
         self._owner = owner
         self.added = []
         self.statements = []
@@ -353,6 +374,12 @@ class _SharedSessionUnitOfWork:
 
 class _AsyncExecuteCycleSession(_ExecuteCycleSession):
     async def scalars(self, statement):
+        if "cycle_failure_guard_latches" in str(statement):
+            return _AllResult(
+                value
+                for value in self.added
+                if isinstance(value, CycleFailureGuardLatch)
+            )
         return super().scalars(statement)
 
     async def execute(self, statement):
@@ -362,10 +389,15 @@ class _AsyncExecuteCycleSession(_ExecuteCycleSession):
         return super().get(model, value)
 
     async def scalar(self, statement):
+        if "FROM cycles" in str(statement):
+            return self._cycle
         return 0
 
     async def flush(self):
         super().flush()
+
+    def begin_nested(self):
+        return _AsyncNestedTransaction()
 
 
 class _AsyncRunNowCreateSession:
@@ -419,6 +451,12 @@ class _RecoverStaleSession:
         self.added = []
 
     async def scalars(self, statement):
+        if "cycle_failure_guard_latches" in str(statement):
+            return _AllResult(
+                value
+                for value in self.added
+                if isinstance(value, CycleFailureGuardLatch)
+            )
         return _AllResult(self._runs)
 
     async def get(self, model, value):
@@ -428,8 +466,25 @@ class _RecoverStaleSession:
             return self._agent_runs.get(value)
         return None
 
+    async def scalar(self, statement):
+        params = statement.compile().params
+        return next(
+            (
+                cycle
+                for cycle_id, cycle in self._cycles.items()
+                if cycle_id in params.values()
+            ),
+            None,
+        )
+
+    async def flush(self):
+        return None
+
     def add(self, value):
         self.added.append(value)
+
+    def begin_nested(self):
+        return _AsyncNestedTransaction()
 
 
 class _SingleRunSession:
@@ -614,6 +669,8 @@ async def cycle_scheduler_session(
         [
             Cycle.__table__,
             CycleRun.__table__,
+            CycleFailureGuardLatch.__table__,
+            CycleFailureGuardObservation.__table__,
             CycleRunEvaluation.__table__,
         ]
     )
@@ -1813,9 +1870,18 @@ async def test_execute_cycle_run_auth_blocks_expired_codex_before_agent_admissio
         raise AssertionError("agent admission should not run after auth preflight blocks")
 
     published = []
+    failure_alerts = []
+
+    async def capture_failure_alert(**kwargs):
+        failure_alerts.append(kwargs)
+
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
     monkeypatch.setattr("brain.platform.integrations.llm._async_resolve_key_from_db", fake_resolve_key)
     monkeypatch.setattr("brain.platform.integrations.llm.refresh_codex_access_token", fake_refresh)
+    monkeypatch.setattr(
+        "brain.systems.cycles.cycle_failure_guard.async_deliver_failure_alert",
+        capture_failure_alert,
+    )
     monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
     monkeypatch.setattr(service, "publish", lambda event, payload: published.append((event, payload)))
 
@@ -1832,6 +1898,21 @@ async def test_execute_cycle_run_auth_blocks_expired_codex_before_agent_admissio
     assert "token expired and refresh failed" not in run.error
     assert run.context_snapshot["auth_preflight"]["status"] == "auth_blocked"
     assert run.context_snapshot["auth_preflight"]["credential"] == "OpenAI Codex / ChatGPT"
+    assert cycle.consecutive_failure_count == 1
+    assert any(
+        isinstance(value, CycleFailureGuardLatch)
+        for value in session.added
+    )
+    assert len(failure_alerts) == 1
+    assert failure_alerts[0]["subject"].identity == "Scheduled Codex check (#5)"
+    assert (
+        failure_alerts[0]["presentation"].title
+        == "Cycle authentication blocked"
+    )
+    assert (
+        "reconnect OpenAI in Settings > Access"
+        in failure_alerts[0]["presentation"].summary
+    )
 
     thread_msg = next(item for item in session.added if item.__class__.__name__ == "IdeaThread")
     assert thread_msg.role == "illo"

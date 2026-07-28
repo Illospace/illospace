@@ -12,20 +12,20 @@ import pytest
 from sqlalchemy import select
 
 import brain.app.scheduler.executor as scheduler_executor
-import brain.app.scheduler.failure_guard as scheduler_failure_guard
+import brain.app.scheduler.scheduler_failure_guard as scheduler_failure_guard
 from brain.app.scheduler.daemon import (
     async_scheduler_health_snapshot,
 )
-from brain.app.scheduler.failure_guard import (
-    CONSECUTIVE_TRIGGER_KIND,
-    ROLLING_WINDOW_TRIGGER_KIND,
+from brain.systems.failure_guard.core import (
     FailureGuardEdge,
     FailureGuardEvaluation,
-    FailureGuardResetEvent,
     FailureGuardTriggerKind,
     FailureGuardTriggerResult,
-    scheduler_failure_signature,
     serialize_failure_guard,
+)
+from brain.app.scheduler.scheduler_failure_guard import (
+    CONSECUTIVE_TRIGGER_KIND, ROLLING_WINDOW_TRIGGER_KIND,
+    SchedulerFailureGuardResetEvent, scheduler_failure_signature,
 )
 from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.programs import nightly_heuristic_review_command
@@ -82,7 +82,9 @@ RuntimeError: worker=<Worker object at 0x8e23cd01> coroutine=<coroutine object r
     assert scheduler_failure_signature(first) == scheduler_failure_signature(second)
 
 
-async def test_scheduler_failure_alert_uses_vault_first_slack_client(monkeypatch):
+async def test_scheduler_failure_alert_bytes_are_unchanged_through_shared_delivery(
+    monkeypatch,
+):
     calls: dict[str, object] = {}
 
     class FakeSlackClient:
@@ -702,14 +704,17 @@ class _RuntimeDurationTrigger:
         session,
         job: SchedulerJob,
         now: datetime,
+        *,
+        observation=None,
     ) -> FailureGuardTriggerResult:
-        del session
+        del session, observation
         assert job.last_started_at is not None
         started_at = job.last_started_at
         if started_at.tzinfo is None:
             started_at = started_at.replace(tzinfo=timezone.utc)
         elapsed_minutes = int((now - started_at).total_seconds() // 60)
         return FailureGuardTriggerResult(
+            kind=self.kind,
             active=elapsed_minutes >= self.minimum_runtime_minutes,
             public_details={
                 "elapsed_minutes": elapsed_minutes,
@@ -729,7 +734,7 @@ class _RuntimeDurationTrigger:
         job: SchedulerJob,
         now: datetime,
         *,
-        event: FailureGuardResetEvent,
+        event: SchedulerFailureGuardResetEvent,
     ) -> bool:
         del session, job, now
         return event == "success"

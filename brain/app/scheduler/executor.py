@@ -31,11 +31,19 @@ from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.slack.client import slack_web_client_from_runtime
 from brain.app.scheduler.catalog import normalize_owner_mode
 from brain.app.scheduler.contracts import validate_scheduler_run_contract
-from brain.app.scheduler.failure_guard import (
-    FailureGuardEvaluation,
+from brain.app.scheduler.scheduler_failure_guard import (
     async_record_scheduler_job_failure,
     async_reset_scheduler_job_failure_guard,
+)
+from brain.systems.failure_guard.core import (
+    FailureGuardEvaluation,
     serialize_failure_guard,
+)
+from brain.systems.failure_guard.slack_delivery import (
+    FailureAlertPresentation,
+    FailureAlertSubject,
+    SlackFailureAlertPolicy,
+    async_deliver_failure_alert,
 )
 from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.programs import (
@@ -387,35 +395,6 @@ def _retryable_failure_summary(
     return RUN_STATUS_SETTLED_FAILURE, retry_summary
 
 
-async def _resolve_scheduler_alert_channel(client: Any, configured: str) -> str:
-    channel = str(configured or "").strip()
-    if not channel.startswith("#"):
-        return channel
-
-    target_name = channel.removeprefix("#")
-    cursor: str | None = None
-    seen_cursors: set[str] = set()
-    while True:
-        response = await client.conversations_list(
-            types="public_channel,private_channel",
-            limit=200,
-            cursor=cursor,
-            exclude_archived=True,
-        )
-        for candidate in response.get("channels") or []:
-            if not isinstance(candidate, dict):
-                continue
-            if str(candidate.get("name") or "") == target_name:
-                return str(candidate.get("id") or channel)
-        metadata = response.get("response_metadata")
-        metadata = metadata if isinstance(metadata, dict) else {}
-        next_cursor = str(metadata.get("next_cursor") or "").strip()
-        if not next_cursor or next_cursor in seen_cursors:
-            return channel
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
-
-
 async def async_deliver_scheduler_failure_alert(
     *,
     job_key: str,
@@ -423,51 +402,54 @@ async def async_deliver_scheduler_failure_alert(
     evaluation: FailureGuardEvaluation,
     error_text: str,
 ) -> None:
-    """Post all edges crossed by one evaluation as one Slack notification."""
+    """Preserve the scheduler card contract through the shared delivery path."""
     crossed_edges = evaluation.crossed_edges
     if not crossed_edges:
-        raise ValueError("failure-guard alert requires at least one crossed edge")
-
-    client = await slack_web_client_from_runtime(
-        requested_by="scheduler_failure_alert",
-        reason="Deliver a repeated scheduler job failure alert to the team.",
-    )
-    configured_channel = (
-        os.getenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "").strip()
-        or "#alerts"
-    )
-    channel = await _resolve_scheduler_alert_channel(client, configured_channel)
-    first_error_line = next(
-        (line.strip() for line in str(error_text or "").splitlines() if line.strip()),
-        "Unknown scheduler failure",
-    )
-    job_url = (
-        f"{public_app_base_url()}/api/system/scheduler"
-        f"?job_key={quote(job_key, safe='')}&run_id={run_id}"
-    )
-    if len(crossed_edges) == 1:
-        alert_title = crossed_edges[0].alert_title
-        failure_summary = crossed_edges[0].alert_summary
-    else:
-        alert_title = "Scheduler job failure guard alert"
-        failure_summary = "\n".join(
-            (
-                "Triggers crossed:",
-                *(
-                    f"- {edge.kind}: {edge.alert_summary}"
-                    for edge in crossed_edges
-                ),
-            )
+        raise ValueError(
+            "scheduler failure alert requires at least one crossed edge"
         )
-    await client.post_message(
-        channel=channel,
-        text=(
-            f"{alert_title}\n"
-            f"Job key: {job_key}\n"
-            f"{failure_summary}\n"
-            f"Error: {first_error_line}\n"
-            f"Job: <{job_url}|open scheduler state>"
+    if len(crossed_edges) == 1:
+        presentation = FailureAlertPresentation(
+            title=crossed_edges[0].alert_title,
+            summary=crossed_edges[0].alert_summary,
+        )
+    else:
+        presentation = FailureAlertPresentation(
+            title="Scheduler job failure guard alert",
+            summary="\n".join(
+                (
+                    "Triggers crossed:",
+                    *(
+                        f"- {edge.kind}: {edge.alert_summary}"
+                        for edge in crossed_edges
+                    ),
+                )
+            ),
+        )
+
+    await async_deliver_failure_alert(
+        policy=SlackFailureAlertPolicy(
+            provide_client=slack_web_client_from_runtime,
+            requested_by="scheduler_failure_alert",
+            reason="Deliver a repeated scheduler job failure alert to the team.",
+            channel=(
+                os.getenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "").strip()
+                or "#alerts"
+            ),
+            unknown_error_text="Unknown scheduler failure",
         ),
+        subject=FailureAlertSubject(
+            identity_label="Job key",
+            identity=job_key,
+            url_label="Job",
+            url=(
+                f"{public_app_base_url()}/api/system/scheduler"
+                f"?job_key={quote(job_key, safe='')}&run_id={run_id}"
+            ),
+            link_label="open scheduler state",
+        ),
+        presentation=presentation,
+        error_text=error_text,
     )
 
 

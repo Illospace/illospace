@@ -15,10 +15,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.scheduler import OWNER_MODE_SCHEDULER, SchedulerJob, SchedulerRun
-from brain.app.scheduler.failure_guard import (
-    FailureGuardEvaluation,
+from brain.app.scheduler.scheduler_failure_guard import (
     async_read_scheduler_failure_guard,
     scheduler_failure_guard_registry,
+)
+from brain.systems.failure_guard.core import (
+    FailureGuardEvaluation,
     serialize_failure_guard,
 )
 from brain.app.scheduler.planner import next_run_after

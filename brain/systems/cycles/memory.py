@@ -39,6 +39,9 @@ from brain.systems.cycles.degradation import (
     degradation_tracking_for_run,
 )
 from brain.systems.cycles.exception_ping import exception_ping_ledger_snapshot
+from brain.systems.cycles.cycle_failure_guard import (
+    async_apply_cycle_terminal_failure_guard,
+)
 from brain.systems.cycles.serializers import (
     serialize_cycle_guidance,
     serialize_cycle_output_target,
@@ -49,6 +52,7 @@ from brain.systems.runs.token_usage import (
     async_summarize_run_tree_usage_in_savepoint,
     usage_totals_payload,
 )
+from brain.systems.failure_guard.core import serialize_failure_guard
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +290,29 @@ def append_cycle_run_output_target_snapshot(
     run.output_targets_snapshot = jsonable(output_targets)
 
 
+async def _apply_cycle_terminal_failure_guard(
+    session,
+    run: CycleRun,
+    cycle: Cycle,
+    *,
+    status: str,
+    error: str | None,
+    now,
+) -> None:
+    evaluation = await async_apply_cycle_terminal_failure_guard(
+        session,
+        cycle,
+        cycle_run_id=run.id,
+        status=status,
+        error_text=error,
+        now=now,
+    )
+    if evaluation is not None:
+        context_snapshot = dict(run.context_snapshot or {})
+        context_snapshot["failure_guard"] = serialize_failure_guard(evaluation)
+        run.context_snapshot = jsonable(context_snapshot)
+
+
 async def finalize_cycle_run(
     run: CycleRun,
     cycle: Cycle,
@@ -312,6 +339,14 @@ async def finalize_cycle_run(
         status=status,
         error=error,
         skip_reason=skip_reason,
+    )
+    await _apply_cycle_terminal_failure_guard(
+        session,
+        run,
+        cycle,
+        status=status,
+        error=error,
+        now=now,
     )
 
 
@@ -350,6 +385,14 @@ async def finalize_stale_cycle_run(
         cycle.last_run_at = now
         cycle.last_status = status
         cycle.last_error = error
+    await _apply_cycle_terminal_failure_guard(
+        session,
+        run,
+        cycle,
+        status=status,
+        error=error,
+        now=now,
+    )
 
 
 async def record_cycle_run_evaluation(
