@@ -18,6 +18,7 @@ from brain.platform.db.models.cycle import (
     Cycle,
     CycleFailureGuardLatch,
     CycleFailureGuardObservation,
+    CycleFailureGuardTriggerState,
     CycleRun,
     CycleRunEvaluation,
 )
@@ -32,6 +33,7 @@ FAILURE_GUARD_TABLES = (
     CycleFailureGuardLatch.__table__,
     CycleFailureGuardObservation.__table__,
     CycleRunEvaluation.__table__,
+    CycleFailureGuardTriggerState.__table__,
 )
 
 
@@ -44,16 +46,30 @@ async def _cycle_latches(session, cycle_id: int):
     return {latch.trigger_kind: latch for latch in result.all()}
 
 
+async def _cycle_trigger_states(session, cycle_id: int):
+    result = await session.scalars(
+        select(CycleFailureGuardTriggerState).where(
+            CycleFailureGuardTriggerState.cycle_id == cycle_id
+        )
+    )
+    return {state.trigger_kind: state for state in result.all()}
+
+
 def test_cycle_model_exposes_failure_guard_state():
     columns = Cycle.__table__.columns
 
     assert columns["failure_signature"].type.length == 64
-    assert columns["consecutive_failure_count"].nullable is False
+    assert "consecutive_failure_count" not in columns
     assert columns["last_failure_error"].nullable is True
     assert "failure_alerted_at" not in columns
     assert [
         column.name
         for column in CycleFailureGuardLatch.__table__.primary_key.columns
+    ] == ["cycle_id", "trigger_kind"]
+    assert CycleFailureGuardLatch.__table__.columns["alerted_at"].nullable is False
+    assert [
+        column.name
+        for column in CycleFailureGuardTriggerState.__table__.primary_key.columns
     ] == ["cycle_id", "trigger_kind"]
     assert [
         column.name
@@ -193,7 +209,9 @@ async def test_terminal_cycle_failures_post_one_named_alert_without_prompt_coope
             error="RuntimeError: coordinator stopped",
         )
 
-    assert cycle.consecutive_failure_count == 3
+    assert (
+        await _cycle_trigger_states(session, cycle.id)
+    )["consecutive"].trigger_state == {"count": 3}
     assert (await _cycle_latches(session, cycle.id))["consecutive"].alerted_at
     assert cycle.last_failure_error == "RuntimeError: coordinator stopped"
     assert calls == [
@@ -265,7 +283,9 @@ async def test_auth_blocked_alerts_with_reconnect_action_then_completion_resets(
         status="auth_blocked",
         error=blocked_error,
     )
-    first_count = cycle.consecutive_failure_count
+    first_count = (
+        await _cycle_trigger_states(session, cycle.id)
+    )["consecutive"].trigger_state["count"]
     first_alerted_at = (
         await _cycle_latches(session, cycle.id)
     )["consecutive"].alerted_at
@@ -279,7 +299,9 @@ async def test_auth_blocked_alerts_with_reconnect_action_then_completion_resets(
     )
 
     assert first_count == 1
-    assert cycle.consecutive_failure_count == first_count
+    assert (
+        await _cycle_trigger_states(session, cycle.id)
+    )["consecutive"].trigger_state["count"] == first_count
     assert (
         await _cycle_latches(session, cycle.id)
     )["consecutive"].alerted_at == first_alerted_at
@@ -309,7 +331,7 @@ async def test_auth_blocked_alerts_with_reconnect_action_then_completion_resets(
     )
 
     assert cycle.failure_signature is None
-    assert cycle.consecutive_failure_count == 0
+    assert await _cycle_trigger_states(session, cycle.id) == {}
     assert await _cycle_latches(session, cycle.id) == {}
     assert cycle.last_failure_error is None
     assert len(calls) == 1
@@ -460,7 +482,9 @@ async def test_terminal_observation_claim_is_idempotent_across_two_sessions(
                 )
             )
             assert observation_count == 1
-            assert second_cycle.consecutive_failure_count == 1
+            assert (
+                await _cycle_trigger_states(second_session, second_cycle.id)
+            )["consecutive"].trigger_state == {"count": 1}
     finally:
         await engine.dispose()
 

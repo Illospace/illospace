@@ -5,11 +5,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
 
 import brain.app.scheduler.executor as scheduler_executor
 import brain.app.scheduler.scheduler_failure_guard as scheduler_failure_guard
@@ -32,11 +30,12 @@ from brain.app.scheduler.programs import nightly_heuristic_review_command
 from brain.app.scheduler.runtime import RUN_STATUS_SETTLED_SUCCESS
 from brain.app.scheduler.executor import async_run_scheduler_run
 from brain.platform.db.models.scheduler import (
-    SchedulerFailureGuardLatch,
-    SchedulerJob,
     SchedulerRun,
 )
 from tests.scheduler_test_support import (
+    guard_latches as _guard_latches,
+    guard_trigger as _guard_trigger,
+    guard_trigger_states as _guard_trigger_states,
     make_scheduler_job as _make_scheduler_job,
     make_scheduler_test_session,
 )
@@ -47,24 +46,6 @@ pytestmark = pytest.mark.asyncio
 @pytest.fixture
 async def session(async_sqlite_session_factory):
     return await make_scheduler_test_session(async_sqlite_session_factory)
-
-
-def _guard_trigger(guard: dict[str, Any], kind: str) -> dict[str, Any]:
-    triggers = guard["triggers"]
-    assert isinstance(triggers, list)
-    return next(trigger for trigger in triggers if trigger["kind"] == kind)
-
-
-async def _guard_latches(
-    session,
-    job: SchedulerJob,
-) -> dict[str, SchedulerFailureGuardLatch]:
-    result = await session.scalars(
-        select(SchedulerFailureGuardLatch).where(
-            SchedulerFailureGuardLatch.job_id == job.id
-        )
-    )
-    return {latch.trigger_kind: latch for latch in result.all()}
 
 
 async def test_failure_signature_normalizes_volatile_runtime_identity():
@@ -223,7 +204,9 @@ async def test_repeated_heuristic_review_failure_emits_one_durable_alert(
 
     assert len(alerts) == 1
     assert caplog.text.count(failure_text) == 1
-    assert job.consecutive_failure_count == 4
+    assert (
+        await _guard_trigger_states(session, job)
+    )["consecutive"].trigger_state == {"count": 4}
     assert failed.result_summary["failed_step"] == "heuristic_review"
     assert alert_timestamps[:2] == [None, None]
     assert alert_timestamps[2] is not None
@@ -285,7 +268,7 @@ async def test_repeated_heuristic_review_failure_emits_one_durable_alert(
     assert heuristic_step["results"][0]["stdout_tail"] == (
         "Nightly heuristic review ran: pruned=0, skills_updated=0"
     )
-    assert job.consecutive_failure_count == 0
+    assert await _guard_trigger_states(session, job) == {}
     assert job.failure_signature is None
     assert await _guard_latches(session, job) == {}
 
@@ -701,18 +684,15 @@ class _RuntimeDurationTrigger:
 
     async def evaluate(
         self,
-        session,
-        job: SchedulerJob,
-        now: datetime,
-        *,
-        observation=None,
+        context,
     ) -> FailureGuardTriggerResult:
-        del session, observation
-        assert job.last_started_at is not None
-        started_at = job.last_started_at
+        assert context.job.last_started_at is not None
+        started_at = context.job.last_started_at
         if started_at.tzinfo is None:
             started_at = started_at.replace(tzinfo=timezone.utc)
-        elapsed_minutes = int((now - started_at).total_seconds() // 60)
+        elapsed_minutes = int(
+            (context.now - started_at).total_seconds() // 60
+        )
         return FailureGuardTriggerResult(
             kind=self.kind,
             active=elapsed_minutes >= self.minimum_runtime_minutes,
@@ -730,13 +710,11 @@ class _RuntimeDurationTrigger:
 
     async def should_reset(
         self,
-        session,
-        job: SchedulerJob,
-        now: datetime,
+        context,
         *,
         event: SchedulerFailureGuardResetEvent,
     ) -> bool:
-        del session, job, now
+        del context
         return event == "success"
 
 
@@ -852,223 +830,6 @@ async def test_third_trigger_flows_through_production_apply_health_delivery_and_
     ) == {
         **duration,
         "elapsed_minutes": 48,
-        "alerted_at": None,
-        "crossed": False,
-    }
-
-
-_DISTINCT_FAILURE_CLASSES_TRIGGER_KIND = FailureGuardTriggerKind(
-    "distinct_failure_classes"
-)
-
-
-@dataclass(frozen=True)
-class _DistinctFailureClassesTrigger:
-    """Stateful proof trigger that remembers distinct failure classifications."""
-
-    threshold: int
-    kind: FailureGuardTriggerKind = field(
-        default=_DISTINCT_FAILURE_CLASSES_TRIGGER_KIND,
-        init=False,
-    )
-
-    async def transition_state(self, context, state, *, event):
-        if event == "success":
-            return None
-        assert context.record is not None
-        failure_class = context.record.signature_input.splitlines()[0]
-        failure_classes = list(state.get("failure_classes", []))
-        if failure_class not in failure_classes:
-            failure_classes.append(failure_class)
-        return {"failure_classes": failure_classes}
-
-    async def evaluate(self, session, job, now):
-        raise AssertionError("Stateful triggers must evaluate from persisted state")
-
-    async def evaluate_with_state(
-        self,
-        session,
-        job,
-        now,
-        *,
-        state,
-    ) -> FailureGuardTriggerResult:
-        del session, job, now
-        failure_classes = list(state.get("failure_classes", []))
-        count = len(failure_classes)
-        return FailureGuardTriggerResult(
-            kind=self.kind,
-            active=count >= self.threshold,
-            public_details={
-                "distinct_count": count,
-                "failure_classes": failure_classes,
-                "threshold": self.threshold,
-            },
-            alert_title="Scheduler job crossed distinct failure classes",
-            alert_summary=(
-                f"Distinct failure classes: {count} "
-                f"(threshold {self.threshold})"
-            ),
-        )
-
-    async def should_reset(
-        self,
-        session,
-        job,
-        now,
-        *,
-        event: SchedulerFailureGuardResetEvent,
-    ) -> bool:
-        del session, job, now
-        return event == "success"
-
-
-async def test_stateful_third_trigger_flows_through_production_registry(
-    session,
-    monkeypatch,
-):
-    monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "99")
-    monkeypatch.setenv("SCHEDULER_FAILURE_RATE_THRESHOLD", "99")
-    monkeypatch.setenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "C_ALERTS")
-    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
-    base = datetime(2026, 4, 21, 4, 0, tzinfo=timezone.utc)
-    job = _make_scheduler_job(next_run_at=base + timedelta(hours=1))
-    session.add(job)
-    await session.flush()
-
-    monkeypatch.setattr(
-        scheduler_failure_guard,
-        "_FAILURE_GUARD_TRIGGER_PROVIDERS",
-        (
-            *scheduler_failure_guard._FAILURE_GUARD_TRIGGER_PROVIDERS,
-            lambda: _DistinctFailureClassesTrigger(threshold=2),
-        ),
-    )
-    assert [
-        str(trigger.kind)
-        for trigger in (
-            scheduler_failure_guard.scheduler_failure_guard_registry().triggers
-        )
-    ] == ["consecutive", "rolling_window", "distinct_failure_classes"]
-
-    deliveries: list[dict[str, str]] = []
-
-    class FakeSlackClient:
-        async def post_message(self, *, channel, text):
-            deliveries.append({"channel": channel, "text": text})
-            return {"ok": True, "message": {"text": text}}
-
-    async def fake_client_from_runtime(*, requested_by, reason):
-        return FakeSlackClient()
-
-    monkeypatch.setattr(
-        scheduler_executor,
-        "slack_web_client_from_runtime",
-        fake_client_from_runtime,
-    )
-
-    async def apply_failure(
-        *,
-        offset: int,
-        failure_key: str,
-        error_text: str,
-    ) -> SchedulerRun:
-        observed_at = base + timedelta(minutes=offset)
-        run = SchedulerRun(
-            job_id=job.id,
-            scheduled_for=observed_at,
-            window_start=observed_at,
-            window_end=observed_at + timedelta(hours=1),
-            status="settled_failure",
-            idempotency_key=f"stateful-trigger:{offset}",
-            started_at=observed_at,
-            finished_at=observed_at,
-        )
-        session.add(run)
-        await session.flush()
-        await scheduler_executor._async_apply_failure_guard(
-            session,
-            job,
-            run,
-            failure_key=failure_key,
-            error_text=error_text,
-            now=observed_at,
-        )
-        return run
-
-    first_run = await apply_failure(
-        offset=0,
-        failure_key="extract",
-        error_text="ValueError: malformed response",
-    )
-    first_trigger = _guard_trigger(
-        first_run.result_summary["failure_guard"],
-        "distinct_failure_classes",
-    )
-    assert first_trigger["distinct_count"] == 1
-    assert first_trigger["crossed"] is False
-    assert deliveries == []
-    assert (
-        await _guard_latches(session, job)
-    )["distinct_failure_classes"].trigger_state == {
-        "failure_classes": ["extract"]
-    }
-
-    second_run = await apply_failure(
-        offset=1,
-        failure_key="publish",
-        error_text="TimeoutError: downstream unavailable",
-    )
-    second_trigger = _guard_trigger(
-        second_run.result_summary["failure_guard"],
-        "distinct_failure_classes",
-    )
-    assert second_trigger == {
-        "kind": "distinct_failure_classes",
-        "distinct_count": 2,
-        "failure_classes": ["extract", "publish"],
-        "threshold": 2,
-        "alerted_at": (base + timedelta(minutes=1)).isoformat(),
-        "crossed": True,
-    }
-    assert deliveries[0]["channel"] == "C_ALERTS"
-    assert "Scheduler job crossed distinct failure classes" in deliveries[0]["text"]
-
-    health = await async_scheduler_health_snapshot(
-        session,
-        now=base + timedelta(minutes=1),
-    )
-    catalog_trigger = _guard_trigger(
-        health["jobs"][0]["failure_guard"],
-        "distinct_failure_classes",
-    )
-    assert catalog_trigger == {
-        **second_trigger,
-        "alerted_at": (
-            base + timedelta(minutes=1)
-        ).replace(tzinfo=None).isoformat(),
-        "crossed": False,
-    }
-    assert health["alerts"][0]["triggers"] == [catalog_trigger]
-
-    await scheduler_executor.async_reset_scheduler_job_failure_guard(
-        session,
-        job,
-        now=base + timedelta(minutes=2),
-    )
-    assert "distinct_failure_classes" not in await _guard_latches(session, job)
-    reset_health = await async_scheduler_health_snapshot(
-        session,
-        now=base + timedelta(minutes=2),
-    )
-    assert reset_health["alerts"] == []
-    assert _guard_trigger(
-        reset_health["jobs"][0]["failure_guard"],
-        "distinct_failure_classes",
-    ) == {
-        **second_trigger,
-        "distinct_count": 0,
-        "failure_classes": [],
         "alerted_at": None,
         "crossed": False,
     }

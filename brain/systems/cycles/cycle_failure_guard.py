@@ -8,9 +8,9 @@ from enum import Enum
 import logging
 import os
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Protocol, TypeAlias
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,7 @@ from brain.platform.db.models.cycle import (
     Cycle,
     CycleFailureGuardLatch,
     CycleFailureGuardObservation,
+    CycleFailureGuardTriggerState,
 )
 from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.failure_guard.core import (
@@ -26,11 +27,18 @@ from brain.systems.failure_guard.core import (
     FailureGuardEvaluation,
     FailureGuardLifecycleEvent,
     FailureGuardLatch,
+    FailureGuardStatefulTrigger,
+    FailureGuardTrigger,
     FailureGuardTriggerKind,
     FailureGuardTriggerResult,
+    FailureGuardTriggerState,
+    async_evaluate_failure_guard_triggers,
     async_evaluate_failure_edges,
     async_transition_failure_guard_trigger_states,
     failure_signature,
+)
+from brain.systems.failure_guard.state_repository import (
+    SqlAlchemyFailureGuardStateStore,
 )
 from brain.systems.failure_guard.slack_delivery import (
     FailureAlertPresentation,
@@ -51,7 +59,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CycleFailureGuardLifecycleContext:
-    """Cycle-owned inputs available to trigger state transitions."""
+    """Cycle-owned inputs available to trigger evaluation and transitions."""
 
     cycle: Cycle
     failure: CycleFailureInput | None
@@ -228,25 +236,15 @@ class CycleConsecutiveFailuresTrigger:
         init=False,
     )
 
-    def evaluate(
+    async def evaluate_with_state(
         self,
-        cycle: Cycle,
-        failure: CycleFailureInput,
-    ) -> FailureGuardTriggerResult:
-        count = int(cycle.consecutive_failure_count or 0)
-        return self._result(failure, count)
-
-    def evaluate_with_state(
-        self,
-        cycle: Cycle,
-        failure: CycleFailureInput,
+        context: CycleFailureGuardLifecycleContext,
         *,
-        state: Mapping[str, Any],
+        state: FailureGuardTriggerState,
     ) -> FailureGuardTriggerResult:
-        count = int(
-            state.get("count", cycle.consecutive_failure_count or 0)
-        )
-        return self._result(failure, count)
+        if context.failure is None:
+            raise ValueError("Cycle failure trigger evaluation requires a failure")
+        return self._result(context.failure, int(state.get("count", 0)))
 
     def _result(
         self,
@@ -279,46 +277,44 @@ class CycleConsecutiveFailuresTrigger:
     async def transition_state(
         self,
         context: CycleFailureGuardLifecycleContext,
-        state: Mapping[str, Any],
+        state: FailureGuardTriggerState,
         *,
         event: FailureGuardLifecycleEvent,
-    ) -> Mapping[str, Any] | None:
+    ) -> FailureGuardTriggerState | None:
         if event == "success":
-            context.cycle.consecutive_failure_count = 0
             return None
         count = (
             1
             if event == "new_failure"
-            else int(
-                state.get(
-                    "count",
-                    context.cycle.consecutive_failure_count or 0,
-                )
-            )
-            + 1
+            else int(state.get("count", 0)) + 1
         )
-        context.cycle.consecutive_failure_count = count
         return {"count": count}
 
 
-class CycleFailureGuardTrigger(Protocol):
-    """One cycle-owned failure trigger."""
+class CycleFailureGuardTrigger(
+    FailureGuardTrigger[CycleFailureGuardLifecycleContext],
+    Protocol,
+):
+    """One stateless cycle failure trigger."""
 
-    kind: FailureGuardTriggerKind
 
-    def evaluate(
-        self,
-        cycle: Cycle,
-        failure: CycleFailureInput,
-    ) -> FailureGuardTriggerResult:
-        """Evaluate cycle failure state and construct public presentation."""
+class CycleFailureGuardStatefulTrigger(
+    FailureGuardStatefulTrigger[CycleFailureGuardLifecycleContext],
+    Protocol,
+):
+    """One state-owning cycle failure trigger."""
+
+
+CycleRegisteredFailureGuardTrigger: TypeAlias = (
+    CycleFailureGuardTrigger | CycleFailureGuardStatefulTrigger
+)
 
 
 @dataclass(frozen=True)
 class CycleFailureGuardRegistry:
     """The cycle-owned set of terminal failure triggers."""
 
-    triggers: tuple[CycleFailureGuardTrigger, ...]
+    triggers: tuple[CycleRegisteredFailureGuardTrigger, ...]
 
     def __post_init__(self) -> None:
         kinds = [str(trigger.kind) for trigger in self.triggers]
@@ -348,7 +344,6 @@ class CycleFailureGuardStore:
         result = await self.session.scalars(
             select(CycleFailureGuardLatch).where(
                 CycleFailureGuardLatch.cycle_id == self.cycle_id,
-                CycleFailureGuardLatch.alerted_at.is_not(None),
             )
         )
         return {
@@ -361,83 +356,20 @@ class CycleFailureGuardStore:
         trigger_kind: FailureGuardTriggerKind,
         alerted_at: datetime,
     ) -> FailureGuardLatch:
-        latch = await self._load_record(trigger_kind)
-        if latch is None:
-            latch = CycleFailureGuardLatch(
-                cycle_id=self.cycle_id,
-                trigger_kind=str(trigger_kind),
-                trigger_state={},
-                alerted_at=alerted_at,
-            )
-            self.session.add(latch)
-        else:
-            latch.alerted_at = alerted_at
+        latch = CycleFailureGuardLatch(
+            cycle_id=self.cycle_id,
+            trigger_kind=str(trigger_kind),
+            alerted_at=alerted_at,
+        )
+        self.session.add(latch)
         return latch
 
     async def delete_latch(
         self,
         trigger_kind: FailureGuardTriggerKind,
     ) -> None:
-        latch = await self._load_record(trigger_kind)
-        if latch is None:
-            return
-        if latch.trigger_state:
-            latch.alerted_at = None
-        else:
-            await self.session.delete(latch)
-
-    async def load_trigger_states(
-        self,
-    ) -> dict[FailureGuardTriggerKind, Mapping[str, Any]]:
-        result = await self.session.scalars(
-            select(CycleFailureGuardLatch).where(
-                CycleFailureGuardLatch.cycle_id == self.cycle_id
-            )
-        )
-        return {
-            FailureGuardTriggerKind(record.trigger_kind): dict(
-                record.trigger_state or {}
-            )
-            for record in result.all()
-            if record.trigger_state
-        }
-
-    async def save_trigger_state(
-        self,
-        trigger_kind: FailureGuardTriggerKind,
-        state: Mapping[str, Any],
-    ) -> None:
-        record = await self._load_record(trigger_kind)
-        if record is None:
-            self.session.add(
-                CycleFailureGuardLatch(
-                    cycle_id=self.cycle_id,
-                    trigger_kind=str(trigger_kind),
-                    trigger_state=dict(state),
-                    alerted_at=None,
-                )
-            )
-            return
-        record.trigger_state = dict(state)
-
-    async def delete_trigger_state(
-        self,
-        trigger_kind: FailureGuardTriggerKind,
-    ) -> None:
-        record = await self._load_record(trigger_kind)
-        if record is None:
-            return
-        if record.alerted_at is None:
-            await self.session.delete(record)
-        else:
-            record.trigger_state = {}
-
-    async def _load_record(
-        self,
-        trigger_kind: FailureGuardTriggerKind,
-    ) -> CycleFailureGuardLatch | None:
-        return await self.session.scalar(
-            select(CycleFailureGuardLatch).where(
+        await self.session.execute(
+            delete(CycleFailureGuardLatch).where(
                 CycleFailureGuardLatch.cycle_id == self.cycle_id,
                 CycleFailureGuardLatch.trigger_kind == str(trigger_kind),
             )
@@ -469,6 +401,25 @@ class CycleFailureGuardStore:
         return True
 
 
+def _cycle_failure_guard_state_store(
+    session: AsyncSession,
+    cycle_id: int,
+) -> SqlAlchemyFailureGuardStateStore[CycleFailureGuardTriggerState]:
+    return SqlAlchemyFailureGuardStateStore(
+        session=session,
+        statement=select(CycleFailureGuardTriggerState).where(
+            CycleFailureGuardTriggerState.cycle_id == cycle_id
+        ),
+        create_record=lambda trigger_kind, trigger_state: (
+            CycleFailureGuardTriggerState(
+                cycle_id=cycle_id,
+                trigger_kind=trigger_kind,
+                trigger_state=trigger_state,
+            )
+        ),
+    )
+
+
 async def async_apply_cycle_terminal_failure_guard(
     session: AsyncSession,
     cycle: Cycle,
@@ -497,6 +448,7 @@ async def async_apply_cycle_terminal_failure_guard(
         raise ValueError(f"Cycle {cycle.id} not found")
 
     registry = cycle_failure_guard_registry()
+    state_store = _cycle_failure_guard_state_store(session, locked_cycle.id)
     if isinstance(policy, ResetCycleTerminalPolicy):
         latches = dict(await store.load_latches())
         for trigger in registry.triggers:
@@ -509,7 +461,7 @@ async def async_apply_cycle_terminal_failure_guard(
                 failure=None,
             ),
             event="success",
-            store=store,
+            store=state_store,
         )
         locked_cycle.failure_signature = None
         locked_cycle.last_failure_error = None
@@ -528,7 +480,7 @@ async def async_apply_cycle_terminal_failure_guard(
             failure=failure,
         ),
         event="new_failure" if signature_changed else "repeated_failure",
-        store=store,
+        store=state_store,
     )
     if signature_changed:
         latches = dict(await store.load_latches())
@@ -541,22 +493,16 @@ async def async_apply_cycle_terminal_failure_guard(
             await session.flush()
 
     locked_cycle.last_failure_error = failure.record.error_text
-    states = dict(await store.load_trigger_states())
-    results = []
-    for trigger in registry.triggers:
-        evaluate_with_state = getattr(trigger, "evaluate_with_state", None)
-        if evaluate_with_state is None:
-            results.append(trigger.evaluate(locked_cycle, failure))
-            continue
-        results.append(
-            evaluate_with_state(
-                locked_cycle,
-                failure,
-                state=dict(states.get(trigger.kind, {})),
-            )
-        )
+    results = await async_evaluate_failure_guard_triggers(
+        triggers=registry.triggers,
+        context=CycleFailureGuardLifecycleContext(
+            cycle=locked_cycle,
+            failure=failure,
+        ),
+        store=state_store,
+    )
     evaluation = await async_evaluate_failure_edges(
-        results=tuple(results),
+        results=results,
         failure_signature=locked_cycle.failure_signature,
         last_error=locked_cycle.last_failure_error,
         now=now,

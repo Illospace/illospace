@@ -14,6 +14,7 @@ __all__ = [
     "Cycle",
     "CycleFailureGuardLatch",
     "CycleFailureGuardObservation",
+    "CycleFailureGuardTriggerState",
     "CycleRevision",
     "CycleGuidance",
     "CycleOutputTarget",
@@ -79,9 +80,6 @@ class Cycle(Base, TimestampMixin):
     last_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     failure_signature: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    consecutive_failure_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"), default=0
-    )
     last_failure_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     degradation_state: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
@@ -95,9 +93,26 @@ class Cycle(Base, TimestampMixin):
 
 
 class CycleFailureGuardLatch(Base):
-    """Durable mutable state and alert latch for one cycle trigger."""
+    """One durable alert latch for one cycle failure-guard trigger."""
 
     __tablename__ = "cycle_failure_guard_latches"
+
+    cycle_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("cycles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    trigger_kind: Mapped[str] = mapped_column(String(40), primary_key=True)
+    alerted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+
+class CycleFailureGuardTriggerState(Base):
+    """One cycle trigger's durable JSON state."""
+
+    __tablename__ = "cycle_failure_guard_trigger_states"
 
     cycle_id: Mapped[int] = mapped_column(
         Integer,
@@ -110,10 +125,6 @@ class CycleFailureGuardLatch(Base):
         nullable=False,
         server_default=text("'{}'::jsonb"),
         default=dict,
-    )
-    alerted_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
     )
 
 

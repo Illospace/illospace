@@ -1,4 +1,4 @@
-"""Persist generic mutable state beside failure-guard trigger latches.
+"""Move failure-guard trigger state out of owners and alert latches.
 
 Revision ID: 0047_failure_guard_trigger_state
 Revises: 0046_cycle_failure_guard
@@ -6,6 +6,8 @@ Create Date: 2026-07-28
 """
 
 from __future__ import annotations
+
+import json
 
 from alembic import op
 import sqlalchemy as sa
@@ -17,11 +19,19 @@ down_revision = "0046_cycle_failure_guard"
 branch_labels = None
 depends_on = None
 
-_TRIGGER_TABLES = (
-    ("scheduler_failure_guard_latches", "scheduler_jobs", "job_id"),
-    ("cycle_failure_guard_latches", "cycles", "cycle_id"),
+_STATE_STORES = (
+    (
+        "scheduler_failure_guard_trigger_states",
+        "scheduler_jobs",
+        "job_id",
+    ),
+    (
+        "cycle_failure_guard_trigger_states",
+        "cycles",
+        "cycle_id",
+    ),
 )
-_STATE_COLUMN = "trigger_state"
+_LEGACY_COUNT_COLUMN = "consecutive_failure_count"
 
 
 def _schema() -> str | None:
@@ -57,89 +67,175 @@ def _state_default():
     return sa.text("'{}'")
 
 
-def _make_trigger_rows_stateful(table_name: str) -> bool:
-    columns = _columns(table_name)
-    if not columns:
-        return False
-    added_state = _STATE_COLUMN not in columns
-    with op.batch_alter_table(table_name, schema=_schema()) as batch:
-        if added_state:
-            batch.add_column(
-                sa.Column(
-                    _STATE_COLUMN,
-                    _state_type(),
-                    nullable=False,
-                    server_default=_state_default(),
-                )
-            )
-        if not columns["alerted_at"]["nullable"]:
-            batch.alter_column(
-                "alerted_at",
-                existing_type=sa.DateTime(timezone=True),
-                nullable=True,
-            )
-    return added_state
-
-
-def _backfill_consecutive_state(
-    latch_table: str,
+def _ensure_state_store(
+    state_table: str,
     owner_table: str,
     owner_key: str,
 ) -> None:
-    if not _table_exists(owner_table):
+    if _table_exists(state_table):
         return
-    bind = op.get_bind()
-    owners = bind.execute(
+    op.create_table(
+        state_table,
+        sa.Column(
+            owner_key,
+            sa.Integer(),
+            sa.ForeignKey(f"{owner_table}.id", ondelete="CASCADE"),
+            primary_key=True,
+        ),
+        sa.Column("trigger_kind", sa.String(length=40), primary_key=True),
+        sa.Column(
+            "trigger_state",
+            _state_type(),
+            nullable=False,
+            server_default=_state_default(),
+        ),
+    )
+
+
+def _backfill_missing_consecutive_state(
+    state_table: str,
+    owner_table: str,
+    owner_key: str,
+) -> None:
+    """Idempotently convert positive legacy counts with one set-based insert."""
+    if _LEGACY_COUNT_COLUMN not in _columns(owner_table):
+        return
+    json_expression = (
+        f"jsonb_build_object('count', owner.{_LEGACY_COUNT_COLUMN})"
+        if op.get_bind().dialect.name == "postgresql"
+        else f"json_object('count', owner.{_LEGACY_COUNT_COLUMN})"
+    )
+    op.execute(
         sa.text(
-            f"SELECT id, consecutive_failure_count FROM {owner_table} "
-            "WHERE consecutive_failure_count > 0"
+            f"INSERT INTO {state_table} "
+            f"({owner_key}, trigger_kind, trigger_state) "
+            f"SELECT owner.id, 'consecutive', {json_expression} "
+            f"FROM {owner_table} AS owner "
+            f"WHERE owner.{_LEGACY_COUNT_COLUMN} > 0 "
+            "AND NOT EXISTS ("
+            f"SELECT 1 FROM {state_table} AS state "
+            f"WHERE state.{owner_key} = owner.id "
+            "AND state.trigger_kind = 'consecutive')"
         )
-    ).mappings()
-    update_state = sa.text(
-        f"UPDATE {latch_table} SET {_STATE_COLUMN} = :trigger_state "
-        f"WHERE {owner_key} = :owner_id AND trigger_kind = 'consecutive'"
-    ).bindparams(sa.bindparam("trigger_state", type_=sa.JSON()))
-    insert_state = sa.text(
-        f"INSERT INTO {latch_table} "
-        f"({owner_key}, trigger_kind, {_STATE_COLUMN}, alerted_at) "
-        "VALUES (:owner_id, 'consecutive', :trigger_state, NULL)"
-    ).bindparams(sa.bindparam("trigger_state", type_=sa.JSON()))
-    for owner in owners:
-        parameters = {
-            "owner_id": owner["id"],
-            "trigger_state": {
-                "count": int(owner["consecutive_failure_count"] or 0)
-            },
-        }
-        updated = bind.execute(update_state, parameters)
-        if updated.rowcount == 0:
-            bind.execute(insert_state, parameters)
+    )
+
+
+def _drop_legacy_count(owner_table: str) -> None:
+    if _LEGACY_COUNT_COLUMN in _columns(owner_table):
+        op.drop_column(owner_table, _LEGACY_COUNT_COLUMN)
 
 
 def upgrade() -> None:
-    for latch_table, owner_table, owner_key in _TRIGGER_TABLES:
-        if not _make_trigger_rows_stateful(latch_table):
-            continue
-        _backfill_consecutive_state(latch_table, owner_table, owner_key)
+    for state_table, owner_table, owner_key in _STATE_STORES:
+        _ensure_state_store(state_table, owner_table, owner_key)
+    for state_table, owner_table, owner_key in _STATE_STORES:
+        _backfill_missing_consecutive_state(
+            state_table,
+            owner_table,
+            owner_key,
+        )
+    for _state_table, owner_table, _owner_key in _STATE_STORES:
+        _drop_legacy_count(owner_table)
+
+
+def _decoded_state(value) -> dict:
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, dict):
+        raise RuntimeError(
+            "Cannot downgrade failure-guard state with a non-object document"
+        )
+    return value
+
+
+def _downgrade_counts(
+    state_table: str,
+    owner_key: str,
+) -> dict[int, int]:
+    if not _table_exists(state_table):
+        return {}
+    rows = op.get_bind().execute(
+        sa.text(
+            f"SELECT {owner_key}, trigger_kind, trigger_state "
+            f"FROM {state_table}"
+        )
+    ).mappings()
+    counts: dict[int, int] = {}
+    for row in rows:
+        if row["trigger_kind"] != "consecutive":
+            raise RuntimeError(
+                "Cannot downgrade failure-guard state with "
+                f"unrepresentable trigger kind: {row['trigger_kind']}"
+            )
+        state = _decoded_state(row["trigger_state"])
+        count = state.get("count")
+        if (
+            set(state) != {"count"}
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+        ):
+            raise RuntimeError(
+                "Cannot downgrade consecutive failure-guard state with "
+                f"unrepresentable document: {state!r}"
+            )
+        counts[int(row[owner_key])] = count
+    return counts
+
+
+def _ensure_legacy_count(owner_table: str) -> None:
+    if _LEGACY_COUNT_COLUMN in _columns(owner_table):
+        return
+    op.add_column(
+        owner_table,
+        sa.Column(
+            _LEGACY_COUNT_COLUMN,
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+        ),
+    )
 
 
 def downgrade() -> None:
-    for latch_table, _owner_table, _owner_key in _TRIGGER_TABLES:
-        columns = _columns(latch_table)
-        if not columns:
+    # Validate every state document before changing schema. Custom state cannot be
+    # represented by the legacy integer column, so downgrade rejects it explicitly.
+    counts_by_store = [
+        (
+            state_table,
+            owner_table,
+            owner_key,
+            _table_exists(state_table),
+            _downgrade_counts(state_table, owner_key),
+        )
+        for state_table, owner_table, owner_key in _STATE_STORES
+    ]
+
+    for (
+        state_table,
+        owner_table,
+        owner_key,
+        state_store_exists,
+        counts,
+    ) in counts_by_store:
+        _ensure_legacy_count(owner_table)
+        if not state_store_exists:
             continue
-        if _STATE_COLUMN in columns:
-            op.execute(
-                sa.text(
-                    f"DELETE FROM {latch_table} WHERE alerted_at IS NULL"
-                )
+        op.execute(
+            sa.text(
+                f"UPDATE {owner_table} "
+                f"SET {_LEGACY_COUNT_COLUMN} = 0"
             )
-        with op.batch_alter_table(latch_table, schema=_schema()) as batch:
-            if _STATE_COLUMN in columns:
-                batch.drop_column(_STATE_COLUMN)
-            if columns["alerted_at"]["nullable"]:
-                batch.alter_column(
-                    "alerted_at",
-                    existing_type=sa.DateTime(timezone=True),
-                    nullable=False,
-                )
+        )
+        update_count = sa.text(
+            f"UPDATE {owner_table} "
+            f"SET {_LEGACY_COUNT_COLUMN} = :count "
+            "WHERE id = :owner_id"
+        )
+        for owner_id, count in counts.items():
+            op.get_bind().execute(
+                update_count,
+                {"owner_id": owner_id, "count": count},
+            )
+        if _table_exists(state_table):
+            op.drop_table(state_table)

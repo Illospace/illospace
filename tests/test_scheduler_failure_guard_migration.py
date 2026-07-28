@@ -232,6 +232,17 @@ def test_trigger_state_migration_backfills_and_round_trips(monkeypatch):
                 "PRIMARY KEY (cycle_id, trigger_kind))"
             )
         )
+        # A prior interrupted invocation may have created schema without
+        # backfilling data. Upgrade must treat those steps independently.
+        connection.execute(
+            sa.text(
+                "CREATE TABLE scheduler_failure_guard_trigger_states ("
+                "job_id INTEGER NOT NULL, "
+                "trigger_kind VARCHAR(40) NOT NULL, "
+                "trigger_state JSON NOT NULL DEFAULT '{}', "
+                "PRIMARY KEY (job_id, trigger_kind))"
+            )
+        )
         connection.execute(
             sa.text(
                 "INSERT INTO scheduler_jobs "
@@ -273,16 +284,20 @@ def test_trigger_state_migration_backfills_and_round_trips(monkeypatch):
                     else "cycle_id"
                 ),
                 "trigger_kind",
-                "trigger_state",
                 "alerted_at",
             }
-            assert columns["trigger_state"]["nullable"] is False
-            assert columns["alerted_at"]["nullable"] is True
+            assert columns["alerted_at"]["nullable"] is False
+
+        for owner_table in ("scheduler_jobs", "cycles"):
+            assert "consecutive_failure_count" not in {
+                column["name"]
+                for column in sa.inspect(connection).get_columns(owner_table)
+            }
 
         scheduler_rows = connection.execute(
             sa.text(
-                "SELECT trigger_kind, trigger_state, alerted_at "
-                "FROM scheduler_failure_guard_latches "
+                "SELECT trigger_kind, trigger_state "
+                "FROM scheduler_failure_guard_trigger_states "
                 "ORDER BY trigger_kind"
             )
         ).mappings().all()
@@ -290,53 +305,75 @@ def test_trigger_state_migration_backfills_and_round_trips(monkeypatch):
             (
                 row["trigger_kind"],
                 json.loads(row["trigger_state"]),
-                row["alerted_at"],
             )
             for row in scheduler_rows
         ] == [
             (
                 "consecutive",
                 {"count": 2},
-                "2026-07-28 12:00:00+00:00",
-            ),
-            (
-                "rolling_window",
-                {},
-                "2026-07-28 13:00:00+00:00",
             ),
         ]
         cycle_row = connection.execute(
             sa.text(
-                "SELECT trigger_kind, trigger_state, alerted_at "
-                "FROM cycle_failure_guard_latches"
+                "SELECT trigger_kind, trigger_state "
+                "FROM cycle_failure_guard_trigger_states"
             )
         ).mappings().one()
         assert cycle_row["trigger_kind"] == "consecutive"
         assert json.loads(cycle_row["trigger_state"]) == {"count": 1}
-        assert cycle_row["alerted_at"] is None
+        assert connection.execute(
+            sa.text(
+                "SELECT trigger_kind, alerted_at "
+                "FROM scheduler_failure_guard_latches "
+                "ORDER BY trigger_kind"
+            )
+        ).all() == [
+            ("consecutive", "2026-07-28 12:00:00+00:00"),
+            ("rolling_window", "2026-07-28 13:00:00+00:00"),
+        ]
 
         connection.execute(
             sa.text(
-                "INSERT INTO scheduler_failure_guard_latches "
-                "(job_id, trigger_kind, trigger_state, alerted_at) "
-                "VALUES (1, 'custom_state', :state, NULL)"
+                "INSERT INTO scheduler_failure_guard_trigger_states "
+                "(job_id, trigger_kind, trigger_state) "
+                "VALUES (1, 'custom_state', :state)"
             ),
             {"state": json.dumps({"seen": ["alpha", "beta"]})},
         )
 
+        schema_before_rejected_downgrade = _schema_bytes(connection)
+        with pytest.raises(
+            RuntimeError,
+            match="unrepresentable trigger kind: custom_state",
+        ):
+            migration.downgrade()
+        assert _schema_bytes(connection) == schema_before_rejected_downgrade
+
+        connection.execute(
+            sa.text(
+                "DELETE FROM scheduler_failure_guard_trigger_states "
+                "WHERE trigger_kind = 'custom_state'"
+            )
+        )
         migration.downgrade()
         migration.downgrade()
 
-        for table_name in (
-            "scheduler_failure_guard_latches",
-            "cycle_failure_guard_latches",
-        ):
-            columns = {
-                column["name"]: column
-                for column in sa.inspect(connection).get_columns(table_name)
-            }
-            assert "trigger_state" not in columns
-            assert columns["alerted_at"]["nullable"] is False
+        assert {
+            "scheduler_failure_guard_trigger_states",
+            "cycle_failure_guard_trigger_states",
+        }.isdisjoint(sa.inspect(connection).get_table_names())
+        assert connection.execute(
+            sa.text(
+                "SELECT consecutive_failure_count "
+                "FROM scheduler_jobs WHERE id = 1"
+            )
+        ).scalar_one() == 2
+        assert connection.execute(
+            sa.text(
+                "SELECT consecutive_failure_count "
+                "FROM cycles WHERE id = 7"
+            )
+        ).scalar_one() == 1
         assert connection.execute(
             sa.text(
                 "SELECT trigger_kind FROM scheduler_failure_guard_latches "

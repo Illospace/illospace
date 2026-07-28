@@ -30,6 +30,7 @@ __all__ = [
     "OWNER_MODE_MIRROR",
     "OWNER_MODE_SCHEDULER",
     "SchedulerFailureGuardLatch",
+    "SchedulerFailureGuardTriggerState",
     "SchedulerJob",
     "SchedulerRun",
     "SchedulerLease",
@@ -92,9 +93,6 @@ class SchedulerJob(Base, CreatedAtMixin):
         DateTime(timezone=True), nullable=True
     )
     failure_signature: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    consecutive_failure_count: Mapped[int] = mapped_column(
-        Integer, server_default=text("0"), default=0
-    )
     last_failure_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
@@ -112,9 +110,26 @@ class SchedulerJob(Base, CreatedAtMixin):
 
 
 class SchedulerFailureGuardLatch(Base):
-    """Durable mutable state and alert latch for one scheduler trigger."""
+    """One durable alert latch for one scheduler failure-guard trigger."""
 
     __tablename__ = "scheduler_failure_guard_latches"
+
+    job_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("scheduler_jobs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    trigger_kind: Mapped[str] = mapped_column(String(40), primary_key=True)
+    alerted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+
+class SchedulerFailureGuardTriggerState(Base):
+    """One scheduler trigger's durable JSON state."""
+
+    __tablename__ = "scheduler_failure_guard_trigger_states"
 
     job_id: Mapped[int] = mapped_column(
         Integer,
@@ -127,10 +142,6 @@ class SchedulerFailureGuardLatch(Base):
         nullable=False,
         server_default=text("'{}'::jsonb"),
         default=dict,
-    )
-    alerted_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
     )
 
 

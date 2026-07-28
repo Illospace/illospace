@@ -5,7 +5,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 import re
-from typing import Any, Literal, Mapping, NewType, Protocol, runtime_checkable
+from typing import (
+    Any,
+    Literal,
+    Mapping,
+    NewType,
+    Protocol,
+    Sequence,
+    TypeAlias,
+    TypeVar,
+    runtime_checkable,
+)
 
 
 FailureGuardTriggerKind = NewType("FailureGuardTriggerKind", str)
@@ -14,7 +24,10 @@ FailureGuardLifecycleEvent = Literal[
     "repeated_failure",
     "success",
 ]
-FailureGuardTriggerState = Mapping[str, Any]
+JsonScalar: TypeAlias = str | int | float | bool | None
+JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+FailureGuardTriggerState: TypeAlias = Mapping[str, JsonValue]
+FailureGuardContextT = TypeVar("FailureGuardContextT")
 
 _RESERVED_PUBLIC_DETAIL_KEYS = frozenset({"kind", "alerted_at", "crossed"})
 _FAILURE_MEMORY_ADDRESS_RE = re.compile(r"\b0x[0-9a-f]+\b", re.IGNORECASE)
@@ -116,14 +129,35 @@ class FailureGuardStateStore(Protocol):
 
 
 @runtime_checkable
-class FailureGuardStatefulTrigger(Protocol):
-    """Optional lifecycle implemented only by triggers that own mutable state."""
+class FailureGuardTrigger(Protocol[FailureGuardContextT]):
+    """A stateless trigger evaluated from consumer-owned context."""
 
     kind: FailureGuardTriggerKind
 
+    async def evaluate(
+        self,
+        context: FailureGuardContextT,
+    ) -> FailureGuardTriggerResult:
+        """Evaluate the trigger and construct its public presentation."""
+
+
+@runtime_checkable
+class FailureGuardStatefulTrigger(Protocol[FailureGuardContextT]):
+    """Complete contract for a trigger that owns persisted JSON state."""
+
+    kind: FailureGuardTriggerKind
+
+    async def evaluate_with_state(
+        self,
+        context: FailureGuardContextT,
+        *,
+        state: FailureGuardTriggerState,
+    ) -> FailureGuardTriggerResult:
+        """Evaluate the trigger from its complete persisted state."""
+
     async def transition_state(
         self,
-        context: Any,
+        context: FailureGuardContextT,
         state: FailureGuardTriggerState,
         *,
         event: FailureGuardLifecycleEvent,
@@ -131,10 +165,38 @@ class FailureGuardStatefulTrigger(Protocol):
         """Return replacement state, or ``None`` to clear persisted state."""
 
 
+async def async_evaluate_failure_guard_triggers(
+    *,
+    triggers: Sequence[
+        FailureGuardTrigger[FailureGuardContextT]
+        | FailureGuardStatefulTrigger[FailureGuardContextT]
+    ],
+    context: FailureGuardContextT,
+    store: FailureGuardStateStore,
+) -> tuple[FailureGuardTriggerResult, ...]:
+    """Evaluate registered triggers through their declared public contract."""
+    states = dict(await store.load_trigger_states())
+    results: list[FailureGuardTriggerResult] = []
+    for trigger in triggers:
+        if isinstance(trigger, FailureGuardStatefulTrigger):
+            results.append(
+                await trigger.evaluate_with_state(
+                    context,
+                    state=dict(states.get(trigger.kind, {})),
+                )
+            )
+        else:
+            results.append(await trigger.evaluate(context))
+    return tuple(results)
+
+
 async def async_transition_failure_guard_trigger_states(
     *,
-    triggers: tuple[Any, ...],
-    context: Any,
+    triggers: Sequence[
+        FailureGuardTrigger[FailureGuardContextT]
+        | FailureGuardStatefulTrigger[FailureGuardContextT]
+    ],
+    context: FailureGuardContextT,
     event: FailureGuardLifecycleEvent,
     store: FailureGuardStateStore,
 ) -> None:
