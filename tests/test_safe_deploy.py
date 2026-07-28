@@ -396,46 +396,14 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     assert "compose up -d --force-recreate --remove-orphans" in upgrade
     assert "replace_idle_worker" in combined
     assert "no interactive AgentRuns" in runtime_lib
-    assert "refusing to kill it" in runtime_lib
-    assert "remove_worker_handoff_after_drain_timeout" in runtime_lib
+    assert "refusing to drain worker" in runtime_lib
+    assert "escalate_worker_swap_after_drain_timeout" in runtime_lib
     assert 'docker rm -f "$handoff_id"' in runtime_lib
-    assert "FORCED WORKER SWAP: killing old worker; affected run ids:" in runtime_lib
+    assert "FORCED WORKER SWAP: worker $worker_id did not drain within" in runtime_lib
     assert "assert_single_running_worker" in runtime_lib
     assert "assert_single_running_worker" in upgrade
     assert "ILLO_COMPOSE_BUILD_NO_CACHE" in upgrade
     assert "ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_FILE" in upgrade
-
-
-def test_compose_worker_drain_timeout_removes_handoff_and_preserves_original_worker(tmp_path):
-    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
-    docker_log = tmp_path / "docker.log"
-    script = f'''
-source "{runtime_lib}"
-worker_swap_snapshot_count() {{ printf '1\\n'; }}
-worker_swap_snapshot_run_ids() {{ printf '477\\n'; }}
-worker_swap_snapshot_details() {{ printf '477:running\\n'; }}
-worker_swap_snapshot_report() {{ printf 'Worker pre-swap check'; }}
-worker_container_id() {{ printf 'original-worker\\n'; }}
-start_worker_handoff() {{ printf 'handoff-worker\\n'; }}
-wait_for_worker_exit() {{ return 1; }}
-docker() {{
-  printf '%s\\n' "$*" >> "{docker_log}"
-  if [ "$1" = "inspect" ]; then
-    return 1
-  fi
-}}
-update_worker_after_drain snapshot
-'''
-
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-
-    assert result.returncode == 1
-    docker_calls = docker_log.read_text()
-    assert "update --restart=unless-stopped original-worker" in docker_calls
-    assert "rm -f handoff-worker" in docker_calls
-    assert "rm -f original-worker" not in docker_calls
-    assert "removed temporary handoff worker handoff-worker" in result.stderr
-    assert "New AgentRuns may remain queued" in result.stderr
 
 
 def test_compose_worker_restart_asserts_exactly_one_running_worker():
@@ -479,7 +447,7 @@ def test_compose_runtime_service_restart_supports_one_many_or_all_services():
     assert "restart_runtime_worker_service" in runtime_lib
     assert "worker_swap_snapshot" in runtime_lib
     assert "started handoff worker" in runtime_lib
-    assert "refusing to kill it" in runtime_lib
+    assert "refusing to drain worker" in runtime_lib
 
 
 def test_compose_pre_swap_check_reports_nonterminal_run_ids():
@@ -700,6 +668,7 @@ def test_inert_stack_check_separates_a_fully_down_stack_from_an_inert_one():
     assert healthy.stderr == ""
 
 
+
 def test_inert_stack_check_is_reachable_as_a_standalone_monitor_entrypoint():
     root = Path(__file__).resolve().parents[1]
     check = root / "deploy" / "scripts" / "inert-stack-check.sh"
@@ -820,7 +789,11 @@ replace_idle_worker
 
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
-    assert result.returncode == 0, result.stderr
+    # A failed recreate on this path means nothing is claiming: the outgoing
+    # worker was already told to drain and there is no handoff worker here. It
+    # used to fall off the end of the `if` and report success.
+    assert result.returncode == 1
+    assert "NOTHING is claiming AgentRuns" in result.stderr
     docker_calls = docker_log.read_text()
     assert "update --restart=no old-worker" in docker_calls
     assert "update --restart=unless-stopped old-worker" in docker_calls

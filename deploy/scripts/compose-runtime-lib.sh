@@ -80,8 +80,29 @@ expand_runtime_services() {
   printf '%s\n' "${expanded_services[@]}"
 }
 
+container_is_oneoff() {
+  local id="$1"
+  [ -n "$id" ] || return 1
+  case "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.oneoff"}}' "$id" 2>/dev/null || true)" in
+    True|true|TRUE) return 0 ;;
+  esac
+  return 1
+}
+
+# `compose ps -q worker` lists the temporary `compose run` handoff workers next
+# to the real service container, so a handoff left behind by an interrupted
+# deploy used to make this return two ids on one line -- and every downstream
+# `docker kill "$worker_id"` then addressed neither. The service container is the
+# one Compose did not tag as one-off.
 worker_container_id() {
-  compose ps -q worker 2>/dev/null || true
+  local id
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    container_is_oneoff "$id" && continue
+    printf '%s\n' "$id"
+    return 0
+  done < <(compose ps -q worker 2>/dev/null || true)
+  return 0
 }
 
 container_running() {
@@ -272,7 +293,7 @@ wait_for_worker_exit() {
       snapshot="$(worker_swap_snapshot)"
       affected_runs="$(worker_swap_snapshot_details "$snapshot")"
       affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
-      echo "Worker did not drain within ${wait_seconds}s; refusing to kill it. Affected run ids: ${affected_ids:-unknown} (id/status: $affected_runs)." >&2
+      echo "Worker did not drain within ${wait_seconds}s. Affected run ids: ${affected_ids:-unknown} (id/status: $affected_runs)." >&2
       record_worker_drain_timeout "$snapshot"
       return 1
     fi
@@ -286,7 +307,7 @@ wait_for_worker_exit() {
         if [ "$consecutive_zero_checks" -ge 2 ] && [ "$hint_printed" = "0" ]; then
           elapsed=$((SECONDS - started_at))
           echo "Hint: worker has 0 active AgentRuns but its process has not exited after ${elapsed}s." >&2
-          echo "Do not force-remove this worker; the deploy remains blocked until it exits safely." >&2
+          echo "Leave it alone: it is already draining and the swap completes on its own. At the ${wait_seconds}s deadline this deploy force-replaces it rather than keeping a worker that can no longer claim." >&2
           hint_printed=1
         fi
       else
@@ -296,26 +317,49 @@ wait_for_worker_exit() {
   done
 }
 
-remove_worker_handoff_after_drain_timeout() {
-  local handoff_id="$1"
-  local worker_id="$2"
-  echo "Worker: drain timed out; stopping and removing temporary handoff worker $handoff_id before returning." >&2
-  docker update --restart=no "$handoff_id" >/dev/null 2>&1 || true
-  docker kill "$handoff_id" >/dev/null 2>&1 || true
-  if ! docker rm -f "$handoff_id" >/dev/null 2>&1; then
-    if docker inspect "$handoff_id" >/dev/null 2>&1; then
-      echo "Worker: could not remove temporary handoff worker $handoff_id; multiple workers may still be running." >&2
-      return 1
-    fi
+# The drain timeout is the operator's own statement of how long a graceful
+# handoff may take, so reaching it has to mean something. It used to mean the
+# opposite of what it said: the handoff worker -- the only container still able
+# to claim -- was deleted, the worker that had already been told to drain was
+# kept, and the script called it "the intended sole worker container". Exactly
+# one container was left, `docker ps` was green, and nothing claimed a run for an
+# hour. (#486 fixed the mirror-image bug, a leaked second claimer; the retained
+# drained worker is precisely what it could not fix.)
+#
+# So the timeout escalates instead: the handoff worker keeps claiming for the
+# whole escalation, the wedged worker is force-replaced, and the handoff is
+# reaped only once the replacement is up. Capacity never reaches zero, and the
+# stack lands back on the single Compose-managed worker that owns the cycle
+# scheduler and the restart policy. Runs the killed worker was holding are
+# recovered by the stale-run reaper.
+escalate_worker_swap_after_drain_timeout() {
+  local worker_id="$1"
+  local handoff_id="$2"
+  local wait_seconds="$3"
+  local snapshot affected_ids run_details
+
+  snapshot="$(worker_swap_snapshot)"
+  affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
+  run_details="$(worker_swap_snapshot_details "$snapshot")"
+
+  echo "FORCED WORKER SWAP: worker $worker_id did not drain within ${wait_seconds}s and will never claim another AgentRun; replacing it rather than keeping a worker that cannot work. Open run ids: ${affected_ids:-unknown} (id/status: $run_details)." >&2
+  echo "Worker: handoff worker ${handoff_id:-none} keeps claiming new AgentRuns until the replacement is up. Runs interrupted here are requeued by the stale-run reaper." >&2
+  record_worker_drain_timeout "$snapshot" "worker_swap_forced"
+
+  suspend_worker_restart_policy "$worker_id"
+  docker kill "$worker_id" >/dev/null 2>&1 || true
+  if container_running "$worker_id"; then
+    echo "Worker: $worker_id survived SIGKILL; it may still be holding AgentRuns, so the swap cannot be completed safely." >&2
+    echo "Recovery: docker rm -f $worker_id, then rerun the upgrade." >&2
+    return 1
   fi
-  echo "Worker: removed temporary handoff worker $handoff_id; original worker $worker_id is retained as the intended sole worker container." >&2
-  echo "Recovery: let the original worker finish its active AgentRuns, then rerun the failed worker restart or upgrade. New AgentRuns may remain queued until the original worker restarts." >&2
+  return 0
 }
 
 update_worker_after_drain() {
   local snapshot="$1"
   local already_reported="${2:-}"
-  local active_runs affected_ids worker_id handoff_id run_details
+  local active_runs affected_ids worker_id handoff_id run_details replacement_id
   active_runs="$(worker_swap_snapshot_count "$snapshot")"
   affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
   run_details="$(worker_swap_snapshot_details "$snapshot")"
@@ -331,22 +375,23 @@ update_worker_after_drain() {
   fi
 
   handoff_id="$(start_worker_handoff)"
-  echo "Worker: started handoff worker ${handoff_id:-unknown} for new AgentRuns."
+  # Draining the only worker before another container exists to claim is the
+  # outage itself, so the handoff has to be confirmed up before the SIGTERM --
+  # not assumed from the fact that `compose run` returned an id.
+  if [ -z "$handoff_id" ] || ! container_running "$handoff_id"; then
+    echo "Worker: refusing to drain worker $worker_id because the handoff worker did not start (${handoff_id:-no container id})." >&2
+    echo "Worker: draining without it would leave zero containers claiming AgentRuns. The worker is untouched and still claiming; nothing was interrupted." >&2
+    echo "Recovery: docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" run -d --no-deps worker will show why it could not start; then rerun the upgrade." >&2
+    [ -z "$handoff_id" ] || docker rm -f "$handoff_id" >/dev/null 2>&1 || true
+    return 1
+  fi
+  echo "Worker: started handoff worker $handoff_id for new AgentRuns."
   echo "Worker: ${active_runs} interactive AgentRun(s); signaling existing worker to drain. Affected run ids: $affected_ids."
   suspend_worker_restart_policy "$worker_id"
   docker kill -s TERM "$worker_id" >/dev/null 2>&1 || true
   if ! wait_for_worker_exit "$worker_id"; then
-    restore_worker_restart_policy
-    if [ "${ILLO_COMPOSE_FORCE_WORKER_SWAP:-0}" != "1" ]; then
-      remove_worker_handoff_after_drain_timeout "$handoff_id" "$worker_id" || true
-      return 1
-    fi
-    snapshot="$(worker_swap_snapshot)"
-    run_details="$(worker_swap_snapshot_details "$snapshot")"
-    affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
-    echo "FORCED WORKER SWAP: killing old worker; affected run ids: ${affected_ids:-unknown} (id/status: $run_details)." >&2
-    suspend_worker_restart_policy "$worker_id"
-    docker kill "$worker_id" >/dev/null 2>&1 || true
+    escalate_worker_swap_after_drain_timeout \
+      "$worker_id" "$handoff_id" "${COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS:-86400}" || return 1
   fi
   # Only drop the suspension once a replacement actually exists. If the recreate
   # failed there is no new worker, so the outgoing container is still the only
@@ -355,13 +400,23 @@ update_worker_after_drain() {
   if compose up -d --force-recreate --no-deps worker; then
     abandon_worker_restart_policy_suspension
   fi
-  if [ -n "$handoff_id" ]; then
-    snapshot="$(worker_swap_snapshot)"
-    affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
-    echo "Worker: regular worker is restarted; draining handoff worker $handoff_id. Open run ids at handoff shutdown: ${affected_ids:-none}."
-    docker kill -s TERM "$handoff_id" >/dev/null 2>&1 || true
-    remove_worker_handoff_bounded "$handoff_id"
+  # The handoff worker is the only thing claiming until this point, so it is
+  # retired against evidence that a replacement took over -- never against the
+  # mere fact that this function reached its last block.
+  replacement_id="$(worker_container_id)"
+  if [ -z "$replacement_id" ] || ! container_running "$replacement_id"; then
+    echo "Worker: no replacement worker is running, so handoff worker $handoff_id is being kept as the only container claiming AgentRuns." >&2
+    echo "Worker: this is a degraded state -- a handoff worker does not run the cycle scheduler and will not come back after a reboot." >&2
+    echo "Recovery: docker rm -f \$(docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" ps -aq worker) && docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" up -d --no-deps worker" >&2
+    record_worker_drain_timeout "$snapshot" "worker_handoff_retained"
+    return 1
   fi
+  snapshot="$(worker_swap_snapshot)"
+  affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
+  echo "Worker: regular worker $replacement_id is running; draining handoff worker $handoff_id. Open run ids at handoff shutdown: ${affected_ids:-none}."
+  docker update --restart=no "$handoff_id" >/dev/null 2>&1 || true
+  docker kill -s TERM "$handoff_id" >/dev/null 2>&1 || true
+  remove_worker_handoff_bounded "$handoff_id"
 }
 
 # Reap the temporary handoff worker without blocking the deploy indefinitely.
@@ -411,12 +466,22 @@ replace_idle_worker() {
   suspend_worker_restart_policy "$worker_id"
   docker kill -s TERM "$worker_id" >/dev/null 2>&1 || true
   if ! wait_for_worker_exit "$worker_id"; then
-    restore_worker_restart_policy
+    # Returning here would leave a container that is running, healthy-looking and
+    # permanently unable to claim -- and this path has no handoff worker to cover
+    # for it. There are no interactive runs to protect, so nothing weighs against
+    # replacing it.
+    echo "FORCED WORKER SWAP: idle worker $worker_id did not exit within ${COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS:-86400}s and will never claim another AgentRun; replacing it. No interactive AgentRuns are affected." >&2
+    docker kill "$worker_id" >/dev/null 2>&1 || true
+  fi
+  # A failed recreate here IS the outage: the outgoing worker was already told to
+  # drain and there is no handoff worker. This used to fall off the end of the
+  # `if` and report success.
+  if ! compose up -d --force-recreate --no-deps worker; then
+    echo "Worker: could not start a replacement worker, so NOTHING is claiming AgentRuns -- the outgoing worker was already signalled to drain." >&2
+    echo "Recovery: docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" up -d --force-recreate --no-deps worker" >&2
     return 1
   fi
-  if compose up -d --force-recreate --no-deps worker; then
-    abandon_worker_restart_policy_suspension
-  fi
+  abandon_worker_restart_policy_suspension
 }
 
 restart_runtime_worker_service() {
