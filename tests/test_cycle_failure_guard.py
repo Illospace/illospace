@@ -8,7 +8,9 @@ from uuid import uuid4
 import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateTable
 
@@ -461,3 +463,40 @@ async def test_terminal_observation_claim_is_idempotent_across_two_sessions(
             assert second_cycle.consecutive_failure_count == 1
     finally:
         await engine.dispose()
+
+
+async def test_terminal_observation_claim_reraises_unrelated_integrity_error():
+    class NestedTransaction:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class FailingSession:
+        def begin_nested(self):
+            return NestedTransaction()
+
+        def add(self, value):
+            pass
+
+        async def flush(self):
+            raise IntegrityError(
+                "insert observation",
+                {},
+                RuntimeError("unrelated constraint"),
+            )
+
+        async def get(self, model, primary_key):
+            return None
+
+    store = cycle_failure_guard.CycleFailureGuardStore(
+        session=FailingSession(),
+        cycle_id=1,
+    )
+
+    with pytest.raises(IntegrityError, match="unrelated constraint"):
+        await store.claim_observation(
+            cycle_run_id=73,
+            observed_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
+        )

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import os
-from typing import Callable
+from typing import Callable, Literal, Protocol
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,19 +16,12 @@ from brain.platform.db.models.scheduler import (
     SchedulerRun,
 )
 from brain.systems.failure_guard.core import (
-    CONSECUTIVE_TRIGGER_KIND,
-    ROLLING_WINDOW_TRIGGER_KIND,
+    FailureRecord,
     FailureGuardEvaluation,
     FailureGuardLatch,
-    FailureGuardRegistry,
-    FailureGuardResetEvent,
-    FailureGuardTrigger,
     FailureGuardTriggerKind,
     FailureGuardTriggerResult,
-    FailureObservation,
-    async_read_failure_guard,
-    async_record_failure,
-    async_reset_failure_guard,
+    async_evaluate_failure_edges,
     failure_signature as scheduler_failure_signature,
     normalize_failure_identity as normalize_scheduler_failure_identity,
     serialize_failure_guard,
@@ -37,6 +30,10 @@ from brain.systems.failure_guard.core import (
 SCHEDULER_FAILURE_ALERT_THRESHOLD_DEFAULT = 3
 SCHEDULER_FAILURE_RATE_THRESHOLD_DEFAULT = 3
 SCHEDULER_FAILURE_RATE_WINDOW_HOURS_DEFAULT = 24
+
+SchedulerFailureGuardResetEvent = Literal["signature_change", "success"]
+CONSECUTIVE_TRIGGER_KIND = FailureGuardTriggerKind("consecutive")
+ROLLING_WINDOW_TRIGGER_KIND = FailureGuardTriggerKind("rolling_window")
 
 
 def _positive_int_setting(name: str, default: int) -> int:
@@ -71,12 +68,11 @@ class ConsecutiveFailuresTrigger:
         session: AsyncSession,
         job: SchedulerJob,
         now: datetime,
-        *,
-        observation: FailureObservation | None = None,
     ) -> FailureGuardTriggerResult:
-        del session, now, observation
+        del session, now
         count = int(job.consecutive_failure_count or 0)
         return FailureGuardTriggerResult(
+            kind=self.kind,
             active=count >= self.threshold,
             public_details={
                 "count": count,
@@ -93,7 +89,7 @@ class ConsecutiveFailuresTrigger:
         job: SchedulerJob,
         now: datetime,
         *,
-        event: FailureGuardResetEvent,
+        event: SchedulerFailureGuardResetEvent,
     ) -> bool:
         del session, job, now, event
         return True
@@ -128,10 +124,7 @@ class RollingWindowFailuresTrigger:
         session: AsyncSession,
         job: SchedulerJob,
         now: datetime,
-        *,
-        observation: FailureObservation | None = None,
     ) -> FailureGuardTriggerResult:
-        del observation
         count = int(
             await session.scalar(
                 select(func.count())
@@ -146,6 +139,7 @@ class RollingWindowFailuresTrigger:
             or 0
         )
         return FailureGuardTriggerResult(
+            kind=self.kind,
             active=count >= self.threshold,
             public_details={
                 "count": count,
@@ -165,15 +159,55 @@ class RollingWindowFailuresTrigger:
         job: SchedulerJob,
         now: datetime,
         *,
-        event: FailureGuardResetEvent,
+        event: SchedulerFailureGuardResetEvent,
     ) -> bool:
         if event != "success":
             return False
         return not (await self.evaluate(session, job, now)).active
 
 
+class SchedulerFailureGuardTrigger(Protocol):
+    """One scheduler-owned failure trigger."""
+
+    kind: FailureGuardTriggerKind
+
+    async def evaluate(
+        self,
+        session: AsyncSession,
+        job: SchedulerJob,
+        now: datetime,
+    ) -> FailureGuardTriggerResult:
+        """Evaluate scheduler state and construct public presentation."""
+
+    async def should_reset(
+        self,
+        session: AsyncSession,
+        job: SchedulerJob,
+        now: datetime,
+        *,
+        event: SchedulerFailureGuardResetEvent,
+    ) -> bool:
+        """Return whether this trigger's latch should reset."""
+
+
+@dataclass(frozen=True)
+class SchedulerFailureGuardRegistry:
+    """The scheduler-owned set of failure triggers."""
+
+    triggers: tuple[SchedulerFailureGuardTrigger, ...]
+
+    def __post_init__(self) -> None:
+        kinds = [str(trigger.kind) for trigger in self.triggers]
+        if any(not kind for kind in kinds):
+            raise ValueError(
+                "Scheduler failure-guard trigger kinds must not be empty"
+            )
+        if len(kinds) != len(set(kinds)):
+            raise ValueError("Scheduler failure-guard trigger kinds must be unique")
+
+
 _FAILURE_GUARD_TRIGGER_PROVIDERS: tuple[
-    Callable[[], FailureGuardTrigger],
+    Callable[[], SchedulerFailureGuardTrigger],
     ...,
 ] = (
     ConsecutiveFailuresTrigger.from_settings,
@@ -181,14 +215,26 @@ _FAILURE_GUARD_TRIGGER_PROVIDERS: tuple[
 )
 
 
-def scheduler_failure_guard_registry() -> FailureGuardRegistry:
+def scheduler_failure_guard_registry() -> SchedulerFailureGuardRegistry:
     """Load the configured registry of independently owned triggers."""
-    return FailureGuardRegistry(
+    return SchedulerFailureGuardRegistry(
         triggers=tuple(
             provide_trigger()
             for provide_trigger in _FAILURE_GUARD_TRIGGER_PROVIDERS
         )
     )
+
+
+async def _async_evaluate_scheduler_triggers(
+    session: AsyncSession,
+    job: SchedulerJob,
+    now: datetime,
+    registry: SchedulerFailureGuardRegistry,
+) -> tuple[FailureGuardTriggerResult, ...]:
+    results = []
+    for trigger in registry.triggers:
+        results.append(await trigger.evaluate(session, job, now))
+    return tuple(results)
 
 
 @dataclass(frozen=True)
@@ -241,17 +287,24 @@ async def async_read_scheduler_failure_guard(
     job: SchedulerJob,
     *,
     now: datetime | None = None,
-    registry: FailureGuardRegistry | None = None,
+    registry: SchedulerFailureGuardRegistry | None = None,
 ) -> FailureGuardEvaluation:
-    """Read every registered trigger through the canonical evaluation path."""
+    """Evaluate scheduler triggers and read their durable latch edges."""
     now = ensure_utc(now)
     registry = registry or scheduler_failure_guard_registry()
-    return await async_read_failure_guard(
+    results = await _async_evaluate_scheduler_triggers(
         session,
         job,
+        now,
+        registry,
+    )
+    return await async_evaluate_failure_edges(
+        results=results,
+        failure_signature=job.failure_signature,
+        last_error=job.last_failure_error,
         now=now,
-        registry=registry,
         store=SchedulerFailureGuardStore(session=session, job_id=job.id),
+        latch_new_edges=False,
     )
 
 
@@ -262,7 +315,7 @@ async def async_record_scheduler_job_failure(
     failure_identity: str,
     error_text: str,
     now: datetime | None = None,
-    registry: FailureGuardRegistry | None = None,
+    registry: SchedulerFailureGuardRegistry | None = None,
 ) -> FailureGuardEvaluation:
     """Persist failure state and evaluate every trigger under one job lock."""
     now = ensure_utc(now)
@@ -275,38 +328,54 @@ async def async_record_scheduler_job_failure(
     if locked_job is None:
         raise ValueError(f"Scheduler job {job.id} not found")
 
-    consecutive_threshold = next(
-        (
-            int(trigger.threshold)
-            for trigger in registry.triggers
-            if trigger.kind == CONSECUTIVE_TRIGGER_KIND
-            and hasattr(trigger, "threshold")
-        ),
-        1,
-    )
-    observation = FailureObservation(
-        classification=(
-            str(failure_identity).partition("\n")[0].strip()
-            or "unclassified_failure"
-        ),
+    record = FailureRecord(
         signature_input=failure_identity,
         error_text=error_text,
-        alert_threshold=consecutive_threshold,
-        alert_class="configured_trigger_failure",
-        operator_action="Open scheduler state and resolve the failing job.",
     )
+    store = SchedulerFailureGuardStore(
+        session=session,
+        job_id=locked_job.id,
+    )
+    signature = scheduler_failure_signature(record.signature_input)
+    if locked_job.failure_signature == signature:
+        locked_job.consecutive_failure_count = int(
+            locked_job.consecutive_failure_count or 0
+        ) + 1
+    else:
+        locked_job.failure_signature = signature
+        locked_job.consecutive_failure_count = 1
+        latches = dict(await store.load_latches())
+        reset_latch = False
+        for trigger in registry.triggers:
+            if trigger.kind not in latches or not await trigger.should_reset(
+                session,
+                locked_job,
+                now,
+                event="signature_change",
+            ):
+                continue
+            await store.delete_latch(trigger.kind)
+            reset_latch = True
+        if reset_latch:
+            await session.flush()
 
-    return await async_record_failure(
+    locked_job.last_failure_error = record.error_text
+    results = await _async_evaluate_scheduler_triggers(
         session,
         locked_job,
-        observation=observation,
-        now=now,
-        registry=registry,
-        store=SchedulerFailureGuardStore(
-            session=session,
-            job_id=locked_job.id,
-        ),
+        now,
+        registry,
     )
+    evaluation = await async_evaluate_failure_edges(
+        results=results,
+        failure_signature=locked_job.failure_signature,
+        last_error=locked_job.last_failure_error,
+        now=now,
+        store=store,
+        latch_new_edges=True,
+    )
+    await session.flush()
+    return evaluation
 
 
 async def async_reset_scheduler_job_failure_guard(
@@ -314,7 +383,7 @@ async def async_reset_scheduler_job_failure_guard(
     job: SchedulerJob,
     *,
     now: datetime | None = None,
-    registry: FailureGuardRegistry | None = None,
+    registry: SchedulerFailureGuardRegistry | None = None,
 ) -> None:
     """Reset trigger latches after a scheduler job succeeds."""
     now = ensure_utc(now)
@@ -327,13 +396,23 @@ async def async_reset_scheduler_job_failure_guard(
     if locked_job is None:
         raise ValueError(f"Scheduler job {job.id} not found")
 
-    await async_reset_failure_guard(
-        session,
-        locked_job,
-        now=now,
-        registry=registry,
-        store=SchedulerFailureGuardStore(
-            session=session,
-            job_id=locked_job.id,
-        ),
+    store = SchedulerFailureGuardStore(
+        session=session,
+        job_id=locked_job.id,
     )
+    latches = dict(await store.load_latches())
+    for trigger in registry.triggers:
+        if trigger.kind not in latches:
+            continue
+        if await trigger.should_reset(
+            session,
+            locked_job,
+            now,
+            event="success",
+        ):
+            await store.delete_latch(trigger.kind)
+
+    locked_job.failure_signature = None
+    locked_job.consecutive_failure_count = 0
+    locked_job.last_failure_error = None
+    await session.flush()

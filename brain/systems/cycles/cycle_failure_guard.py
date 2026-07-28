@@ -8,6 +8,7 @@ from enum import Enum
 import logging
 import os
 from types import MappingProxyType
+from typing import Protocol
 
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -21,19 +22,16 @@ from brain.platform.db.models.cycle import (
 )
 from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.failure_guard.core import (
-    CONSECUTIVE_TRIGGER_KIND,
+    FailureRecord,
     FailureGuardEvaluation,
     FailureGuardLatch,
-    FailureGuardRegistry,
-    FailureGuardResetEvent,
-    FailureGuardSubject,
     FailureGuardTriggerKind,
     FailureGuardTriggerResult,
-    FailureObservation,
-    async_record_failure,
-    async_reset_failure_guard,
+    async_evaluate_failure_edges,
+    failure_signature,
 )
 from brain.systems.failure_guard.slack_delivery import (
+    FailureAlertPresentation,
     FailureAlertSubject,
     SlackFailureAlertPolicy,
     async_deliver_failure_alert,
@@ -44,6 +42,7 @@ from brain.systems.slack.client import slack_web_client_from_runtime
 CYCLE_FAILURE_ALERT_THRESHOLD_DEFAULT = 3
 CYCLE_REPEATED_FAILURE_ALERT_CLASS = "repeated_failure"
 CYCLE_AUTH_BLOCKED_ALERT_CLASS = "auth_blocked"
+CYCLE_CONSECUTIVE_TRIGGER_KIND = FailureGuardTriggerKind("consecutive")
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +91,29 @@ class IgnoreCycleTerminalPolicy:
 
 
 @dataclass(frozen=True)
+class CycleFailureInput:
+    """Cycle-owned trigger input for one terminal failure."""
+
+    classification: str
+    record: FailureRecord
+    alert_threshold: int
+    alert_class: str
+    operator_action: str | None
+
+    def __post_init__(self) -> None:
+        if not self.classification.strip():
+            raise ValueError("cycle failure classification must not be empty")
+        if self.alert_threshold < 1:
+            raise ValueError("cycle failure alert threshold must be positive")
+        if not self.alert_class.strip():
+            raise ValueError("cycle failure alert class must not be empty")
+        if self.operator_action is not None and not self.operator_action.strip():
+            raise ValueError("cycle failure operator action must not be empty")
+
+
+@dataclass(frozen=True)
 class RecordCycleFailurePolicy:
-    """Construct the typed observation for one terminal failure class."""
+    """Construct the typed cycle trigger input for one terminal failure."""
 
     classification: str
     default_error: str
@@ -105,15 +125,17 @@ class RecordCycleFailurePolicy:
         init=False,
     )
 
-    def observation(self, error_text: str | None) -> FailureObservation:
+    def failure_input(self, error_text: str | None) -> CycleFailureInput:
         threshold = self.provide_alert_threshold()
         failure_error = str(error_text or self.default_error).strip()
-        return FailureObservation(
+        return CycleFailureInput(
             classification=self.classification,
-            signature_input=(
-                f"cycle_status:{self.classification}\n{failure_error}"
+            record=FailureRecord(
+                signature_input=(
+                    f"cycle_status:{self.classification}\n{failure_error}"
+                ),
+                error_text=failure_error,
             ),
-            error_text=failure_error,
             alert_threshold=threshold,
             alert_class=self.alert_class,
             operator_action=self.operator_action,
@@ -189,74 +211,74 @@ CYCLE_TERMINAL_POLICIES: Mapping[str, CycleTerminalPolicy] = MappingProxyType(
 
 @dataclass(frozen=True)
 class CycleConsecutiveFailuresTrigger:
-    """Present cycle streaks from explicit failure-observation data."""
+    """Evaluate cycle streaks from explicit cycle-owned failure input."""
 
-    default_threshold: int
     kind: FailureGuardTriggerKind = field(
-        default=CONSECUTIVE_TRIGGER_KIND,
+        default=CYCLE_CONSECUTIVE_TRIGGER_KIND,
         init=False,
     )
 
-    @classmethod
-    def from_settings(cls) -> CycleConsecutiveFailuresTrigger:
-        return cls(default_threshold=_cycle_failure_alert_threshold())
-
-    async def evaluate(
+    def evaluate(
         self,
-        session: AsyncSession,
-        subject: FailureGuardSubject,
-        now: datetime,
-        *,
-        observation: FailureObservation | None = None,
+        cycle: Cycle,
+        failure: CycleFailureInput,
     ) -> FailureGuardTriggerResult:
-        del session, now
-        count = int(subject.consecutive_failure_count or 0)
-        if observation is None:
-            classification = "failure"
-            threshold = self.default_threshold
-            alert_class = CYCLE_REPEATED_FAILURE_ALERT_CLASS
-            operator_action = None
-        else:
-            classification = observation.classification
-            threshold = observation.alert_threshold
-            alert_class = observation.alert_class
-            operator_action = observation.operator_action
-
-        presentation = CYCLE_ALERT_PRESENTATIONS[alert_class]
+        count = int(cycle.consecutive_failure_count or 0)
+        presentation = CYCLE_ALERT_PRESENTATIONS[failure.alert_class]
         summary_lines = [
             f"Failure count: {count}",
-            f"Window: {presentation.describe_window(threshold)}",
+            (
+                "Window: "
+                f"{presentation.describe_window(failure.alert_threshold)}"
+            ),
         ]
-        if operator_action is not None:
-            summary_lines.append(f"Action: {operator_action}")
+        if failure.operator_action is not None:
+            summary_lines.append(f"Action: {failure.operator_action}")
         return FailureGuardTriggerResult(
-            active=count >= threshold,
+            kind=self.kind,
+            active=count >= failure.alert_threshold,
             public_details={
-                "classification": classification,
+                "classification": failure.classification,
                 "count": count,
-                "threshold": threshold,
-                "window_runs": threshold,
+                "threshold": failure.alert_threshold,
+                "window_runs": failure.alert_threshold,
             },
             alert_title=presentation.title,
             alert_summary="\n".join(summary_lines),
         )
 
-    async def should_reset(
+
+class CycleFailureGuardTrigger(Protocol):
+    """One cycle-owned failure trigger."""
+
+    kind: FailureGuardTriggerKind
+
+    def evaluate(
         self,
-        session: AsyncSession,
-        subject: FailureGuardSubject,
-        now: datetime,
-        *,
-        event: FailureGuardResetEvent,
-    ) -> bool:
-        del session, subject, now, event
-        return True
+        cycle: Cycle,
+        failure: CycleFailureInput,
+    ) -> FailureGuardTriggerResult:
+        """Evaluate cycle failure state and construct public presentation."""
 
 
-def cycle_failure_guard_registry() -> FailureGuardRegistry:
+@dataclass(frozen=True)
+class CycleFailureGuardRegistry:
+    """The cycle-owned set of terminal failure triggers."""
+
+    triggers: tuple[CycleFailureGuardTrigger, ...]
+
+    def __post_init__(self) -> None:
+        kinds = [str(trigger.kind) for trigger in self.triggers]
+        if any(not kind for kind in kinds):
+            raise ValueError("Cycle failure-guard trigger kinds must not be empty")
+        if len(kinds) != len(set(kinds)):
+            raise ValueError("Cycle failure-guard trigger kinds must be unique")
+
+
+def cycle_failure_guard_registry() -> CycleFailureGuardRegistry:
     """Return every trigger applied to cycle terminal observations."""
-    return FailureGuardRegistry(
-        triggers=(CycleConsecutiveFailuresTrigger.from_settings(),)
+    return CycleFailureGuardRegistry(
+        triggers=(CycleConsecutiveFailuresTrigger(),)
     )
 
 
@@ -320,7 +342,13 @@ class CycleFailureGuardStore:
                 )
                 await self.session.flush()
         except IntegrityError:
-            return False
+            existing_claim = await self.session.get(
+                CycleFailureGuardObservation,
+                cycle_run_id,
+            )
+            if existing_claim is not None:
+                return False
+            raise
         return True
 
 
@@ -353,24 +381,48 @@ async def async_apply_cycle_terminal_failure_guard(
 
     registry = cycle_failure_guard_registry()
     if isinstance(policy, ResetCycleTerminalPolicy):
-        await async_reset_failure_guard(
-            session,
-            locked_cycle,
-            now=now,
-            registry=registry,
-            store=store,
-        )
+        latches = dict(await store.load_latches())
+        for trigger in registry.triggers:
+            if trigger.kind in latches:
+                await store.delete_latch(trigger.kind)
+        locked_cycle.failure_signature = None
+        locked_cycle.consecutive_failure_count = 0
+        locked_cycle.last_failure_error = None
+        await session.flush()
         return None
 
-    observation = policy.observation(error_text)
-    evaluation = await async_record_failure(
-        session,
-        locked_cycle,
-        observation=observation,
-        now=now,
-        registry=registry,
-        store=store,
+    failure = policy.failure_input(error_text)
+    signature = failure_signature(failure.record.signature_input)
+    if locked_cycle.failure_signature == signature:
+        locked_cycle.consecutive_failure_count = int(
+            locked_cycle.consecutive_failure_count or 0
+        ) + 1
+    else:
+        locked_cycle.failure_signature = signature
+        locked_cycle.consecutive_failure_count = 1
+        latches = dict(await store.load_latches())
+        reset_latch = False
+        for trigger in registry.triggers:
+            if trigger.kind in latches:
+                await store.delete_latch(trigger.kind)
+                reset_latch = True
+        if reset_latch:
+            await session.flush()
+
+    locked_cycle.last_failure_error = failure.record.error_text
+    results = tuple(
+        trigger.evaluate(locked_cycle, failure)
+        for trigger in registry.triggers
     )
+    evaluation = await async_evaluate_failure_edges(
+        results=results,
+        failure_signature=locked_cycle.failure_signature,
+        last_error=locked_cycle.last_failure_error,
+        now=now,
+        store=store,
+        latch_new_edges=True,
+    )
+    await session.flush()
 
     if evaluation.crossed_edges:
         logger.error(
@@ -381,9 +433,10 @@ async def async_apply_cycle_terminal_failure_guard(
             cycle_run_id,
             ",".join(str(edge.kind) for edge in evaluation.crossed_edges),
             evaluation.failure_signature,
-            observation.error_text,
+            failure.record.error_text,
         )
         try:
+            crossed_edge = evaluation.crossed_edges[0]
             await async_deliver_failure_alert(
                 policy=SlackFailureAlertPolicy(
                     provide_client=slack_web_client_from_runtime,
@@ -397,7 +450,6 @@ async def async_apply_cycle_terminal_failure_guard(
                         or "#alerts"
                     ),
                     unknown_error_text="Unknown cycle failure",
-                    combined_alert_title="Cycle failure guard alert",
                 ),
                 subject=FailureAlertSubject(
                     identity_label="Cycle",
@@ -409,8 +461,11 @@ async def async_apply_cycle_terminal_failure_guard(
                     ),
                     link_label="open cycle state",
                 ),
-                evaluation=evaluation,
-                error_text=observation.error_text,
+                presentation=FailureAlertPresentation(
+                    title=crossed_edge.alert_title,
+                    summary=crossed_edge.alert_summary,
+                ),
+                error_text=failure.record.error_text,
             )
         except Exception:
             logger.exception(

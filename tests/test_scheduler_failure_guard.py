@@ -17,16 +17,16 @@ from brain.app.scheduler.daemon import (
     async_scheduler_health_snapshot,
 )
 from brain.systems.failure_guard.core import (
-    CONSECUTIVE_TRIGGER_KIND,
-    ROLLING_WINDOW_TRIGGER_KIND,
     FailureGuardEdge,
     FailureGuardEvaluation,
-    FailureGuardResetEvent,
     FailureGuardTriggerKind,
     FailureGuardTriggerResult,
     serialize_failure_guard,
 )
-from brain.app.scheduler.scheduler_failure_guard import scheduler_failure_signature
+from brain.app.scheduler.scheduler_failure_guard import (
+    CONSECUTIVE_TRIGGER_KIND, ROLLING_WINDOW_TRIGGER_KIND,
+    SchedulerFailureGuardResetEvent, scheduler_failure_signature,
+)
 from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.programs import nightly_heuristic_review_command
 from brain.app.scheduler.runtime import RUN_STATUS_SETTLED_SUCCESS
@@ -714,6 +714,7 @@ class _RuntimeDurationTrigger:
             started_at = started_at.replace(tzinfo=timezone.utc)
         elapsed_minutes = int((now - started_at).total_seconds() // 60)
         return FailureGuardTriggerResult(
+            kind=self.kind,
             active=elapsed_minutes >= self.minimum_runtime_minutes,
             public_details={
                 "elapsed_minutes": elapsed_minutes,
@@ -733,7 +734,7 @@ class _RuntimeDurationTrigger:
         job: SchedulerJob,
         now: datetime,
         *,
-        event: FailureGuardResetEvent,
+        event: SchedulerFailureGuardResetEvent,
     ) -> bool:
         del session, job, now
         return event == "success"

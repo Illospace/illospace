@@ -1905,12 +1905,13 @@ async def test_execute_cycle_run_auth_blocks_expired_codex_before_agent_admissio
     )
     assert len(failure_alerts) == 1
     assert failure_alerts[0]["subject"].identity == "Scheduled Codex check (#5)"
-    assert failure_alerts[0]["evaluation"].crossed_edges[
-        0
-    ].alert_title == "Cycle authentication blocked"
+    assert (
+        failure_alerts[0]["presentation"].title
+        == "Cycle authentication blocked"
+    )
     assert (
         "reconnect OpenAI in Settings > Access"
-        in failure_alerts[0]["evaluation"].crossed_edges[0].alert_summary
+        in failure_alerts[0]["presentation"].summary
     )
 
     thread_msg = next(item for item in session.added if item.__class__.__name__ == "IdeaThread")

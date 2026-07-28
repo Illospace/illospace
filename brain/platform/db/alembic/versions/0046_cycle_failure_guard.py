@@ -16,6 +16,8 @@ down_revision = "0045_scheduler_failure_guard_latches"
 branch_labels = None
 depends_on = None
 
+# The earlier 0046 from unreleased draft commit a83fb25 was never pushed,
+# merged, or deployed, so it is disposable and requires no transition path.
 _CYCLE_TABLE = "cycles"
 _LATCH_TABLE = "cycle_failure_guard_latches"
 _OBSERVATION_TABLE = "cycle_failure_guard_observations"

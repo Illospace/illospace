@@ -40,6 +40,7 @@ from brain.systems.failure_guard.core import (
     serialize_failure_guard,
 )
 from brain.systems.failure_guard.slack_delivery import (
+    FailureAlertPresentation,
     FailureAlertSubject,
     SlackFailureAlertPolicy,
     async_deliver_failure_alert,
@@ -402,6 +403,30 @@ async def async_deliver_scheduler_failure_alert(
     error_text: str,
 ) -> None:
     """Preserve the scheduler card contract through the shared delivery path."""
+    crossed_edges = evaluation.crossed_edges
+    if not crossed_edges:
+        raise ValueError(
+            "scheduler failure alert requires at least one crossed edge"
+        )
+    if len(crossed_edges) == 1:
+        presentation = FailureAlertPresentation(
+            title=crossed_edges[0].alert_title,
+            summary=crossed_edges[0].alert_summary,
+        )
+    else:
+        presentation = FailureAlertPresentation(
+            title="Scheduler job failure guard alert",
+            summary="\n".join(
+                (
+                    "Triggers crossed:",
+                    *(
+                        f"- {edge.kind}: {edge.alert_summary}"
+                        for edge in crossed_edges
+                    ),
+                )
+            ),
+        )
+
     await async_deliver_failure_alert(
         policy=SlackFailureAlertPolicy(
             provide_client=slack_web_client_from_runtime,
@@ -412,7 +437,6 @@ async def async_deliver_scheduler_failure_alert(
                 or "#alerts"
             ),
             unknown_error_text="Unknown scheduler failure",
-            combined_alert_title="Scheduler job failure guard alert",
         ),
         subject=FailureAlertSubject(
             identity_label="Job key",
@@ -424,7 +448,7 @@ async def async_deliver_scheduler_failure_alert(
             ),
             link_label="open scheduler state",
         ),
-        evaluation=evaluation,
+        presentation=presentation,
         error_text=error_text,
     )
 
