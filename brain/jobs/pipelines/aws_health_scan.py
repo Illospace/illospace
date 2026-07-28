@@ -1,13 +1,16 @@
 """Run the hourly Uwear AWS health scan as one headless AgentRun."""
 from __future__ import annotations
 
-import json
+import asyncio
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from brain.contracts.scheduler_handoff import (
+    emit_detached_agent_run_handoff,
+)
 from brain.platform.db.enums import SettlementState
 from brain.platform.db.models.org import User
 from brain.platform.db.models.scheduler import SchedulerJob, SchedulerRun
@@ -163,15 +166,7 @@ async def async_main() -> int:
         print(f"AWS health scan spawn failed: {exc}", file=sys.stderr)
         return 1
 
-    print(
-        json.dumps(
-            {
-                "scheduler_agent_run_id": run_id,
-                "status": "dispatched",
-            },
-            sort_keys=True,
-        )
-    )
+    print(emit_detached_agent_run_handoff(run_id))
     return 0
 
 

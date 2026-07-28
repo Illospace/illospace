@@ -5,20 +5,27 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.schema import CreateTable
 
+from brain.contracts.scheduler_handoff import (
+    emit_detached_agent_run_handoff,
+)
 from brain.app.scheduler.executor import (
     async_drain_scheduler,
-    async_reconcile_scheduler_agent_runs,
     async_run_scheduler_run,
 )
 from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.jobs.pipelines import aws_health_scan
 from brain.platform.db.models.agent_run import AgentRunRow
-from brain.platform.db.models.scheduler import SchedulerJob, SchedulerRun
+from brain.platform.db.models.scheduler import (
+    SchedulerJob,
+    SchedulerRun,
+    SchedulerRunStep,
+)
 from tests.scheduler_test_support import (
     make_scheduler_job,
     make_scheduler_test_session,
@@ -67,7 +74,7 @@ async def test_drain_budget_bounds_admission_not_in_flight_execution(session):
             session,
             max_runs=2,
             runner=runner,
-            execution_budget_seconds=0.25,
+            admission_budget_seconds=0.25,
             now=now,
         ),
         timeout=1.5,
@@ -96,7 +103,7 @@ async def test_drain_budget_bounds_admission_not_in_flight_execution(session):
         session,
         max_runs=2,
         runner=runner,
-        execution_budget_seconds=1,
+        admission_budget_seconds=1,
         now=now,
     )
 
@@ -120,7 +127,7 @@ async def test_healthy_drain_keeps_existing_result_shape(session):
     result = await async_drain_scheduler(
         session,
         runner=runner,
-        execution_budget_seconds=1,
+        admission_budget_seconds=1,
         now=datetime(2026, 7, 28, 19, 30, tzinfo=timezone.utc),
     )
 
@@ -136,6 +143,76 @@ async def test_healthy_drain_keeps_existing_result_shape(session):
             }
         ],
     }
+
+
+async def test_undeclared_command_output_cannot_activate_detached_lifecycle(session):
+    job = _due_job("ordinary_json_job", priority=100)
+    session.add(job)
+    await session.flush()
+
+    async def runner(_command, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=emit_detached_agent_run_handoff(321),
+            stderr="",
+        )
+
+    result = await async_drain_scheduler(
+        session,
+        runner=runner,
+        admission_budget_seconds=1,
+        now=datetime(2026, 7, 28, 19, 30, tzinfo=timezone.utc),
+    )
+
+    scheduler_run = await session.get(SchedulerRun, result["results"][0]["run_id"])
+    assert scheduler_run is not None
+    step = await session.scalar(
+        select(SchedulerRunStep).where(SchedulerRunStep.run_id == scheduler_run.id)
+    )
+    assert step is not None
+    assert scheduler_run.status == "settled_success"
+    assert scheduler_run.agent_run_id is None
+    assert step.status == "settled_success"
+    assert step.agent_run_id is None
+
+
+async def test_declared_detached_command_rejects_malformed_handoff(session):
+    now = datetime(2026, 7, 28, 19, 30, tzinfo=timezone.utc)
+    job = make_scheduler_job(
+        job_key="uwear_aws_health_scan",
+        family="uwear_aws_health_scan",
+        program_key="uwear_aws_health_scan",
+        handler_ref="brain.app.scheduler.programs:uwear_aws_health_scan",
+        retry_policy={"max_attempts": 1, "backoff_seconds": 0},
+        next_run_at=now,
+    )
+    session.add(job)
+    await session.flush()
+
+    async def runner(_command, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {"scheduler_agent_run_id": 321, "status": "dispatched"}
+            ),
+            stderr="",
+        )
+
+    result = await async_drain_scheduler(
+        session,
+        runner=runner,
+        admission_budget_seconds=1,
+        now=now,
+    )
+
+    assert result["results"][0]["status"] == "settled_failure"
+    scheduler_run = await session.get(
+        SchedulerRun,
+        result["results"][0]["run_id"],
+    )
+    assert scheduler_run is not None
+    assert scheduler_run.agent_run_id is None
+    assert "invalid detached AgentRun handoff envelope" in scheduler_run.error_text
 
 
 async def test_structured_dispatch_leaves_scheduler_run_for_reconciliation(session):
@@ -159,9 +236,7 @@ async def test_structured_dispatch_leaves_scheduler_run_for_reconciliation(sessi
     async def runner(_command, **_kwargs):
         return SimpleNamespace(
             returncode=0,
-            stdout=json.dumps(
-                {"scheduler_agent_run_id": 321, "status": "dispatched"}
-            ),
+            stdout=emit_detached_agent_run_handoff(321),
             stderr="",
         )
 
@@ -176,86 +251,109 @@ async def test_structured_dispatch_leaves_scheduler_run_for_reconciliation(sessi
     assert dispatched.agent_run_id == 321
     assert dispatched.lease_id is None
     assert dispatched.finished_at is None
+    step = await session.scalar(
+        select(SchedulerRunStep).where(SchedulerRunStep.run_id == dispatched.id)
+    )
+    assert step is not None
+    assert step.status == "executing"
+    assert step.finished_at is None
     assert dispatched.result_summary["agent_run"] == {
         "run_id": 321,
         "status": "dispatched",
     }
 
 
-async def test_terminal_agent_run_is_recorded_on_scheduler_run(monkeypatch):
-    now = datetime(2026, 7, 28, 19, 44, tzinfo=timezone.utc)
-    scheduler_run = SimpleNamespace(
-        id=17,
-        job_id=9,
-        status="executing",
-        agent_run_id=321,
-        trace_id="run:321",
-        result_summary={
-            "steps": [],
-            "agent_run": {"run_id": 321, "status": "dispatched"},
-        },
-        error_text=None,
-        finished_at=None,
-        lease_id=None,
-    )
-    job = SimpleNamespace(
-        id=9,
+@pytest.mark.parametrize(
+    ("agent_status", "scheduler_status", "finished_at_field"),
+    [
+        ("completed", "settled_success", "completed_at"),
+        ("failed", "settled_failure", "failed_at"),
+        ("canceled", "settled_failure", "canceled_at"),
+    ],
+)
+async def test_later_drain_reconciles_detached_agent_run_and_step(
+    session,
+    agent_status,
+    scheduler_status,
+    finished_at_field,
+):
+    await session.execute(CreateTable(AgentRunRow.__table__, if_not_exists=True))
+
+    now = datetime(2026, 7, 28, 19, 30, tzinfo=timezone.utc)
+    job = make_scheduler_job(
         job_key="uwear_aws_health_scan",
-        enabled=True,
-        pause_reason=None,
-        last_finished_at=None,
+        family="uwear_aws_health_scan",
+        program_key="uwear_aws_health_scan",
+        handler_ref="brain.app.scheduler.programs:uwear_aws_health_scan",
+        retry_policy={"max_attempts": 1, "backoff_seconds": 0},
+        next_run_at=now,
     )
-    agent_run = SimpleNamespace(
-        id=321,
-        status="completed",
-        completed_at=now,
-        failed_at=None,
-        canceled_at=None,
-    )
-    scalar_result = MagicMock()
-    scalar_result.all.return_value = [scheduler_run]
-    mock_session = MagicMock()
-    mock_session.scalars = AsyncMock(return_value=scalar_result)
-    mock_session.scalar = AsyncMock(return_value=None)
-    mock_session.flush = AsyncMock()
+    session.add(job)
+    await session.flush()
 
-    async def get(model, row_id):
-        if model is AgentRunRow:
-            assert row_id == 321
-            return agent_run
-        if model is SchedulerJob:
-            assert row_id == 9
-            return job
-        raise AssertionError(f"Unexpected model lookup: {model}")
+    async def runner(_command, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=emit_detached_agent_run_handoff(321),
+            stderr="",
+        )
 
-    mock_session.get = AsyncMock(side_effect=get)
-    reset_guard = AsyncMock()
-    monkeypatch.setattr(
-        "brain.app.scheduler.executor.async_reset_scheduler_job_failure_guard",
-        reset_guard,
-    )
-
-    reconciled = await async_reconcile_scheduler_agent_runs(
-        mock_session,
+    first_drain = await async_drain_scheduler(
+        session,
+        job_key=job.job_key,
+        runner=runner,
+        admission_budget_seconds=1,
         now=now,
     )
+    assert first_drain["executed"] == 1
 
-    assert reconciled == [
-        {
-            "run_id": 17,
-            "agent_run_id": 321,
-            "agent_run_status": "completed",
-            "status": "settled_success",
-        }
-    ]
-    assert scheduler_run.status == "settled_success"
-    assert scheduler_run.finished_at == now
-    assert scheduler_run.result_summary["agent_run"] == {
-        "run_id": 321,
-        "status": "completed",
-        "reconciled_at": now.isoformat(),
-    }
-    reset_guard.assert_awaited_once_with(mock_session, job, now=now)
+    scheduler_run = await session.scalar(
+        select(SchedulerRun).where(SchedulerRun.job_id == job.id)
+    )
+    assert scheduler_run is not None
+    scheduler_step = await session.scalar(
+        select(SchedulerRunStep).where(SchedulerRunStep.run_id == scheduler_run.id)
+    )
+    assert scheduler_step is not None
+    assert scheduler_run.status == "executing"
+    assert scheduler_step.status == "executing"
+
+    terminal_at = datetime(2026, 7, 28, 19, 35, tzinfo=timezone.utc)
+    session.add(
+        AgentRunRow(
+            id=321,
+            thread_id=f"headless:health-scan:{agent_status}",
+            profile="fast",
+            recipe="fast",
+            status=agent_status,
+            input_message="Run the AWS health scan.",
+            target_ref={},
+            workspace_ref={},
+            model_policy={},
+            metadata_={},
+            **{finished_at_field: terminal_at},
+        )
+    )
+    await session.flush()
+
+    second_drain = await async_drain_scheduler(
+        session,
+        job_key=job.job_key,
+        runner=runner,
+        admission_budget_seconds=1,
+        now=terminal_at,
+    )
+    assert second_drain["executed"] == 0
+
+    await session.refresh(scheduler_run)
+    await session.refresh(scheduler_step)
+    assert scheduler_run.status == scheduler_status
+    assert scheduler_step.status == scheduler_status
+    assert scheduler_run.finished_at is not None
+    assert scheduler_step.finished_at == scheduler_run.finished_at
+    assert scheduler_run.finished_at.replace(tzinfo=timezone.utc) == terminal_at
+    assert scheduler_run.result_summary["agent_run"]["status"] == agent_status
+    assert scheduler_step.result_summary["agent_run"]["status"] == agent_status
 
 
 async def test_aws_health_scan_returns_immediately_after_dispatch(monkeypatch, capsys):
@@ -267,6 +365,8 @@ async def test_aws_health_scan_returns_immediately_after_dispatch(monkeypatch, c
     assert exit_code == 0
     spawn.assert_awaited_once_with()
     assert json.loads(capsys.readouterr().out) == {
+        "type": "scheduler.detached_agent_run",
+        "version": 1,
         "scheduler_agent_run_id": 321,
         "status": "dispatched",
     }

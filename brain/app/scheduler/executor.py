@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import logging
 import os
 import shlex
@@ -21,8 +20,13 @@ from brain.kernel.common.time import ensure_utc
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.platform.async_io import run_blocking
-from brain.platform.db.models.agent_run import AgentRunRow
+from brain.contracts.scheduler_handoff import (
+    AGENT_RUN_COMPLETION_MODE,
+    DetachedAgentRunHandoff,
+    DetachedAgentRunHandoffError,
+    parse_detached_agent_run_handoff,
+)
+from brain.platform.async_io import run_blocking, run_subprocess
 from brain.platform.db.models.scheduler import (
     OWNER_MODE_SCHEDULER,
     SchedulerJob,
@@ -34,6 +38,10 @@ from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.slack.client import slack_web_client_from_runtime
 from brain.app.scheduler.catalog import normalize_owner_mode
 from brain.app.scheduler.contracts import validate_scheduler_run_contract
+from brain.app.scheduler.detached_agent_runs import (
+    async_mark_detached_run_dispatched,
+    async_reconcile_detached_runs,
+)
 from brain.app.scheduler.scheduler_failure_guard import (
     async_record_scheduler_job_failure,
     async_reset_scheduler_job_failure_guard,
@@ -55,11 +63,11 @@ from brain.app.scheduler.programs import (
     build_scheduler_step_plan,
     nightly_commands,
     nightly_commands_for_step,
+    scheduler_program_completion_mode,
 )
 from brain.app.scheduler.runtime import (
     LEASE_TTL_SECONDS,
     RUN_STATUS_CLAIMED,
-    RUN_STATUS_EXECUTING,
     RUN_STATUS_PAUSED,
     RUN_STATUS_RECORDED,
     RUN_STATUS_RETRYABLE,
@@ -72,7 +80,6 @@ from brain.app.scheduler.runtime import (
     async_finish_run,
     async_find_scheduler_job,
     async_heartbeat_lease,
-    async_release_lease,
     async_retry_run,
     async_set_scheduler_job_load_shed as async_set_scheduler_job_load_shed_state,
     async_set_scheduler_job_owner_mode as async_set_scheduler_job_owner_mode_state,
@@ -83,11 +90,6 @@ from brain.app.scheduler.runtime import (
     retry_available_at,
     trace_id_for_run_id,
     trace_id_for_scheduler_run_id,
-)
-from brain.systems.runs.status import (
-    TERMINAL_RUN_STATUSES as TERMINAL_AGENT_RUN_STATUSES,
-    RunStatus as AgentRunStatus,
-    coerce_run_status as coerce_agent_run_status,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -103,9 +105,10 @@ def _positive_float_env(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
-DEFAULT_DRAIN_EXECUTION_BUDGET_SECONDS = _positive_float_env(
-    "SCHEDULER_DRAIN_EXECUTION_BUDGET_SECONDS",
-    30.0,
+DEFAULT_DRAIN_ADMISSION_BUDGET_SECONDS = _positive_float_env(
+    "SCHEDULER_DRAIN_ADMISSION_BUDGET_SECONDS",
+    # Deprecated fallback; remove after deploy configuration uses the admission name.
+    _positive_float_env("SCHEDULER_DRAIN_EXECUTION_BUDGET_SECONDS", 30.0),
 )
 
 _FINAL_RUN_STATUSES = {
@@ -132,50 +135,14 @@ async def _async_run_command(
     env: dict[str, str] | None = None,
     timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    argv = list(command)
-    process = await asyncio.create_subprocess_exec(
-        *argv,
+    return await run_subprocess(
+        list(command),
         cwd=str(cwd or REPO_ROOT),
         env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    communicate = asyncio.create_task(process.communicate())
-    try:
-        if timeout_seconds is None:
-            stdout_bytes, stderr_bytes = await asyncio.shield(communicate)
-        else:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                asyncio.shield(communicate),
-                timeout=max(0.0, float(timeout_seconds)),
-            )
-    except asyncio.TimeoutError:
-        if process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-        stdout_bytes, stderr_bytes = await communicate
-        raise subprocess.TimeoutExpired(
-            argv,
-            timeout_seconds,
-            output=stdout_bytes.decode(errors="replace"),
-            stderr=stderr_bytes.decode(errors="replace"),
-        ) from None
-    except asyncio.CancelledError:
-        if process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-        await communicate
-        raise
-
-    return subprocess.CompletedProcess(
-        argv,
-        int(process.returncode or 0),
-        stdout_bytes.decode(errors="replace"),
-        stderr_bytes.decode(errors="replace"),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout_seconds,
     )
 
 
@@ -239,26 +206,6 @@ def _command_summary(proc: Any) -> dict[str, Any]:
         "stdout_tail": _tail(getattr(proc, "stdout", None)),
         "stderr_tail": _tail(getattr(proc, "stderr", None)),
     }
-
-
-def _scheduler_agent_run_id(proc: Any) -> int | None:
-    """Read the explicit detached-run handoff emitted by a scheduler command."""
-    stdout = str(getattr(proc, "stdout", "") or "")
-    for line in reversed(stdout.splitlines()):
-        try:
-            payload = json.loads(line)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        value = payload.get("scheduler_agent_run_id")
-        if value is None:
-            continue
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
-    return None
 
 
 def _python_one_liner(code: str) -> list[str]:
@@ -630,7 +577,10 @@ async def _async_run_step(
 
     env = _shell_env(job, run, step.step_key)
     results: list[dict[str, Any]] = []
-    dispatched_agent_run_id: int | None = None
+    completion_mode = str(
+        step_spec.get("completion_mode") or scheduler_program_completion_mode(job)
+    ).strip().lower()
+    detached_handoff: DetachedAgentRunHandoff | None = None
     for command in commands:
         try:
             proc = await _call_runner(
@@ -663,12 +613,6 @@ async def _async_run_step(
                 "error": error_text,
             }
         summary = {"command": list(command), **_command_summary(proc)}
-        agent_run_id = _scheduler_agent_run_id(proc)
-        if agent_run_id is not None:
-            dispatched_agent_run_id = agent_run_id
-            run.agent_run_id = agent_run_id
-            run.trace_id = trace_id_for_run_id(agent_run_id)
-            summary["scheduler_agent_run_id"] = agent_run_id
         results.append(summary)
         if int(getattr(proc, "returncode", 1)) != 0:
             error_text = summary["stderr_tail"] or summary["stdout_tail"] or "step failed"
@@ -681,7 +625,37 @@ async def _async_run_step(
                 error_text=error_text,
             )
             return {"ok": False, "step_key": step.step_key, "results": results, "error": error_text}
+        if completion_mode == AGENT_RUN_COMPLETION_MODE:
+            try:
+                detached_handoff = parse_detached_agent_run_handoff(
+                    getattr(proc, "stdout", None)
+                )
+            except DetachedAgentRunHandoffError as exc:
+                error_text = f"{type(exc).__name__}: {exc}"
+                await async_update_run_step(
+                    session,
+                    step,
+                    status=RUN_STATUS_RETRYABLE,
+                    finished_at=now,
+                    result_summary={"results": results},
+                    error_text=error_text,
+                )
+                return {
+                    "ok": False,
+                    "step_key": step.step_key,
+                    "results": results,
+                    "error": error_text,
+                }
+            summary["scheduler_agent_run_id"] = detached_handoff.agent_run_id
 
+    if detached_handoff is not None:
+        return {
+            "ok": True,
+            "step_key": step.step_key,
+            "results": results,
+            "agent_run_id": detached_handoff.agent_run_id,
+            "_detached_handoff": detached_handoff,
+        }
     await async_update_run_step(
         session,
         step,
@@ -689,12 +663,8 @@ async def _async_run_step(
         finished_at=now,
         result_summary={"results": results},
         error_text=None,
-        agent_run_id=dispatched_agent_run_id,
     )
-    result = {"ok": True, "step_key": step.step_key, "results": results}
-    if dispatched_agent_run_id is not None:
-        result["agent_run_id"] = dispatched_agent_run_id
-    return result
+    return {"ok": True, "step_key": step.step_key, "results": results}
 
 
 async def async_run_scheduler_run(
@@ -766,6 +736,11 @@ async def async_run_scheduler_run(
     await session.flush()
 
     step_results: list[dict[str, Any]] = []
+    detached_dispatch: tuple[
+        SchedulerRunStep,
+        DetachedAgentRunHandoff,
+        dict[str, Any],
+    ] | None = None
     for step_spec in sorted(step_plan, key=lambda item: int(item.get("sequence_no", 0))):
         step_key = str(step_spec["step_key"])
         step = step_by_key[step_key]
@@ -779,6 +754,7 @@ async def async_run_scheduler_run(
             now=now,
             resume=resume,
         )
+        handoff = result.pop("_detached_handoff", None)
         step_results.append(result)
         if not result["ok"]:
             failure_status, failure_summary = _retryable_failure_summary(
@@ -808,35 +784,20 @@ async def async_run_scheduler_run(
                 now=now,
             )
             return run
+        if handoff is not None:
+            detached_dispatch = (step, handoff, result)
 
-    dispatched_agent_run_ids = [
-        int(result["agent_run_id"])
-        for result in step_results
-        if result.get("agent_run_id") is not None
-    ]
-    if dispatched_agent_run_ids:
-        agent_run_id = dispatched_agent_run_ids[-1]
-        run.agent_run_id = agent_run_id
-        run.trace_id = trace_id_for_run_id(agent_run_id)
-        run.status = RUN_STATUS_EXECUTING
-        run.result_summary = {
-            "steps": step_results,
-            "agent_run": {
-                "run_id": agent_run_id,
-                "status": "dispatched",
-            },
-        }
-        run.error_text = None
-        run.finished_at = None
-        if run.lease_id:
-            await async_release_lease(
-                session,
-                run.lease_id,
-                reason="agent_run_dispatched",
-                now=now,
-            )
-        await session.flush()
-        return run
+    if detached_dispatch is not None:
+        detached_step, handoff, step_result = detached_dispatch
+        return await async_mark_detached_run_dispatched(
+            session,
+            run,
+            detached_step,
+            handoff=handoff,
+            step_result=step_result,
+            step_results=step_results,
+            now=now,
+        )
 
     await async_finish_run(
         session,
@@ -1191,130 +1152,6 @@ async def async_set_scheduler_job_load_shed(
     return updated
 
 
-def _agent_run_finished_at(agent_run: AgentRunRow, *, now: datetime) -> datetime:
-    for attr_name in ("completed_at", "failed_at", "canceled_at"):
-        value = getattr(agent_run, attr_name, None)
-        if value is not None:
-            return _utcnow(value)
-    return now
-
-
-async def async_reconcile_scheduler_agent_runs(
-    session: AsyncSession,
-    *,
-    now: datetime | None = None,
-) -> list[dict[str, Any]]:
-    """Settle detached scheduler runs from their linked AgentRun outcomes."""
-    now = _utcnow(now)
-    runs = (
-        await session.scalars(
-            select(SchedulerRun)
-            .where(
-                SchedulerRun.status == RUN_STATUS_EXECUTING,
-                SchedulerRun.agent_run_id.is_not(None),
-            )
-            .order_by(SchedulerRun.id.asc())
-        )
-    ).all()
-    reconciled: list[dict[str, Any]] = []
-    for run in runs:
-        agent_run = await session.get(AgentRunRow, int(run.agent_run_id))
-        if agent_run is None:
-            continue
-        agent_status = coerce_agent_run_status(agent_run.status)
-        if agent_status not in TERMINAL_AGENT_RUN_STATUSES:
-            continue
-
-        terminal_scheduler_status = (
-            RUN_STATUS_SETTLED_SUCCESS
-            if agent_status == AgentRunStatus.COMPLETED
-            else RUN_STATUS_SETTLED_FAILURE
-        )
-        job = await session.get(SchedulerJob, run.job_id)
-        error_text = None
-        if terminal_scheduler_status == RUN_STATUS_SETTLED_FAILURE:
-            error_text = (
-                f"Agent run {run.agent_run_id} ended with status "
-                f"{agent_status.value}"
-            )
-        summary = {
-            **(run.result_summary or {}),
-            "agent_run": {
-                "run_id": int(run.agent_run_id),
-                "status": agent_status.value,
-                "reconciled_at": now.isoformat(),
-            },
-        }
-        scheduler_status = terminal_scheduler_status
-        if terminal_scheduler_status == RUN_STATUS_SETTLED_FAILURE and job is not None:
-            scheduler_status, summary = _retryable_failure_summary(
-                job,
-                run,
-                base_summary=summary,
-                now=now,
-            )
-        step = await session.scalar(
-            select(SchedulerRunStep)
-            .where(
-                SchedulerRunStep.run_id == run.id,
-                SchedulerRunStep.agent_run_id == run.agent_run_id,
-            )
-            .order_by(SchedulerRunStep.sequence_no.desc())
-            .limit(1)
-        )
-        if step is not None:
-            await async_update_run_step(
-                session,
-                step,
-                status=(
-                    RUN_STATUS_SETTLED_SUCCESS
-                    if terminal_scheduler_status == RUN_STATUS_SETTLED_SUCCESS
-                    else scheduler_status
-                ),
-                finished_at=_agent_run_finished_at(agent_run, now=now),
-                result_summary={
-                    **(step.result_summary or {}),
-                    "agent_run": summary["agent_run"],
-                },
-                error_text=error_text,
-                agent_run_id=int(run.agent_run_id),
-            )
-        finished_at = _agent_run_finished_at(agent_run, now=now)
-        await async_finish_run(
-            session,
-            run,
-            status=scheduler_status,
-            result_summary=summary,
-            error_text=error_text,
-            now=finished_at,
-        )
-        if job is not None:
-            if scheduler_status == RUN_STATUS_SETTLED_SUCCESS:
-                await async_reset_scheduler_job_failure_guard(
-                    session,
-                    job,
-                    now=now,
-                )
-            else:
-                await _async_apply_failure_guard(
-                    session,
-                    job,
-                    run,
-                    failure_key="detached_agent_run",
-                    error_text=error_text or "Detached agent run failed",
-                    now=now,
-                )
-        reconciled.append(
-            {
-                "run_id": run.id,
-                "agent_run_id": int(run.agent_run_id),
-                "agent_run_status": agent_status.value,
-                "status": scheduler_status,
-            }
-        )
-    return reconciled
-
-
 async def async_drain_scheduler(
     session: AsyncSession,
     *,
@@ -1326,22 +1163,27 @@ async def async_drain_scheduler(
     runner: Runner = _async_run_command,
     now: datetime | None = None,
     allowed_owner_modes: tuple[str, ...] | None = None,
-    execution_budget_seconds: float | None = None,
+    admission_budget_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Start due runs within one bounded scheduler-tick admission budget."""
     now = _utcnow(now)
     modes = allowed_owner_modes or (normalize_owner_mode(owner_mode),)
     budget_seconds = (
-        DEFAULT_DRAIN_EXECUTION_BUDGET_SECONDS
-        if execution_budget_seconds is None
-        else float(execution_budget_seconds)
+        DEFAULT_DRAIN_ADMISSION_BUDGET_SECONDS
+        if admission_budget_seconds is None
+        else float(admission_budget_seconds)
     )
     if budget_seconds <= 0:
-        raise ValueError("execution_budget_seconds must be greater than zero")
+        raise ValueError("admission_budget_seconds must be greater than zero")
     loop = asyncio.get_running_loop()
     admission_deadline = loop.time() + budget_seconds
 
-    await async_reconcile_scheduler_agent_runs(session, now=now)
+    await async_reconcile_detached_runs(
+        session,
+        retryable_failure_summary=_retryable_failure_summary,
+        apply_failure_guard=_async_apply_failure_guard,
+        now=now,
+    )
 
     await async_materialize_due_runs(
         session,
