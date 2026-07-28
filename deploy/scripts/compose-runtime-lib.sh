@@ -161,8 +161,10 @@ suspend_worker_restart_policy() {
   # of clobbering it -- doctor.sh installs its own cleanup.
   existing="$(trap -p EXIT | sed -n "s/^trap -- '\(.*\)' EXIT\$/\1/p")"
   case "$existing" in
-    ""|*restore_worker_restart_policy*)
+    "")
       trap 'restore_worker_restart_policy' EXIT
+      ;;
+    *restore_worker_restart_policy*)
       ;;
     *)
       trap "restore_worker_restart_policy; $existing" EXIT
@@ -177,9 +179,20 @@ suspend_worker_restart_policy() {
 
 restore_worker_restart_policy() {
   local id="${WORKER_RESTART_POLICY_SUSPENDED_ID:-}"
+  local int_trap term_trap hup_trap
   [ -n "$id" ] || return 0
-  WORKER_RESTART_POLICY_SUSPENDED_ID=""
-  docker update --restart="$(worker_declared_restart_policy)" "$id" >/dev/null 2>&1 || true
+  int_trap="$(trap -p INT)"
+  term_trap="$(trap -p TERM)"
+  hup_trap="$(trap -p HUP)"
+  trap '' INT TERM HUP
+  if docker update --restart="$(worker_declared_restart_policy)" "$id" >/dev/null 2>&1; then
+    WORKER_RESTART_POLICY_SUSPENDED_ID=""
+  fi
+  trap - INT TERM HUP
+  [ -z "$int_trap" ] || eval "$int_trap"
+  [ -z "$term_trap" ] || eval "$term_trap"
+  [ -z "$hup_trap" ] || eval "$hup_trap"
+  return 0
 }
 
 # Called once the suspended container has been replaced by a fresh one. The

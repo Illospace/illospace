@@ -604,6 +604,42 @@ printf 'deploy continued\\n'
     assert cleanup_log.read_text() == "caller cleanup ran\n"
 
 
+def test_worker_restart_policy_restore_survives_a_second_signal(tmp_path):
+    """A signal during restoration must not strand the worker at restart=no."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    docker_log = tmp_path / "docker.log"
+    policy = tmp_path / "policy"
+    second_signal_sent = tmp_path / "second-signal-sent"
+    script = f'''
+source "{runtime_lib}"
+docker() {{
+  printf '%s\\n' "$*" >> "{docker_log}"
+  case "$2" in
+    --restart=no)
+      printf 'no\\n' > "{policy}"
+      ;;
+    --restart=unless-stopped)
+      if [ ! -e "{second_signal_sent}" ]; then
+        touch "{second_signal_sent}"
+        kill -s TERM "$$"
+        [ -n "$(trap -p TERM)" ] || return 143
+      fi
+      printf 'unless-stopped\\n' > "{policy}"
+      ;;
+  esac
+}}
+suspend_worker_restart_policy stranded-worker
+kill -s TERM "$$"
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == -signal.SIGTERM
+    assert policy.read_text() == "unless-stopped\n"
+    docker_calls = docker_log.read_text()
+    assert docker_calls.count("update --restart=unless-stopped stranded-worker") == 1
+
+
 def test_worker_is_not_signalled_when_restart_policy_suspension_fails(tmp_path):
     """Suspension is a safety precondition for every worker kill path."""
     runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
@@ -831,7 +867,30 @@ exit 7
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
     assert result.returncode == 7
-    assert "update --restart=unless-stopped some-worker" in docker_log.read_text()
+    docker_calls = docker_log.read_text()
+    assert docker_calls.count("update --restart=unless-stopped some-worker") == 1
+    assert "caller cleanup ran" in result.stdout
+
+
+def test_repeated_worker_restart_policy_suspension_preserves_an_existing_exit_trap(tmp_path):
+    """A second suspension must not discard the caller's chained cleanup."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    docker_log = tmp_path / "docker.log"
+    script = f'''
+source "{runtime_lib}"
+docker() {{ printf '%s\\n' "$*" >> "{docker_log}"; }}
+caller_cleanup() {{ printf 'caller cleanup ran\\n'; }}
+trap caller_cleanup EXIT
+suspend_worker_restart_policy some-worker
+suspend_worker_restart_policy some-worker
+exit 7
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 7
+    docker_calls = docker_log.read_text()
+    assert docker_calls.count("update --restart=unless-stopped some-worker") == 1
     assert "caller cleanup ran" in result.stdout
 
 
