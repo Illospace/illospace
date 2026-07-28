@@ -1165,13 +1165,10 @@ async def test_domain_projection_creates_updates_and_dedupes_domain_records(sess
 
 
 @pytest.mark.requires_db
-async def test_merged_github_projection_triggers_one_deploy_sweep_and_replay_is_inert(
+async def test_merged_github_projection_has_no_deploy_side_effect_and_replay_is_inert(
     session, monkeypatch
 ):
-    import brain.systems.deploy_state_sweep as deploy_sweep
-
     repo = "uwear-ai/uwear-backend"
-    monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", repo)
     principal = await _seed_connection(session)
     domain_service = AsyncDomainService(session)
     domain = await domain_service.create_domain(
@@ -1208,13 +1205,6 @@ async def test_merged_github_projection_triggers_one_deploy_sweep_and_replay_is_
         external_id_field="external_id",
         field_mapping={"repo": "hints.repo"},
     )
-    calls = []
-
-    async def fake_sweep(session_arg, *, org_id, repo, merge_event, ancestry_tokens):
-        calls.append((session_arg, org_id, repo, dict(merge_event), ancestry_tokens))
-        return {"updated": 0}
-
-    monkeypatch.setattr(deploy_sweep, "run_deploy_sweep", fake_sweep)
     envelope = {
         "origin": f"github:{repo}",
         "kind": "github_event",
@@ -1248,36 +1238,26 @@ async def test_merged_github_projection_triggers_one_deploy_sweep_and_replay_is_
 
     assert first["status"] == "processed"
     assert replay["idempotent_replay"] is True
-    assert len(calls) == 1
-    assert calls[0][1:3] == (ORG_ID, repo)
-    assert calls[0][4] == [None]
+    records = await domain_service.list_records(
+        ORG_ID,
+        domain.id,
+        object_key="github_ticket",
+    )
+    assert len(records) == 1
+    assert records[0].data == {"external_id": "PR_859", "repo": repo}
 
 
 @pytest.mark.requires_db
-async def test_postgres_merged_main_envelope_flips_record_and_emits_domain_event(
+async def test_postgres_merged_main_envelope_has_no_deploy_side_effect(
     db_session, monkeypatch
 ):
-    import brain.systems.deploy_state_sweep as deploy_sweep
-    import brain.systems.runs.tool_catalog.handlers.github as github_handlers
-
     repo = "uwear-ai/uwear-backend"
-    monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", repo)
-    monkeypatch.setattr(
-        github_handlers,
-        "_github_token_candidates",
-        AsyncMock(return_value=[{"token": None, "source": "public"}]),
-    )
-    monkeypatch.setattr(
-        deploy_sweep,
-        "is_ancestor_of",
-        AsyncMock(return_value=True),
-    )
     principal = await _seed_connection(db_session)
     domain_service = AsyncDomainService(db_session)
     domain = await domain_service.create_domain(
         ORG_ID,
-        name="Deploy Sweep Integration",
-        slug="deploy-sweep-integration",
+        name="Deploy Read Integration",
+        slug="deploy-read-integration",
         objects=[
             {
                 "key": "github_ticket",
@@ -1286,6 +1266,8 @@ async def test_postgres_merged_main_envelope_flips_record_and_emits_domain_event
                     {"key": "external_id", "field_type": "text", "required": True},
                     {"key": "title", "field_type": "text", "required": True},
                     {"key": "repo", "field_type": "text"},
+                    {"key": "fix_pr", "field_type": "text"},
+                    {"key": "fix_merge_sha", "field_type": "text"},
                     {
                         "key": "status",
                         "field_type": "enum",
@@ -1296,18 +1278,6 @@ async def test_postgres_merged_main_envelope_flips_record_and_emits_domain_event
             }
         ],
     )
-    from brain.systems.deploy_tracker import (
-        DEPLOY_STATE_FIELD_DEFINITIONS,
-        ensure_deploy_state_fields,
-    )
-
-    first_fields = await ensure_deploy_state_fields(db_session, org_id=ORG_ID)
-    second_fields = await ensure_deploy_state_fields(db_session, org_id=ORG_ID)
-    # The canonical set is currently ten lifecycle fields plus five
-    # alert-resolution provenance fields. This fresh object starts with none of
-    # them, so the first pass installs the full set and the second is idempotent.
-    assert first_fields["fields_added"] == len(DEPLOY_STATE_FIELD_DEFINITIONS)
-    assert second_fields["fields_added"] == 0
     record = await domain_service.create_record(
         ORG_ID,
         domain.id,
@@ -1320,9 +1290,7 @@ async def test_postgres_merged_main_envelope_flips_record_and_emits_domain_event
             "status": "Todo",
             "progress_note": "fix merged to staging",
             "fix_pr": f"{repo}#905",
-            "fix_merge_sha": "fix-sha",
-            "fix_merged_at": "2026-07-09T12:00:00Z",
-            "deploy_state": "prod_pending",
+            "fix_merge_sha": "f" * 40,
         },
     )
     policy = await inbound.create_source_policy(
@@ -1380,18 +1348,18 @@ async def test_postgres_merged_main_envelope_flips_record_and_emits_domain_event
     assert first["status"] == "processed"
     assert replay["idempotent_replay"] is True
     assert record.version == version_after_first
-    assert record.data["deploy_state"] == "deployed"
-    assert record.data["deployed_at"] == "2026-07-10T12:00:00+00:00"
-    sweep_events = (
+    assert record.data["fix_pr"] == f"{repo}#905"
+    assert record.data["fix_merge_sha"] == "f" * 40
+    assert "verified" not in record.data
+    domain_events = (
         await db_session.scalars(
-            select(DomainEvent).where(
-                DomainEvent.record_id == record.id,
-                DomainEvent.reason == "deploy_sweep:promotion",
-            )
+            select(DomainEvent).where(DomainEvent.record_id == record.id)
         )
     ).all()
-    assert len(sweep_events) == 1
-    assert sweep_events[0].patch["deploy_state"] == "deployed"
+    assert all(
+        not str(event.reason or "").startswith("deploy")
+        for event in domain_events
+    )
 
 
 async def test_domain_projection_requires_explicit_policy_action_permission(session):

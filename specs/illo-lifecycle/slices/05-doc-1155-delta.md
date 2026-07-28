@@ -46,9 +46,9 @@ immediately before `## States`.
 In **## States**, replace the `Done` bullet with:
 
 > - `Done`: linked PR merged or issue closed. For an alert-linked ticket (one
->   with a `rollbar_item`), `Done` additionally requires the fix deployed to
->   prod AND verified quiet (`deploy_state` = `verified`) per the
->   **Deploy-State Ladder** — merged-to-staging is not done. A `Done` item must
+>   with a `rollbar_item`), `Done` additionally requires current ancestry to
+>   show `deployed` and `verified=true` — merged-to-staging is not done. A
+>   `Done` item must
 >   not appear in anyone's priority workset — see **Before Posting** and
 >   **Public Output**.
 
@@ -68,15 +68,14 @@ or hide a staging-only alert ticket; qualify each exactly as the bundled
 SKILL.md now does:
 
 - **## Backlog Hygiene**, the `Done` classification bullet → append
-  "(alert-linked tickets: only once deploy-verified — see **Deploy-State
-  Ladder**)".
+  "(alert-linked tickets: only once current ancestry is deployed and the
+  verification judgment is true)".
 - **## Before Posting** gate 1 (state gate) → append the exception sentence:
-  "Exception: an alert-linked ticket whose fix is merely merged (not
-  deploy-verified) is NOT cleanup — it stays active as `prod_pending` per the
-  **Deploy-State Ladder**."
+  "Exception: an alert-linked ticket whose fix is only on staging or is not
+  verified is NOT cleanup."
 - **## Public Output**, the `Done` item bullet → "(linked PR merged — and,
-  for an alert-linked ticket, deploy-verified per the **Deploy-State
-  Ladder**)", and the close-the-issue parenthetical gains "— never for an
+  for an alert-linked ticket, current ancestry is deployed and verification
+  is true)", and the close-the-issue parenthetical gains "— never for an
   alert-linked ticket that is not yet deploy-verified".
 
 ## After applying

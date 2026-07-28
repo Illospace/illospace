@@ -32,14 +32,13 @@ from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cortex.project_context.github import (
     async_get_pull_request_deploy_info,
 )
-from brain.systems.deploy_state import DeployState
 from brain.systems.deploy_fix_refs import (
     github_repo_from_issue_text,
     normalize_fix_pr_reference,
 )
 from brain.systems.deploy_tracker import (
     append_progress_note,
-    ensure_deploy_state_fields,
+    ensure_deploy_verification_fields,
     list_deploy_ticket_records,
     update_deploy_ticket_record,
 )
@@ -48,15 +47,6 @@ from brain.systems.vault import async_resolve_project_bound_env_tokens
 
 PullRequestLookup = Callable[[str, int], Awaitable[Mapping[str, Any]]]
 
-_ENUMERATED_STATES = {
-    DeployState.STAGING.value,
-    DeployState.PROD_PENDING.value,
-    DeployState.DEPLOYED.value,
-}
-_SHA_BACKFILL_STATES = {
-    DeployState.STAGING.value,
-    DeployState.PROD_PENDING.value,
-}
 _MERGE_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _NEEDS_HUMAN_NOTE = "needs-human: no fix PR reference"
 _READ_ONLY_GITHUB_APP_PERMISSIONS = {"pull_requests": "read"}
@@ -140,7 +130,6 @@ async def _plan_backfill_record(
 ) -> BackfillPlan:
     """Interpret one record, enrich it when needed, and build its plan."""
     data = record.data or {}
-    state = str(data.get("deploy_state") or "").strip()
     old_fix_pr = None if data.get("fix_pr") is None else str(data.get("fix_pr"))
     title_repo = github_repo_from_issue_text(record.title)
     canonical_fix_pr = normalize_fix_pr_reference(
@@ -153,12 +142,12 @@ async def _plan_backfill_record(
 
     if canonical_fix_pr is None:
         unresolvable_reason = "no fix PR reference"
-        if state in _SHA_BACKFILL_STATES:
-            patch.update(_progress_note_patch(data))
+        patch.update(_progress_note_patch(data))
     else:
         if old_fix_pr != canonical_fix_pr:
             patch["fix_pr"] = canonical_fix_pr
-        if state in _SHA_BACKFILL_STATES:
+        existing_sha = str(data.get("fix_merge_sha") or "").strip()
+        if not _MERGE_SHA_RE.fullmatch(existing_sha):
             if pull_request_lookup is None:
                 raise ValueError(
                     "actor_user_id is required when pull_request_lookup is not supplied"
@@ -205,7 +194,6 @@ async def backfill_deploy_fix_refs(
     records = await list_deploy_ticket_records(
         session,
         org_id=org_id,
-        states=_ENUMERATED_STATES,
     )
     lookup = pull_request_lookup
     if lookup is None and actor_user_id:
@@ -228,7 +216,7 @@ async def backfill_deploy_fix_refs(
                 f"Backfill patch escaped scope: {sorted(unexpected_fields)}"
             )
     if apply:
-        await ensure_deploy_state_fields(session, org_id=org_id)
+        await ensure_deploy_verification_fields(session, org_id=org_id)
         for plan in plans:
             if not plan.patch:
                 continue

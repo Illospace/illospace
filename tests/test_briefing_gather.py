@@ -20,6 +20,12 @@ from brain.systems.briefing import DossierBudget, assemble_dossier, gather_piece
 from brain.systems.briefing.compose import compose_packet
 from brain.systems.briefing.gather import DefaultSlackReader, SlackThreadRead
 from brain.systems.chantiers import latest_source_movement
+from brain.systems.deploy_state import (
+    DeployState,
+    DeployStateBatch,
+    DeployStateObservation,
+)
+from brain.systems.deploy_state_github import AncestryObservation
 
 _T0 = datetime(2026, 7, 9, 9, 0, tzinfo=timezone.utc)
 _IDEA_ID = "0f6f3f7e-0000-0000-0000-00000000aaaa"
@@ -191,16 +197,36 @@ class FakeSlack:
 class FakeGithub:
     """Speaks the FLAT backend-read contract."""
 
-    def __init__(self, refs=None, error: Exception | None = None):
+    def __init__(
+        self,
+        refs=None,
+        error: Exception | None = None,
+        deploy_states=None,
+        deploy_result=None,
+    ):
         self._refs = refs or {}
         self._error = error
+        self._deploy_states = deploy_states or {}
+        self._deploy_result = deploy_result
         self.calls: list[tuple[str, int]] = []
+        self.deploy_calls: list[dict[int, tuple[str, str]]] = []
 
     async def read_ref(self, *, repo_slug, number):
         self.calls.append((repo_slug, number))
         if self._error:
             raise self._error
         return self._refs.get((repo_slug, number))
+
+    async def derive_deploy_states(self, refs):
+        self.deploy_calls.append(dict(refs))
+        if self._error:
+            raise self._error
+        if self._deploy_result is not None:
+            return self._deploy_result
+        return {
+            key: self._deploy_states.get(ref)
+            for key, ref in refs.items()
+        }
 
 
 def _session(idea=None, event=None, records=()):
@@ -305,7 +331,7 @@ async def test_idea_org_scope_enforced():
 
 async def test_record_org_scope_enforced():
     foreign = SimpleNamespace(id=1238, org_id="org-OTHER", title="t",
-                              data={"deploy_state": "prod_pending"}, updated_at=_T0)
+                              data={}, updated_at=_T0)
     result = await gather_pieces(
         WriteForbiddenSession(records=[foreign]), org_id=_ORG,
         job_ref="domain_record:1238", slack=None, github=None, budget=DossierBudget(),
@@ -378,7 +404,7 @@ async def test_refs_from_event_hints_and_tracker_identity_and_text():
     event = _event(hints={"provider": "github", "repo": "uwear/uwear-app", "number": 12})
     record = SimpleNamespace(
         id=1238, org_id=_ORG, title="tracker",
-        data={"repo": "uwear/uwear-backend", "pr_number": "347", "deploy_state": "prod_pending"},
+        data={"repo": "uwear/uwear-backend", "pr_number": "347"},
         updated_at=_T0,
     )
     seen = []
@@ -482,7 +508,7 @@ async def test_related_tracker_records_are_gathered_and_self_excluded():
     )
     related = SimpleNamespace(
         id=1300, org_id=_ORG, title="backend ticket",
-        data={"repo": "uwear/uwear-backend", "pr_number": "347", "deploy_state": "staging"},
+        data={"repo": "uwear/uwear-backend", "pr_number": "347"},
         updated_at=_T0,
     )
     foreign = SimpleNamespace(
@@ -498,6 +524,146 @@ async def test_related_tracker_records_are_gathered_and_self_excluded():
     assert "domain_record:1300" in refs  # related found, org-scoped
     assert "domain_record:1301" not in refs  # foreign org never leaks
     assert refs.count("domain_record:1238") == 1  # self not duplicated
+
+
+@pytest.mark.parametrize(
+    ("derived", "expected"),
+    [
+        (DeployState.DEPLOYED, "state: deployed"),
+        (None, "state: unknown"),
+    ],
+)
+async def test_deploy_piece_uses_batch_deriver_and_verified_overlay(
+    derived,
+    expected,
+):
+    fix_ref = ("uwear-ai/uwear-backend", "a" * 40)
+    record = SimpleNamespace(
+        id=2474,
+        org_id=_ORG,
+        title="Production alert",
+        data={
+            "fix_pr": "uwear-ai/uwear-backend#1264",
+            "fix_merge_sha": fix_ref[1],
+            "verified": True,
+            "verified_at": "2026-07-27T12:00:00+00:00",
+        },
+        updated_at=_T0,
+    )
+    github = FakeGithub(deploy_states={fix_ref: derived})
+
+    result = await gather_pieces(
+        WriteForbiddenSession(records=[record]),
+        org_id=_ORG,
+        job_ref="domain_record:2474",
+        slack=None,
+        github=github,
+        budget=DossierBudget(),
+    )
+
+    deploy = next(piece for piece in result.pieces if piece.source == "deploy_state")
+    assert expected in deploy.body
+    assert "verified: yes" in deploy.body
+    assert "verified_at: 2026-07-27T12:00:00+00:00" in deploy.body
+    assert github.deploy_calls == [{2474: fix_ref}]
+
+
+async def test_record_prose_hides_conflicting_stored_deploy_state():
+    fix_ref = ("uwear-ai/uwear-backend", "a" * 40)
+    record = SimpleNamespace(
+        id=2474,
+        org_id=_ORG,
+        title="Conflicting legacy state",
+        data={
+            "summary": "Production alert",
+            "fix_pr": "uwear-ai/uwear-backend#1264",
+            "fix_merge_sha": fix_ref[1],
+            "deploy_state": "staging",
+            "deployed_at": "2026-07-01T12:00:00+00:00",
+            "verified": False,
+        },
+        updated_at=_T0,
+    )
+
+    result = await gather_pieces(
+        WriteForbiddenSession(records=[record]),
+        org_id=_ORG,
+        job_ref="domain_record:2474",
+        slack=None,
+        github=FakeGithub(
+            deploy_states={fix_ref: DeployState.DEPLOYED}
+        ),
+        budget=DossierBudget(),
+    )
+
+    rendered = "\n".join(piece.body for piece in result.pieces)
+    assert "state: deployed" in rendered
+    assert rendered.count("state: deployed") == 1
+    assert "staging" not in rendered
+    assert "deploy_state:" not in rendered
+    record_piece = next(
+        piece for piece in result.pieces
+        if piece.source == "record"
+    )
+    assert record_piece.body == "summary: Production alert"
+
+
+async def test_deploy_degradation_note_summarizes_per_ref_compare_failures():
+    fix_ref = ("uwear-ai/uwear-backend", "a" * 40)
+    failure = DeployStateObservation(
+        state=None,
+        in_staging=None,
+        in_main=None,
+        comparisons=(
+            AncestryObservation(
+                branch="staging",
+                is_ancestor=None,
+                error_category="github_http_503",
+                status_code=503,
+            ),
+            AncestryObservation(
+                branch="main",
+                is_ancestor=None,
+                error_category="github_http_503",
+                status_code=503,
+            ),
+        ),
+    )
+    batch = DeployStateBatch(
+        {2474: None},
+        observations_by_key={2474: failure},
+        observations_by_ref={fix_ref: failure},
+    )
+    record = SimpleNamespace(
+        id=2474,
+        org_id=_ORG,
+        title="Unavailable ancestry",
+        data={
+            "fix_pr": "uwear-ai/uwear-backend#1264",
+            "fix_merge_sha": fix_ref[1],
+        },
+        updated_at=_T0,
+    )
+
+    result = await gather_pieces(
+        WriteForbiddenSession(records=[record]),
+        org_id=_ORG,
+        job_ref="domain_record:2474",
+        slack=None,
+        github=FakeGithub(deploy_result=batch),
+        budget=DossierBudget(),
+    )
+
+    assert (
+        "deploy: ancestry unavailable for 1/1 fixes: "
+        "uwear-ai/uwear-backend#1264 "
+        "(github_http_503×2)"
+    ) in result.source_notes
+    deploy = next(
+        piece for piece in result.pieces
+        if piece.source == "deploy_state"
+    )
+    assert "state: unknown" in deploy.body
 
 
 @pytest.mark.parametrize(
@@ -898,6 +1064,67 @@ async def test_backend_github_read_flattens_pr_and_falls_back_to_exact_issue(mon
     assert await handler.github_read_ref_for_backend(
         repo_slug="uwear/x", number=3, org_id=_ORG
     ) is None
+
+
+async def test_backend_deploy_batch_isolates_token_resolution_by_repository(
+    monkeypatch,
+):
+    from brain.systems import deploy_state as deploy_state_module
+    from brain.systems.runs.tool_catalog.handlers import github as handler
+
+    broken_ref = ("uwear/broken", "b" * 40)
+    healthy_ref = ("uwear/healthy", "a" * 40)
+    resolved_repos = []
+
+    async def fake_candidates(*, repo_slug, **kwargs):
+        resolved_repos.append(repo_slug)
+        assert kwargs["org_id"] == _ORG
+        if repo_slug == broken_ref[0]:
+            raise RuntimeError("repository credential lookup failed")
+        return [
+            {
+                "key_name": "healthy",
+                "token": "healthy-token",
+                "source": "test",
+            }
+        ]
+
+    compared = []
+
+    async def fake_ancestry(repo, sha, branch, *, token=None):
+        compared.append((repo, sha, branch, token))
+        return AncestryObservation(
+            branch=branch,
+            is_ancestor=branch == "main",
+        )
+
+    monkeypatch.setattr(handler, "_github_token_candidates", fake_candidates)
+    monkeypatch.setattr(
+        deploy_state_module,
+        "observe_ancestry",
+        fake_ancestry,
+    )
+
+    batch = await handler.github_deploy_states_for_backend(
+        {
+            1: broken_ref,
+            2: healthy_ref,
+        },
+        org_id=_ORG,
+    )
+
+    assert resolved_repos == [broken_ref[0], healthy_ref[0]]
+    assert batch[1] is None
+    assert batch[2] is DeployState.DEPLOYED
+    assert {item[0] for item in compared} == {healthy_ref[0]}
+    assert {item[3] for item in compared} == {"healthy-token"}
+    failure = batch.observations_by_key[1].failures[0]
+    assert failure.branch == "credentials"
+    assert (
+        failure.error_category
+        == "credential_resolution_runtime_error"
+    )
+    assert list(batch.unavailable_refs) == [broken_ref]
 
 
 def _github_event(*, org_id=_ORG, summary="GitHub issue #81 opened: SEO landing pages"):

@@ -43,7 +43,7 @@ reads fail, say so and defer writes.
   Domain `1` tracker write. Always-on: one problem = one issue; search open and
   closed GitHub issues plus Domain `1` for the error signature or Rollbar id
   (prefer `rollbar_item`; exact matches never expire). Any match, even closed
-  or `Done`, uses the **Deploy-State Ladder**, never a refile; never describe
+  or `Done`, uses **Deploy State on Read**, never a refile; never describe
   an internal tracker record as a GitHub issue.
 - **Backlog maintenance** — slug `uwear-engineering-triage-backlog-maintenance`,
   asset
@@ -297,76 +297,55 @@ generic coordination ticket in the GitHub Ticket Tracker Domain instead of
 adding a Uwear-specific object. Keep low-confidence hunches internal or as
 low-noise tracker notes.
 
-## Deploy-State Ladder (re-firing alerts)
+## Deploy State on Read (re-firing alerts)
 
-Uwear merges fixes to `staging` and promotes to prod roughly weekly (an
-evergreen staging→main promotion PR) unless urgent, so prod alerts re-fire
-for already-fixed bugs. When an incoming alert matches an existing ticket,
-first update `alert_last_seen_at` and `alert_occurrences` on the record —
-every matched re-fire, all cases; the post-deploy verifier infers "quiet"
-from these fields — then branch on the fix's deploy-state — never
-binary-skip, never refile:
+Uwear merges fixes to `staging` and promotes to prod roughly weekly. Treat a
+fix's deploy state as a view of its stored `fix_merge_sha`, never as tracker
+state to maintain. Use `check_fix_deploy_state` (or the same GitHub ancestry
+read): contained by `main` means `deployed`; otherwise contained by `staging`
+means `staging`; contained by neither means `unmerged`. An indeterminate API
+read is `unknown` and must be reported as such — never reuse an old claim or
+guess healthy.
 
-1. **No fix merged yet:** append an occurrence/freshness note to the ticket.
-   On a rate spike (a Rollbar Nth-error milestone: 10th/100th/500th…), raise
-   `priority` and say why in `progress_note`.
-2. **Fix merged to staging but not in prod** (`deploy_state` is `staging` or
-   `prod_pending`): **expected noise.** Annotate the ticket; optionally reply
-   once in the alert thread "known — fixed by PR #X merged to staging, ships
-   with the next weekly promotion". Never refile and never re-ping the owner.
-   This holds even if the ticket was prematurely closed or `Done`: quietly
-   normalize the status (back to `In Review`/`Blocked`) with the annotation
-   and flag the premature close — still no refile, still no owner ping. A
-   re-fire while a deployed fix is inside the settle window (default
-   30 minutes after deploy) is the same expected drain noise — annotate
-   only. If the alert is an occurrence milestone, also apply **Urgent
-   Promotion** below.
-3. **Fix deployed to prod** (`deploy_state` is `deployed` or `verified`, or
-   the ticket is `Done` with no merely-staged fix) **and the alert still
-   fires past the settle window**: **the fix did not work.** Reopen the
-   ticket — status back to `Todo`, note the failed attempt in
-   `progress_note`, clear `deploy_state` — and escalate to the builder (the
-   fix PR's author) by name. Escalation is a named mention and a next
-   action, never a reassignment — do not change the GitHub assignee (the
-   **Ownership** rules stand). This case is why blind dedup-suppression is
-   unacceptable.
+When an incoming alert matches an existing ticket, update occurrence evidence
+and branch on the freshly computed state:
 
-Determine deploy-state mechanically, never by assumption: the fix PR's merge
-commit must be an ancestor of `main` to count as deployed (GitHub compare
-`main...SHA`; use the `check_fix_deploy_state` tool when available). A fix
-merged to staging after the promotion PR's cutoff is NOT in that promotion.
-Hotfix PRs targeting `main` directly count as deployed on merge.
-`deployed_at` is the promotion/hotfix merge-to-main time — never the earlier
-staging `fix_merged_at`. A reverted fix still passes the ancestry check: when
-a revert of the fix is linked or discovered, clear `deploy_state` (treat as
-not merged) and say so. If GitHub cannot confirm, leave the recorded state
-unchanged and say so — degrade open, never guess.
+1. **Unmerged:** append an occurrence/freshness note. On a Rollbar occurrence
+   milestone, raise `priority` and say why in `progress_note`.
+2. **Staging:** treat the re-fire as expected pre-promotion noise. Annotate the
+   ticket; optionally reply once that the named fix ships with the next
+   promotion. Do not refile or re-ping the owner. A prematurely closed ticket
+   returns to an active review state.
+3. **Deployed:** a later reproduction disproves the verification judgment.
+   Reopen the ticket, record the failed attempt, set `verified=false`, clear
+   `verified_at`, and escalate to the fix PR's author by name without changing
+   the GitHub assignee.
+4. **Unknown:** state exactly which GitHub evidence is unavailable and take no
+   deploy-dependent action.
 
-For an alert-linked ticket, `Done` means **deployed to prod AND verified
-quiet** in Rollbar since the deploy (settle window, then a quiet window —
-default 24 h), with evidence such as "verified quiet since deploy at T".
-Merged-to-staging is never `Done`.
+A no-diff staging→main promotion still resolves because an identical commit is
+contained by `main`. A fix merged after a promotion cutoff stays `staging`.
+Hotfixes targeting `main` resolve as `deployed`. A revert does not erase
+ancestry, so record the revert explicitly and clear the superseded fix identity
+until a new governing fix is known.
 
-When you file or link a fix, stamp the structured fields on the tracker
-record — `rollbar_item` (e.g. `Uwear-API#2206`), `fix_pr` (repo-qualified,
-e.g. `uwear-ai/uwear-backend#905` — the promotion sweep matches tickets by
-the fix's repo, so cross-repo fixes only work when this is stamped),
-`fix_merge_sha`, `fix_merged_at`, `deploy_state` — instead of burying them in
-prose. The fields track the latest fix attempt believed to govern
-production; when a newer fix PR supersedes an older one, restamp all of them
-and note the supersession in `progress_note`. The ladder only works if these
-are data.
+For an alert-linked ticket, `Done` requires both a computed `deployed` state
+and a human/monitor verification judgment. Resolution harvest stores
+`verified=true` and `verified_at`; a later reproduction stores
+`verified=false` and wins.
+
+At fix time, store only `fix_pr` (canonical `owner/repo#N`) and the 40-hex
+`fix_merge_sha`. When a newer fix supersedes it, replace both and clear the
+verification judgment. Agents may write `verified`/`verified_at` only when
+they have direct human or monitor evidence. Never write a deploy-state field,
+promotion timestamp, or deploy timestamp.
 
 ## Urgent Promotion
 
-When a `prod_pending` fix's alert hits a Rollbar Nth-error milestone
-(10th/100th/500th…), RECOMMEND early promotion in the team channel, for
-example: "fix for #904 (PR #905) is merged and waiting; #2206 hit its 500th
-occurrence today; recommend promoting now." Recommend at most once per ticket
-per day (stamp `promotion_recommended_at`). Recommend only — NEVER merge the
-promotion PR or any PR yourself; promotion is a human action. This never-merge
-rule is absolute for the staging→main promotion PR: no delegated merge or
-closure authority (Workflow step 5) overrides it.
+When a computed `staging` fix hits a Rollbar occurrence milestone, recommend
+early promotion in the team channel and cite the fix PR plus milestone.
+Recommend only — NEVER merge the promotion PR or any PR yourself; promotion is
+a human action. This never-merge rule is absolute for staging→main.
 
 ## States
 
@@ -384,8 +363,8 @@ closure authority (Workflow step 5) overrides it.
   external dependency.
 - `Done`: linked PR merged or issue closed. For an alert-linked ticket (one
   with a `rollbar_item`), `Done` additionally requires the fix deployed to
-  prod AND verified quiet (`deploy_state` = `verified`) per the
-  **Deploy-State Ladder** — merged-to-staging is not done. A `Done` item must
+  prod by current ancestry AND `verified=true` per **Deploy State on Read** —
+  merged-to-staging is not done. A `Done` item must
   not appear in anyone's priority workset — see **Before Posting** and
   **Public Output**.
 - `Canceled` / `wontfix`: obsolete, duplicate, invalid, intentionally closed,
@@ -495,8 +474,8 @@ fix any that fail:
 1. **State gate:** no `Done` item is in the priority list. A merged PR whose
    issue is still open goes to the `Cleanup — safe to close` batch or gets
    closed — never listed as active work. Exception: an alert-linked ticket
-   whose fix is merely merged (not deploy-verified) is NOT cleanup — it stays
-   active as `prod_pending` per the **Deploy-State Ladder**.
+   whose fix is only on staging or is not verified is NOT cleanup — keep it
+   active per **Deploy State on Read**.
 2. **Owner gate:** every PR shows its GitHub assignee when set, else its human
    author, with an evidence-based next action (fix the named failing check /
    merge when green / close when obsolete) and no reviewer or coordination
@@ -504,10 +483,10 @@ fix any that fail:
    routing only if unassigned. No customer-generation issue is pre-assigned.
 3. **Dedup gate:** no two items describe the same underlying problem under
    different issue numbers.
-4. **Deploy-state gate:** no expected-noise re-fire (Ladder case 2, including
-   a within-settle deploy drain) re-pings an owner or appears as new work;
-   every reopened ticket (Ladder case 3) names the builder and the failed fix
-   without reassigning the issue.
+4. **Deploy-state gate:** no expected-noise staging re-fire re-pings an owner
+   or appears as new work; every reopened deployed ticket names the builder
+   and failed fix without reassigning the issue; every indeterminate read is
+   shown as `unknown`.
 5. **Coverage gate:** every Phase A source was swept and counts reconcile
    (`returned` = `total_matching`, GitHub counts and active chantiers covered);
    the recap footer names Reda, Axel, and JB; no truncation marker remains.
@@ -534,7 +513,7 @@ Slack or team-facing summaries must be safe for teammates:
 
 - Say the priority workset is not the full backlog when relevant.
 - A `Done` item (linked PR merged — and, for an alert-linked ticket,
-  deploy-verified per the **Deploy-State Ladder**) must never appear in a
+  deploy-verified per **Deploy State on Read**) must never appear in a
   person's priority workset, even if its GitHub issue is still open. If the PR
   is merged but the issue is open, either close the issue (when closure
   authority is delegated and the PR clearly resolves it — never for an

@@ -39,6 +39,8 @@ Design stances, each load-bearing (and each cross-family-review hardened):
 from __future__ import annotations
 
 import re
+from collections import Counter
+from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -47,8 +49,20 @@ from typing import Any, Protocol
 from sqlalchemy import select
 
 from brain.kernel.common.coercion import coerce_datetime
-from brain.systems.briefing.core import DossierBudget, SourcePiece
+from brain.systems.briefing.core import (
+    DEPLOY_EVIDENCE_SOURCE,
+    DossierBudget,
+    SourcePiece,
+)
 from brain.systems.chantiers import latest_source_movement
+from brain.systems.deploy_record_contract import (
+    DEPLOY_FIELDS_HIDDEN_FROM_RECORD_PROSE,
+)
+from brain.systems.deploy_state import (
+    DeployState,
+    DeployStateBatch,
+    render_deploy_state,
+)
 
 # Conservative same-job reference pattern: explicit owner/repo#N only.
 _GITHUB_REF_RE = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)\b")
@@ -92,6 +106,11 @@ class GithubReader(Protocol):
         """Return the FLAT contract {kind, title, body, state,
         body_total_chars, checks?} or None when the ref does not exist."""
         ...
+
+    async def derive_deploy_states(
+        self,
+        refs: dict[int, tuple[str, str]],
+    ) -> Mapping[int, DeployState | None]: ...
 
 
 def _ts_from_slack(ts: Any) -> datetime | None:
@@ -180,6 +199,20 @@ class DefaultGithubReader:
             repo_slug=repo_slug, number=number, org_id=self._org_id, user_id=self._user_id
         )
 
+    async def derive_deploy_states(
+        self,
+        refs: dict[int, tuple[str, str]],
+    ) -> DeployStateBatch[int]:
+        from brain.systems.runs.tool_catalog.handlers.github import (
+            github_deploy_states_for_backend,
+        )
+
+        return await github_deploy_states_for_backend(
+            refs,
+            org_id=self._org_id,
+            user_id=self._user_id,
+        )
+
 
 async def _load_job(session: Any, *, org_id: str, job_ref: str) -> tuple[Any | None, Any | None]:
     """Resolve a job_ref to (idea, record) — both queries org-scoped."""
@@ -264,7 +297,11 @@ def _record_piece(record: Any) -> SourcePiece | None:
         or _text(data.get("title") or data.get("name"))
         or f"record {getattr(record, 'id', '?')}"
     )
-    skip = {"title", "name"}
+    skip = {
+        "title",
+        "name",
+        *DEPLOY_FIELDS_HIDDEN_FROM_RECORD_PROSE,
+    }
     body = "; ".join(
         f"{key}: {value}" for key, value in sorted(data.items())
         if key not in skip and isinstance(value, (str, int, float, bool)) and _text(value)
@@ -586,22 +623,119 @@ def _checks_summary(checks: Any) -> str:
     return f"{len(runs)} check runs: {summary}"
 
 
-def _deploy_piece(record: Any) -> SourcePiece | None:
+def _deploy_ref(record: Any) -> tuple[str, str] | None:
     data = _data(record)
-    state = _text(data.get("deploy_state"))
-    if not state:
+    match = _GITHUB_REF_RE.fullmatch(_text(data.get("fix_pr")))
+    sha = _text(data.get("fix_merge_sha"))
+    if match is None or not sha:
         return None
-    bits = [f"deploy_state: {state}"]
-    for key in ("fix_pr", "pr_number", "repo", "deployed_at", "verified_at"):
+    return match.group(1), sha
+
+
+def _deploy_piece(
+    record: Any,
+    state: DeployState | None,
+) -> SourcePiece | None:
+    data = _data(record)
+    fix_pr = _text(data.get("fix_pr"))
+    sha = _text(data.get("fix_merge_sha"))
+    verified = data.get("verified") is True
+    if not fix_pr and not sha and not verified and not data.get("verified_at"):
+        return None
+    bits = [f"state: {render_deploy_state(state)}"]
+    for key in ("fix_pr", "fix_merge_sha"):
         if _text(data.get(key)):
             bits.append(f"{key}: {data[key]}")
+    bits.append(f"verified: {'yes' if verified else 'no'}")
+    if _text(data.get("verified_at")):
+        bits.append(f"verified_at: {data['verified_at']}")
     return SourcePiece(
-        source="deploy_state",
-        ref=f"deploy:{data.get('fix_pr') or data.get('pr_number') or getattr(record, 'id', '')}",
-        title="Deploy ladder",
+        source=DEPLOY_EVIDENCE_SOURCE,
+        ref=f"deploy:{fix_pr or getattr(record, 'id', '')}",
+        title="Deploy state",
         body="; ".join(bits),
         ts=getattr(record, "updated_at", None),
     )
+
+
+async def _deploy_pieces(
+    records: list[Any],
+    *,
+    github: GithubReader | None,
+    notes: list[str],
+) -> list[SourcePiece]:
+    refs = {
+        int(getattr(record, "id")): ref
+        for record in records
+        if (ref := _deploy_ref(record)) is not None
+    }
+    states: dict[int, DeployState | None] = {}
+    derive_many = getattr(github, "derive_deploy_states", None)
+    if refs and derive_many is None:
+        notes.append("deploy: ancestry reader unavailable")
+    elif refs:
+        try:
+            result = await derive_many(refs)
+            states = dict(result)
+            unavailable = getattr(result, "unavailable_refs", {})
+            if unavailable:
+                labels_by_ref = {
+                    ref: (
+                        _text(_data(record).get("fix_pr"))
+                        or f"{ref[0]}@{ref[1][:12]}"
+                    )
+                    for record in records
+                    if (ref := _deploy_ref(record)) is not None
+                }
+                affected_labels = [
+                    labels_by_ref.get(
+                        ref,
+                        f"{ref[0]}@{ref[1][:12]}",
+                    )
+                    for ref in unavailable
+                ]
+                visible_labels = affected_labels[:4]
+                affected_summary = ", ".join(visible_labels)
+                if len(affected_labels) > len(visible_labels):
+                    affected_summary += (
+                        f", +{len(affected_labels) - len(visible_labels)} more"
+                    )
+                categories = Counter(
+                    str(failure.error_category)
+                    for observation in unavailable.values()
+                    for failure in observation.failures
+                )
+                category_summary = ", ".join(
+                    (
+                        f"{category}×{count}"
+                        if count > 1
+                        else category
+                    )
+                    for category, count in sorted(categories.items())
+                )
+                total = len(
+                    getattr(result, "observations_by_ref", {})
+                ) or len(set(refs.values()))
+                note = (
+                    "deploy: ancestry unavailable for "
+                    f"{len(unavailable)}/{total} fixes"
+                )
+                if affected_summary:
+                    note += f": {affected_summary}"
+                if category_summary:
+                    note += f" ({category_summary})"
+                notes.append(note)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"deploy: ancestry unavailable — {type(exc).__name__}")
+    pieces: list[SourcePiece] = []
+    for record in records:
+        piece = _deploy_piece(
+            record,
+            states.get(int(getattr(record, "id"))),
+        )
+        if piece is not None:
+            pieces.append(piece)
+    return pieces
 
 
 async def _related_tracker_records(
@@ -657,6 +791,7 @@ async def gather_pieces(
 
     event = None
     provenance_note_added = False
+    deploy_records: list[Any] = []
     if idea is not None:
         try:
             event = await load_inbound_event(session, org_id=org_id, idea=idea)
@@ -665,12 +800,10 @@ async def gather_pieces(
             provenance_note_added = True
 
     if record is not None:
+        deploy_records.append(record)
         piece = _record_piece(record)
         if piece:
             result.pieces.append(piece)
-        deploy = _deploy_piece(record)
-        if deploy:
-            result.pieces.append(deploy)
         try:
             result.pieces.extend(
                 await _chantier_pieces_for_record(session, org_id=org_id, record=record)
@@ -810,6 +943,7 @@ async def gather_pieces(
                 exclude_id=getattr(record, "id", None) if record is not None else None,
             )
             for row in related:
+                deploy_records.append(row)
                 piece = _record_piece(row)
                 if piece:
                     result.pieces.append(
@@ -821,4 +955,11 @@ async def gather_pieces(
         except Exception as exc:  # noqa: BLE001
             notes.append(f"record: related lookup unavailable — {type(exc).__name__}")
 
+    result.pieces.extend(
+        await _deploy_pieces(
+            deploy_records,
+            github=github,
+            notes=notes,
+        )
+    )
     return result

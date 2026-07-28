@@ -28,6 +28,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+# Evidence assembled from live GitHub ancestry plus the stored verification
+# overlay. The source label is stable for packet compatibility; its contents
+# are never read from a persisted deploy-state field.
+DEPLOY_EVIDENCE_SOURCE = "deploy_state"
+
 # Fixed section order, highest priority first. Unknown sources render after
 # these, alphabetically, and shed first under total-budget pressure.
 SOURCE_PRIORITY: tuple[str, ...] = (
@@ -36,7 +41,7 @@ SOURCE_PRIORITY: tuple[str, ...] = (
     "slack_thread",
     "github_issue",
     "github_pr",
-    "deploy_state",
+    DEPLOY_EVIDENCE_SOURCE,
     "decision",
     "evidence",
 )

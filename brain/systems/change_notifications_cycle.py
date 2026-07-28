@@ -18,35 +18,24 @@ from __future__ import annotations
 from brain.systems.change_notifications import DEFAULT_URGENT_TERMS, render_outbound
 
 
-async def _maybe_run_deploy_verification(session, org_id) -> dict | None:
-    """Harvest alert-thread outcomes, then run the close-only verifier."""
+async def _maybe_run_alert_resolution_harvest(session, org_id) -> dict | None:
+    """Harvest alert-thread outcomes without blocking the notify tick."""
     import logging
-    from datetime import datetime, timezone
 
-    from brain.systems.deploy_state_config import deploy_feature_enabled
-
-    if session is None or not deploy_feature_enabled():
+    if session is None:
         return None
     try:
-        from brain.systems.deploy_state_sweep import (
-            run_alert_resolution_harvest,
-            run_deploy_verification,
-        )
+        from brain.systems.alert_resolution import run_alert_resolution_harvest
 
         async with session.begin_nested():
-            harvest = await run_alert_resolution_harvest(
+            return await run_alert_resolution_harvest(
                 session,
                 org_id=org_id,
             )
-            verification = await run_deploy_verification(
-                session,
-                org_id=org_id,
-                now=datetime.now(timezone.utc),
-            )
-            verification["resolution_harvest"] = harvest
-            return verification
     except Exception:
-        logging.getLogger("illo.notify").exception("deploy verification failed safely")
+        logging.getLogger("illo.notify").exception(
+            "alert resolution harvest failed safely"
+        )
         return None
 
 
@@ -284,7 +273,7 @@ async def run_notify_cycle(
     deliver_briefs=None,
 ) -> dict:
     """One notify-cycle tick. Returns a small summary of what was sent."""
-    verification = await _maybe_run_deploy_verification(session, org_id)
+    resolution_harvest = await _maybe_run_alert_resolution_harvest(session, org_id)
     events = await _load_change_events(session, org_id, since)
     await _fill_owner_labels(session, events)
     await _attach_and_refresh_packets(session, org_id, events)
@@ -347,8 +336,8 @@ async def run_notify_cycle(
     }
     if post_failures:
         summary["post_failures"] = post_failures
-    if verification is not None:
-        summary["verification"] = verification
+    if resolution_harvest is not None:
+        summary["resolution_harvest"] = resolution_harvest
     if deliveries and deliveries.get("selected"):
         summary["brief_deliveries"] = deliveries
     if notice_deliveries and notice_deliveries.get("selected"):

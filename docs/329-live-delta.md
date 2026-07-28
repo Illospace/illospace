@@ -26,10 +26,10 @@ The activation command installs or verifies these mirrors:
 
 | slug | bundled source | characters | bytes | SHA-256 |
 |---|---|---:|---:|---|
-| `uwear-engineering-triage-customer-support` | `references/customer-support.md` | `2599` | `2609` | `ccd9e6ded301f69fb493e6557c0f17312f05fdf8c8eba90f734101e73ebc9be8` |
-| `uwear-engineering-triage-creating-work-items` | `references/creating-work-items.md` | `2858` | `2872` | `d027c689ed08caa5fba348c96a41706326fbc35752707c64a55583ae19a59d5e` |
+| `uwear-engineering-triage-customer-support` | `references/customer-support.md` | `2572` | `2580` | `21edc8546172ca52f8350319b49ac31a8dc991e7b0139d3acc112ceaf5e5219b` |
+| `uwear-engineering-triage-creating-work-items` | `references/creating-work-items.md` | `3853` | `3867` | `91394950aa115939655cc05e9d29a8bc054c0e7e92e5d585d08b2173e481b155` |
 | `uwear-engineering-triage-backlog-maintenance` | `references/backlog-maintenance.md` | `2554` | `2558` | `1c2bc475b50a974f0b5efb5a41375c059cb13839e4b70c95d113f42faabe0abc` |
-| `uwear-engineering-triage-chantier-operations` | `references/chantier-operations.md` | `14526` | `14536` | `e0a589a6627eba13930354b17899bc7d0b90b1c98a60196b34c855be101dc822` |
+| `uwear-engineering-triage-chantier-operations` | `references/chantier-operations.md` | `14651` | `14661` | `f69df4cdc69d4d72e087acc0fa24e2022063fd9e1a8d2b443bfe1ec7c8c5c616` |
 | `uwear-engineering-triage-memory` | `references/memory.md` | `4872` | `4898` | `fd42aad5b3af22c28982f3a49fb49d11606587ca0d7adb16cf37a63d8a0df503` |
 
 Expected memory mirror fingerprint:
@@ -41,9 +41,9 @@ Expected memory mirror fingerprint:
 Core record `1155`, slug `uwear-engineering-triage`, must become the exact
 mirror of `SKILL.md`:
 
-- characters: `33436` (must remain `< 34000`);
-- bytes: `33564`; and
-- SHA-256: `223b63a03ce4194e9b903beebdccfa1ca02578cf5294cbe0e469ccda42bebd96`.
+- characters: `31800` (must remain `< 34000`);
+- bytes: `31896`; and
+- SHA-256: `52fbb96829c54b6861ddbc37f49a21ae71088ff5a48b9076d22f11711729fa6f`.
 
 ## Safety and idempotency
 

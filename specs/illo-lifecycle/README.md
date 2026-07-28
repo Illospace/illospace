@@ -4,7 +4,7 @@
 
 **Status (2026-07-10):** Slice 5 (deploy-state & post-deploy verification,
 [slices/05-deploy-state.md](slices/05-deploy-state.md)) is **code-complete on
-this branch**: pure core + sweep + verification + `check_fix_deploy_state`
+this branch**: read-time ancestry core + `check_fix_deploy_state`
 tool + prose ladder (SKILL.md/monitor prompt), Codex-implemented and
 Claude-reviewed, fast suite green (3438 passed, 9 pre-existing
 `test_llm_worker` env failures), and the ladder **verified live** by two
@@ -57,15 +57,8 @@ enumerated per slice below.
 - **Slice 4:** register a cycle calling `run_notify_cycle(session, org_id=…,
   channel_id=<team channel>, since=<last_run_at>)`; add the urgent-bypass hook at
   triage completion.
-- **Slice 5:** set `ILLO_DEPLOY_SWEEP_REPOS` (watched repos) to arm the
-  promotion sweep (+ optional `ILLO_DEPLOY_SETTLE_MINUTES` /
-  `ILLO_DEPLOY_QUIET_HOURS` overrides); ensure the Slice-1 source
-  policy/projection **covers `pull_request` events** — the sweep hook runs on
-  the post-projection ingest path, so unprojected merge envelopes never reach
-  it; ~~apply the deploy-state ladder delta to live doc 1155~~ **done — doc
-  v6 (2026-07-10) carries it**; verification tick rides Slice 4's cycle
-  registration; optional Rollbar read-only token (Vault) for API-backed quiet
-  checks — **Reda decided 2026-07-10: skip for now**, Slack-inference default
+- **Slice 5:** superseded by issue #473; deploy state is derived from GitHub
+  ancestry at read time and has no runtime activation gate.
   stands.
 
 **Before ending your pass:** update this section.

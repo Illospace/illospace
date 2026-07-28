@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import json
 import re
-from typing import Any
+from typing import Any, Hashable, Mapping
 
 from brain.kernel.common.pagination import InvalidPageToken
 from brain.systems.cortex.project_context.github import (
@@ -38,16 +37,15 @@ from brain.systems.cortex.project_context.github_promotion import (
     async_reconcile_promotion_pull_request,
 )
 from brain.systems.deploy_state import (
-    DeployState,
-    as_utc_datetime,
-    classify_refire,
-    derive_deploy_state,
+    DeployStateBatch,
+    DeployStateObservation,
+    derive_deploy_states,
+    observe_deploy_state,
 )
-from brain.systems.deploy_state_config import (
-    deploy_feature_enabled,
-    deploy_settle_window,
+from brain.systems.deploy_state_github import (
+    AncestryObservation,
+    ancestry_failure,
 )
-from brain.systems.deploy_state_github import is_ancestor_of
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
 from brain.systems.vault import (
@@ -1414,61 +1412,14 @@ async def _handle_list_github_sub_issues(
     return json.dumps({"error": "No GitHub token candidates were available"})
 
 
-async def _maybe_ensure_deploy_fields(repo_slug: str) -> None:
-    """Lazily provision runtime fields when this env-gated feature is armed."""
-    from brain.systems.deploy_tracker import ensure_deploy_state_fields
-
-    if not deploy_feature_enabled(repo_slug):
-        return
-    org_id = _clean(getattr(_agent_context, "org_id", None))
-    if not org_id:
-        return
-    import logging
-
-    try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-        async with UnitOfWork() as uow:
-            summary = await ensure_deploy_state_fields(uow.session, org_id=org_id)
-        if not summary.get("object_types"):
-            # Zero matches is a schema/config mismatch (e.g. the tracker's
-            # object key differs) — the failure mode a silent pass hides.
-            logging.getLogger("illo.deploy_state").warning(
-                "ensure_deploy_state_fields matched no ticket object types for org %s",
-                org_id,
-            )
-    except Exception:
-        # Schema bootstrap is best-effort for this read tool; GitHub facts remain
-        # useful even if the domain database is temporarily unavailable.
-        logging.getLogger("illo.deploy_state").warning(
-            "deploy-state field bootstrap failed; continuing with GitHub facts only",
-            exc_info=True,
-        )
-        return
-
-
-def _parse_github_datetime(value: Any) -> datetime | None:
-    if not isinstance(value, datetime | str):
-        return None
-    return as_utc_datetime(value)
-
-
 def _indeterminate_deploy_result(repo_slug: str, *, error: GitHubConnectorError | None = None) -> str:
-    action = classify_refire(
-        deploy_state=None,
-        ticket_status="Todo",
-        deployed_at=None,
-        now=datetime.now(timezone.utc),
-        settle=deploy_settle_window(),
-    )
     payload: dict[str, Any] = {
         "repo": repo_slug,
         "merged": None,
         "base_ref": None,
         "in_staging": None,
         "in_main": None,
-        "deploy_state": None,
-        "recommended_action": action.value,
+        "deploy_state": "unknown",
         "indeterminate": True,
     }
     if error is not None:
@@ -1486,12 +1437,6 @@ async def _handle_check_fix_deploy_state(
     repo_slug = parse_github_repo_slug(repo or "")
     if not repo_slug:
         return json.dumps({"error": "check_fix_deploy_state requires repo as owner/name or a GitHub URL"})
-    if not deploy_feature_enabled(repo_slug):
-        return json.dumps({
-            "error": "deploy-state checks are disabled for this repository",
-            "repo": repo_slug,
-            "disabled": True,
-        })
     clean_sha = _clean(sha)
     try:
         clean_pr = int(pr_number) if pr_number is not None else None
@@ -1502,7 +1447,6 @@ async def _handle_check_fix_deploy_state(
     if clean_pr is not None and clean_pr < 1:
         return json.dumps({"error": "check_fix_deploy_state requires a positive pr_number"})
 
-    await _maybe_ensure_deploy_fields(repo_slug)
     candidates = await _github_token_candidates(
         repo_slug=repo_slug,
         token_secret_key=token_secret_key,
@@ -1510,11 +1454,11 @@ async def _handle_check_fix_deploy_state(
     read_state = _github_read_state()
     read_candidates = _ordered_read_candidates(candidates, repo_slug=repo_slug, state=read_state)
     last_error: GitHubConnectorError | None = None
+    compare_failures: list[dict[str, str | int]] = []
     for index, candidate in enumerate(read_candidates):
         token = candidate.get("token")
         merged: bool | None = None
         base_ref: str | None = None
-        merged_at: datetime | None = None
         candidate_sha = clean_sha
         if clean_pr is not None:
             try:
@@ -1533,7 +1477,6 @@ async def _handle_check_fix_deploy_state(
             pr = info.get("pull_request") or {}
             merged = pr.get("merged") if isinstance(pr.get("merged"), bool) else None
             base_ref = _clean((pr.get("base") or {}).get("ref"))
-            merged_at = _parse_github_datetime(pr.get("merged_at"))
             head_sha = _clean((pr.get("head") or {}).get("sha"))
             candidate_sha = (
                 _clean(pr.get("merge_commit_sha")) or head_sha
@@ -1543,47 +1486,30 @@ async def _handle_check_fix_deploy_state(
         if not candidate_sha:
             return _indeterminate_deploy_result(repo_slug)
 
-        in_staging = await is_ancestor_of(repo_slug, candidate_sha, "staging", token=token)
-        in_main = await is_ancestor_of(repo_slug, candidate_sha, "main", token=token)
-        if (in_staging is None or in_main is None) and index < len(read_candidates) - 1:
+        observation = await observe_deploy_state(
+            repo_slug,
+            candidate_sha,
+            tokens=(token,),
+        )
+        compare_failures.extend(observation.failure_payloads())
+        if observation.state is None and index < len(read_candidates) - 1:
             continue
-        state = derive_deploy_state(
-            merged=merged,
-            base_ref=base_ref,
-            in_staging=in_staging,
-            in_main=in_main,
-        )
-        observed_at = datetime.now(timezone.utc)
-        # A staging PR's merged_at is not the production deploy time, and a
-        # raw SHA has no deploy timestamp. Treat a newly observed main ancestor
-        # as inside settle rather than falsely escalating an unknown timeline.
-        classified_deployed_at = None
-        if state is DeployState.DEPLOYED:
-            classified_deployed_at = (
-                merged_at if str(base_ref or "").casefold() == "main" else observed_at
-            )
-        action = classify_refire(
-            deploy_state=state,
-            ticket_status="Todo",
-            deployed_at=classified_deployed_at,
-            now=observed_at,
-            settle=deploy_settle_window(),
-        )
         read_state.preferred[repo_slug] = token
         payload = {
             "repo": repo_slug,
             "merged": merged,
             "base_ref": base_ref,
-            "in_staging": in_staging,
-            "in_main": in_main,
-            "deploy_state": state.value if state else None,
-            "recommended_action": action.value,
-            "indeterminate": in_staging is None or in_main is None,
+            "in_staging": observation.in_staging,
+            "in_main": observation.in_main,
+            "deploy_state": observation.display_state,
+            "indeterminate": observation.state is None,
             "token_secret_key_used": bool(candidate.get("key_name")),
             "token_source": candidate.get("source"),
         }
         if last_error is not None:
             payload["fallback_from_status_code"] = last_error.status_code
+        if compare_failures:
+            payload["compare_failures"] = compare_failures
         return json.dumps(payload)
     return _indeterminate_deploy_result(repo_slug, error=last_error)
 
@@ -1670,6 +1596,86 @@ async def github_read_ref_for_backend(
     return None
 
 
+async def github_deploy_states_for_backend(
+    refs: Mapping[Hashable, tuple[str, str]],
+    *,
+    org_id: str,
+    user_id: str | None = None,
+) -> DeployStateBatch[Hashable]:
+    """Batch ancestry reads using the backend caller's ordered identities."""
+    normalized_refs = {
+        key: (
+            str(repo or "").strip(),
+            str(sha or "").strip(),
+        )
+        for key, (repo, sha) in refs.items()
+    }
+    tokens_by_repo: dict[str, tuple[str | None, ...]] = {}
+    resolution_failures: dict[str, DeployStateObservation] = {}
+    for repo_slug in dict.fromkeys(
+        repo for repo, _sha in normalized_refs.values()
+    ):
+        try:
+            candidates = await _github_token_candidates(
+                repo_slug=repo_slug,
+                token_secret_key=None,
+                org_id=org_id,
+                user_id=user_id,
+            )
+            ordered = _ordered_read_candidates(
+                candidates,
+                repo_slug=repo_slug,
+                state=_github_read_state(),
+            )
+            tokens_by_repo[repo_slug] = tuple(
+                candidate.get("token") for candidate in ordered
+            ) or (None,)
+        except Exception as exc:  # noqa: BLE001
+            failure = ancestry_failure("credentials", exc)
+            resolution_failures[repo_slug] = DeployStateObservation(
+                state=None,
+                in_staging=None,
+                in_main=None,
+                comparisons=(
+                    AncestryObservation(
+                        branch=failure.branch,
+                        is_ancestor=None,
+                        error_category=(
+                            "credential_resolution_"
+                            f"{failure.error_category}"
+                        ),
+                        status_code=failure.status_code,
+                    ),
+                ),
+            )
+
+    healthy_refs = {
+        key: ref
+        for key, ref in normalized_refs.items()
+        if ref[0] not in resolution_failures
+    }
+    healthy = await derive_deploy_states(
+        healthy_refs,
+        tokens=tokens_by_repo,
+    )
+    observations_by_ref = dict(healthy.observations_by_ref)
+    for ref in dict.fromkeys(normalized_refs.values()):
+        if ref[0] in resolution_failures:
+            observations_by_ref[ref] = resolution_failures[ref[0]]
+    observations_by_key = {
+        key: observations_by_ref[ref]
+        for key, ref in normalized_refs.items()
+    }
+    return DeployStateBatch(
+        {
+            key: observation.state
+            for key, observation in observations_by_key.items()
+        },
+        observations_by_key=observations_by_key,
+        observations_by_ref=observations_by_ref,
+    )
+
+
 __all__ = [
     "_handle_add_github_issue_comment",
     "_handle_add_github_sub_issue",
@@ -1680,5 +1686,6 @@ __all__ = [
     "_handle_read_github_source",
     "_handle_remove_github_sub_issue",
     "_handle_update_github_issue",
+    "github_deploy_states_for_backend",
     "github_read_ref_for_backend",
 ]

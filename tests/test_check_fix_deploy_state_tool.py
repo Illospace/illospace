@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from brain.systems.cortex.project_context.github import GitHubConnectorError
-from brain.systems.deploy_state_github import is_ancestor_of
+from brain.systems.deploy_state_github import (
+    AncestryObservation,
+    is_ancestor_of,
+    observe_ancestry,
+)
 from brain.systems.runs.tool_catalog.handlers.github import _handle_check_fix_deploy_state
 
 
@@ -16,16 +20,17 @@ _H = "brain.systems.runs.tool_catalog.handlers.github"
 
 
 @pytest.mark.asyncio
-async def test_check_fix_deploy_state_uses_pr_merge_sha_and_shared_ladder(monkeypatch):
-    monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", "uwear-ai/uwear-backend")
-
+async def test_check_fix_deploy_state_uses_pr_merge_sha_and_shared_deriver(monkeypatch):
     async def ancestry(repo, sha, branch, *, token=None):
         assert repo == "uwear-ai/uwear-backend"
         assert sha == "merge-sha"
         assert token is None
-        return branch == "staging"
+        return AncestryObservation(
+            branch=branch,
+            is_ancestor=branch == "staging",
+        )
 
-    with patch(f"{_H}._maybe_ensure_deploy_fields", new=AsyncMock()), patch(
+    with patch(
         f"{_H}.async_get_pull_request_deploy_info",
         new=AsyncMock(
             return_value={
@@ -39,7 +44,10 @@ async def test_check_fix_deploy_state_uses_pr_merge_sha_and_shared_ladder(monkey
                 },
             }
         ),
-    ), patch(f"{_H}.is_ancestor_of", new=AsyncMock(side_effect=ancestry)):
+    ), patch(
+        "brain.systems.deploy_state.observe_ancestry",
+        new=AsyncMock(side_effect=ancestry),
+    ):
         payload = json.loads(
             await _handle_check_fix_deploy_state(
                 repo="https://github.com/uwear-ai/uwear-backend.git",
@@ -51,19 +59,18 @@ async def test_check_fix_deploy_state_uses_pr_merge_sha_and_shared_ladder(monkey
     assert payload["base_ref"] == "staging"
     assert payload["in_staging"] is True
     assert payload["in_main"] is False
-    assert payload["deploy_state"] == "prod_pending"
-    assert payload["recommended_action"] == "expected_noise"
+    assert payload["deploy_state"] == "staging"
+    assert payload["indeterminate"] is False
 
 
 @pytest.mark.asyncio
 async def test_check_fix_deploy_state_sha_in_main_degrades_open_on_unknown_deploy_time(monkeypatch):
-    monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", "uwear-ai/uwear-backend")
-
     async def ancestry(repo, sha, branch, *, token=None):
-        return True
+        return AncestryObservation(branch=branch, is_ancestor=True)
 
-    with patch(f"{_H}._maybe_ensure_deploy_fields", new=AsyncMock()), patch(
-        f"{_H}.is_ancestor_of", new=AsyncMock(side_effect=ancestry)
+    with patch(
+        "brain.systems.deploy_state.observe_ancestry",
+        new=AsyncMock(side_effect=ancestry),
     ):
         payload = json.loads(
             await _handle_check_fix_deploy_state(
@@ -75,17 +82,14 @@ async def test_check_fix_deploy_state_sha_in_main_degrades_open_on_unknown_deplo
     assert payload["merged"] is None
     assert payload["in_main"] is True
     assert payload["deploy_state"] == "deployed"
-    assert payload["recommended_action"] == "expected_noise"
 
 
 @pytest.mark.asyncio
 async def test_staging_pr_now_in_main_does_not_use_old_staging_merge_as_deploy_time(monkeypatch):
-    monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", "uwear-ai/uwear-backend")
-
     async def ancestry(repo, sha, branch, *, token=None):
-        return True
+        return AncestryObservation(branch=branch, is_ancestor=True)
 
-    with patch(f"{_H}._maybe_ensure_deploy_fields", new=AsyncMock()), patch(
+    with patch(
         f"{_H}.async_get_pull_request_deploy_info",
         new=AsyncMock(
             return_value={
@@ -98,7 +102,10 @@ async def test_staging_pr_now_in_main_does_not_use_old_staging_merge_as_deploy_t
                 }
             }
         ),
-    ), patch(f"{_H}.is_ancestor_of", new=AsyncMock(side_effect=ancestry)):
+    ), patch(
+        "brain.systems.deploy_state.observe_ancestry",
+        new=AsyncMock(side_effect=ancestry),
+    ):
         payload = json.loads(
             await _handle_check_fix_deploy_state(
                 repo="uwear-ai/uwear-backend",
@@ -107,13 +114,11 @@ async def test_staging_pr_now_in_main_does_not_use_old_staging_merge_as_deploy_t
         )
 
     assert payload["deploy_state"] == "deployed"
-    assert payload["recommended_action"] == "expected_noise"
 
 
 @pytest.mark.asyncio
 async def test_check_fix_deploy_state_no_token_visibility_degrades_open(monkeypatch):
-    monkeypatch.setenv("ILLO_DEPLOY_SWEEP_REPOS", "uwear-ai/uwear-backend")
-    with patch(f"{_H}._maybe_ensure_deploy_fields", new=AsyncMock()), patch(
+    with patch(
         f"{_H}.async_get_pull_request_deploy_info",
         new=AsyncMock(
             side_effect=GitHubConnectorError(
@@ -132,19 +137,65 @@ async def test_check_fix_deploy_state_no_token_visibility_degrades_open(monkeypa
     assert payload["merged"] is None
     assert payload["in_staging"] is None
     assert payload["in_main"] is None
-    assert payload["deploy_state"] is None
-    assert payload["recommended_action"] == "note_occurrence"
+    assert payload["deploy_state"] == "unknown"
     assert payload["indeterminate"] is True
     assert payload["status_code"] == 404
 
 
 @pytest.mark.asyncio
-async def test_check_fix_deploy_state_is_env_gated(monkeypatch):
-    monkeypatch.delenv("ILLO_DEPLOY_SWEEP_REPOS", raising=False)
-    payload = json.loads(
-        await _handle_check_fix_deploy_state(repo="uwear-ai/uwear-backend", sha="abc123")
-    )
-    assert payload["disabled"] is True
+async def test_check_fix_deploy_state_is_always_on(monkeypatch):
+    async def ancestry(_repo, _sha, branch, *, token=None):
+        return AncestryObservation(branch=branch, is_ancestor=False)
+
+    with patch(
+        "brain.systems.deploy_state.observe_ancestry",
+        new=AsyncMock(side_effect=ancestry),
+    ):
+        payload = json.loads(
+            await _handle_check_fix_deploy_state(
+                repo="uwear-ai/uwear-backend",
+                sha="abc123",
+            )
+        )
+    assert payload["deploy_state"] == "unmerged"
+    assert payload.get("disabled") is None
+
+
+@pytest.mark.asyncio
+async def test_check_fix_deploy_state_surfaces_compare_failures():
+    async def ancestry(_repo, _sha, branch, *, token=None):
+        return AncestryObservation(
+            branch=branch,
+            is_ancestor=None,
+            error_category="github_http_503",
+            status_code=503,
+        )
+
+    with patch(
+        "brain.systems.deploy_state.observe_ancestry",
+        new=AsyncMock(side_effect=ancestry),
+    ):
+        payload = json.loads(
+            await _handle_check_fix_deploy_state(
+                repo="uwear-ai/uwear-backend",
+                sha="abc123",
+            )
+        )
+
+    assert payload["deploy_state"] == "unknown"
+    assert payload["indeterminate"] is True
+    assert payload["compare_failures"] == [
+        {
+            "branch": "staging",
+            "category": "github_http_503",
+            "status_code": 503,
+        },
+        {
+            "branch": "main",
+            "category": "github_http_503",
+            "status_code": 503,
+        },
+    ]
 
 
 def test_check_fix_deploy_state_tool_is_registered_and_read_only():
@@ -189,3 +240,11 @@ async def test_ancestry_helper_failure_is_indeterminate():
         new=AsyncMock(side_effect=GitHubConnectorError(503, "offline")),
     ):
         assert await is_ancestor_of("uwear-ai/uwear-backend", "abc123", "main") is None
+        observation = await observe_ancestry(
+            "uwear-ai/uwear-backend",
+            "abc123",
+            "main",
+        )
+
+    assert observation.error_category == "github_http_503"
+    assert observation.status_code == 503

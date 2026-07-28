@@ -14,6 +14,7 @@ from sqlalchemy import String, and_, cast, func, or_, select
 
 from brain.kernel.common.pagination import next_offset_token, page_offset
 from brain.systems.cortex.thread_links import thread_id_from_reference, thread_link_payload
+from brain.systems.deploy_record_contract import record_data_for_serialization
 from brain.systems.runs.tool_definitions import WORKSPACE_OVERVIEW_SPARSE_GUIDANCE
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, logger
 
@@ -1047,7 +1048,9 @@ async def _query_domain_records(
             "object_key": obj.key,
             "object_name": obj.name,
             "title": record.title,
-            "data": _jsonable(record.data),
+            "data": _jsonable(
+                record_data_for_serialization(obj.key, record.data)
+            ),
             "version": record.version,
             "provenance": {"table": "domain_records", "id": int(record.id)},
         }
