@@ -9,7 +9,7 @@ import os
 import signal
 import time
 
-from brain.contracts.worker_swap import (
+from brain.contracts.worker_lifecycle import (
     WorkerLifecyclePhase,
     publish_worker_lifecycle_phase,
 )
@@ -36,6 +36,7 @@ logging.basicConfig(
 logger = logging.getLogger("cortex.worker")
 
 _running = True
+_draining = False
 _terminate_process = os._exit
 
 
@@ -48,12 +49,21 @@ def _publish_worker_lifecycle_phase(phase: WorkerLifecyclePhase) -> None:
         logger.exception("could not publish worker lifecycle phase %s", phase.value)
 
 
-def _signal_handler(signum, _frame):
-    global _running
-    logger.info("received %s, draining agent-run worker", signal.Signals(signum).name)
+def _begin_draining() -> None:
+    """Idempotently stop claim capacity before any runner drain begins."""
+
+    global _draining, _running
     _running = False
+    if _draining:
+        return
+    _draining = True
     _publish_worker_lifecycle_phase(WorkerLifecyclePhase.DRAINING)
     request_runner_stop()
+
+
+def _signal_handler(signum, _frame):
+    logger.info("received %s, draining agent-run worker", signal.Signals(signum).name)
+    _begin_draining()
 
 
 signal.signal(signal.SIGTERM, _signal_handler)
@@ -164,8 +174,13 @@ def _recover_timed_out_runs(drain_result: DrainResult) -> None:
 
 
 def main() -> None:
+    global _draining
     exit_code = 0
     cycle_scheduler_enabled = False
+    if _running:
+        # ``main`` runs once in production. Resetting here also keeps direct
+        # invocation in tests independent without erasing a pre-start signal.
+        _draining = False
     try:
         _publish_worker_lifecycle_phase(WorkerLifecyclePhase.STARTING)
         logger.info("starting agent-run worker")
@@ -241,6 +256,7 @@ def main() -> None:
         raise
     finally:
         try:
+            _begin_draining()
             drain_result = stop_runner(
                 drain_timeout_seconds=_shutdown_drain_timeout_seconds()
             )

@@ -76,17 +76,7 @@ class RunStatus(StrEnum):
     EXPIRED = "expired"
 
 
-class WorkerLifecyclePhase(StrEnum):
-    """Externally observable AgentRun worker lifecycle."""
-
-    STARTING = "starting"
-    CLAIMING = "claiming"
-    DRAINING = "draining"
-    STOPPED = "stopped"
-
-
 RUN_STATUS_VALUES = tuple(status.value for status in RunStatus)
-WORKER_LIFECYCLE_PHASE_VALUES = tuple(phase.value for phase in WorkerLifecyclePhase)
 ACTIVE_RUN_STATUS_VALUES = (
     RunStatus.STARTING.value,
     RunStatus.RUNNING.value,
