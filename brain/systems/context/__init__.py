@@ -17,8 +17,18 @@ from brain.systems.context.compaction import (
     split_session_messages_for_compaction,
 )
 from brain.systems.context.semantic_compaction import (
+    CompactionPlan,
     CompactionCheckpoint,
-    compact_session_messages_with_checkpoint,
+    plan_session_compaction,
+)
+from brain.systems.context.errors import (
+    ContextCompactionStalledError,
+    ContextFloorExceedsBudgetError,
+)
+from brain.systems.context.window_policy import (
+    ContextAdmission,
+    ContextCompactionOutcome,
+    ContextWindowPolicy,
 )
 from brain.systems.context.thread_handoff import (
     ThreadHandoff,
@@ -60,7 +70,13 @@ __all__ = [
     "CONTEXT_POLICY_VERSION",
     "CompactionReport",
     "CompactionWindow",
+    "CompactionPlan",
     "CompactionCheckpoint",
+    "ContextAdmission",
+    "ContextCompactionOutcome",
+    "ContextCompactionStalledError",
+    "ContextFloorExceedsBudgetError",
+    "ContextWindowPolicy",
     "ContextRender",
     "ContextRuntime",
     "ContextPack",
@@ -80,12 +96,12 @@ __all__ = [
     "WORKER_SECTION_ORDER",
     "apply_active_context_policy",
     "compact_session_messages",
-    "compact_session_messages_with_checkpoint",
     "context_policy_active_enabled",
     "filter_context_pack_sections",
     "build_thread_handoff",
     "build_thread_handoff_context_messages",
     "normalize_task_class",
+    "plan_session_compaction",
     "recent_raw_messages_for_handoff",
     "resolve_model_context_budget",
     "split_session_messages_for_compaction",

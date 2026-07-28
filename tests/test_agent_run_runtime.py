@@ -1224,8 +1224,9 @@ def test_repeated_unwinnable_compaction_stops_and_rate_limits_warning(
     monkeypatch,
     caplog,
 ):
+    from brain.systems.context.errors import ContextCompactionStalledError
+    from brain.systems.context.window_policy import ContextWindowPolicy
     from brain.systems.runs import direct_agent
-    from brain.systems.runs.direct_loop.state import ContextCompactionTracker
 
     monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", "4096")
     monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "500")
@@ -1239,45 +1240,47 @@ def test_repeated_unwinnable_compaction_stops_and_rate_limits_warning(
         {"role": "user", "content": "z" * 1200},
         {"role": "assistant", "content": "w" * 1200},
     ]
-    tracker = ContextCompactionTracker()
+    policy = ContextWindowPolicy.resolve(
+        model="gpt-5.5",
+        provider="openai",
+        reasoning_effort="low",
+        max_output_tokens=0,
+        tools=[],
+    )
 
     with caplog.at_level("WARNING", logger="agent"):
-        for _ in range(direct_agent._MAX_CONSECUTIVE_CONTEXT_COMPACTION_NO_PROGRESS - 1):
-            compacted, report = direct_agent._maybe_compact_active_context(
+        for _ in range(policy.max_consecutive_no_progress - 1):
+            outcome = direct_agent._compact_active_context(
                 messages,
+                policy=policy,
                 session_id="stalled-compaction",
                 model="gpt-5.5",
                 phase="mid_turn",
                 provider_name="openai",
-                reasoning_effort="low",
-                max_output_tokens=0,
-                tracker=tracker,
             )
-            assert compacted == messages
-            assert report is None
+            assert outcome.messages == messages
+            assert outcome.report is None
 
         with pytest.raises(
-            direct_agent.ContextCompactionStalledError,
+            ContextCompactionStalledError,
             match=r"context_compaction_stalled: .*ceiling=500.*tools=0.*attempts=3",
         ):
-            direct_agent._maybe_compact_active_context(
+            direct_agent._compact_active_context(
                 messages,
+                policy=policy,
                 session_id="stalled-compaction",
                 model="gpt-5.5",
                 phase="mid_turn",
                 provider_name="openai",
-                reasoning_effort="low",
-                max_output_tokens=0,
-                tracker=tracker,
             )
 
     assert caplog.text.count("no safe transcript messages were eligible for compaction") == 1
 
 
 def test_repeated_compaction_that_stays_over_ceiling_also_stops(monkeypatch):
-    from brain.systems.context.compaction import CompactionReport
+    from brain.systems.context.errors import ContextCompactionStalledError
+    from brain.systems.context.window_policy import ContextWindowPolicy
     from brain.systems.runs import direct_agent
-    from brain.systems.runs.direct_loop.state import ContextCompactionTracker
 
     monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", "4096")
     monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "500")
@@ -1293,49 +1296,40 @@ def test_repeated_compaction_that_stays_over_ceiling_also_stops(monkeypatch):
         {"role": "user", "content": "latest"},
     ]
 
-    def still_too_large(candidate_messages, **_kwargs):
-        compacted = candidate_messages[1:]
-        return compacted, CompactionReport(
-            original_count=len(candidate_messages),
-            kept_count=len(compacted),
-            omitted_count=1,
-            summary="Reduced, but not enough.",
-            strategy="semantic_checkpoint",
-            provenance={"final_estimated_tokens": 600},
-        )
+    def oversized_checkpoint(_omitted, _context):
+        return {"active_objective": "still too large " + ("q" * 2400)}
 
-    monkeypatch.setattr(
-        "brain.systems.context.semantic_compaction.compact_session_messages_with_checkpoint",
-        still_too_large,
+    policy = ContextWindowPolicy.resolve(
+        model="gpt-5.5",
+        provider="openai",
+        reasoning_effort="low",
+        max_output_tokens=0,
+        tools=[],
     )
-    tracker = ContextCompactionTracker()
-
-    for _ in range(direct_agent._MAX_CONSECUTIVE_CONTEXT_COMPACTION_NO_PROGRESS - 1):
-        _, report = direct_agent._maybe_compact_active_context(
+    for _ in range(policy.max_consecutive_no_progress - 1):
+        outcome = direct_agent._compact_active_context(
             messages,
+            policy=policy,
             session_id="insufficient-compaction",
             model="gpt-5.5",
             phase="mid_turn",
             provider_name="openai",
-            reasoning_effort="low",
-            max_output_tokens=0,
-            tracker=tracker,
+            semantic_compactor=oversized_checkpoint,
         )
-        assert report is not None
+        assert outcome.report is not None
 
     with pytest.raises(
-        direct_agent.ContextCompactionStalledError,
-        match=r"context_compaction_stalled: estimated=600 ceiling=500",
+        ContextCompactionStalledError,
+        match=r"context_compaction_stalled: estimated=\d+ ceiling=500",
     ):
-        direct_agent._maybe_compact_active_context(
+        direct_agent._compact_active_context(
             messages,
+            policy=policy,
             session_id="insufficient-compaction",
             model="gpt-5.5",
             phase="mid_turn",
             provider_name="openai",
-            reasoning_effort="low",
-            max_output_tokens=0,
-            tracker=tracker,
+            semantic_compactor=oversized_checkpoint,
         )
 
 

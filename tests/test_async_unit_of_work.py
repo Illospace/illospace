@@ -192,6 +192,25 @@ async def test_unit_of_work_async_lifecycle_rolls_back_on_error(monkeypatch):
     assert session.closed is True
 
 
+@pytest.mark.asyncio
+async def test_unit_of_work_commit_failure_rolls_back_closes_and_preserves_error(monkeypatch):
+    class CommitFailureSession(_AsyncSession):
+        async def commit(self) -> None:
+            self.commits += 1
+            raise RuntimeError("commit exploded")
+
+    session = CommitFailureSession()
+    monkeypatch.setattr(uow_module, "SessionFactory", lambda: session)
+
+    with pytest.raises(RuntimeError, match="commit exploded"):
+        async with UnitOfWork():
+            pass
+
+    assert session.commits == 1
+    assert session.rollbacks == 1
+    assert session.closed is True
+
+
 def test_cortex_runner_exposes_async_db_boundaries_without_sync_bridge():
     source = inspect.getsource(cortex_runner)
 

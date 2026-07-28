@@ -22,8 +22,9 @@ from sqlalchemy import func, select
 from brain.kernel import config as brain_config
 from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, PROCESSING_RUN_STATUS_VALUES
 from brain.systems.cortex.status import PROTECTED_IDEA_STATUSES
-from brain.systems.runs.engine import AgentRunDatabaseFlushError, AsyncAgentRunEngine
+from brain.systems.runs.engine import AsyncAgentRunEngine
 from brain.systems.runs.events import activity_event, run_event
+from brain.systems.runs.execution_failure import RunExecutionFailure
 from brain.systems.runs.failures import (
     coerce_failure_category,
     failure_category_for_error,
@@ -258,7 +259,7 @@ def _engine_for_session(session) -> AsyncAgentRunEngine:
         session,
         recipes=default_recipes(),
         stream=RunStream(_live_stream_sink(session)),
-        auto_commit_events=True,
+        auto_commit_events=False,
         cancel_event_factory=_run_cancel_token,
         durable_steering_drain=_drain_steering_in_isolated_uow,
     )
@@ -1476,11 +1477,24 @@ async def _process_claimed_run_async(run_id: int) -> bool:
             publish_safe("status_change", status_payload)
         return True
     except Exception as exc:
-        logger.exception("agent_run_failed", extra={"run_id": run_id})
-        error = str(exc) if isinstance(exc, AgentRunDatabaseFlushError) else "runner_failed"
+        failure = RunExecutionFailure.capture(int(run_id), exc)
+        logger.exception(
+            "agent_run_failed",
+            extra={
+                "run_id": run_id,
+                "primary_error": str(failure),
+            },
+        )
         try:
-            status_payload = await _mark_run_failed_after_runner_error_async(int(run_id), error)
-            await _finalize_cycle_run_if_needed_async(int(run_id), status="failed", error=error)
+            status_payload = await _mark_run_failed_after_runner_error_async(
+                int(run_id),
+                str(failure),
+            )
+            await _finalize_cycle_run_if_needed_async(
+                int(run_id),
+                status="failed",
+                error=str(failure),
+            )
             if status_payload:
                 publish_safe("status_change", status_payload)
         except Exception:

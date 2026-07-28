@@ -934,10 +934,11 @@ async def test_runner_setup_failure_never_persists_diagnostic_as_public_output(
     assert all(raw_diagnostic not in str(value) for value in (artifacts, text_events))
 
 
-async def test_original_flush_exception_is_logged_and_persisted_on_run_failed(
-    caplog,
+async def test_engine_preserves_original_flush_exception_for_uow_owner(
     session_factory,
 ):
+    from brain.systems.runs.execution_failure import RunExecutionFailure
+
     session = session_factory()
     armed = {"value": False}
     raised = {"value": False}
@@ -956,34 +957,139 @@ async def test_original_flush_exception_is_logged_and_persisted_on_run_failed(
             raise AssertionError("the injected flush must fail")
 
     try:
-        with caplog.at_level("ERROR", logger="brain.systems.runs.engine"):
-            result = await AsyncAgentRunEngine(
+        with pytest.raises(RunExecutionFailure) as captured:
+            await AsyncAgentRunEngine(
                 session,
                 recipes={"fast": FlushFailureRecipe()},
             ).run(_run_request(thread_id="thread-1", message="flush failure"))
     finally:
         event.remove(session.sync_session, "before_flush", fail_first_armed_flush)
 
-    events = list(
-        (
-            await session.scalars(
-                select(AgentRunEventRow)
-                .where(
-                    AgentRunEventRow.run_id == result.id,
-                    AgentRunEventRow.event_type == "run.failed",
-                )
-                .order_by(AgentRunEventRow.sequence_no.asc())
-            )
-        ).all()
+    failure = captured.value
+
+    assert isinstance(failure.original, RuntimeError)
+    assert str(failure.original) == "original flush exploded"
+    assert str(failure) == (
+        "run_execution_failed: RuntimeError: original flush exploded"
+    )
+    assert "PendingRollbackError" not in str(failure)
+
+
+def test_run_execution_failure_survives_a_cleanup_exception():
+    from brain.systems.runs.execution_failure import RunExecutionFailure
+
+    primary = RunExecutionFailure(42, RuntimeError("primary exploded"))
+    try:
+        raise primary
+    except RunExecutionFailure:
+        try:
+            raise RuntimeError("cleanup exploded")
+        except RuntimeError as cleanup:
+            captured = RunExecutionFailure.capture(42, cleanup)
+
+    assert captured is primary
+
+
+async def test_runner_commit_failure_rolls_back_then_settles_in_fresh_uow(
+    monkeypatch,
+    session_factory,
+):
+    from contextlib import asynccontextmanager
+
+    from brain.systems.runs.cortex import runner
+
+    setup_session = session_factory()
+    store = AsyncAgentRunStore(setup_session)
+    run = await store.create_run(
+        _run_request(thread_id="thread-commit-failure", message="commit failure")
+    )
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+    await setup_session.commit()
+    await setup_session.close()
+
+    opened_uows = 0
+
+    class CommitAwareUoW:
+        def __init__(self):
+            nonlocal opened_uows
+            self.index = opened_uows
+            opened_uows += 1
+            self.session = session_factory()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, _exc, _tb):
+            try:
+                if exc_type is not None:
+                    await self.session.rollback()
+                elif self.index == 0:
+                    await self.session.rollback()
+                    raise RuntimeError("commit exploded")
+                else:
+                    await self.session.commit()
+            finally:
+                await self.session.close()
+
+    class CompletingEngine:
+        def __init__(self, session):
+            self.session = session
+
+        async def run_existing(self, run_id):
+            row = await self.session.get(AgentRunRow, int(run_id))
+            assert row is not None
+            row.status = RunStatus.COMPLETED.value
+            return SimpleNamespace(status=RunStatus.COMPLETED)
+
+    @asynccontextmanager
+    async def heartbeat(_run_id):
+        yield
+
+    async def materialize(_run_id):
+        return True, None
+
+    async def no_settlement(_session, _run_id):
+        return None
+
+    async def no_cycle_finalization(*_args, **_kwargs):
+        return None
+
+    async def no_contract_gate(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(runner, "_unit_of_work_factory", lambda: CommitAwareUoW)
+    monkeypatch.setattr(runner, "_engine_for_session", lambda session: CompletingEngine(session))
+    monkeypatch.setattr(runner, "_run_heartbeat_async", heartbeat)
+    monkeypatch.setattr(runner, "_async_materialize_project_context", materialize)
+    monkeypatch.setattr(runner, "_settle_terminal_root_run_async", no_settlement)
+    monkeypatch.setattr(runner, "_finalize_cycle_run_if_needed_async", no_cycle_finalization)
+    monkeypatch.setattr(
+        "brain.systems.cycles.contract_gate.async_prepare_cycle_run_visible_finalization",
+        no_contract_gate,
     )
 
-    assert result.status == RunStatus.FAILED
-    assert len(events) == 1
-    assert events[0].payload["error"] == (
-        "database_flush_failed: RuntimeError: original flush exploded"
+    processed = await runner._process_claimed_run_async(run.id)
+
+    inspection_session = session_factory()
+    row = await inspection_session.get(AgentRunRow, run.id)
+    failed_event = (
+        await inspection_session.scalars(
+            select(AgentRunEventRow).where(
+                AgentRunEventRow.run_id == run.id,
+                AgentRunEventRow.event_type == "run.failed",
+            )
+        )
+    ).one()
+    await inspection_session.close()
+
+    assert processed is False
+    assert opened_uows == 2
+    assert row is not None
+    assert row.status == RunStatus.FAILED.value
+    assert failed_event.payload["error"] == (
+        "run_execution_failed: RuntimeError: commit exploded"
     )
-    assert "PendingRollbackError" not in events[0].payload["error"]
-    assert "original flush exploded" in caplog.text
 
 
 async def test_oversized_system_admission_error_reaches_run_failed_event(

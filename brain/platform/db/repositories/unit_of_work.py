@@ -1,8 +1,10 @@
 """Unit of Work — transaction boundary for database-backed code."""
 from __future__ import annotations
 
+from contextlib import suppress
 from functools import cached_property
 import inspect
+import logging
 from typing import Any, Generic, TypeVar
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,6 +73,7 @@ from brain.platform.db.repositories.vault import (
 )
 
 RepoT = TypeVar("RepoT")
+logger = logging.getLogger(__name__)
 
 
 def _method_owner(repo_cls: type[Any], name: str) -> type[Any] | None:
@@ -137,13 +140,31 @@ class UnitOfWork:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         assert self._async_session is not None
-        if exc_type:
-            await self._async_session.rollback()
-        else:
-            await self._async_session.commit()
-        await self._async_session.close()
-        self._async_session = None
-        self._clear_cached_repositories()
+        exit_failed = exc_type is not None
+        try:
+            if exc_type:
+                try:
+                    await self._async_session.rollback()
+                except BaseException:
+                    logger.exception("unit_of_work_rollback_failed")
+            else:
+                try:
+                    await self._async_session.commit()
+                except BaseException:
+                    exit_failed = True
+                    with suppress(BaseException):
+                        await self._async_session.rollback()
+                    raise
+        finally:
+            try:
+                await self._async_session.close()
+            except BaseException:
+                if not exit_failed:
+                    raise
+                logger.exception("unit_of_work_close_failed_after_primary_error")
+            finally:
+                self._async_session = None
+                self._clear_cached_repositories()
 
     def __enter__(self) -> UnitOfWork:
         raise RuntimeError("UnitOfWork is async-only; use `async with UnitOfWork()`.")

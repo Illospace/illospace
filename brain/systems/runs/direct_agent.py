@@ -33,7 +33,6 @@ import time
 import uuid
 from collections.abc import Awaitable
 from contextlib import suppress
-from dataclasses import dataclass
 from typing import Any, Callable
 
 from brain.platform.integrations.llm import (
@@ -126,6 +125,10 @@ from brain.systems.runs.routing_metadata import (
 from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
 from brain.systems import sessions as _session_store
+from brain.systems.context.window_policy import (
+    ContextCompactionOutcome,
+    ContextWindowPolicy,
+)
 
 logger = logging.getLogger("agent")
 
@@ -224,8 +227,6 @@ _RESEARCH_BUDGET = 6
 _MAX_PARALLEL_TOOL_CALLS = int(os.environ.get("AGENT_MAX_PARALLEL_TOOL_CALLS", "10"))
 _PARALLEL_SAFE_TOOL_NAMES = parallel_safe_tool_names(scope="agent")
 _AGENT_CACHE_DEBUG = os.environ.get("AGENT_CACHE_DEBUG", "").lower() in {"1", "true", "yes", "on"}
-_CONTEXT_COMPACTION_MIN_MESSAGES = 4
-_MAX_CONSECUTIVE_CONTEXT_COMPACTION_NO_PROGRESS = 3
 
 
 # ── Extracted Helpers ──────────────────────────────────────────
@@ -973,215 +974,55 @@ def _record_context_compaction_event(
     )
 
 
-@dataclass(frozen=True)
-class ContextAdmission:
-    budget: Any
-    floor_tokens: int
-    tool_count: int
-    min_messages: int
-
-
-class ContextFloorExceedsBudgetError(RuntimeError):
-    def __init__(self, *, floor: int, ceiling: int, tools: int, min_messages: int):
-        self.floor = int(floor)
-        self.ceiling = int(ceiling)
-        self.tools = int(tools)
-        self.min_messages = int(min_messages)
-        super().__init__(
-            "context_floor_exceeds_budget: "
-            f"floor={self.floor} ceiling={self.ceiling} tools={self.tools} "
-            f"min_messages={self.min_messages}"
-        )
-
-
-class ContextCompactionStalledError(RuntimeError):
-    def __init__(
-        self,
-        *,
-        estimated: int,
-        ceiling: int,
-        tools: int,
-        attempts: int,
-        phase: str,
-    ):
-        self.estimated = int(estimated)
-        self.ceiling = int(ceiling)
-        self.tools = int(tools)
-        self.attempts = int(attempts)
-        self.phase = str(phase)
-        super().__init__(
-            "context_compaction_stalled: "
-            f"estimated={self.estimated} ceiling={self.ceiling} tools={self.tools} "
-            f"attempts={self.attempts} phase={self.phase}"
-        )
-
-
-def _irreducible_context_messages(
+def _compact_active_context(
     messages: list[dict],
     *,
-    min_messages: int = _CONTEXT_COMPACTION_MIN_MESSAGES,
-) -> list[dict]:
-    """Return the raw messages the compactor's smallest safe window must retain."""
-    from brain.systems.context.compaction import split_session_messages_for_compaction
-
-    window = split_session_messages_for_compaction(
-        messages,
-        max_messages=max(1, int(min_messages)),
-    )
-    if window is None or not window.omitted_messages:
-        return list(messages)
-    return list(window.kept_early) + list(window.kept_recent)
-
-
-def _admit_active_context(
-    messages: list[dict],
-    *,
-    model: str,
-    system: list[dict] | str | None = None,
-    tools: list[dict] | None = None,
-    provider_name: str | None = None,
-    reasoning_effort: str | None = None,
-    max_output_tokens: int | None = None,
-    min_messages: int = _CONTEXT_COMPACTION_MIN_MESSAGES,
-) -> ContextAdmission:
-    """Reject a prompt scaffold that no transcript compaction can fit."""
-    from brain.systems.context.budget import resolve_model_context_budget
-    from brain.systems.context.compaction import estimate_session_tokens
-
-    budget = resolve_model_context_budget(
-        model=model,
-        provider=provider_name,
-        reasoning_effort=reasoning_effort,
-        max_output_tokens=max_output_tokens,
-        tools=tools,
-    )
-    floor_messages = _irreducible_context_messages(
-        messages,
-        min_messages=min_messages,
-    )
-    floor_tokens = estimate_session_tokens(
-        floor_messages,
-        system=system,
-        tools=tools,
-    )
-    admission = ContextAdmission(
-        budget=budget,
-        floor_tokens=floor_tokens,
-        tool_count=len(tools or []),
-        min_messages=int(min_messages),
-    )
-    if floor_tokens >= budget.auto_compact_threshold_tokens:
-        error = ContextFloorExceedsBudgetError(
-            floor=floor_tokens,
-            ceiling=budget.auto_compact_threshold_tokens,
-            tools=admission.tool_count,
-            min_messages=admission.min_messages,
-        )
-        logger.error("%s", error)
-        raise error
-    return admission
-
-
-def _maybe_compact_active_context(
-    messages: list[dict],
-    *,
+    policy: ContextWindowPolicy,
     session_id: str,
     model: str,
     phase: str,
     system: list[dict] | str | None = None,
     tools: list[dict] | None = None,
     provider_name: str | None = None,
-    reasoning_effort: str | None = None,
-    max_output_tokens: int | None = None,
     run_id: int | None = None,
     semantic_compactor=None,
     force: bool = False,
     emergency: bool = False,
-    tracker=None,
-) -> tuple[list[dict], object | None]:
-    """Compact active history when the estimated prompt crosses the runtime limit."""
-    from brain.systems.context.budget import resolve_model_context_budget
-    from brain.systems.context.compaction import (
-        estimate_session_tokens,
-    )
-    from brain.systems.context.semantic_compaction import compact_session_messages_with_checkpoint
-
-    budget = resolve_model_context_budget(
-        model=model,
-        provider=provider_name,
-        reasoning_effort=reasoning_effort,
-        max_output_tokens=max_output_tokens,
-        tools=tools,
-    )
-    estimated_tokens = estimate_session_tokens(messages, system=system, tools=tools)
-    if not force and estimated_tokens < budget.auto_compact_threshold_tokens:
-        if tracker is not None:
-            tracker.reset()
-        return messages, None
-
-    compacted, report = compact_session_messages_with_checkpoint(
+) -> ContextCompactionOutcome:
+    """Orchestrate the run-scoped context policy and its canonical plan."""
+    outcome = policy.compact(
         messages,
-        token_limit=budget.auto_compact_threshold_tokens,
-        target_tokens=budget.emergency_target_tokens if emergency else budget.target_tokens,
         session_id=session_id,
         phase=phase,
         system=system,
         tools=tools,
         max_messages=_MAX_PERSISTED_MESSAGES,
-        min_messages=_CONTEXT_COMPACTION_MIN_MESSAGES,
         force=force,
         emergency=emergency,
         semantic_compactor=semantic_compactor,
     )
-    final_tokens = report.provenance.get("final_estimated_tokens")
-    if not isinstance(final_tokens, int):
-        final_tokens = estimate_session_tokens(compacted, system=system, tools=tools)
-    below_threshold = final_tokens < budget.auto_compact_threshold_tokens
-    made_sufficient_progress = report.omitted_count > 0 and below_threshold
-    if made_sufficient_progress:
-        if tracker is not None:
-            tracker.reset()
-    elif tracker is not None:
-        tracker.consecutive_no_progress += 1
-    if report.omitted_count <= 0:
-        if tracker is None or not tracker.warned_no_safe_messages:
-            logger.warning(
-                "Agent %s: %s context exceeded token limit (~%d >= %d) but no safe transcript "
-                "messages were eligible for compaction",
-                session_id,
-                phase,
-                estimated_tokens,
-                budget.auto_compact_threshold_tokens,
-            )
-            if tracker is not None:
-                tracker.warned_no_safe_messages = True
-    if (
-        not made_sufficient_progress
-        and tracker is not None
-        and tracker.consecutive_no_progress >= _MAX_CONSECUTIVE_CONTEXT_COMPACTION_NO_PROGRESS
-    ):
-        error = ContextCompactionStalledError(
-            estimated=final_tokens,
-            ceiling=budget.auto_compact_threshold_tokens,
-            tools=len(tools or []),
-            attempts=tracker.consecutive_no_progress,
-            phase=phase,
+    if outcome.warning_required:
+        logger.warning(
+            "Agent %s: %s context exceeded token limit (~%d > %d) but no safe transcript "
+            "messages were eligible for compaction",
+            session_id,
+            phase,
+            outcome.estimated_tokens,
+            policy.threshold_tokens,
         )
-        logger.error("Agent %s: %s", session_id, error)
-        raise error
-    if report.omitted_count <= 0:
-        return messages, None
+    if outcome.report is None:
+        return outcome
     logger.info(
         "Agent %s: %s auto-compacted active context from ~%d to ~%s tokens "
         "(limit=%d, omitted=%d, kept=%d, strategy=%s)",
         session_id,
         phase,
-        estimated_tokens,
-        final_tokens if final_tokens is not None else "?",
-        budget.auto_compact_threshold_tokens,
-        report.omitted_count,
-        len(compacted),
-        report.strategy,
+        outcome.estimated_tokens,
+        outcome.final_tokens,
+        policy.threshold_tokens,
+        outcome.report.omitted_count,
+        len(outcome.messages),
+        outcome.report.strategy,
     )
     _record_context_compaction_event(
         run_id=run_id,
@@ -1189,10 +1030,10 @@ def _maybe_compact_active_context(
         model=model,
         provider_name=provider_name,
         phase=phase,
-        budget=budget.to_payload(),
-        report=report,
+        budget=policy.budget.to_payload(),
+        report=outcome.report,
     )
-    return compacted, report
+    return outcome
 
 
 def _mark_tools_cacheable(tools: list[dict]) -> list[dict]:
@@ -1687,17 +1528,22 @@ async def run_agent_async(
         system = _apply_provider_system_cache_policy(state.provider_name, system, cache_system_prompt)
         reasoning_effort, max_tokens = _build_reasoning_effort(thinking)
         current_user_message = {"role": "user", "content": _initial_user_content(message, metadata)}
+        context_policy = ContextWindowPolicy.resolve(
+            model=model,
+            provider=state.provider_name,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_tokens,
+            tools=tools,
+        )
 
         # The current request plus the static prompt/tool scaffold is unavoidable.
         # Admit it before startup handoff compaction can make its own model call.
-        _admit_active_context(
+        context_policy.admit(
             [current_user_message],
-            model=model,
             system=system,
             tools=tools,
-            provider_name=state.provider_name,
-            reasoning_effort=reasoning_effort,
-            max_output_tokens=max_tokens,
+            session_id=session_id,
+            phase="startup_admission",
         )
 
         if persist_session:
@@ -1717,14 +1563,12 @@ async def run_agent_async(
             current_user_message,
             raw_archive_messages,
         )
-        _admit_active_context(
+        context_policy.admit(
             state.messages,
-            model=model,
             system=system,
             tools=tools,
-            provider_name=state.provider_name,
-            reasoning_effort=reasoning_effort,
-            max_output_tokens=max_tokens,
+            session_id=session_id,
+            phase="active_context_admission",
         )
 
         # Agent loop
@@ -1754,20 +1598,19 @@ async def run_agent_async(
             if guidance_count and raw_archive_messages is not None and len(state.messages) > before_guidance_len:
                 raw_archive_messages.append(copy.deepcopy(state.messages[-1]))
             state.messages = _sanitize_tool_pairs(state.messages, session_id)
-            state.messages, _ = _maybe_compact_active_context(
+            compaction = _compact_active_context(
                 state.messages,
+                policy=context_policy,
                 session_id=session_id,
                 model=model,
                 phase="pre_sampling",
                 system=system,
                 tools=tools,
                 provider_name=state.provider_name,
-                reasoning_effort=reasoning_effort,
-                max_output_tokens=max_tokens,
                 run_id=run_id,
                 semantic_compactor=semantic_compactor,
-                tracker=state.context_compaction,
             )
+            state.messages = compaction.messages
             if scheduled_result_contract and turn == 0:
                 _ensure_current_message_last(state.messages, current_user_message)
             if state.provider_name == "anthropic" and cache_system_prompt and len(state.messages) >= 2:
@@ -1905,6 +1748,20 @@ async def run_agent_async(
                                 provider_name=state.provider_name,
                                 session_id=session_id,
                             )
+                        context_policy = ContextWindowPolicy.resolve(
+                            model=model,
+                            provider=state.provider_name,
+                            reasoning_effort=reasoning_effort,
+                            max_output_tokens=max_tokens,
+                            tools=tools,
+                        )
+                        context_policy.admit(
+                            state.messages,
+                            system=system,
+                            tools=tools,
+                            session_id=session_id,
+                            phase="model_fallback_admission",
+                        )
                         request = _build_api_request(
                             model,
                             state.messages,
@@ -1940,23 +1797,22 @@ async def run_agent_async(
                         error=overflow_payload.get("message"),
                         latency_ms=int((time.time() - _call_start) * 1000),
                     )
-                    state.messages, recovery_report = _maybe_compact_active_context(
+                    compaction = _compact_active_context(
                         state.messages,
+                        policy=context_policy,
                         session_id=session_id,
                         model=model,
                         phase="context_overflow_retry",
                         system=system,
                         tools=tools,
                         provider_name=state.provider_name,
-                        reasoning_effort=reasoning_effort,
-                        max_output_tokens=max_tokens,
                         run_id=run_id,
                         semantic_compactor=semantic_compactor,
                         force=True,
                         emergency=True,
-                        tracker=state.context_compaction,
                     )
-                    if recovery_report is None:
+                    state.messages = compaction.messages
+                    if compaction.report is None:
                         logger.warning(
                             "Agent %s turn %d: context overflow recovery had no eligible messages to compact",
                             session_id,
@@ -2106,6 +1962,20 @@ async def run_agent_async(
                         tool_handlers,
                         disabled_names,
                     )
+                    context_policy = ContextWindowPolicy.resolve(
+                        model=model,
+                        provider=state.provider_name,
+                        reasoning_effort=reasoning_effort,
+                        max_output_tokens=max_tokens,
+                        tools=tools,
+                    )
+                    context_policy.admit(
+                        state.messages,
+                        system=system,
+                        tools=tools,
+                        session_id=session_id,
+                        phase="tool_surface_admission",
+                    )
                     for disablement in execution.tool_disablements:
                         _append_message_with_archive(
                             state.messages,
@@ -2142,20 +2012,19 @@ async def run_agent_async(
                         reminder_message,
                         raw_archive_messages,
                     )
-                state.messages, _ = _maybe_compact_active_context(
+                compaction = _compact_active_context(
                     state.messages,
+                    policy=context_policy,
                     session_id=session_id,
                     model=model,
                     phase="mid_turn",
                     system=system,
                     tools=tools,
                     provider_name=state.provider_name,
-                    reasoning_effort=reasoning_effort,
-                    max_output_tokens=max_tokens,
                     run_id=run_id,
                     semantic_compactor=semantic_compactor,
-                    tracker=state.context_compaction,
                 )
+                state.messages = compaction.messages
             else:
                 logger.warning("Unknown stop_reason: %s", response.stop_reason)
                 break

@@ -179,13 +179,9 @@ def test_model_context_budget_is_model_and_provider_aware(monkeypatch):
     assert openai_budget.reserved_tool_tokens > 0
 
 
-def test_context_admission_floor_includes_irreducible_messages_and_healthy_path(monkeypatch):
+def test_context_admission_floor_includes_canonical_checkpoint_and_healthy_path(monkeypatch):
     from brain.systems.context.compaction import estimate_session_tokens
-    from brain.systems.runs.direct_agent import (
-        _CONTEXT_COMPACTION_MIN_MESSAGES,
-        _admit_active_context,
-        _irreducible_context_messages,
-    )
+    from brain.systems.context.window_policy import ContextWindowPolicy
 
     monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", "10000")
     monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "7000")
@@ -200,31 +196,58 @@ def test_context_admission_floor_includes_irreducible_messages_and_healthy_path(
     system = "healthy system prompt"
     tools = [{"name": "read_file"}]
 
-    admission = _admit_active_context(
-        messages,
+    policy = ContextWindowPolicy.resolve(
         model="gpt-5.5",
-        provider_name="openai",
+        provider="openai",
         reasoning_effort="low",
         max_output_tokens=0,
+        tools=tools,
+    )
+    admission = policy.admit(
+        messages,
         system=system,
         tools=tools,
+        session_id="admission-test",
     )
 
-    floor_messages = _irreducible_context_messages(
-        messages,
-        min_messages=_CONTEXT_COMPACTION_MIN_MESSAGES,
-    )
-    assert admission.floor_tokens == estimate_session_tokens(
-        floor_messages,
+    retained_raw_edges = messages[:2] + messages[-1:]
+    assert admission.floor_tokens > estimate_session_tokens(
+        retained_raw_edges,
         system=system,
         tools=tools,
     )
-    assert admission.floor_tokens < admission.budget.auto_compact_threshold_tokens
+    assert policy.admits(admission.floor_tokens)
     assert admission.tool_count == 1
+    assert admission.min_messages == policy.min_messages
+
+
+def test_context_window_threshold_is_an_inclusive_admission_boundary():
+    from brain.systems.context.budget import ModelContextBudget
+    from brain.systems.context.window_policy import ContextWindowPolicy
+
+    budget = ModelContextBudget(
+        provider="openai",
+        model="gpt-5.5",
+        context_window_tokens=1_000,
+        reserved_output_tokens=0,
+        reserved_reasoning_tokens=0,
+        reserved_tool_tokens=0,
+        safety_margin_tokens=0,
+        effective_input_limit_tokens=500,
+        auto_compact_threshold_tokens=500,
+        target_tokens=350,
+        emergency_target_tokens=250,
+    )
+    policy = ContextWindowPolicy(budget)
+
+    assert policy.admits(500) is True
+    assert policy.requires_compaction(500) is False
+    assert policy.admits(501) is False
+    assert policy.requires_compaction(501) is True
 
 
 def test_structured_checkpoint_compaction_uses_injected_semantic_compactor():
-    from brain.systems.context.semantic_compaction import compact_session_messages_with_checkpoint
+    from brain.systems.context.semantic_compaction import plan_session_compaction
 
     messages = [{"role": "user", "content": "Build the compaction harness cleanly."}]
     for index in range(16):
@@ -243,7 +266,7 @@ def test_structured_checkpoint_compaction_uses_injected_semantic_compactor():
             "verification_status": "not run",
         }
 
-    compacted, report = compact_session_messages_with_checkpoint(
+    plan = plan_session_compaction(
         messages,
         token_limit=10,
         target_tokens=10,
@@ -254,6 +277,7 @@ def test_structured_checkpoint_compaction_uses_injected_semantic_compactor():
         force=True,
         semantic_compactor=semantic_compactor,
     )
+    compacted, report = plan.messages, plan.report
 
     checkpoint_text = "\n".join(
         msg.get("content", "")
@@ -267,7 +291,7 @@ def test_structured_checkpoint_compaction_uses_injected_semantic_compactor():
 
 
 def test_structured_checkpoint_falls_back_and_retains_constraints():
-    from brain.systems.context.semantic_compaction import compact_session_messages_with_checkpoint
+    from brain.systems.context.semantic_compaction import plan_session_compaction
 
     messages = [
         {"role": "user", "content": "Never edit billing.py. Must preserve tool-call boundaries."},
@@ -280,7 +304,7 @@ def test_structured_checkpoint_falls_back_and_retains_constraints():
     def broken_compactor(_omitted, _context):
         raise RuntimeError("summary model unavailable")
 
-    compacted, report = compact_session_messages_with_checkpoint(
+    plan = plan_session_compaction(
         messages,
         token_limit=10,
         target_tokens=10,
@@ -291,6 +315,7 @@ def test_structured_checkpoint_falls_back_and_retains_constraints():
         force=True,
         semantic_compactor=broken_compactor,
     )
+    compacted, report = plan.messages, plan.report
 
     checkpoint_text = "\n".join(
         msg.get("content", "")
@@ -306,7 +331,7 @@ def test_structured_checkpoint_falls_back_and_retains_constraints():
 def test_structured_checkpoint_fallback_uses_latest_user_intent_as_objective():
     import json
 
-    from brain.systems.context.semantic_compaction import compact_session_messages_with_checkpoint
+    from brain.systems.context.semantic_compaction import plan_session_compaction
 
     messages = [{"role": "user", "content": "First stale question: which project is attached?"}]
     for index in range(12):
@@ -317,7 +342,7 @@ def test_structured_checkpoint_fallback_uses_latest_user_intent_as_objective():
     def broken_compactor(_omitted, _context):
         raise RuntimeError("summary model unavailable")
 
-    compacted, report = compact_session_messages_with_checkpoint(
+    plan = plan_session_compaction(
         messages,
         token_limit=10,
         target_tokens=10,
@@ -328,6 +353,7 @@ def test_structured_checkpoint_fallback_uses_latest_user_intent_as_objective():
         force=True,
         semantic_compactor=broken_compactor,
     )
+    compacted, report = plan.messages, plan.report
 
     checkpoint_text = next(
         msg["content"]

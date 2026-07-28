@@ -11,18 +11,6 @@ from brain.systems.runs.direct_loop.result import TokenAccumulator
 
 
 @dataclass
-class ContextCompactionTracker:
-    """Track consecutive compactions that cannot get below the context ceiling."""
-
-    consecutive_no_progress: int = 0
-    warned_no_safe_messages: bool = False
-
-    def reset(self) -> None:
-        self.consecutive_no_progress = 0
-        self.warned_no_safe_messages = False
-
-
-@dataclass
 class AgentLoopState:
     """State that evolves across provider turns in the agent loop."""
 
@@ -35,4 +23,3 @@ class AgentLoopState:
     provider_name: str | None = None
     operation_type: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    context_compaction: ContextCompactionTracker = field(default_factory=ContextCompactionTracker)
