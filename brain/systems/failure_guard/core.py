@@ -5,10 +5,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 import re
-from typing import Any, Mapping, NewType, Protocol
+from typing import Any, Literal, Mapping, NewType, Protocol, runtime_checkable
 
 
 FailureGuardTriggerKind = NewType("FailureGuardTriggerKind", str)
+FailureGuardLifecycleEvent = Literal[
+    "new_failure",
+    "repeated_failure",
+    "success",
+]
+FailureGuardTriggerState = Mapping[str, Any]
 
 _RESERVED_PUBLIC_DETAIL_KEYS = frozenset({"kind", "alerted_at", "crossed"})
 _FAILURE_MEMORY_ADDRESS_RE = re.compile(r"\b0x[0-9a-f]+\b", re.IGNORECASE)
@@ -85,6 +91,67 @@ class FailureGuardStore(Protocol):
         alerted_at: datetime,
     ) -> FailureGuardLatch:
         """Persist and return one trigger latch."""
+
+
+class FailureGuardStateStore(Protocol):
+    """Generic mutable state persistence for registered triggers."""
+
+    async def load_trigger_states(
+        self,
+    ) -> Mapping[FailureGuardTriggerKind, FailureGuardTriggerState]:
+        """Return the persisted state for every stateful trigger."""
+
+    async def save_trigger_state(
+        self,
+        trigger_kind: FailureGuardTriggerKind,
+        state: FailureGuardTriggerState,
+    ) -> None:
+        """Persist one trigger's complete state document."""
+
+    async def delete_trigger_state(
+        self,
+        trigger_kind: FailureGuardTriggerKind,
+    ) -> None:
+        """Delete one trigger's state while preserving any active latch."""
+
+
+@runtime_checkable
+class FailureGuardStatefulTrigger(Protocol):
+    """Optional lifecycle implemented only by triggers that own mutable state."""
+
+    kind: FailureGuardTriggerKind
+
+    async def transition_state(
+        self,
+        context: Any,
+        state: FailureGuardTriggerState,
+        *,
+        event: FailureGuardLifecycleEvent,
+    ) -> FailureGuardTriggerState | None:
+        """Return replacement state, or ``None`` to clear persisted state."""
+
+
+async def async_transition_failure_guard_trigger_states(
+    *,
+    triggers: tuple[Any, ...],
+    context: Any,
+    event: FailureGuardLifecycleEvent,
+    store: FailureGuardStateStore,
+) -> None:
+    """Apply one lifecycle event to every registered state-owning trigger."""
+    states = dict(await store.load_trigger_states())
+    for trigger in triggers:
+        if not isinstance(trigger, FailureGuardStatefulTrigger):
+            continue
+        next_state = await trigger.transition_state(
+            context,
+            dict(states.get(trigger.kind, {})),
+            event=event,
+        )
+        if next_state is None:
+            await store.delete_trigger_state(trigger.kind)
+        else:
+            await store.save_trigger_state(trigger.kind, dict(next_state))
 
 
 @dataclass(frozen=True)

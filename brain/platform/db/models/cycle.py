@@ -95,7 +95,7 @@ class Cycle(Base, TimestampMixin):
 
 
 class CycleFailureGuardLatch(Base):
-    """One durable alert latch for one cycle failure-guard trigger."""
+    """Durable mutable state and alert latch for one cycle trigger."""
 
     __tablename__ = "cycle_failure_guard_latches"
 
@@ -105,9 +105,15 @@ class CycleFailureGuardLatch(Base):
         primary_key=True,
     )
     trigger_kind: Mapped[str] = mapped_column(String(40), primary_key=True)
-    alerted_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+    trigger_state: Mapped[dict] = mapped_column(
+        JSONB,
         nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    alerted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
 

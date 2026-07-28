@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 
 import pytest
 import sqlalchemy as sa
@@ -190,3 +191,158 @@ def test_failure_guard_downgrade_rejects_unrepresentable_trigger(monkeypatch):
 
         assert _schema_bytes(connection) == schema_before
         assert _row_bytes(connection) == rows_before
+
+
+def test_trigger_state_migration_backfills_and_round_trips(monkeypatch):
+    migration = importlib.import_module(
+        "brain.platform.db.alembic.versions.0047_failure_guard_trigger_state"
+    )
+    engine = sa.create_engine("sqlite://")
+
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "CREATE TABLE scheduler_jobs ("
+                "id INTEGER PRIMARY KEY, "
+                "consecutive_failure_count INTEGER NOT NULL)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "CREATE TABLE cycles ("
+                "id INTEGER PRIMARY KEY, "
+                "consecutive_failure_count INTEGER NOT NULL)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "CREATE TABLE scheduler_failure_guard_latches ("
+                "job_id INTEGER NOT NULL, "
+                "trigger_kind VARCHAR(40) NOT NULL, "
+                "alerted_at DATETIME NOT NULL, "
+                "PRIMARY KEY (job_id, trigger_kind))"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "CREATE TABLE cycle_failure_guard_latches ("
+                "cycle_id INTEGER NOT NULL, "
+                "trigger_kind VARCHAR(40) NOT NULL, "
+                "alerted_at DATETIME NOT NULL, "
+                "PRIMARY KEY (cycle_id, trigger_kind))"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO scheduler_jobs "
+                "(id, consecutive_failure_count) VALUES (1, 2)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO cycles "
+                "(id, consecutive_failure_count) VALUES (7, 1)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO scheduler_failure_guard_latches "
+                "(job_id, trigger_kind, alerted_at) VALUES "
+                "(1, 'consecutive', '2026-07-28 12:00:00+00:00'), "
+                "(1, 'rolling_window', '2026-07-28 13:00:00+00:00')"
+            )
+        )
+        operations = Operations(MigrationContext.configure(connection))
+        monkeypatch.setattr(migration, "op", operations)
+
+        migration.upgrade()
+        migration.upgrade()
+
+        for table_name in (
+            "scheduler_failure_guard_latches",
+            "cycle_failure_guard_latches",
+        ):
+            columns = {
+                column["name"]: column
+                for column in sa.inspect(connection).get_columns(table_name)
+            }
+            assert set(columns) == {
+                (
+                    "job_id"
+                    if table_name.startswith("scheduler")
+                    else "cycle_id"
+                ),
+                "trigger_kind",
+                "trigger_state",
+                "alerted_at",
+            }
+            assert columns["trigger_state"]["nullable"] is False
+            assert columns["alerted_at"]["nullable"] is True
+
+        scheduler_rows = connection.execute(
+            sa.text(
+                "SELECT trigger_kind, trigger_state, alerted_at "
+                "FROM scheduler_failure_guard_latches "
+                "ORDER BY trigger_kind"
+            )
+        ).mappings().all()
+        assert [
+            (
+                row["trigger_kind"],
+                json.loads(row["trigger_state"]),
+                row["alerted_at"],
+            )
+            for row in scheduler_rows
+        ] == [
+            (
+                "consecutive",
+                {"count": 2},
+                "2026-07-28 12:00:00+00:00",
+            ),
+            (
+                "rolling_window",
+                {},
+                "2026-07-28 13:00:00+00:00",
+            ),
+        ]
+        cycle_row = connection.execute(
+            sa.text(
+                "SELECT trigger_kind, trigger_state, alerted_at "
+                "FROM cycle_failure_guard_latches"
+            )
+        ).mappings().one()
+        assert cycle_row["trigger_kind"] == "consecutive"
+        assert json.loads(cycle_row["trigger_state"]) == {"count": 1}
+        assert cycle_row["alerted_at"] is None
+
+        connection.execute(
+            sa.text(
+                "INSERT INTO scheduler_failure_guard_latches "
+                "(job_id, trigger_kind, trigger_state, alerted_at) "
+                "VALUES (1, 'custom_state', :state, NULL)"
+            ),
+            {"state": json.dumps({"seen": ["alpha", "beta"]})},
+        )
+
+        migration.downgrade()
+        migration.downgrade()
+
+        for table_name in (
+            "scheduler_failure_guard_latches",
+            "cycle_failure_guard_latches",
+        ):
+            columns = {
+                column["name"]: column
+                for column in sa.inspect(connection).get_columns(table_name)
+            }
+            assert "trigger_state" not in columns
+            assert columns["alerted_at"]["nullable"] is False
+        assert connection.execute(
+            sa.text(
+                "SELECT trigger_kind FROM scheduler_failure_guard_latches "
+                "ORDER BY trigger_kind"
+            )
+        ).scalars().all() == ["consecutive", "rolling_window"]
+        assert connection.execute(
+            sa.text("SELECT COUNT(*) FROM cycle_failure_guard_latches")
+        ).scalar_one() == 0
