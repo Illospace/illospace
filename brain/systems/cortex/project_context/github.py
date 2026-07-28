@@ -54,6 +54,32 @@ query GetIssueParent($issueId: ID!) {
 }
 """.strip()
 
+GITHUB_ISSUE_CLOSING_PULL_REQUESTS_QUERY = """
+query GetIssueClosingPullRequests(
+  $owner: String!,
+  $name: String!,
+  $number: Int!
+) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      closedByPullRequestsReferences(first: 50) {
+        nodes {
+          number
+          baseRefName
+          mergedAt
+          mergeCommit {
+            oid
+          }
+          repository {
+            nameWithOwner
+          }
+        }
+      }
+    }
+  }
+}
+""".strip()
+
 
 @dataclass
 class GitHubConnectorError(Exception):
@@ -1408,6 +1434,108 @@ async def async_get_issue(
         len(" ".join(str((issue or {}).get("body") or "").split())) if isinstance(issue, dict) else 0
     )
     return {"repo": slug, "issue": payload}
+
+
+async def async_get_issue_closure_info(
+    slug: str,
+    issue_number: int,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Read an issue closure and the PRs GitHub identifies as closing it."""
+
+    owner, repo = slug.split("/", 1)
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        issue = await _async_request(
+            client,
+            "GET",
+            f"/repos/{owner}/{repo}/issues/{issue_number}",
+            token=token,
+        )
+        linked = await _async_request(
+            client,
+            "POST",
+            "/graphql",
+            token=token,
+            json={
+                "query": GITHUB_ISSUE_CLOSING_PULL_REQUESTS_QUERY,
+                "variables": {
+                    "owner": owner,
+                    "name": repo,
+                    "number": int(issue_number),
+                },
+            },
+        )
+    errors = linked.get("errors") if isinstance(linked, dict) else None
+    if isinstance(errors, list) and errors:
+        messages = [
+            str(error.get("message") or "Unknown GraphQL error")
+            for error in errors
+            if isinstance(error, dict)
+        ]
+        raise GitHubConnectorError(
+            status_code=502,
+            message=(
+                "GitHub closing-PR lookup failed: "
+                + ("; ".join(messages) or "unknown error")
+            ),
+        )
+    data = linked.get("data") if isinstance(linked, dict) else None
+    repository = data.get("repository") if isinstance(data, dict) else None
+    issue_node = (
+        repository.get("issue")
+        if isinstance(repository, dict)
+        else None
+    )
+    connection = (
+        issue_node.get("closedByPullRequestsReferences")
+        if isinstance(issue_node, dict)
+        else None
+    )
+    nodes = connection.get("nodes") if isinstance(connection, dict) else None
+    if not isinstance(nodes, list):
+        raise GitHubConnectorError(
+            status_code=502,
+            message=(
+                f"GitHub closing-PR lookup for {slug}#{issue_number} "
+                "returned an invalid connection."
+            ),
+        )
+
+    issue_data = issue if isinstance(issue, dict) else {}
+    closer = issue_data.get("closed_by")
+    return {
+        "repo": slug,
+        "number": issue_data.get("number"),
+        "title": issue_data.get("title"),
+        "state": issue_data.get("state"),
+        "closed_at": issue_data.get("closed_at"),
+        "closed_by": (
+            closer.get("login")
+            if isinstance(closer, dict)
+            else None
+        ),
+        "fixing_pull_requests": [
+            {
+                "repo": (
+                    (node.get("repository") or {}).get("nameWithOwner")
+                    if isinstance(node.get("repository"), dict)
+                    else slug
+                )
+                or slug,
+                "number": node.get("number"),
+                "base_ref_name": node.get("baseRefName"),
+                "merge_commit_sha": (
+                    (node.get("mergeCommit") or {}).get("oid")
+                    if isinstance(node.get("mergeCommit"), dict)
+                    else None
+                ),
+                "merged_at": node.get("mergedAt"),
+            }
+            for node in nodes
+            if isinstance(node, dict)
+        ],
+    }
 
 
 def _issue_reference(slug: str, issue_number: int) -> dict[str, Any]:

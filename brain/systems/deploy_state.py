@@ -54,6 +54,30 @@ class DeployStateObservation:
             payloads.append(payload)
         return payloads
 
+    def branch_ancestry_result(self, branch: str) -> str:
+        """Render the latest comparison for one branch without re-checking it."""
+
+        comparison = next(
+            (
+                item
+                for item in reversed(self.comparisons)
+                if item.branch == str(branch or "").strip()
+            ),
+            None,
+        )
+        if comparison is None:
+            return "unknown"
+        status = str(
+            comparison.status
+            or comparison.error_category
+            or "unknown"
+        )
+        if comparison.is_ancestor is True:
+            return f"{status} (contained)"
+        if comparison.is_ancestor is False:
+            return f"{status} (not contained)"
+        return f"{status} (indeterminate)"
+
 
 _Key = TypeVar("_Key", bound=Hashable)
 

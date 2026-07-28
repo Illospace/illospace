@@ -206,6 +206,38 @@ async def _async_maybe_harvest_alert_resolution(session, cycle: Cycle, run: Cycl
     return summary
 
 
+async def _async_maybe_detect_staging_only_closures(
+    session,
+    cycle: Cycle,
+    run: CycleRun,
+) -> dict | None:
+    """Correct premature GitHub closures before the coordinator reads tracker state."""
+
+    if cycle.name != _UWEAR_COORDINATOR_CYCLE_NAME:
+        return None
+    try:
+        from brain.systems.staging_only_closure import (
+            run_staging_only_closure_sweep,
+        )
+
+        summary = await run_staging_only_closure_sweep(
+            session,
+            org_id=str(cycle.org_id),
+        )
+    except Exception as exc:  # noqa: BLE001 - scheduled sweep must degrade safely
+        logger.exception("coordinator staging-only closure sweep failed safely")
+        summary = {
+            "errors": [str(exc)],
+            "updated": 0,
+            "flagged": 0,
+            "messages_posted": 0,
+        }
+    context_snapshot = dict(run.context_snapshot or {})
+    context_snapshot["staging_only_closure_sweep"] = summary
+    run.context_snapshot = context_snapshot
+    return summary
+
+
 async def _async_attach_open_ask_stragglers(
     session,
     cycle: Cycle,
@@ -728,6 +760,11 @@ async def async_execute_cycle_run(run_id: int) -> None:
         # its digest. No-op for every other cycle (name-gated) and degrades its
         # own Slack/DB errors, so it never breaks a cycle launch.
         await _async_maybe_harvest_alert_resolution(uow.session, cycle, run)
+        await _async_maybe_detect_staging_only_closures(
+            uow.session,
+            cycle,
+            run,
+        )
 
         target = await async_resolve_cycle_execution_target(
             uow.session,

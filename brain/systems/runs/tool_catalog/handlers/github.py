@@ -15,6 +15,7 @@ from brain.systems.cortex.project_context.github import (
     async_create_repo_issue,
     async_grep_repo,
     async_get_repo_issue_parent,
+    async_get_issue_closure_info,
     async_get_pull_request_deploy_info,
     async_get_pull_request,
     async_get_pull_request_checks,
@@ -1596,6 +1597,60 @@ async def github_read_ref_for_backend(
     return None
 
 
+async def github_issue_closure_for_backend(
+    *,
+    repo_slug: str,
+    issue_number: int,
+    org_id: str,
+    user_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Read one issue's closure/closing-PR facts with backend identities."""
+
+    candidates = await _github_token_candidates(
+        repo_slug=repo_slug,
+        token_secret_key=None,
+        org_id=org_id,
+        user_id=user_id,
+    )
+    read_state = _github_read_state()
+    ordered = _ordered_read_candidates(
+        candidates,
+        repo_slug=repo_slug,
+        state=read_state,
+    )
+    if not ordered:
+        raise GitHubConnectorError(
+            status_code=401,
+            message="No GitHub token candidates were available",
+        )
+    saw_not_found = False
+    last_error: GitHubConnectorError | None = None
+    for candidate in ordered:
+        token = candidate.get("token")
+        try:
+            result = await async_get_issue_closure_info(
+                repo_slug,
+                int(issue_number),
+                token=token,
+            )
+        except GitHubConnectorError as exc:
+            last_error = exc
+            if exc.status_code == 404:
+                saw_not_found = True
+                continue
+            if exc.status_code in {401, 403}:
+                read_state.rejected[(token, repo_slug)] = exc
+                continue
+            raise
+        read_state.preferred[repo_slug] = token
+        return result
+    if saw_not_found:
+        return None
+    if last_error is not None:
+        raise last_error
+    return None
+
+
 async def github_deploy_states_for_backend(
     refs: Mapping[Hashable, tuple[str, str]],
     *,
@@ -1687,5 +1742,6 @@ __all__ = [
     "_handle_remove_github_sub_issue",
     "_handle_update_github_issue",
     "github_deploy_states_for_backend",
+    "github_issue_closure_for_backend",
     "github_read_ref_for_backend",
 ]

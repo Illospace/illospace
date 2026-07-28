@@ -1323,6 +1323,44 @@ async def test_uwear_coordinator_pre_sweep_harvests_alert_resolution(monkeypatch
     assert run.context_snapshot["alert_resolution_harvest"] == summary
 
 
+@pytest.mark.asyncio
+async def test_uwear_coordinator_pre_sweep_detects_staging_only_closures(monkeypatch):
+    import brain.systems.staging_only_closure as staging_only_closure
+
+    calls = []
+
+    async def fake_sweep(session, *, org_id):
+        calls.append((session, org_id))
+        return {
+            "updated": 9,
+            "flagged": 9,
+            "messages_posted": 1,
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        staging_only_closure,
+        "run_staging_only_closure_sweep",
+        fake_sweep,
+    )
+    cycle = Cycle()
+    cycle.name = "Uwear Ticket Coordinator Check-ins"
+    cycle.org_id = "org-1"
+    run = CycleRun()
+    run.context_snapshot = {"launch_context": {"origin": "cycle_scheduler"}}
+    fake_session = object()
+
+    summary = await service._async_maybe_detect_staging_only_closures(
+        fake_session,
+        cycle,
+        run,
+    )
+
+    assert calls == [(fake_session, "org-1")]
+    assert summary["flagged"] == 9
+    assert run.context_snapshot["staging_only_closure_sweep"] == summary
+
+
 def test_coordinator_launch_prompt_maps_declared_contract_to_visible_sections():
     cycle = Cycle()
     cycle.id = 2

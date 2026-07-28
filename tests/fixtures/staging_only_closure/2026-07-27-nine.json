@@ -1,0 +1,90 @@
+{
+  "repo": "uwear-ai/uwear-backend",
+  "closed_at": "2026-07-27T09:08:19Z",
+  "closed_by": "uwear-claw",
+  "issues": [
+    {
+      "number": 1281,
+      "title": "PostgreSQL deadlock",
+      "error_signature": "DeadlockDetectedError",
+      "rollbar_item": "Uwear-API#2323",
+      "pull_request": 1305,
+      "base_ref_name": "staging",
+      "merge_commit_sha": "0000000000000000000000000000000000001305",
+      "main_ancestry_status": "diverged"
+    },
+    {
+      "number": 1290,
+      "title": "Generation-result QA failures",
+      "pull_request": 1310,
+      "base_ref_name": "staging",
+      "merge_commit_sha": "0000000000000000000000000000000000001310",
+      "main_ancestry_status": "diverged"
+    },
+    {
+      "number": 1277,
+      "title": "OAuth callback cluster",
+      "pull_request": 1302,
+      "base_ref_name": "staging",
+      "merge_commit_sha": "0000000000000000000000000000000000001302",
+      "main_ancestry_status": "diverged"
+    },
+    {
+      "number": 1278,
+      "title": "MCP video aspect_ratio bills on failure",
+      "pull_request": 1309,
+      "base_ref_name": "staging",
+      "merge_commit_sha": "0000000000000000000000000000000000001309",
+      "main_ancestry_status": "diverged"
+    },
+    {
+      "number": 1279,
+      "title": "MCP reference_attachments dropped",
+      "pull_request": 1309,
+      "base_ref_name": "staging",
+      "merge_commit_sha": "0000000000000000000000000000000000001309",
+      "main_ancestry_status": "diverged"
+    },
+    {
+      "number": 1280,
+      "title": "MCP avatars bypass canonical route",
+      "pull_request": 1304,
+      "base_ref_name": "staging",
+      "merge_commit_sha": "0000000000000000000000000000000000001304",
+      "main_ancestry_status": "diverged"
+    },
+    {
+      "number": 1257,
+      "title": "Image-transform buffer validation",
+      "pull_request": 1301,
+      "base_ref_name": "staging",
+      "merge_commit_sha": "0000000000000000000000000000000000001301",
+      "main_ancestry_status": "diverged"
+    },
+    {
+      "number": 1108,
+      "title": "Production Automation S5",
+      "pull_request": 1311,
+      "base_ref_name": "staging",
+      "merge_commit_sha": "0000000000000000000000000000000000001311",
+      "main_ancestry_status": "diverged"
+    },
+    {
+      "number": 1109,
+      "title": "Production Automation S6",
+      "pull_request": 1276,
+      "base_ref_name": "staging",
+      "merge_commit_sha": "0000000000000000000000000000000000001276",
+      "main_ancestry_status": "diverged"
+    }
+  ],
+  "production_evidence": [
+    {
+      "source": "rollbar",
+      "reference": "Uwear-API#2323",
+      "signature": "DeadlockDetectedError",
+      "occurred_at": "2026-07-27T07:57:19Z",
+      "is_open": true
+    }
+  ]
+}
