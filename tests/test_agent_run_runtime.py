@@ -1091,6 +1091,254 @@ async def test_scheduled_cycle_handoff_identity_summary_does_not_override_missio
     assert first_request.messages[-1]["content"] == message
 
 
+async def test_oversized_system_prompt_fails_admission_before_sampling_and_names_budget(
+    monkeypatch,
+    caplog,
+):
+    from brain.systems.runs import direct_agent
+
+    class FakeProvider:
+        def __init__(self):
+            self.requests = []
+
+        def is_api_error(self, exc):
+            return False
+
+        def is_retryable_error(self, exc):
+            return False
+
+        def create(self, request):
+            self.requests.append(request)
+            raise AssertionError("admission failure must happen before provider sampling")
+
+    provider = FakeProvider()
+    monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", "4096")
+    monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "500")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_OUTPUT_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_REASONING_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_TOOL_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_SAFETY_MARGIN_TOKENS", "0")
+    monkeypatch.setattr(direct_agent, "get_provider", lambda _provider_name, _client: provider)
+    resolved_llm = SimpleNamespace(
+        provider="openai",
+        client=object(),
+        source="test",
+        auth_mode="api_key",
+        is_oauth=False,
+        token_prefix="test-token",
+        build_request_headers=lambda **_kwargs: {},
+    )
+
+    with caplog.at_level("ERROR", logger="agent"):
+        result = await direct_agent.run_agent_async(
+            "start",
+            system_prompt="oversized " + ("x" * 4000),
+            session_id="oversized-admission",
+            model="openai/gpt-5.5",
+            thinking="low",
+            tools=[{"name": "read_file"}, {"name": "search_files"}],
+            tool_handlers={},
+            max_turns=20,
+            persist_session=False,
+            cache_system_prompt=False,
+            resolved_llm=resolved_llm,
+        )
+
+    assert result.success is False
+    assert result.tokens_input == 0
+    assert result.error is not None
+    assert result.error.startswith("context_floor_exceeds_budget:")
+    assert "floor=" in result.error
+    assert "ceiling=500" in result.error
+    assert "tools=2" in result.error
+    assert provider.requests == []
+    assert result.error in caplog.text
+
+
+async def test_context_admission_healthy_path_still_samples_once(monkeypatch):
+    from brain.platform.integrations.providers import (
+        LLMResponse,
+        StopReason,
+        TextContentBlock,
+        Usage,
+    )
+    from brain.systems.runs import direct_agent
+
+    class FakeProvider:
+        def __init__(self):
+            self.requests = []
+
+        def is_api_error(self, exc):
+            return False
+
+        def is_retryable_error(self, exc):
+            return False
+
+        def create(self, request):
+            self.requests.append(request)
+            return LLMResponse(
+                content=[TextContentBlock("healthy response")],
+                stop_reason=StopReason.END_TURN,
+                usage=Usage(input_tokens=12, output_tokens=3),
+            )
+
+    provider = FakeProvider()
+    monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", "10000")
+    monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "7000")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_OUTPUT_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_REASONING_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_TOOL_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_SAFETY_MARGIN_TOKENS", "0")
+    monkeypatch.setattr(direct_agent, "get_provider", lambda _provider_name, _client: provider)
+    resolved_llm = SimpleNamespace(
+        provider="openai",
+        client=object(),
+        source="test",
+        auth_mode="api_key",
+        is_oauth=False,
+        token_prefix="test-token",
+        build_request_headers=lambda **_kwargs: {},
+    )
+
+    result = await direct_agent.run_agent_async(
+        "start",
+        system_prompt="small healthy system prompt",
+        session_id="healthy-admission",
+        model="openai/gpt-5.5",
+        thinking="low",
+        tools=[{"name": "read_file"}],
+        tool_handlers={},
+        max_turns=1,
+        persist_session=False,
+        cache_system_prompt=False,
+        resolved_llm=resolved_llm,
+    )
+
+    assert result.success is True
+    assert result.output == "healthy response"
+    assert result.error is None
+    assert len(provider.requests) == 1
+
+
+def test_repeated_unwinnable_compaction_stops_and_rate_limits_warning(
+    monkeypatch,
+    caplog,
+):
+    from brain.systems.runs import direct_agent
+    from brain.systems.runs.direct_loop.state import ContextCompactionTracker
+
+    monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", "4096")
+    monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "500")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_OUTPUT_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_REASONING_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_TOOL_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_SAFETY_MARGIN_TOKENS", "0")
+    messages = [
+        {"role": "user", "content": "x" * 1200},
+        {"role": "assistant", "content": "y" * 1200},
+        {"role": "user", "content": "z" * 1200},
+        {"role": "assistant", "content": "w" * 1200},
+    ]
+    tracker = ContextCompactionTracker()
+
+    with caplog.at_level("WARNING", logger="agent"):
+        for _ in range(direct_agent._MAX_CONSECUTIVE_CONTEXT_COMPACTION_NO_PROGRESS - 1):
+            compacted, report = direct_agent._maybe_compact_active_context(
+                messages,
+                session_id="stalled-compaction",
+                model="gpt-5.5",
+                phase="mid_turn",
+                provider_name="openai",
+                reasoning_effort="low",
+                max_output_tokens=0,
+                tracker=tracker,
+            )
+            assert compacted == messages
+            assert report is None
+
+        with pytest.raises(
+            direct_agent.ContextCompactionStalledError,
+            match=r"context_compaction_stalled: .*ceiling=500.*tools=0.*attempts=3",
+        ):
+            direct_agent._maybe_compact_active_context(
+                messages,
+                session_id="stalled-compaction",
+                model="gpt-5.5",
+                phase="mid_turn",
+                provider_name="openai",
+                reasoning_effort="low",
+                max_output_tokens=0,
+                tracker=tracker,
+            )
+
+    assert caplog.text.count("no safe transcript messages were eligible for compaction") == 1
+
+
+def test_repeated_compaction_that_stays_over_ceiling_also_stops(monkeypatch):
+    from brain.systems.context.compaction import CompactionReport
+    from brain.systems.runs import direct_agent
+    from brain.systems.runs.direct_loop.state import ContextCompactionTracker
+
+    monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", "4096")
+    monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "500")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_OUTPUT_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_REASONING_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_TOOL_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_SAFETY_MARGIN_TOKENS", "0")
+    messages = [
+        {"role": "user", "content": "x" * 1600},
+        {"role": "assistant", "content": "y" * 1600},
+        {"role": "user", "content": "z" * 1600},
+        {"role": "assistant", "content": "w" * 1600},
+        {"role": "user", "content": "latest"},
+    ]
+
+    def still_too_large(candidate_messages, **_kwargs):
+        compacted = candidate_messages[1:]
+        return compacted, CompactionReport(
+            original_count=len(candidate_messages),
+            kept_count=len(compacted),
+            omitted_count=1,
+            summary="Reduced, but not enough.",
+            strategy="semantic_checkpoint",
+            provenance={"final_estimated_tokens": 600},
+        )
+
+    monkeypatch.setattr(
+        "brain.systems.context.semantic_compaction.compact_session_messages_with_checkpoint",
+        still_too_large,
+    )
+    tracker = ContextCompactionTracker()
+
+    for _ in range(direct_agent._MAX_CONSECUTIVE_CONTEXT_COMPACTION_NO_PROGRESS - 1):
+        _, report = direct_agent._maybe_compact_active_context(
+            messages,
+            session_id="insufficient-compaction",
+            model="gpt-5.5",
+            phase="mid_turn",
+            provider_name="openai",
+            reasoning_effort="low",
+            max_output_tokens=0,
+            tracker=tracker,
+        )
+        assert report is not None
+
+    with pytest.raises(
+        direct_agent.ContextCompactionStalledError,
+        match=r"context_compaction_stalled: estimated=600 ceiling=500",
+    ):
+        direct_agent._maybe_compact_active_context(
+            messages,
+            session_id="insufficient-compaction",
+            model="gpt-5.5",
+            phase="mid_turn",
+            provider_name="openai",
+            reasoning_effort="low",
+            max_output_tokens=0,
+            tracker=tracker,
+        )
+
+
 def test_fast_onboarding_tool_surface_uses_standard_fast_surface(monkeypatch):
     from brain.systems.runs.recipes.fast import _agent_tools_for_runtime
 

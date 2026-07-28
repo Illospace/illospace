@@ -22,7 +22,7 @@ from sqlalchemy import func, select
 from brain.kernel import config as brain_config
 from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, PROCESSING_RUN_STATUS_VALUES
 from brain.systems.cortex.status import PROTECTED_IDEA_STATUSES
-from brain.systems.runs.engine import AsyncAgentRunEngine
+from brain.systems.runs.engine import AgentRunDatabaseFlushError, AsyncAgentRunEngine
 from brain.systems.runs.events import activity_event, run_event
 from brain.systems.runs.failures import (
     coerce_failure_category,
@@ -1475,11 +1475,12 @@ async def _process_claimed_run_async(run_id: int) -> bool:
         if status_payload:
             publish_safe("status_change", status_payload)
         return True
-    except Exception:
+    except Exception as exc:
         logger.exception("agent_run_failed", extra={"run_id": run_id})
+        error = str(exc) if isinstance(exc, AgentRunDatabaseFlushError) else "runner_failed"
         try:
-            status_payload = await _mark_run_failed_after_runner_error_async(int(run_id), "runner_failed")
-            await _finalize_cycle_run_if_needed_async(int(run_id), status="failed", error="runner_failed")
+            status_payload = await _mark_run_failed_after_runner_error_async(int(run_id), error)
+            await _finalize_cycle_run_if_needed_async(int(run_id), status="failed", error=error)
             if status_payload:
                 publish_safe("status_change", status_payload)
         except Exception:

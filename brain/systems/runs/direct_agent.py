@@ -33,6 +33,7 @@ import time
 import uuid
 from collections.abc import Awaitable
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from brain.platform.integrations.llm import (
@@ -223,6 +224,8 @@ _RESEARCH_BUDGET = 6
 _MAX_PARALLEL_TOOL_CALLS = int(os.environ.get("AGENT_MAX_PARALLEL_TOOL_CALLS", "10"))
 _PARALLEL_SAFE_TOOL_NAMES = parallel_safe_tool_names(scope="agent")
 _AGENT_CACHE_DEBUG = os.environ.get("AGENT_CACHE_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+_CONTEXT_COMPACTION_MIN_MESSAGES = 4
+_MAX_CONSECUTIVE_CONTEXT_COMPACTION_NO_PROGRESS = 3
 
 
 # ── Extracted Helpers ──────────────────────────────────────────
@@ -970,6 +973,115 @@ def _record_context_compaction_event(
     )
 
 
+@dataclass(frozen=True)
+class ContextAdmission:
+    budget: Any
+    floor_tokens: int
+    tool_count: int
+    min_messages: int
+
+
+class ContextFloorExceedsBudgetError(RuntimeError):
+    def __init__(self, *, floor: int, ceiling: int, tools: int, min_messages: int):
+        self.floor = int(floor)
+        self.ceiling = int(ceiling)
+        self.tools = int(tools)
+        self.min_messages = int(min_messages)
+        super().__init__(
+            "context_floor_exceeds_budget: "
+            f"floor={self.floor} ceiling={self.ceiling} tools={self.tools} "
+            f"min_messages={self.min_messages}"
+        )
+
+
+class ContextCompactionStalledError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        estimated: int,
+        ceiling: int,
+        tools: int,
+        attempts: int,
+        phase: str,
+    ):
+        self.estimated = int(estimated)
+        self.ceiling = int(ceiling)
+        self.tools = int(tools)
+        self.attempts = int(attempts)
+        self.phase = str(phase)
+        super().__init__(
+            "context_compaction_stalled: "
+            f"estimated={self.estimated} ceiling={self.ceiling} tools={self.tools} "
+            f"attempts={self.attempts} phase={self.phase}"
+        )
+
+
+def _irreducible_context_messages(
+    messages: list[dict],
+    *,
+    min_messages: int = _CONTEXT_COMPACTION_MIN_MESSAGES,
+) -> list[dict]:
+    """Return the raw messages the compactor's smallest safe window must retain."""
+    from brain.systems.context.compaction import split_session_messages_for_compaction
+
+    window = split_session_messages_for_compaction(
+        messages,
+        max_messages=max(1, int(min_messages)),
+    )
+    if window is None or not window.omitted_messages:
+        return list(messages)
+    return list(window.kept_early) + list(window.kept_recent)
+
+
+def _admit_active_context(
+    messages: list[dict],
+    *,
+    model: str,
+    system: list[dict] | str | None = None,
+    tools: list[dict] | None = None,
+    provider_name: str | None = None,
+    reasoning_effort: str | None = None,
+    max_output_tokens: int | None = None,
+    min_messages: int = _CONTEXT_COMPACTION_MIN_MESSAGES,
+) -> ContextAdmission:
+    """Reject a prompt scaffold that no transcript compaction can fit."""
+    from brain.systems.context.budget import resolve_model_context_budget
+    from brain.systems.context.compaction import estimate_session_tokens
+
+    budget = resolve_model_context_budget(
+        model=model,
+        provider=provider_name,
+        reasoning_effort=reasoning_effort,
+        max_output_tokens=max_output_tokens,
+        tools=tools,
+    )
+    floor_messages = _irreducible_context_messages(
+        messages,
+        min_messages=min_messages,
+    )
+    floor_tokens = estimate_session_tokens(
+        floor_messages,
+        system=system,
+        tools=tools,
+    )
+    admission = ContextAdmission(
+        budget=budget,
+        floor_tokens=floor_tokens,
+        tool_count=len(tools or []),
+        min_messages=int(min_messages),
+    )
+    if floor_tokens >= budget.auto_compact_threshold_tokens:
+        error = ContextFloorExceedsBudgetError(
+            floor=floor_tokens,
+            ceiling=budget.auto_compact_threshold_tokens,
+            tools=admission.tool_count,
+            min_messages=admission.min_messages,
+        )
+        logger.error("%s", error)
+        raise error
+    return admission
+
+
 def _maybe_compact_active_context(
     messages: list[dict],
     *,
@@ -985,6 +1097,7 @@ def _maybe_compact_active_context(
     semantic_compactor=None,
     force: bool = False,
     emergency: bool = False,
+    tracker=None,
 ) -> tuple[list[dict], object | None]:
     """Compact active history when the estimated prompt crosses the runtime limit."""
     from brain.systems.context.budget import resolve_model_context_budget
@@ -1002,6 +1115,8 @@ def _maybe_compact_active_context(
     )
     estimated_tokens = estimate_session_tokens(messages, system=system, tools=tools)
     if not force and estimated_tokens < budget.auto_compact_threshold_tokens:
+        if tracker is not None:
+            tracker.reset()
         return messages, None
 
     compacted, report = compact_session_messages_with_checkpoint(
@@ -1013,21 +1128,48 @@ def _maybe_compact_active_context(
         system=system,
         tools=tools,
         max_messages=_MAX_PERSISTED_MESSAGES,
-        min_messages=4,
+        min_messages=_CONTEXT_COMPACTION_MIN_MESSAGES,
         force=force,
         emergency=emergency,
         semantic_compactor=semantic_compactor,
     )
     final_tokens = report.provenance.get("final_estimated_tokens")
+    if not isinstance(final_tokens, int):
+        final_tokens = estimate_session_tokens(compacted, system=system, tools=tools)
+    below_threshold = final_tokens < budget.auto_compact_threshold_tokens
+    made_sufficient_progress = report.omitted_count > 0 and below_threshold
+    if made_sufficient_progress:
+        if tracker is not None:
+            tracker.reset()
+    elif tracker is not None:
+        tracker.consecutive_no_progress += 1
     if report.omitted_count <= 0:
-        logger.warning(
-            "Agent %s: %s context exceeded token limit (~%d >= %d) but no safe transcript "
-            "messages were eligible for compaction",
-            session_id,
-            phase,
-            estimated_tokens,
-            budget.auto_compact_threshold_tokens,
+        if tracker is None or not tracker.warned_no_safe_messages:
+            logger.warning(
+                "Agent %s: %s context exceeded token limit (~%d >= %d) but no safe transcript "
+                "messages were eligible for compaction",
+                session_id,
+                phase,
+                estimated_tokens,
+                budget.auto_compact_threshold_tokens,
+            )
+            if tracker is not None:
+                tracker.warned_no_safe_messages = True
+    if (
+        not made_sufficient_progress
+        and tracker is not None
+        and tracker.consecutive_no_progress >= _MAX_CONSECUTIVE_CONTEXT_COMPACTION_NO_PROGRESS
+    ):
+        error = ContextCompactionStalledError(
+            estimated=final_tokens,
+            ceiling=budget.auto_compact_threshold_tokens,
+            tools=len(tools or []),
+            attempts=tracker.consecutive_no_progress,
+            phase=phase,
         )
+        logger.error("Agent %s: %s", session_id, error)
+        raise error
+    if report.omitted_count <= 0:
         return messages, None
     logger.info(
         "Agent %s: %s auto-compacted active context from ~%d to ~%s tokens "
@@ -1544,6 +1686,19 @@ async def run_agent_async(
         system = _build_system_blocks(llm, system_prompt, cache_system_prompt)
         system = _apply_provider_system_cache_policy(state.provider_name, system, cache_system_prompt)
         reasoning_effort, max_tokens = _build_reasoning_effort(thinking)
+        current_user_message = {"role": "user", "content": _initial_user_content(message, metadata)}
+
+        # The current request plus the static prompt/tool scaffold is unavoidable.
+        # Admit it before startup handoff compaction can make its own model call.
+        _admit_active_context(
+            [current_user_message],
+            model=model,
+            system=system,
+            tools=tools,
+            provider_name=state.provider_name,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_tokens,
+        )
 
         if persist_session:
             state.messages, thread_handoff = _prepare_thread_startup_context(
@@ -1557,11 +1712,19 @@ async def run_agent_async(
         else:
             state.messages = loaded_messages
 
-        current_user_message = {"role": "user", "content": _initial_user_content(message, metadata)}
         _append_message_with_archive(
             state.messages,
             current_user_message,
             raw_archive_messages,
+        )
+        _admit_active_context(
+            state.messages,
+            model=model,
+            system=system,
+            tools=tools,
+            provider_name=state.provider_name,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_tokens,
         )
 
         # Agent loop
@@ -1603,6 +1766,7 @@ async def run_agent_async(
                 max_output_tokens=max_tokens,
                 run_id=run_id,
                 semantic_compactor=semantic_compactor,
+                tracker=state.context_compaction,
             )
             if scheduled_result_contract and turn == 0:
                 _ensure_current_message_last(state.messages, current_user_message)
@@ -1790,6 +1954,7 @@ async def run_agent_async(
                         semantic_compactor=semantic_compactor,
                         force=True,
                         emergency=True,
+                        tracker=state.context_compaction,
                     )
                     if recovery_report is None:
                         logger.warning(
@@ -1989,6 +2154,7 @@ async def run_agent_async(
                     max_output_tokens=max_tokens,
                     run_id=run_id,
                     semantic_compactor=semantic_compactor,
+                    tracker=state.context_compaction,
                 )
             else:
                 logger.warning("Unknown stop_reason: %s", response.stop_reason)

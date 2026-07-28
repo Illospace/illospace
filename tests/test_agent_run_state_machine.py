@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -932,6 +932,143 @@ async def test_runner_setup_failure_never_persists_diagnostic_as_public_output(
     assert [artifact.text for artifact in artifacts] == [UPSTREAM_FAILED_RUN_MESSAGE]
     assert [event.payload for event in text_events] == [{"text": UPSTREAM_FAILED_RUN_MESSAGE}]
     assert all(raw_diagnostic not in str(value) for value in (artifacts, text_events))
+
+
+async def test_original_flush_exception_is_logged_and_persisted_on_run_failed(
+    caplog,
+    session_factory,
+):
+    session = session_factory()
+    armed = {"value": False}
+    raised = {"value": False}
+
+    def fail_first_armed_flush(_session, _flush_context, _instances):
+        if armed["value"] and not raised["value"]:
+            raised["value"] = True
+            raise RuntimeError("original flush exploded")
+
+    event.listen(session.sync_session, "before_flush", fail_first_armed_flush)
+
+    class FlushFailureRecipe:
+        async def execute(self, runtime: RunRuntime) -> RunRecipeResult:
+            armed["value"] = True
+            await runtime.activity("Trigger the failing flush")
+            raise AssertionError("the injected flush must fail")
+
+    try:
+        with caplog.at_level("ERROR", logger="brain.systems.runs.engine"):
+            result = await AsyncAgentRunEngine(
+                session,
+                recipes={"fast": FlushFailureRecipe()},
+            ).run(_run_request(thread_id="thread-1", message="flush failure"))
+    finally:
+        event.remove(session.sync_session, "before_flush", fail_first_armed_flush)
+
+    events = list(
+        (
+            await session.scalars(
+                select(AgentRunEventRow)
+                .where(
+                    AgentRunEventRow.run_id == result.id,
+                    AgentRunEventRow.event_type == "run.failed",
+                )
+                .order_by(AgentRunEventRow.sequence_no.asc())
+            )
+        ).all()
+    )
+
+    assert result.status == RunStatus.FAILED
+    assert len(events) == 1
+    assert events[0].payload["error"] == (
+        "database_flush_failed: RuntimeError: original flush exploded"
+    )
+    assert "PendingRollbackError" not in events[0].payload["error"]
+    assert "original flush exploded" in caplog.text
+
+
+async def test_oversized_system_admission_error_reaches_run_failed_event(
+    monkeypatch,
+    caplog,
+    session_factory,
+):
+    from brain.systems.runs import direct_agent
+
+    class FakeProvider:
+        def __init__(self):
+            self.requests = []
+
+        def is_api_error(self, exc):
+            return False
+
+        def is_retryable_error(self, exc):
+            return False
+
+        def create(self, request):
+            self.requests.append(request)
+            raise AssertionError("admission failure must happen before provider sampling")
+
+    provider = FakeProvider()
+    monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", "4096")
+    monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "500")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_OUTPUT_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_REASONING_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_TOOL_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_SAFETY_MARGIN_TOKENS", "0")
+    monkeypatch.setattr(direct_agent, "get_provider", lambda _provider_name, _client: provider)
+    resolved_llm = SimpleNamespace(
+        provider="openai",
+        client=object(),
+        source="test",
+        auth_mode="api_key",
+        is_oauth=False,
+        token_prefix="test-token",
+        build_request_headers=lambda **_kwargs: {},
+    )
+
+    class OversizedSystemRecipe:
+        async def execute(self, _runtime: RunRuntime) -> RunRecipeResult:
+            agent_result = await direct_agent.run_agent_async(
+                "start",
+                system_prompt="oversized " + ("x" * 4000),
+                session_id="oversized-event",
+                model="openai/gpt-5.5",
+                thinking="low",
+                tools=[{"name": "read_file"}, {"name": "search_files"}],
+                tool_handlers={},
+                max_turns=20,
+                persist_session=False,
+                cache_system_prompt=False,
+                resolved_llm=resolved_llm,
+            )
+            return RunRecipeResult(
+                error=agent_result.error,
+                status=RunStatus.FAILED,
+            )
+
+    session = session_factory()
+    with caplog.at_level("ERROR", logger="agent"):
+        result = await AsyncAgentRunEngine(
+            session,
+            recipes={"fast": OversizedSystemRecipe()},
+        ).run(_run_request(thread_id="thread-1", message="oversized system"))
+
+    failed_event = (
+        await session.scalars(
+            select(AgentRunEventRow).where(
+                AgentRunEventRow.run_id == result.id,
+                AgentRunEventRow.event_type == "run.failed",
+            )
+        )
+    ).one()
+    error = failed_event.payload["error"]
+
+    assert result.status == RunStatus.FAILED
+    assert error.startswith("context_floor_exceeds_budget:")
+    assert "floor=" in error
+    assert "ceiling=500" in error
+    assert "tools=2" in error
+    assert error in caplog.text
+    assert provider.requests == []
 
 
 async def test_interactive_slack_transport_failure_never_persists_raw_error_as_final_answer(

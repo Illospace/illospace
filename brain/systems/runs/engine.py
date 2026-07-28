@@ -34,6 +34,61 @@ from brain.systems.runs.tools import AsyncRunToolExecutor
 
 logger = logging.getLogger(__name__)
 _post_completion_tasks: set[asyncio.Task[None]] = set()
+_FIRST_FLUSH_ERROR_KEY = "agent_run_first_flush_error"
+
+
+class AgentRunDatabaseFlushError(RuntimeError):
+    """Preserve the first flush exception when a later DB error masks it."""
+
+    def __init__(self, run_id: int, original: BaseException):
+        self.run_id = int(run_id)
+        self.original = original
+        super().__init__(
+            "database_flush_failed: "
+            f"{type(original).__name__}: {str(original).strip() or repr(original)}"
+        )
+
+
+def _first_flush_error(session: AsyncSession) -> BaseException | None:
+    value = session.info.get(_FIRST_FLUSH_ERROR_KEY)
+    if isinstance(value, BaseException):
+        return value
+    transaction = session.sync_session.get_transaction()
+    rollback_error = getattr(transaction, "_rollback_exception", None)
+    return rollback_error if isinstance(rollback_error, BaseException) else None
+
+
+@asynccontextmanager
+async def _capture_first_flush_error(session: AsyncSession, *, run_id: int):
+    """Instrument one run-owned session without changing unrelated sessions."""
+    original_flush = session.flush
+    session.info.pop(_FIRST_FLUSH_ERROR_KEY, None)
+
+    async def capturing_flush(*args, **kwargs):
+        try:
+            return await original_flush(*args, **kwargs)
+        except BaseException as exc:
+            if _first_flush_error(session) is None:
+                session.info[_FIRST_FLUSH_ERROR_KEY] = exc
+                logger.exception(
+                    "agent_run_database_flush_failed run_id=%s original=%s: %s",
+                    run_id,
+                    type(exc).__name__,
+                    exc,
+                )
+            raise
+
+    session.flush = capturing_flush
+    try:
+        yield
+    except BaseException as exc:
+        first = _first_flush_error(session)
+        if first is not None and not isinstance(exc, AgentRunDatabaseFlushError):
+            raise AgentRunDatabaseFlushError(run_id, first) from first
+        raise
+    finally:
+        session.flush = original_flush
+        session.info.pop(_FIRST_FLUSH_ERROR_KEY, None)
 
 
 class AsyncRunRecipeHandler(Protocol):
@@ -191,6 +246,10 @@ class AsyncAgentRunEngine:
         return await self.store.set_status(run_id, RunStatus.PAUSED, reason=reason)
 
     async def run_existing(self, run_id: int) -> AgentRun:
+        async with _capture_first_flush_error(self.store.session, run_id=run_id):
+            return await self._run_existing_with_flush_capture(run_id)
+
+    async def _run_existing_with_flush_capture(self, run_id: int) -> AgentRun:
         execution_lease = getattr(self.store, "execution_lease", None)
         if callable(execution_lease):
             post_completion_tasks: list[Callable[[], Awaitable[Any]]] = []
@@ -276,10 +335,15 @@ class AsyncAgentRunEngine:
             if inspect.isawaitable(result):
                 result = await result
         except Exception as exc:
+            error, flush_failed = await self._prepare_failure_diagnostic(run.id, exc)
             return await self.fail(
                 run.id,
-                str(exc),
-                failure_category=failure_category_for_error(exc),
+                error,
+                failure_category=(
+                    RunFailureCategory.INTERNAL
+                    if flush_failed
+                    else failure_category_for_error(exc)
+                ),
                 execution_claim=execution_claim,
             )
         for artifact in result.artifacts:
@@ -299,11 +363,16 @@ class AsyncAgentRunEngine:
             )
         if result_status == RunStatus.FAILED:
             error = str(result.error or result.output or "recipe_failed")
+            error, flush_failed = await self._prepare_failure_diagnostic(run.id, error)
             return await self.fail(
                 run.id,
                 error,
                 final_output=result.final_output,
-                failure_category=result.failure_category or failure_category_for_error(error),
+                failure_category=(
+                    RunFailureCategory.INTERNAL
+                    if flush_failed
+                    else result.failure_category or failure_category_for_error(error)
+                ),
                 execution_claim=execution_claim,
             )
         if result_status == RunStatus.CANCELED:
@@ -324,6 +393,26 @@ class AsyncAgentRunEngine:
         else:
             deferred_post_completion_tasks.extend(result.post_completion_tasks)
         return completed
+
+    async def _prepare_failure_diagnostic(
+        self,
+        run_id: int,
+        error: BaseException | str,
+    ) -> tuple[str, bool]:
+        first = _first_flush_error(self.store.session)
+        if first is None:
+            return str(error), False
+        if self.store.session.info.get(_FIRST_FLUSH_ERROR_KEY) is not first:
+            self.store.session.info[_FIRST_FLUSH_ERROR_KEY] = first
+            logger.error(
+                "agent_run_database_flush_failed run_id=%s original=%s: %s",
+                run_id,
+                type(first).__name__,
+                first,
+            )
+        diagnostic = str(AgentRunDatabaseFlushError(run_id, first))
+        await self.store.session.rollback()
+        return diagnostic, True
 
     async def complete(
         self,

@@ -179,6 +179,50 @@ def test_model_context_budget_is_model_and_provider_aware(monkeypatch):
     assert openai_budget.reserved_tool_tokens > 0
 
 
+def test_context_admission_floor_includes_irreducible_messages_and_healthy_path(monkeypatch):
+    from brain.systems.context.compaction import estimate_session_tokens
+    from brain.systems.runs.direct_agent import (
+        _CONTEXT_COMPACTION_MIN_MESSAGES,
+        _admit_active_context,
+        _irreducible_context_messages,
+    )
+
+    monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW_TOKENS", "10000")
+    monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "7000")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_OUTPUT_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_REASONING_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_TOOL_TOKENS", "0")
+    monkeypatch.setenv("AGENT_CONTEXT_SAFETY_MARGIN_TOKENS", "0")
+    messages = [
+        {"role": "user", "content": f"message {index} " + ("x" * 80)}
+        for index in range(8)
+    ]
+    system = "healthy system prompt"
+    tools = [{"name": "read_file"}]
+
+    admission = _admit_active_context(
+        messages,
+        model="gpt-5.5",
+        provider_name="openai",
+        reasoning_effort="low",
+        max_output_tokens=0,
+        system=system,
+        tools=tools,
+    )
+
+    floor_messages = _irreducible_context_messages(
+        messages,
+        min_messages=_CONTEXT_COMPACTION_MIN_MESSAGES,
+    )
+    assert admission.floor_tokens == estimate_session_tokens(
+        floor_messages,
+        system=system,
+        tools=tools,
+    )
+    assert admission.floor_tokens < admission.budget.auto_compact_threshold_tokens
+    assert admission.tool_count == 1
+
+
 def test_structured_checkpoint_compaction_uses_injected_semantic_compactor():
     from brain.systems.context.semantic_compaction import compact_session_messages_with_checkpoint
 
