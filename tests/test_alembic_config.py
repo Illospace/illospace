@@ -49,7 +49,7 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     # Downgrade removes only the cycle guard tables introduced by this migration.
     "0046_cycle_failure_guard.py",
     # Downgrade removes only the cold-start receipt table introduced here.
-    "0047_scheduler_cold_start_reconciliation.py",
+    "0048_scheduler_cold_start_reconciliation.py",
 }
 
 

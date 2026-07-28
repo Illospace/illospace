@@ -1,7 +1,7 @@
 """Persist scheduler cold-start gap reconciliation receipts.
 
-Revision ID: 0047_scheduler_cold_start
-Revises: 0046_cycle_failure_guard
+Revision ID: 0048_scheduler_cold_start
+Revises: 0047_knowledge_index
 Create Date: 2026-07-28
 """
 
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 
-revision = "0047_scheduler_cold_start"
-down_revision = "0046_cycle_failure_guard"
+revision = "0048_scheduler_cold_start"
+down_revision = "0047_knowledge_index"
 branch_labels = None
 depends_on = None
 
