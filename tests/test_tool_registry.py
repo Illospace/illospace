@@ -408,6 +408,7 @@ def test_context_route_surface_is_registry_driven():
         "read_workspace_overview",
         "read_workspace_records",
         "runtime_settings",
+        "search_knowledge",
     }
     assert set(routes) == names
     assert "broad" in routes["brain_recall"]["scopes"]

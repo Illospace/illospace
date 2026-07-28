@@ -118,6 +118,22 @@ DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
 DB_POOL_OVERFLOW = int(os.getenv("DB_POOL_OVERFLOW", "0"))
 DB_POOL_TIMEOUT_SECONDS = float(os.getenv("DB_POOL_TIMEOUT_SECONDS", "10"))
 
+# Knowledge indexing is always live. These values bound recurring work and
+# provide a useful public-repository default when Project Contexts have not
+# configured repositories yet.
+KNOWLEDGE_CONNECTOR_BATCH_SIZE = max(
+    1,
+    int(os.getenv("KNOWLEDGE_CONNECTOR_BATCH_SIZE", "100")),
+)
+KNOWLEDGE_GITHUB_REPOSITORIES = tuple(
+    repository.strip()
+    for repository in os.getenv(
+        "KNOWLEDGE_GITHUB_REPOSITORIES",
+        "uwear-ai/illospace",
+    ).split(",")
+    if repository.strip()
+)
+
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Embeddings — three modes:
@@ -153,6 +169,7 @@ MEMORY_RERANKER = os.getenv("MEMORY_RERANKER", "weighted")
 # this value requires a staged migration plus re-embedding; never resize
 # populated vectors silently.
 MEMORY_SEMANTIC_EMBEDDING_DIM = EMBEDDING_DIM
+KNOWLEDGE_EMBEDDING_DIM = EMBEDDING_DIM
 SUMMARY_SEMANTIC_EMBEDDING_DIM = EMBEDDING_DIM
 NARRATIVE_SEMANTIC_EMBEDDING_DIM = EMBEDDING_DIM
 SKILL_SEMANTIC_EMBEDDING_DIM = EMBEDDING_DIM
@@ -210,6 +227,15 @@ Vector(N) literals.
             configurable=True,
             provider_specific=False,
             notes="Shared reconstructive memory-node embedding dimension from EMBEDDING_DIM.",
+        ),
+        "knowledge.semantic": EmbeddingVectorSpec(
+            family="knowledge.semantic",
+            dimensions=semantic_dim,
+            table="knowledge_item_embeddings",
+            column="embedding",
+            configurable=True,
+            provider_specific=False,
+            notes="Knowledge index summaries use the shared semantic embedding space.",
         ),
         "summary.semantic": EmbeddingVectorSpec(
             family="summary.semantic",

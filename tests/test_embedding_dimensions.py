@@ -5,6 +5,7 @@ from sqlalchemy import inspect
 
 from brain.kernel import config
 from brain.platform.db.models.idea import Idea
+from brain.platform.db.models.knowledge import KnowledgeItemEmbedding
 from brain.platform.db.models.narrative import ProjectNarrative
 from brain.platform.db.models.reconstructive_memory import MemoryNodeEmbedding
 from brain.platform.db.models.skill import Skill
@@ -20,6 +21,7 @@ def test_embedding_vector_registry_defines_required_families():
 
     assert set(registry) == {
         "memory.semantic",
+        "knowledge.semantic",
         "summary.semantic",
         "narrative.semantic",
         "skill.semantic",
@@ -29,6 +31,7 @@ def test_embedding_vector_registry_defines_required_families():
 
     shared = config.EMBEDDING_DIM
     assert registry["memory.semantic"].dimensions == shared
+    assert registry["knowledge.semantic"].dimensions == shared
     assert registry["summary.semantic"].dimensions == shared
     assert registry["narrative.semantic"].dimensions == shared
     assert registry["skill.semantic"].dimensions == shared
@@ -41,6 +44,9 @@ def test_embedding_vector_registry_defines_required_families():
 def test_model_vector_dimensions_match_registry():
     assert _vector_dim(MemoryNodeEmbedding, "embedding") == config.get_embedding_dimension(
         "memory.semantic"
+    )
+    assert _vector_dim(KnowledgeItemEmbedding, "embedding") == config.get_embedding_dimension(
+        "knowledge.semantic"
     )
     assert _vector_dim(MemoryNodeEmbedding, "embedding") == config.get_embedding_dimension(
         "summary.semantic"
