@@ -1882,6 +1882,7 @@ async def _async_compare_payload(
     head: str,
     *,
     token: str | None = None,
+    non_object_message: str = "GitHub compare response was not an object.",
 ) -> dict[str, Any]:
     owner, repo = slug.split("/", 1)
     async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
@@ -1894,7 +1895,7 @@ async def _async_compare_payload(
     if not isinstance(payload, dict):
         raise GitHubConnectorError(
             status_code=502,
-            message="GitHub compare response was not an object.",
+            message=non_object_message,
         )
     return payload
 
@@ -1953,7 +1954,13 @@ async def async_compare_commits(
     token: str | None = None,
 ) -> str:
     """Return GitHub's compare status for ``base...head``."""
-    payload = await _async_compare_payload(slug, base, head, token=token)
+    payload = await _async_compare_payload(
+        slug,
+        base,
+        head,
+        token=token,
+        non_object_message="GitHub compare response omitted a recognized status.",
+    )
     status = payload.get("status")
     if status not in {"identical", "behind", "ahead", "diverged"}:
         raise GitHubConnectorError(

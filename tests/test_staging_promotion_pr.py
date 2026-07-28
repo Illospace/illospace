@@ -1,6 +1,7 @@
 """Tests for the scheduled staging-to-main promotion PR reconciler."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 import uuid
@@ -20,6 +21,7 @@ from brain.platform.db.models.vault import (
 from brain.systems.cortex.project_context import github_promotion
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
+    async_compare_commits,
     async_compare_repo_branches,
 )
 from brain.systems.cortex.project_context.github_promotion import (
@@ -213,6 +215,77 @@ async def test_create_race_422_already_exists_settles_as_already_open(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_concurrent_reconciliations_settle_one_create_and_one_422_conflict(
+    monkeypatch,
+):
+    search_barrier = asyncio.Barrier(2)
+    create_lock = asyncio.Lock()
+    open_pull_numbers: list[int] = []
+    search_count = 0
+    compare = AsyncMock(return_value=COMPARE_PAYLOAD)
+
+    async def list_pulls(*args, **kwargs):
+        nonlocal search_count
+        search_count += 1
+        await search_barrier.wait()
+        return {"pull_requests": []}
+
+    async def create_pull(*args, **kwargs):
+        assert search_count == 2
+        async with create_lock:
+            if not open_pull_numbers:
+                open_pull_numbers.append(901)
+                return {
+                    "repo": REPO,
+                    "pull_request": {
+                        "number": 901,
+                        "html_url": f"https://github.com/{REPO}/pull/901",
+                        "state": "open",
+                        "draft": False,
+                    },
+                }
+            raise GitHubConnectorError(
+                status_code=422,
+                message=(
+                    "Validation Failed: A pull request already exists for "
+                    "uwear-ai:staging: "
+                    f"https://github.com/{REPO}/pull/901"
+                ),
+            )
+
+    list_open_pulls = AsyncMock(side_effect=list_pulls)
+    create = AsyncMock(side_effect=create_pull)
+    monkeypatch.setattr(github_promotion, "async_compare_repo_branches", compare)
+    monkeypatch.setattr(
+        github_promotion,
+        "async_list_repo_pull_requests",
+        list_open_pulls,
+    )
+    monkeypatch.setattr(github_promotion, "async_create_repo_pull_request", create)
+
+    target = PROMOTION_PULL_REQUEST_POLICY.target_for(REPO)
+    results = await asyncio.gather(
+        github_promotion.async_reconcile_promotion_pull_request(
+            target,
+            token="app-token",
+        ),
+        github_promotion.async_reconcile_promotion_pull_request(
+            target,
+            token="app-token",
+        ),
+    )
+
+    assert {(result.outcome, result.settled_by) for result in results} == {
+        ("created", "create"),
+        ("already_open", "create_conflict"),
+    }
+    assert open_pull_numbers == [901]
+    assert compare.await_count == 2
+    assert list_open_pulls.await_count == 2
+    assert create.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_api_error_is_logged_and_other_repository_still_settles(monkeypatch, caplog):
     actor = staging_promotion_pr.PromotionActor(user_id="user-1", org_id="org-1")
     reconcile = AsyncMock(
@@ -332,6 +405,27 @@ async def test_compare_connector_reads_ahead_count_and_commit_subjects():
         f"/repos/{REPO}/compare/main...staging",
     )
     assert request.await_args.kwargs["token"] == "app-token"
+
+
+@pytest.mark.asyncio
+async def test_async_compare_commits_preserves_legacy_non_object_diagnostic():
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(return_value=[]),
+    ):
+        with pytest.raises(GitHubConnectorError) as exc_info:
+            await async_compare_commits(
+                REPO,
+                "main",
+                "staging",
+                token="app-token",
+            )
+
+    assert exc_info.value.status_code == 502
+    assert (
+        exc_info.value.message
+        == "GitHub compare response omitted a recognized status."
+    )
 
 
 @pytest.mark.asyncio
