@@ -41,7 +41,7 @@ CONNECTION_ID = "33333333-3333-4333-8333-333333333333"
 
 def test_cold_start_receipt_migration_round_trips(monkeypatch):
     migration = importlib.import_module(
-        "brain.platform.db.alembic.versions.0049_scheduler_cold_start_reconciliation"
+        "brain.platform.db.alembic.versions.0050_scheduler_cold_start_reconciliation"
     )
     engine = sa.create_engine("sqlite://")
 
