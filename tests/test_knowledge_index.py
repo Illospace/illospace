@@ -32,11 +32,16 @@ from brain.platform.db.models.org import Org, User
 from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
 from brain.systems.knowledge.connectors.base import KnowledgeDraft
 from brain.systems.knowledge.connectors.domain_records import DomainRecordsConnector
+from brain.systems.knowledge.connectors.github import _draft_for_issue
 from brain.systems.knowledge.connectors.memory import MemoryConnector
 from brain.systems.knowledge.search import reciprocal_rank_fusion, search_knowledge
 from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS, sync_connector
 from brain.systems.external_agents import service as external_agents
 from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
+from brain.systems.cortex.project_context.github import (
+    GithubFixingPullRequest,
+    GithubIssueClosure,
+)
 
 
 _ORG_ID = "11111111-1111-4111-8111-111111111111"
@@ -178,6 +183,62 @@ def test_default_knowledge_sync_includes_the_memory_mirror():
         "slack",
         "memory",
     ]
+
+
+def test_github_closed_issue_draft_carries_closure_facts_into_distillation():
+    merged_at = datetime(2026, 7, 28, 20, 10, tzinfo=timezone.utc)
+    draft = _draft_for_issue(
+        "Illospace/illospace",
+        {
+            "id": 577,
+            "number": 577,
+            "title": "Knowledge slice 2",
+            "state": "closed",
+            "body": "Implement the conversational knowledge layer.",
+            "labels": [],
+            "user": {"login": "redawear"},
+            "created_at": "2026-07-28T18:00:00Z",
+            "updated_at": "2026-07-28T20:10:00Z",
+            "closed_at": "2026-07-28T20:10:00Z",
+        },
+        closure=GithubIssueClosure(
+            repo="Illospace/illospace",
+            number=577,
+            title="Knowledge slice 2",
+            state="closed",
+            closed_at=merged_at,
+            closed_by="redawear",
+            fixing_pull_requests=(
+                GithubFixingPullRequest(
+                    repo="Illospace/illospace",
+                    number=583,
+                    base_ref_name="main",
+                    merge_commit_sha="a" * 40,
+                    merged_at=merged_at,
+                ),
+            ),
+        ),
+        org_id=_ORG_ID,
+        actor_user_id="22222222-2222-4222-8222-222222222222",
+    )
+
+    assert draft.distill is True
+    assert draft.resolution == (
+        "Resolved by merged PR Illospace/illospace#583 "
+        f"(commit {'a' * 40}) at {merged_at.isoformat()}"
+    )
+    assert "Illospace/illospace#583" in draft.entities
+    assert draft.extra["closed_by"] == "redawear"
+    assert draft.extra["fixing_pull_requests"] == [
+        {
+            "repo": "Illospace/illospace",
+            "number": 583,
+            "base_ref_name": "main",
+            "merge_commit_sha": "a" * 40,
+            "merged_at": merged_at.isoformat(),
+        }
+    ]
+    assert draft.extra["org_id"] == _ORG_ID
 
 
 @pytest.fixture

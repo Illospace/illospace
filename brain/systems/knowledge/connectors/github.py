@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 import re
 from typing import Any
 
@@ -18,6 +20,8 @@ from brain.platform.db.models.idea import ProjectProfile
 from brain.platform.db.models.org import User
 from brain.platform.db.models.vault import Secret, VaultProjectBinding
 from brain.systems.cortex.project_context.github import (
+    GithubIssueClosure,
+    async_get_issue_closure_info,
     async_list_repo_issues,
     parse_github_repo_slug,
 )
@@ -34,6 +38,15 @@ _READ_PERMISSIONS = {
     "issues": "read",
     "pull_requests": "read",
 }
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _GitHubAuthority:
+    token: str | None
+    org_id: str | None
+    actor_user_id: str | None
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -111,7 +124,7 @@ async def _configured_repositories(session: AsyncSession) -> list[str]:
     return repositories
 
 
-async def _github_token(session: AsyncSession, repo: str) -> str | None:
+async def _github_authority(session: AsyncSession, repo: str) -> _GitHubAuthority:
     binding = await session.scalar(
         select(VaultProjectBinding)
         .join(Secret, Secret.id == VaultProjectBinding.secret_id)
@@ -124,7 +137,7 @@ async def _github_token(session: AsyncSession, repo: str) -> str | None:
         .limit(1)
     )
     if binding is None:
-        return None
+        return _GitHubAuthority(token=None, org_id=None, actor_user_id=None)
     actor = None
     if binding.created_by_user_id:
         actor = await session.get(User, str(binding.created_by_user_id))
@@ -138,7 +151,11 @@ async def _github_token(session: AsyncSession, repo: str) -> str | None:
             )
         ).first()
     if actor is None:
-        return None
+        return _GitHubAuthority(
+            token=None,
+            org_id=str(binding.org_id),
+            actor_user_id=None,
+        )
     env = await async_resolve_project_bound_env_tokens(
         actor_user_id=str(actor.id),
         org_id=str(actor.org_id),
@@ -149,11 +166,30 @@ async def _github_token(session: AsyncSession, repo: str) -> str | None:
     for key in ("GITHUB_TOKEN", "GH_TOKEN"):
         token = str(env.get(key) or "").strip()
         if token:
-            return token
-    return next((str(value).strip() for value in env.values() if str(value).strip()), None)
+            return _GitHubAuthority(
+                token=token,
+                org_id=str(actor.org_id),
+                actor_user_id=str(actor.id),
+            )
+    token = next(
+        (str(value).strip() for value in env.values() if str(value).strip()),
+        None,
+    )
+    return _GitHubAuthority(
+        token=token,
+        org_id=str(actor.org_id),
+        actor_user_id=str(actor.id),
+    )
 
 
-def _draft_for_issue(repo: str, issue: Mapping[str, Any]) -> KnowledgeDraft:
+def _draft_for_issue(
+    repo: str,
+    issue: Mapping[str, Any],
+    *,
+    closure: GithubIssueClosure | None = None,
+    org_id: str | None = None,
+    actor_user_id: str | None = None,
+) -> KnowledgeDraft:
     labels = [
         str(label.get("name") or "").strip()
         for label in issue.get("labels") or []
@@ -169,13 +205,49 @@ def _draft_for_issue(repo: str, issue: Mapping[str, Any]) -> KnowledgeDraft:
         summary_prefix += f" Labels: {', '.join(labels)}."
     summary = f"{summary_prefix}\n{body}".strip()
     resolution = None
+    closure_extra: dict[str, Any] = {}
     if state == "closed":
         if kind == "pr" and issue.get("merged_at"):
             resolution = f"Merged at {issue['merged_at']}"
+        elif kind == "issue" and closure is not None:
+            fixing_pull_requests = [
+                {
+                    "repo": fixing.repo,
+                    "number": fixing.number,
+                    "base_ref_name": fixing.base_ref_name,
+                    "merge_commit_sha": fixing.merge_commit_sha,
+                    "merged_at": (
+                        fixing.merged_at.isoformat()
+                        if fixing.merged_at is not None
+                        else None
+                    ),
+                }
+                for fixing in closure.fixing_pull_requests
+            ]
+            closure_extra = {
+                "closed_by": closure.closed_by,
+                "fixing_pull_requests": fixing_pull_requests,
+            }
+            if closure.fixing_pull_requests:
+                fixing = closure.fixing_pull_requests[0]
+                resolution = f"Resolved by merged PR {fixing.canonical_ref}"
+                if fixing.merge_commit_sha:
+                    resolution += f" (commit {fixing.merge_commit_sha})"
+                if fixing.merged_at is not None:
+                    resolution += f" at {fixing.merged_at.isoformat()}"
+            elif closure.closed_at is not None:
+                resolution = f"Closed at {closure.closed_at.isoformat()}"
+            else:
+                resolution = "Closed"
         elif issue.get("closed_at"):
             resolution = f"Closed at {issue['closed_at']}"
         else:
             resolution = "Closed"
+    closure_refs = (
+        [fixing.canonical_ref for fixing in closure.fixing_pull_requests]
+        if closure is not None
+        else []
+    )
     return KnowledgeDraft(
         source="github",
         kind=kind,
@@ -183,7 +255,11 @@ def _draft_for_issue(repo: str, issue: Mapping[str, Any]) -> KnowledgeDraft:
         title=str(issue.get("title") or f"{repo}#{number}"),
         summary=summary,
         resolution=resolution,
-        entities=[*labels, *_linked_references(body, repo)],
+        entities=[
+            *labels,
+            *_linked_references(body, repo),
+            *closure_refs,
+        ],
         raw_text=body,
         extra={
             "repo": repo,
@@ -194,9 +270,13 @@ def _draft_for_issue(repo: str, issue: Mapping[str, Any]) -> KnowledgeDraft:
             "url": issue.get("html_url"),
             "body_truncated": bool(issue.get("body_truncated")),
             "body_total_chars": int(issue.get("body_total_chars") or len(body)),
+            **closure_extra,
+            **({"org_id": org_id} if org_id else {}),
+            **({"actor_user_id": actor_user_id} if actor_user_id else {}),
         },
         source_created_at=_parse_timestamp(issue.get("created_at")),
         source_updated_at=_parse_timestamp(issue.get("updated_at")),
+        distill=True,
     )
 
 
@@ -245,7 +325,8 @@ class GitHubConnector:
             remaining = self.max_items - len(drafts)
             if remaining <= 0:
                 break
-            token = await _github_token(session, repo)
+            authority = await _github_authority(session, repo)
+            token = authority.token
             payload = await async_list_repo_issues(
                 repo,
                 token=token,
@@ -265,7 +346,34 @@ class GitHubConnector:
                 high_key = max(high_key, issue_key)
                 if not state.get("next_page") and state.get("watermark") and issue_key <= watermark_key:
                     continue
-                drafts.append(_draft_for_issue(repo, issue))
+                kind = "pr" if issue.get("type") == "pull_request" else "issue"
+                closure = None
+                if (
+                    str(issue.get("state") or "").lower() == "closed"
+                    and kind == "issue"
+                ):
+                    try:
+                        closure = await async_get_issue_closure_info(
+                            repo,
+                            int(issue.get("number") or 0),
+                            token=token,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "GitHub closure enrichment unavailable for %s#%s: %s",
+                            repo,
+                            issue.get("number"),
+                            exc,
+                        )
+                drafts.append(
+                    _draft_for_issue(
+                        repo,
+                        issue,
+                        closure=closure,
+                        org_id=authority.org_id,
+                        actor_user_id=authority.actor_user_id,
+                    )
+                )
 
             next_page = payload.get("next_page")
             if next_page:

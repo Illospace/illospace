@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import json
 
 import numpy as np
 import pytest
@@ -11,6 +12,11 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler
 
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
+from brain.platform.db.models.agent_run import (
+    AgentRunArtifactRow,
+    AgentRunEventRow,
+    AgentRunRow,
+)
 from brain.platform.db.models.inbound import InboundEventRow
 from brain.platform.db.models.knowledge import (
     KnowledgeItem,
@@ -44,6 +50,9 @@ async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
             User.__table__,
             ExternalAgentConnectionRow.__table__,
             InboundEventRow.__table__,
+            AgentRunRow.__table__,
+            AgentRunEventRow.__table__,
+            AgentRunArtifactRow.__table__,
             KnowledgeItem.__table__,
             KnowledgeItemEmbedding.__table__,
             KnowledgeSyncState.__table__,
@@ -208,22 +217,72 @@ async def test_slack_backfill_is_bounded_and_reports_each_page_through_shared_st
     await _seed_monitored_slack(session)
     connector = SlackKnowledgeConnector(client=_PagedSlackHistory(), max_items=1)
 
+    first_dispatch = await sync_connector(session, connector)
+    first_run = (await session.scalars(select(AgentRunRow))).one()
+    first_run.status = "completed"
+    session.add(
+        AgentRunArtifactRow(
+            run_id=first_run.id,
+            root_run_id=first_run.root_run_id,
+            artifact_type="final_answer",
+            text=json.dumps(
+                {
+                    "question": "What happened in the first thread?",
+                    "summary": "The first Slack thread was distilled.",
+                    "resolution": None,
+                    "systems": ["slack"],
+                    "code_references": [],
+                }
+            ),
+        )
+    )
+    await session.flush()
     first = await sync_connector(session, connector)
+
+    second_dispatch = await sync_connector(session, connector)
+    second_run = (
+        await session.scalars(select(AgentRunRow).order_by(AgentRunRow.id.desc()))
+    ).first()
+    assert second_run is not None
+    second_run.status = "completed"
+    session.add(
+        AgentRunArtifactRow(
+            run_id=second_run.id,
+            root_run_id=second_run.root_run_id,
+            artifact_type="final_answer",
+            text=json.dumps(
+                {
+                    "question": "What happened in the second thread?",
+                    "summary": "The second Slack thread was distilled.",
+                    "resolution": None,
+                    "systems": ["slack"],
+                    "code_references": [],
+                }
+            ),
+        )
+    )
+    await session.flush()
     second = await sync_connector(session, connector)
 
+    assert first_dispatch.status == "pending"
+    assert first_dispatch.stats["pending"] == 1
     assert first.stats == {
         "ingested": 1,
         "skipped": 0,
         "failed": 0,
         "truncated": 0,
+        "distilled": 1,
     }
     assert first.cursor["phase"] == "backfill"
     assert first.cursor["history_cursor"] == "history-2"
+    assert second_dispatch.status == "pending"
+    assert second_dispatch.stats["pending"] == 1
     assert second.stats == {
         "ingested": 1,
         "skipped": 0,
         "failed": 0,
         "truncated": 0,
+        "distilled": 1,
     }
     assert second.cursor["phase"] == "incremental"
     assert await session.scalar(select(func.count()).select_from(KnowledgeItem)) == 2
