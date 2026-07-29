@@ -73,6 +73,7 @@ from brain.systems.cycles.execution import (
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.run import AgentRun
+from brain.platform.db.models.agent_run import AgentRunEventRow
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -938,6 +939,28 @@ async def async_finalize_cycle_run_from_run(
                 int(run_id),
                 provider_errors_only=True,
             )
+        if effective_status == "failed" and not str(error or "").strip():
+            failure_event = (
+                await uow.session.scalars(
+                    select(AgentRunEventRow)
+                    .where(
+                        AgentRunEventRow.run_id == int(run_id),
+                        AgentRunEventRow.event_type.in_(("run.failed", "run.status_changed")),
+                    )
+                    .order_by(
+                        (AgentRunEventRow.event_type == "run.failed").desc(),
+                        AgentRunEventRow.sequence_no.desc(),
+                        AgentRunEventRow.id.desc(),
+                    )
+                    .limit(1)
+                )
+            ).first()
+            failure_payload = dict(getattr(failure_event, "payload", None) or {})
+            error = str(
+                failure_payload.get("error")
+                or failure_payload.get("reason")
+                or ""
+            ).strip() or None
         final_status, final_error = cycle_finalization_status_from_verdict(
             effective_status,
             verdict=verdict,

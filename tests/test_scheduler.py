@@ -100,6 +100,41 @@ async def test_sync_scheduler_catalog_seeds_scheduler_jobs_without_cron_table(se
         assert "legacy_cron_retired" not in job["default_payload"]
 
 
+async def test_command_failure_prefers_structured_exception_over_log_tail():
+    proc = SimpleNamespace(
+        returncode=1,
+        stdout=json.dumps(
+            {
+                "job": "knowledge_index_sync",
+                "ok": False,
+                "results": [
+                    {
+                        "source": "github",
+                        "status": "failed",
+                        "exception_type": "RuntimeError",
+                        "error": "connector exploded",
+                    }
+                ],
+            }
+        ),
+        stderr=(
+            "INFO:httpx:HTTP Request: POST https://example.test HTTP/1.1 201 Created\n"
+            "INFO:knowledge:continuing with remaining connectors\n"
+        ),
+    )
+
+    summary = scheduler_executor._command_summary(proc)
+
+    assert scheduler_executor._command_failure_error_text(summary) == (
+        "RuntimeError: connector exploded"
+    )
+    assert summary["exception"] == {
+        "type": "RuntimeError",
+        "message": "connector exploded",
+    }
+    assert "HTTP/1.1 201 Created" in summary["stderr_tail"]
+
+
 async def test_knowledge_index_sync_catalog_config(session):
     now = datetime(2026, 4, 21, 0, 0, tzinfo=timezone.utc)
 
@@ -1185,7 +1220,8 @@ async def test_scheduler_daemon_tick_emits_new_failure_once_without_historical_s
     assert len(first_tick["drain"]["results"]) == 1
     failure = first_tick["drain"]["results"][0]
     assert failure["status"] == "settled_failure"
-    assert "NEW_FAILURE_418" in failure["error_text"]
+    assert failure["error_text"] == "Command exited with status 1"
+    assert "NEW_FAILURE_418" not in failure["error_text"]
     new_failure_text = failure["error_text"]
 
     run = await session.get(SchedulerRun, failure["run_id"])

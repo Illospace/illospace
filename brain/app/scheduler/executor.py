@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -200,11 +202,82 @@ def _tail(text: str | None, limit: int = 2000) -> str | None:
 
 
 def _command_summary(proc: Any) -> dict[str, Any]:
-    return {
+    summary = {
         "returncode": int(getattr(proc, "returncode", 1)),
         "stdout_tail": _tail(getattr(proc, "stdout", None)),
         "stderr_tail": _tail(getattr(proc, "stderr", None)),
     }
+    exception = _command_exception(
+        stdout=getattr(proc, "stdout", None),
+        stderr=getattr(proc, "stderr", None),
+    )
+    if exception:
+        summary["exception"] = exception
+    return summary
+
+
+def _json_objects(text_value: str | None) -> list[dict[str, Any]]:
+    objects: list[dict[str, Any]] = []
+    for line in reversed(str(text_value or "").splitlines()):
+        try:
+            value = json.loads(line.strip())
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, dict):
+            objects.append(value)
+    return objects
+
+
+def _failed_result(payload: dict[str, Any]) -> dict[str, Any] | None:
+    results = payload.get("results")
+    if isinstance(results, list):
+        for item in reversed(results):
+            if isinstance(item, dict) and str(item.get("status") or "").lower() in {
+                "error",
+                "failed",
+            }:
+                nested = _failed_result(item)
+                return nested or item
+    if str(payload.get("status") or "").lower() in {"error", "failed"}:
+        return payload
+    if payload.get("error") and payload.get("ok") is False:
+        return payload
+    return None
+
+
+_TRACEBACK_EXCEPTION_LINE = re.compile(
+    r"^(?P<type>[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)):\s*(?P<message>.+)$"
+)
+
+
+def _command_exception(*, stdout: str | None, stderr: str | None) -> dict[str, str] | None:
+    for payload in _json_objects(stdout):
+        failure = _failed_result(payload)
+        if failure is None:
+            continue
+        message = str(failure.get("error") or "").strip()
+        if not message:
+            continue
+        exception_type = str(failure.get("exception_type") or "").strip()
+        return {
+            **({"type": exception_type} if exception_type else {}),
+            "message": message,
+        }
+    for line in reversed(str(stderr or "").splitlines()):
+        match = _TRACEBACK_EXCEPTION_LINE.match(line.strip())
+        if match:
+            return {"type": match.group("type"), "message": match.group("message")}
+    return None
+
+
+def _command_failure_error_text(summary: dict[str, Any]) -> str:
+    exception = summary.get("exception")
+    if isinstance(exception, dict):
+        message = str(exception.get("message") or "").strip()
+        exception_type = str(exception.get("type") or "").strip()
+        if message:
+            return f"{exception_type}: {message}" if exception_type else message
+    return f"Command exited with status {int(summary.get('returncode') or 1)}"
 
 
 def _python_one_liner(code: str) -> list[str]:
@@ -616,7 +689,7 @@ async def _async_run_step(
         summary = {"command": list(command), **_command_summary(proc)}
         results.append(summary)
         if int(getattr(proc, "returncode", 1)) != 0:
-            error_text = summary["stderr_tail"] or summary["stdout_tail"] or "step failed"
+            error_text = _command_failure_error_text(summary)
             await async_update_run_step(
                 session,
                 step,

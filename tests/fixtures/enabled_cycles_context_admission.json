@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "description": "Content-free size mirrors of every enabled production Cycle observed on 2026-07-29; padding preserves the measured high-water admission floors without storing mission text.",
+  "cycles": [
+    {
+      "cycle_id": 2,
+      "name": "Uwear Ticket Coordinator Check-ins",
+      "model": "openai/gpt-5.6-sol",
+      "thinking": "xhigh",
+      "timezone": "America/Toronto",
+      "prompt_chars": 6276,
+      "guidance_chars": 64000,
+      "observed_floor_tokens": 52230
+    },
+    {
+      "cycle_id": 8,
+      "name": "GitHub Reflex — event fast lane",
+      "model": "openai/gpt-5.4-mini",
+      "thinking": "low",
+      "timezone": "America/Toronto",
+      "prompt_chars": 4138,
+      "guidance_chars": 12000
+    },
+    {
+      "cycle_id": 9,
+      "name": "Uwear Backend Promotion Readiness",
+      "model": "openai/gpt-5.6-sol",
+      "thinking": "high",
+      "timezone": "America/Toronto",
+      "prompt_chars": 5083,
+      "guidance_chars": 90000,
+      "observed_floor_tokens": 61604
+    }
+  ]
+}

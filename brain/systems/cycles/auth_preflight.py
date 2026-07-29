@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.platform.integrations.provider_auth_preflight import (
     ProviderAuthPreflightResult,
     async_probe_provider_auth,
-    skipped_provider_auth_preflight,
 )
 from brain.platform.providers.model_policy import (
     async_get_default_model,
@@ -22,11 +21,18 @@ def _with_cycle_presentation(
 ) -> ProviderAuthPreflightResult:
     if not result.blocked:
         return result
-    repair_action = (
-        "Reconnect OpenAI in Settings > Access by signing in to Codex / ChatGPT again, "
-        "then rerun the Cycle or wait for its next scheduled run."
-    )
-    credential = result.credential or "OpenAI"
+    if result.provider == "anthropic":
+        repair_action = (
+            "Add an Anthropic API key in Settings > Access, then rerun the Cycle or "
+            "choose an available OpenAI model."
+        )
+        credential = result.credential or "Anthropic API key"
+    else:
+        repair_action = (
+            "Reconnect OpenAI in Settings > Access by signing in to Codex / ChatGPT again, "
+            "then rerun the Cycle or wait for its next scheduled run."
+        )
+        credential = result.credential or "OpenAI"
     return result.with_presentation(
         repair_action=repair_action,
         visible_message=(
@@ -42,7 +48,7 @@ async def async_preflight_cycle_external_auth(
     *,
     cycle: Any,
 ) -> ProviderAuthPreflightResult:
-    """Apply the Cycle's OpenAI-only probe and scheduled-run wording."""
+    """Probe the Cycle's selected provider before admitting an agent run."""
 
     user_id = str(getattr(cycle, "user_id", "") or "") or None
     org_id = str(getattr(cycle, "org_id", "") or "") or None
@@ -56,11 +62,6 @@ async def async_preflight_cycle_external_auth(
         )
 
     provider = infer_provider_from_model(model)
-    if provider != "openai":
-        return skipped_provider_auth_preflight(
-            provider=provider,
-            model=model,
-        )
     result = await async_probe_provider_auth(
         session,
         user_id=user_id,

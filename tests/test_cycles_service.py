@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -31,6 +32,8 @@ from brain.platform.db.models.cycle import (
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea
+from brain.platform.integrations.provider_auth_preflight import ProviderAuthPreflightResult
+from brain.platform.providers.model_policy import infer_provider_from_model
 
 
 RAW_PROVIDER_ERROR = (
@@ -59,6 +62,15 @@ REFLEX_ANSWER = (
     "Next action: inspect new GitHub events at the next scheduled run.\n"
     "Self-review: the mission and advertised result contract are satisfied."
 )
+
+
+async def _passed_cycle_auth(_session, *, cycle):
+    model = str(cycle.model_override or "openai/gpt-5.6-sol")
+    return ProviderAuthPreflightResult(
+        status="passed",
+        provider=infer_provider_from_model(model),
+        model=model,
+    )
 
 
 def _result_contract(required_outputs=None):
@@ -1815,6 +1827,7 @@ async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeyp
         "UnitOfWork",
         _AsyncUnitOfWorkFactory([session]),
     )
+    monkeypatch.setattr(service, "async_preflight_cycle_external_auth", _passed_cycle_auth)
     admissions = []
 
     async def fake_admit(*args, **kwargs):
@@ -1922,6 +1935,7 @@ async def test_async_execute_cycle_run_uses_native_uow_without_sync_bridges(monk
         return 77
 
     monkeypatch.setattr(service, "UnitOfWork", factory)
+    monkeypatch.setattr(service, "async_preflight_cycle_external_auth", _passed_cycle_auth)
     monkeypatch.setattr(service, "_async_admit_cycle_run", fake_async_admit)
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
     monkeypatch.setattr(service, "open_unit_of_work", _fail_sync_bridge, raising=False)
@@ -2147,6 +2161,7 @@ async def test_execute_cycle_run_creates_execution_thread_when_target_thread_is_
         return True
 
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr(service, "async_preflight_cycle_external_auth", _passed_cycle_auth)
     monkeypatch.setattr(cycle_execution, "_async_idea_has_active_run", fake_idea_has_active_run)
     monkeypatch.setattr(service, "_async_admit_cycle_run", fake_async_admit)
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
@@ -2614,6 +2629,65 @@ def test_cycle_contract_rejects_raw_provider_error_as_visible_answer():
     assert review["missing_outputs"] == ["visible_final_answer"]
     assert review["provider_error"] == "server_error"
     assert "help.openai.com" not in review["candidate_summary"]
+
+
+@pytest.mark.asyncio
+async def test_cycle_contract_repair_resolves_codex_auth_asynchronously(monkeypatch):
+    from brain.platform.integrations import llm as llm_integration
+    from brain.platform.integrations import providers as provider_integration
+    from brain.systems.cycles import contract_gate
+
+    session = object()
+    agent_run = AgentRun()
+    agent_run.id = 44
+    agent_run.user_id = "user-1"
+    agent_run.org_id = "org-1"
+    agent_run.model_policy = {"model": "openai/gpt-5.6-sol"}
+    agent_run.metadata_ = {}
+    resolver_calls = []
+    provider_requests = []
+
+    class ResolvedLLM:
+        provider = "openai"
+        client = object()
+
+        @staticmethod
+        def build_request_headers(**_kwargs):
+            return {}
+
+    async def resolve_async(**kwargs):
+        resolver_calls.append(kwargs)
+        return ResolvedLLM()
+
+    class FakeProvider:
+        def create(self, request):
+            provider_requests.append(request)
+            return SimpleNamespace(content=[{"type": "text", "text": "Repaired answer"}])
+
+    monkeypatch.setattr(llm_integration, "async_resolve_llm_client", resolve_async)
+    monkeypatch.setattr(provider_integration, "get_provider", lambda *_args: FakeProvider())
+
+    answer = await contract_gate._async_repair_cycle_contract_answer(
+        session=session,
+        agent_run=agent_run,
+        mission="Report the result",
+        result_contract={"kind": "autonomous_cycle_run_result"},
+        evidence_packet={},
+        missing_outputs=["visible_final_answer"],
+        candidate_answer="",
+    )
+
+    assert answer == "Repaired answer"
+    assert resolver_calls == [
+        {
+            "user_id": "user-1",
+            "org_id": "org-1",
+            "provider": "openai",
+            "auth_mode": "chatgpt",
+            "session": session,
+        }
+    ]
+    assert len(provider_requests) == 1
 
 
 def test_cycle_contract_rejects_empty_answer_with_captured_provider_exception():
@@ -3365,6 +3439,46 @@ def test_finalize_cycle_run_from_run_ignores_non_cycle_run(monkeypatch):
 
     assert cycle_run.status == "running"
     assert cycle.last_status is None
+
+
+def test_finalize_cycle_failure_uses_original_run_failed_event(monkeypatch):
+    agent_run = AgentRun()
+    agent_run.id = 44
+    agent_run.metadata_ = {"source": "cycle", "cycle_run_id": 12}
+
+    cycle_run = CycleRun()
+    cycle_run.id = 12
+    cycle_run.cycle_id = 5
+    cycle_run.status = "running"
+    cycle = Cycle()
+    cycle.id = 5
+    failure_event = AgentRunEventRow(
+        id=9,
+        run_id=44,
+        root_run_id=44,
+        sequence_no=9,
+        event_type="run.failed",
+        payload={"error": "RuntimeError: provider request exploded"},
+    )
+    session = _AsyncFakeSession(
+        agent_run=agent_run,
+        run=cycle_run,
+        cycle=cycle,
+        events=[failure_event],
+    )
+    finalized = []
+
+    async def capture_finalize(run, active_cycle, *, status, error, session):
+        finalized.append((run, active_cycle, status, error, session))
+
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr(service, "_finalize_cycle_run", capture_finalize)
+
+    service.finalize_cycle_run_from_run(44, status="failed")
+
+    assert finalized[0][2] == "failed"
+    assert finalized[0][3] == "RuntimeError: provider request exploded"
+    assert "Cycle ended with failed status" not in finalized[0][3]
 
 
 def test_cycle_route_scope_uses_workspace_when_available():

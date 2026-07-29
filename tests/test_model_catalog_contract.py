@@ -46,3 +46,31 @@ def test_composer_consumes_runtime_catalog_instead_of_owning_model_options():
     assert "MODEL_OPTIONS" not in source
     assert "modelCatalog" in source
     assert "RuntimeModelCatalogEntry" in source
+
+
+def test_gpt_5_6_sol_uses_provider_context_contract(monkeypatch):
+    from brain.platform.model_catalog import get_model_catalog_entry
+    from brain.systems.context.budget import resolve_model_context_budget
+
+    for name in (
+        "AGENT_MODEL_CONTEXT_WINDOW_TOKENS",
+        "AGENT_CONTEXT_RESERVED_OUTPUT_TOKENS",
+        "AGENT_CONTEXT_RESERVED_REASONING_TOKENS",
+        "AGENT_CONTEXT_RESERVED_TOOL_TOKENS",
+        "AGENT_CONTEXT_SAFETY_MARGIN_TOKENS",
+        "AGENT_AUTO_COMPACT_TOKEN_LIMIT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    entry = get_model_catalog_entry("openai/gpt-5.6-sol")
+    assert entry is not None
+    assert entry.context_window_tokens == 1_050_000
+
+    budget = resolve_model_context_budget(
+        model=entry.id,
+        reasoning_effort="xhigh",
+        max_output_tokens=32_768,
+        tools=[{"name": f"tool-{index}"} for index in range(87)],
+    )
+    assert budget.context_window_tokens == 1_050_000
+    assert budget.auto_compact_threshold_tokens == 863_690

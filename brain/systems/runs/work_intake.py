@@ -11,7 +11,12 @@ from typing import Any
 from sqlalchemy import text
 
 from brain.platform.db.models.idea import Idea
-from brain.platform.providers.model_policy import EFFORT_TIER_SET
+from brain.platform.integrations.provider_auth_preflight import async_probe_provider_auth
+from brain.platform.providers.model_policy import (
+    EFFORT_TIER_SET,
+    async_get_default_model,
+    infer_provider_from_model,
+)
 from brain.systems.cortex.project_context.resolution import resolve_effective_project_context
 from brain.systems.cortex.thread_context import async_build_agent_visible_thread_context
 from brain.systems.runs.direct_targets import (
@@ -1061,6 +1066,37 @@ async def admit_work(
 ) -> WorkIntakeResult:
     try:
         request = await build_agent_run_request(session, event)
+        model_policy = dict(request.model_policy or {})
+        model = str(
+            model_policy.get("model")
+            or model_policy.get("model_override")
+            or ""
+        ).strip()
+        requested_provider = str(model_policy.get("provider") or "").strip().lower()
+        if not model:
+            model = await async_get_default_model(
+                session,
+                provider=requested_provider or None,
+                include_provider_prefix=True,
+                user_id=request.user_id,
+                org_id=request.org_id,
+            )
+        provider = infer_provider_from_model(model, default=requested_provider or None)
+        if provider == "anthropic":
+            auth_preflight = await async_probe_provider_auth(
+                session,
+                user_id=request.user_id,
+                org_id=request.org_id,
+                provider=provider,
+                model=model,
+            )
+            if auth_preflight.blocked:
+                reason = (
+                    f"{auth_preflight.error_code}: provider={provider} model={model} "
+                    f"credential={auth_preflight.credential or 'unavailable'}"
+                )
+                logger.warning("Work admission blocked before run creation: %s", reason)
+                return WorkIntakeResult(ok=False, skipped_reason=reason)
         from brain.systems.runs.open_asks import (
             annotate_request_with_open_ask,
             record_open_ask,
