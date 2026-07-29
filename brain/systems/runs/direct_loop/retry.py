@@ -6,15 +6,99 @@ import logging
 import threading
 import time
 import asyncio
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable
 
 from brain.platform.integrations.providers import LLMRequest
+from brain.platform.integrations.provider_error_sentinel import provider_error_kind
 from brain.platform.async_io import run_blocking
+from brain.systems.runs.tool_catalog.metadata import is_write_side_effect_class
+from brain.systems.runs.tool_catalog.registry import get_tool_registration
 
 logger = logging.getLogger("agent")
 _MAX_RETRY_AFTER_SECONDS = 60.0
+_RETRYABLE_PROVIDER_ERROR_KINDS = frozenset(
+    {"server_error", "overloaded_error", "rate_limit_error"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseTextRetryDecision:
+    """Classification plus the replay-safety policy for one model response."""
+
+    provider_error_kind: str | None
+    should_retry: bool
+    inspect_response: bool
+    withhold_stream: bool
+    spawned_worker: bool
+    tool_history_safety: str
+
+
+def _spawned_worker_invocation(
+    metadata: Mapping[str, object],
+    *,
+    tool_call_source: str,
+) -> bool:
+    provenance = metadata.get("execution_provenance")
+    if not isinstance(provenance, Mapping):
+        provenance = {}
+    return bool(
+        tool_call_source == "worker"
+        and (
+            provenance.get("spawned_by_tool") is True
+            or str(provenance.get("origin") or "") == "spawn_worker"
+        )
+    )
+
+
+def _tool_history_safety(tool_calls_made: Sequence[str]) -> str:
+    for tool_name in tool_calls_made:
+        registration = get_tool_registration(tool_name)
+        if registration is None:
+            return "unknown"
+        if is_write_side_effect_class(registration.side_effect_class):
+            return "write"
+    return "read_only"
+
+
+def response_text_retry_decision(
+    response_text: str,
+    *,
+    scheduled_result_contract: bool,
+    metadata: Mapping[str, object],
+    tool_call_source: str,
+    tool_calls_made: Sequence[str],
+) -> ResponseTextRetryDecision:
+    """Decide provider-text handling from provenance, history, and text."""
+
+    spawned_worker = _spawned_worker_invocation(
+        metadata,
+        tool_call_source=tool_call_source,
+    )
+    history_safety = _tool_history_safety(tool_calls_made)
+    inspect_response = bool(scheduled_result_contract or spawned_worker)
+    detected_kind = (
+        provider_error_kind(response_text)
+        if inspect_response and str(response_text or "").strip()
+        else None
+    )
+    retry_safe = bool(
+        scheduled_result_contract
+        or (spawned_worker and history_safety == "read_only")
+    )
+    return ResponseTextRetryDecision(
+        provider_error_kind=detected_kind,
+        should_retry=bool(
+            retry_safe and detected_kind in _RETRYABLE_PROVIDER_ERROR_KINDS
+        ),
+        inspect_response=inspect_response,
+        withhold_stream=inspect_response,
+        spawned_worker=spawned_worker,
+        tool_history_safety=history_safety,
+    )
 
 
 class _NeverCancelled:

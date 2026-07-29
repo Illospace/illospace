@@ -51,6 +51,9 @@ _MERGE_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _NEEDS_HUMAN_NOTE = "needs-human: no fix PR reference"
 _READ_ONLY_GITHUB_APP_PERMISSIONS = {"pull_requests": "read"}
 _ALLOWED_PATCH_FIELDS = {"fix_pr", "fix_merge_sha", "progress_note"}
+_ACTIVE_BACKFILL_STATES = frozenset({"staging", "prod_pending"})
+_NORMALIZE_ONLY_STATE = "deployed"
+_BACKFILL_STATES = _ACTIVE_BACKFILL_STATES | {_NORMALIZE_ONLY_STATE}
 
 
 class BackfillPatch(TypedDict, total=False):
@@ -61,6 +64,7 @@ class BackfillPatch(TypedDict, total=False):
 
 class BackfillReportRow(TypedDict):
     record_id: int
+    deploy_state: str
     old_fix_pr: str | None
     new_fix_pr: str | None
     sha_found: bool
@@ -127,6 +131,7 @@ async def _plan_backfill_record(
     record: DomainRecord,
     *,
     pull_request_lookup: PullRequestLookup | None,
+    normalize_only: bool = False,
 ) -> BackfillPlan:
     """Interpret one record, enrich it when needed, and build its plan."""
     data = record.data or {}
@@ -142,12 +147,13 @@ async def _plan_backfill_record(
 
     if canonical_fix_pr is None:
         unresolvable_reason = "no fix PR reference"
-        patch.update(_progress_note_patch(data))
+        if not normalize_only:
+            patch.update(_progress_note_patch(data))
     else:
         if old_fix_pr != canonical_fix_pr:
             patch["fix_pr"] = canonical_fix_pr
         existing_sha = str(data.get("fix_merge_sha") or "").strip()
-        if not _MERGE_SHA_RE.fullmatch(existing_sha):
+        if not normalize_only and not _MERGE_SHA_RE.fullmatch(existing_sha):
             if pull_request_lookup is None:
                 raise ValueError(
                     "actor_user_id is required when pull_request_lookup is not supplied"
@@ -173,6 +179,7 @@ async def _plan_backfill_record(
         patch=patch,
         report_row={
             "record_id": record.id,
+            "deploy_state": str(data.get("deploy_state") or "").strip(),
             "old_fix_pr": old_fix_pr,
             "new_fix_pr": canonical_fix_pr or old_fix_pr,
             "sha_found": sha_found,
@@ -191,10 +198,15 @@ async def backfill_deploy_fix_refs(
 ) -> dict[str, object]:
     """Build and optionally apply the deploy fix-reference backfill."""
 
-    records = await list_deploy_ticket_records(
-        session,
-        org_id=org_id,
-    )
+    records = [
+        record
+        for record in await list_deploy_ticket_records(
+            session,
+            org_id=org_id,
+        )
+        if str((record.data or {}).get("deploy_state") or "").strip()
+        in _BACKFILL_STATES
+    ]
     lookup = pull_request_lookup
     if lookup is None and actor_user_id:
         lookup = github_app_pull_request_lookup(
@@ -205,6 +217,10 @@ async def backfill_deploy_fix_refs(
         await _plan_backfill_record(
             record,
             pull_request_lookup=lookup,
+            normalize_only=(
+                str((record.data or {}).get("deploy_state") or "").strip()
+                == _NORMALIZE_ONLY_STATE
+            ),
         )
         for record in records
     ]

@@ -8,12 +8,14 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
+from brain.platform.integrations.provider_auth_preflight import (
+    ProviderAuthPreflightResult,
+)
 from brain.platform.providers.model_policy import EFFORT_TIER_SET, normalize_model_name
 from brain.systems.cortex.events import publish
 from brain.systems.cortex.thought_lifecycle import ThreadMessageCommand, post_thread_message
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUSES, CYCLE_RUN_TERMINAL_STATUSES
 from brain.systems.cycles.auth_preflight import (
-    CycleAuthPreflightResult,
     async_preflight_cycle_external_auth,
 )
 from brain.systems.cycles.common import (
@@ -256,7 +258,7 @@ async def _async_append_cycle_auth_blocked_thread_message(
     idea: Idea,
     cycle: Cycle,
     cycle_run: CycleRun,
-    preflight: CycleAuthPreflightResult,
+    preflight: ProviderAuthPreflightResult,
 ) -> tuple[dict, dict | None]:
     metadata = {
         "source": "cycle",
@@ -808,8 +810,9 @@ async def async_finalize_cycle_run_from_run(
     status: str,
     error: str | None = None,
 ) -> None:
-    if status not in {"completed", "failed"}:
+    if status not in {"completed", "failed", "expired"}:
         return
+    effective_status = "failed" if status == "expired" else status
     async with UnitOfWork() as uow:
         agent_run = await uow.session.get(AgentRun, run_id)
         metadata = agent_run.metadata_ if agent_run else None
@@ -823,18 +826,18 @@ async def async_finalize_cycle_run_from_run(
         if not run or not cycle or run.status in TERMINAL_RUN_STATUSES:
             return
         verdict = persisted_cycle_contract_verdict(run)
-        if status == "completed" and verdict is None:
+        if effective_status == "completed" and verdict is None:
             verdict = await async_prepare_cycle_run_visible_finalization(uow.session, int(run_id))
-        elif status == "failed" and verdict is None:
+        elif effective_status == "failed" and verdict is None:
             verdict = await async_prepare_cycle_run_visible_finalization(
                 uow.session,
                 int(run_id),
                 provider_errors_only=True,
             )
         final_status, final_error = cycle_finalization_status_from_verdict(
-            status,
+            effective_status,
             verdict=verdict,
-            error=error if status == "failed" else None,
+            error=error if effective_status == "failed" else None,
         )
         await _finalize_cycle_run(
             run,

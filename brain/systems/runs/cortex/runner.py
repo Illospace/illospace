@@ -23,6 +23,10 @@ from brain.kernel import config as brain_config
 from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, PROCESSING_RUN_STATUS_VALUES
 from brain.systems.cortex.status import PROTECTED_IDEA_STATUSES
 from brain.systems.runs.engine import AsyncAgentRunEngine
+from brain.systems.runs.evidence_health import (
+    materialization_failures_for_worker,
+    record_parent_evidence_failures,
+)
 from brain.systems.runs.events import activity_event, run_event
 from brain.systems.runs.execution_failure import RunExecutionFailure
 from brain.systems.runs.failures import (
@@ -734,6 +738,12 @@ async def _settle_terminal_root_run_async(session, run_id: int) -> dict[str, Any
     return await _settle_idea_for_terminal_root_run_async(session, run_id)
 
 
+async def settle_terminal_root_run_async(session, run_id: int) -> dict[str, Any] | None:
+    """Project a terminal root run onto its originating user-facing surface."""
+
+    return await _settle_terminal_root_run_async(session, run_id)
+
+
 async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict[str, Any] | None:
     run = await session.get(AgentRunRow, int(run_id))
     if run is None or run.parent_run_id is not None:
@@ -797,156 +807,20 @@ def _run_has_project_context(run: AgentRunRow | None) -> bool:
     return False
 
 
-def _evidence_health_with_failure(
-    evidence_health: Any,
-    failure: dict[str, Any],
-) -> tuple[dict[str, Any], bool]:
-    health = dict(evidence_health or {}) if isinstance(evidence_health, dict) else {}
-    failures = [dict(item) for item in health.get("failures") or [] if isinstance(item, dict)]
-    identity = (
-        failure.get("worker_run_id"),
-        failure.get("repo"),
-        failure.get("stage"),
-    )
-    added = not any(
-        (item.get("worker_run_id"), item.get("repo"), item.get("stage")) == identity
-        for item in failures
-    )
-    if added:
-        failures.append(dict(failure))
-    health["status"] = "degraded"
-    health["failures"] = failures[:20]
-    health["failure_count"] = len(failures)
-    return health, added
-
-
-def _spawned_worker_materialization_failures(
-    run: AgentRunRow,
-    result: Any,
-) -> list[dict[str, Any]]:
-    raw_metadata = getattr(run, "metadata_", None)
-    metadata = dict(raw_metadata or {}) if isinstance(raw_metadata, dict) else {}
-    parent_run_id = getattr(run, "parent_run_id", None)
-    if parent_run_id is None or not (
-        metadata.get("spawned_by_tool") is True or metadata.get("origin") == "spawn_worker"
-    ):
-        return []
-
-    errors = [
-        str(item)
-        for item in [
-            *(getattr(result, "errors", []) or []),
-            *(getattr(result, "warnings", []) or []),
-        ]
-        if str(item).strip()
-    ]
-    failed_resources = [
-        dict(item)
-        for item in [
-            *(getattr(result, "failed_resources", []) or []),
-            *(getattr(result, "degraded_resources", []) or []),
-        ]
-        if isinstance(item, dict)
-    ]
-    if not failed_resources:
-        raw_target_ref = getattr(run, "target_ref", None)
-        target_ref = raw_target_ref if isinstance(raw_target_ref, dict) else {}
-        snapshot = target_ref.get("project_context_snapshot")
-        resources = snapshot.get("resources") if isinstance(snapshot, dict) else []
-        failed_resources = [dict(item) for item in resources or [] if isinstance(item, dict)][:1]
-    if not failed_resources:
-        failed_resources = [{}]
-
-    failures: list[dict[str, Any]] = []
-    for index, resource in enumerate(failed_resources):
-        repo = (
-            str(resource.get("repo") or resource.get("name") or "unknown").strip()
-            or "unknown"
-        )
-        if index < len(errors):
-            fallback_error = errors[index]
-        elif errors:
-            fallback_error = errors[0]
-        else:
-            fallback_error = "Project Context materialization failed."
-        error = str(resource.get("error") or fallback_error)
-        failures.append(
-            {
-                "kind": "worker_tool_failure",
-                "tool": "spawn_worker",
-                "child_run_id": int(run.id),
-                "worker_run_id": int(run.id),
-                "worker_role": str(metadata.get("worker_role") or "worker"),
-                "repo": repo,
-                "stage": "project_context_materialization",
-                "error": error,
-            }
-        )
-    return failures
-
-
 async def _record_spawned_worker_materialization_failure(
     session: Any,
     run: AgentRunRow,
     result: Any,
 ) -> None:
-    failures = _spawned_worker_materialization_failures(run, result)
+    failures = materialization_failures_for_worker(run, result)
     if not failures or run.parent_run_id is None:
         return
 
-    parent = await session.get(
-        AgentRunRow,
-        int(run.parent_run_id),
-        with_for_update=True,
+    await record_parent_evidence_failures(
+        session,
+        parent_run_id=int(run.parent_run_id),
+        failures=failures,
     )
-    if parent is None:
-        return
-    parent_metadata = (
-        dict(parent.metadata_ or {}) if isinstance(parent.metadata_, dict) else {}
-    )
-    added_failures: list[dict[str, Any]] = []
-    for failure in failures:
-        health, added = _evidence_health_with_failure(parent_metadata.get("evidence_health"), failure)
-        parent_metadata["evidence_health"] = health
-        if added:
-            added_failures.append(failure)
-    parent.metadata_ = parent_metadata
-
-    cycle_run_id = (
-        parent_metadata.get("cycle_run_id")
-        if parent_metadata.get("source") == "cycle"
-        else None
-    )
-    if cycle_run_id:
-        try:
-            from brain.platform.db.models.cycle import CycleRun
-
-            cycle_run = await session.get(
-                CycleRun,
-                int(cycle_run_id),
-                with_for_update=True,
-            )
-        except (TypeError, ValueError):
-            cycle_run = None
-        if cycle_run is not None:
-            context_snapshot = dict(cycle_run.context_snapshot or {})
-            cycle_health = context_snapshot.get("evidence_health")
-            for failure in failures:
-                cycle_health, _ = _evidence_health_with_failure(cycle_health, failure)
-            context_snapshot["evidence_health"] = cycle_health
-            cycle_run.context_snapshot = context_snapshot
-
-    store = AsyncAgentRunStore(session, auto_commit=True)
-    for failure in added_failures:
-        await store.append_event(
-            run_event(
-                int(parent.id),
-                "run.worker_failed",
-                failure,
-                root_run_id=parent.root_run_id or parent.id,
-                producer="spawn_worker",
-            )
-        )
 
 
 def _project_context_root(run_id: int, *, thread_id: str | None = None) -> str:
@@ -1426,6 +1300,14 @@ async def _mark_run_failed_after_runner_error_async(
                 )
             )
             await store.set_status(int(run_id), RunStatus.FAILED, reason=error[:500])
+            from brain.systems.runs.chantier_continuation import (
+                queue_worker_continuation_for_terminal_run,
+            )
+
+            await queue_worker_continuation_for_terminal_run(
+                uow.session,
+                terminal_run_id=int(run_id),
+            )
         return await _settle_terminal_root_run_async(uow.session, int(run_id))
 
 
@@ -1767,6 +1649,7 @@ __all__ = [
     "runner_in_flight_count",
     "runner_in_flight_ids",
     "run_queued_once",
+    "settle_terminal_root_run_async",
     "start_runner",
     "stop_runner",
 ]

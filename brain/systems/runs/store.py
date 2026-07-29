@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import logging
 import os
@@ -34,6 +34,7 @@ from brain.systems.runs.domain import (
     RunRecipe,
 )
 from brain.systems.runs.events import run_event, status_changed_event
+from brain.systems.runs.failures import safe_terminal_run_message
 from brain.systems.runs.ids import trace_id_for_run_id
 from brain.systems.runs.status import (
     RunStatus,
@@ -69,6 +70,20 @@ _CHILD_CREATION_TOKEN_METADATA_KEY = "parent_step_creation_token"
 _DEADLOCK_RETRY_ATTEMPTS = 3
 _DEADLOCK_RETRY_BASE_SECONDS = 0.05
 _UNSET = object()
+
+
+def _agent_run_deadline_seconds() -> int:
+    try:
+        return max(1, int(os.getenv("AGENT_RUN_DEADLINE_SECONDS", "900")))
+    except (TypeError, ValueError):
+        return 900
+
+
+def _agent_run_max_interruption_requeues() -> int:
+    try:
+        return max(0, int(os.getenv("AGENT_RUN_MAX_INTERRUPTION_REQUEUES", "3")))
+    except (TypeError, ValueError):
+        return 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +183,9 @@ def to_domain(row: AgentRunRow) -> AgentRun:
         metadata=dict(_row_value(row, "metadata_") or {}),
         created_at=_row_value(row, "created_at"),
         started_at=_row_value(row, "started_at"),
+        deadline_at=_row_value(row, "deadline_at"),
+        closeout_expires_at=_row_value(row, "closeout_expires_at"),
+        expired_at=_row_value(row, "expired_at"),
         paused_at=_row_value(row, "paused_at"),
         completed_at=_row_value(row, "completed_at"),
         failed_at=_row_value(row, "failed_at"),
@@ -386,6 +404,7 @@ class AsyncAgentRunStore:
                 [request.root_run_id or request.parent_run_id, request.parent_run_id],
                 key_share=True,
             )
+        admitted_at = datetime.now(timezone.utc)
         row = AgentRunRow(
             org_id=request.org_id,
             user_id=request.user_id,
@@ -403,7 +422,9 @@ class AsyncAgentRunStore:
             source_idempotency_scope=source_idempotency_scope,
             source_idempotency_key=source_idempotency_key,
             parent_step_key_hash=parent_step_key_hash,
-            started_at=datetime.now(timezone.utc) if status == RunStatus.STARTING else None,
+            started_at=admitted_at if status == RunStatus.STARTING else None,
+            deadline_at=request.deadline_at
+            or admitted_at + timedelta(seconds=_agent_run_deadline_seconds()),
         )
         try:
             async with self.session.begin_nested():
@@ -521,6 +542,7 @@ class AsyncAgentRunStore:
                         else parent_run.model_policy or {}
                     ),
                     metadata=metadata_payload,
+                    deadline_at=parent_run.deadline_at,
                 ),
                 initial_status=status,
                 parent_step_key_hash=_parent_step_key_hash(step_key),
@@ -962,20 +984,26 @@ class AsyncAgentRunStore:
         interrupted_at: datetime | None = None,
         details: dict[str, Any] | None = None,
     ) -> tuple[AgentRun, bool]:
-        """Fence an abandoned execution attempt and return it to the queue.
+        """Fence an abandoned execution attempt and requeue it within a fixed cap.
 
         ``interrupted`` is intentionally an audited event/metadata state rather
         than a durable row status: claimers already consume ``queued`` rows, so
-        recovery remains atomic and requires no intermediate-state sweeper.
+        recovery remains atomic and requires no intermediate-state sweeper. A
+        run that exhausts the cap is settled as ``expired`` with partial state
+        preserved instead of looping forever.
         """
 
         row = await self._locked_run(run_id)
         current = coerce_run_status(row.status, default=RunStatus.FAILED)
+        metadata = dict(row.metadata_ or {})
+        previous_count = _coerce_int(metadata.get("interruption_count"), default=0)
+        requeue_allowed = previous_count < _agent_run_max_interruption_requeues()
+        target_status = RunStatus.QUEUED if requeue_allowed else RunStatus.EXPIRED
         try:
             current, target = ensure_run_transition(
                 current,
-                RunStatus.QUEUED,
-                allow_interrupted_requeue=True,
+                target_status,
+                allow_interrupted_requeue=requeue_allowed,
             )
         except RunTransitionError:
             return to_domain(row), False
@@ -985,15 +1013,13 @@ class AsyncAgentRunStore:
         interrupted_at = interrupted_at or datetime.now(timezone.utc)
         if interrupted_at.tzinfo is None:
             interrupted_at = interrupted_at.replace(tzinfo=timezone.utc)
-        metadata = dict(row.metadata_ or {})
-        previous_count = _coerce_int(metadata.get("interruption_count"), default=0)
         interruption = {
             **dict(details or {}),
             "reason": str(reason or "worker_shutdown"),
             "interrupted_at": interrupted_at.isoformat(),
             "from_status": current.value,
             "execution_attempt": int(row.execution_attempt or 0),
-            "requeued": True,
+            "requeued": requeue_allowed,
         }
         metadata["interruption"] = interruption
         metadata["interruption_count"] = previous_count + 1
@@ -1008,8 +1034,7 @@ class AsyncAgentRunStore:
                 reason=interruption["reason"],
                 transitioned_at=interrupted_at,
                 metadata_update=metadata,
-                allow_interrupted_requeue=True,
-                expected_updated_at=row.updated_at,
+                allow_interrupted_requeue=requeue_allowed,
                 expected_execution_token=row.execution_token,
                 expected_execution_attempt=int(row.execution_attempt or 0),
                 before_status_events=(
@@ -1024,13 +1049,52 @@ class AsyncAgentRunStore:
                 after_status_events=(
                     run_event(
                         int(row.id),
-                        "run.requeued",
+                        "run.requeued" if requeue_allowed else "run.interruption_limit_exhausted",
                         interruption,
                         root_run_id=row.root_run_id,
                         producer="worker_shutdown",
                     ),
                 ),
             )
+            if changed and not requeue_allowed:
+                final_output = str(safe_terminal_run_message(RunStatus.EXPIRED) or "")
+                if final_output:
+                    artifact = await self.append_final_answer_once(
+                        int(row.id),
+                        final_output,
+                        root_run_id=row.root_run_id,
+                    )
+                    safe_output = str(getattr(artifact, "text", None) or final_output)
+                    if not await self.has_event_type(int(row.id), "run.text_delta"):
+                        await self.append_event(
+                            run_event(
+                                int(row.id),
+                                "run.text_completed",
+                                {"text": safe_output},
+                                root_run_id=row.root_run_id,
+                                producer="worker_shutdown",
+                            )
+                        )
+                await self.append_event(
+                    run_event(
+                        int(row.id),
+                        "run.expired",
+                        {
+                            "reason": "interruption_limit_exhausted",
+                            "interruption_count": previous_count + 1,
+                        },
+                        root_run_id=row.root_run_id,
+                        producer="worker_shutdown",
+                    )
+                )
+                from brain.systems.runs.chantier_continuation import (
+                    queue_chantier_continuation_for_terminal_run,
+                )
+
+                await queue_chantier_continuation_for_terminal_run(
+                    self.session,
+                    terminal_run_id=int(row.id),
+                )
             if auto_commit:
                 await self.session.commit()
             return transitioned_run, changed
@@ -1139,6 +1203,8 @@ class AsyncAgentRunStore:
             values["failed_at"] = now
         elif target == RunStatus.CANCELED:
             values["canceled_at"] = now
+        elif target == RunStatus.EXPIRED:
+            values["expired_at"] = now
         if target == RunStatus.QUEUED:
             values["paused_at"] = None
         if target in TERMINAL_RUN_STATUSES or target in {RunStatus.PAUSED, RunStatus.QUEUED}:

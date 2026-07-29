@@ -1,11 +1,24 @@
 """Tests for deployment safety hooks."""
 
+import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
+from brain.contracts import worker_lifecycle as worker_lifecycle_contract
 from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
+from brain.contracts.worker_lifecycle import (
+    WorkerContainerState,
+    WorkerCoverObservation,
+    WorkerLifecyclePhase,
+    observe_worker_cover,
+    publish_worker_lifecycle_phase,
+    read_worker_lifecycle_phase,
+)
 from brain.contracts.worker_swap import (
     WorkerSwapDecision,
     parse_worker_swap_snapshot,
@@ -488,6 +501,141 @@ def test_worker_swap_snapshot_derives_decision_and_presentation_from_canonical_p
         assert repr(status) in worker_swap_rows_sql()
 
 
+def test_worker_lifecycle_phase_is_published_outside_the_worker_process(
+    tmp_path, monkeypatch
+):
+    assert worker_lifecycle_contract.WORKER_LIFECYCLE_PATH == Path(
+        "/tmp/illo-worker-lifecycle-phase"
+    )
+    phase_path = tmp_path / "worker-lifecycle-phase"
+    monkeypatch.setattr(
+        worker_lifecycle_contract,
+        "WORKER_LIFECYCLE_PATH",
+        phase_path,
+    )
+    monkeypatch.setattr(
+        worker_lifecycle_contract,
+        "_process_start_identity",
+        lambda pid: f"test-process:{pid}",
+    )
+
+    assert read_worker_lifecycle_phase() is None
+    for phase in WorkerLifecyclePhase:
+        publish_worker_lifecycle_phase(phase)
+        record = json.loads(phase_path.read_text())
+        assert record["phase"] == phase.value
+        assert record["pid"] == os.getpid()
+        assert record["process_start_identity"]
+        assert read_worker_lifecycle_phase() is phase
+
+
+def test_stale_worker_lifecycle_record_from_a_prior_process_is_unknown(
+    tmp_path, monkeypatch
+):
+    phase_path = tmp_path / "worker-lifecycle-phase"
+    monkeypatch.setattr(
+        worker_lifecycle_contract,
+        "WORKER_LIFECYCLE_PATH",
+        phase_path,
+    )
+    monkeypatch.setattr(
+        worker_lifecycle_contract,
+        "_process_start_identity",
+        lambda pid: f"current-process:{pid}",
+    )
+    phase_path.write_text(
+        json.dumps(
+            {
+                "phase": WorkerLifecyclePhase.CLAIMING.value,
+                "pid": os.getpid(),
+                "process_start_identity": "stale-process-generation",
+            }
+        )
+    )
+
+    assert read_worker_lifecycle_phase() is None
+
+
+def test_failed_lifecycle_transition_invalidates_the_previous_claiming_record(
+    tmp_path, monkeypatch
+):
+    phase_path = tmp_path / "worker-lifecycle-phase"
+    monkeypatch.setattr(
+        worker_lifecycle_contract,
+        "WORKER_LIFECYCLE_PATH",
+        phase_path,
+    )
+    monkeypatch.setattr(
+        worker_lifecycle_contract,
+        "_process_start_identity",
+        lambda pid: f"test-process:{pid}",
+    )
+    publish_worker_lifecycle_phase(WorkerLifecyclePhase.CLAIMING)
+    monkeypatch.setattr(
+        worker_lifecycle_contract.os,
+        "replace",
+        lambda _source, _destination: (_ for _ in ()).throw(OSError("replace failed")),
+    )
+
+    with pytest.raises(OSError, match="replace failed"):
+        publish_worker_lifecycle_phase(WorkerLifecyclePhase.DRAINING)
+
+    assert not phase_path.exists()
+
+
+def test_worker_lifecycle_contract_is_import_safe():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import brain.contracts.worker_lifecycle; "
+                "assert 'brain.app' not in sys.modules; "
+                "assert 'brain.systems' not in sys.modules; "
+                "assert 'brain.platform' not in sys.modules"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_worker_cover_observation_combines_liveness_and_lifecycle_phase():
+    for phase in (None, "unknown", WorkerLifecyclePhase.STARTING):
+        assert (
+            observe_worker_cover(WorkerContainerState.RUNNING, phase)
+            is WorkerCoverObservation.PENDING
+        )
+    assert (
+        observe_worker_cover(
+            WorkerContainerState.RUNNING,
+            WorkerLifecyclePhase.CLAIMING,
+        )
+        is WorkerCoverObservation.CLAIMING
+    )
+    for phase in (WorkerLifecyclePhase.DRAINING, WorkerLifecyclePhase.STOPPED):
+        assert (
+            observe_worker_cover(WorkerContainerState.RUNNING, phase)
+            is WorkerCoverObservation.DEFINITIVELY_NOT_CLAIMING
+        )
+    assert (
+        observe_worker_cover(
+            WorkerContainerState.UNKNOWN,
+            WorkerLifecyclePhase.CLAIMING,
+        )
+        is WorkerCoverObservation.PENDING
+    )
+    assert (
+        observe_worker_cover(
+            WorkerContainerState.DEFINITIVELY_NOT_RUNNING,
+            WorkerLifecyclePhase.CLAIMING,
+        )
+        is WorkerCoverObservation.DEFINITIVELY_NOT_CLAIMING
+    )
+
+
 def test_safe_deploy_scripts_cannot_restate_worker_swap_status_policy():
     root = Path(__file__).resolve().parents[1]
     consumers = [
@@ -496,6 +644,7 @@ def test_safe_deploy_scripts_cannot_restate_worker_swap_status_policy():
         root / "deploy" / "scripts" / "compose-runtime-lib.sh",
         root / "deploy" / "scripts" / "upgrade.sh",
         root / "deploy" / "scripts" / "runtime-services.sh",
+        root / "deploy" / "scripts" / "worker-lifecycle-lib.sh",
         root / "deploy" / "scripts" / "worker-swap-lib.sh",
     ]
     forbidden = (
@@ -519,6 +668,7 @@ def test_safe_deploy_scripts_cannot_restate_worker_swap_status_policy():
     contract = (root / "brain" / "contracts" / "worker_swap.py").read_text()
     native_adapter = (root / "brain" / "app" / "cli" / "worker_swap_snapshot.py").read_text()
     assert "OPEN_RUN_STATUS_VALUES" in contract
+    assert "WorkerLifecycle" not in contract
     assert "OPEN_RUN_STATUS_VALUES" in native_adapter
 
 

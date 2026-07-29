@@ -95,3 +95,55 @@ def test_interruption_presentation_is_not_a_terminal_failure():
     )
     assert interruption.interruption_notice_condition(result) == "interruption:requeued"
     assert not hasattr(failures, "interrupted_run_message")
+
+
+async def test_non_requeued_interruption_settles_origin_and_cycle(monkeypatch):
+    from brain.systems.cycles import service as cycles_service
+    from brain.systems.runs import interruption
+    from brain.systems.runs.cortex import runner
+
+    events = []
+
+    class FakeUnitOfWork:
+        session = object()
+
+        async def __aenter__(self):
+            events.append("enter")
+            return self
+
+        async def __aexit__(self, *_exc_info):
+            events.append("commit")
+
+    async def settle(session, run_id):
+        assert session is FakeUnitOfWork.session
+        events.append(("settle", run_id))
+        return {"status": "expired"}
+
+    async def finalize(run_id, *, status, error):
+        events.append(("finalize", run_id, status, error))
+
+    monkeypatch.setattr(interruption, "UnitOfWork", FakeUnitOfWork)
+    monkeypatch.setattr(runner, "settle_terminal_root_run_async", settle)
+    monkeypatch.setattr(cycles_service, "async_finalize_cycle_run_from_run", finalize)
+
+    result = await interruption.notify_run_interruption(
+        interruption.RunInterruption(
+            run_id=2330,
+            reason="worker_shutdown",
+            interrupted_at=datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc),
+            requeued=False,
+        )
+    )
+
+    assert result == {"status": "expired"}
+    assert events == [
+        "enter",
+        ("settle", 2330),
+        "commit",
+        (
+            "finalize",
+            2330,
+            "expired",
+            "Agent run interruption limit exhausted",
+        ),
+    ]

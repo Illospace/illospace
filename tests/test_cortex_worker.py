@@ -139,8 +139,10 @@ def test_cycle_scheduler_stall_grace_defaults_to_five_minutes(monkeypatch):
 
 
 def test_worker_exits_when_cycle_scheduler_heartbeat_is_stale(monkeypatch, caplog):
+    from brain.contracts.worker_lifecycle import WorkerLifecyclePhase
     from brain.systems.cortex import worker
 
+    calls = []
     terminate_calls = []
 
     class QueueStallMonitorStub:
@@ -148,6 +150,16 @@ def test_worker_exits_when_cycle_scheduler_heartbeat_is_stale(monkeypatch, caplo
             return False
 
     monkeypatch.setattr(worker, "_running", True)
+    monkeypatch.setattr(
+        worker,
+        "_publish_worker_lifecycle_phase",
+        lambda phase: calls.append(("phase", phase)),
+    )
+    monkeypatch.setattr(
+        worker,
+        "request_runner_stop",
+        lambda: calls.append(("request_runner_stop", None)),
+    )
     monkeypatch.setattr(worker, "_require_embedding_backend_ready", lambda: None)
     monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: True)
     monkeypatch.setattr(worker, "start_cycle_scheduler", lambda: None)
@@ -155,7 +167,11 @@ def test_worker_exits_when_cycle_scheduler_heartbeat_is_stale(monkeypatch, caplo
     monkeypatch.setattr(worker, "runner_health_snapshot", lambda: {"runner_running": True})
     monkeypatch.setattr(worker, "QueueStallMonitor", lambda **_kwargs: QueueStallMonitorStub())
     monkeypatch.setattr(worker, "seconds_since_last_cycle_tick", lambda: 301.0)
-    monkeypatch.setattr(worker, "stop_runner", lambda **_kwargs: worker.DrainResult())
+    monkeypatch.setattr(
+        worker,
+        "stop_runner",
+        lambda **_kwargs: calls.append(("stop_runner", None)) or worker.DrainResult(),
+    )
     monkeypatch.setattr(worker, "stop_cycle_scheduler", lambda: None)
     monkeypatch.setattr(worker.logging, "shutdown", lambda: None)
     monkeypatch.setattr(worker, "_terminate_process", terminate_calls.append)
@@ -165,6 +181,14 @@ def test_worker_exits_when_cycle_scheduler_heartbeat_is_stale(monkeypatch, caplo
 
     assert exc_info.value.code == 1
     assert terminate_calls == [1]
+    assert calls == [
+        ("phase", WorkerLifecyclePhase.STARTING),
+        ("phase", WorkerLifecyclePhase.CLAIMING),
+        ("phase", WorkerLifecyclePhase.DRAINING),
+        ("request_runner_stop", None),
+        ("stop_runner", None),
+        ("phase", WorkerLifecyclePhase.STOPPED),
+    ]
     assert "cycle scheduler wedged; exiting for restart" in caplog.text
 
 
@@ -173,11 +197,17 @@ def test_worker_term_path_calls_terminate_process_with_zero(monkeypatch):
 
     calls = []
 
-    monkeypatch.setattr(worker, "_running", False)
+    monkeypatch.setattr(worker, "_running", True)
     monkeypatch.setattr(worker, "_require_embedding_backend_ready", lambda: None)
     monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: True)
     monkeypatch.setattr(worker, "start_cycle_scheduler", lambda: None)
-    monkeypatch.setattr(worker, "start_runner", lambda: None)
+    monkeypatch.setattr(worker, "start_runner", lambda: setattr(worker, "_running", False))
+    monkeypatch.setattr(worker, "_publish_worker_lifecycle_phase", lambda _phase: None)
+    monkeypatch.setattr(
+        worker,
+        "request_runner_stop",
+        lambda: calls.append("request_runner_stop"),
+    )
     monkeypatch.setattr(
         worker,
         "stop_runner",
@@ -190,11 +220,104 @@ def test_worker_term_path_calls_terminate_process_with_zero(monkeypatch):
     worker.main()
 
     assert calls == [
+        "request_runner_stop",
         "stop_runner",
         "stop_cycle_scheduler",
         "logging.shutdown",
         ("terminate", 0),
     ]
+
+
+def test_worker_publishes_draining_before_unconditional_runner_stop(monkeypatch):
+    from brain.contracts.worker_lifecycle import WorkerLifecyclePhase
+    from brain.systems.cortex import worker
+
+    phases = []
+    terminate_calls = []
+
+    def require_embedding_backend_ready():
+        assert phases == [WorkerLifecyclePhase.STARTING]
+
+    def start_runner():
+        assert phases == [WorkerLifecyclePhase.STARTING]
+
+    def stop_after_first_poll(_seconds):
+        worker._running = False
+
+    def stop_runner(**_kwargs):
+        assert phases[-1] is WorkerLifecyclePhase.DRAINING
+        return worker.DrainResult()
+
+    monkeypatch.setattr(worker, "_running", True)
+    monkeypatch.setattr(worker, "_publish_worker_lifecycle_phase", phases.append)
+    monkeypatch.setattr(
+        worker,
+        "_require_embedding_backend_ready",
+        require_embedding_backend_ready,
+    )
+    monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: False)
+    monkeypatch.setattr(worker, "start_runner", start_runner)
+    monkeypatch.setattr(worker, "request_runner_stop", lambda: None)
+    monkeypatch.setattr(
+        worker,
+        "runner_health_snapshot",
+        lambda: {"runner_running": True},
+    )
+    monkeypatch.setattr(
+        worker.QueueStallMonitor,
+        "should_check",
+        lambda _self, *, now: False,
+    )
+    monkeypatch.setattr(worker.time, "sleep", stop_after_first_poll)
+    monkeypatch.setattr(worker, "stop_runner", stop_runner)
+    monkeypatch.setattr(worker.logging, "shutdown", lambda: None)
+    monkeypatch.setattr(worker, "_terminate_process", terminate_calls.append)
+
+    worker.main()
+
+    assert phases == [
+        WorkerLifecyclePhase.STARTING,
+        WorkerLifecyclePhase.CLAIMING,
+        WorkerLifecyclePhase.DRAINING,
+        WorkerLifecyclePhase.STOPPED,
+    ]
+    assert terminate_calls == [0]
+
+
+def test_worker_sigterm_during_startup_never_publishes_claiming(monkeypatch):
+    from brain.contracts.worker_lifecycle import WorkerLifecyclePhase
+    from brain.systems.cortex import worker
+
+    phases = []
+    terminate_calls = []
+
+    def interrupt_embedding_startup():
+        worker._signal_handler(signal.SIGTERM, None)
+
+    monkeypatch.setattr(worker, "_running", True)
+    monkeypatch.setattr(worker, "_publish_worker_lifecycle_phase", phases.append)
+    monkeypatch.setattr(worker, "request_runner_stop", lambda: None)
+    monkeypatch.setattr(
+        worker,
+        "_require_embedding_backend_ready",
+        interrupt_embedding_startup,
+    )
+    monkeypatch.setattr(
+        worker,
+        "stop_runner",
+        lambda **_kwargs: worker.DrainResult(),
+    )
+    monkeypatch.setattr(worker.logging, "shutdown", lambda: None)
+    monkeypatch.setattr(worker, "_terminate_process", terminate_calls.append)
+
+    worker.main()
+
+    assert phases == [
+        WorkerLifecyclePhase.STARTING,
+        WorkerLifecyclePhase.DRAINING,
+        WorkerLifecyclePhase.STOPPED,
+    ]
+    assert terminate_calls == [0]
 
 
 def test_worker_entry_point_recovers_timed_out_runs(monkeypatch, caplog):
@@ -226,17 +349,30 @@ def test_worker_entry_point_recovers_timed_out_runs(monkeypatch, caplog):
 
 
 def test_signal_handler_requests_runner_stop(monkeypatch):
+    from brain.contracts.worker_lifecycle import WorkerLifecyclePhase
     from brain.systems.cortex import worker
 
-    request_stop_calls = []
+    calls = []
     previous_running = worker._running
-    monkeypatch.setattr(worker, "request_runner_stop", lambda: request_stop_calls.append(True))
+    previous_draining = worker._draining
+    monkeypatch.setattr(
+        worker,
+        "_publish_worker_lifecycle_phase",
+        lambda phase: calls.append(("phase", phase)),
+    )
+    monkeypatch.setattr(worker, "request_runner_stop", lambda: calls.append(("stop", True)))
     try:
         worker._running = True
+        worker._draining = False
 
+        worker._signal_handler(signal.SIGTERM, None)
         worker._signal_handler(signal.SIGTERM, None)
 
         assert worker._running is False
-        assert request_stop_calls == [True]
+        assert calls == [
+            ("phase", WorkerLifecyclePhase.DRAINING),
+            ("stop", True),
+        ]
     finally:
         worker._running = previous_running
+        worker._draining = previous_draining

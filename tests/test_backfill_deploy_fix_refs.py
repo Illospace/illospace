@@ -88,6 +88,11 @@ async def _domain(session):
                     {"key": "fix_pr", "field_type": "text"},
                     {"key": "fix_merge_sha", "field_type": "text"},
                     {
+                        "key": "deploy_state",
+                        "field_type": "enum",
+                        "options": ["staging", "prod_pending", "deployed"],
+                    },
+                    {
                         "key": "status",
                         "field_type": "enum",
                         "options": ["Todo", "In Progress", "In Review", "Done"],
@@ -109,6 +114,7 @@ async def _record(session, domain, *, title, **data):
             "title": title,
             "repo": REPO,
             "status": "Todo",
+            "deploy_state": "staging",
             "progress_note": "investigating",
             **data,
         },
@@ -159,6 +165,14 @@ async def _seed_backfill_records(session) -> dict[str, DomainRecord]:
             domain,
             title="Already deployed",
             fix_pr=f"https://github.com/{REPO}/pull/999",
+            deploy_state="deployed",
+        ),
+        "unrelated": await _record(
+            session,
+            domain,
+            title="Not in deploy backfill scope",
+            fix_pr=f"https://github.com/{REPO}/pull/888",
+            deploy_state=None,
         ),
         "archived": await _record(
             session,
@@ -243,6 +257,9 @@ async def test_backfill_dry_run_writes_nothing(session):
     assert records["archived"].id not in {
         row["record_id"] for row in report["records"]
     }
+    assert records["unrelated"].id not in {
+        row["record_id"] for row in report["records"]
+    }
     for name, record in records.items():
         await session.refresh(record)
         assert record.data == before_data[name]
@@ -291,7 +308,10 @@ async def test_backfill_apply_normalizes_enriches_and_stays_in_scope(session):
         "no fix PR reference"
     )
     assert rows_by_id[records["deployed"].id]["sha_found"] is False
-    assert any(call.args == (REPO, 999) for call in github_lookup.await_args_list)
+    assert not any(
+        call.args == (REPO, 999)
+        for call in github_lookup.await_args_list
+    )
 
     for name, record in records.items():
         await session.refresh(record)
@@ -309,6 +329,8 @@ async def test_backfill_apply_normalizes_enriches_and_stays_in_scope(session):
     assert records["no_reference"].data["progress_note"].splitlines().count(
         "needs-human: no fix PR reference"
     ) == 1
+    assert records["deployed"].data.get("fix_merge_sha") is None
+    assert records["unrelated"].data == before_data["unrelated"]
     assert records["archived"].data == before_data["archived"]
 
     events = (
@@ -382,10 +404,16 @@ async def test_backfill_validates_every_plan_before_first_write(session, monkeyp
     }
     original_planner = backfill._plan_backfill_record
 
-    async def out_of_scope_second_plan(record, *, pull_request_lookup):
+    async def out_of_scope_second_plan(
+        record,
+        *,
+        pull_request_lookup,
+        normalize_only=False,
+    ):
         plan = await original_planner(
             record,
             pull_request_lookup=pull_request_lookup,
+            normalize_only=normalize_only,
         )
         if record.id == second.id:
             return replace(plan, patch={"verified": True})
