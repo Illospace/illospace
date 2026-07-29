@@ -53,6 +53,39 @@ def response_surface_guidance(
     return "\n".join(lines)
 
 
+HEADLESS_SURFACE = "headless"
+
+_VISIBLE_SURFACE_KEYS = (
+    "required_response_tool",
+    "final_answer_target_surface",
+    "originating_surface",
+    "triggering_surface",
+    "source_surface",
+)
+
+
+def has_user_visible_surface(
+    *,
+    target_ref: Mapping[str, Any] | None,
+    metadata: Mapping[str, Any] | None,
+) -> bool:
+    """True when this run's output is written for a person rather than a parent run.
+
+    A headless run reports upward and is never read directly, so it settles the
+    question on its own: monitored Slack intakes and spawn_worker(headless=True)
+    both carry surface hints while being invisible to everyone.
+    """
+
+    containers = (dict(target_ref or {}), dict(metadata or {}))
+    if any(container.get(HEADLESS_SURFACE) for container in containers):
+        return False
+    surfaces = [
+        _first_text(containers, (key,)) for key in _VISIBLE_SURFACE_KEYS
+    ]
+    named = [value for value in surfaces if value and value != HEADLESS_SURFACE]
+    return bool(named or _first_string_list(containers, ("alternative_response_tools",)))
+
+
 def _first_text(containers: tuple[Mapping[str, Any], ...], keys: tuple[str, ...]) -> str:
     for container in containers:
         if not isinstance(container, Mapping):
@@ -81,4 +114,4 @@ def _first_string_list(
     return []
 
 
-__all__ = ["response_surface_guidance"]
+__all__ = ["response_surface_guidance", "has_user_visible_surface"]

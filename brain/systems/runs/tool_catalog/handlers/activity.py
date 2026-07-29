@@ -49,7 +49,11 @@ async def _handle_my_activity() -> dict:
                 extra={"run_id": run_id},
                 exc_info=True,
             )
-            result.update(tokens_used=0, workers_spawned=0)
+            result.update(
+                tokens_used=0,
+                run_budget_tokens_used=0,
+                workers_spawned=0,
+            )
     if not result.get("execution_artifacts"):
         try:
             execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}

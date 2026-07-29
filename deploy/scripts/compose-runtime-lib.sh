@@ -8,6 +8,7 @@ RUNTIME_SERVICE_CATALOG="${RUNTIME_SERVICE_CATALOG:-$ROOT/deploy/compose/runtime
 WORKER_SWAP_PYTHON_BIN="${WORKER_SWAP_PYTHON_BIN:-python3}"
 
 source "$COMPOSE_RUNTIME_LIB_DIR/worker-swap-lib.sh"
+source "$COMPOSE_RUNTIME_LIB_DIR/worker-lifecycle-lib.sh"
 
 compose() {
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
@@ -126,6 +127,51 @@ container_running_known() {
     false) return 1 ;;
     *) return 2 ;;
   esac
+}
+
+# Combine Docker liveness and the generation-validated lifecycle phase into the
+# only cover answer consumed by swap waits. The Python contract owns the policy:
+# inspect/exec failures and `starting` are pending, a positive `claiming` record
+# is cover, and either a confirmed exit or `draining`/`stopped` loses cover.
+worker_cover_observation() {
+  local id="$1"
+  local container_state=unknown phase=unknown running_state
+
+  if container_running_known "$id"; then
+    container_state=running
+    phase="$(
+      docker exec "$id" python -m brain.contracts.worker_lifecycle read 2>/dev/null
+    )" || phase=unknown
+  else
+    running_state=$?
+    if [ "$running_state" = "1" ]; then
+      container_state=definitively_not_running
+    fi
+  fi
+
+  worker_lifecycle_cover_observe "$container_state" "$phase" || printf 'pending\n'
+}
+
+# Wait through pending cover, but return success only for strict claiming
+# evidence. No raw liveness or phase fact can authorize the destructive caller.
+wait_for_worker_claiming() {
+  local id="$1"
+  local wait_seconds="${COMPOSE_RUNTIME_WORKER_CLAIMING_TIMEOUT_SECONDS:-360}"
+  local deadline=$((SECONDS + wait_seconds))
+  local observation="pending"
+  while true; do
+    observation="$(worker_cover_observation "$id")"
+    case "$observation" in
+      claiming) return 0 ;;
+      definitively_not_claiming) break ;;
+      pending) ;;
+      *) observation="pending" ;;
+    esac
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 2
+  done
+  echo "Worker: container ${id:-unknown} did not report claiming within ${wait_seconds}s (last cover observation: $observation)." >&2
+  return 1
 }
 
 container_restart_policy() {
@@ -341,9 +387,8 @@ wait_for_worker_exit() {
   local deadline=$((started_at + wait_seconds))
   local wait_iterations=0
   local consecutive_zero_checks=0
-  local handoff_missing_checks=0
   local hint_printed=0
-  local active_runs affected_runs affected_ids elapsed snapshot handoff_state
+  local active_runs affected_runs affected_ids elapsed snapshot handoff_observation
   while container_running "$id"; do
     if [ "$SECONDS" -ge "$deadline" ]; then
       snapshot="$(worker_swap_snapshot)"
@@ -354,23 +399,18 @@ wait_for_worker_exit() {
       return 1
     fi
     if [ -n "$handoff_id" ]; then
-      handoff_state=0
-      container_running_known "$handoff_id" || handoff_state=$?
-      case "$handoff_state" in
-        0) handoff_missing_checks=0 ;;
-        1)
-          # Two consecutive definite answers, because a handoff that Docker is
-          # restarting reads as stopped for an instant and is not lost.
-          handoff_missing_checks=$((handoff_missing_checks + 1))
-          if [ "$handoff_missing_checks" -ge 2 ]; then
-            elapsed=$((SECONDS - started_at))
-            echo "Worker: handoff worker $handoff_id stopped after ${elapsed}s while worker $id was still draining, so NOTHING is claiming AgentRuns." >&2
-            echo "Worker: a handoff is a \`compose run\` container and therefore has restart=no, so it does not come back on its own -- not even from the worker's own 'exiting for restart' supervisor. Ending the drain wait now instead of holding zero capacity until the ${wait_seconds}s deadline." >&2
-            return 2
-          fi
+      handoff_observation="$(worker_cover_observation "$handoff_id")"
+      case "$handoff_observation" in
+        claiming) ;;
+        pending)
+          # Unknown Docker/exec observations never authorize an escalation.
           ;;
-        # Unknown: dockerd is a snap here and restarts itself without warning, so
-        # an unanswered inspect must never authorise force-replacing a worker.
+        definitively_not_claiming)
+          elapsed=$((SECONDS - started_at))
+          echo "Worker: handoff worker $handoff_id stopped claiming after ${elapsed}s while worker $id was still draining, so NOTHING is claiming AgentRuns." >&2
+          echo "Worker: the handoff either exited or published draining/stopped. Handoff containers have restart=no, and a draining worker cannot resume claiming; ending the wait now instead of holding zero capacity until the ${wait_seconds}s deadline." >&2
+          return 2
+          ;;
         *) ;;
       esac
     fi
@@ -426,7 +466,7 @@ escalate_worker_swap_after_drain_timeout() {
   run_details="$(worker_swap_snapshot_details "$snapshot")"
 
   if [ "$drain_status" = "2" ]; then
-    echo "FORCED WORKER SWAP: handoff worker ${handoff_id:-none} stopped while worker $worker_id was still draining, so nothing is claiming AgentRuns right now; replacing the drained worker immediately rather than waiting out the remaining ${wait_seconds}s deadline. Open run ids: ${affected_ids:-unknown} (id/status: $run_details)." >&2
+    echo "FORCED WORKER SWAP: handoff worker ${handoff_id:-none} lost claiming capacity while worker $worker_id was still draining, so nothing is claiming AgentRuns right now; replacing the drained worker immediately rather than waiting out the remaining ${wait_seconds}s deadline. Open run ids: ${affected_ids:-unknown} (id/status: $run_details)." >&2
     echo "Worker: capacity is already zero, so this escalation IS the recovery -- it is not a precaution. Runs interrupted here are requeued by the stale-run reaper." >&2
     record_worker_drain_timeout "$snapshot" "worker_handoff_lost"
   else
@@ -464,17 +504,21 @@ update_worker_after_drain() {
   fi
 
   handoff_id="$(start_worker_handoff)"
-  # Draining the only worker before another container exists to claim is the
-  # outage itself, so the handoff has to be confirmed up before the SIGTERM --
-  # not assumed from the fact that `compose run` returned an id.
-  if [ -z "$handoff_id" ] || ! container_running "$handoff_id"; then
+  # Draining the only worker before another container can claim is the outage
+  # itself. A running handoff may still be blocked in embedding startup, so the
+  # lifecycle contract must positively report claiming before the SIGTERM.
+  if [ -z "$handoff_id" ]; then
     echo "Worker: refusing to drain worker $worker_id because the handoff worker did not start (${handoff_id:-no container id})." >&2
     echo "Worker: draining without it would leave zero containers claiming AgentRuns. The worker is untouched and still claiming; nothing was interrupted." >&2
     echo "Recovery: docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" run -d --no-deps worker will show why it could not start; then rerun the upgrade." >&2
-    [ -z "$handoff_id" ] || docker rm -f "$handoff_id" >/dev/null 2>&1 || true
     return 1
   fi
-  echo "Worker: started handoff worker $handoff_id for new AgentRuns."
+  if ! wait_for_worker_claiming "$handoff_id"; then
+    echo "Worker: refusing to drain worker $worker_id because handoff worker $handoff_id is not confirmed claiming." >&2
+    echo "Worker: the existing worker is untouched. The handoff is being kept because a non-claiming or unknown lifecycle phase cannot authorize its removal." >&2
+    return 1
+  fi
+  echo "Worker: started handoff worker $handoff_id; it is claiming new AgentRuns."
   echo "Worker: ${active_runs} interactive AgentRun(s); signaling existing worker to drain. Affected run ids: $affected_ids."
   suspend_worker_restart_policy "$worker_id"
   docker kill -s TERM "$worker_id" >/dev/null 2>&1 || true
@@ -492,11 +536,12 @@ update_worker_after_drain() {
     abandon_worker_restart_policy_suspension
   fi
   # The handoff worker is the only thing claiming until this point, so it is
-  # retired against evidence that a replacement took over -- never against the
-  # mere fact that this function reached its last block.
+  # retired against strict claiming evidence from the replacement -- never
+  # against container-running state or an unknown lifecycle observation.
   replacement_id="$(worker_container_id)"
-  if [ -z "$replacement_id" ] || ! container_running "$replacement_id"; then
-    echo "Worker: no replacement worker is running, so handoff worker $handoff_id is being kept as the only container claiming AgentRuns." >&2
+  if [ -z "$replacement_id" ] || ! wait_for_worker_claiming "$replacement_id"; then
+    echo "Worker: replacement worker ${replacement_id:-none} is not confirmed claiming, so handoff worker $handoff_id is being kept as the only container claiming AgentRuns." >&2
+    echo "Worker: a missing, starting, or unknown replacement cannot authorize handoff removal." >&2
     echo "Worker: this is a degraded state -- a handoff worker does not run the cycle scheduler and will not come back after a reboot." >&2
     echo "Recovery: docker rm -f \$(docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" ps -aq worker) && docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" up -d --no-deps worker" >&2
     record_worker_drain_timeout "$snapshot" "worker_handoff_retained"
@@ -504,7 +549,7 @@ update_worker_after_drain() {
   fi
   snapshot="$(worker_swap_snapshot)"
   affected_ids="$(worker_swap_snapshot_run_ids "$snapshot")"
-  echo "Worker: regular worker $replacement_id is running; draining handoff worker $handoff_id. Open run ids at handoff shutdown: ${affected_ids:-none}."
+  echo "Worker: regular worker $replacement_id is claiming; draining handoff worker $handoff_id. Open run ids at handoff shutdown: ${affected_ids:-none}."
   docker update --restart=no "$handoff_id" >/dev/null 2>&1 || true
   docker kill -s TERM "$handoff_id" >/dev/null 2>&1 || true
   remove_worker_handoff_bounded "$handoff_id"

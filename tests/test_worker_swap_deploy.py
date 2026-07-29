@@ -21,12 +21,15 @@ def _simulator(
     *,
     body: str,
     handoff_starts: bool = True,
+    handoff_phase: str | None = "claiming",
     recreate_succeeds: bool = True,
+    replacement_phase: str | None = "claiming",
     survives_kill: bool = False,
     stub_drain_wait: bool = True,
     handoff_dies_after_ticks: int | None = None,
     handoff_state_unknown: bool = False,
     drain_timeout_seconds: int = 1,
+    claiming_timeout_seconds: int = 0,
 ) -> str:
     """Build a bash script whose `docker`/`compose` mutate simulated containers.
 
@@ -42,6 +45,7 @@ def _simulator(
 
     state.mkdir(parents=True, exist_ok=True)
     (state / "worker-1.running").write_text("1")
+    (state / "worker-1.generation").write_text("worker-generation-1")
 
     return f'''
 export STATE="{state}"
@@ -50,6 +54,7 @@ export HANDOFF_DIES_AFTER_TICKS={-1 if handoff_dies_after_ticks is None else han
 export HANDOFF_STATE_UNKNOWN={"1" if handoff_state_unknown else "0"}
 COMPOSE_RUNTIME_HANDOFF_REAP_TIMEOUT_SECONDS=0
 COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS={drain_timeout_seconds}
+COMPOSE_RUNTIME_WORKER_CLAIMING_TIMEOUT_SECONDS={claiming_timeout_seconds}
 source "{RUNTIME_LIB}"
 
 ticks() {{ cat "$STATE/ticks" 2>/dev/null || printf '0\\n'; }}
@@ -67,6 +72,13 @@ sleep() {
 '''}
 
 log() {{ printf '%s\\n' "$*" >> "$STATE/calls.log"; }}
+
+publish_phase() {{
+  local id="$1"
+  local phase="$2"
+  printf '%s\\n' "$phase" > "$STATE/$id.phase"
+  cp "$STATE/$id.generation" "$STATE/$id.phase-generation"
+}}
 
 worker_swap_snapshot() {{ printf '2896:running\\n'; }}
 worker_swap_snapshot_count() {{ printf '1\\n'; }}
@@ -96,6 +108,16 @@ docker() {{
         *RestartPolicy*) printf 'unless-stopped\\n' ;;
       esac
       ;;
+    exec)
+      local id="$2"
+      [ -f "$STATE/$id.phase" ] || return 1
+      [ -f "$STATE/$id.generation" ] || return 1
+      if ! cmp -s "$STATE/$id.generation" "$STATE/$id.phase-generation"; then
+        printf 'unknown\\n'
+        return 0
+      fi
+      cat "$STATE/$id.phase"
+      ;;
     kill)
       local id="${{!#}}"
       if [ "$2" = "-s" ]; then
@@ -103,9 +125,14 @@ docker() {{
       else
         [ "$SURVIVES_KILL" = "1" ] && return 0
         rm -f "$STATE/$id.running"
+        rm -f "$STATE/$id.phase" "$STATE/$id.phase-generation"
       fi
       ;;
-    rm) rm -f "$STATE/${{!#}}.running" "$STATE/${{!#}}.stopped" ;;
+    rm)
+      rm -f "$STATE/${{!#}}.running" "$STATE/${{!#}}.stopped"
+      rm -f "$STATE/${{!#}}.phase" "$STATE/${{!#}}.phase-generation"
+      rm -f "$STATE/${{!#}}.generation"
+      ;;
     update) : ;;
   esac
   return 0
@@ -136,13 +163,15 @@ compose() {{
         rm -f "$f"
       done
       : > "$STATE/worker-2.running"
+      printf 'worker-generation-2\\n' > "$STATE/worker-2.generation"
+      {"publish_phase worker-2 " + repr(replacement_phase) if replacement_phase is not None else ":"}
       ;;
   esac
   return 0
 }}
 
 start_worker_handoff() {{
-  {': > "$STATE/handoff-1.running"; printf "handoff-1\\n"' if handoff_starts else 'printf "\\n"'}
+  {': > "$STATE/handoff-1.running"; printf "handoff-generation-1\\n" > "$STATE/handoff-1.generation"; ' + ("publish_phase handoff-1 " + repr(handoff_phase) + "; " if handoff_phase is not None else "") + 'printf "handoff-1\\n"' if handoff_starts else 'printf "\\n"'}
 }}
 
 # The drain never completes: the worker is wedged on an in-flight run, which is
@@ -213,6 +242,78 @@ def test_the_worker_is_not_drained_when_no_handoff_worker_came_up(tmp_path):
     assert (state / "worker-1.running").exists()
 
 
+def test_a_starting_handoff_does_not_authorize_draining_the_last_claimer(tmp_path):
+    state = tmp_path / "s"
+    result = _run(
+        _simulator(
+            state,
+            body="update_worker_after_drain 2896:running",
+            handoff_phase="starting",
+        )
+    )
+
+    assert "STATUS=1" in result.stdout
+    assert "kill -s TERM worker-1" not in _calls(state)
+    assert "not confirmed claiming" in result.stderr
+    assert (state / "worker-1.running").exists()
+
+
+def test_an_unknown_handoff_phase_does_not_authorize_drain_or_removal(tmp_path):
+    state = tmp_path / "s"
+    result = _run(
+        _simulator(
+            state,
+            body="update_worker_after_drain 2896:running",
+            handoff_phase=None,
+        )
+    )
+
+    calls = _calls(state)
+    assert "STATUS=1" in result.stdout
+    assert "kill -s TERM worker-1" not in calls
+    assert "rm -f handoff-1" not in calls
+    assert "last cover observation: pending" in result.stderr
+    assert (state / "worker-1.running").exists()
+    assert (state / "handoff-1.running").exists()
+
+
+def test_a_starting_replacement_does_not_authorize_handoff_removal(tmp_path):
+    state = tmp_path / "s"
+    result = _run(
+        _simulator(
+            state,
+            body="update_worker_after_drain 2896:running",
+            replacement_phase="starting",
+        )
+    )
+
+    calls = _calls(state)
+    assert "STATUS=1" in result.stdout
+    assert "kill -s TERM worker-1" in calls
+    assert "kill -s TERM handoff-1" not in calls
+    assert "rm -f handoff-1" not in calls
+    assert "replacement worker worker-2 is not confirmed claiming" in result.stderr
+    assert (state / "handoff-1.running").exists()
+
+
+def test_an_unknown_replacement_phase_never_authorizes_handoff_removal(tmp_path):
+    state = tmp_path / "s"
+    result = _run(
+        _simulator(
+            state,
+            body="update_worker_after_drain 2896:running",
+            replacement_phase=None,
+        )
+    )
+
+    calls = _calls(state)
+    assert "STATUS=1" in result.stdout
+    assert "kill -s TERM handoff-1" not in calls
+    assert "rm -f handoff-1" not in calls
+    assert "last cover observation: pending" in result.stderr
+    assert (state / "handoff-1.running").exists()
+
+
 def test_a_worker_that_survives_sigkill_stops_the_swap(tmp_path):
     """It may still be holding runs, so the deploy must not continue over it."""
 
@@ -266,7 +367,7 @@ def test_the_drain_wait_ends_when_the_handoff_worker_dies(tmp_path):
     result = _run(script)
 
     assert "STATUS=2" in result.stdout
-    assert "stopped after" in result.stderr
+    assert "stopped claiming after" in result.stderr
     assert "NOTHING is claiming AgentRuns" in result.stderr
     assert "restart=no" in result.stderr
     # The worker it was draining is untouched by the wait itself.
@@ -301,18 +402,39 @@ def test_an_unanswered_handoff_inspect_does_not_end_the_drain_wait(tmp_path):
     assert "NOTHING is claiming AgentRuns" not in result.stderr
 
 
-def test_a_single_missed_handoff_observation_does_not_end_the_drain_wait(tmp_path):
-    """A handoff Docker is restarting reads as stopped for an instant."""
-
+def test_claiming_wait_observes_unknown_then_starting_then_claiming(tmp_path):
     state = tmp_path / "s"
     script = _simulator(
         state,
         body=(
             ': > "$STATE/handoff-1.running"\n'
-            'sleep() { local n; n=$(( $(ticks) + 1 )); printf "%s\\n" "$n" > "$STATE/ticks"; '
-            'case "$n" in 1) rm -f "$STATE/handoff-1.running" ;; '
-            '2) : > "$STATE/handoff-1.running" ;; '
-            '4) rm -f "$STATE/worker-1.running" ;; esac; return 0; }\n'
+            'printf "handoff-generation-1\\n" > "$STATE/handoff-1.generation"\n'
+            'sleep() { local n; n=$(( $(ticks) + 1 )); '
+            'printf "%s\\n" "$n" > "$STATE/ticks"; '
+            'case "$n" in '
+            '1) publish_phase handoff-1 starting ;; '
+            '2) publish_phase handoff-1 claiming ;; '
+            "esac; return 0; }\n"
+            "wait_for_worker_claiming handoff-1"
+        ),
+        claiming_timeout_seconds=10,
+    )
+    result = _run(script)
+
+    assert "STATUS=0" in result.stdout
+    assert (state / "ticks").read_text().strip() == "2"
+
+
+def test_drain_wait_loses_cover_when_claiming_becomes_draining(tmp_path):
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        body=(
+            ': > "$STATE/handoff-1.running"\n'
+            'printf "handoff-generation-1\\n" > "$STATE/handoff-1.generation"\n'
+            "publish_phase handoff-1 claiming\n"
+            'sleep() { printf "1\\n" > "$STATE/ticks"; '
+            "publish_phase handoff-1 draining; return 0; }\n"
             "wait_for_worker_exit worker-1 handoff-1"
         ),
         stub_drain_wait=False,
@@ -320,8 +442,48 @@ def test_a_single_missed_handoff_observation_does_not_end_the_drain_wait(tmp_pat
     )
     result = _run(script)
 
-    assert "STATUS=0" in result.stdout
-    assert "NOTHING is claiming AgentRuns" not in result.stderr
+    assert "STATUS=2" in result.stdout
+    assert "stopped claiming" in result.stderr
+    assert (state / "handoff-1.running").exists()
+
+
+def test_restarted_container_cannot_reuse_a_stale_claiming_record(tmp_path):
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        body=(
+            ': > "$STATE/handoff-1.running"\n'
+            'printf "old-generation\\n" > "$STATE/handoff-1.generation"\n'
+            "publish_phase handoff-1 claiming\n"
+            'printf "new-generation\\n" > "$STATE/handoff-1.generation"\n'
+            "wait_for_worker_claiming handoff-1"
+        ),
+    )
+    result = _run(script)
+
+    assert "STATUS=1" in result.stdout
+    assert "last cover observation: pending" in result.stderr
+
+
+def test_a_confirmed_handoff_exit_ends_the_drain_wait(tmp_path):
+    """A definite Docker exit is lost cover; only an unanswered inspect is pending."""
+
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        body=(
+            ': > "$STATE/handoff-1.running"\n'
+            'sleep() { local n; n=$(( $(ticks) + 1 )); printf "%s\\n" "$n" > "$STATE/ticks"; '
+            'case "$n" in 1) rm -f "$STATE/handoff-1.running" ;; esac; return 0; }\n'
+            "wait_for_worker_exit worker-1 handoff-1"
+        ),
+        stub_drain_wait=False,
+        drain_timeout_seconds=86400,
+    )
+    result = _run(script)
+
+    assert "STATUS=2" in result.stdout
+    assert "NOTHING is claiming AgentRuns" in result.stderr
 
 
 def test_a_lost_handoff_force_replaces_the_drained_worker(tmp_path):
@@ -341,7 +503,7 @@ def test_a_lost_handoff_force_replaces_the_drained_worker(tmp_path):
     assert "STATUS=0" in result.stdout
     assert result.stdout.split("RUNNING=")[1].strip() == "worker-2"
     assert "FORCED WORKER SWAP" in result.stderr
-    assert "handoff worker handoff-1 stopped" in result.stderr
+    assert "handoff worker handoff-1 lost claiming capacity" in result.stderr
     # The banner must not promise cover that is exactly what died.
     assert "keeps claiming new AgentRuns" not in result.stderr
 

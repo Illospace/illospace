@@ -5,7 +5,9 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
 
 from brain.platform.db.models.agent_run import AgentRunRow
@@ -13,6 +15,7 @@ from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.scheduler import (
     SchedulerColdStartReconciliation,
     SchedulerFailureGuardLatch,
+    SchedulerFailureGuardTriggerState,
     SchedulerJob,
     SchedulerLease,
     SchedulerLivenessCheckpoint,
@@ -68,6 +71,7 @@ async def make_scheduler_test_session(async_sqlite_session_factory):
             SchedulerLivenessCheckpoint.__table__,
             SchedulerJob.__table__,
             SchedulerFailureGuardLatch.__table__,
+            SchedulerFailureGuardTriggerState.__table__,
             SchedulerRun.__table__,
             SchedulerLease.__table__,
             SchedulerRunStep.__table__,
@@ -101,3 +105,33 @@ def make_scheduler_job(**overrides) -> SchedulerJob:
     }
     defaults.update(overrides)
     return SchedulerJob(**defaults)
+
+
+def guard_trigger(guard: dict[str, Any], kind: str) -> dict[str, Any]:
+    triggers = guard["triggers"]
+    assert isinstance(triggers, list)
+    return next(trigger for trigger in triggers if trigger["kind"] == kind)
+
+
+async def guard_latches(
+    session,
+    job: SchedulerJob,
+) -> dict[str, SchedulerFailureGuardLatch]:
+    result = await session.scalars(
+        select(SchedulerFailureGuardLatch).where(
+            SchedulerFailureGuardLatch.job_id == job.id
+        )
+    )
+    return {latch.trigger_kind: latch for latch in result.all()}
+
+
+async def guard_trigger_states(
+    session,
+    job: SchedulerJob,
+) -> dict[str, SchedulerFailureGuardTriggerState]:
+    result = await session.scalars(
+        select(SchedulerFailureGuardTriggerState).where(
+            SchedulerFailureGuardTriggerState.job_id == job.id
+        )
+    )
+    return {state.trigger_kind: state for state in result.all()}

@@ -2,26 +2,24 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from brain.contracts.scheduler_handoff import (
+    emit_detached_agent_run_handoff,
+)
 from brain.platform.db.enums import SettlementState
-from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.org import User
 from brain.platform.db.models.scheduler import SchedulerJob, SchedulerRun
 from brain.platform.db.models.skill_bundle import SkillInstallation
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.runtime_settings import display as runtime_display
-from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
 SKILL_NAME = "uwear-aws-health-scan"
-RUN_TIMEOUT_SECONDS = 840
-POLL_INTERVAL_SECONDS = 2.0
 
 
 def _timestamp_rendering_contract(
@@ -161,53 +159,14 @@ async def spawn_health_scan_run(*, now: datetime | None = None) -> int:
         return int(result.run_id)
 
 
-async def _read_run_status(run_id: int) -> RunStatus:
-    async with UnitOfWork() as uow:
-        run = await uow.session.get(AgentRunRow, int(run_id))
-        if run is None:
-            raise LookupError(f"Agent run {run_id} not found")
-        return coerce_run_status(run.status)
-
-
-async def wait_for_terminal_run(
-    run_id: int,
-    *,
-    timeout_seconds: float = RUN_TIMEOUT_SECONDS,
-    poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
-) -> RunStatus:
-    """Poll the admitted run until it settles or the pipeline wait budget expires."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + max(0.0, float(timeout_seconds))
-    while True:
-        status = await _read_run_status(run_id)
-        if status in TERMINAL_RUN_STATUSES:
-            return status
-
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            raise TimeoutError(
-                f"Agent run {run_id} did not reach a terminal state within {timeout_seconds:g}s"
-            )
-        await asyncio.sleep(min(max(0.01, poll_interval_seconds), remaining))
-
-
-async def async_main(*, timeout_seconds: float = RUN_TIMEOUT_SECONDS) -> int:
+async def async_main() -> int:
     try:
         run_id = await spawn_health_scan_run()
     except Exception as exc:  # noqa: BLE001 - process boundary must fail cleanly
         print(f"AWS health scan spawn failed: {exc}", file=sys.stderr)
         return 1
 
-    try:
-        status = await wait_for_terminal_run(run_id, timeout_seconds=timeout_seconds)
-    except Exception as exc:  # noqa: BLE001 - process boundary must fail cleanly
-        print(f"AWS health scan run {run_id} wait failed: {exc}", file=sys.stderr)
-        return 1
-
-    print(json.dumps({"run_id": run_id, "status": status.value}, sort_keys=True))
-    if status != RunStatus.COMPLETED:
-        print(f"AWS health scan run {run_id} ended with status {status.value}", file=sys.stderr)
-        return 1
+    print(emit_detached_agent_run_handoff(run_id))
     return 0
 
 

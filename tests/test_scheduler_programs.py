@@ -71,6 +71,13 @@ def test_pinned_program_set_equals_scheduler_catalog():
     assert set(_PINNED_PROJECTION_HASHES) == set(_CATALOG_BY_JOB_KEY)
 
 
+def test_aws_health_scan_declares_detached_agent_run_completion():
+    assert (
+        SINGLE_COMMAND_PROGRAM_REGISTRY["uwear_aws_health_scan"].completion_mode
+        == "agent_run"
+    )
+
+
 def test_catalog_programs_do_not_reach_legacy_substring_fallback(monkeypatch):
     def fail_if_called(*_args, **_kwargs):
         raise AssertionError("catalog program reached legacy substring fallback")

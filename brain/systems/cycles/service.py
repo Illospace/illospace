@@ -8,12 +8,14 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
+from brain.platform.integrations.provider_auth_preflight import (
+    ProviderAuthPreflightResult,
+)
 from brain.platform.providers.model_policy import EFFORT_TIER_SET, normalize_model_name
 from brain.systems.cortex.events import publish
 from brain.systems.cortex.thought_lifecycle import ThreadMessageCommand, post_thread_message
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUSES, CYCLE_RUN_TERMINAL_STATUSES
 from brain.systems.cycles.auth_preflight import (
-    CycleAuthPreflightResult,
     async_preflight_cycle_external_auth,
 )
 from brain.systems.cycles.common import (
@@ -257,7 +259,7 @@ async def _async_append_cycle_auth_blocked_thread_message(
     idea: Idea,
     cycle: Cycle,
     cycle_run: CycleRun,
-    preflight: CycleAuthPreflightResult,
+    preflight: ProviderAuthPreflightResult,
 ) -> tuple[dict, dict | None]:
     metadata = {
         "source": "cycle",
