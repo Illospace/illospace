@@ -347,6 +347,31 @@ class AsyncAgentRunStore:
                 return None
         return await self.refresh_run(run_id)
 
+    async def lock_terminal_boundary(
+        self,
+        run_id: int,
+        *,
+        anchor_run_id: int | None = None,
+    ) -> AgentRunRow:
+        """Lock a terminal run and its fan-out anchor in global order.
+
+        Terminal hooks inspect and may mutate the fan-out anchor after changing
+        the terminal child.  Both rows therefore need the same mutable lock,
+        acquired together before either is changed, so concurrent root/child
+        finalizers cannot acquire the pair in opposite orders.
+        """
+
+        run_id = int(run_id)
+        anchor_run_id = int(anchor_run_id or run_id)
+        locked_ids = await self._acquire_agent_run_locks(
+            [anchor_run_id, run_id],
+            key_share=False,
+            no_key_update=True,
+        )
+        if self._dialect_name() == "postgresql" and run_id not in locked_ids:
+            raise LookupError(f"Run {run_id} not found")
+        return await self.refresh_run(run_id)
+
     async def _run_for_source_idempotency(
         self,
         *,
@@ -1011,11 +1036,36 @@ class AsyncAgentRunStore:
         preserved instead of looping forever.
         """
 
-        row = await self._locked_run(run_id)
+        snapshot = await self.require_run(run_id)
+        snapshot_metadata = snapshot.metadata_ if isinstance(snapshot.metadata_, dict) else {}
+        terminal_interruption = _coerce_int(
+            snapshot_metadata.get("interruption_count"),
+            default=0,
+        ) >= _agent_run_max_interruption_requeues()
+        if terminal_interruption:
+            anchor_run_id = int(snapshot.parent_run_id or snapshot.id)
+            await self.commit_event_boundary(run_id)
+            row = await self.lock_terminal_boundary(
+                run_id,
+                anchor_run_id=anchor_run_id,
+            )
+        else:
+            row = await self._locked_run(run_id)
         current = coerce_run_status(row.status, default=RunStatus.FAILED)
         metadata = dict(row.metadata_ or {})
         previous_count = _coerce_int(metadata.get("interruption_count"), default=0)
         requeue_allowed = previous_count < _agent_run_max_interruption_requeues()
+        if not requeue_allowed and not terminal_interruption:
+            anchor_run_id = int(row.parent_run_id or row.id)
+            await self.commit_event_boundary(run_id)
+            row = await self.lock_terminal_boundary(
+                run_id,
+                anchor_run_id=anchor_run_id,
+            )
+            current = coerce_run_status(row.status, default=RunStatus.FAILED)
+            metadata = dict(row.metadata_ or {})
+            previous_count = _coerce_int(metadata.get("interruption_count"), default=0)
+            requeue_allowed = previous_count < _agent_run_max_interruption_requeues()
         target_status = RunStatus.QUEUED if requeue_allowed else RunStatus.EXPIRED
         try:
             current, target = ensure_run_transition(
@@ -1360,15 +1410,17 @@ class AsyncAgentRunStore:
             return await self._append_event_locked(event)
 
     async def commit_event_boundary(self, run_id: int) -> None:
-        """Publish pre-action events before a tool opens an isolated UoW.
+        """Publish prior run work before crossing into a new lock boundary.
 
         Tool handlers such as ``spawn_worker`` deliberately persist through a
         separate session.  Keeping the runner transaction open after
         ``run.tool_started`` leaves both the AgentRun row lock and its advisory
         event-stream lock held while that handler tries to lock the same run,
-        producing a cross-session lock cycle.  Serialize the commit with event
-        appends so parallel tool calls cannot operate on the shared
-        ``AsyncSession`` while its transaction is closing.
+        producing a cross-session lock cycle. Terminal writes likewise release
+        prior child locks here before acquiring their root/child pair in global
+        order. Serialize the commit with event appends so parallel tool calls
+        cannot operate on the shared ``AsyncSession`` while its transaction is
+        closing.
         """
 
         async with _event_lock(int(run_id)):

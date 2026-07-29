@@ -1267,6 +1267,11 @@ async def _mark_run_failed_after_runner_error_async(
         store = AsyncAgentRunStore(uow.session)
         row = await store.require_run(int(run_id))
         if coerce_run_status(row.status, default=RunStatus.FAILED) not in TERMINAL_RUN_STATUSES:
+            row = await store.lock_terminal_boundary(
+                int(run_id),
+                anchor_run_id=row.parent_run_id or row.id,
+            )
+        if coerce_run_status(row.status, default=RunStatus.FAILED) not in TERMINAL_RUN_STATUSES:
             category = failure_category_for_error(error)
             failure = public_run_failure(RunStatus.FAILED, category)
             await store.update_metadata(

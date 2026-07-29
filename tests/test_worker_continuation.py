@@ -566,7 +566,7 @@ def test_spawn_worker_schema_exposes_opt_in_join_flag():
     assert join_parent["default"] is False
 
 
-async def test_fanout_anchor_lock_uses_select_for_update():
+async def test_fanout_anchor_lock_uses_select_for_no_key_update():
     captured = {}
     anchor = object()
 
@@ -587,7 +587,7 @@ async def test_fanout_anchor_lock_uses_select_for_update():
         )
     )
     assert "WHERE agent_runs.id = 482" in sql
-    assert sql.rstrip().endswith("FOR UPDATE")
+    assert sql.rstrip().endswith("FOR NO KEY UPDATE")
 
 
 async def test_evidence_locks_refresh_preloaded_parent_and_cycle_after_concurrent_commit(
