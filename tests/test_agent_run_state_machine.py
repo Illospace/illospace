@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import Callable, AsyncIterator
 from datetime import datetime, timedelta, timezone
@@ -1629,6 +1630,44 @@ async def test_stale_active_run_reaper_interrupts_requeues_and_retries_abandoned
     assert retried is not None
     assert retried.id == run.id
     assert retried.status == RunStatus.STARTING
+
+
+async def test_scheduler_reaps_abandoned_run_without_a_worker(session_factory, monkeypatch, capsys):
+    from brain.app.cli import scheduler
+    from brain.systems.runs.cortex import runner
+
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    run = await store.create_run(_run_request(thread_id="idea-1", message="scheduler recovery"))
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+    old = datetime.now(timezone.utc) - timedelta(seconds=600)
+    row = await session.get(AgentRunRow, run.id)
+    assert row is not None
+    row.created_at = old
+    row.started_at = old
+    row.updated_at = old
+    row.execution_token = "dead-worker"
+    row.metadata_ = {"runner_heartbeat": {"at": old.isoformat(), "reason": "runner_running"}}
+    for event in (await session.scalars(select(AgentRunEventRow).where(AgentRunEventRow.run_id == run.id))).all():
+        event.created_at = old
+    await session.commit()
+
+    monkeypatch.setattr(scheduler, "_monotonic", lambda: 100.0)
+    with (
+        patch("brain.systems.runs.cortex.runner.UnitOfWork", return_value=_SessionUoW(session)),
+        patch("brain.systems.runs.cortex.runner.publish_safe"),
+        patch("brain.systems.runs.cortex.runner._settle_idea_for_terminal_root_run_async", return_value=None),
+        patch("brain.systems.runs.cortex.runner.notify_run_interruption", return_value=None),
+    ):
+        next_reap_at = await scheduler._reap_stale_active_runs_if_due(next_reap_at=0.0)
+
+    row = await session.get(AgentRunRow, run.id)
+    assert next_reap_at == 160.0
+    assert row is not None
+    assert row.status == RunStatus.QUEUED.value
+    event = json.loads(capsys.readouterr().out)
+    assert event == {"event": "agent_run_stale_reap", "ok": True, "reaped": 1}
 
 
 async def test_stale_active_run_reaper_uses_recent_events_as_liveness(session_factory):
