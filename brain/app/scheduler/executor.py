@@ -107,8 +107,7 @@ def _positive_float_env(name: str, default: float) -> float:
 
 DEFAULT_DRAIN_ADMISSION_BUDGET_SECONDS = _positive_float_env(
     "SCHEDULER_DRAIN_ADMISSION_BUDGET_SECONDS",
-    # Deprecated fallback; remove after deploy configuration uses the admission name.
-    _positive_float_env("SCHEDULER_DRAIN_EXECUTION_BUDGET_SECONDS", 30.0),
+    30.0,
 )
 
 _FINAL_RUN_STATUSES = {
