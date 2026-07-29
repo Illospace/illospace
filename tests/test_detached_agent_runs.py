@@ -9,6 +9,7 @@ from sqlalchemy import event
 from sqlalchemy.schema import CreateTable
 
 from brain.app.scheduler.detached_agent_runs import async_reconcile_detached_runs
+from brain.app.scheduler.runtime import async_finish_run
 from brain.contracts.scheduler_handoff import (
     DetachedAgentRunHandoff,
     DetachedAgentRunHandoffError,
@@ -158,6 +159,68 @@ def test_detached_agent_run_handoff_rejects_any_malformed_envelope(payload):
 
 
 @pytest.mark.asyncio
+async def test_finish_run_rejects_a_job_for_a_different_run(scheduler_session):
+    job, run, _, _ = await _add_detached_candidate(
+        scheduler_session,
+        candidate_id=10,
+        agent_status="completed",
+    )
+    wrong_job = make_scheduler_job(
+        job_key="wrong_detached_job",
+        family="wrong_detached_job",
+        program_key="wrong_detached_job",
+    )
+    scheduler_session.add(wrong_job)
+    await scheduler_session.flush()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            rf"Scheduler job {wrong_job.id} does not match run {run.id} "
+            rf"job_id {job.id}"
+        ),
+    ):
+        await async_finish_run(
+            scheduler_session,
+            run,
+            job=wrong_job,
+            status="settled_success",
+        )
+
+    assert run.status == "executing"
+    assert run.finished_at is None
+    assert job.last_finished_at is None
+    assert wrong_job.last_finished_at is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_detached_runs_rejects_a_missing_job(scheduler_session):
+    job, run, _, _ = await _add_detached_candidate(
+        scheduler_session,
+        candidate_id=11,
+        agent_status="completed",
+    )
+    job_id = job.id
+    run_id = run.id
+    await scheduler_session.delete(job)
+    await scheduler_session.commit()
+    scheduler_session.expunge_all()
+
+    with pytest.raises(
+        ValueError,
+        match=rf"Scheduler job {job_id} not found for detached run {run_id}",
+    ):
+        await async_reconcile_detached_runs(
+            scheduler_session,
+            retryable_failure_summary=lambda *_args, **_kwargs: (
+                "settled_failure",
+                {},
+            ),
+            apply_failure_guard=lambda *_args, **_kwargs: None,
+        )
+
+
+@pytest.mark.asyncio
 async def test_reconcile_detached_runs_preserves_mixed_candidate_outcomes(
     scheduler_session,
 ):
@@ -295,38 +358,10 @@ async def test_reconcile_detached_runs_preserves_mixed_candidate_outcomes(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("candidate_count", [1, 4])
-async def test_reconcile_detached_runs_uses_four_selects_for_any_batch_size(
+async def test_reconcile_detached_runs_select_count_is_constant_with_batch_size(
     scheduler_session,
-    candidate_count,
 ):
     terminal_at = datetime(2026, 7, 28, 19, 35, tzinfo=timezone.utc)
-    for candidate_id in range(100, 100 + candidate_count):
-        await _add_detached_candidate(
-            scheduler_session,
-            candidate_id=candidate_id,
-            agent_status="failed",
-            terminal_at=terminal_at,
-            attempt=2,
-        )
-    await scheduler_session.commit()
-    scheduler_session.expunge_all()
-
-    select_statements: list[str] = []
-
-    def count_selects(
-        _connection,
-        _cursor,
-        statement,
-        _parameters,
-        _context,
-        _executemany,
-    ):
-        if statement.lstrip().upper().startswith("SELECT"):
-            select_statements.append(statement)
-
-    engine = scheduler_session.bind
-    event.listen(engine.sync_engine, "before_cursor_execute", count_selects)
 
     def retryable_failure_summary(_job, _run, *, base_summary, now):
         del now
@@ -335,15 +370,54 @@ async def test_reconcile_detached_runs_uses_four_selects_for_any_batch_size(
     async def apply_failure_guard(*_args, **_kwargs):
         return None
 
-    try:
-        reconciled = await async_reconcile_detached_runs(
-            scheduler_session,
-            retryable_failure_summary=retryable_failure_summary,
-            apply_failure_guard=apply_failure_guard,
-            now=terminal_at,
-        )
-    finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", count_selects)
+    async def reconcile_and_count_selects(candidate_ids: range) -> int:
+        for candidate_id in candidate_ids:
+            await _add_detached_candidate(
+                scheduler_session,
+                candidate_id=candidate_id,
+                agent_status="failed",
+                terminal_at=terminal_at,
+                attempt=2,
+            )
+        await scheduler_session.commit()
+        scheduler_session.expunge_all()
 
-    assert len(reconciled) == candidate_count
-    assert len(select_statements) == 4
+        select_count = 0
+
+        def count_selects(
+            _connection,
+            _cursor,
+            statement,
+            _parameters,
+            _context,
+            _executemany,
+        ):
+            nonlocal select_count
+            if statement.lstrip().upper().startswith("SELECT"):
+                select_count += 1
+
+        engine = scheduler_session.bind
+        event.listen(engine.sync_engine, "before_cursor_execute", count_selects)
+        try:
+            reconciled = await async_reconcile_detached_runs(
+                scheduler_session,
+                retryable_failure_summary=retryable_failure_summary,
+                apply_failure_guard=apply_failure_guard,
+                now=terminal_at,
+            )
+        finally:
+            event.remove(
+                engine.sync_engine,
+                "before_cursor_execute",
+                count_selects,
+            )
+
+        assert len(reconciled) == len(candidate_ids)
+        return select_count
+
+    single_candidate_selects = await reconcile_and_count_selects(range(100, 101))
+    larger_batch_selects = await reconcile_and_count_selects(range(200, 208))
+
+    assert single_candidate_selects <= 4
+    assert larger_batch_selects <= 4
+    assert larger_batch_selects <= single_candidate_selects
