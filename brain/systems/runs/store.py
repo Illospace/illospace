@@ -292,6 +292,7 @@ class AsyncAgentRunStore:
         run_ids: Iterable[int | None],
         *,
         key_share: bool,
+        no_key_update: bool = False,
         skip_locked: bool = False,
     ) -> set[int]:
         """Acquire one lock mode across run rows in ascending global order."""
@@ -304,7 +305,7 @@ class AsyncAgentRunStore:
             .order_by(AgentRunRow.id.asc())
             .with_for_update(
                 read=key_share,
-                key_share=key_share,
+                key_share=key_share or no_key_update,
                 skip_locked=skip_locked,
             )
         )
@@ -318,7 +319,13 @@ class AsyncAgentRunStore:
         root_run_id: int | None = None,
         skip_locked: bool = False,
     ) -> AgentRunRow | None:
-        """Lock a root/current pair in id order, with only the current row exclusive."""
+        """Lock a root/current pair in order, with the current row mutable.
+
+        ``FOR NO KEY UPDATE`` still serializes every run mutation while staying
+        compatible with child-event ``FOR KEY SHARE`` locks on the root. Run
+        primary keys are immutable, so the stronger ``FOR UPDATE`` lock only
+        creates unnecessary root/child lock convoys.
+        """
         run_id = int(run_id)
         if self._dialect_name() != "postgresql":
             return await self.refresh_run(run_id)
@@ -333,6 +340,7 @@ class AsyncAgentRunStore:
             locked_ids = await self._acquire_agent_run_locks(
                 [lock_id],
                 key_share=lock_id != run_id,
+                no_key_update=lock_id == run_id,
                 skip_locked=skip_locked,
             )
             if lock_id not in locked_ids:

@@ -51,7 +51,8 @@ class _SharedRowLocks:
                 self.contention_observed.set()
                 await self._condition.wait()
             previous_mode = self._holders[run_id].get(transaction)
-            if previous_mode == "update" or previous_mode == mode:
+            strength = {"key_share": 1, "no_key_update": 2, "update": 3}
+            if previous_mode is not None and strength[previous_mode] >= strength[mode]:
                 return
             self._holders[run_id][transaction] = mode
             self.events[transaction].append(("row", run_id))
@@ -73,6 +74,8 @@ class _SharedRowLocks:
         ]
         if mode == "key_share":
             return "update" in other_modes
+        if mode == "no_key_update":
+            return any(held_mode in {"no_key_update", "update"} for held_mode in other_modes)
         return bool(other_modes)
 
 
@@ -99,11 +102,16 @@ class _ContendingPostgresSession:
     async def scalars(self, statement):
         compiled = statement.compile(dialect=postgresql.dialect())
         sql = str(compiled)
-        if "FOR UPDATE" in sql or "FOR KEY SHARE" in sql:
+        if "FOR UPDATE" in sql or "FOR KEY SHARE" in sql or "FOR NO KEY UPDATE" in sql:
             run_ids = next(
                 value for value in compiled.params.values() if isinstance(value, list)
             )
-            mode = "key_share" if "FOR KEY SHARE" in sql else "update"
+            if "FOR KEY SHARE" in sql:
+                mode = "key_share"
+            elif "FOR NO KEY UPDATE" in sql:
+                mode = "no_key_update"
+            else:
+                mode = "update"
             for run_id in sorted(int(value) for value in run_ids):
                 await self._locks.acquire(self._transaction, run_id, mode)
             self._lock_calls += 1
@@ -186,9 +194,13 @@ async def test_agent_run_lock_order_is_transaction_wide_and_precedes_advisory_lo
     outer = asyncio.create_task(
         _write_child_event(outer_session, run_id=3065, root_run_id=3024)
     )
-    await asyncio.wait_for(locks.contention_observed.wait(), timeout=1)
     nested_session.resume.set()
     await asyncio.wait_for(asyncio.gather(nested, outer), timeout=1)
+
+    # The outer transaction only mutates the parent row. FOR NO KEY UPDATE is
+    # compatible with the nested child's key-share protection of that parent,
+    # so child event persistence no longer creates a parent lock convoy.
+    assert not locks.contention_observed.is_set()
 
     for transaction_events in locks.events.values():
         row_lock_ids = [
