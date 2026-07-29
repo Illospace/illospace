@@ -454,7 +454,11 @@ async def _lock_parent_run(session: Any, parent_run_id: int) -> AgentRunRow | No
     rows = await session.scalars(
         select(AgentRunRow)
         .where(AgentRunRow.id == int(parent_run_id))
-        .with_for_update()
+        # Evidence receipts only mutate non-key parent fields. Keep this
+        # compatible with the FOR KEY SHARE lock held by child event writers;
+        # a stronger FOR UPDATE waiter can otherwise starve behind continuous
+        # child activity and convoy ordered terminal locks behind it.
+        .with_for_update(key_share=True)
         .execution_options(populate_existing=True)
     )
     return rows.one_or_none()
