@@ -334,6 +334,62 @@ async def test_run_admission_marks_idea_working_without_worker_details(monkeypat
     assert added[0].trigger == "agent_run_admitted"
 
 
+async def test_run_admission_rejects_uncredentialed_anthropic_before_creation(monkeypatch):
+    from brain.platform.integrations.provider_auth_preflight import (
+        ProviderAuthPreflightResult,
+    )
+    from brain.systems.runs.domain import AgentRunRequest
+    from brain.systems.runs import work_intake
+
+    request = AgentRunRequest(
+        org_id="org-1",
+        user_id="user-1",
+        thread_id="thread-1",
+        message="run",
+        model_policy={"model": "anthropic/claude-sonnet-5"},
+    )
+    create_calls = []
+
+    async def build_request(*_args, **_kwargs):
+        return request
+
+    async def blocked_probe(_session, **kwargs):
+        return ProviderAuthPreflightResult(
+            status="auth_blocked",
+            provider="anthropic",
+            model=kwargs["model"],
+            credential="Anthropic API key",
+            error_code="provider_credential_unavailable",
+        )
+
+    class FailStore:
+        def __init__(self, _session):
+            create_calls.append("constructed")
+
+    monkeypatch.setattr(work_intake, "build_agent_run_request", build_request)
+    monkeypatch.setattr(work_intake, "async_probe_provider_auth", blocked_probe)
+    monkeypatch.setattr(work_intake, "AsyncAgentRunStore", FailStore)
+
+    result = await work_intake.admit_work(
+        object(),
+        work_intake.WorkIntakeEvent(
+            source="test",
+            event_type="test.run",
+            org_id="org-1",
+            actor=None,
+            target={"kind": "direct", "thread_id": "thread-1"},
+        ),
+    )
+
+    assert result.ok is False
+    assert result.run_id is None
+    assert result.skipped_reason == (
+        "provider_credential_unavailable: provider=anthropic "
+        "model=anthropic/claude-sonnet-5 credential=Anthropic API key"
+    )
+    assert create_calls == []
+
+
 async def test_run_admission_preserves_protected_idea_statuses(monkeypatch):
     from brain.platform.db.models.idea import Idea
     from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
@@ -2112,16 +2168,28 @@ async def test_spawn_worker_auth_policy_probes_anthropic_and_owns_wording(
     )
 
 
-async def test_cycle_auth_policy_skips_anthropic_without_probing(monkeypatch):
+async def test_cycle_auth_policy_blocks_anthropic_without_credentials(monkeypatch):
     from brain.systems.cycles import auth_preflight
+    from brain.platform.integrations.provider_auth_preflight import (
+        ProviderAuthPreflightResult,
+    )
 
-    async def unexpected_probe(*_args, **_kwargs):
-        raise AssertionError("Cycle policy must remain OpenAI-only")
+    probes = []
+
+    async def blocked_probe(*_args, **kwargs):
+        probes.append(kwargs)
+        return ProviderAuthPreflightResult(
+            status="auth_blocked",
+            provider="anthropic",
+            model=kwargs["model"],
+            credential="Anthropic API key",
+            error_code="provider_credential_unavailable",
+        )
 
     monkeypatch.setattr(
         auth_preflight,
         "async_probe_provider_auth",
-        unexpected_probe,
+        blocked_probe,
     )
 
     result = await auth_preflight.async_preflight_cycle_external_auth(
@@ -2133,8 +2201,10 @@ async def test_cycle_auth_policy_skips_anthropic_without_probing(monkeypatch):
         ),
     )
 
-    assert result.status == "skipped"
+    assert result.status == "auth_blocked"
     assert result.provider == "anthropic"
+    assert probes[0]["provider"] == "anthropic"
+    assert "Add an Anthropic API key" in result.visible_message
 
 
 @pytest.mark.parametrize(

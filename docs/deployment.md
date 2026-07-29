@@ -95,6 +95,20 @@ contract.
 
 - Keep `deploy/compose/.env`, `.env`, database dumps, uploads, logs, and
   operator notes out of git.
+- Before shipping, run the checked-in enabled-Cycle admission fixture gate:
+  `python3 -m brain.jobs.check_cycle_context_admission`. After the stack is
+  upgraded, run the same gate inside the API container with `--live`; it reads
+  every enabled Cycle plus its current prompt, guidance, output targets, model,
+  and thinking configuration from Postgres without writing. A failed result is
+  a deployment failure; a warning means the minimum prompt is above 80% of its
+  admission ceiling.
+
+  ```bash
+  docker compose --env-file deploy/compose/.env \
+    -f deploy/compose/docker-compose.yml \
+    exec -T api python3 -m brain.jobs.check_cycle_context_admission --live
+  ```
+
 - Prefer `EMBEDDING_BACKEND=api` for the simplest team-server install.
 - Use GPU workers only when the host has the right CUDA/PyTorch stack.
 - Let the `migrate` service run Alembic migrations before API, worker, and

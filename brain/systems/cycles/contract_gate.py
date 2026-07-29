@@ -497,7 +497,7 @@ def _repair_prompt(
     ]
 
 
-def _repair_model(agent_run: AgentRunRow) -> str:
+async def _repair_model(session: Any, agent_run: AgentRunRow) -> str:
     model_policy = _json_dict(getattr(agent_run, "model_policy", None))
     metadata = _json_dict(getattr(agent_run, "metadata_", None))
     for container in (model_policy, metadata):
@@ -505,21 +505,19 @@ def _repair_model(agent_run: AgentRunRow) -> str:
             value = str(container.get(key) or "").strip()
             if value:
                 return value
-    from brain.platform.providers.model_policy import get_default_model, resolve_default_provider
+    from brain.platform.providers.model_policy import async_get_default_model
 
-    provider = resolve_default_provider(
+    return await async_get_default_model(
+        session,
+        include_provider_prefix=True,
         user_id=str(getattr(agent_run, "user_id", "") or "") or None,
         org_id=str(getattr(agent_run, "org_id", "") or "") or None,
-    )
-    return get_default_model(
-        provider=provider,
-        include_provider_prefix=False,
-        user_id=str(getattr(agent_run, "user_id", "") or "") or None,
     )
 
 
 async def _async_repair_cycle_contract_answer(
     *,
+    session: Any,
     agent_run: AgentRunRow,
     mission: str,
     result_contract: dict[str, Any],
@@ -530,19 +528,33 @@ async def _async_repair_cycle_contract_answer(
     """Run exactly one bounded LLM repair pass for a failed Cycle contract answer."""
 
     try:
-        from brain.platform.integrations.llm import resolve_llm_client
+        from brain.platform.integrations.llm import async_resolve_llm_client
         from brain.platform.integrations.providers import get_provider
-        from brain.platform.providers.model_policy import infer_provider_from_model, resolve_default_provider
+        from brain.platform.providers.model_policy import (
+            infer_provider_from_model,
+            required_openai_auth_mode,
+            resolve_default_provider,
+        )
         from brain.systems.runs.direct_loop.request import build_api_request
         from brain.systems.sessions import _content_to_dicts
         from brain.systems.sessions.harvest import _extract_text
 
         user_id = str(getattr(agent_run, "user_id", "") or "") or None
         org_id = str(getattr(agent_run, "org_id", "") or "") or None
-        model = _repair_model(agent_run)
+        model = await _repair_model(session, agent_run)
         default_provider = resolve_default_provider(user_id=user_id, org_id=org_id)
         requested_provider = infer_provider_from_model(model, default=default_provider)
-        llm = resolve_llm_client(user_id=user_id, org_id=org_id, provider=requested_provider)
+        llm = await async_resolve_llm_client(
+            user_id=user_id,
+            org_id=org_id,
+            provider=requested_provider,
+            auth_mode=(
+                required_openai_auth_mode(model)
+                if requested_provider == "openai"
+                else None
+            ),
+            session=session,
+        )
         provider = get_provider(llm.provider, llm.client)
         session_id = f"cycle-contract-repair-{int(agent_run.id)}"
         request = build_api_request(
@@ -760,6 +772,7 @@ async def async_prepare_cycle_run_visible_finalization(
     verdict["repair_mode"] = "append_missing_outputs" if append_only else "replace_invalid_answer"
     try:
         repair_answer = await _async_repair_cycle_contract_answer(
+            session=session,
             agent_run=agent_run,
             mission=mission,
             result_contract=result_contract,

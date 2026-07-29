@@ -52,6 +52,7 @@ async def run_knowledge_index_sync(
                     "failed": 1,
                     "truncated": 0,
                 },
+                "exception_type": type(exc).__name__,
                 "error": str(exc),
             }
         results.append(payload)

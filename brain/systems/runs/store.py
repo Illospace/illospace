@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -13,6 +13,7 @@ import os
 import threading
 from typing import Any
 import uuid
+import weakref
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -101,15 +102,22 @@ class ExecutionClaimLost(RuntimeError):
 
 
 _EVENT_LOCKS_GUARD = threading.Lock()
-_EVENT_LOCKS: dict[int, threading.RLock] = {}
+_EVENT_LOCKS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    weakref.WeakValueDictionary[int, asyncio.Lock],
+] = weakref.WeakKeyDictionary()
 
 
-def _event_lock(run_id: int) -> threading.RLock:
+def _event_lock(run_id: int) -> asyncio.Lock:
+    """Return a coroutine-aware lock scoped to the active event loop and run."""
+
+    loop = asyncio.get_running_loop()
     with _EVENT_LOCKS_GUARD:
-        lock = _EVENT_LOCKS.get(int(run_id))
+        loop_locks = _EVENT_LOCKS.setdefault(loop, weakref.WeakValueDictionary())
+        lock = loop_locks.get(int(run_id))
         if lock is None:
-            lock = threading.RLock()
-            _EVENT_LOCKS[int(run_id)] = lock
+            lock = asyncio.Lock()
+            loop_locks[int(run_id)] = lock
         return lock
 
 
@@ -1340,16 +1348,20 @@ class AsyncAgentRunStore:
         return messages
 
     async def append_event(self, event: AgentRunEvent) -> AgentRunEventRow:
-        with _event_lock(int(event.run_id)):
-            await self._acquire_agent_run_locks(
-                [event.root_run_id or event.run_id, event.run_id],
-                key_share=True,
-            )
-            await self.lock_event_stream(
-                int(event.run_id),
-            )
-            sequence_no = event.sequence_no
-            if sequence_no is None:
+        async with _event_lock(int(event.run_id)):
+            return await self._append_event_locked(event)
+
+    async def _append_event_locked(self, event: AgentRunEvent) -> AgentRunEventRow:
+        await self._acquire_agent_run_locks(
+            [event.root_run_id or event.run_id, event.run_id],
+            key_share=True,
+        )
+        await self.lock_event_stream(
+            int(event.run_id),
+        )
+        sequence_no = event.sequence_no
+        if sequence_no is None:
+            with getattr(self.session, "no_autoflush", nullcontext()):
                 sequence_no = int(
                     await self.session.scalar(
                         select(func.coalesce(func.max(AgentRunEventRow.sequence_no), 0)).where(
@@ -1358,22 +1370,22 @@ class AsyncAgentRunStore:
                     )
                     or 0
                 ) + 1
-            row = AgentRunEventRow(
-                run_id=event.run_id,
-                root_run_id=event.root_run_id or event.run_id,
-                sequence_no=sequence_no,
-                event_type=event.event_type,
-                payload=dict(event.payload or {}),
-                producer=event.producer,
-                visibility=(
-                    event.visibility.value if isinstance(event.visibility, EventVisibility) else str(event.visibility)
-                ),
-            )
-            self.session.add(row)
-            await self.session.flush()
-            if self.auto_commit:
-                await self.session.commit()
-            return row
+        row = AgentRunEventRow(
+            run_id=event.run_id,
+            root_run_id=event.root_run_id or event.run_id,
+            sequence_no=sequence_no,
+            event_type=event.event_type,
+            payload=dict(event.payload or {}),
+            producer=event.producer,
+            visibility=(
+                event.visibility.value if isinstance(event.visibility, EventVisibility) else str(event.visibility)
+            ),
+        )
+        self.session.add(row)
+        await self.session.flush()
+        if self.auto_commit:
+            await self.session.commit()
+        return row
 
     async def lock_event_stream(self, run_id: int) -> None:
         """Serialize event writers for one run."""
@@ -1439,46 +1451,47 @@ class AsyncAgentRunStore:
         return safe_provider_error_sentinel(detected_provider_error)
 
     async def append_artifact(self, artifact: AgentRunArtifact) -> AgentRunArtifactRow:
-        artifact_type = (
-            artifact.artifact_type.value
-            if isinstance(artifact.artifact_type, ArtifactType)
-            else str(artifact.artifact_type)
-        )
-        artifact_text = artifact.text
-        if artifact_type == ArtifactType.FINAL_ANSWER.value and artifact_text is not None:
-            artifact_text = await self.safe_cycle_provider_error_text(
-                int(artifact.run_id),
-                str(artifact_text),
+        async with _event_lock(int(artifact.run_id)):
+            artifact_type = (
+                artifact.artifact_type.value
+                if isinstance(artifact.artifact_type, ArtifactType)
+                else str(artifact.artifact_type)
             )
-        await self._acquire_agent_run_locks(
-            [artifact.root_run_id or artifact.run_id, artifact.run_id],
-            key_share=True,
-        )
-        row = AgentRunArtifactRow(
-            run_id=artifact.run_id,
-            root_run_id=artifact.root_run_id or artifact.run_id,
-            artifact_type=artifact_type,
-            title=artifact.title,
-            payload=dict(artifact.payload or {}),
-            text=artifact_text,
-            uri=artifact.uri,
-            visibility=(
-                artifact.visibility.value
-                if isinstance(artifact.visibility, EventVisibility)
-                else str(artifact.visibility)
-            ),
-        )
-        self.session.add(row)
-        await self.session.flush()
-        await self.append_event(
-            run_event(
-                artifact.run_id,
-                "run.artifact_created",
-                {"artifact_id": row.id, "artifact_type": row.artifact_type, "title": row.title},
-                root_run_id=row.root_run_id,
+            artifact_text = artifact.text
+            if artifact_type == ArtifactType.FINAL_ANSWER.value and artifact_text is not None:
+                artifact_text = await self.safe_cycle_provider_error_text(
+                    int(artifact.run_id),
+                    str(artifact_text),
+                )
+            await self._acquire_agent_run_locks(
+                [artifact.root_run_id or artifact.run_id, artifact.run_id],
+                key_share=True,
             )
-        )
-        return row
+            row = AgentRunArtifactRow(
+                run_id=artifact.run_id,
+                root_run_id=artifact.root_run_id or artifact.run_id,
+                artifact_type=artifact_type,
+                title=artifact.title,
+                payload=dict(artifact.payload or {}),
+                text=artifact_text,
+                uri=artifact.uri,
+                visibility=(
+                    artifact.visibility.value
+                    if isinstance(artifact.visibility, EventVisibility)
+                    else str(artifact.visibility)
+                ),
+            )
+            self.session.add(row)
+            await self.session.flush()
+            await self._append_event_locked(
+                run_event(
+                    artifact.run_id,
+                    "run.artifact_created",
+                    {"artifact_id": row.id, "artifact_type": row.artifact_type, "title": row.title},
+                    root_run_id=row.root_run_id,
+                )
+            )
+            return row
 
     async def append_final_answer_once(
         self,

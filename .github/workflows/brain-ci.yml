@@ -43,6 +43,7 @@ jobs:
               # script-only change that breaks its own guard test would otherwise
               # skip the suite that guards it and only fail once it reaches main.
               - "brain/**"
+              - "deploy/**"
               - "tests/**"
               - "scripts/**"
               - "requirements*.txt"
@@ -103,6 +104,9 @@ jobs:
 
       - name: Install dependencies
         run: python3 -m pip install -r requirements.txt pytest pytest-asyncio
+
+      - name: Check enabled Cycle context admission
+        run: python3 -m brain.jobs.check_cycle_context_admission
 
       - name: Run backend fast suite
         run: >-

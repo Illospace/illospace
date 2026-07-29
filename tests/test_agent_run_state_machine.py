@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -92,6 +92,48 @@ def test_interrupted_requeue_transition_is_declared_but_scoped(from_status: RunS
     ) == (from_status, RunStatus.QUEUED)
     with pytest.raises(RunTransitionError, match="outside interrupted requeue"):
         ensure_run_transition(from_status, RunStatus.QUEUED)
+
+
+async def test_concurrent_event_appends_are_sequential_and_leave_session_usable(session_factory):
+    from brain.systems.runs.events import run_event
+
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    run = await store.create_run(_run_request(thread_id="thread-event-race", message="run"))
+    baseline = int(
+        await session.scalar(
+            select(func.max(AgentRunEventRow.sequence_no)).where(
+                AgentRunEventRow.run_id == run.id
+            )
+        )
+        or 0
+    )
+    active_writers = 0
+    max_active_writers = 0
+    original_acquire = store._acquire_agent_run_locks
+
+    async def observed_acquire(*args, **kwargs):
+        nonlocal active_writers, max_active_writers
+        active_writers += 1
+        max_active_writers = max(max_active_writers, active_writers)
+        try:
+            await asyncio.sleep(0)
+            return await original_acquire(*args, **kwargs)
+        finally:
+            active_writers -= 1
+
+    store._acquire_agent_run_locks = observed_acquire
+    first, second = await asyncio.gather(
+        store.append_event(run_event(run.id, "run.concurrent_first")),
+        store.append_event(run_event(run.id, "run.concurrent_second")),
+    )
+
+    assert max_active_writers == 1
+    assert sorted((first.sequence_no, second.sequence_no)) == [baseline + 1, baseline + 2]
+
+    third = await store.append_event(run_event(run.id, "run.after_concurrent_append"))
+    assert third.sequence_no == baseline + 3
+    assert await session.scalar(select(func.count()).select_from(AgentRunEventRow)) >= 4
 
 
 async def test_inline_child_is_atomically_owned_before_parent_executes_it(session_factory):

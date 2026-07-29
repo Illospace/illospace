@@ -126,4 +126,6 @@ if [ "$WORKER_RESTART_STATUS" -ne 0 ]; then
 fi
 
 "$SCRIPT_DIR/doctor.sh"
+echo "Cycle context admission: checking every enabled live Cycle."
+compose exec -T api python3 -m brain.jobs.check_cycle_context_admission --live
 schedule_updater_refresh_after_self_update

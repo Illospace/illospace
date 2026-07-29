@@ -43,7 +43,9 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         description="Organization default; falls back to GPT-5.5 when unavailable.",
         supported_effort_tiers=_ALL_EFFORT_TIERS,
         availability_fallback="openai/gpt-5.5",
-        context_window_tokens=128_000,
+        # https://developers.openai.com/api/docs/models/gpt-5.6-sol
+        # Provider contract: 1,050,000 total tokens (922,000 input + 128,000 output).
+        context_window_tokens=1_050_000,
         input_price_per_million=5.0,
         output_price_per_million=30.0,
         provider_default=True,
