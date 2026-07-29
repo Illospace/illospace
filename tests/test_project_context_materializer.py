@@ -5,6 +5,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 
+class _ScalarRows:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def one_or_none(self):
+        return self._rows[0] if self._rows else None
+
+
 def test_project_context_materialization_result_is_ready_when_evidence_is_degraded():
     from brain.systems.cortex.project_context.materializer import ProjectContextMaterializationResult
 
@@ -1485,9 +1493,26 @@ async def test_spawned_reader_materialization_issue_degrades_parent_cycle_eviden
         context_snapshot={"evidence_health": {"status": "pending", "expected_checks": ["github"]}},
     )
 
+    lock_order = []
+
+    rows_by_id = {49: child, 42: parent, 12: cycle_run}
+
     class FakeSession:
         async def get(self, _model, object_id, **_kwargs):
-            return {49: child, 42: parent, 12: cycle_run}.get(object_id)
+            if _kwargs.get("with_for_update"):
+                lock_order.append((_model.__name__, object_id))
+            return rows_by_id.get(object_id)
+
+        async def scalars(self, stmt):
+            entity = stmt.column_descriptions[0]["entity"]
+            object_id = int(stmt.whereclause.right.value)
+            if stmt.get_execution_options().get("populate_existing") is not True:
+                raise AssertionError(
+                    f"locked read of {entity.__name__} must refresh the identity map"
+                )
+            if stmt._for_update_arg is not None:
+                lock_order.append((entity.__name__, object_id))
+            return _ScalarRows([rows_by_id[object_id]] if object_id in rows_by_id else [])
 
     class FakeUow:
         session = FakeSession()
@@ -1524,7 +1549,10 @@ async def test_spawned_reader_materialization_issue_degrades_parent_cycle_eviden
     )
     mark_failed = AsyncMock(return_value=None)
     monkeypatch.setattr(runner, "UnitOfWork", lambda: FakeUow())
-    monkeypatch.setattr(runner, "AsyncAgentRunStore", FakeStore)
+    monkeypatch.setattr(
+        "brain.systems.runs.evidence_health.AsyncAgentRunStore",
+        FakeStore,
+    )
     monkeypatch.setattr(runner, "_async_record_project_activity", AsyncMock())
     monkeypatch.setattr(runner, "materialize_project_context_workspaces", AsyncMock(return_value=result))
     monkeypatch.setattr(runner, "_mark_run_failed_after_runner_error_async", mark_failed)
@@ -1544,10 +1572,11 @@ async def test_spawned_reader_materialization_issue_degrades_parent_cycle_eviden
         "child_run_id": 49,
         "worker_run_id": 49,
         "worker_role": "repo_reader",
-        "repo": "example-org/missing-repo",
+        "shard": "example-org/missing-repo",
         "stage": "project_context_materialization",
         "error": error,
     }
+    assert lock_order == [("AgentRunRow", 42), ("CycleRun", 12)]
     assert [(event.run_id, event.event_type, event.payload) for event in events] == [
         (42, "run.worker_failed", failure)
     ]

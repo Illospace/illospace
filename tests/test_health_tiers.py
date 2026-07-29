@@ -306,6 +306,64 @@ async def test_deep_health_exposes_legacy_cycle_backlog(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_health_exposes_spawn_worker_success_rate_over_rolling_window(
+    async_sqlite_session_factory,
+    sqlite_postgres_ddl_patch,
+    monkeypatch,
+):
+    from brain.platform.db.models.agent_run import AgentRunRow
+
+    session = await async_sqlite_session_factory([AgentRunRow.__table__])
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+
+    def run_row(run_id, *, status, origin, age_hours):
+        created_at = now - timedelta(hours=age_hours)
+        return AgentRunRow(
+            id=run_id,
+            org_id=None,
+            user_id=None,
+            thread_id=f"health-thread-{run_id}",
+            profile="worker" if origin == "spawn_worker" else "fast",
+            recipe="worker" if origin == "spawn_worker" else "fast",
+            status=status,
+            input_message="health rate fixture",
+            target_ref={},
+            workspace_ref={},
+            model_policy={},
+            metadata_={"origin": origin},
+            created_at=created_at,
+            updated_at=created_at,
+            completed_at=created_at,
+        )
+
+    session.add_all(
+        [
+            run_row(1, status="completed", origin="spawn_worker", age_hours=1),
+            run_row(2, status="completed", origin="spawn_worker", age_hours=2),
+            run_row(3, status="failed", origin="spawn_worker", age_hours=3),
+            run_row(4, status="failed", origin="scheduler", age_hours=1),
+            run_row(5, status="failed", origin="spawn_worker", age_hours=30),
+        ]
+    )
+    await session.flush()
+    monkeypatch.setattr(health, "_apply_statement_timeout", AsyncMock())
+    monkeypatch.setattr(health, "_utc_now", lambda: now)
+
+    check = await health._run_health_check(session)
+
+    rate = check.details["spawn_worker_success_rate"]
+    assert rate == {
+        "window_minutes": 1440,
+        "completed": 2,
+        "failed": 1,
+        "terminal": 3,
+        "rate": 2 / 3,
+        "percent": 66.7,
+    }
+    assert "spawn_worker success 66.7%" in check.summary
+
+
+@pytest.mark.asyncio
 async def test_legacy_cycle_backlog_health_reports_stale_due_cycles(monkeypatch):
     now = datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
     cycle = SimpleNamespace(

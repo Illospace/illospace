@@ -11,14 +11,24 @@ from typing import Any
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.effort import EFFORT_TIERS, EFFORT_TIER_SET
+from brain.platform.integrations.provider_auth_preflight import (
+    ProviderAuthPreflightResult,
+    async_probe_provider_auth,
+    skipped_provider_auth_preflight,
+)
 from brain.platform.providers.model_policy import (
     DEFAULT_PROVIDER_MODELS,
     PROVIDER_MODEL_OPTIONS,
     async_get_default_model,
     async_get_default_thinking,
+    infer_provider_from_model,
 )
 from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.domain import RunRecipe
+from brain.systems.runs.evidence_health import (
+    WorkerEvidenceFailure,
+    record_parent_evidence_failures,
+)
 from brain.systems.runs.events import run_event
 from brain.systems.runs.execution_context import _agent_context
 from brain.systems.runs.routing_metadata import effective_routing_snapshot
@@ -46,6 +56,61 @@ _MATERIALIZED_PROJECT_CONTEXT_KEYS = frozenset({
     "workspace_root",
     "workspaces",
 })
+_SPAWN_WORKER_AUTH_PROVIDERS = frozenset({"anthropic", "openai"})
+
+
+def _with_spawn_worker_auth_presentation(
+    result: ProviderAuthPreflightResult,
+) -> ProviderAuthPreflightResult:
+    if not result.blocked:
+        return result
+
+    credential = result.credential or "provider"
+    if credential == "Anthropic API key":
+        repair_action = (
+            "Add an Anthropic API key in Settings > Access, then retry the run."
+        )
+        detail = f"the {credential} is not configured"
+    elif credential == "OpenAI runtime":
+        repair_action = (
+            "Add an OpenAI API key in Settings > Access, then retry the run."
+        )
+        detail = f"the {credential} credential is unavailable"
+    else:
+        repair_action = (
+            "Reconnect OpenAI in Settings > Access by signing in to Codex / ChatGPT again, "
+            "then retry the run."
+        )
+        detail = (
+            f"the {credential} credential is unavailable or could not be refreshed"
+        )
+    return result.with_presentation(
+        repair_action=repair_action,
+        visible_message=f"spawn_worker auth blocked: {detail}. {repair_action}",
+    )
+
+
+async def _preflight_spawn_worker_auth(
+    session: Any,
+    *,
+    user_id: str | None,
+    org_id: str | None,
+    model: str,
+) -> ProviderAuthPreflightResult:
+    provider = infer_provider_from_model(model)
+    if provider not in _SPAWN_WORKER_AUTH_PROVIDERS:
+        return skipped_provider_auth_preflight(
+            provider=provider,
+            model=model,
+        )
+    result = await async_probe_provider_auth(
+        session,
+        user_id=user_id,
+        org_id=org_id,
+        provider=provider,
+        model=model,
+    )
+    return _with_spawn_worker_auth_presentation(result)
 
 
 def _current_agent_value(name: str) -> Any:
@@ -346,6 +411,24 @@ def _assignment_payload(
     }
 
 
+def _assignment_shard(
+    assignment: WorkerAssignment,
+    *,
+    idempotency_key: str | None,
+) -> str:
+    metadata = assignment.metadata if isinstance(assignment.metadata, Mapping) else {}
+    for source in (metadata, assignment.to_payload()):
+        for key in ("shard", "repo", "source", "resource_id"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    if len(assignment.allowed_resources) == 1:
+        return str(assignment.allowed_resources[0])
+    if idempotency_key:
+        return assignment.id
+    return assignment.role
+
+
 async def _handle_spawn_worker(
     objective: str,
     role: str = "worker",
@@ -416,6 +499,10 @@ async def _handle_spawn_worker(
         "spawned_by_run_id": parent_run_id,
         "headless": bool(headless),
         "worker_role": assignment.role,
+        "worker_shard": _assignment_shard(
+            assignment,
+            idempotency_key=idempotency_key,
+        ),
         "worker_assignment": assignment.to_payload(),
         "parent_node_id": assignment.id,
         "tool_policy": merged_tool_policy,
@@ -449,6 +536,52 @@ async def _handle_spawn_worker(
             effort_overridden=effort_override is not None,
         )
         worker_metadata["routing"] = inherited_routing
+        existing_child_lookup = getattr(store, "child_run_for_step", None)
+        existing_child = (
+            await existing_child_lookup(parent.id, step_key)
+            if callable(existing_child_lookup)
+            else None
+        )
+        if existing_child is None:
+            preflight = await _preflight_spawn_worker_auth(
+                uow.session,
+                user_id=parent.user_id,
+                org_id=parent.org_id,
+                model=str(child_policy["model"]),
+            )
+            if preflight.blocked:
+                shard = str(worker_metadata["worker_shard"])
+                failure = WorkerEvidenceFailure.for_admission(
+                    worker_role=assignment.role,
+                    shard=shard,
+                    configuration_error=preflight.error_code,
+                    provider=preflight.provider,
+                    credential=preflight.credential,
+                    error=(
+                        preflight.visible_message
+                        or "spawn_worker provider authentication is unavailable."
+                    ),
+                )
+                await record_parent_evidence_failures(
+                    uow.session,
+                    parent_run_id=int(parent.id),
+                    failures=[failure],
+                )
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "status": "auth_blocked",
+                        "error": preflight.visible_message,
+                        "error_code": preflight.error_code,
+                        "configuration_error": preflight.error_code,
+                        "provider": preflight.provider,
+                        "credential": preflight.credential,
+                        "parent_run_id": parent_run_id,
+                        "shard": shard,
+                        "worker_slot_consumed": False,
+                    },
+                    default=str,
+                )
         child, created = await store.create_child_run_with_result(
             parent,
             recipe=RunRecipe.WORKER,

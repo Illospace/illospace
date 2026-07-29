@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 
 class _FakeLLM:
     provider = "anthropic"
@@ -29,6 +31,88 @@ def _response(text: str):
         cache_creation_input_tokens=0,
     )
     return SimpleNamespace(stop_reason="end_turn", content=[block], usage=usage)
+
+
+def test_provider_error_classifier_recognizes_transient_aliases_and_contextual_5xx():
+    from brain.platform.integrations.provider_error_sentinel import (
+        provider_error_kind,
+    )
+
+    assert provider_error_kind("server_is_overloaded") == "overloaded_error"
+    assert provider_error_kind("service_unavailable_error") == "server_error"
+    assert provider_error_kind("provider HTTP 503 unavailable") == "server_error"
+    assert provider_error_kind("Reader counted 500 matching files.") is None
+    assert (
+        provider_error_kind("", provider_exception="server_is_overloaded")
+        == "overloaded_error"
+    )
+    assert (
+        provider_error_kind("", provider_exception="provider HTTP 503 unavailable")
+        == "server_error"
+    )
+
+
+@pytest.mark.parametrize("spawned", [False, True], ids=["non_spawned", "spawned"])
+@pytest.mark.parametrize(
+    ("tools", "history_safety"),
+    [
+        (["read_file"], "read_only"),
+        (["write_file"], "write"),
+        (["unregistered_test_tool"], "unknown"),
+    ],
+    ids=["read_only_history", "write_history", "unknown_history"],
+)
+@pytest.mark.parametrize(
+    ("response_text", "expected_kind", "transient"),
+    [
+        ("provider HTTP 503 unavailable", "server_error", True),
+        (
+            "Contact help.openai.com with request ID req-non-retryable.",
+            "provider_error",
+            False,
+        ),
+        ("Cycle run degraded: mission_contract_failed.", None, False),
+    ],
+    ids=["retryable_text", "non_retryable_text", "internal_failure"],
+)
+def test_response_text_retry_decision_matrix(
+    *,
+    spawned,
+    tools,
+    history_safety,
+    response_text,
+    expected_kind,
+    transient,
+):
+    from brain.systems.runs.direct_loop.retry import (
+        response_text_retry_decision,
+    )
+
+    decision = response_text_retry_decision(
+        response_text,
+        scheduled_result_contract=False,
+        metadata={
+            "execution_provenance": (
+                {"origin": "spawn_worker", "spawned_by_tool": True}
+                if spawned
+                else {"origin": "slack_teammate"}
+            )
+        },
+        tool_call_source="worker" if spawned else "coordinator",
+        tool_calls_made=tools,
+    )
+
+    assert tools
+    assert decision.spawned_worker is spawned
+    assert decision.tool_history_safety == history_safety
+    assert decision.inspect_response is spawned
+    assert decision.withhold_stream is spawned
+    assert decision.provider_error_kind == (
+        expected_kind if spawned else None
+    )
+    assert decision.should_retry is (
+        spawned and history_safety == "read_only" and transient
+    )
 
 
 async def test_scheduled_cycle_retries_provider_error_text_before_returning_safe_sentinel(
@@ -98,6 +182,89 @@ async def test_scheduled_cycle_retries_provider_error_text_before_returning_safe
     assert result.output == "upstream_provider_error: server_error"
     assert "help.openai.com" not in result.output
     assert streamed_deltas == []
+
+
+async def test_spawned_read_only_worker_retries_overload_text_and_recovers(
+    monkeypatch,
+):
+    from brain.systems.runs import direct_agent
+
+    raw_provider_error = (
+        "API error: Our servers are currently overloaded | "
+        "server_is_overloaded | service_unavailable_error"
+    )
+    provider_calls = []
+    streamed_deltas = []
+
+    class FakeStream:
+        def __init__(self, text):
+            self.text = text
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            yield SimpleNamespace(type="text", text=self.text)
+
+        def get_final_message(self):
+            return _response(self.text)
+
+    class FakeProvider:
+        def stream(self, request):
+            provider_calls.append(request)
+            text = (
+                raw_provider_error
+                if len(provider_calls) == 1
+                else "Recovered repository evidence."
+            )
+            return FakeStream(text)
+
+        def create(self, _request):
+            raise AssertionError("Worker calls with activity hooks should stream")
+
+        def is_api_error(self, _exc):
+            return False
+
+        def is_retryable_error(self, _exc):
+            return False
+
+    monkeypatch.setattr(
+        direct_agent,
+        "get_provider",
+        lambda *_args, **_kwargs: FakeProvider(),
+    )
+    monkeypatch.setattr(
+        direct_agent,
+        "_PROVIDER_ERROR_TEXT_RETRY_DELAYS",
+        (0,),
+    )
+
+    result = await direct_agent.run_agent_async(
+        message="Read the repository shard",
+        model="claude-sonnet-4-6",
+        tools=[],
+        persist_session=False,
+        session_id="spawn-worker-overload-retry",
+        resolved_llm=_FakeLLM(),
+        tool_call_source="worker",
+        on_stream_activity=lambda _label: None,
+        on_stream_delta=streamed_deltas.append,
+        metadata={
+            "execution_provenance": {
+                "origin": "spawn_worker",
+                "spawned_by_tool": True,
+            }
+        },
+    )
+
+    assert len(provider_calls) == 2
+    assert result.success is True
+    assert result.output == "Recovered repository evidence."
+    assert raw_provider_error not in streamed_deltas
+    assert streamed_deltas == ["Recovered repository evidence."]
 
 
 async def test_interactive_slack_transport_disconnect_retries_stream_and_completes(monkeypatch):

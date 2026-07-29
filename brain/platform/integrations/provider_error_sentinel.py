@@ -13,6 +13,34 @@ _PROVIDER_ERROR_KINDS = (
     "rate_limit_error",
 )
 _PROVIDER_ERROR_KIND_VALUES = frozenset((*_PROVIDER_ERROR_KINDS, "provider_error"))
+_PROVIDER_ERROR_ALIASES = {
+    "server_is_overloaded": "overloaded_error",
+    "service_unavailable_error": "server_error",
+}
+_TRANSIENT_PROVIDER_STATUS_RE = re.compile(
+    r"\b(?:(?:http(?:\s+status)?|status(?:\s+code)?)\s*)?"
+    r"(?:500|502|503|504|529)\b",
+    re.IGNORECASE,
+)
+_PROVIDER_ERROR_CONTEXT_RE = re.compile(
+    r"\b(?:api|error|failed|http|provider|server|service|unavailable|upstream)\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_normalized_provider_error(normalized: str) -> str | None:
+    for alias, kind in _PROVIDER_ERROR_ALIASES.items():
+        if re.search(rf"\b{re.escape(alias)}\b", normalized):
+            return kind
+    for kind in _PROVIDER_ERROR_KINDS:
+        if re.search(rf"\b{re.escape(kind)}\b", normalized):
+            return kind
+    if (
+        _TRANSIENT_PROVIDER_STATUS_RE.search(normalized)
+        and _PROVIDER_ERROR_CONTEXT_RE.search(normalized)
+    ):
+        return "server_error"
+    return None
 
 
 def provider_error_kind(
@@ -32,9 +60,8 @@ def provider_error_kind(
     if normalized.startswith(PROVIDER_ERROR_SENTINEL_PREFIX):
         sentinel_kind = normalized.removeprefix(PROVIDER_ERROR_SENTINEL_PREFIX).strip()
         return sentinel_kind if sentinel_kind in _PROVIDER_ERROR_KIND_VALUES else "provider_error"
-    for kind in _PROVIDER_ERROR_KINDS:
-        if re.search(rf"\b{re.escape(kind)}\b", normalized):
-            return kind
+    if classified := _classify_normalized_provider_error(normalized):
+        return classified
     if "help.openai.com" in normalized:
         return "provider_error"
     if text:
@@ -45,10 +72,7 @@ def provider_error_kind(
     exception_text = str(provider_exception or "").strip().lower()
     if not exception_text:
         return None
-    for kind in _PROVIDER_ERROR_KINDS:
-        if re.search(rf"\b{re.escape(kind)}\b", exception_text):
-            return kind
-    return "provider_error"
+    return _classify_normalized_provider_error(exception_text) or "provider_error"
 
 
 def safe_provider_error_sentinel(kind: str | None) -> str:
