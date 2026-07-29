@@ -868,8 +868,19 @@ async def test_sync_connector_accounts_for_truncated_raw_text(
 async def test_distillation_admission_is_restart_safe_and_holds_cursor_until_harvest(
     session,
     embedding_runtime,
+    monkeypatch,
 ):
     del embedding_runtime
+    from brain.systems.memory import embeddings as embedding_client
+
+    embedded_documents: list[str] = []
+
+    def capture_embedding(text, runtime_config=None):
+        del runtime_config
+        embedded_documents.append(text)
+        return _unit_vector()
+
+    monkeypatch.setattr(embedding_client, "embed_document", capture_embedding)
     user_id = "22222222-2222-4222-8222-222222222222"
     session.add(Org(id=_ORG_ID, name="Knowledge Org", slug="knowledge-org"))
     session.add(
@@ -951,6 +962,13 @@ async def test_distillation_admission_is_restart_safe_and_holds_cursor_until_har
     assert item.resolution == "The deployment path was fixed."
     assert item.entities == ["deployment", "deploy.py"]
     assert "Why did release 42 fail?" in item.search_text
+    assert embedded_documents == [
+        "Why did release 42 fail?\n"
+        "Release thread\n"
+        "Release 42 failed during deployment.\n"
+        "The deployment path was fixed.\n"
+        "deployment deploy.py"
+    ]
     assert (
         await session.scalar(
             select(func.count()).select_from(KnowledgeItemEmbedding)

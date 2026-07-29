@@ -125,6 +125,26 @@ def build_search_text(
     return "\n".join(value.strip() for value in values if value and value.strip())
 
 
+def build_embedding_text(item: KnowledgeItem) -> str:
+    """Render every distilled field, while deliberately excluding raw text."""
+
+    extra = dict(item.extra or {})
+    distillation = extra.get("distillation")
+    question = (
+        str(distillation.get("question") or "").strip()
+        if isinstance(distillation, dict)
+        else ""
+    )
+    values = [
+        question,
+        item.title,
+        item.summary,
+        item.resolution or "",
+        " ".join(str(entity) for entity in item.entities),
+    ]
+    return "\n".join(value.strip() for value in values if value and value.strip())
+
+
 def _bounded_raw_text(draft: KnowledgeDraft) -> tuple[str, dict[str, Any], bool]:
     raw_text = str(draft.raw_text or "")
     extra = dict(draft.extra or {})
@@ -359,7 +379,7 @@ async def _ensure_embedding(
 
     vector = np.asarray(
         embedding_client.embed_document(
-            f"{item.title}\n{item.summary}",
+            build_embedding_text(item),
             runtime_config=runtime,
         ),
         dtype=np.float32,
@@ -648,6 +668,7 @@ __all__ = [
     "KnowledgeSyncResult",
     "KnowledgeSyncStats",
     "RAW_TEXT_MAX_CHARS",
+    "build_embedding_text",
     "build_search_text",
     "content_digest",
     "sync_connector",
