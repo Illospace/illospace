@@ -68,6 +68,27 @@ async def async_run_event_backbone_status(
     )
 
 
+async def initialize_live_fanout_cursor(
+    *,
+    logger: logging.Logger = logger,
+) -> int:
+    """Start live websocket delivery after events that predate this process."""
+    global _last_event_id
+    async with UnitOfWork() as uow:
+        max_event_id = int(
+            await uow.session.scalar(
+                select(func.coalesce(func.max(AgentRunEventRow.id), 0))
+            )
+            or 0
+        )
+    _last_event_id = max_event_id
+    logger.info(
+        "run_event_fanout_cursor_initialized last_event_id=%s",
+        max_event_id,
+    )
+    return max_event_id
+
+
 async def fanout_run_events_once(
     ws_manager,
     *,
@@ -129,6 +150,7 @@ async def fanout_run_events(
     logger: logging.Logger = logger,
     **kwargs: Any,
 ) -> None:
+    await initialize_live_fanout_cursor(logger=logger)
     while True:
         try:
             delivered, had_error = await fanout_run_events_once(
@@ -151,4 +173,5 @@ __all__ = [
     "async_run_event_backbone_status",
     "fanout_run_events",
     "fanout_run_events_once",
+    "initialize_live_fanout_cursor",
 ]
