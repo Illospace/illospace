@@ -827,7 +827,10 @@ def test_inert_stack_check_is_reachable_as_a_standalone_monitor_entrypoint():
     assert check.exists()
     content = check.read_text()
     assert 'source "$SCRIPT_DIR/compose-runtime-lib.sh"' in content
+    assert 'source "$SCRIPT_DIR/agent-run-queue-health-lib.sh"' in content
+    assert '. "$ENV_FILE"' in content
     assert "assert_stack_not_inert" in content
+    assert "assert_agent_run_queue_not_starved" in content
     # The entrypoint may document the override, but must not define its own list.
     assert not re.search(r"^STACK_REQUIRED_SERVICES=", content, flags=re.MULTILINE)
     assert "deploy/scripts/inert-stack-check.sh" in launcher
@@ -838,10 +841,41 @@ def test_deploy_doctor_delegates_stack_presence_to_the_shared_invariant():
     doctor = (root / "deploy" / "scripts" / "doctor.sh").read_text()
 
     assert 'source "$SCRIPT_DIR/compose-runtime-lib.sh"' in doctor
+    assert 'source "$SCRIPT_DIR/agent-run-queue-health-lib.sh"' in doctor
     assert "assert_stack_not_inert $DOCTOR_REQUIRED_SERVICES" in doctor
+    assert "assert_agent_run_queue_not_starved" in doctor
+    assert 'fail "$queue_health_output"' in doctor
     # Presence has exactly one owner; doctor only grades health of what is present.
     assert "service is not running" not in doctor
     assert "compose() {" not in doctor
+
+
+def test_deploy_queue_health_calls_the_python_predicate_with_doctor_threshold():
+    root = Path(__file__).resolve().parents[1]
+    queue_health_lib = (
+        root / "deploy" / "scripts" / "agent-run-queue-health-lib.sh"
+    )
+    script = f'''
+source "{queue_health_lib}"
+compose() {{
+  printf '%s\\n' "$*"
+}}
+ILLO_AGENT_RUN_QUEUED_DOCTOR_SECONDS=725
+assert_agent_run_queue_not_starved
+'''
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == (
+        "exec -T api python -m brain.systems.runs.cortex.queue_health "
+        "--stale-after-seconds 725"
+    )
+    assert "psql" not in queue_health_lib.read_text()
 
 
 def test_boot_unit_binds_to_the_docker_unit_that_actually_exists(tmp_path):
