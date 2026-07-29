@@ -1115,6 +1115,174 @@ async def test_postgres_event_boundary_releases_parent_for_isolated_child_uow(db
 
 
 @pytest.mark.requires_db
+async def test_postgres_completed_tool_releases_event_stream_for_follow_up_writer(db_engine):
+    """A completed tool call must not retain the run's event-stream lock."""
+
+    import uuid
+
+    from brain.platform.db.models.org import Org
+    from brain.systems.runs.events import run_event
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+
+    factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    org_id = str(uuid.uuid4())
+    run_id = None
+    try:
+        async with factory() as setup_session:
+            setup_session.add(
+                Org(
+                    id=org_id,
+                    name="Completed Tool Boundary Test",
+                    slug=f"completed-tool-boundary-{uuid.uuid4().hex[:12]}",
+                )
+            )
+            await setup_session.flush()
+            run = await AsyncAgentRunStore(setup_session).create_run(
+                _run_request(
+                    org_id=org_id,
+                    thread_id=f"thread-{uuid.uuid4().hex}",
+                    message="completed tool boundary",
+                )
+            )
+            run_id = run.id
+            await setup_session.commit()
+
+        async with factory() as tool_session, factory() as follow_up_session:
+            tool_store = AsyncAgentRunStore(tool_session)
+            executor = AsyncRunToolExecutor(tool_store)
+
+            async def handler(**_kwargs):
+                return {"ok": True}
+
+            result = await executor.execute(
+                run_id,
+                ToolExecution(
+                    name="read_file",
+                    args={"path": "README.md"},
+                    handler=handler,
+                ),
+            )
+            assert result == {"ok": True}
+
+            follow_up = await asyncio.wait_for(
+                AsyncAgentRunStore(follow_up_session).append_event(
+                    run_event(run_id, "run.follow_up")
+                ),
+                timeout=1,
+            )
+            await follow_up_session.commit()
+
+            assert follow_up.event_type == "run.follow_up"
+    finally:
+        async with factory() as cleanup_session:
+            if run_id is not None:
+                await cleanup_session.execute(
+                    AgentRunArtifactRow.__table__.delete().where(
+                        AgentRunArtifactRow.run_id == run_id
+                    )
+                )
+                await cleanup_session.execute(
+                    AgentRunEventRow.__table__.delete().where(
+                        AgentRunEventRow.run_id == run_id
+                    )
+                )
+                await cleanup_session.execute(
+                    AgentRunRow.__table__.delete().where(AgentRunRow.id == run_id)
+                )
+            await cleanup_session.execute(Org.__table__.delete().where(Org.id == org_id))
+            await cleanup_session.commit()
+
+
+@pytest.mark.requires_db
+@pytest.mark.parametrize("failure_mode", ("raises", "returns_error"))
+async def test_postgres_failed_tool_releases_event_stream_for_follow_up_writer(
+    db_engine,
+    failure_mode,
+):
+    """A failed tool call must not poison later event writers for the run."""
+
+    import uuid
+
+    from brain.platform.db.models.org import Org
+    from brain.systems.runs.events import run_event
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+
+    factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    org_id = str(uuid.uuid4())
+    run_id = None
+    try:
+        async with factory() as setup_session:
+            setup_session.add(
+                Org(
+                    id=org_id,
+                    name="Failed Tool Boundary Test",
+                    slug=f"failed-tool-boundary-{uuid.uuid4().hex[:12]}",
+                )
+            )
+            await setup_session.flush()
+            run = await AsyncAgentRunStore(setup_session).create_run(
+                _run_request(
+                    org_id=org_id,
+                    thread_id=f"thread-{uuid.uuid4().hex}",
+                    message="failed tool boundary",
+                )
+            )
+            run_id = run.id
+            await setup_session.commit()
+
+        async with factory() as tool_session, factory() as follow_up_session:
+            tool_store = AsyncAgentRunStore(tool_session)
+            executor = AsyncRunToolExecutor(tool_store)
+
+            async def handler(**_kwargs):
+                if failure_mode == "raises":
+                    raise RuntimeError("tool exploded")
+                return {"error": "tool returned failure"}
+
+            execution = executor.execute(
+                run_id,
+                ToolExecution(
+                    name="read_file",
+                    args={"path": "README.md"},
+                    handler=handler,
+                ),
+            )
+            if failure_mode == "raises":
+                with pytest.raises(RuntimeError, match="tool exploded"):
+                    await execution
+            else:
+                assert await execution == {"error": "tool returned failure"}
+
+            follow_up = await asyncio.wait_for(
+                AsyncAgentRunStore(follow_up_session).append_event(
+                    run_event(run_id, "run.follow_up_after_failure")
+                ),
+                timeout=1,
+            )
+            await follow_up_session.commit()
+
+            assert follow_up.event_type == "run.follow_up_after_failure"
+    finally:
+        async with factory() as cleanup_session:
+            if run_id is not None:
+                await cleanup_session.execute(
+                    AgentRunArtifactRow.__table__.delete().where(
+                        AgentRunArtifactRow.run_id == run_id
+                    )
+                )
+                await cleanup_session.execute(
+                    AgentRunEventRow.__table__.delete().where(
+                        AgentRunEventRow.run_id == run_id
+                    )
+                )
+                await cleanup_session.execute(
+                    AgentRunRow.__table__.delete().where(AgentRunRow.id == run_id)
+                )
+            await cleanup_session.execute(Org.__table__.delete().where(Org.id == org_id))
+            await cleanup_session.commit()
+
+
+@pytest.mark.requires_db
 async def test_postgres_waiting_event_session_does_not_block_advisory_lock_owner(db_engine):
     """A DB advisory-lock waiter must not own another session's Python lock."""
 

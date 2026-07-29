@@ -159,13 +159,12 @@ class AsyncRunToolExecutor:
         await self._append_event(
             run_event(run_id, "run.tool_started", _event_payload(tool.name, safe_args), root_run_id=root_run_id)
         )
-        commit_event_boundary = getattr(self.store, "commit_event_boundary", None)
-        if callable(commit_event_boundary):
+        if callable(getattr(self.store, "commit_event_boundary", None)):
             # The handler may use an isolated UnitOfWork that writes to this
             # same run (spawn_worker is the canonical example).  Make the
             # started marker durable and release the parent transaction's row
             # and advisory locks before invoking it.
-            await commit_event_boundary(run_id)
+            await self._commit_event_boundary(run_id)
         manifest = None
         manifest_id = None
         try:
@@ -283,6 +282,7 @@ class AsyncRunToolExecutor:
                 )
             if collector is not None:
                 collector.append(record)
+            await self._commit_event_boundary(run_id)
             raise
         except asyncio.CancelledError:
             if manifest_id:
@@ -330,6 +330,7 @@ class AsyncRunToolExecutor:
                 payload=record.to_payload(),
                 text=error_text[:4000],
             )
+            await self._commit_event_boundary(run_id)
             raise
         failure = result_failure_summary(result)
         if manifest_id:
@@ -379,6 +380,7 @@ class AsyncRunToolExecutor:
                 payload=record.to_payload(),
                 text=failure[:4000],
             )
+            await self._commit_event_boundary(run_id)
             return result
         safe_result = redact_tool_result(tool.name, result)
         await self._append_event(
@@ -407,7 +409,18 @@ class AsyncRunToolExecutor:
             payload=record.to_payload(),
             text=safe_result[:4000],
         )
+        # Make the completed marker and its artifact durable before the caller
+        # can wait on another session that appends to this run. PostgreSQL's
+        # event-stream advisory lock is transaction-scoped; returning with this
+        # transaction open can deadlock terminal settlement behind an otherwise
+        # successful tool call.
+        await self._commit_event_boundary(run_id)
         return result
+
+    async def _commit_event_boundary(self, run_id: int) -> None:
+        commit_event_boundary = getattr(self.store, "commit_event_boundary", None)
+        if callable(commit_event_boundary):
+            await commit_event_boundary(run_id)
 
     async def _action_context(self, run_id: int, *, root_run_id: int | None = None) -> dict[str, Any]:
         require_run = getattr(self.store, "require_run", None)
@@ -498,6 +511,7 @@ class AsyncRunToolExecutor:
             payload=record.to_payload(),
             text=policy_failure[:4000],
         )
+        await self._commit_event_boundary(run_id)
         return result
 
     async def _append_event(self, event) -> None:

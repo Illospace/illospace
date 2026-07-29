@@ -49,7 +49,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from brain.systems.briefing.compose import PacketRender, compose_packet, fill_launch_url
+from brain.systems.briefing.compose import (
+    UNCLAIMED_LABEL,
+    PacketRender,
+    compose_packet,
+    fill_launch_url,
+)
 from brain.systems.briefing.core import Dossier, DossierBudget, assemble_dossier
 from brain.systems.briefing.deliver import (
     DeliveryTarget,
@@ -115,8 +120,9 @@ def _member_targets() -> dict[str, str]:
 async def _owner_label(session: Any, owner_user_id: str | None) -> str | None:
     """Best-effort uuid → display name (the _fill_owner_labels pattern).
 
-    Degrades to the RAW ID — never to None — so a transient lookup failure
-    can't render an assigned item as "unclaimed" in the brief.
+    Degrades to a human-safe label — never to a raw internal UUID and never
+    to None — so a transient lookup failure can't leak serialization or
+    render an assigned item as "unclaimed" in the brief.
     """
     if not owner_user_id or session is None:
         return None
@@ -127,10 +133,32 @@ async def _owner_label(session: Any, owner_user_id: str | None) -> str | None:
             await session.execute(select(User.id, User.name, User.email).where(User.id == str(owner_user_id)))
         ).first()
         if row is None:
-            return str(owner_user_id)
-        return row.name or row.email or str(row.id)
-    except Exception:  # noqa: BLE001 — degrade to the raw id, never break a mint
-        return str(owner_user_id)
+            return "assigned teammate"
+        return row.name or row.email or "assigned teammate"
+    except Exception:  # noqa: BLE001 — labels must never break a mint
+        return "assigned teammate"
+
+
+def _preferred_actionable_title(pieces: list[Any]) -> str | None:
+    """Choose human-authored work truth over the inbound alert serialization."""
+    for source in ("github_issue", "github_pr", "slack_thread"):
+        for piece in pieces:
+            title = str(getattr(piece, "title", "") or "").strip()
+            if getattr(piece, "source", None) == source and title:
+                return title
+    return None
+
+
+def _delivery_brief(
+    packet: PacketRender,
+    *,
+    launch_url: str,
+    owner_label: str | None,
+    source_ref: dict[str, Any] | None,
+) -> str:
+    if (source_ref or {}).get("brief_mode") == "compact_follow_up":
+        return f"→ {owner_label or UNCLAIMED_LABEL} · Launch: {launch_url}"
+    return fill_launch_url(packet.human_brief, launch_url)
 
 
 def _repo_origin_hint(dossier: Dossier) -> str | None:
@@ -180,23 +208,31 @@ async def build_packet_for_job(
         github=active_readers.github,
         budget=active_budget,
     )
+    packet_source_ref = dict(source_ref or {})
+    actionable_title = (
+        _preferred_actionable_title(gathered.pieces)
+        if packet_source_ref.get("origin_lane") == "actionable"
+        else None
+    )
     dossier = assemble_dossier(
         gathered.pieces,
         job_ref=job_ref,
         budget=active_budget,
+        headline=actionable_title,
         source_notes=gathered.source_notes,
     )
+    effective_ask = f"Pick up this issue: {actionable_title}" if actionable_title else ask
     packet = compose_packet(
         dossier,
         org_id=org_id,
-        ask=ask,
+        ask=effective_ask,
         acceptance_criteria=list(_ACCEPTANCE_CRITERIA_V1),
         owner_user_id=owner_user_id,
         owner_label=owner_label,
         target_tool=target_tool,
         repo_origin_url=_repo_origin_hint(dossier),
         source_surface=source_surface,
-        source_ref=dict(source_ref or {}),
+        source_ref=packet_source_ref,
     )
     return packet, dossier
 
@@ -358,8 +394,11 @@ async def mint_packet_for_job(
                 else {}
             )
             row, created = await create_launch_handoff_with_status(session, packet.handoff_input)
-            filled_brief = fill_launch_url(
-                packet.human_brief, launch_handoff_url_for_id(row.id, target_tool=row.target_tool)
+            filled_brief = _delivery_brief(
+                packet,
+                launch_url=launch_handoff_url_for_id(row.id, target_tool=row.target_tool),
+                owner_label=owner_label,
+                source_ref=source_ref,
             )
             if created:
                 if deliver_to is not None:
@@ -380,9 +419,13 @@ async def mint_packet_for_job(
                 # Refilled AFTER the repair: it may have rotated target_tool,
                 # which changes the launch URL an undelivered brief carries.
                 await refresh_pending_delivery_brief(
-                    session, handoff_id=str(row.id), brief=fill_launch_url(
-                        packet.human_brief,
-                        launch_handoff_url_for_id(row.id, target_tool=row.target_tool),
+                    session,
+                    handoff_id=str(row.id),
+                    brief=_delivery_brief(
+                        packet,
+                        launch_url=launch_handoff_url_for_id(row.id, target_tool=row.target_tool),
+                        owner_label=owner_label,
+                        source_ref=source_ref,
                     ),
                 )
             if locked_idea is not None:
@@ -415,7 +458,12 @@ async def mint_packet_for_job(
         created=created,
         delivery=delivery,
         handoff=row,
-        human_brief=fill_launch_url(packet.human_brief, launch_url),
+        human_brief=_delivery_brief(
+            packet,
+            launch_url=launch_url,
+            owner_label=owner_label,
+            source_ref=source_ref,
+        ),
         launch_url=launch_url,
         reason="minted" if created else "reused",
         source_notes=list(dossier.source_notes),
@@ -586,6 +634,18 @@ async def _mint_for_idea_and_event(
     owner_label = await _owner_label(session, owner_user_id)
     target_tool = agent_target_for_member(owner_user_id, _member_targets())
     deliver_to, delivery_skip = _delivery_target_for_event(event)
+    actionable_lane = (
+        dict(details.get("inbound_triage") or {}).get("reason")
+        == "actionable_run_completion"
+    )
+    tool_names = {
+        str(name) for name in (attribution or {}).get("tool_names") or []
+    }
+    packet_source_ref: dict[str, Any] = {"inbound_event_id": str(event.id)}
+    if actionable_lane:
+        packet_source_ref["origin_lane"] = "actionable"
+        if "post_slack_reply" in tool_names:
+            packet_source_ref["brief_mode"] = "compact_follow_up"
 
     result = await mint_packet_for_job(
         session,
@@ -597,7 +657,7 @@ async def _mint_for_idea_and_event(
         owner_label=owner_label,
         target_tool=target_tool,
         source_surface="inbound_triage",
-        source_ref={"inbound_event_id": str(event.id)},
+        source_ref=packet_source_ref,
         readers=readers,
         reader_user_id=str(getattr(event, "authority_user_id", "") or "") or None,
         deliver_to=deliver_to,

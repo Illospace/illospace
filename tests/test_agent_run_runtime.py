@@ -2552,17 +2552,17 @@ async def test_runtime_tool_executor_records_public_events_and_redacted_artifact
     assert _stream_has(runtime.stream.messages, "run.tool_completed", completed.payload | {"run_id": 42})
 
 
-async def test_runtime_tool_executor_commits_started_event_before_handler():
+async def test_runtime_tool_executor_commits_event_boundaries_around_handler():
     from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
 
     runtime = _runtime("worker")
     observed = []
 
     async def commit_event_boundary(run_id):
-        assert runtime.store.events[-1].event_type == "run.tool_started"
-        observed.append(("commit", run_id))
+        observed.append(("commit", run_id, runtime.store.events[-1].event_type))
 
     async def handler(**_kwargs):
+        assert observed == [("commit", 42, "run.tool_started")]
         observed.append(("handler", 42))
         return {"ok": True}
 
@@ -2576,7 +2576,11 @@ async def test_runtime_tool_executor_commits_started_event_before_handler():
     )
 
     assert result == {"ok": True}
-    assert observed == [("commit", 42), ("handler", 42)]
+    assert observed == [
+        ("commit", 42, "run.tool_started"),
+        ("handler", 42),
+        ("commit", 42, "run.tool_completed"),
+    ]
 
 
 async def test_agent_execution_context_is_isolated_between_parallel_tool_tasks():
