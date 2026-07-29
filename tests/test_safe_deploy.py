@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -698,24 +699,124 @@ def test_compose_worker_survives_a_host_reboot_like_every_other_service():
     assert "24h" not in worker_directives
 
 
-def test_worker_restart_policy_suspension_is_restored_when_a_deploy_is_interrupted(tmp_path):
-    """An interrupted swap must not strand the worker at restart=no (#527)."""
+def test_worker_restart_policy_suspension_documents_untrappable_recovery():
+    """The trap guarantee must stop short of SIGKILL and power loss."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    content = runtime_lib.read_text()
+    comment = content.split("# A worker that is about to be drained", 1)[1].split(
+        "suspend_worker_restart_policy()", 1
+    )[0]
+
+    assert "catchable interruptions" in comment
+    assert "reconcile_worker_restart_policy" in comment
+    assert "SIGKILL" in comment
+    assert "power loss" in comment
+    assert "crash-safe" not in comment
+
+
+@pytest.mark.parametrize(
+    ("signal_name", "signal_number", "shell_status"),
+    [
+        ("INT", signal.SIGINT, 130),
+        ("TERM", signal.SIGTERM, 143),
+        ("HUP", signal.SIGHUP, 129),
+    ],
+)
+def test_worker_restart_policy_suspension_is_restored_when_a_deploy_is_interrupted(
+    tmp_path, signal_name, signal_number, shell_status
+):
+    """A signalled swap must restore the policy and die from that signal."""
     runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
     docker_log = tmp_path / "docker.log"
+    cleanup_log = tmp_path / "cleanup.log"
     script = f'''
 source "{runtime_lib}"
 docker() {{ printf '%s\\n' "$*" >> "{docker_log}"; }}
+caller_cleanup() {{ printf 'caller cleanup ran\\n' >> "{cleanup_log}"; }}
+trap caller_cleanup EXIT
 suspend_worker_restart_policy stranded-worker
-# Simulate the deploy dying mid-drain: Ctrl-C, SSH drop, dockerd snap refresh.
-exit 130
+kill -s {signal_name} "$$"
+printf 'deploy continued\\n'
 '''
 
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
-    assert result.returncode == 130
+    # subprocess exposes true signal death as -N; a shell waiting on this same
+    # process reports the conventional 128+N status.
+    assert result.returncode == -signal_number
+    assert 128 - result.returncode == shell_status
+    assert "deploy continued" not in result.stdout
     docker_calls = docker_log.read_text()
     assert "update --restart=no stranded-worker" in docker_calls
-    assert "update --restart=unless-stopped stranded-worker" in docker_calls
+    assert docker_calls.count("update --restart=unless-stopped stranded-worker") == 1
+    assert cleanup_log.read_text() == "caller cleanup ran\n"
+
+
+def test_worker_restart_policy_restore_survives_a_second_signal(tmp_path):
+    """A signal during restoration must not strand the worker at restart=no."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    docker_log = tmp_path / "docker.log"
+    policy = tmp_path / "policy"
+    second_signal_sent = tmp_path / "second-signal-sent"
+    script = f'''
+source "{runtime_lib}"
+docker() {{
+  printf '%s\\n' "$*" >> "{docker_log}"
+  case "$2" in
+    --restart=no)
+      printf 'no\\n' > "{policy}"
+      ;;
+    --restart=unless-stopped)
+      if [ ! -e "{second_signal_sent}" ]; then
+        touch "{second_signal_sent}"
+        kill -s TERM "$$"
+        [ -n "$(trap -p TERM)" ] || return 143
+      fi
+      printf 'unless-stopped\\n' > "{policy}"
+      ;;
+  esac
+}}
+suspend_worker_restart_policy stranded-worker
+kill -s TERM "$$"
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == -signal.SIGTERM
+    assert policy.read_text() == "unless-stopped\n"
+    docker_calls = docker_log.read_text()
+    assert docker_calls.count("update --restart=unless-stopped stranded-worker") == 1
+
+
+def test_worker_is_not_signalled_when_restart_policy_suspension_fails(tmp_path):
+    """Suspension is a safety precondition for every worker kill path."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    docker_log = tmp_path / "docker.log"
+    script = f'''
+source "{runtime_lib}"
+docker() {{
+  printf '%s\\n' "$*" >> "{docker_log}"
+  if [ "$1" = "update" ] && [ "$2" = "--restart=no" ]; then
+    printf 'suspension failed\\n' >&2
+    return 1
+  fi
+  return 0
+}}
+compose() {{ :; }}
+worker_container_id() {{ printf 'old-worker\\n'; }}
+worker_swap_snapshot() {{ printf 'snapshot\\n'; }}
+worker_swap_snapshot_decision() {{ printf 'replace\\n'; }}
+wait_for_worker_exit() {{ return 0; }}
+replace_idle_worker
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "suspension failed" in result.stderr
+    docker_calls = docker_log.read_text()
+    assert "update --restart=no old-worker" in docker_calls
+    assert "kill" not in docker_calls
 
 
 def test_worker_restart_policy_is_not_restored_onto_a_replaced_worker(tmp_path):
@@ -914,7 +1015,50 @@ exit 7
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
     assert result.returncode == 7
-    assert "update --restart=unless-stopped some-worker" in docker_log.read_text()
+    docker_calls = docker_log.read_text()
+    assert docker_calls.count("update --restart=unless-stopped some-worker") == 1
+    assert "caller cleanup ran" in result.stdout
+
+
+def test_worker_restart_policy_suspension_does_not_infer_exit_trap_ownership_from_text(tmp_path):
+    """A caller trap may mention the restore function without invoking it."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    docker_log = tmp_path / "docker.log"
+    script = f'''
+source "{runtime_lib}"
+docker() {{ printf '%s\\n' "$*" >> "{docker_log}"; }}
+trap 'printf "caller cleanup mentions restore_worker_restart_policy\\n"' EXIT
+suspend_worker_restart_policy some-worker
+exit 7
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 7
+    docker_calls = docker_log.read_text()
+    assert docker_calls.count("update --restart=unless-stopped some-worker") == 1
+    assert result.stdout == "caller cleanup mentions restore_worker_restart_policy\n"
+
+
+def test_repeated_worker_restart_policy_suspension_preserves_an_existing_exit_trap(tmp_path):
+    """A second suspension must not discard the caller's chained cleanup."""
+    runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
+    docker_log = tmp_path / "docker.log"
+    script = f'''
+source "{runtime_lib}"
+docker() {{ printf '%s\\n' "$*" >> "{docker_log}"; }}
+caller_cleanup() {{ printf 'caller cleanup ran\\n'; }}
+trap caller_cleanup EXIT
+suspend_worker_restart_policy some-worker
+suspend_worker_restart_policy some-worker
+exit 7
+'''
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 7
+    docker_calls = docker_log.read_text()
+    assert docker_calls.count("update --restart=unless-stopped some-worker") == 1
     assert "caller cleanup ran" in result.stdout
 
 

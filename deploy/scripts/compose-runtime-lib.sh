@@ -188,6 +188,7 @@ worker_declared_restart_policy() {
 }
 
 WORKER_RESTART_POLICY_SUSPENDED_ID=""
+WORKER_RESTART_POLICY_RESTORE_TRAP_INSTALLED=""
 
 # A worker that is about to be drained must not be resurrected by the daemon the
 # moment it exits: that races the handoff worker and doubles concurrency (#486).
@@ -195,8 +196,9 @@ WORKER_RESTART_POLICY_SUSPENDED_ID=""
 # persistent mutation of the container, so an interrupted deploy (Ctrl-C, SSH
 # drop, dockerd snap refresh, power cut) used to strand the worker at
 # restart=no. The Compose file still read `unless-stopped`, nothing reconciled
-# the drift, and the next reboot silently dropped the worker (#527). The trap
-# makes the window crash-safe.
+# the drift, and the next reboot silently dropped the worker (#527). The traps
+# restore the policy after catchable interruptions; reconcile_worker_restart_policy
+# repairs persistent drift after SIGKILL, power loss, or other untrappable failures.
 suspend_worker_restart_policy() {
   local id="$1"
   local existing
@@ -204,24 +206,38 @@ suspend_worker_restart_policy() {
   WORKER_RESTART_POLICY_SUSPENDED_ID="$id"
   # Chain onto whatever EXIT trap the sourcing script already installed instead
   # of clobbering it -- doctor.sh installs its own cleanup.
-  existing="$(trap -p EXIT | sed -n "s/^trap -- '\(.*\)' EXIT\$/\1/p")"
-  case "$existing" in
-    ""|*restore_worker_restart_policy*)
+  if [ "${WORKER_RESTART_POLICY_RESTORE_TRAP_INSTALLED:-}" != "1" ]; then
+    existing="$(trap -p EXIT | sed -n "s/^trap -- '\(.*\)' EXIT\$/\1/p")"
+    if [ -z "$existing" ]; then
       trap 'restore_worker_restart_policy' EXIT
-      ;;
-    *)
+    else
       trap "restore_worker_restart_policy; $existing" EXIT
-      ;;
-  esac
-  trap 'restore_worker_restart_policy' INT TERM HUP
-  docker update --restart=no "$id" >/dev/null 2>&1 || true
+    fi
+    WORKER_RESTART_POLICY_RESTORE_TRAP_INSTALLED="1"
+  fi
+  trap 'trap - INT; restore_worker_restart_policy; kill -s INT "$$"' INT
+  trap 'trap - TERM; restore_worker_restart_policy; kill -s TERM "$$"' TERM
+  trap 'trap - HUP; restore_worker_restart_policy; kill -s HUP "$$"' HUP
+  # Every caller signals or kills the worker next, so suspension is mandatory.
+  docker update --restart=no "$id" >/dev/null || exit 1
 }
 
 restore_worker_restart_policy() {
   local id="${WORKER_RESTART_POLICY_SUSPENDED_ID:-}"
+  local int_trap term_trap hup_trap
   [ -n "$id" ] || return 0
-  WORKER_RESTART_POLICY_SUSPENDED_ID=""
-  docker update --restart="$(worker_declared_restart_policy)" "$id" >/dev/null 2>&1 || true
+  int_trap="$(trap -p INT)"
+  term_trap="$(trap -p TERM)"
+  hup_trap="$(trap -p HUP)"
+  trap '' INT TERM HUP
+  if docker update --restart="$(worker_declared_restart_policy)" "$id" >/dev/null 2>&1; then
+    WORKER_RESTART_POLICY_SUSPENDED_ID=""
+  fi
+  trap - INT TERM HUP
+  [ -z "$int_trap" ] || eval "$int_trap"
+  [ -z "$term_trap" ] || eval "$term_trap"
+  [ -z "$hup_trap" ] || eval "$hup_trap"
+  return 0
 }
 
 # Called once the suspended container has been replaced by a fresh one. The
