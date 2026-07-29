@@ -553,182 +553,18 @@ def _patch_reconcile_plumbing(monkeypatch, reconcile):
 
 
 @pytest.mark.asyncio
-async def test_moved_sha_pair_wakes_the_readiness_cycle(monkeypatch):
+async def test_existing_promotion_pr_does_not_wake_readiness_cycle(monkeypatch):
     _patch_reconcile_plumbing(monkeypatch, _reconcile_pair("already_open"))
-    heads = AsyncMock(side_effect=["staging-new-sha", "main-new-sha"])
-    monkeypatch.setattr(staging_promotion_pr, "async_get_repo_branch_head", heads)
+    wake = AsyncMock(side_effect=AssertionError("hourly job must not wake agent cycle"))
     monkeypatch.setattr(
         staging_promotion_pr,
-        "_async_last_evaluated_pair",
-        AsyncMock(return_value=("staging-old-sha", "main-new-sha")),
+        "_async_wake_readiness_cycle",
+        wake,
+        raising=False,
     )
-    wake = AsyncMock(return_value="woken")
-    monkeypatch.setattr(staging_promotion_pr, "async_wake_cycle_now", wake)
-
-    result = await staging_promotion_pr.run_promotion_job()
-
-    assert result["ok"] is True
-    assert result["readiness_wake"] == {
-        "cycle": staging_promotion_pr.READINESS_CYCLE_NAME,
-        "outcome": "woken",
-        "staging_sha": "staging-new-sha",
-        "main_sha": "main-new-sha",
-    }
-    wake.assert_awaited_once_with(name=staging_promotion_pr.READINESS_CYCLE_NAME)
-    assert heads.await_args_list[0].args == (REPO, "staging")
-    assert heads.await_args_list[1].args == (REPO, "main")
-
-
-@pytest.mark.asyncio
-async def test_unchanged_sha_pair_does_not_wake(monkeypatch):
-    _patch_reconcile_plumbing(monkeypatch, _reconcile_pair("already_open"))
-    monkeypatch.setattr(
-        staging_promotion_pr,
-        "async_get_repo_branch_head",
-        AsyncMock(side_effect=["same-staging", "same-main"]),
-    )
-    monkeypatch.setattr(
-        staging_promotion_pr,
-        "_async_last_evaluated_pair",
-        AsyncMock(return_value=("same-staging", "same-main")),
-    )
-    wake = AsyncMock()
-    monkeypatch.setattr(staging_promotion_pr, "async_wake_cycle_now", wake)
-
-    result = await staging_promotion_pr.run_promotion_job()
-
-    assert result["ok"] is True
-    assert result["readiness_wake"]["outcome"] == "pair_unchanged"
-    wake.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_no_diff_backend_skips_the_wake_probe_entirely(monkeypatch):
-    _patch_reconcile_plumbing(monkeypatch, _reconcile_pair("no_diff"))
-    heads = AsyncMock()
-    monkeypatch.setattr(staging_promotion_pr, "async_get_repo_branch_head", heads)
-    wake = AsyncMock()
-    monkeypatch.setattr(staging_promotion_pr, "async_wake_cycle_now", wake)
 
     result = await staging_promotion_pr.run_promotion_job()
 
     assert result["ok"] is True
     assert "readiness_wake" not in result
-    heads.assert_not_awaited()
     wake.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_wake_failure_fails_the_job_but_keeps_reconciliation_results(
-    monkeypatch, caplog
-):
-    _patch_reconcile_plumbing(monkeypatch, _reconcile_pair("created"))
-    monkeypatch.setattr(
-        staging_promotion_pr,
-        "_async_wake_readiness_cycle",
-        AsyncMock(side_effect=RuntimeError("status record unreadable")),
-    )
-
-    result = await staging_promotion_pr.run_promotion_job()
-
-    assert result["ok"] is False
-    assert result["failures"] == 1
-    assert [r["outcome"] for r in result["results"]] == ["created", "no_diff"]
-    assert result["readiness_wake"]["outcome"] == "error"
-    assert "Readiness cycle wake failed" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_last_evaluated_pair_reads_the_cycle_status_record(
-    async_sqlite_session_factory,
-    sqlite_postgres_ddl_patch,
-    monkeypatch,
-):
-    from brain.platform.db.models.domain import (
-        Domain,
-        DomainObjectType,
-        DomainRecord,
-    )
-
-    session = await async_sqlite_session_factory(
-        [
-            Org.__table__,
-            Domain.__table__,
-            DomainObjectType.__table__,
-            DomainRecord.__table__,
-        ],
-        connect_listener=_register_sqlite_functions,
-    )
-    org_id = "bbbbbbbb-0000-4000-8000-000000000002"
-    session.add(Org(id=org_id, name="Readiness Org", slug="readiness-org"))
-    domain = Domain(org_id=org_id, slug="promotion-readiness", name="Promotion Readiness")
-    session.add(domain)
-    await session.flush()
-    object_type = DomainObjectType(domain_id=domain.id, key="status", name="Status")
-    session.add(object_type)
-    await session.flush()
-    session.add(
-        DomainRecord(
-            org_id=org_id,
-            domain_id=domain.id,
-            object_type_id=object_type.id,
-            title="status",
-            data={
-                "last_staging_sha": "7bc4dd27c554",
-                "last_main_sha": "762e2b48f7d9",
-            },
-        )
-    )
-    await session.commit()
-
-    class TestUnitOfWork:
-        def __init__(self):
-            self.session = session
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr(staging_promotion_pr, "UnitOfWork", TestUnitOfWork)
-
-    pair = await staging_promotion_pr._async_last_evaluated_pair(org_id)
-
-    assert pair == ("7bc4dd27c554", "762e2b48f7d9")
-
-    # Another org's identically-slugged domain must not leak in.
-    assert await staging_promotion_pr._async_last_evaluated_pair(
-        "bbbbbbbb-0000-4000-8000-000000000099"
-    ) == (None, None)
-
-    # An archived object type reads as "no baseline", never as evidence.
-    object_type.archived_at = datetime.now(timezone.utc)
-    await session.commit()
-    assert await staging_promotion_pr._async_last_evaluated_pair(org_id) == (None, None)
-
-
-@pytest.mark.asyncio
-async def test_dead_wake_disposition_fails_the_job(monkeypatch, caplog):
-    """A wake that can never fire again (cycle gone) must not stay green."""
-    _patch_reconcile_plumbing(monkeypatch, _reconcile_pair("already_open"))
-    monkeypatch.setattr(
-        staging_promotion_pr,
-        "async_get_repo_branch_head",
-        AsyncMock(side_effect=["staging-new", "main-new"]),
-    )
-    monkeypatch.setattr(
-        staging_promotion_pr,
-        "_async_last_evaluated_pair",
-        AsyncMock(return_value=(None, None)),
-    )
-    monkeypatch.setattr(
-        staging_promotion_pr, "async_wake_cycle_now", AsyncMock(return_value="not_found")
-    )
-
-    result = await staging_promotion_pr.run_promotion_job()
-
-    assert result["ok"] is False
-    assert result["failures"] == 1
-    assert result["readiness_wake"]["outcome"] == "not_found"
-    assert "settled dead" in caplog.text
