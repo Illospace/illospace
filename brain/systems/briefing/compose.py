@@ -156,6 +156,8 @@ def _shorten_item(item: DossierItem, cap: int) -> str:
 
 def _narrative_item(dossier: Dossier) -> DossierItem | None:
     for section in dossier.sections:
+        if section.source == "internal_record":
+            continue
         for item in section.items:
             if item.excerpt or item.truncated:
                 return item

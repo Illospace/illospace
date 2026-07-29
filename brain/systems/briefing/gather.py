@@ -516,19 +516,17 @@ async def _chantier_pieces_for_record(
 
 def _idea_piece(idea: Any) -> SourcePiece:
     details = dict(getattr(idea, "agent_details", None) or {})
-    assignment = details.get("assignment") or {}
-    body_bits = [_text(getattr(idea, "description", ""))]
-    if details.get("task_domain"):
-        body_bits.append(f"task_domain: {details['task_domain']}")
-    if assignment:
-        body_bits.append(
-            f"owner: {assignment.get('owner_id') or 'unclaimed'} (basis: {assignment.get('basis', '?')})"
-        )
+    inbound = dict(details.get("inbound_triage") or {})
+    actionable_job_home = inbound.get("reason") == "actionable_run_completion"
     return SourcePiece(
-        source="record",
+        # The actionable lane creates a synthetic idea only as a durable
+        # anchor for the coding-agent packet. It is bookkeeping, not human
+        # narrative, so keep it in context_parts without letting it outrank
+        # the real Slack/GitHub evidence in the posted brief.
+        source="internal_record" if actionable_job_home else "record",
         ref=f"{JOB_REF_IDEA_PREFIX}{getattr(idea, 'id', '')}",
         title=_text(getattr(idea, "title", "")) or "triaged item",
-        body="; ".join(bit for bit in body_bits if bit),
+        body=_text(getattr(idea, "description", "")),
         ts=getattr(idea, "updated_at", None),
         weight=8,  # below the event-summary piece: the raw signal reads better
     )

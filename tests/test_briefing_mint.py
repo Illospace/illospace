@@ -473,14 +473,15 @@ async def test_stamp_reads_go_through_a_row_locked_idea(posts):
     assert getattr(session, "locked_idea_selects", 0) >= 1  # spec-pinned serialization
 
 
-async def test_owner_label_lookup_failure_degrades_to_id_not_unclaimed(posts):
+async def test_owner_label_lookup_failure_uses_human_safe_fallback(posts):
     idea = _idea()
     session = FakeSession(ideas=[idea], events=[_event()], users=[])  # no User row
     result = await mint_packet_after_triage(
         session, event=_event(), run_row=SimpleNamespace(id=1), readers=_readers())
     header = result.human_brief.splitlines()[0]
     assert "unclaimed" not in header  # assigned item never reads as unclaimed
-    assert _OWNER[:8] in header  # raw id (possibly shortened by the cap) shows
+    assert "assigned teammate" in header
+    assert _OWNER not in result.human_brief
 
 
 class CleanGithub:
@@ -688,6 +689,67 @@ async def test_actionable_run_mints_job_home_and_records_delivery(posts):
     assert session.deliveries[0].channel == "C0PROD"
     assert session.deliveries[0].thread_ts == "1751964840.0"
     assert session.deliveries[0].state == "pending"
+    brief = session.deliveries[0].brief
+    assert "half the batch melted" in brief
+    assert "Illo run" not in brief
+    assert "task_domain:" not in brief
+    assert "basis:" not in brief
+    assert _RUN_USER not in brief
+
+
+async def test_actionable_run_with_existing_reply_records_compact_human_follow_up(posts):
+    from brain.systems.briefing.mint import mint_packet_after_actionable_run
+
+    issue_title = "[Prod][Batch] POST /batch exceeds 25s while inner task keeps running"
+    raw_alert = '<rollbar-link|#2333 New error: {"active_after_504": 1, "route": "/batch"}>'
+    event = _actionable_event()
+    event.envelope["summary"] = raw_alert
+
+    class RollbarThread:
+        async def read_thread(self, *, channel, thread_ts, limit):
+            return SlackThreadRead(
+                messages=({"ts": thread_ts, "user": "rollbar", "text": raw_alert},),
+                total=1,
+                channel=channel,
+            )
+
+    class FiledIssue:
+        async def read_ref(self, *, repo_slug, number):
+            assert (repo_slug, number) == ("uwear-ai/uwear-backend", 616)
+            return {
+                "kind": "github_issue",
+                "title": issue_title,
+                "body": "The request times out while work continues in the background.",
+                "state": "open",
+                "body_total_chars": 63,
+            }
+
+    attribution = _attribution()
+    attribution["tool_names"] = ["post_slack_reply", "create_github_issue"]
+    session = FakeSession(
+        events=[event],
+        users=[SimpleNamespace(id=_RUN_USER, name="Axel", email=None)],
+    )
+    result = await mint_packet_after_actionable_run(
+        session,
+        event=event,
+        run_row=_run_row(),
+        attribution=attribution,
+        readers=Readers(slack=RollbarThread(), github=FiledIssue()),
+    )
+
+    assert result.ok and result.created and result.delivery == "recorded"
+    assert result.handoff.title == issue_title
+    assert issue_title in result.handoff.instructions
+    assert raw_alert not in result.handoff.instructions
+
+    brief = session.deliveries[0].brief
+    assert brief == f"→ Axel · Launch: {result.launch_url}"
+    assert "Illo run" not in brief
+    assert "task_domain:" not in brief
+    assert "basis:" not in brief
+    assert _RUN_USER not in brief
+    assert raw_alert not in brief
 
 
 async def test_actionable_run_without_durable_work_skips(posts):
