@@ -339,6 +339,28 @@ async def test_queued_backlog_health_snapshot_respects_full_capacity(monkeypatch
     assert health["stale_queued_backlog"] is False
 
 
+async def test_queued_backlog_health_snapshot_accepts_doctor_threshold(monkeypatch):
+    from brain.systems.runs.cortex import queue_health
+
+    oldest = datetime.now(timezone.utc) - timedelta(seconds=900)
+    received_thresholds = []
+
+    async def fake_snapshot(*, stale_after_seconds):
+        received_thresholds.append(stale_after_seconds)
+        return 1, oldest, 0
+
+    monkeypatch.setattr(queue_health, "queued_backlog_snapshot_async", fake_snapshot)
+    monkeypatch.setattr(queue_health, "runner_concurrency", lambda: 4)
+
+    health = await queue_health.queued_backlog_health_snapshot_async(
+        stale_after_seconds=600,
+    )
+
+    assert received_thresholds == [600.0]
+    assert health["watchdog_after_seconds"] == 600
+    assert health["stale_queued_backlog"] is True
+
+
 async def test_supervisor_starts_runner_slots_before_stale_reconcile_finishes(monkeypatch):
     from brain.systems.runs.cortex import runner
 
