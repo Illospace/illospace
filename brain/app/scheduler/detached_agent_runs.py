@@ -106,7 +106,7 @@ async def async_mark_detached_run_dispatched(
 
 
 def _agent_run_finished_at(agent_run: AgentRunRow, *, now: datetime) -> datetime:
-    for attr_name in ("completed_at", "failed_at", "canceled_at"):
+    for attr_name in ("completed_at", "failed_at", "canceled_at", "expired_at"):
         value = getattr(agent_run, attr_name, None)
         if value is not None:
             if value.tzinfo is None:

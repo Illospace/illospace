@@ -121,6 +121,7 @@ def _notice(
     run_id: int,
     budget_tokens_used: int,
     ceiling_tokens: int,
+    seconds_since_last_write_tool_call: int | None,
 ) -> RunBudgetNotice:
     position = (
         f"Run {run_id} has used {budget_tokens_used} of {ceiling_tokens} cumulative "
@@ -136,11 +137,21 @@ def _notice(
             "This run has reached its token budget ceiling. Stop new work: "
             "persist what you have and emit the closing output now."
         )
+    if seconds_since_last_write_tool_call is None:
+        activity = "No state-changing tool call has completed yet."
+    else:
+        seconds = max(0, int(seconds_since_last_write_tool_call))
+        if seconds < 60:
+            activity = f"The last state-changing tool call completed {seconds} seconds ago."
+        else:
+            minutes = seconds // 60
+            unit = "minute" if minutes == 1 else "minutes"
+            activity = f"The last state-changing tool call completed {minutes} {unit} ago."
     return RunBudgetNotice(
         key=key,
         message={
             "role": "user",
-            "content": f"{position} {instruction}",
+            "content": f"{position} {activity} {instruction}",
         },
     )
 
@@ -184,6 +195,9 @@ async def load_due_budget_notices(
                 run_id=resolved_run_id,
                 budget_tokens_used=budget_tokens_used,
                 ceiling_tokens=ceiling_tokens,
+                seconds_since_last_write_tool_call=activity.get(
+                    "seconds_since_last_write_tool_call"
+                ),
             )
         )
     if budget_tokens_used >= ceiling_tokens and CEILING_NOTICE_KEY not in sent:
@@ -193,6 +207,9 @@ async def load_due_budget_notices(
                 run_id=resolved_run_id,
                 budget_tokens_used=budget_tokens_used,
                 ceiling_tokens=ceiling_tokens,
+                seconds_since_last_write_tool_call=activity.get(
+                    "seconds_since_last_write_tool_call"
+                ),
             )
         )
     return tuple(notices)

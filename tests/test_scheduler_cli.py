@@ -89,6 +89,49 @@ async def test_stale_run_reaper_uses_independent_cadence_and_emits_count(monkeyp
     ]
 
 
+async def test_scheduler_enforces_agent_run_deadlines_without_a_worker(
+    monkeypatch,
+    capsys,
+):
+    calls: list[tuple[str, int]] = []
+
+    async def sweep(_session, *, limit):
+        calls.append(("sweep", limit))
+        return SimpleNamespace(
+            closeout_requested=1,
+            expired=1,
+            expired_run_ids=(42,),
+        )
+
+    async def settle(_session, run_id):
+        calls.append(("settle", run_id))
+        return None
+
+    async def finalize(run_id, *, status, error):
+        assert status == "expired"
+        assert error == "Agent run deadline elapsed"
+        calls.append(("finalize", run_id))
+
+    monkeypatch.setattr(scheduler_cli, "UnitOfWork", _FakeUnitOfWork)
+    monkeypatch.setattr(scheduler_cli, "sweep_agent_run_deadlines", sweep)
+    monkeypatch.setattr(scheduler_cli, "settle_terminal_root_run_async", settle)
+    monkeypatch.setattr(scheduler_cli, "async_finalize_cycle_run_from_run", finalize)
+
+    next_sweep_at = await scheduler_cli._enforce_agent_run_deadlines_if_due(
+        next_sweep_at=0.0,
+        now=100.0,
+    )
+
+    assert next_sweep_at == 160.0
+    assert calls == [("sweep", 25), ("settle", 42), ("finalize", 42)]
+    assert json.loads(capsys.readouterr().out) == {
+        "event": "agent_run_deadline_sweep",
+        "ok": True,
+        "closeout_requested": 1,
+        "expired": 1,
+    }
+
+
 async def test_stale_run_reaper_failure_emits_and_daemon_keeps_ticking(monkeypatch, capsys):
     tick_calls = 0
     sleep_calls = 0
@@ -105,6 +148,9 @@ async def test_stale_run_reaper_failure_emits_and_daemon_keeps_ticking(monkeypat
         assert limit == 25
         raise RuntimeError("reaper unavailable")
 
+    async def skip_deadline_sweep(*, next_sweep_at):
+        return next_sweep_at
+
     async def stop_after_second_tick(_seconds):
         nonlocal sleep_calls
         sleep_calls += 1
@@ -116,6 +162,7 @@ async def test_stale_run_reaper_failure_emits_and_daemon_keeps_ticking(monkeypat
     monkeypatch.setattr(scheduler_cli, "async_scheduler_daemon_startup", fake_startup)
     monkeypatch.setattr(scheduler_cli, "async_scheduler_daemon_tick", fake_tick)
     monkeypatch.setattr(scheduler_cli, "reap_stale_active_runs", fail_reap_stale_active_runs)
+    monkeypatch.setattr(scheduler_cli, "_enforce_agent_run_deadlines_if_due", skip_deadline_sweep)
     monkeypatch.setattr(scheduler_cli, "_monotonic", lambda: next(monotonic_times))
     monkeypatch.setattr(scheduler_cli.asyncio, "sleep", stop_after_second_tick)
 

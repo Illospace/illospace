@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -32,6 +33,24 @@ from tests.scheduler_test_support import (
 )
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_only_admission_budget_environment_name_remains(monkeypatch):
+    source = (
+        Path(__file__).parents[1] / "brain/app/scheduler/executor.py"
+    ).read_text(encoding="utf-8")
+    deprecated_name = "_".join(
+        ("SCHEDULER", "DRAIN", "EXECUTION", "BUDGET", "SECONDS")
+    )
+    assert deprecated_name not in source
+
+    monkeypatch.setenv("SCHEDULER_DRAIN_ADMISSION_BUDGET_SECONDS", "12.5")
+    from brain.app.scheduler import executor
+
+    assert executor._positive_float_env(
+        "SCHEDULER_DRAIN_ADMISSION_BUDGET_SECONDS",
+        30.0,
+    ) == 12.5
 
 
 @pytest.fixture

@@ -250,6 +250,7 @@ class AsyncAgentRunEngine:
             workspace_ref=dict(row.workspace_ref or {}),
             model_policy=dict(row.model_policy or {}),
             metadata=dict(row.metadata_ or {}),
+            deadline_at=row.deadline_at,
         )
         run = to_domain(row) if execution_claim is not None else await self._enter_running(row)
         cancel_event = self.cancel_event_factory(run.id) if self.cancel_event_factory else None

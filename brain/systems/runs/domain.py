@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
@@ -58,12 +58,19 @@ class AgentRunRequest:
     workspace_ref: dict[str, Any] = field(default_factory=dict)
     model_policy: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    deadline_at: datetime | None = None
 
     def __post_init__(self) -> None:
         org_id = str(self.org_id or "").strip()
         if not org_id:
             raise ValueError("AgentRun requires workspace org_id")
         object.__setattr__(self, "org_id", org_id)
+        if self.deadline_at is not None and self.deadline_at.tzinfo is None:
+            object.__setattr__(
+                self,
+                "deadline_at",
+                self.deadline_at.replace(tzinfo=timezone.utc),
+            )
 
     @property
     def normalized_profile(self) -> RunProfile:
@@ -96,6 +103,9 @@ class AgentRun:
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime | None = None
     started_at: datetime | None = None
+    deadline_at: datetime | None = None
+    closeout_expires_at: datetime | None = None
+    expired_at: datetime | None = None
     paused_at: datetime | None = None
     completed_at: datetime | None = None
     failed_at: datetime | None = None
