@@ -280,11 +280,21 @@ def run_stream_payload(run: AgentRunRow) -> dict[str, Any]:
         "created_at": timestamp,
         "updated_at": _iso(run.updated_at),
         "started_at": _iso(run.started_at),
+        "deadline_at": _iso(getattr(run, "deadline_at", None)),
+        "closeout_expires_at": _iso(getattr(run, "closeout_expires_at", None)),
+        "expired_at": _iso(getattr(run, "expired_at", None)),
         "paused_at": _iso(run.paused_at),
         "completed_at": _iso(run.completed_at),
         "failed_at": _iso(run.failed_at),
         "canceled_at": _iso(run.canceled_at),
-        "duration_sec": _duration_sec(run.started_at, run.completed_at or run.failed_at or run.canceled_at, run.updated_at),
+        "duration_sec": _duration_sec(
+            run.started_at,
+            run.completed_at
+            or run.failed_at
+            or run.canceled_at
+            or getattr(run, "expired_at", None),
+            run.updated_at,
+        ),
     }
     if failure is not None:
         payload["failure"] = failure

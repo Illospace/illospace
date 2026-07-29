@@ -738,6 +738,12 @@ async def _settle_terminal_root_run_async(session, run_id: int) -> dict[str, Any
     return await _settle_idea_for_terminal_root_run_async(session, run_id)
 
 
+async def settle_terminal_root_run_async(session, run_id: int) -> dict[str, Any] | None:
+    """Project a terminal root run onto its originating user-facing surface."""
+
+    return await _settle_terminal_root_run_async(session, run_id)
+
+
 async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict[str, Any] | None:
     run = await session.get(AgentRunRow, int(run_id))
     if run is None or run.parent_run_id is not None:
@@ -1643,6 +1649,7 @@ __all__ = [
     "runner_in_flight_count",
     "runner_in_flight_ids",
     "run_queued_once",
+    "settle_terminal_root_run_async",
     "start_runner",
     "stop_runner",
 ]

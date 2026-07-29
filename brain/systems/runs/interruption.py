@@ -101,6 +101,23 @@ def interruption_notice_condition(interruption: RunInterruption) -> str:
 async def notify_run_interruption(interruption: RunInterruption) -> dict[str, Any] | None:
     """Notify the originating surface after the interruption commit succeeds."""
 
+    if not interruption.requeued:
+        from brain.systems.runs.cortex.runner import settle_terminal_root_run_async
+
+        async with _unit_of_work_factory()() as uow:
+            result = await settle_terminal_root_run_async(
+                uow.session,
+                int(interruption.run_id),
+            )
+        from brain.systems.cycles.service import async_finalize_cycle_run_from_run
+
+        await async_finalize_cycle_run_from_run(
+            int(interruption.run_id),
+            status="expired",
+            error="Agent run interruption limit exhausted",
+        )
+        return result
+
     async with _unit_of_work_factory()() as uow:
         run = await uow.session.get(AgentRunRow, int(interruption.run_id))
         if run is None or not is_slack_origin(run):
