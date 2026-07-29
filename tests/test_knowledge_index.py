@@ -15,6 +15,7 @@ from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.main import app
+from brain.jobs.pipelines.knowledge_index_sync import CONNECTOR_FACTORIES
 from brain.kernel.config import KNOWLEDGE_EMBEDDING_DIM
 from brain.platform.db.models.agent_run import (
     AgentRunArtifactRow,
@@ -28,8 +29,10 @@ from brain.platform.db.models.knowledge import (
     KnowledgeSyncState,
 )
 from brain.platform.db.models.org import Org, User
+from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
 from brain.systems.knowledge.connectors.base import KnowledgeDraft
 from brain.systems.knowledge.connectors.domain_records import DomainRecordsConnector
+from brain.systems.knowledge.connectors.memory import MemoryConnector
 from brain.systems.knowledge.search import reciprocal_rank_fusion, search_knowledge
 from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS, sync_connector
 from brain.systems.external_agents import service as external_agents
@@ -134,6 +137,48 @@ def _unit_vector(axis: int = 0) -> np.ndarray:
     return vector
 
 
+def _memory_node(
+    node_id: int,
+    at: datetime,
+    *,
+    node_kind: str = "summary",
+    content_kind: str = "decision",
+    title: str | None = None,
+    text: str | None = None,
+    scope: str = "engineering",
+    org_id: str | None = _ORG_ID,
+    user_id: str | None = None,
+    visibility: str = "org",
+    confidence: float = 0.8,
+) -> MemoryNode:
+    label = title or f"Memory {node_id}"
+    return MemoryNode(
+        id=node_id,
+        node_kind=node_kind,
+        content_kind=content_kind,
+        canonical_label=label,
+        text=text or f"Memory body {node_id}",
+        normalized_key=label.casefold(),
+        scope_key=scope,
+        org_id=org_id,
+        user_id=user_id,
+        visibility=visibility,
+        confidence=confidence,
+        truth_status="active",
+        freshness_status="fresh",
+        created_at=at,
+        updated_at=at,
+    )
+
+
+def test_default_knowledge_sync_includes_the_memory_mirror():
+    assert [factory.source_key for factory in CONNECTOR_FACTORIES] == [
+        "domain_records",
+        "github",
+        "memory",
+    ]
+
+
 @pytest.fixture
 def embedding_runtime(monkeypatch):
     from brain.systems.memory import embeddings as embedding_client
@@ -182,6 +227,8 @@ async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
             KnowledgeItem.__table__,
             KnowledgeItemEmbedding.__table__,
             KnowledgeSyncState.__table__,
+            MemoryNode.__table__,
+            MemoryEdgeNode.__table__,
         ]
     )
 
@@ -297,6 +344,263 @@ async def test_domain_records_connector_advances_and_resumes_watermark_with_id_t
             )
         ).all()
     ) == ["domain_record:1", "domain_record:2", "domain_record:3"]
+
+
+async def test_memory_connector_mirrors_only_shared_consolidated_memories(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    updated_at = datetime(2026, 7, 18, 14, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            _memory_node(
+                11,
+                updated_at,
+                content_kind="decision",
+                title="Queue ownership rule",
+                text="An in-progress ticket belongs to the agent already working it.",
+                visibility="org",
+                confidence=0.92,
+            ),
+            _memory_node(
+                12,
+                updated_at,
+                node_kind="content",
+                content_kind="decision",
+                title="Unconsolidated source",
+                text="This source memory must not be mirrored yet.",
+                visibility="org",
+                confidence=0.7,
+            ),
+            _memory_node(
+                13,
+                updated_at,
+                content_kind="preference",
+                title="Private preference",
+                text="This user-private summary must remain in memory only.",
+                scope="personal",
+                org_id=None,
+                user_id="22222222-2222-4222-8222-222222222222",
+                visibility="private",
+                confidence=0.8,
+            ),
+        ]
+    )
+    await session.flush()
+
+    result = await sync_connector(session, MemoryConnector(max_items=10))
+    items = list((await session.scalars(select(KnowledgeItem))).all())
+
+    assert result.status == "ok"
+    assert result.stats == {
+        "ingested": 1,
+        "skipped": 0,
+        "failed": 0,
+        "truncated": 0,
+    }
+    assert result.cursor == {"updated_at": updated_at.isoformat(), "id": 13}
+    assert [item.source_ref for item in items] == ["memory_node:11"]
+    assert items[0].source == "memory"
+    assert items[0].kind == "memory"
+    assert items[0].title == "Queue ownership rule"
+    assert (
+        items[0].summary
+        == "An in-progress ticket belongs to the agent already working it."
+    )
+    assert items[0].raw_text == items[0].summary
+    assert items[0].entities == ["decision", "engineering"]
+    assert items[0].extra == {
+        "archived": False,
+        "consolidated": True,
+        "confidence": 0.92,
+        "freshness_status": "fresh",
+        "memory_type": "decision",
+        "node_kind": "summary",
+        "org_id": _ORG_ID,
+        "scope": "engineering",
+        "sensitivity": "low",
+        "source_type": "reconstructive_memory_node",
+        "superseded": False,
+        "superseded_by": None,
+        "truth_status": "active",
+        "visibility": "org",
+    }
+
+
+async def test_memory_connector_resumes_a_bounded_same_timestamp_backfill(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    updated_at = datetime(2026, 7, 19, 9, 30, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            _memory_node(
+                node_id,
+                updated_at,
+                content_kind="lesson",
+                title=f"Consolidated lesson {node_id}",
+                text=f"Durable lesson body {node_id}",
+                visibility="team",
+            )
+            for node_id in (21, 22, 23)
+        ]
+    )
+    await session.flush()
+    connector = MemoryConnector(max_items=2)
+
+    first = await sync_connector(session, connector)
+    second = await sync_connector(session, connector)
+    exhausted = await sync_connector(session, connector)
+
+    assert first.stats["ingested"] == 2
+    assert first.cursor == {"updated_at": updated_at.isoformat(), "id": 22}
+    assert second.stats["ingested"] == 1
+    assert second.cursor == {"updated_at": updated_at.isoformat(), "id": 23}
+    assert exhausted.stats == {
+        "ingested": 0,
+        "skipped": 0,
+        "failed": 0,
+        "truncated": 0,
+    }
+    assert exhausted.cursor == second.cursor
+    assert list(
+        (
+            await session.scalars(
+                select(KnowledgeItem.source_ref).order_by(KnowledgeItem.source_ref)
+            )
+        ).all()
+    ) == ["memory_node:21", "memory_node:22", "memory_node:23"]
+
+
+async def test_memory_connector_propagates_archived_and_superseded_state(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    created_at = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
+    nodes = [
+        _memory_node(
+            node_id,
+            created_at,
+            content_kind="decision",
+            title=f"Decision {node_id}",
+            text=f"Decision body {node_id}",
+        )
+        for node_id in (31, 32)
+    ]
+    replacement = _memory_node(
+        33,
+        created_at,
+        node_kind="content",
+        title="Replacement decision",
+    )
+    session.add_all([*nodes, replacement])
+    await session.flush()
+    connector = MemoryConnector(max_items=10)
+    await sync_connector(session, connector)
+
+    retired_at = datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc)
+    nodes[0].archived_at = retired_at
+    nodes[0].updated_at = retired_at
+    nodes[1].truth_status = "superseded"
+    nodes[1].freshness_status = "stale"
+    nodes[1].updated_at = retired_at
+    session.add(
+        MemoryEdgeNode(
+            source_node_id=32,
+            target_node_id=33,
+            edge_kind="superseded_by",
+            org_id=_ORG_ID,
+            visibility="org",
+            created_by="test",
+        )
+    )
+    await session.flush()
+
+    result = await sync_connector(session, connector)
+    mirrored = {
+        item.source_ref: item
+        for item in (await session.scalars(select(KnowledgeItem))).all()
+    }
+
+    assert result.stats == {
+        "ingested": 2,
+        "skipped": 0,
+        "failed": 0,
+        "truncated": 0,
+    }
+    assert (
+        mirrored["memory_node:31"].archived_at.replace(tzinfo=timezone.utc)
+        == retired_at
+    )
+    assert mirrored["memory_node:31"].extra["archived"] is True
+    assert mirrored["memory_node:31"].extra["superseded"] is False
+    assert (
+        mirrored["memory_node:32"].archived_at.replace(tzinfo=timezone.utc)
+        == retired_at
+    )
+    assert mirrored["memory_node:32"].extra["archived"] is False
+    assert mirrored["memory_node:32"].extra["superseded"] is True
+    assert mirrored["memory_node:32"].extra["superseded_by"] == 33
+    assert mirrored["memory_node:32"].extra["truth_status"] == "superseded"
+
+
+async def test_memory_connector_scrubs_a_mirror_when_visibility_becomes_private(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    created_at = datetime(2026, 7, 21, 10, 0, tzinfo=timezone.utc)
+    node = _memory_node(
+        41,
+        created_at,
+        content_kind="decision",
+        title="Shared launch decision",
+        text="The private launch detail must disappear if visibility changes.",
+        scope="launch",
+        visibility="team",
+        confidence=0.9,
+    )
+    session.add(node)
+    await session.flush()
+    connector = MemoryConnector(max_items=10)
+    await sync_connector(session, connector)
+
+    withdrawn_at = datetime(2026, 7, 21, 11, 0, tzinfo=timezone.utc)
+    node.visibility = "private"
+    node.updated_at = withdrawn_at
+    await session.flush()
+
+    result = await sync_connector(session, connector)
+    mirrored = await session.scalar(
+        select(KnowledgeItem).where(KnowledgeItem.source_ref == "memory_node:41")
+    )
+
+    assert result.stats == {
+        "ingested": 1,
+        "skipped": 0,
+        "failed": 0,
+        "truncated": 0,
+    }
+    assert result.cursor == {"updated_at": withdrawn_at.isoformat(), "id": 41}
+    assert mirrored is not None
+    assert mirrored.archived_at.replace(tzinfo=timezone.utc) == withdrawn_at
+    assert mirrored.title == "Memory no longer shared"
+    assert (
+        mirrored.summary
+        == "This consolidated memory is no longer shared with the workspace."
+    )
+    assert mirrored.raw_text == ""
+    assert "launch detail" not in mirrored.search_text
+    assert mirrored.extra == {
+        "archived": True,
+        "mirror_status": "visibility_withdrawn",
+        "node_kind": "summary",
+        "truth_status": "active",
+        "visibility": "private",
+    }
 
 
 def test_reciprocal_rank_fusion_uses_recency_as_weight_not_candidate_gate():

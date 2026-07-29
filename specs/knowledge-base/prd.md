@@ -204,6 +204,13 @@ Slack connector (thread-level re-pull, one row per thread) + LLM distillation
 via headless Illo runs (`admit_work`, effort from the routing ladder) for
 Slack and upgraded GitHub resolution-extraction + memory mirror connector.
 
+The memory mirror is workspace-visible by construction: it indexes only
+consolidated `MemoryNode` summaries with `org` or `team` visibility while the
+knowledge read path has no item-level ACL. Private/user-scoped summaries still
+advance the connector watermark but never land in the index; if a previously
+shared summary becomes private, its derived row is scrubbed and archived. The
+memory recall and mutation paths remain untouched.
+
 ## Slice 3 (sketch)
 
 Golden-question eval harness + R2 routine retarget (scores against

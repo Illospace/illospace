@@ -2,5 +2,6 @@
 
 from brain.systems.knowledge.connectors.domain_records import DomainRecordsConnector
 from brain.systems.knowledge.connectors.github import GitHubConnector
+from brain.systems.knowledge.connectors.memory import MemoryConnector
 
-__all__ = ["DomainRecordsConnector", "GitHubConnector"]
+__all__ = ["DomainRecordsConnector", "GitHubConnector", "MemoryConnector"]
