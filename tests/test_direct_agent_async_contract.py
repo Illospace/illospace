@@ -267,10 +267,25 @@ async def test_spawned_read_only_worker_retries_overload_text_and_recovers(
     assert streamed_deltas == ["Recovered repository evidence."]
 
 
-async def test_interactive_slack_transport_disconnect_retries_stream_and_completes(monkeypatch):
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["transport_disconnect", "provider_server_error"],
+)
+async def test_interactive_slack_transient_failure_retries_stream_and_completes(
+    monkeypatch,
+    failure_kind,
+):
     import httpx
 
-    from brain.platform.integrations.providers import is_transient_transport_disconnect
+    from brain.platform.integrations.openai_codex_client import (
+        OpenAICodexRetryableError,
+    )
+    from brain.platform.integrations.provider_error_sentinel import (
+        is_retryable_provider_error,
+    )
+    from brain.platform.integrations.providers import (
+        is_transient_transport_disconnect,
+    )
     from brain.systems.runs import direct_agent
 
     raw_error = (
@@ -292,6 +307,8 @@ async def test_interactive_slack_transport_disconnect_retries_stream_and_complet
         def __iter__(self):
             if self.attempt == 1:
                 yield SimpleNamespace(type="text", text="Partial answer")
+                if failure_kind == "provider_server_error":
+                    raise OpenAICodexRetryableError("server_error")
                 raise httpx.RemoteProtocolError(raw_error)
             yield SimpleNamespace(type="text", text="Recovered answer")
 
@@ -310,7 +327,9 @@ async def test_interactive_slack_transport_disconnect_retries_stream_and_complet
             return False
 
         def is_retryable_error(self, exc):
-            return is_transient_transport_disconnect(exc)
+            return is_transient_transport_disconnect(exc) or is_retryable_provider_error(
+                exc
+            )
 
     monkeypatch.setattr(direct_agent, "get_provider", lambda *_args, **_kwargs: FakeProvider())
     monkeypatch.setattr(direct_agent, "_API_RETRY_DELAYS", (0,))

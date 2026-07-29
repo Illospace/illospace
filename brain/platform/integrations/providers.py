@@ -20,6 +20,9 @@ from brain.platform.integrations.openai_codex_client import (
     OpenAICodexError,
     OpenAICodexRetryableError,
 )
+from brain.platform.integrations.provider_error_sentinel import (
+    is_retryable_provider_error,
+)
 from brain.platform.integrations.transports.anthropic import AnthropicMessagesTransport
 from brain.platform.integrations.transports.base import (
     ContentBlock,
@@ -76,7 +79,7 @@ from brain.platform.provider_health import (
 logger = logging.getLogger("brain.platform.integrations.providers")
 
 
-_RETRYABLE_OPENAI_STREAM_TERMS = (
+_RETRYABLE_OPENAI_FREEFORM_ERROR_TERMS = (
     "429",
     "502",
     "503",
@@ -110,7 +113,35 @@ def _openai_stream_error_message(error: Any) -> str:
 
 def _is_retryable_openai_error_message(message: str) -> bool:
     lowered = str(message or "").lower()
-    return any(term in lowered for term in _RETRYABLE_OPENAI_STREAM_TERMS)
+    return (
+        is_retryable_provider_error(lowered)
+        or any(term in lowered for term in _RETRYABLE_OPENAI_FREEFORM_ERROR_TERMS)
+    )
+
+
+def _openai_stream_failure(event: Any) -> Exception | None:
+    """Translate every terminal OpenAI SSE failure envelope through one path."""
+
+    event_type = str(_block_get(event, "type", "") or "")
+    if event_type == "error":
+        error = _block_get(event, "error", None) or event
+    elif event_type == "response.failed":
+        response = _block_get(event, "response", None) or event
+        error = (
+            _block_get(response, "error", None)
+            or _block_get(event, "error", None)
+            or response
+        )
+    else:
+        return None
+
+    message = _openai_stream_error_message(error) or "OpenAI streaming error"
+    if (
+        is_retryable_provider_error(error)
+        or _is_retryable_openai_error_message(message)
+    ):
+        return OpenAICodexRetryableError(message)
+    return RuntimeError(message)
 
 
 def is_transient_transport_disconnect(error: BaseException | str | None) -> bool:
@@ -479,12 +510,8 @@ class OpenAIProvider(LLMProvider):
                     if event_type == "response.completed":
                         final_response = _block_get(event, "response", None)
                         continue
-                    if event_type == "error":
-                        error = _block_get(event, "error", None)
-                        message = _openai_stream_error_message(error) or "OpenAI streaming error"
-                        if _is_retryable_openai_error_message(message):
-                            raise OpenAICodexRetryableError(message)
-                        raise RuntimeError(message)
+                    if failure := _openai_stream_failure(event):
+                        raise failure
 
                     reasoning_summary_delta = (
                         _extract_openai_reasoning_summary_from_event(event)

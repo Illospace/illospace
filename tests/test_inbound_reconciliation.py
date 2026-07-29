@@ -374,7 +374,16 @@ async def test_failed_slack_run_never_mints(session, posts, caplog):
     assert "run_status=failed" in skipped[0].getMessage()
 
 
-async def test_transient_failed_monitor_run_readmits_once_and_replacement_replies(session, posts):
+@pytest.mark.parametrize(
+    "failure_reason",
+    [INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE, "server_error"],
+    ids=["transport_disconnect", "provider_server_error"],
+)
+async def test_transient_failed_monitor_run_readmits_once_and_replacement_replies(
+    session,
+    posts,
+    failure_reason,
+):
     event_id, original_run_id = await _seed_slack_lane(
         session,
         tool_results=[],
@@ -385,7 +394,7 @@ async def test_transient_failed_monitor_run_readmits_once_and_replacement_replie
     await store.set_status(
         original_run_id,
         RunStatus.FAILED,
-        reason=INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE,
+        reason=failure_reason,
     )
 
     receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
@@ -439,7 +448,16 @@ async def test_transient_failed_monitor_run_readmits_once_and_replacement_replie
     assert [event.payload["tool_name"] for event in reply_events] == ["post_slack_reply"]
 
 
-async def test_second_transient_failure_is_terminal_and_result_shows_retry_lineage(session, posts):
+@pytest.mark.parametrize(
+    "failure_reason",
+    [INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE, "server_error"],
+    ids=["transport_disconnect", "provider_server_error"],
+)
+async def test_second_transient_failure_is_terminal_and_result_shows_retry_lineage(
+    session,
+    posts,
+    failure_reason,
+):
     from brain.systems.inbound.results import read_inbound_submission_result
 
     event_id, original_run_id = await _seed_slack_lane(
@@ -451,7 +469,7 @@ async def test_second_transient_failure_is_terminal_and_result_shows_retry_linea
     await store.set_status(
         original_run_id,
         RunStatus.FAILED,
-        reason=INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE,
+        reason=failure_reason,
     )
     replacement = (await session.scalars(
         select(AgentRunRow).where(AgentRunRow.id != original_run_id)
@@ -459,7 +477,7 @@ async def test_second_transient_failure_is_terminal_and_result_shows_retry_linea
     await store.set_status(
         replacement.id,
         RunStatus.FAILED,
-        reason=INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE,
+        reason=failure_reason,
     )
     await reconcile_inbound_triage_run(session, replacement.id)
 

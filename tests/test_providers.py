@@ -515,7 +515,41 @@ class TestOpenAIProvider:
             )) as stream:
                 stream.get_final_message()
 
-    def test_runtime_retries_openai_stream_overload_error(self):
+    def test_response_failed_server_error_is_retryable(self):
+        client = MagicMock()
+        client.responses.create.return_value = iter([
+            {
+                "type": "response.failed",
+                "response": {
+                    "status": "failed",
+                    "error": {
+                        "code": "server_error",
+                        "message": "The service failed while processing the response.",
+                    },
+                },
+            },
+        ])
+
+        provider = OpenAIProvider(client)
+
+        with pytest.raises(OpenAICodexRetryableError):
+            with provider.stream(LLMRequest(
+                model="openai/gpt-5.5",
+                messages=[{"role": "user", "content": "hi"}],
+            )) as stream:
+                stream.get_final_message()
+
+    @pytest.mark.parametrize(
+        "stream_error",
+        [
+            {
+                "message": "Our servers are currently overloaded. Please try again later."
+            },
+            {"code": "server_error"},
+        ],
+        ids=["overload_message", "structured_server_error"],
+    )
+    def test_runtime_retries_openai_stream_error(self, stream_error):
         from types import SimpleNamespace
 
         from brain.systems.runs.direct_loop.retry import api_call_with_retry
@@ -539,7 +573,7 @@ class TestOpenAIProvider:
             iter([
                 {
                     "type": "error",
-                    "error": {"message": "Our servers are currently overloaded. Please try again later."},
+                    "error": stream_error,
                 },
             ]),
             iter([{"type": "response.completed", "response": mock_resp}]),

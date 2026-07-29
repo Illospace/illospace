@@ -2,27 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
-import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable
 
-from brain.platform.integrations.providers import LLMRequest
-from brain.platform.integrations.provider_error_sentinel import provider_error_kind
 from brain.platform.async_io import run_blocking
+from brain.platform.integrations.provider_error_sentinel import (
+    is_retryable_provider_error,
+    provider_error_kind,
+)
+from brain.platform.integrations.providers import LLMRequest
 from brain.systems.runs.tool_catalog.metadata import is_write_side_effect_class
 from brain.systems.runs.tool_catalog.registry import get_tool_registration
 
 logger = logging.getLogger("agent")
 _MAX_RETRY_AFTER_SECONDS = 60.0
-_RETRYABLE_PROVIDER_ERROR_KINDS = frozenset(
-    {"server_error", "overloaded_error", "rate_limit_error"}
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +92,7 @@ def response_text_retry_decision(
     return ResponseTextRetryDecision(
         provider_error_kind=detected_kind,
         should_retry=bool(
-            retry_safe and detected_kind in _RETRYABLE_PROVIDER_ERROR_KINDS
+            retry_safe and is_retryable_provider_error(detected_kind)
         ),
         inspect_response=inspect_response,
         withhold_stream=inspect_response,

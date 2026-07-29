@@ -11,6 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundEventRow
+from brain.platform.integrations.provider_error_sentinel import (
+    is_retryable_provider_error,
+)
 from brain.platform.integrations.providers import is_transient_transport_disconnect
 from brain.systems.inbound.attribution import summarize_inbound_run_attribution
 from brain.systems.inbound.preservation import (
@@ -319,6 +322,7 @@ async def _readmit_failed_monitored_channel_once(
     if not (
         is_transient_transport_disconnect(failure_reason)
         or is_interactive_transport_fallback(failure_reason)
+        or is_retryable_provider_error(failure_reason)
     ):
         return False
 
