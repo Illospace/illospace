@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -41,6 +42,14 @@ RetryableFailureSummary = Callable[
     tuple[str, dict[str, Any]],
 ]
 ApplyFailureGuard = Callable[..., Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class _DetachedRunCandidate:
+    run: SchedulerRun
+    agent_run: AgentRunRow | None
+    job: SchedulerJob
+    step: SchedulerRunStep | None
 
 
 def _agent_run_summary(
@@ -121,15 +130,9 @@ def _terminal_scheduler_status(agent_status: AgentRunStatus) -> str:
     return RUN_STATUS_SETTLED_FAILURE
 
 
-async def async_reconcile_detached_runs(
+async def _async_load_detached_run_candidates(
     session: AsyncSession,
-    *,
-    retryable_failure_summary: RetryableFailureSummary,
-    apply_failure_guard: ApplyFailureGuard,
-    now: datetime | None = None,
-) -> list[dict[str, Any]]:
-    """Settle detached scheduler runs from their linked AgentRun outcomes."""
-    clock = ensure_utc(now)
+) -> list[_DetachedRunCandidate]:
     runs = (
         await session.scalars(
             select(SchedulerRun)
@@ -140,10 +143,79 @@ async def async_reconcile_detached_runs(
             .order_by(SchedulerRun.id.asc())
         )
     ).all()
-    reconciled: list[dict[str, Any]] = []
+    if not runs:
+        return []
+
+    agent_run_ids = tuple(
+        sorted({int(run.agent_run_id) for run in runs})
+    )
+    job_ids = tuple(sorted({run.job_id for run in runs}))
+    run_ids = tuple(run.id for run in runs)
+    agent_runs = (
+        await session.scalars(
+            select(AgentRunRow).where(AgentRunRow.id.in_(agent_run_ids))
+        )
+    ).all()
+    jobs = (
+        await session.scalars(
+            select(SchedulerJob).where(SchedulerJob.id.in_(job_ids))
+        )
+    ).all()
+    jobs_by_id = {job.id: job for job in jobs}
     for run in runs:
+        if run.job_id not in jobs_by_id:
+            raise ValueError(
+                f"Scheduler job {run.job_id} not found for detached run {run.id}"
+            )
+    steps = (
+        await session.scalars(
+            select(SchedulerRunStep)
+            .where(
+                SchedulerRunStep.run_id.in_(run_ids),
+                SchedulerRunStep.agent_run_id.in_(agent_run_ids),
+            )
+            .order_by(
+                SchedulerRunStep.run_id.asc(),
+                SchedulerRunStep.sequence_no.desc(),
+            )
+        )
+    ).all()
+
+    agent_runs_by_id = {agent_run.id: agent_run for agent_run in agent_runs}
+    steps_by_link: dict[tuple[int, int], SchedulerRunStep] = {}
+    for step in steps:
+        if step.agent_run_id is None:
+            continue
+        steps_by_link.setdefault(
+            (step.run_id, int(step.agent_run_id)),
+            step,
+        )
+    return [
+        _DetachedRunCandidate(
+            run=run,
+            agent_run=agent_runs_by_id.get(int(run.agent_run_id)),
+            job=jobs_by_id[run.job_id],
+            step=steps_by_link.get((run.id, int(run.agent_run_id))),
+        )
+        for run in runs
+    ]
+
+
+async def async_reconcile_detached_runs(
+    session: AsyncSession,
+    *,
+    retryable_failure_summary: RetryableFailureSummary,
+    apply_failure_guard: ApplyFailureGuard,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Settle detached scheduler runs from their linked AgentRun outcomes."""
+    clock = ensure_utc(now)
+    candidates = await _async_load_detached_run_candidates(session)
+    reconciled: list[dict[str, Any]] = []
+    for candidate in candidates:
+        run = candidate.run
         agent_run_id = int(run.agent_run_id)
-        agent_run = await session.get(AgentRunRow, agent_run_id)
+        agent_run = candidate.agent_run
         if agent_run is None:
             continue
         agent_status = coerce_agent_run_status(agent_run.status)
@@ -151,7 +223,7 @@ async def async_reconcile_detached_runs(
             continue
 
         terminal_status = _terminal_scheduler_status(agent_status)
-        job = await session.get(SchedulerJob, run.job_id)
+        job = candidate.job
         error_text = None
         if terminal_status == RUN_STATUS_SETTLED_FAILURE:
             error_text = (
@@ -167,7 +239,7 @@ async def async_reconcile_detached_runs(
             "agent_run": agent_summary,
         }
         scheduler_status = terminal_status
-        if terminal_status == RUN_STATUS_SETTLED_FAILURE and job is not None:
+        if terminal_status == RUN_STATUS_SETTLED_FAILURE:
             scheduler_status, summary = retryable_failure_summary(
                 job,
                 run,
@@ -176,15 +248,7 @@ async def async_reconcile_detached_runs(
             )
 
         finished_at = _agent_run_finished_at(agent_run, now=clock)
-        step = await session.scalar(
-            select(SchedulerRunStep)
-            .where(
-                SchedulerRunStep.run_id == run.id,
-                SchedulerRunStep.agent_run_id == agent_run_id,
-            )
-            .order_by(SchedulerRunStep.sequence_no.desc())
-            .limit(1)
-        )
+        step = candidate.step
         if step is not None:
             step.status = (
                 RUN_STATUS_SETTLED_SUCCESS
@@ -204,27 +268,27 @@ async def async_reconcile_detached_runs(
         await async_finish_run(
             session,
             run,
+            job=job,
             status=scheduler_status,
             result_summary=summary,
             error_text=error_text,
             now=finished_at,
         )
-        if job is not None:
-            if scheduler_status == RUN_STATUS_SETTLED_SUCCESS:
-                await async_reset_scheduler_job_failure_guard(
-                    session,
-                    job,
-                    now=clock,
-                )
-            else:
-                await apply_failure_guard(
-                    session,
-                    job,
-                    run,
-                    failure_key="detached_agent_run",
-                    error_text=error_text or "Detached agent run failed",
-                    now=clock,
-                )
+        if scheduler_status == RUN_STATUS_SETTLED_SUCCESS:
+            await async_reset_scheduler_job_failure_guard(
+                session,
+                job,
+                now=clock,
+            )
+        else:
+            await apply_failure_guard(
+                session,
+                job,
+                run,
+                failure_key="detached_agent_run",
+                error_text=error_text or "Detached agent run failed",
+                now=clock,
+            )
         reconciled.append(
             {
                 "run_id": run.id,
