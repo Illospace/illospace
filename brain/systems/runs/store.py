@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -14,7 +15,7 @@ from typing import Any
 import uuid
 
 from sqlalchemy import func, select, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.integrations.provider_error_sentinel import (
@@ -66,6 +67,8 @@ _DEFERRED_RUN_ACTIVE_STATUS_VALUES = frozenset({
 _SOURCE_IDEMPOTENCY_METADATA_KEYS = ("idempotency_key", "idempotencyKey")
 _CREATABLE_RUN_STATUSES = frozenset({RunStatus.QUEUED, RunStatus.STARTING})
 _CHILD_CREATION_TOKEN_METADATA_KEY = "parent_step_creation_token"
+_DEADLOCK_RETRY_ATTEMPTS = 3
+_DEADLOCK_RETRY_BASE_SECONDS = 0.05
 _UNSET = object()
 
 
@@ -137,6 +140,29 @@ async def _await_uninterruptibly(awaitable):
                 return task.result()
 
 
+def _is_postgres_deadlock(exc: BaseException) -> bool:
+    if not isinstance(exc, DBAPIError):
+        return False
+
+    pending: list[BaseException] = [exc.orig]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        sqlstate = (
+            getattr(current, "sqlstate", None)
+            or getattr(current, "pgcode", None)
+            or getattr(getattr(current, "diag", None), "sqlstate", None)
+        )
+        if sqlstate == "40P01":
+            return True
+        if isinstance(current.__cause__, BaseException):
+            pending.append(current.__cause__)
+    return False
+
+
 def to_domain(row: AgentRunRow) -> AgentRun:
     return AgentRun(
         id=_row_value(row, "id"),
@@ -186,6 +212,28 @@ def _deferred_run_target_id(row: AgentRunRow) -> int | None:
     return None
 
 
+def _heartbeat_write_needed(
+    row: AgentRunRow,
+    *,
+    now: datetime,
+    min_interval_seconds: float,
+) -> bool:
+    status = coerce_run_status(row.status, default=RunStatus.FAILED)
+    if status not in _RUNNER_HEARTBEAT_STATUSES:
+        return False
+    if min_interval_seconds <= 0:
+        return True
+
+    metadata = dict(row.metadata_ or {})
+    previous = metadata.get(_RUNNER_HEARTBEAT_METADATA_KEY)
+    previous = dict(previous) if isinstance(previous, dict) else {}
+    previous_at = _parse_datetime(previous.get("at"))
+    return (
+        previous_at is None
+        or (now - previous_at).total_seconds() >= min_interval_seconds
+    )
+
+
 def _source_idempotency_parts(request: AgentRunRequest) -> tuple[str | None, str | None]:
     metadata = dict(request.metadata or {})
     key = ""
@@ -230,6 +278,58 @@ class AsyncAgentRunStore:
     def __init__(self, session: AsyncSession, *, auto_commit: bool = False):
         self.session = session
         self.auto_commit = bool(auto_commit)
+
+    async def _acquire_agent_run_locks(
+        self,
+        run_ids: Iterable[int | None],
+        *,
+        key_share: bool,
+        skip_locked: bool = False,
+    ) -> set[int]:
+        """Acquire one lock mode across run rows in ascending global order."""
+        lock_ids = sorted({int(run_id) for run_id in run_ids if run_id is not None})
+        if not lock_ids or self._dialect_name() != "postgresql":
+            return set()
+        statement = (
+            select(AgentRunRow.id)
+            .where(AgentRunRow.id.in_(lock_ids))
+            .order_by(AgentRunRow.id.asc())
+            .with_for_update(
+                read=key_share,
+                key_share=key_share,
+                skip_locked=skip_locked,
+            )
+        )
+        rows = (await self.session.scalars(statement)).all()
+        return {int(run_id) for run_id in rows}
+
+    async def _try_locked_run(
+        self,
+        run_id: int,
+        *,
+        root_run_id: int | None = None,
+        skip_locked: bool = False,
+    ) -> AgentRunRow | None:
+        """Lock a root/current pair in id order, with only the current row exclusive."""
+        run_id = int(run_id)
+        if self._dialect_name() != "postgresql":
+            return await self.refresh_run(run_id)
+
+        if root_run_id is None:
+            snapshot = await self.refresh_run(run_id)
+            root_run_id = int(snapshot.root_run_id or run_id)
+        else:
+            root_run_id = int(root_run_id or run_id)
+
+        for lock_id in sorted({root_run_id, run_id}):
+            locked_ids = await self._acquire_agent_run_locks(
+                [lock_id],
+                key_share=lock_id != run_id,
+                skip_locked=skip_locked,
+            )
+            if lock_id not in locked_ids:
+                return None
+        return await self.refresh_run(run_id)
 
     async def _run_for_source_idempotency(
         self,
@@ -301,6 +401,11 @@ class AsyncAgentRunStore:
         if existing is not None:
             return to_domain(existing)
 
+        if request.parent_run_id is not None:
+            await self._acquire_agent_run_locks(
+                [request.root_run_id or request.parent_run_id, request.parent_run_id],
+                key_share=True,
+            )
         admitted_at = datetime.now(timezone.utc)
         row = AgentRunRow(
             org_id=request.org_id,
@@ -399,10 +504,9 @@ class AsyncAgentRunStore:
                     .values(updated_at=AgentRunRow.updated_at)
                 )
             else:
-                await self.session.execute(
-                    select(AgentRunRow.id)
-                    .where(AgentRunRow.id == int(parent_run.id))
-                    .with_for_update()
+                parent_run = await self._locked_run(
+                    int(parent_run.id),
+                    root_run_id=parent_run.root_run_id or parent_run.id,
                 )
             if step_key:
                 metadata_payload["parent_step_key"] = step_key
@@ -559,11 +663,39 @@ class AsyncAgentRunStore:
     ) -> ExecutionClaim | None:
         auto_commit = self.auto_commit
         self.auto_commit = False
+        run_id = int(row.id)
+        attempt = 1
         try:
-            return await self._try_acquire_execution_claim_transaction(row, token=token)
-        except BaseException:
-            await _await_uninterruptibly(self.session.rollback())
-            raise
+            while True:
+                try:
+                    return await self._try_acquire_execution_claim_transaction(
+                        row,
+                        token=token,
+                    )
+                except Exception as exc:
+                    await _await_uninterruptibly(self.session.rollback())
+                    if (
+                        not _is_postgres_deadlock(exc)
+                        or attempt >= _DEADLOCK_RETRY_ATTEMPTS
+                    ):
+                        raise
+                    delay_seconds = _DEADLOCK_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+                    logger.warning(
+                        "agent_run_deadlock_retry",
+                        extra={
+                            "run_id": run_id,
+                            "operation": "acquire_execution_claim",
+                            "attempt": attempt,
+                            "max_attempts": _DEADLOCK_RETRY_ATTEMPTS,
+                            "delay_seconds": delay_seconds,
+                        },
+                    )
+                    await asyncio.sleep(delay_seconds)
+                    row = await self.refresh_run(run_id)
+                    attempt += 1
+                except BaseException:
+                    await _await_uninterruptibly(self.session.rollback())
+                    raise
         finally:
             self.auto_commit = auto_commit
 
@@ -573,6 +705,10 @@ class AsyncAgentRunStore:
         *,
         token: str,
     ) -> ExecutionClaim | None:
+        row = await self._locked_run(
+            int(row.id),
+            root_run_id=row.root_run_id or row.id,
+        )
         status = coerce_run_status(row.status, default=RunStatus.FAILED)
         if status in TERMINAL_RUN_STATUSES:
             return None
@@ -729,22 +865,41 @@ class AsyncAgentRunStore:
             )
             if seen_ids:
                 stmt = stmt.where(~AgentRunRow.id.in_(seen_ids))
-            if self._dialect_name() == "postgresql":
-                stmt = stmt.with_for_update(skip_locked=True)
             rows = (await self.session.scalars(stmt)).all()
             if not rows:
                 return None
             for row in rows:
-                if await self._deferred_run_dependency_active(row):
+                locked_row = await self._try_locked_run(
+                    int(row.id),
+                    root_run_id=row.root_run_id or row.id,
+                    skip_locked=self._dialect_name() == "postgresql",
+                )
+                if locked_row is None:
                     seen_ids.append(int(row.id))
                     continue
-                return await self.set_status(row.id, RunStatus.STARTING, reason="claimed")
+                if locked_row.status != RunStatus.QUEUED.value:
+                    seen_ids.append(int(row.id))
+                    continue
+                if await self._deferred_run_dependency_active(locked_row):
+                    seen_ids.append(int(row.id))
+                    continue
+                claimed, _changed = await self._set_status_on_locked_run(
+                    locked_row,
+                    RunStatus.STARTING,
+                    reason="claimed",
+                )
+                return claimed
 
     async def claim_run(self, run_id: int) -> AgentRun | None:
         row = await self._locked_run(run_id)
         if row.status != RunStatus.QUEUED.value:
             return None
-        return await self.set_status(row.id, RunStatus.STARTING, reason="claimed")
+        claimed, _changed = await self._set_status_on_locked_run(
+            row,
+            RunStatus.STARTING,
+            reason="claimed",
+        )
+        return claimed
 
     async def get_run(self, run_id: int) -> AgentRunRow | None:
         return await self.session.get(AgentRunRow, int(run_id))
@@ -759,7 +914,7 @@ class AsyncAgentRunStore:
         return dict((await self.require_run(run_id)).metadata_ or {})
 
     async def update_metadata(self, run_id: int, patch: dict[str, Any]) -> dict[str, Any]:
-        row = await self.require_run(run_id)
+        row = await self._locked_run(run_id)
         metadata = dict(row.metadata_ or {})
         metadata.update(dict(patch or {}))
         row.metadata_ = metadata
@@ -775,20 +930,29 @@ class AsyncAgentRunStore:
         min_interval_seconds: float = 0.0,
         now: datetime | None = None,
     ) -> bool:
-        row = await self.require_run(run_id)
-        status = coerce_run_status(row.status, default=RunStatus.FAILED)
-        if status not in _RUNNER_HEARTBEAT_STATUSES:
+        now = now or datetime.now(timezone.utc)
+        snapshot = await self.refresh_run(run_id)
+        if not _heartbeat_write_needed(
+            snapshot,
+            now=now,
+            min_interval_seconds=min_interval_seconds,
+        ):
             return False
 
-        now = now or datetime.now(timezone.utc)
+        row = await self._locked_run(
+            run_id,
+            root_run_id=snapshot.root_run_id or snapshot.id,
+        )
+        if not _heartbeat_write_needed(
+            row,
+            now=now,
+            min_interval_seconds=min_interval_seconds,
+        ):
+            return False
+
         metadata = dict(row.metadata_ or {})
         previous = metadata.get(_RUNNER_HEARTBEAT_METADATA_KEY)
         previous = dict(previous) if isinstance(previous, dict) else {}
-        if min_interval_seconds > 0:
-            previous_at = _parse_datetime(previous.get("at"))
-            if previous_at is not None and (now - previous_at).total_seconds() < min_interval_seconds:
-                return False
-
         metadata[_RUNNER_HEARTBEAT_METADATA_KEY] = {
             "at": now.isoformat(),
             "token": token or previous.get("token"),
@@ -866,8 +1030,8 @@ class AsyncAgentRunStore:
         auto_commit = self.auto_commit
         self.auto_commit = False
         try:
-            transitioned_run, changed = await self.set_status_with_result(
-                int(row.id),
+            transitioned_run, changed = await self._set_status_on_locked_run(
+                row,
                 target,
                 reason=interruption["reason"],
                 transitioned_at=interrupted_at,
@@ -964,7 +1128,45 @@ class AsyncAgentRunStore:
             raise ExecutionClaimLost(
                 f"AgentRun {run_id} execution claim {execution_claim.attempt} is no longer current"
             )
-        row = await self.refresh_run(run_id)
+        row = await self._locked_run(run_id)
+        return await self._set_status_on_locked_run(
+            row,
+            status,
+            reason=reason,
+            execution_claim=execution_claim,
+            expected_updated_at=expected_updated_at,
+            expected_execution_token=expected_execution_token,
+            expected_execution_attempt=expected_execution_attempt,
+            rollback_on_conflict=rollback_on_conflict,
+            transitioned_at=transitioned_at,
+            metadata_update=metadata_update,
+            allow_interrupted_requeue=allow_interrupted_requeue,
+            before_status_events=before_status_events,
+            after_status_events=after_status_events,
+        )
+
+    async def _set_status_on_locked_run(
+        self,
+        row: AgentRunRow,
+        status: RunStatus | str,
+        *,
+        reason: str | None = None,
+        execution_claim: ExecutionClaim | None = None,
+        expected_updated_at: datetime | None | object = _UNSET,
+        expected_execution_token: str | None | object = _UNSET,
+        expected_execution_attempt: int | object = _UNSET,
+        rollback_on_conflict: bool = True,
+        transitioned_at: datetime | None = None,
+        metadata_update: dict[str, Any] | None = None,
+        allow_interrupted_requeue: bool = False,
+        before_status_events: tuple[AgentRunEvent, ...] = (),
+        after_status_events: tuple[AgentRunEvent, ...] = (),
+    ) -> tuple[AgentRun, bool]:
+        run_id = int(row.id)
+        if execution_claim is not None and execution_claim.lost.is_set():
+            raise ExecutionClaimLost(
+                f"AgentRun {run_id} execution claim {execution_claim.attempt} is no longer current"
+            )
         persisted_status = coerce_run_status(row.status, default=RunStatus.FAILED)
         if execution_claim is not None and (
             str(row.execution_token or "") != execution_claim.token
@@ -1139,6 +1341,10 @@ class AsyncAgentRunStore:
 
     async def append_event(self, event: AgentRunEvent) -> AgentRunEventRow:
         with _event_lock(int(event.run_id)):
+            await self._acquire_agent_run_locks(
+                [event.root_run_id or event.run_id, event.run_id],
+                key_share=True,
+            )
             await self.lock_event_stream(
                 int(event.run_id),
             )
@@ -1205,14 +1411,10 @@ class AsyncAgentRunStore:
                 .values(updated_at=AgentRunRow.updated_at)
             )
         else:
-            locked_rows = await self.session.scalars(
-                select(AgentRunRow)
-                .where(AgentRunRow.id.in_(lock_ids))
-                .order_by(AgentRunRow.id.asc())
-                .with_for_update()
-                .execution_options(populate_existing=True)
+            await self._acquire_agent_run_locks(
+                lock_ids,
+                key_share=False,
             )
-            locked_rows.all()
         if not await self.try_lock_event_stream(run_id):
             return None
         row = await self.refresh_run(run_id)
@@ -1248,6 +1450,10 @@ class AsyncAgentRunStore:
                 int(artifact.run_id),
                 str(artifact_text),
             )
+        await self._acquire_agent_run_locks(
+            [artifact.root_run_id or artifact.run_id, artifact.run_id],
+            key_share=True,
+        )
         row = AgentRunArtifactRow(
             run_id=artifact.run_id,
             root_run_id=artifact.root_run_id or artifact.run_id,
@@ -1368,16 +1574,16 @@ class AsyncAgentRunStore:
         )
         return older_active is not None
 
-    async def _locked_run(self, run_id: int) -> AgentRunRow:
-        stmt = (
-            select(AgentRunRow)
-            .where(AgentRunRow.id == int(run_id))
-            .limit(1)
-            .execution_options(populate_existing=True)
+    async def _locked_run(
+        self,
+        run_id: int,
+        *,
+        root_run_id: int | None = None,
+    ) -> AgentRunRow:
+        row = await self._try_locked_run(
+            int(run_id),
+            root_run_id=root_run_id,
         )
-        if self._dialect_name() == "postgresql":
-            stmt = stmt.with_for_update()
-        row = (await self.session.scalars(stmt)).first()
         if row is None:
             raise LookupError(f"Run {run_id} not found")
         return row
