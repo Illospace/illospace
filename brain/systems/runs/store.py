@@ -1351,6 +1351,21 @@ class AsyncAgentRunStore:
         async with _event_lock(int(event.run_id)):
             return await self._append_event_locked(event)
 
+    async def commit_event_boundary(self, run_id: int) -> None:
+        """Publish pre-action events before a tool opens an isolated UoW.
+
+        Tool handlers such as ``spawn_worker`` deliberately persist through a
+        separate session.  Keeping the runner transaction open after
+        ``run.tool_started`` leaves both the AgentRun row lock and its advisory
+        event-stream lock held while that handler tries to lock the same run,
+        producing a cross-session lock cycle.  Serialize the commit with event
+        appends so parallel tool calls cannot operate on the shared
+        ``AsyncSession`` while its transaction is closing.
+        """
+
+        async with _event_lock(int(run_id)):
+            await self.session.commit()
+
     async def _append_event_locked(self, event: AgentRunEvent) -> AgentRunEventRow:
         await self._acquire_agent_run_locks(
             [event.root_run_id or event.run_id, event.run_id],
