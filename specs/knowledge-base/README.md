@@ -7,8 +7,8 @@ temporary build plan lives in [prd.md](prd.md).
 
 - Slice 1 is shipped: the derived index, structural Domain Records and GitHub
   connectors, hybrid search, scheduler wiring, and MCP/in-run exposure exist.
-- Slice 2 is in progress under issue #577.
-- Slice 3 is blocked on slice 2 and tracked by issue #578.
+- Slice 2 is implemented under issue #577 and awaiting merge/deploy.
+- Slice 3 is tracked by issue #578 and begins after slice 2 merges.
 
 ## Dependency graph
 
@@ -38,10 +38,9 @@ slice 1 (shipped)
 
 ## Next Agent Prompt
 
-Complete issue #577 by integrating the Slack connector, restart-safe headless
-distillation, GitHub distillation opt-in, and the additive privacy-preserving
-memory mirror. Use TDD, run focused and full verification, update this handoff,
-then publish and merge the PR. After #577 is merged, implement #578's golden
-question harness and routine retarget; only perform the memory strangler swap
-if the measured evaluation demonstrates a win. Finally deploy and verify the
-knowledge sync operationally.
+Publish and merge issue #577 after its full verification completes. Then
+implement #578's golden-question harness and routine retarget. Record baseline
+and candidate scores against the north-star contract; only perform the memory
+strangler swap if the measured evaluation demonstrates a win. Finally deploy
+and verify Slack, GitHub, and memory connector accounting plus distillation
+dispatch/harvest operationally.

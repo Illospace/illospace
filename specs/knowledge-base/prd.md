@@ -5,7 +5,7 @@
 After shipping, this doc gets closed into a rationale (close-spec) and the code
 becomes the reference.*
 
-Status: slice 1 ready to implement. Slices 2–3 sketched, not scoped.
+Status: slices 1–2 implemented. Slice 3 is tracked by issue #578.
 
 ## What we're building
 
@@ -198,7 +198,7 @@ caller's job: follow `source_ref` to the canonical system for the full thing.
 Out of scope for slice 1: any change to the memory subsystem, Slack, LLM
 distillation, backfill tuning, deploy.
 
-## Slice 2 (sketch)
+## Slice 2 (implemented by #577)
 
 Slack connector (thread-level re-pull, one row per thread) + LLM distillation
 via headless Illo runs (`admit_work`, effort from the routing ladder) for
@@ -210,6 +210,21 @@ knowledge read path has no item-level ACL. Private/user-scoped summaries still
 advance the connector watermark but never land in the index; if a previously
 shared summary becomes private, its derived row is scrubbed and archived. The
 memory recall and mutation paths remain untouched.
+
+Delivered:
+
+- [x] One bounded, cursor-paged Slack connector row per complete thread.
+- [x] Restart-safe headless distillation through `admit_work`, using workspace
+      routing defaults and final-answer artifacts as the return path.
+- [x] Durable two-phase connector cursors; upstream watermarks advance only
+      after every admitted item is distilled or explicitly degraded.
+- [x] Slack and GitHub raw text remains lexical; only successful distilled
+      fields are embedded.
+- [x] Closed GitHub issues carry fixing-PR, merge-commit, closer, and merge-time
+      provenance when GitHub exposes it, with a structural fallback otherwise.
+- [x] Additive workspace-visible consolidated-memory mirror with private/user
+      exclusion and visibility-withdrawal scrubbing.
+- [x] Honest pending, distilled, failed, and truncation accounting.
 
 ## Slice 3 (sketch)
 
