@@ -30,6 +30,8 @@ from brain.app.scheduler.programs import nightly_heuristic_review_command
 from brain.app.scheduler.runtime import RUN_STATUS_SETTLED_SUCCESS
 from brain.app.scheduler.executor import async_run_scheduler_run
 from brain.platform.db.models.scheduler import (
+    SchedulerFailureGuardLatch,
+    SchedulerFailureGuardTriggerState,
     SchedulerRun,
 )
 from tests.scheduler_test_support import (
@@ -61,6 +63,154 @@ RuntimeError: worker=<Worker object at 0x8e23cd01> coroutine=<coroutine object r
 """
 
     assert scheduler_failure_signature(first) == scheduler_failure_signature(second)
+
+
+async def test_health_projection_preserves_each_jobs_latches_and_trigger_output(
+    session,
+    monkeypatch,
+):
+    monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "3")
+    monkeypatch.setenv("SCHEDULER_FAILURE_RATE_THRESHOLD", "2")
+    monkeypatch.setenv("SCHEDULER_FAILURE_RATE_WINDOW_HOURS", "24")
+    now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+    consecutive_alerted_at = now - timedelta(hours=2)
+    rolling_alerted_at = now - timedelta(hours=1)
+    consecutive_job = _make_scheduler_job(
+        job_key="consecutive_failure",
+        family="consecutive_failure",
+        failure_signature="consecutive-signature",
+        last_failure_error="RuntimeError: repeated failure",
+        next_run_at=now + timedelta(hours=1),
+    )
+    rolling_job = _make_scheduler_job(
+        job_key="rolling_failure",
+        family="rolling_failure",
+        failure_signature="rolling-signature",
+        last_failure_error="TimeoutError: intermittent failure",
+        next_run_at=now + timedelta(hours=2),
+    )
+    session.add_all([consecutive_job, rolling_job])
+    await session.flush()
+    session.add_all(
+        [
+            SchedulerFailureGuardTriggerState(
+                job_id=consecutive_job.id,
+                trigger_kind="consecutive",
+                trigger_state={"count": 3},
+            ),
+            SchedulerFailureGuardTriggerState(
+                job_id=rolling_job.id,
+                trigger_kind="consecutive",
+                trigger_state={"count": 1},
+            ),
+            SchedulerFailureGuardLatch(
+                job_id=consecutive_job.id,
+                trigger_kind="consecutive",
+                alerted_at=consecutive_alerted_at,
+            ),
+            SchedulerFailureGuardLatch(
+                job_id=rolling_job.id,
+                trigger_kind="rolling_window",
+                alerted_at=rolling_alerted_at,
+            ),
+        ]
+    )
+    for job, offset in (
+        (consecutive_job, 3),
+        (rolling_job, 4),
+        (rolling_job, 5),
+    ):
+        started_at = now - timedelta(hours=offset)
+        session.add(
+            SchedulerRun(
+                job_id=job.id,
+                scheduled_for=started_at,
+                window_start=started_at,
+                window_end=started_at + timedelta(hours=1),
+                status="settled_failure",
+                idempotency_key=f"projection-pin:{job.id}:{offset}",
+                started_at=started_at,
+                finished_at=started_at,
+            )
+        )
+    await session.flush()
+
+    snapshot = await async_scheduler_health_snapshot(session, now=now)
+    guards = {
+        job["job_key"]: job["failure_guard"]
+        for job in snapshot["jobs"]
+    }
+
+    assert guards == {
+        "consecutive_failure": {
+            "failure_signature": "consecutive-signature",
+            "last_error": "RuntimeError: repeated failure",
+            "triggers": [
+                {
+                    "kind": "consecutive",
+                    "count": 3,
+                    "threshold": 3,
+                    "window_hours": None,
+                    "alerted_at": consecutive_alerted_at.replace(
+                        tzinfo=None
+                    ).isoformat(),
+                    "crossed": False,
+                },
+                {
+                    "kind": "rolling_window",
+                    "count": 1,
+                    "threshold": 2,
+                    "window_hours": 24,
+                    "alerted_at": None,
+                    "crossed": False,
+                },
+            ],
+        },
+        "rolling_failure": {
+            "failure_signature": "rolling-signature",
+            "last_error": "TimeoutError: intermittent failure",
+            "triggers": [
+                {
+                    "kind": "consecutive",
+                    "count": 1,
+                    "threshold": 3,
+                    "window_hours": None,
+                    "alerted_at": None,
+                    "crossed": False,
+                },
+                {
+                    "kind": "rolling_window",
+                    "count": 2,
+                    "threshold": 2,
+                    "window_hours": 24,
+                    "alerted_at": rolling_alerted_at.replace(
+                        tzinfo=None
+                    ).isoformat(),
+                    "crossed": False,
+                },
+            ],
+        },
+    }
+    assert snapshot["alerts"] == [
+        {
+            "type": "scheduler_job_failure_guard",
+            "job_key": "consecutive_failure",
+            "failure_signature": "consecutive-signature",
+            "last_error": "RuntimeError: repeated failure",
+            "triggers": [
+                guards["consecutive_failure"]["triggers"][0],
+            ],
+        },
+        {
+            "type": "scheduler_job_failure_guard",
+            "job_key": "rolling_failure",
+            "failure_signature": "rolling-signature",
+            "last_error": "TimeoutError: intermittent failure",
+            "triggers": [
+                guards["rolling_failure"]["triggers"][1],
+            ],
+        },
+    ]
 
 
 async def test_scheduler_failure_alert_bytes_are_unchanged_through_shared_delivery(
