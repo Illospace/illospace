@@ -12,6 +12,7 @@ _PROVIDER_ERROR_KINDS = (
     "overloaded_error",
     "rate_limit_error",
 )
+_RETRYABLE_PROVIDER_ERROR_KINDS = frozenset(_PROVIDER_ERROR_KINDS)
 _PROVIDER_ERROR_KIND_VALUES = frozenset((*_PROVIDER_ERROR_KINDS, "provider_error"))
 _PROVIDER_ERROR_ALIASES = {
     "server_is_overloaded": "overloaded_error",
@@ -75,6 +76,19 @@ def provider_error_kind(
     return _classify_normalized_provider_error(exception_text) or "provider_error"
 
 
+def is_retryable_provider_error(
+    candidate: Any,
+    *,
+    provider_exception: BaseException | str | None = None,
+) -> bool:
+    """Classify retryability through the single provider-error taxonomy."""
+
+    return (
+        provider_error_kind(candidate, provider_exception=provider_exception)
+        in _RETRYABLE_PROVIDER_ERROR_KINDS
+    )
+
+
 def safe_provider_error_sentinel(kind: str | None) -> str:
     """Return a request-ID-free marker safe for internal persistence."""
 
@@ -86,6 +100,7 @@ def safe_provider_error_sentinel(kind: str | None) -> str:
 
 __all__ = [
     "PROVIDER_ERROR_SENTINEL_PREFIX",
+    "is_retryable_provider_error",
     "provider_error_kind",
     "safe_provider_error_sentinel",
 ]
