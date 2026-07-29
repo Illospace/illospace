@@ -95,6 +95,8 @@ EXPECTED_TABLES = {
     "routing_decisions",
     "routing_experiments",
     "run_target_bindings",
+    "scheduler_cold_start_reconciliations",
+    "scheduler_liveness_checkpoints",
     "scheduler_failure_guard_latches",
     "scheduler_failure_guard_trigger_states",
     "scheduler_jobs",

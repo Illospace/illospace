@@ -51,6 +51,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     # Downgrade removes only the dedicated trigger-state tables introduced here,
     # after restoring every representable legacy count.
     "0048_failure_guard_trigger_state.py",
+    # Downgrade removes only the cold-start receipt table introduced here.
+    "0050_scheduler_cold_start_reconciliation.py",
 }
 
 

@@ -45,6 +45,7 @@ async def run_staging_only_closure_sweep(
     github: ClosureGithubClient | None = None,
     production_evidence: ProductionEvidenceReader | None = None,
     slack: Any | None = None,
+    notify: bool = True,
     now: datetime | None = None,
 ) -> dict[str, object]:
     """Reconcile closed tracker issues through shared tracker owners."""
@@ -148,10 +149,13 @@ async def run_staging_only_closure_sweep(
         findings.append(finding)
         if transition.progress_added:
             surfaced.append(finding)
-    posted, notification_errors = await post_production_gate_findings(
-        surfaced,
-        slack=slack,
-    )
+    if notify:
+        posted, notification_errors = await post_production_gate_findings(
+            surfaced,
+            slack=slack,
+        )
+    else:
+        posted, notification_errors = 0, []
     errors.extend(notification_errors)
     return {
         "examined": len(records),

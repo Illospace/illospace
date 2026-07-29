@@ -40,7 +40,7 @@ async def post_production_gate_findings(
             return 0, [f"slack_client:{exc}"]
 
     try:
-        software_channel = await _resolve_channel(slack, SOFTWARE_CHANNEL)
+        software_channel = await resolve_slack_channel(slack, SOFTWARE_CHANNEL)
     except Exception as exc:  # noqa: BLE001
         logger.warning("production-gate channel lookup failed: %s", exc)
         errors.append(f"slack_channel:{exc}")
@@ -98,7 +98,7 @@ def _closer_key(finding: ProductionGateFinding) -> str:
     return _text(finding.closure.closed_by).casefold()
 
 
-async def _resolve_channel(client: Any, channel: str) -> str:
+async def resolve_slack_channel(client: Any, channel: str) -> str:
     list_channels = getattr(client, "conversations_list", None)
     if not channel.startswith("#") or not callable(list_channels):
         return channel

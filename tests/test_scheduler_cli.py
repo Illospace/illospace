@@ -5,7 +5,7 @@ import json
 from types import SimpleNamespace
 
 import brain.app.cli.scheduler as scheduler_cli
-from brain.app.cli.scheduler import _emit
+from brain.app.cli.scheduler import _emit, build_parser
 
 
 class _FakeUnitOfWork:
@@ -27,6 +27,7 @@ def _daemon_args(**overrides):
         "once": False,
         "poll_interval_seconds": 15,
         "now": None,
+        "cold_start_gap_threshold_seconds": 3600,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -49,6 +50,14 @@ def test_compact_tick_emission_is_one_bounded_line(capsys):
     assert output.count("\n") == 1
     assert len(output) < 250
     assert '"snapshot"' not in output
+
+
+def test_daemon_cold_start_threshold_is_operator_configurable():
+    args = build_parser().parse_args(
+        ["daemon", "--cold-start-gap-threshold-seconds", "900", "--once"]
+    )
+
+    assert args.cold_start_gap_threshold_seconds == 900
 
 
 async def test_stale_run_reaper_uses_independent_cadence_and_emits_count(monkeypatch, capsys):

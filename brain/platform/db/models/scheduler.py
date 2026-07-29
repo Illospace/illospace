@@ -29,6 +29,8 @@ __all__ = [
     "OWNER_MODE_CRON",
     "OWNER_MODE_MIRROR",
     "OWNER_MODE_SCHEDULER",
+    "SchedulerColdStartReconciliation",
+    "SchedulerLivenessCheckpoint",
     "SchedulerFailureGuardLatch",
     "SchedulerFailureGuardTriggerState",
     "SchedulerJob",
@@ -36,6 +38,104 @@ __all__ = [
     "SchedulerLease",
     "SchedulerRunStep",
 ]
+
+
+class SchedulerColdStartReconciliation(Base, CreatedAtMixin):
+    """Durable receipt for one explicit scheduler cold-start window."""
+
+    __tablename__ = "scheduler_cold_start_reconciliations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'degraded', 'failed')",
+            name="ck_scheduler_cold_start_reconciliations_status",
+        ),
+        CheckConstraint(
+            "notice_state IN ('pending', 'posting', 'posted', 'failed')",
+            name="ck_scheduler_cold_start_reconciliations_notice_state",
+        ),
+        UniqueConstraint(
+            "gap_started_at",
+            "reconciled_through",
+            name="uq_scheduler_cold_start_reconciliations_window",
+        ),
+        UniqueConstraint(
+            "notice_marker",
+            name="uq_scheduler_cold_start_reconciliations_notice_marker",
+        ),
+        UniqueConstraint(
+            "notice_client_msg_id",
+            name="uq_scheduler_cold_start_reconciliations_client_msg_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    gap_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    reconciled_through: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'running'"),
+        default="running",
+    )
+    lane_results: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    notice_state: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'pending'"),
+        default="pending",
+    )
+    notice_marker: Mapped[str] = mapped_column(String(80), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    claim_generation: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("1"),
+        default=1,
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    notice_posted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    notice_message_ts: Mapped[Optional[str]] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+    notice_client_msg_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class SchedulerLivenessCheckpoint(Base, CreatedAtMixin):
+    """Scheduler liveness plus the successfully reconciled outage watermark."""
+
+    __tablename__ = "scheduler_liveness_checkpoints"
+
+    checkpoint_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    last_reconciled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
 
 
 class SchedulerJob(Base, CreatedAtMixin):

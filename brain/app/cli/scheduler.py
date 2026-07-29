@@ -6,7 +6,7 @@ import argparse
 import asyncio
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from brain.app.scheduler.catalog import (
     async_list_scheduler_jobs,
@@ -299,6 +299,9 @@ async def cmd_daemon(args: argparse.Namespace) -> int:
                 uow.session,
                 owner_mode=args.owner_mode,
                 now=_now_from_args(args),
+                cold_start_gap_threshold=timedelta(
+                    seconds=args.cold_start_gap_threshold_seconds
+                ),
             )
         _emit({"event": "scheduler_startup", **startup})
         while True:
@@ -430,6 +433,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_daemon.add_argument("--job-key", default=None, help="Optional job filter")
     p_daemon.add_argument("--max-runs", type=int, default=10, help="Maximum runs per tick")
     p_daemon.add_argument("--poll-interval-seconds", type=int, default=30, help="Seconds between daemon ticks")
+    p_daemon.add_argument(
+        "--cold-start-gap-threshold-seconds",
+        type=int,
+        default=3600,
+        help="Minimum stale liveness-checkpoint age that triggers reconciliation",
+    )
     p_daemon.add_argument("--no-resume", dest="resume", action="store_false", help="Do not resume completed steps")
     p_daemon.add_argument("--once", action="store_true", help="Run one tick and exit")
     p_daemon.add_argument("--now", default=None, help="Optional ISO timestamp override")

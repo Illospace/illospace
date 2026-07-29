@@ -3,6 +3,7 @@
 from brain.systems.slack.connector import (
     SlackConnectorConfig,
     ensure_slack_connection,
+    process_normalized_slack_envelope,
     process_socket_payload,
     socket_mode_ack,
 )
@@ -13,6 +14,7 @@ __all__ = [
     "SlackConnectorConfig",
     "ensure_slack_connection",
     "normalize_slack_socket_event",
+    "process_normalized_slack_envelope",
     "process_socket_payload",
     "link_slack_identity",
     "list_slack_identity_mappings",
