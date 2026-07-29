@@ -175,6 +175,7 @@ def test_default_knowledge_sync_includes_the_memory_mirror():
     assert [factory.source_key for factory in CONNECTOR_FACTORIES] == [
         "domain_records",
         "github",
+        "slack",
         "memory",
     ]
 

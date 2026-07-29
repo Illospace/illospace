@@ -119,12 +119,16 @@ class MonitoredIntakePolicy:
     allowed_ignored_subtypes: frozenset[str] = frozenset()
 
 
-def visible_slack_content(event: Mapping[str, Any]) -> SlackVisibleContent:
+def visible_slack_content(
+    event: Mapping[str, Any],
+    *,
+    limit: int | None = 4000,
+) -> SlackVisibleContent:
     """Decode Slack text and blocks once without changing the alert fallback."""
 
     return SlackVisibleContent(
-        message_text=_event_message_text(event),
-        block_text=_slack_block_text(event.get("blocks")),
+        message_text=_event_message_text(event, limit=limit),
+        block_text=_slack_block_text(event.get("blocks"), limit=limit),
     )
 
 
@@ -461,14 +465,19 @@ MONITORED_INTAKE_POLICIES: tuple[MonitoredIntakePolicy, ...] = (
 )
 
 
-def _bounded_text(value: Any, *, limit: int = 4000) -> str:
-    return str(value or "")[:limit]
+def _bounded_text(value: Any, *, limit: int | None = 4000) -> str:
+    text = str(value or "")
+    return text if limit is None else text[:limit]
 
 
-def _event_message_text(event: Mapping[str, Any]) -> str:
+def _event_message_text(
+    event: Mapping[str, Any],
+    *,
+    limit: int | None = 4000,
+) -> str:
     """Preserve origin/main's alert text and attachment fallback byte-for-byte."""
 
-    text = _bounded_text(event.get("text"))
+    text = _bounded_text(event.get("text"), limit=limit)
     if text.strip():
         return text
     previews: list[str] = []
@@ -479,13 +488,14 @@ def _event_message_text(event: Mapping[str, Any]) -> str:
         if not isinstance(attachment, Mapping):
             continue
         preview = attachment.get("fallback") or attachment.get("title")
-        bounded = _bounded_text(preview, limit=500).strip()
+        preview_limit = 500 if limit is not None else None
+        bounded = _bounded_text(preview, limit=preview_limit).strip()
         if bounded:
             previews.append(bounded)
-    return _bounded_text("\n".join(previews))
+    return _bounded_text("\n".join(previews), limit=limit)
 
 
-def _slack_block_text(blocks: Any) -> str:
+def _slack_block_text(blocks: Any, *, limit: int | None = 4000) -> str:
     parts: list[str] = []
 
     def _collect(value: Any) -> None:
@@ -502,7 +512,7 @@ def _slack_block_text(blocks: Any) -> str:
                 _collect(item)
 
     _collect(blocks)
-    return _bounded_text("\n".join(parts))
+    return _bounded_text("\n".join(parts), limit=limit)
 
 
 def _mapping(value: Any) -> dict[str, Any]:

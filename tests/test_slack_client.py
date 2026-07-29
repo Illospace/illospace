@@ -86,6 +86,32 @@ async def test_slack_client_reads_thread_context_with_query_params(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_slack_client_pages_channel_history_through_existing_transport(monkeypatch):
+    calls: list[tuple[str, dict[str, Any]]] = []
+    client = SlackWebClient("xoxb-test")
+
+    async def fake_post(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((method, payload))
+        return {"ok": True, "messages": []}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    result = await client.conversation_history(
+        channel="C456",
+        limit=500,
+        cursor="history-2",
+    )
+
+    assert result["ok"] is True
+    assert calls == [
+        (
+            "conversations.history",
+            {"channel": "C456", "limit": 200, "cursor": "history-2"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_slack_client_surfaces_response_metadata_errors(monkeypatch):
     _patch_http_client(
         monkeypatch,
