@@ -65,6 +65,11 @@ async def test_run_activity_uses_token_ledger_and_worker_spawn_events():
         "cache_read": 148_000,
         "cache_write": 800,
     })
+    summarize_tools = AsyncMock(return_value={
+        "run_id": 42,
+        "last_write_tool_call_at": "2026-07-28T11:53:00+00:00",
+        "seconds_since_last_write_tool_call": 420,
+    })
 
     with patch(
         "brain.systems.runs.runtime_activity.UnitOfWork",
@@ -72,6 +77,9 @@ async def test_run_activity_uses_token_ledger_and_worker_spawn_events():
     ), patch(
         "brain.systems.runs.runtime_activity.async_summarize_run_usage",
         new=summarize,
+    ), patch(
+        "brain.systems.runs.runtime_activity.tool_call_summary",
+        new=summarize_tools,
     ):
         result = await load_run_activity(42)
 
@@ -79,8 +87,11 @@ async def test_run_activity_uses_token_ledger_and_worker_spawn_events():
         "tokens_used": 1_200,
         "run_budget_tokens_used": 150_000,
         "workers_spawned": 2,
+        "last_write_tool_call_at": "2026-07-28T11:53:00+00:00",
+        "seconds_since_last_write_tool_call": 420,
     }
     summarize.assert_awaited_once_with(session, 42)
+    summarize_tools.assert_awaited_once_with(session, 42)
     worker_count_query = session.scalar.await_args.args[0]
     compiled = worker_count_query.compile()
     query_text = str(compiled)
@@ -271,9 +282,24 @@ def test_agent_pushes_soft_and_ceiling_budget_notices_once_without_activity_tool
 
     client.messages.create.side_effect = create
     load_activity = AsyncMock(side_effect=[
-        {"tokens_used": 0, "run_budget_tokens_used": 0, "workers_spawned": 0},
-        {"tokens_used": 50, "run_budget_tokens_used": 750, "workers_spawned": 0},
-        {"tokens_used": 100, "run_budget_tokens_used": 1500, "workers_spawned": 0},
+        {
+            "tokens_used": 0,
+            "run_budget_tokens_used": 0,
+            "workers_spawned": 0,
+            "seconds_since_last_write_tool_call": None,
+        },
+        {
+            "tokens_used": 50,
+            "run_budget_tokens_used": 750,
+            "workers_spawned": 0,
+            "seconds_since_last_write_tool_call": 420,
+        },
+        {
+            "tokens_used": 100,
+            "run_budget_tokens_used": 1500,
+            "workers_spawned": 0,
+            "seconds_since_last_write_tool_call": 480,
+        },
     ])
     record_notice = AsyncMock(return_value=True)
 
@@ -328,7 +354,8 @@ def test_agent_pushes_soft_and_ceiling_budget_notices_once_without_activity_tool
     assert "750 of 1500 cumulative budget tokens" in final_context
     assert "Wrap up now and persist durable progress" in final_context
     assert "1500 of 1500 cumulative budget tokens" in final_context
-    assert "tool call" not in final_context
+    assert "last state-changing tool call completed 7 minutes ago" in final_context
+    assert "last state-changing tool call completed 8 minutes ago" in final_context
     assert "persist what you have and emit the closing output" in final_context
     assert "my_activity" not in final_context
 

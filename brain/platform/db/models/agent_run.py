@@ -47,6 +47,7 @@ class AgentRunRow(Base, TimestampMixin):
         Index("ix_agent_runs_org_created", "org_id", "created_at"),
         Index("ix_agent_runs_thread_created", "thread_id", "created_at"),
         Index("ix_agent_runs_status_created", "status", "created_at"),
+        Index("ix_agent_runs_status_deadline", "status", "deadline_at"),
         Index("ix_agent_runs_root_run_id", "root_run_id"),
         Index("ix_agent_runs_parent_run_id", "parent_run_id"),
         Index("ix_agent_runs_parent_created", "parent_run_id", "created_at", "id"),
@@ -94,6 +95,9 @@ class AgentRunRow(Base, TimestampMixin):
     execution_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     execution_attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", default=0)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closeout_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -167,6 +167,214 @@ async def test_child_does_not_inherit_root_source_idempotency(session_factory):
     assert child.parent_run_id == root.id
 
 
+async def test_new_run_persists_a_deadline_from_the_runtime_limit(
+    session_factory,
+    monkeypatch,
+):
+    monkeypatch.setenv("AGENT_RUN_DEADLINE_SECONDS", "120")
+    session = session_factory()
+    before = datetime.now(timezone.utc)
+
+    run = await AsyncAgentRunStore(session).create_run(
+        _run_request(thread_id="thread-deadline", message="bounded work")
+    )
+
+    assert run.deadline_at is not None
+    assert before + timedelta(seconds=119) <= run.deadline_at
+    assert run.deadline_at <= datetime.now(timezone.utc) + timedelta(seconds=120)
+
+
+async def test_child_run_cannot_outlive_its_parent_deadline(session_factory):
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    deadline = datetime.now(timezone.utc) + timedelta(minutes=3)
+    root = await store.create_run(
+        _run_request(
+            thread_id="thread-parent-deadline",
+            message="root",
+            deadline_at=deadline,
+        )
+    )
+
+    child = await store.create_child_run(
+        root,
+        recipe=RunRecipe.WORKER,
+        message="child",
+        step_key="node:bounded-child",
+    )
+
+    assert child.deadline_at == deadline
+
+
+async def test_deadline_sweep_requests_one_graceful_closeout_before_expiring(
+    session_factory,
+):
+    from brain.systems.runs.deadlines import sweep_agent_run_deadlines
+    from brain.systems.runs.events import run_event
+
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    run = await store.create_run(
+        _run_request(
+            thread_id="thread-closeout",
+            message="finish safely",
+            deadline_at=now - timedelta(seconds=1),
+        )
+    )
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+    tool_event = await store.append_event(
+        run_event(
+            run.id,
+            "run.tool_completed",
+            {"tool": "write_file", "side_effect": "write", "is_write": True},
+        )
+    )
+    tool_event.created_at = now - timedelta(minutes=5)
+    await session.flush()
+
+    first = await sweep_agent_run_deadlines(
+        session,
+        now=now,
+        grace_seconds=90,
+    )
+    second = await sweep_agent_run_deadlines(
+        session,
+        now=now + timedelta(seconds=30),
+        grace_seconds=90,
+    )
+
+    row = await session.get(AgentRunRow, run.id)
+    assert first.closeout_requested == 1
+    assert first.expired == 0
+    assert second.closeout_requested == 0
+    assert second.expired == 0
+    assert row is not None
+    assert row.status == RunStatus.RUNNING.value
+    assert row.closeout_expires_at.replace(tzinfo=timezone.utc) == now + timedelta(seconds=90)
+    closeout_events = (
+        await session.scalars(
+            select(AgentRunEventRow).where(
+                AgentRunEventRow.run_id == run.id,
+                AgentRunEventRow.event_type == "run.deadline_closeout_requested",
+            )
+        )
+    ).all()
+    steering_events = (
+        await session.scalars(
+            select(AgentRunEventRow).where(
+                AgentRunEventRow.run_id == run.id,
+                AgentRunEventRow.event_type == "run.steering_submitted",
+            )
+        )
+    ).all()
+    assert len(closeout_events) == 1
+    assert len(steering_events) == 1
+    assert closeout_events[0].payload["seconds_since_last_state_change"] == 300
+    assert "last state-changing tool call completed 5 minutes ago" in steering_events[0].payload["content"]
+    assert "close-out window ends in 90 seconds" in steering_events[0].payload["content"]
+
+
+async def test_deadline_sweep_expires_after_grace_and_preserves_partial_state(
+    session_factory,
+):
+    from brain.systems.runs.deadlines import sweep_agent_run_deadlines
+    from brain.systems.runs.events import run_event
+
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    run = await store.create_run(
+        _run_request(
+            thread_id="thread-expire",
+            message="bounded work",
+            deadline_at=now - timedelta(minutes=2),
+            metadata={"partial_result": {"saved": True}},
+        )
+    )
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+    row = await session.get(AgentRunRow, run.id)
+    assert row is not None
+    row.closeout_expires_at = now - timedelta(seconds=1)
+    for index in range(3):
+        read_event = await store.append_event(
+            run_event(
+                run.id,
+                "run.tool_completed",
+                {"tool": "read_file", "side_effect": "read_only", "is_write": False},
+            )
+        )
+        read_event.created_at = now - timedelta(seconds=30 - index)
+    await session.flush()
+
+    with patch(
+        "brain.systems.runs.chantier_continuation.queue_chantier_continuation_for_terminal_run",
+        return_value=None,
+    ):
+        result = await sweep_agent_run_deadlines(session, now=now)
+
+    row = await session.get(AgentRunRow, run.id)
+    final_answers = (
+        await session.scalars(
+            select(AgentRunArtifactRow).where(
+                AgentRunArtifactRow.run_id == run.id,
+                AgentRunArtifactRow.artifact_type == "final_answer",
+            )
+        )
+    ).all()
+    assert result.expired == 1
+    assert result.expired_run_ids == (run.id,)
+    assert row is not None
+    assert row.status == RunStatus.EXPIRED.value
+    assert row.expired_at.replace(tzinfo=timezone.utc) == now
+    assert row.metadata_["partial_result"] == {"saved": True}
+    assert len(final_answers) == 1
+    assert "timed out" in str(final_answers[0].text)
+    assert (await _event_types(session, run.id)).count("run.expired") == 1
+
+
+async def test_interruption_requeue_cap_expires_instead_of_looping_forever(
+    session_factory,
+    monkeypatch,
+):
+    monkeypatch.setenv("AGENT_RUN_MAX_INTERRUPTION_REQUEUES", "2")
+    session = session_factory()
+    store = AsyncAgentRunStore(session, auto_commit=True)
+    run = await store.create_run(
+        _run_request(
+            thread_id="thread-interruption-cap",
+            message="bounded restart",
+            metadata={
+                "interruption_count": 2,
+                "partial_result": {"saved": True},
+            },
+        )
+    )
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+    running = await store.require_run(run.id)
+    assert running.status == RunStatus.RUNNING.value
+    assert running.metadata_["interruption_count"] == 2
+
+    with patch(
+        "brain.systems.runs.chantier_continuation.queue_chantier_continuation_for_terminal_run",
+        return_value=None,
+    ):
+        expired, changed = await store.interrupt_and_requeue(run.id)
+
+    row = await store.require_run(run.id)
+    assert changed is True
+    assert expired.status == RunStatus.EXPIRED
+    assert row.status == RunStatus.EXPIRED.value
+    assert row.metadata_["interruption_count"] == 3
+    assert row.metadata_["partial_result"] == {"saved": True}
+    assert row.metadata_["interruption"]["requeued"] is False
+    assert "run.interruption_limit_exhausted" in await _event_types(session, run.id)
+    assert "timed out" in await store.latest_artifact_text(run.id)
+
+
 async def test_child_creation_and_parent_event_are_atomic_and_repairable(tmp_path, monkeypatch):
     database_engine, factory = await _file_session_factory(tmp_path / "child-event-atomicity.sqlite3")
     try:
