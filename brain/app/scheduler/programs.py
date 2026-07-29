@@ -8,9 +8,11 @@ from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from brain.contracts.scheduler_handoff import AGENT_RUN_COMPLETION_MODE
 from brain.platform.db.models.scheduler import SchedulerJob, SchedulerRun
 
 DEFAULT_STEP_KIND = "single"
+DEFAULT_COMPLETION_MODE = "command"
 WRAPPER_STEP_KEY = "nightly_wrapper"
 ILLO_EXTERNAL_HEARTBEAT_COMMAND = [
     "python3",
@@ -60,6 +62,7 @@ class SingleCommandProgram:
     command: tuple[str, ...]
     step_key: str
     description: str
+    completion_mode: str = DEFAULT_COMPLETION_MODE
 
     def build_step_plan(
         self,
@@ -90,10 +93,16 @@ class SingleCommandProgram:
 
 # Programs whose plan and StepSpec projections share one representation.
 SINGLE_COMMAND_PROGRAM_REGISTRY: dict[str, SingleCommandProgram] = {
+    "knowledge_index_sync": SingleCommandProgram(
+        command=("python3", "-m", "brain.jobs.pipelines.knowledge_index_sync"),
+        step_key="knowledge_index_sync",
+        description="Incrementally sync the Illo knowledge index",
+    ),
     "uwear_aws_health_scan": SingleCommandProgram(
         command=("python3", "-m", "brain.jobs.pipelines.aws_health_scan"),
         step_key="uwear_aws_health_scan",
         description="Uwear AWS production health scan",
+        completion_mode=AGENT_RUN_COMPLETION_MODE,
     ),
     "uwear_staging_promotion_pr": SingleCommandProgram(
         command=("python3", "-m", "brain.jobs.pipelines.staging_promotion_pr"),
@@ -101,6 +110,14 @@ SINGLE_COMMAND_PROGRAM_REGISTRY: dict[str, SingleCommandProgram] = {
         description="Ensure Uwear staging promotion pull requests exist",
     ),
 }
+
+
+def scheduler_program_completion_mode(job: SchedulerJob) -> str:
+    """Return the completion lifecycle declared by an exact-key program."""
+    definition = SINGLE_COMMAND_PROGRAM_REGISTRY.get(job.program_key)
+    if definition is None:
+        return DEFAULT_COMPLETION_MODE
+    return definition.completion_mode
 
 
 @dataclass(frozen=True)
@@ -565,17 +582,18 @@ def build_scheduler_step_plan(job: SchedulerJob) -> list[dict[str, object]]:
             if not isinstance(step, dict):
                 continue
             step_key = str(step.get("step_key") or step.get("key") or f"step_{index}")
-            plan.append(
-                {
-                    "step_key": step_key,
-                    "sequence_no": int(step.get("sequence_no") or index),
-                    "kind": str(step.get("kind") or DEFAULT_STEP_KIND),
-                    "handler_ref": step.get("handler_ref") or job.handler_ref,
-                    "payload": step.get("payload") or {},
-                    "command": step.get("command"),
-                    "commands": step.get("commands"),
-                }
-            )
+            projected_step: dict[str, object] = {
+                "step_key": step_key,
+                "sequence_no": int(step.get("sequence_no") or index),
+                "kind": str(step.get("kind") or DEFAULT_STEP_KIND),
+                "handler_ref": step.get("handler_ref") or job.handler_ref,
+                "payload": step.get("payload") or {},
+                "command": step.get("command"),
+                "commands": step.get("commands"),
+            }
+            if step.get("completion_mode"):
+                projected_step["completion_mode"] = str(step["completion_mode"])
+            plan.append(projected_step)
         if plan:
             return plan
 

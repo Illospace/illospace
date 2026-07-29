@@ -43,7 +43,6 @@ from brain.platform.async_io import run_blocking
 from brain.platform.integrations.providers import get_provider
 from brain.platform.integrations.providers import ContentBlockType, LLMRequest, MessageRole, StopReason
 from brain.platform.integrations.provider_error_sentinel import (
-    provider_error_kind,
     safe_provider_error_sentinel,
 )
 from brain.platform.providers.model_policy import (
@@ -90,6 +89,7 @@ from brain.systems.runs.direct_loop.context_recovery import (
 )
 from brain.systems.runs.direct_loop.retry import (
     async_api_call_with_retry as _runtime_async_api_call_with_retry,
+    response_text_retry_decision,
 )
 from brain.systems.runs.direct_loop.model_fallback import (
     fallback_model_for,
@@ -121,6 +121,11 @@ from brain.systems.runs.context import has_scheduled_result_contract
 from brain.systems.runs.routing_metadata import (
     effective_routing_snapshot,
     routing_metadata_with_effective,
+)
+from brain.systems.runs.direct_loop.run_budget_notice import (
+    load_budget_notices_sent,
+    load_due_budget_notices,
+    record_budget_notice_sent,
 )
 from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
 from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
@@ -1518,6 +1523,7 @@ async def run_agent_async(
         loaded_messages, stored_system = (
             await _maybe_await(load_session(session_id)) if persist_session else ([], None)
         )
+        run_budget_notices_sent = await load_budget_notices_sent(run_id)
         if stored_system and not system_prompt:
             system_prompt = stored_system
         raw_archive_messages = copy.deepcopy(loaded_messages) if persist_session else None
@@ -1597,6 +1603,17 @@ async def run_agent_async(
             )
             if guidance_count and raw_archive_messages is not None and len(state.messages) > before_guidance_len:
                 raw_archive_messages.append(copy.deepcopy(state.messages[-1]))
+            for notice in await load_due_budget_notices(
+                run_id=run_id,
+                sent=run_budget_notices_sent,
+            ):
+                if await record_budget_notice_sent(run_id=int(run_id), notice=notice):
+                    _append_message_with_archive(
+                        state.messages,
+                        notice.message,
+                        raw_archive_messages,
+                    )
+                run_budget_notices_sent.add(notice.key)
             state.messages = _sanitize_tool_pairs(state.messages, session_id)
             compaction = _compact_active_context(
                 state.messages,
@@ -1650,11 +1667,23 @@ async def run_agent_async(
             overflow_retry_used = False
             provider_error_text_attempt = 0
             detected_provider_error = None
+            response_text_policy = response_text_retry_decision(
+                "",
+                scheduled_result_contract=scheduled_result_contract,
+                metadata=metadata,
+                tool_call_source=tool_call_source,
+                tool_calls_made=state.tool_calls_made,
+            )
             while True:
                 try:
-                    # Scheduled Cycles settle through the contract gate; withholding live text
-                    # deltas keeps an upstream error body from becoming a public interim answer.
-                    visible_stream_delta = None if scheduled_result_contract else on_stream_delta
+                    # Withhold retry-eligible text until the response is classified so
+                    # an upstream error body cannot become a public interim answer.
+                    attempt_deltas: list[str] = []
+                    visible_stream_delta = on_stream_delta
+                    if scheduled_result_contract:
+                        visible_stream_delta = None
+                    elif response_text_policy.withhold_stream and on_stream_delta:
+                        visible_stream_delta = attempt_deltas.append
                     response = await _api_call_with_retry_async(
                         state.provider, request, llm, cancel_event, on_stream_activity, visible_stream_delta,
                         session_id, turn, state.tokens, start_time, state.tool_calls_made, _call_start,
@@ -1662,12 +1691,19 @@ async def run_agent_async(
                     response_text = _extract_text(
                         [{"role": "assistant", "content": _content_to_dicts(response.content)}]
                     ).strip()
+                    response_text_decision = response_text_retry_decision(
+                        response_text,
+                        scheduled_result_contract=scheduled_result_contract,
+                        metadata=metadata,
+                        tool_call_source=tool_call_source,
+                        tool_calls_made=state.tool_calls_made,
+                    )
                     detected_provider_error = (
-                        provider_error_kind(response_text) if scheduled_result_contract else None
+                        response_text_decision.provider_error_kind
                     )
                     if detected_provider_error:
                         logger.error(
-                            "Agent %s turn %d: Cycle provider error text blocked "
+                            "Agent %s turn %d: provider error text blocked "
                             "(kind=%s, attempt=%d/%d): %s",
                             session_id,
                             turn,
@@ -1676,7 +1712,11 @@ async def run_agent_async(
                             len(_PROVIDER_ERROR_TEXT_RETRY_DELAYS) + 1,
                             response_text,
                         )
-                        if provider_error_text_attempt < len(_PROVIDER_ERROR_TEXT_RETRY_DELAYS):
+                        if (
+                            response_text_decision.should_retry
+                            and provider_error_text_attempt
+                            < len(_PROVIDER_ERROR_TEXT_RETRY_DELAYS)
+                        ):
                             delay = _PROVIDER_ERROR_TEXT_RETRY_DELAYS[provider_error_text_attempt]
                             provider_error_text_attempt += 1
                             if on_stream_activity:
@@ -1687,6 +1727,9 @@ async def run_agent_async(
                             await asyncio.sleep(max(0.0, float(delay)))
                             _call_start = time.time()
                             continue
+                    elif attempt_deltas and on_stream_delta:
+                        for delta in attempt_deltas:
+                            await _call_optional_async(on_stream_delta, delta)
                     break
                 except Exception as exc:
                     fallback = fallback_model_for(model)

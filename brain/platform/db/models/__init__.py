@@ -1,6 +1,7 @@
 """SQLAlchemy models — import all to register with Base.metadata."""
 from brain.platform.db.models.org import *  # noqa
 from brain.platform.db.models.reconstructive_memory import *  # noqa
+from brain.platform.db.models.knowledge import *  # noqa
 from brain.platform.db.models.skill import *  # noqa
 from brain.platform.db.models.skill_bundle import *  # noqa
 from brain.platform.db.models.skill_quality import *  # noqa

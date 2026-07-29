@@ -6,6 +6,10 @@ import json
 import logging
 from typing import Any
 
+from brain.platform.integrations.provider_error_sentinel import (
+    provider_error_kind,
+    safe_provider_error_sentinel,
+)
 from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.context import compact_project_reference
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
@@ -28,8 +32,12 @@ from brain.systems.runs.token_usage import (
     async_summarize_run_usage_in_savepoint,
     usage_totals_payload,
 )
+from brain.systems.personality import soul_prompt_section
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
-from brain.systems.runs.recipes.surface_guidance import response_surface_guidance
+from brain.systems.runs.recipes.surface_guidance import (
+    has_user_visible_surface,
+    response_surface_guidance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -225,12 +233,29 @@ class WorkerRecipe(BaseRunRecipe):
                 effort=str(thinking),
             )
             output = str(getattr(result, "output", "") or "").strip()
-            status = RunStatus.COMPLETED if getattr(result, "success", False) else RunStatus.FAILED
+            detected_provider_error = (
+                provider_error_kind(output)
+                if getattr(result, "success", False)
+                else None
+            )
+            status = (
+                RunStatus.COMPLETED
+                if getattr(result, "success", False) and not detected_provider_error
+                else RunStatus.FAILED
+            )
             error = None
             failure_category = None
             failure = None
             if status == RunStatus.FAILED:
-                error = str(getattr(result, "error", None) or output or "worker_recipe_failed")
+                error = (
+                    safe_provider_error_sentinel(detected_provider_error)
+                    if detected_provider_error
+                    else str(
+                        getattr(result, "error", None)
+                        or output
+                        or "worker_recipe_failed"
+                    )
+                )
                 failure_category = failure_category_for_error(error)
                 failure = public_run_failure(status, failure_category)
                 output = ""
@@ -313,8 +338,16 @@ def build_worker_prompt(
         if workspace_ref:
             context_parts.append("Workspace:\n" + compact_project_reference(workspace_ref))
         context_block = "\n\n".join(context_parts)
+    # A headless worker reports to its parent run and needs no identity. One that
+    # inherited a response surface writes text a person reads, so it needs the voice.
+    soul_section = (
+        soul_prompt_section()
+        if has_user_visible_surface(target_ref=target_ref, metadata=metadata)
+        else ""
+    )
     return (
-        WORKER_AGENT_INSTRUCTIONS
+        (f"{soul_section}\n\n" if soul_section else "")
+        + WORKER_AGENT_INSTRUCTIONS
         + "\n\n"
         + response_surface_guidance(target_ref=target_ref, metadata=metadata)
         + _json_block("Worker Assignment", assignment.to_payload())

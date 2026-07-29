@@ -170,6 +170,32 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
         "retry_policy": {"max_attempts": 2, "backoff_seconds": 30},
         "misfire_policy": "skip",
     },
+    {
+        "job_key": "knowledge_index_sync",
+        "family": "knowledge_index_sync",
+        "program_key": "knowledge_index_sync",
+        "handler_kind": CATALOG_HANDLER_KIND,
+        "handler_ref": "brain.app.scheduler.programs:knowledge_index_sync",
+        "cron_expr": "*/30 * * * *",
+        "timezone": "UTC",
+        "default_payload": {
+            "name": "Knowledge Index Sync",
+            "description": "Incrementally index configured company knowledge sources",
+        },
+        "task_contract": {
+            "memory_scope": {"visibility": "system"},
+            "allowed_actions": ["scheduler.run"],
+            "output_channel": "scheduler",
+            "success_criteria": [
+                "Every registered source reports ingestion, skip, failure, and truncation counts"
+            ],
+        },
+        "priority": 80,
+        "max_concurrency": 1,
+        "timeout_seconds": 900,
+        "retry_policy": {"max_attempts": 2, "backoff_seconds": 120},
+        "misfire_policy": "skip",
+    },
 )
 
 

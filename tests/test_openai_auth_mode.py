@@ -28,21 +28,24 @@ def test_other_models_do_not_pin_an_auth_mode(model):
 
 
 def test_cycle_preflight_and_run_agree_on_required_auth_mode():
-    """The preflight must validate the credential the run will actually use.
+    """The shared probe must validate the credential the run will actually use.
 
-    A divergent copy in the cycle preflight recognized only gpt-5.5, so a
+    A divergent preflight copy recognized only gpt-5.5, so a
     GPT-5.6 cycle validated an interchangeable credential and lost the
     actionable auth-blocked message when the ChatGPT credential was dead.
     """
-    from brain.systems.cycles import auth_preflight
+    from brain.platform.integrations import provider_auth_preflight
     from brain.systems.runs import direct_agent
     from brain.systems.runs.direct_loop import final_reply_checker
 
-    for module in (auth_preflight, direct_agent, final_reply_checker):
+    for module in (provider_auth_preflight, direct_agent, final_reply_checker):
         assert not hasattr(module, "_required_openai_auth_mode"), (
             f"{module.__name__} redeclares the auth-mode rule; import the shared helper"
         )
 
-    assert auth_preflight.required_openai_auth_mode is required_openai_auth_mode
+    assert (
+        provider_auth_preflight.required_openai_auth_mode
+        is required_openai_auth_mode
+    )
     assert direct_agent.required_openai_auth_mode is required_openai_auth_mode
     assert final_reply_checker.required_openai_auth_mode is required_openai_auth_mode

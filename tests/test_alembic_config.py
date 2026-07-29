@@ -48,6 +48,9 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0045_scheduler_failure_guard_latches.py",
     # Downgrade removes only the cycle guard tables introduced by this migration.
     "0046_cycle_failure_guard.py",
+    # Downgrade removes only the dedicated trigger-state tables introduced here,
+    # after restoring every representable legacy count.
+    "0048_failure_guard_trigger_state.py",
 }
 
 

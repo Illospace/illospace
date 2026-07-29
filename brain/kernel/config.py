@@ -9,6 +9,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from brain.kernel.common.env import env_float, env_int
+
 # ---------------------------------------------------------------------------
 # Resolve .env (if python-dotenv available)
 # ---------------------------------------------------------------------------
@@ -60,6 +62,27 @@ AGENT_CONTEXT_DIR = Path(os.getenv("AGENT_CONTEXT_DIR", PRIVATE_HOME / "agent-co
 AGENT_CHECKLIST_PATH = Path(os.getenv("AGENT_CHECKLIST_PATH", AGENT_CONTEXT_DIR / "pre-flight-checklist.md"))
 AGENT_SOUL_PATH = Path(os.getenv("AGENT_SOUL_PATH", AGENT_CONTEXT_DIR / "SOUL.md"))
 BRAIN_LOG_DIR = Path(os.getenv("BRAIN_LOG_DIR", PRIVATE_HOME / "logs"))
+
+# ---------------------------------------------------------------------------
+# Agent runtime
+# ---------------------------------------------------------------------------
+# Unvalidated estimate: 33 near-limit requests * 150K budget tokens = 4.95M,
+# rounded to 5M. The budget metric includes uncached input/output plus cache
+# reads/writes; see cumulative_run_budget_tokens() in runtime_activity.py.
+_DEFAULT_AGENT_RUN_CUMULATIVE_TOKEN_BUDGET = 5_000_000
+AGENT_RUN_CUMULATIVE_TOKEN_BUDGET = env_int(
+    "AGENT_RUN_CUMULATIVE_TOKEN_BUDGET",
+    _DEFAULT_AGENT_RUN_CUMULATIVE_TOKEN_BUDGET,
+    minimum=0,
+)
+
+_DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION = 2 / 3
+AGENT_RUN_BUDGET_NOTICE_FRACTION = env_float(
+    "AGENT_RUN_BUDGET_NOTICE_FRACTION",
+    _DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION,
+)
+if not 0 < AGENT_RUN_BUDGET_NOTICE_FRACTION < 1:
+    AGENT_RUN_BUDGET_NOTICE_FRACTION = _DEFAULT_AGENT_RUN_BUDGET_NOTICE_FRACTION
 
 # ---------------------------------------------------------------------------
 # Database
@@ -118,6 +141,22 @@ DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
 DB_POOL_OVERFLOW = int(os.getenv("DB_POOL_OVERFLOW", "0"))
 DB_POOL_TIMEOUT_SECONDS = float(os.getenv("DB_POOL_TIMEOUT_SECONDS", "10"))
 
+# Knowledge indexing is always live. These values bound recurring work and
+# provide a useful public-repository default when Project Contexts have not
+# configured repositories yet.
+KNOWLEDGE_CONNECTOR_BATCH_SIZE = max(
+    1,
+    int(os.getenv("KNOWLEDGE_CONNECTOR_BATCH_SIZE", "100")),
+)
+KNOWLEDGE_GITHUB_REPOSITORIES = tuple(
+    repository.strip()
+    for repository in os.getenv(
+        "KNOWLEDGE_GITHUB_REPOSITORIES",
+        "uwear-ai/illospace",
+    ).split(",")
+    if repository.strip()
+)
+
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Embeddings — three modes:
@@ -153,6 +192,7 @@ MEMORY_RERANKER = os.getenv("MEMORY_RERANKER", "weighted")
 # this value requires a staged migration plus re-embedding; never resize
 # populated vectors silently.
 MEMORY_SEMANTIC_EMBEDDING_DIM = EMBEDDING_DIM
+KNOWLEDGE_EMBEDDING_DIM = EMBEDDING_DIM
 SUMMARY_SEMANTIC_EMBEDDING_DIM = EMBEDDING_DIM
 NARRATIVE_SEMANTIC_EMBEDDING_DIM = EMBEDDING_DIM
 SKILL_SEMANTIC_EMBEDDING_DIM = EMBEDDING_DIM
@@ -210,6 +250,15 @@ Vector(N) literals.
             configurable=True,
             provider_specific=False,
             notes="Shared reconstructive memory-node embedding dimension from EMBEDDING_DIM.",
+        ),
+        "knowledge.semantic": EmbeddingVectorSpec(
+            family="knowledge.semantic",
+            dimensions=semantic_dim,
+            table="knowledge_item_embeddings",
+            column="embedding",
+            configurable=True,
+            provider_specific=False,
+            notes="Knowledge index summaries use the shared semantic embedding space.",
         ),
         "summary.semantic": EmbeddingVectorSpec(
             family="summary.semantic",

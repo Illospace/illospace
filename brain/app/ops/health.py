@@ -25,6 +25,7 @@ DEFAULT_GPU_HEALTH_TIMEOUT_SECONDS = 1.0
 DEFAULT_STUCK_RUN_SECONDS = 15 * 60
 DEFAULT_RECENT_FAILURE_WINDOW_MINUTES = 60
 DEFAULT_RECENT_FAILURE_LIMIT = 10
+DEFAULT_SPAWN_WORKER_RATE_WINDOW_MINUTES = 24 * 60
 DEFAULT_STALE_CYCLE_BACKLOG_MINUTES = 15
 DEFAULT_STALE_CYCLE_BACKLOG_LIMIT = 10
 
@@ -593,10 +594,18 @@ async def _run_health_check(session: AsyncSession | None = None) -> HealthCheck:
         DEFAULT_RECENT_FAILURE_WINDOW_MINUTES,
         minimum=1,
     )
+    spawn_worker_rate_window_minutes = _int_env(
+        "HEALTH_SPAWN_WORKER_RATE_WINDOW_MINUTES",
+        DEFAULT_SPAWN_WORKER_RATE_WINDOW_MINUTES,
+        minimum=1,
+    )
     recent_limit = _int_env("HEALTH_RECENT_FAILURE_LIMIT", DEFAULT_RECENT_FAILURE_LIMIT, minimum=1)
     now = _utc_now()
     stuck_cutoff = now - timedelta(seconds=stuck_after_seconds)
     failure_cutoff = now - timedelta(minutes=failure_window_minutes)
+    spawn_worker_rate_cutoff = now - timedelta(
+        minutes=spawn_worker_rate_window_minutes
+    )
     try:
         if session is None:
             raise RuntimeError("health checks require an explicit database session")
@@ -626,6 +635,31 @@ async def _run_health_check(session: AsyncSession | None = None) -> HealthCheck:
         recent_failure_count = await session.scalar(
             select(func.count()).select_from(AgentRun).where(recent_failure_clause)
         ) or 0
+        spawn_worker_counts_result = await session.execute(
+            select(AgentRun.status, func.count())
+            .where(
+                AgentRun.metadata_["origin"].as_string() == "spawn_worker",
+                AgentRun.status.in_(("completed", RUN_FAILED_STATUS_VALUE)),
+                func.coalesce(AgentRun.completed_at, AgentRun.created_at)
+                >= spawn_worker_rate_cutoff,
+            )
+            .group_by(AgentRun.status)
+        )
+        spawn_worker_counts = {
+            str(status): int(count)
+            for status, count in spawn_worker_counts_result
+        }
+        spawn_worker_completed = spawn_worker_counts.get("completed", 0)
+        spawn_worker_failed = spawn_worker_counts.get(
+            RUN_FAILED_STATUS_VALUE,
+            0,
+        )
+        spawn_worker_terminal = spawn_worker_completed + spawn_worker_failed
+        spawn_worker_success_rate = (
+            spawn_worker_completed / spawn_worker_terminal
+            if spawn_worker_terminal
+            else None
+        )
 
         status = "ok"
         reasons: list[str] = []
@@ -635,6 +669,15 @@ async def _run_health_check(session: AsyncSession | None = None) -> HealthCheck:
         if recent_failure_count:
             status = "degraded"
             reasons.append(f"{int(recent_failure_count)} recent failed run(es)")
+        if (
+            spawn_worker_success_rate is not None
+            and spawn_worker_success_rate < 0.9
+        ):
+            status = "degraded"
+            reasons.append(
+                "spawn_worker success "
+                f"{spawn_worker_success_rate * 100:.1f}%"
+            )
 
         return HealthCheck(
             name="run",
@@ -647,6 +690,18 @@ async def _run_health_check(session: AsyncSession | None = None) -> HealthCheck:
                 "stuck_runs": [_run_row_payload(row, now=now) for row in stuck_runs],
                 "recent_failures_count": int(recent_failure_count),
                 "recent_failures": [_run_row_payload(row, now=now) for row in recent_failures],
+                "spawn_worker_success_rate": {
+                    "window_minutes": spawn_worker_rate_window_minutes,
+                    "completed": spawn_worker_completed,
+                    "failed": spawn_worker_failed,
+                    "terminal": spawn_worker_terminal,
+                    "rate": spawn_worker_success_rate,
+                    "percent": (
+                        round(spawn_worker_success_rate * 100, 1)
+                        if spawn_worker_success_rate is not None
+                        else None
+                    ),
+                },
             },
             remediation="Inspect stuck run leases and recent failure errors." if status != "ok" else None,
         )

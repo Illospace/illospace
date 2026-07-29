@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
@@ -14,6 +15,7 @@ from brain.platform.db.models.agent_run import (
     AgentRunEventRow,
     AgentRunRow,
 )
+from brain.platform.db.models.cycle import CycleRun
 from brain.systems.runs.chantier_continuation import (
     CONTINUATION_QUEUED_EVENT,
     GENERIC_CONTINUATION_QUEUED_EVENT,
@@ -23,9 +25,71 @@ from brain.systems.runs.chantier_continuation import (
 )
 from brain.systems.runs.domain import AgentRunRequest, RunRecipe
 from brain.systems.runs.engine import AsyncAgentRunEngine
+from brain.systems.runs.evidence_health import (
+    WorkerEvidenceFailure,
+    WorkerEvidenceReceipt,
+    record_parent_evidence_failures,
+)
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.tool_catalog.definitions.workers import WORKER_SPAWN_TOOLS
+
+
+def test_worker_evidence_receipt_deduplicates_by_full_canonical_identity():
+    execution_failure = WorkerEvidenceFailure(
+        worker_run_id=49,
+        worker_role="GitHub reader",
+        shard="github:Illospace/illospace",
+        stage="worker_execution",
+        status="failed",
+        error="The worker failed.",
+    )
+    distinct_failure_for_same_worker = WorkerEvidenceFailure(
+        worker_run_id=49,
+        worker_role="GitHub reader",
+        shard="github:Illospace/illospace",
+        stage="project_context_materialization",
+        error="The repository could not be materialized.",
+    )
+
+    receipt, first_added = WorkerEvidenceReceipt().with_failures(
+        [execution_failure]
+    )
+    receipt, replay_added = receipt.with_failures(
+        [execution_failure, distinct_failure_for_same_worker]
+    )
+
+    assert first_added == (execution_failure,)
+    assert replay_added == (distinct_failure_for_same_worker,)
+    assert receipt.failures == (
+        execution_failure,
+        distinct_failure_for_same_worker,
+    )
+
+
+def test_worker_evidence_receipt_keeps_identity_past_presentation_limit():
+    failures = tuple(
+        WorkerEvidenceFailure(
+            worker_run_id=worker_id,
+            worker_role="repository reader",
+            shard=f"github:example/repo-{worker_id}",
+            stage="worker_execution",
+            status="failed",
+            error="The worker failed.",
+        )
+        for worker_id in range(1, 22)
+    )
+
+    receipt, added = WorkerEvidenceReceipt().with_failures(failures)
+    payload = receipt.to_payload()
+    replayed = WorkerEvidenceReceipt.from_payload(payload)
+    replayed, replay_added = replayed.with_failures([failures[20]])
+
+    assert added == failures
+    assert len(payload["failures"]) == 20
+    assert payload["failure_count"] == 21
+    assert replay_added == ()
+    assert replayed.to_payload()["failure_count"] == 21
 
 
 async def _session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
@@ -95,6 +159,7 @@ async def _worker(
     step: str,
     role: str,
     join_parent: bool | None,
+    shard: str | None = None,
 ):
     metadata = {
         "origin": "spawn_worker",
@@ -103,6 +168,8 @@ async def _worker(
     }
     if join_parent is not None:
         metadata["join_parent"] = join_parent
+    if shard:
+        metadata["shard"] = shard
     child = await store.create_child_run(
         anchor,
         recipe=RunRecipe.WORKER,
@@ -173,6 +240,12 @@ async def test_all_children_terminal_queues_one_generic_continuation_on_parent_t
         "completed_fanout_run_id": anchor.id,
         "worker_run_ids": [reader.id, verifier.id],
     }
+    assert continuation.metadata_["evidence_health"] == {
+        "status": "ok",
+        "completeness": "complete",
+        "worker_shards": ["repository reader", "independent verifier"],
+    }
+    assert "Evidence health: ok" in continuation.input_message
     assert "Reader found the relevant contract." in continuation.input_message
     assert "Verifier confirmed the contract." in continuation.input_message
 
@@ -196,6 +269,99 @@ async def test_all_children_terminal_queues_one_generic_continuation_on_parent_t
     assert events[0].payload["continuation_run_id"] == continuation.id
 
 
+async def test_failed_spawned_reader_marks_parent_and_continuation_evidence_degraded(
+    async_sqlite_session_factory,
+    sqlite_postgres_ddl_patch,
+):
+    session = await _session(async_sqlite_session_factory, sqlite_postgres_ddl_patch)
+    store = AsyncAgentRunStore(session)
+    anchor = await _anchor(store)
+    failed_reader = await _worker(
+        store,
+        anchor,
+        step="github-reader",
+        role="GitHub reader",
+        join_parent=True,
+        shard="github:Illospace/illospace",
+    )
+    healthy_reader = await _worker(
+        store,
+        anchor,
+        step="domain-reader",
+        role="Domain reader",
+        join_parent=True,
+        shard="domain:engineering-tickets",
+    )
+    engine = AsyncAgentRunEngine(session, recipes={})
+
+    await engine.fail(
+        failed_reader.id,
+        "upstream_provider_error: overloaded_error",
+        failure_category="upstream",
+    )
+    await engine.complete(
+        healthy_reader.id,
+        output="Domain evidence completed.",
+    )
+
+    refreshed_anchor = await session.get(AgentRunRow, anchor.id)
+    health = refreshed_anchor.metadata_["evidence_health"]
+    assert health["status"] == "degraded"
+    assert health["completeness"] == "unavailable"
+    assert health["missing_shards"] == ["github:Illospace/illospace"]
+    assert health["failures"] == [
+        {
+            "kind": "worker_tool_failure",
+            "tool": "spawn_worker",
+            "child_run_id": failed_reader.id,
+            "worker_run_id": failed_reader.id,
+            "worker_role": "GitHub reader",
+            "shard": "github:Illospace/illospace",
+            "stage": "worker_execution",
+            "status": "failed",
+            "error": (
+                "I hit a temporary upstream problem on this and it is still open "
+                "— I will come back."
+            ),
+            "failure_category": "upstream",
+        }
+    ]
+
+    continuation = (await _generic_continuations(session))[0]
+    assert continuation.metadata_["evidence_health"] == health
+    assert "Evidence health: degraded" in continuation.input_message
+    assert "github:Illospace/illospace" in continuation.input_message
+    assert "Do not report a normal sweep" in continuation.input_message
+
+
+async def test_non_spawn_worker_child_failure_does_not_change_parent_evidence_health(
+    async_sqlite_session_factory,
+    sqlite_postgres_ddl_patch,
+):
+    session = await _session(async_sqlite_session_factory, sqlite_postgres_ddl_patch)
+    store = AsyncAgentRunStore(session)
+    anchor = await _anchor(store)
+    ordinary_child = await store.create_child_run(
+        anchor,
+        recipe=RunRecipe.FAST,
+        message="Run an ordinary child task.",
+        step_key="ordinary-child",
+        metadata={"origin": "scheduler"},
+        initial_status=RunStatus.STARTING,
+    )
+    await store.set_status(ordinary_child.id, RunStatus.RUNNING)
+
+    await AsyncAgentRunEngine(session, recipes={}).fail(
+        ordinary_child.id,
+        "ordinary internal failure",
+        failure_category="internal",
+    )
+
+    refreshed_anchor = await session.get(AgentRunRow, anchor.id)
+    assert "evidence_health" not in refreshed_anchor.metadata_
+    assert await _generic_continuations(session) == []
+
+
 async def test_generic_continuation_waits_for_terminal_parent(
     async_sqlite_session_factory,
     sqlite_postgres_ddl_patch,
@@ -214,11 +380,15 @@ async def test_generic_continuation_waits_for_terminal_parent(
 
     await engine.complete(worker.id, output="Worker finished before its parent.")
     assert await _generic_continuations(session) == []
+    assert "evidence_health" not in (
+        (await session.get(AgentRunRow, anchor.id)).metadata_
+    )
 
     await engine.complete(anchor.id, output="Parent has now reached terminal state.")
     continuations = await _generic_continuations(session)
     assert len(continuations) == 1
     assert "Worker finished before its parent." in continuations[0].input_message
+    assert continuations[0].metadata_["evidence_health"]["status"] == "ok"
 
 
 async def test_spawn_worker_without_join_flag_remains_fire_and_forget(
@@ -418,3 +588,107 @@ async def test_fanout_anchor_lock_uses_select_for_update():
     )
     assert "WHERE agent_runs.id = 482" in sql
     assert sql.rstrip().endswith("FOR UPDATE")
+
+
+async def test_evidence_locks_refresh_preloaded_parent_and_cycle_after_concurrent_commit(
+    tmp_path,
+    sqlite_postgres_ddl_patch,
+):
+    database = tmp_path / "evidence-lock-freshness.sqlite3"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        for table in (
+            AgentRunRow.__table__,
+            AgentRunEventRow.__table__,
+            CycleRun.__table__,
+        ):
+            await connection.execute(CreateTable(table, if_not_exists=True))
+
+    try:
+        async with factory() as setup_session:
+            cycle_run = CycleRun(
+                cycle_id=7,
+                scheduled_for=datetime.now(UTC),
+                status="running",
+                prompt_snapshot="Inspect the repository.",
+                context_snapshot={
+                    "evidence_health": {"status": "pending"},
+                    "setup_cycle_marker": True,
+                },
+            )
+            setup_session.add(cycle_run)
+            await setup_session.flush()
+            anchor = await _anchor(
+                AsyncAgentRunStore(setup_session),
+                metadata={
+                    "source": "cycle",
+                    "cycle_run_id": cycle_run.id,
+                    "evidence_health": {"status": "pending"},
+                    "setup_parent_marker": True,
+                },
+            )
+            await setup_session.commit()
+            parent_run_id = anchor.id
+            cycle_run_id = cycle_run.id
+
+        async with factory() as stale_session:
+            stale_parent = await stale_session.get(AgentRunRow, parent_run_id)
+            stale_cycle = await stale_session.get(CycleRun, cycle_run_id)
+            assert "concurrent_parent_marker" not in stale_parent.metadata_
+            assert "concurrent_cycle_marker" not in stale_cycle.context_snapshot
+
+            async with factory() as writer_session:
+                writer_parent = await writer_session.get(
+                    AgentRunRow,
+                    parent_run_id,
+                )
+                writer_parent.metadata_ = {
+                    **writer_parent.metadata_,
+                    "concurrent_parent_marker": "committed while lock waited",
+                }
+                writer_cycle = await writer_session.get(CycleRun, cycle_run_id)
+                writer_cycle.context_snapshot = {
+                    **writer_cycle.context_snapshot,
+                    "concurrent_cycle_marker": "committed while lock waited",
+                }
+                await writer_session.commit()
+
+            failure = WorkerEvidenceFailure(
+                worker_run_id=49,
+                worker_role="repository reader",
+                shard="github:example/repository",
+                stage="worker_execution",
+                status="failed",
+                error="The worker failed.",
+            )
+            await record_parent_evidence_failures(
+                stale_session,
+                parent_run_id=parent_run_id,
+                failures=[failure],
+            )
+            await stale_session.commit()
+
+        async with factory() as inspection_session:
+            persisted_parent = await inspection_session.get(
+                AgentRunRow,
+                parent_run_id,
+            )
+            persisted_cycle = await inspection_session.get(
+                CycleRun,
+                cycle_run_id,
+            )
+            assert persisted_parent.metadata_["concurrent_parent_marker"] == (
+                "committed while lock waited"
+            )
+            assert persisted_cycle.context_snapshot[
+                "concurrent_cycle_marker"
+            ] == "committed while lock waited"
+            assert persisted_parent.metadata_["evidence_health"][
+                "failure_count"
+            ] == 1
+            assert persisted_cycle.context_snapshot["evidence_health"][
+                "failure_count"
+            ] == 1
+    finally:
+        await engine.dispose()

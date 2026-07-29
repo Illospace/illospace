@@ -5,9 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import time
 from datetime import datetime
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.app.scheduler.catalog import (
     async_list_scheduler_jobs,
     async_list_scheduler_runs,
@@ -30,6 +30,12 @@ from brain.app.scheduler.executor import (
 )
 from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.runtime import make_lease_owner
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.runs.cortex.runner import reap_stale_active_runs
+
+_STALE_RUN_REAP_INTERVAL_SECONDS = 60.0
+_STALE_RUN_REAP_LIMIT = 25
+_monotonic = time.monotonic
 
 
 def _emit(payload: dict, *, compact: bool = False) -> None:
@@ -44,6 +50,34 @@ def _now_from_args(args: argparse.Namespace) -> datetime | None:
     if not raw:
         return None
     return datetime.fromisoformat(raw)
+
+
+async def _reap_stale_active_runs_if_due(*, next_reap_at: float) -> float:
+    now = _monotonic()
+    if now < next_reap_at:
+        return next_reap_at
+
+    try:
+        reaped = await reap_stale_active_runs(limit=_STALE_RUN_REAP_LIMIT)
+    except Exception as exc:
+        _emit(
+            {
+                "event": "agent_run_stale_reap_failed",
+                "ok": False,
+                "error": str(exc),
+            },
+            compact=True,
+        )
+    else:
+        _emit(
+            {
+                "event": "agent_run_stale_reap",
+                "ok": True,
+                "reaped": reaped,
+            },
+            compact=True,
+        )
+    return now + _STALE_RUN_REAP_INTERVAL_SECONDS
 
 
 async def cmd_status(args: argparse.Namespace) -> int:
@@ -205,6 +239,7 @@ async def cmd_retry_run(args: argparse.Namespace) -> int:
 
 async def cmd_daemon(args: argparse.Namespace) -> int:
     tick = 0
+    next_stale_reap_at = 0.0
     try:
         async with UnitOfWork() as uow:
             startup = await async_scheduler_daemon_startup(
@@ -214,6 +249,9 @@ async def cmd_daemon(args: argparse.Namespace) -> int:
             )
         _emit({"event": "scheduler_startup", **startup})
         while True:
+            next_stale_reap_at = await _reap_stale_active_runs_if_due(
+                next_reap_at=next_stale_reap_at,
+            )
             async with UnitOfWork() as uow:
                 result = await async_scheduler_daemon_tick(
                     uow.session,
