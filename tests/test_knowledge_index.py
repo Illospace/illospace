@@ -1377,3 +1377,56 @@ async def test_github_legacy_cursor_is_reset_for_org_scope_backfill(session):
     assert drafts == []
     assert list_issues.await_args.kwargs["since"] is None
     assert cursor["version"] == 2
+
+
+async def test_public_github_closure_uses_accounted_structural_fallback(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    repo = "Illospace/illospace"
+    issue = {
+        "id": 577,
+        "number": 577,
+        "title": "Knowledge slice 2",
+        "state": "closed",
+        "body": "Implement the conversational knowledge layer.",
+        "labels": [],
+        "user": {"login": "redawear"},
+        "created_at": "2026-07-28T18:00:00Z",
+        "updated_at": "2026-07-28T20:10:00Z",
+        "closed_at": "2026-07-28T20:10:00Z",
+    }
+    list_issues = AsyncMock(return_value={"issues": [issue], "next_page": None})
+    get_closure = AsyncMock()
+    authority = SimpleNamespace(token=None, org_id=None, actor_user_id=None)
+    connector = GitHubConnector(repositories=[repo])
+
+    with patch(
+        "brain.systems.knowledge.connectors.github._github_authority",
+        new=AsyncMock(return_value=authority),
+    ), patch(
+        "brain.systems.knowledge.connectors.github.async_list_repo_issues",
+        new=list_issues,
+    ), patch(
+        "brain.systems.knowledge.connectors.github.async_get_issue_closure_info",
+        new=get_closure,
+    ):
+        result = await sync_connector(session, connector)
+
+    item = await session.scalar(
+        select(KnowledgeItem).where(
+            KnowledgeItem.source_ref == "github:Illospace/illospace#577"
+        )
+    )
+    assert result.status == "degraded"
+    assert result.cursor["version"] == 2
+    assert result.stats["failed"] == 1
+    assert get_closure.await_count == 0
+    assert item is not None
+    assert item.resolution == "Closed at 2026-07-28T20:10:00Z"
+    assert item.extra["closure_enrichment"] == {
+        "status": "unavailable",
+        "reason": "authentication_required",
+    }
+    assert item.extra["distillation"]["status"] == "failed"

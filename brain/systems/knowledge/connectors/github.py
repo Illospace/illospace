@@ -188,6 +188,7 @@ def _draft_for_issue(
     issue: Mapping[str, Any],
     *,
     closure: GithubIssueClosure | None = None,
+    closure_unavailable_reason: str | None = None,
     org_id: str | None = None,
     actor_user_id: str | None = None,
 ) -> KnowledgeDraft:
@@ -249,6 +250,11 @@ def _draft_for_issue(
         if closure is not None
         else []
     )
+    if closure_unavailable_reason:
+        closure_extra["closure_enrichment"] = {
+            "status": "unavailable",
+            "reason": closure_unavailable_reason,
+        }
     return KnowledgeDraft(
         source="github",
         kind=kind,
@@ -351,29 +357,40 @@ class GitHubConnector:
                     continue
                 kind = "pr" if issue.get("type") == "pull_request" else "issue"
                 closure = None
+                closure_unavailable_reason = None
                 if (
                     str(issue.get("state") or "").lower() == "closed"
                     and kind == "issue"
                 ):
-                    try:
-                        closure = await async_get_issue_closure_info(
-                            repo,
-                            int(issue.get("number") or 0),
-                            token=token,
-                        )
-                    except Exception as exc:
-                        logger.exception(
-                            "GitHub closure enrichment unavailable for %s#%s: %s",
+                    if not token:
+                        closure_unavailable_reason = "authentication_required"
+                        logger.warning(
+                            "GitHub closure enrichment skipped for %s#%s: "
+                            "authenticated GraphQL access is unavailable",
                             repo,
                             issue.get("number"),
-                            exc,
                         )
-                        raise
+                    else:
+                        try:
+                            closure = await async_get_issue_closure_info(
+                                repo,
+                                int(issue.get("number") or 0),
+                                token=token,
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                "GitHub closure enrichment unavailable for %s#%s: %s",
+                                repo,
+                                issue.get("number"),
+                                exc,
+                            )
+                            raise
                 drafts.append(
                     _draft_for_issue(
                         repo,
                         issue,
                         closure=closure,
+                        closure_unavailable_reason=closure_unavailable_reason,
                         org_id=authority.org_id,
                         actor_user_id=authority.actor_user_id,
                     )
