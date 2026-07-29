@@ -1202,7 +1202,10 @@ async def test_scheduler_daemon_tick_emits_new_failure_once_without_historical_s
         handler_kind="command",
         handler_ref=(
             'python3 -c "import sys; '
-            "sys.stderr.write('NEW_FAILURE_418'); sys.exit(1)\""
+            "sys.stdout.write('{\\\"ok\\\": false, \\\"results\\\": [{\\\"status\\\": "
+            "\\\"failed\\\", \\\"exception_type\\\": \\\"RuntimeError\\\", "
+            "\\\"error\\\": \\\"NEW_FAILURE_418\\\"}]}\\n'); "
+            "sys.stderr.write('INFO httpx HTTP/1.1 201 Created'); sys.exit(1)\""
         ),
         default_payload={"name": "Scheduler Tick Failure"},
         retry_policy={"max_attempts": 1, "backoff_seconds": 0},
@@ -1220,12 +1223,13 @@ async def test_scheduler_daemon_tick_emits_new_failure_once_without_historical_s
     assert len(first_tick["drain"]["results"]) == 1
     failure = first_tick["drain"]["results"][0]
     assert failure["status"] == "settled_failure"
-    assert failure["error_text"] == "Command exited with status 1"
-    assert "NEW_FAILURE_418" not in failure["error_text"]
+    assert failure["error_text"] == "RuntimeError: NEW_FAILURE_418"
+    assert "HTTP/1.1 201 Created" not in failure["error_text"]
     new_failure_text = failure["error_text"]
 
     run = await session.get(SchedulerRun, failure["run_id"])
     assert run is not None
+    assert run.error_text == "RuntimeError: NEW_FAILURE_418"
     historical_traceback = "Traceback: historical failure\n" * 10_000
     run.error_text = historical_traceback
     await session.flush()
