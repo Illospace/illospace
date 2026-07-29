@@ -159,6 +159,13 @@ class AsyncRunToolExecutor:
         await self._append_event(
             run_event(run_id, "run.tool_started", _event_payload(tool.name, safe_args), root_run_id=root_run_id)
         )
+        commit_event_boundary = getattr(self.store, "commit_event_boundary", None)
+        if callable(commit_event_boundary):
+            # The handler may use an isolated UnitOfWork that writes to this
+            # same run (spawn_worker is the canonical example).  Make the
+            # started marker durable and release the parent transaction's row
+            # and advisory locks before invoking it.
+            await commit_event_boundary(run_id)
         manifest = None
         manifest_id = None
         try:
