@@ -24,6 +24,7 @@ from brain.platform.db.models.cycle import (
     Cycle,
     CycleFailureGuardLatch,
     CycleFailureGuardObservation,
+    CycleFailureGuardTriggerState,
     CycleRun,
     CycleRunEvaluation,
 )
@@ -374,6 +375,12 @@ class _SharedSessionUnitOfWork:
 
 class _AsyncExecuteCycleSession(_ExecuteCycleSession):
     async def scalars(self, statement):
+        if "cycle_failure_guard_trigger_states" in str(statement):
+            return _AllResult(
+                value
+                for value in self.added
+                if isinstance(value, CycleFailureGuardTriggerState)
+            )
         if "cycle_failure_guard_latches" in str(statement):
             return _AllResult(
                 value
@@ -451,6 +458,12 @@ class _RecoverStaleSession:
         self.added = []
 
     async def scalars(self, statement):
+        if "cycle_failure_guard_trigger_states" in str(statement):
+            return _AllResult(
+                value
+                for value in self.added
+                if isinstance(value, CycleFailureGuardTriggerState)
+            )
         if "cycle_failure_guard_latches" in str(statement):
             return _AllResult(
                 value
@@ -1990,7 +2003,11 @@ async def test_execute_cycle_run_auth_blocks_expired_codex_before_agent_admissio
     assert "token expired and refresh failed" not in run.error
     assert run.context_snapshot["auth_preflight"]["status"] == "auth_blocked"
     assert run.context_snapshot["auth_preflight"]["credential"] == "OpenAI Codex / ChatGPT"
-    assert cycle.consecutive_failure_count == 1
+    assert next(
+        value.trigger_state
+        for value in session.added
+        if isinstance(value, CycleFailureGuardTriggerState)
+    ) == {"count": 1}
     assert any(
         isinstance(value, CycleFailureGuardLatch)
         for value in session.added
