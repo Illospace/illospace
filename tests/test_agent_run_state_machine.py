@@ -1114,6 +1114,86 @@ async def test_postgres_event_boundary_releases_parent_for_isolated_child_uow(db
             await cleanup_session.commit()
 
 
+@pytest.mark.requires_db
+async def test_postgres_child_event_key_share_does_not_block_parent_mutation(db_engine):
+    import uuid
+
+    from brain.platform.db.models.org import Org
+    from brain.systems.runs.events import run_event
+
+    factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    org_id = str(uuid.uuid4())
+    root_id = None
+    child_id = None
+    try:
+        async with factory() as setup_session:
+            setup_session.add(
+                Org(
+                    id=org_id,
+                    name="Child Event Lock Test",
+                    slug=f"child-event-lock-{uuid.uuid4().hex[:12]}",
+                )
+            )
+            await setup_session.flush()
+            store = AsyncAgentRunStore(setup_session)
+            root = await store.create_run(
+                _run_request(
+                    org_id=org_id,
+                    thread_id=f"thread-{uuid.uuid4().hex}",
+                    message="root",
+                )
+            )
+            root_id = root.id
+            child = await store.create_child_run(
+                root,
+                recipe=RunRecipe.WORKER,
+                message="child",
+                step_key="spawn_worker:child-event-lock",
+            )
+            child_id = child.id
+            await setup_session.commit()
+
+        async with factory() as child_session, factory() as parent_session:
+            await AsyncAgentRunStore(child_session).append_event(
+                run_event(
+                    child_id,
+                    "run.activity",
+                    {"label": "Preparing project context"},
+                    root_run_id=root_id,
+                )
+            )
+
+            locked_parent = await asyncio.wait_for(
+                AsyncAgentRunStore(parent_session)._locked_run(
+                    root_id,
+                    root_run_id=root_id,
+                ),
+                timeout=1,
+            )
+            assert locked_parent.id == root_id
+            await parent_session.rollback()
+            await child_session.rollback()
+    finally:
+        async with factory() as cleanup_session:
+            run_ids = [value for value in (root_id, child_id) if value is not None]
+            if run_ids:
+                await cleanup_session.execute(
+                    AgentRunArtifactRow.__table__.delete().where(
+                        AgentRunArtifactRow.run_id.in_(run_ids)
+                    )
+                )
+                await cleanup_session.execute(
+                    AgentRunEventRow.__table__.delete().where(
+                        AgentRunEventRow.run_id.in_(run_ids)
+                    )
+                )
+                await cleanup_session.execute(
+                    AgentRunRow.__table__.delete().where(AgentRunRow.id.in_(run_ids))
+                )
+            await cleanup_session.execute(Org.__table__.delete().where(Org.id == org_id))
+            await cleanup_session.commit()
+
+
 async def test_runtime_fails_legacy_run_without_workspace_org_id(session_factory):
     class UnexpectedRecipe:
         async def execute(self, _runtime: RunRuntime) -> RunRecipeResult:
