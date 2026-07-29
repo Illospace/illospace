@@ -1115,6 +1115,99 @@ async def test_postgres_event_boundary_releases_parent_for_isolated_child_uow(db
 
 
 @pytest.mark.requires_db
+async def test_postgres_waiting_event_session_does_not_block_advisory_lock_owner(db_engine):
+    """A DB advisory-lock waiter must not own another session's Python lock."""
+
+    import uuid
+
+    from brain.platform.db.models.org import Org
+    from brain.systems.runs.events import run_event
+
+    factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    org_id = str(uuid.uuid4())
+    run_id = None
+    try:
+        async with factory() as setup_session:
+            setup_session.add(
+                Org(
+                    id=org_id,
+                    name="Event Session Lock Test",
+                    slug=f"event-session-lock-{uuid.uuid4().hex[:12]}",
+                )
+            )
+            await setup_session.flush()
+            run = await AsyncAgentRunStore(setup_session).create_run(
+                _run_request(
+                    org_id=org_id,
+                    thread_id=f"thread-{uuid.uuid4().hex}",
+                    message="event session lock",
+                )
+            )
+            run_id = run.id
+            await setup_session.commit()
+
+        async with factory() as owner_session, factory() as waiter_session:
+            owner_store = AsyncAgentRunStore(owner_session)
+            waiter_store = AsyncAgentRunStore(waiter_session)
+            first = await owner_store.append_event(
+                run_event(run_id, "run.owner_first")
+            )
+
+            waiter_entered_advisory_lock = asyncio.Event()
+            original_waiter_lock = waiter_store.lock_event_stream
+
+            async def observed_waiter_lock(locked_run_id: int):
+                waiter_entered_advisory_lock.set()
+                await original_waiter_lock(locked_run_id)
+
+            waiter_store.lock_event_stream = observed_waiter_lock
+            waiter_task = asyncio.create_task(
+                waiter_store.append_event(run_event(run_id, "run.waiter"))
+            )
+            try:
+                await asyncio.wait_for(waiter_entered_advisory_lock.wait(), timeout=1)
+                await asyncio.sleep(0.05)
+                assert not waiter_task.done()
+
+                # The owner retains PostgreSQL's transaction-scoped advisory
+                # lock. It must still be able to take its own session lock and
+                # append; a process-wide run lock deadlocks at this point.
+                second = await asyncio.wait_for(
+                    owner_store.append_event(run_event(run_id, "run.owner_second")),
+                    timeout=1,
+                )
+                await owner_session.commit()
+                waited = await asyncio.wait_for(waiter_task, timeout=1)
+                await waiter_session.commit()
+            finally:
+                waiter_task.cancel()
+                await asyncio.gather(waiter_task, return_exceptions=True)
+                await owner_session.rollback()
+                await waiter_session.rollback()
+
+            assert second.sequence_no == first.sequence_no + 1
+            assert waited.sequence_no == second.sequence_no + 1
+    finally:
+        async with factory() as cleanup_session:
+            if run_id is not None:
+                await cleanup_session.execute(
+                    AgentRunArtifactRow.__table__.delete().where(
+                        AgentRunArtifactRow.run_id == run_id
+                    )
+                )
+                await cleanup_session.execute(
+                    AgentRunEventRow.__table__.delete().where(
+                        AgentRunEventRow.run_id == run_id
+                    )
+                )
+                await cleanup_session.execute(
+                    AgentRunRow.__table__.delete().where(AgentRunRow.id == run_id)
+                )
+            await cleanup_session.execute(Org.__table__.delete().where(Org.id == org_id))
+            await cleanup_session.commit()
+
+
+@pytest.mark.requires_db
 async def test_postgres_child_event_key_share_does_not_block_parent_mutation(db_engine):
     import uuid
 

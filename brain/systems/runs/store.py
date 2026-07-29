@@ -10,10 +10,8 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import logging
 import os
-import threading
 from typing import Any
 import uuid
-import weakref
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -101,24 +99,32 @@ class ExecutionClaimLost(RuntimeError):
     """Raised when an execution owner loses its durable fencing claim."""
 
 
-_EVENT_LOCKS_GUARD = threading.Lock()
-_EVENT_LOCKS: weakref.WeakKeyDictionary[
-    asyncio.AbstractEventLoop,
-    weakref.WeakValueDictionary[int, asyncio.Lock],
-] = weakref.WeakKeyDictionary()
+_SESSION_EVENT_LOCKS_KEY = "agent_run_event_locks"
 
 
-def _event_lock(run_id: int) -> asyncio.Lock:
-    """Return a coroutine-aware lock scoped to the active event loop and run."""
+def _event_lock(session: AsyncSession, run_id: int) -> asyncio.Lock:
+    """Serialize one run's event writes that share an AsyncSession.
 
-    loop = asyncio.get_running_loop()
-    with _EVENT_LOCKS_GUARD:
-        loop_locks = _EVENT_LOCKS.setdefault(loop, weakref.WeakValueDictionary())
-        lock = loop_locks.get(int(run_id))
-        if lock is None:
-            lock = asyncio.Lock()
-            loop_locks[int(run_id)] = lock
-        return lock
+    PostgreSQL's advisory lock serializes different sessions.  A process-wide
+    run lock cannot safely wrap that database wait: another session may retain
+    the advisory lock across event appends and need the process lock again,
+    creating a cross-layer cycle.  Session-local locks still protect SQLAlchemy
+    from concurrent use while leaving cross-session ordering to PostgreSQL.
+    """
+
+    session_info = getattr(session, "info", None)
+    if session_info is not None:
+        locks = session_info.setdefault(_SESSION_EVENT_LOCKS_KEY, {})
+    else:
+        locks = getattr(session, _SESSION_EVENT_LOCKS_KEY, None)
+        if locks is None:
+            locks = {}
+            setattr(session, _SESSION_EVENT_LOCKS_KEY, locks)
+    lock = locks.get(int(run_id))
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[int(run_id)] = lock
+    return lock
 
 
 def _creatable_run_status(value: RunStatus | str) -> RunStatus:
@@ -1406,7 +1412,7 @@ class AsyncAgentRunStore:
         return messages
 
     async def append_event(self, event: AgentRunEvent) -> AgentRunEventRow:
-        async with _event_lock(int(event.run_id)):
+        async with _event_lock(self.session, int(event.run_id)):
             return await self._append_event_locked(event)
 
     async def commit_event_boundary(self, run_id: int) -> None:
@@ -1423,7 +1429,7 @@ class AsyncAgentRunStore:
         closing.
         """
 
-        async with _event_lock(int(run_id)):
+        async with _event_lock(self.session, int(run_id)):
             await self.session.commit()
 
     async def _append_event_locked(self, event: AgentRunEvent) -> AgentRunEventRow:
@@ -1526,7 +1532,7 @@ class AsyncAgentRunStore:
         return safe_provider_error_sentinel(detected_provider_error)
 
     async def append_artifact(self, artifact: AgentRunArtifact) -> AgentRunArtifactRow:
-        async with _event_lock(int(artifact.run_id)):
+        async with _event_lock(self.session, int(artifact.run_id)):
             artifact_type = (
                 artifact.artifact_type.value
                 if isinstance(artifact.artifact_type, ArtifactType)
