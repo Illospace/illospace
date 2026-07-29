@@ -65,13 +65,19 @@ def _normalize_entries(raw: Any) -> list[dict[str, Any]]:
     return entries
 
 
+def monitored_channels(connection: ExternalAgentConnectionRow) -> list[dict[str, Any]]:
+    """Return normalized monitored-channel configuration without a DB read."""
+
+    return _normalize_entries(_slack_metadata(connection).get("monitored_channels"))
+
+
 def monitored_channel_ids(connection: ExternalAgentConnectionRow) -> set[str]:
     """Return the set of enabled monitored channel ids for a connection.
 
     Pure read helper (no session) used by the connector on the hot path.
     """
 
-    entries = _normalize_entries(_slack_metadata(connection).get("monitored_channels"))
+    entries = monitored_channels(connection)
     return {entry["channel_id"] for entry in entries if entry.get("enabled", True)}
 
 
@@ -105,7 +111,7 @@ async def list_monitored_channels(
     org_id: str | None = None,
 ) -> list[dict[str, Any]]:
     connection = await _connection_for_org(session, connection_id, org_id)
-    return _normalize_entries(_slack_metadata(connection).get("monitored_channels"))
+    return monitored_channels(connection)
 
 
 async def add_monitored_channel(
@@ -173,5 +179,6 @@ __all__ = [
     "add_monitored_channel",
     "list_monitored_channels",
     "monitored_channel_ids",
+    "monitored_channels",
     "remove_monitored_channel",
 ]

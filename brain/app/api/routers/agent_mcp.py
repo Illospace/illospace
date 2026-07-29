@@ -935,6 +935,7 @@ async def _tool_read(
                 "query",
                 capability=capability,
             ),
+            org_id=principal.org_id,
             sources=_clean_string_list(capability_arguments.get("sources")),
             kinds=_clean_string_list(capability_arguments.get("kinds")),
             limit=int(capability_arguments.get("limit") or 10),

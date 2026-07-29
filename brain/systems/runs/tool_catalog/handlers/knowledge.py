@@ -7,6 +7,7 @@ from typing import Any
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.knowledge.search import search_knowledge
+from brain.systems.runs.tool_catalog.handlers.common import _agent_context
 
 
 async def _handle_search_knowledge(
@@ -18,10 +19,14 @@ async def _handle_search_knowledge(
     clean_query = str(query or "").strip()
     if not clean_query:
         return json.dumps({"error": "search_knowledge requires query"})
+    org_id = str(getattr(_agent_context, "org_id", "") or "").strip()
+    if not org_id:
+        return json.dumps({"error": "search_knowledge requires workspace context"})
     async with UnitOfWork() as uow:
         result = await search_knowledge(
             uow.session,
             clean_query,
+            org_id=org_id,
             sources=sources,
             kinds=kinds,
             limit=max(1, min(int(limit or 10), 50)),

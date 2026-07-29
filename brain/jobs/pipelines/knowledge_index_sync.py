@@ -9,7 +9,12 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.knowledge.connectors import DomainRecordsConnector, GitHubConnector
+from brain.systems.knowledge.connectors import (
+    DomainRecordsConnector,
+    GitHubConnector,
+    MemoryConnector,
+    SlackKnowledgeConnector,
+)
 from brain.systems.knowledge.connectors.base import KnowledgeConnector
 from brain.systems.knowledge.service import sync_connector
 
@@ -18,6 +23,8 @@ logger = logging.getLogger(__name__)
 CONNECTOR_FACTORIES: tuple[Callable[[], KnowledgeConnector], ...] = (
     DomainRecordsConnector,
     GitHubConnector,
+    SlackKnowledgeConnector,
+    MemoryConnector,
 )
 
 

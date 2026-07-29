@@ -32,6 +32,7 @@ DIRECT_TARGET_KINDS: frozenset[str] = frozenset(
         "app_report",
         "external_agent_headless_ask",
         "inbound_submission",
+        "knowledge_distillation",
     }
 )
 

@@ -588,6 +588,7 @@ class SlackWebClient:
         channel: str,
         limit: int = 50,
         latest: str | None = None,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "channel": channel,
@@ -596,6 +597,8 @@ class SlackWebClient:
         if latest:
             payload["latest"] = latest
             payload["inclusive"] = True
+        if cursor:
+            payload["cursor"] = cursor
         return await self._post("conversations.history", payload)
 
     async def conversations_list(
@@ -641,6 +644,8 @@ async def slack_web_client_from_runtime(
     *,
     requested_by: str,
     reason: str,
+    org_id: str | None = None,
+    owner_user_id: str | None = None,
 ) -> SlackWebClient:
     """Backend Slack client with Vault-first bot-token resolution.
 
@@ -651,6 +656,8 @@ async def slack_web_client_from_runtime(
     that (2026-07-16). Resolution order mirrors the connector's
     ``SlackConnectorConfig.from_runtime``: env when set, else the runtime
     secret under the connector authority. One owner for the secret.
+    Durable connection consumers should pass that row's org/user authority so
+    token resolution and the source being read cannot drift apart.
     """
     token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
     if not token:
@@ -660,9 +667,14 @@ async def slack_web_client_from_runtime(
             read_runtime_secret,
         )
 
-        org_id = os.environ.get("ILLO_SLACK_ORG_ID") or os.environ.get("ILLO_ORG_ID")
+        org_id = (
+            org_id
+            or os.environ.get("ILLO_SLACK_ORG_ID")
+            or os.environ.get("ILLO_ORG_ID")
+        )
         owner_user_id = (
-            os.environ.get("ILLO_SLACK_OWNER_USER_ID")
+            owner_user_id
+            or os.environ.get("ILLO_SLACK_OWNER_USER_ID")
             or os.environ.get("ILLO_OWNER_USER_ID")
         )
         if not org_id or not owner_user_id:
