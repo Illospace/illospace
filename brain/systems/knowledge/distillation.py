@@ -246,6 +246,14 @@ async def admit_distillation(
     attempt: int,
 ) -> DistillationEntry:
     actor = await _resolve_actor(session, draft)
+    scoped_draft = replace(
+        draft,
+        extra={
+            **dict(draft.extra or {}),
+            "org_id": str(actor.org_id),
+            "actor_user_id": str(actor.id),
+        },
+    )
     attempt = max(1, int(attempt))
     idempotency_key = _idempotency_key(
         draft,
@@ -261,12 +269,12 @@ async def admit_distillation(
             actor={"id": str(actor.id), "org_id": str(actor.org_id)},
             target={
                 "kind": "knowledge_distillation",
-                "thread_id": f"knowledge-distillation:{_source_ref_hash(draft)}",
+                "thread_id": f"knowledge-distillation:{_source_ref_hash(scoped_draft)}",
                 "headless": True,
                 "final_answer_target_surface": "headless",
             },
             payload={
-                "message": _distillation_prompt(draft),
+                "message": _distillation_prompt(scoped_draft),
                 "workspace_ref": {"source": "knowledge_index", "mode": "headless"},
                 "metadata": {
                     "origin": "knowledge_index",
@@ -279,7 +287,7 @@ async def admit_distillation(
                     "knowledge_distillation": {
                         "input_digest": input_digest,
                         "attempt": attempt,
-                        "draft": serialize_draft(draft),
+                        "draft": serialize_draft(scoped_draft),
                     },
                 },
             },
@@ -350,7 +358,7 @@ def _apply_fields(
     return replace(
         draft,
         summary=fields.summary,
-        resolution=fields.resolution,
+        resolution=fields.resolution or draft.resolution,
         entities=entities,
         extra=extra,
         distill=False,

@@ -38,6 +38,7 @@ _READ_PERMISSIONS = {
     "issues": "read",
     "pull_requests": "read",
 }
+_CURSOR_VERSION = 2
 
 logger = logging.getLogger(__name__)
 
@@ -297,9 +298,11 @@ class GitHubConnector:
         session: AsyncSession,
         cursor: dict[str, Any],
     ) -> tuple[list[KnowledgeDraft], dict[str, Any]]:
+        if int(cursor.get("version") or 0) != _CURSOR_VERSION:
+            cursor = {}
         repositories = list(self.repositories or await _configured_repositories(session))
         if not repositories:
-            return [], dict(cursor)
+            return [], {**dict(cursor), "version": _CURSOR_VERSION}
         repo_states = {
             str(key): dict(value)
             for key, value in (cursor.get("repositories") or {}).items()
@@ -359,12 +362,13 @@ class GitHubConnector:
                             token=token,
                         )
                     except Exception as exc:
-                        logger.warning(
+                        logger.exception(
                             "GitHub closure enrichment unavailable for %s#%s: %s",
                             repo,
                             issue.get("number"),
                             exc,
                         )
+                        raise
                 drafts.append(
                     _draft_for_issue(
                         repo,
@@ -384,6 +388,7 @@ class GitHubConnector:
                     "high_watermark_id": high_key[1],
                 }
                 return drafts, {
+                    "version": _CURSOR_VERSION,
                     "active_repository": repo_index,
                     "repositories": repo_states,
                 }
@@ -394,11 +399,13 @@ class GitHubConnector:
             }
             if len(drafts) >= self.max_items:
                 return drafts, {
+                    "version": _CURSOR_VERSION,
                     "active_repository": min(repo_index + 1, len(repositories) - 1),
                     "repositories": repo_states,
                 }
 
         return drafts, {
+            "version": _CURSOR_VERSION,
             "active_repository": 0,
             "repositories": repo_states,
         }

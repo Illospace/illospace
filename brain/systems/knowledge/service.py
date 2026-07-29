@@ -109,6 +109,7 @@ def content_digest(draft: KnowledgeDraft, *, raw_text: str, extra: dict[str, Any
 
 def build_search_text(
     *,
+    question: str,
     title: str,
     summary: str,
     resolution: str | None,
@@ -116,6 +117,7 @@ def build_search_text(
     raw_text: str,
 ) -> str:
     values = [
+        question,
         title,
         summary,
         resolution or "",
@@ -136,8 +138,7 @@ def build_embedding_text(item: KnowledgeItem) -> str:
         else ""
     )
     values = [
-        question,
-        item.title,
+        question or item.title,
         item.summary,
         item.resolution or "",
         " ".join(str(entity) for entity in item.entities),
@@ -195,15 +196,77 @@ def _pending_cursor(
 async def _start_distillations(
     session: AsyncSession,
     drafts: list[KnowledgeDraft],
-) -> tuple[list[dict[str, Any]], list[KnowledgeDraft]]:
+) -> tuple[list[dict[str, Any]], list[KnowledgeDraft], int]:
     entries: list[dict[str, Any]] = []
     fallbacks: list[KnowledgeDraft] = []
+    skipped = 0
+    existing_by_ref: dict[str, KnowledgeItem] = {}
+    embedded_item_ids: set[int] = set()
+    if drafts:
+        source_refs = [draft.source_ref for draft in drafts]
+        existing_items = list(
+            (
+                await session.scalars(
+                    select(KnowledgeItem).where(
+                        KnowledgeItem.source == drafts[0].source,
+                        KnowledgeItem.source_ref.in_(source_refs),
+                    )
+                )
+            ).all()
+        )
+        existing_by_ref = {item.source_ref: item for item in existing_items}
+        if existing_items:
+            try:
+                runtime = await runtime_settings.async_get_embedding_runtime_config(
+                    session,
+                    include_secret=True,
+                )
+                model = embedding_model_identity(runtime)
+            except Exception:
+                model = None
+            if model is not None:
+                embedded_item_ids = set(
+                    (
+                        await session.scalars(
+                            select(KnowledgeItemEmbedding.item_id)
+                            .join(
+                                KnowledgeItem,
+                                KnowledgeItem.id == KnowledgeItemEmbedding.item_id,
+                            )
+                            .where(
+                                KnowledgeItem.id.in_(
+                                    [item.id for item in existing_items]
+                                ),
+                                KnowledgeItemEmbedding.model == model,
+                                KnowledgeItemEmbedding.content_digest
+                                == KnowledgeItem.content_digest,
+                            )
+                        )
+                    ).all()
+                )
     for draft in drafts:
         digest = content_digest(
             draft,
             raw_text=draft.raw_text,
             extra=dict(draft.extra or {}),
         )
+        existing = existing_by_ref.get(draft.source_ref)
+        distillation = (
+            dict(existing.extra or {}).get("distillation")
+            if existing is not None
+            else None
+        )
+        if (
+            isinstance(distillation, dict)
+            and str(distillation.get("input_digest") or "") == digest
+            and str(distillation.get("status") or "") in {"completed", "failed"}
+            and (
+                str(distillation.get("status") or "") == "failed"
+                or existing.id in embedded_item_ids
+            )
+        ):
+            skipped += 1
+            continue
         try:
             entry = await admit_distillation(
                 session,
@@ -227,7 +290,7 @@ async def _start_distillations(
             )
             continue
         entries.append(entry.to_dict())
-    return entries, fallbacks
+    return entries, fallbacks, skipped
 
 
 async def _harvest_distillations(
@@ -313,7 +376,14 @@ async def _upsert_item(
         )
     )
     changed = item is None or item.content_digest != digest
+    distillation = extra.get("distillation")
+    question = (
+        str(distillation.get("question") or "").strip()
+        if isinstance(distillation, dict)
+        else ""
+    )
     search_text = build_search_text(
+        question=question,
         title=draft.title,
         summary=draft.summary,
         resolution=draft.resolution,
@@ -514,6 +584,16 @@ async def sync_connector(
             list(manifest.get("entries") or []),
         )
         stats.failed += failures
+        stats.distilled = sum(
+            1 for _draft, should_embed in resolved if should_embed
+        )
+        await _ingest_drafts(
+            session,
+            source=source,
+            drafts=resolved,
+            stats=stats,
+            run_at=run_at,
+        )
         if pending:
             stats.pending = len(pending)
             await _sync_state(
@@ -535,14 +615,6 @@ async def sync_connector(
                 cursor=committed_cursor,
             )
 
-        stats.distilled = sum(1 for _draft, should_embed in resolved if should_embed)
-        await _ingest_drafts(
-            session,
-            source=source,
-            drafts=resolved,
-            stats=stats,
-            run_at=run_at,
-        )
         status = "ok" if stats.failed == 0 else "degraded"
         await _sync_state(
             session,
@@ -607,7 +679,10 @@ async def sync_connector(
         stats=stats,
         run_at=run_at,
     )
-    entries, admission_fallbacks = await _start_distillations(session, distillable)
+    entries, admission_fallbacks, unchanged_distillations = (
+        await _start_distillations(session, distillable)
+    )
+    stats.skipped += unchanged_distillations
     if entries:
         stats.failed += len(admission_fallbacks)
         stats.pending = len(entries)

@@ -135,10 +135,17 @@ def reciprocal_rank_fusion(
 
 def _item_filters(
     *,
+    org_id: str,
     sources: Sequence[str] | None,
     kinds: Sequence[str] | None,
 ) -> list[Any]:
-    filters: list[Any] = [KnowledgeItem.archived_at.is_(None)]
+    clean_org_id = str(org_id or "").strip()
+    if not clean_org_id:
+        raise ValueError("org_id is required for knowledge search")
+    filters: list[Any] = [
+        KnowledgeItem.archived_at.is_(None),
+        KnowledgeItem.extra["org_id"].as_string() == clean_org_id,
+    ]
     clean_sources = [str(value).strip() for value in sources or [] if str(value).strip()]
     clean_kinds = [str(value).strip() for value in kinds or [] if str(value).strip()]
     if clean_sources:
@@ -334,6 +341,7 @@ async def search_knowledge(
     session: AsyncSession,
     query: str,
     *,
+    org_id: str,
     sources: Sequence[str] | None = None,
     kinds: Sequence[str] | None = None,
     limit: int = 10,
@@ -345,7 +353,12 @@ async def search_knowledge(
         raise ValueError("query is required")
     max_results = max(1, min(int(limit or 10), 50))
     channel_limit = min(200, max(20, max_results * 4))
-    filters = _item_filters(sources=sources, kinds=kinds)
+    clean_org_id = str(org_id or "").strip()
+    filters = _item_filters(
+        org_id=clean_org_id,
+        sources=sources,
+        kinds=kinds,
+    )
 
     lexical_items, lexical_scores = await _lexical_channel(
         session,
@@ -383,6 +396,7 @@ async def search_knowledge(
     ]
     return {
         "query": clean_query,
+        "org_id": clean_org_id,
         "sources": [str(value) for value in sources or []],
         "kinds": [str(value) for value in kinds or []],
         "semantic_available": semantic_error is None,

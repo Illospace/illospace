@@ -95,6 +95,7 @@ def _withdrawn_draft(node: MemoryNode) -> KnowledgeDraft:
             "archived": True,
             "mirror_status": "visibility_withdrawn",
             "node_kind": node.node_kind,
+            "org_id": str(node.org_id) if node.org_id is not None else None,
             "truth_status": node.truth_status,
             "visibility": node.visibility,
         },
