@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.schema import CreateTable
 
 from brain.app.scheduler.detached_agent_runs import async_reconcile_detached_runs
@@ -291,3 +292,58 @@ async def test_reconcile_detached_runs_preserves_mixed_candidate_outcomes(
         assert run.status == step.status == "executing"
         assert run.finished_at is None
         assert step.finished_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("candidate_count", [1, 4])
+async def test_reconcile_detached_runs_uses_four_selects_for_any_batch_size(
+    scheduler_session,
+    candidate_count,
+):
+    terminal_at = datetime(2026, 7, 28, 19, 35, tzinfo=timezone.utc)
+    for candidate_id in range(100, 100 + candidate_count):
+        await _add_detached_candidate(
+            scheduler_session,
+            candidate_id=candidate_id,
+            agent_status="failed",
+            terminal_at=terminal_at,
+            attempt=2,
+        )
+    await scheduler_session.commit()
+    scheduler_session.expunge_all()
+
+    select_statements: list[str] = []
+
+    def count_selects(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ):
+        if statement.lstrip().upper().startswith("SELECT"):
+            select_statements.append(statement)
+
+    engine = scheduler_session.bind
+    event.listen(engine.sync_engine, "before_cursor_execute", count_selects)
+
+    def retryable_failure_summary(_job, _run, *, base_summary, now):
+        del now
+        return "settled_failure", base_summary
+
+    async def apply_failure_guard(*_args, **_kwargs):
+        return None
+
+    try:
+        reconciled = await async_reconcile_detached_runs(
+            scheduler_session,
+            retryable_failure_summary=retryable_failure_summary,
+            apply_failure_guard=apply_failure_guard,
+            now=terminal_at,
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", count_selects)
+
+    assert len(reconciled) == candidate_count
+    assert len(select_statements) == 4

@@ -477,6 +477,7 @@ async def async_finish_run(
     session: AsyncSession,
     run: SchedulerRun,
     *,
+    job: SchedulerJob | None,
     status: str,
     result_summary: dict[str, Any] | None = None,
     error_text: str | None = None,
@@ -491,7 +492,6 @@ async def async_finish_run(
         run.trace_id = trace_id_for_run_id(run.agent_run_id)
     elif not run.trace_id:
         run.trace_id = trace_id_for_scheduler_run_id(run.id)
-    job = await session.get(SchedulerJob, run.job_id)
     if job is not None:
         job.last_finished_at = now
         if status == RUN_STATUS_SETTLED_SUCCESS:

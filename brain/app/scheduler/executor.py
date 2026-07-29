@@ -263,6 +263,7 @@ def _final_status_from_handler_result(result: dict[str, Any]) -> str:
 
 async def _async_block_invalid_contract_run(
     session: AsyncSession,
+    job: SchedulerJob,
     run: SchedulerRun,
     *,
     contract: dict[str, Any],
@@ -273,6 +274,7 @@ async def _async_block_invalid_contract_run(
     await async_finish_run(
         session,
         run,
+        job=job,
         status="blocked",
         result_summary={
             "reason": "contract_invalid",
@@ -693,6 +695,7 @@ async def async_run_scheduler_run(
     if contract_errors:
         return await _async_block_invalid_contract_run(
             session,
+            job,
             run,
             contract=contract,
             contract_errors=contract_errors,
@@ -770,6 +773,7 @@ async def async_run_scheduler_run(
             await async_finish_run(
                 session,
                 run,
+                job=job,
                 status=failure_status,
                 result_summary=failure_summary,
                 error_text=result["error"],
@@ -802,6 +806,7 @@ async def async_run_scheduler_run(
     await async_finish_run(
         session,
         run,
+        job=job,
         status=RUN_STATUS_SETTLED_SUCCESS,
         result_summary={"steps": step_results},
         error_text=None,
@@ -899,6 +904,7 @@ async def async_execute_scheduler_run(
     if contract_errors:
         return await _async_block_invalid_contract_run(
             session,
+            job,
             run,
             contract=contract,
             contract_errors=contract_errors,
