@@ -51,6 +51,7 @@ from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_r
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.stream import RunStream
 from brain.systems.runs.cortex.queue_health import (
+    QueuedBacklogSnapshot,
     queued_backlog_snapshot_async as _shared_queued_backlog_snapshot_async,
     queued_watchdog_after_seconds as _shared_queued_watchdog_after_seconds,
     runner_concurrency as _shared_runner_concurrency,
@@ -1125,7 +1126,7 @@ async def _reap_stale_runs_if_due_async(*, force: bool = False) -> int:
         return 0
 
 
-async def _queued_backlog_snapshot_async() -> tuple[int, datetime | None, int]:
+async def _queued_backlog_snapshot_async() -> QueuedBacklogSnapshot:
     return await _shared_queued_backlog_snapshot_async()
 
 
@@ -1153,25 +1154,27 @@ async def _nudge_stale_queued_runs_if_due_async(*, force: bool = False) -> bool:
         return False
 
     try:
-        queued_count, oldest_queued_at, active_count = await _queued_backlog_snapshot_async()
+        snapshot = await _queued_backlog_snapshot_async()
     except Exception:
         logger.exception("agent_run_queued_watchdog_snapshot_failed")
         return False
-    if queued_count <= 0 or oldest_queued_at is None:
+    if snapshot.queued <= 0 or snapshot.oldest_queued_at is None:
         return False
-    if active_count >= _runner_concurrency():
+    if snapshot.recent_active_runs >= _runner_concurrency():
         return False
 
-    age_seconds = (datetime.now(timezone.utc) - oldest_queued_at).total_seconds()
+    age_seconds = (
+        datetime.now(timezone.utc) - snapshot.oldest_queued_at
+    ).total_seconds()
     if age_seconds < _queued_watchdog_after_seconds():
         return False
 
     logger.warning(
         "agent_run_queued_watchdog_nudge",
         extra={
-            "queued": queued_count,
+            "queued": snapshot.queued,
             "oldest_queued_age_seconds": int(age_seconds),
-            "active_runs": active_count,
+            "recent_active_runs": snapshot.recent_active_runs,
         },
     )
     task = asyncio.create_task(

@@ -35,6 +35,7 @@ def _run(
     updated_at: datetime,
     started_at: datetime | None = None,
     execution_attempt: int = 0,
+    metadata: dict | None = None,
 ) -> AgentRunRow:
     return AgentRunRow(
         thread_id=thread_id,
@@ -46,10 +47,11 @@ def _run(
         updated_at=updated_at,
         started_at=started_at,
         execution_attempt=execution_attempt,
+        metadata_=metadata or {},
     )
 
 
-async def test_requeued_run_age_starts_at_requeue(
+async def test_requeued_run_age_uses_interruption_after_later_metadata_write(
     queue_health_session,
     monkeypatch,
 ):
@@ -58,12 +60,56 @@ async def test_requeued_run_age_starts_at_requeue(
     now = datetime.now(timezone.utc)
     created_at = now - timedelta(hours=4)
     requeued_at = now - timedelta(seconds=30)
+    metadata_written_again_at = now - timedelta(seconds=5)
     queue_health_session.add(
         _run(
             thread_id="requeued",
             status="queued",
             created_at=created_at,
-            updated_at=requeued_at,
+            updated_at=metadata_written_again_at,
+            started_at=created_at,
+            execution_attempt=1,
+            metadata={
+                "interruption": {
+                    "interrupted_at": requeued_at.isoformat(),
+                    "from_status": "running",
+                },
+                "interruption_count": 1,
+                "later_write": True,
+            },
+        )
+    )
+    await queue_health_session.flush()
+    monkeypatch.setattr(
+        queue_health,
+        "UnitOfWork",
+        lambda: _SessionUnitOfWork(queue_health_session),
+    )
+
+    snapshot = await queue_health.queued_backlog_snapshot_async(
+        stale_after_seconds=60,
+    )
+
+    assert snapshot.queued == 1
+    assert snapshot.oldest_queued_at is not None
+    assert 25 <= (now - snapshot.oldest_queued_at).total_seconds() <= 35
+    assert snapshot.recent_active_runs == 0
+
+
+async def test_requeued_run_without_interruption_record_falls_back_to_creation(
+    queue_health_session,
+    monkeypatch,
+):
+    from brain.systems.runs.cortex import queue_health
+
+    now = datetime.now(timezone.utc)
+    created_at = now - timedelta(hours=4)
+    queue_health_session.add(
+        _run(
+            thread_id="historical-requeue",
+            status="queued",
+            created_at=created_at,
+            updated_at=now,
             started_at=created_at,
             execution_attempt=1,
         )
@@ -75,16 +121,14 @@ async def test_requeued_run_age_starts_at_requeue(
         lambda: _SessionUnitOfWork(queue_health_session),
     )
 
-    queued, oldest_queued_at, recent_active = (
-        await queue_health.queued_backlog_snapshot_async(
-            stale_after_seconds=60,
-        )
+    snapshot = await queue_health.queued_backlog_snapshot_async(
+        stale_after_seconds=60,
     )
 
-    assert queued == 1
-    assert oldest_queued_at is not None
-    assert 25 <= (now - oldest_queued_at).total_seconds() <= 35
-    assert recent_active == 0
+    assert snapshot.oldest_queued_at is not None
+    assert 3.9 * 60 * 60 <= (
+        now - snapshot.oldest_queued_at
+    ).total_seconds() <= 4.1 * 60 * 60
 
 
 async def test_stale_processing_rows_do_not_hide_queue_starvation(
@@ -121,15 +165,14 @@ async def test_stale_processing_rows_do_not_hide_queue_starvation(
         "UnitOfWork",
         lambda: _SessionUnitOfWork(queue_health_session),
     )
-    monkeypatch.setattr(queue_health, "runner_concurrency", lambda: 4)
-
     health = await queue_health.queued_backlog_health_snapshot_async(
         stale_after_seconds=60,
+        configured_concurrency=4,
     )
 
-    assert health["active_runs"] == 0
-    assert health["queue_moving_at_capacity"] is False
-    assert health["stale_queued_backlog"] is True
+    assert health.recent_active_runs == 0
+    assert health.queue_moving_at_capacity is False
+    assert health.stale_queued_backlog is True
 
 
 async def test_recent_processing_claims_excuse_saturated_queue(
@@ -166,41 +209,79 @@ async def test_recent_processing_claims_excuse_saturated_queue(
         "UnitOfWork",
         lambda: _SessionUnitOfWork(queue_health_session),
     )
-    monkeypatch.setattr(queue_health, "runner_concurrency", lambda: 4)
-
     health = await queue_health.queued_backlog_health_snapshot_async(
         stale_after_seconds=60,
+        configured_concurrency=4,
     )
 
-    assert health["active_runs"] == 4
-    assert health["queue_moving_at_capacity"] is True
-    assert health["stale_queued_backlog"] is False
+    assert health.recent_active_runs == 4
+    assert health.queue_moving_at_capacity is True
+    assert health.stale_queued_backlog is False
+
+
+def test_explicit_worker_capacity_keeps_partial_claims_starved():
+    from brain.systems.runs.cortex.queue_health import (
+        QueuedBacklogSnapshot,
+        QueueHealthPolicy,
+        evaluate_queue_health,
+    )
+
+    now = datetime.now(timezone.utc)
+    health = evaluate_queue_health(
+        QueuedBacklogSnapshot(
+            queued=1,
+            oldest_queued_at=now - timedelta(minutes=15),
+            recent_active_runs=4,
+        ),
+        QueueHealthPolicy(
+            watchdog_after_seconds=600,
+            configured_concurrency=8,
+        ),
+        now=now,
+    )
+
+    assert health.queue_moving_at_capacity is False
+    assert health.stale_queued_backlog is True
 
 
 def test_queue_health_cli_fails_with_legible_starvation_message(
     monkeypatch,
     capsys,
 ):
-    from brain.systems.runs.cortex import queue_health
+    from brain.app.cli import agent_run_queue_health
+    from brain.systems.runs.cortex.queue_health import QueueHealth
 
-    async def fake_health(*, stale_after_seconds):
+    async def fake_health(*, stale_after_seconds, configured_concurrency):
         assert stale_after_seconds == 600
-        return {
-            "queued": 3,
-            "recent_active_runs": 0,
-            "configured_concurrency": 4,
-            "oldest_queued_age_seconds": 900,
-            "watchdog_after_seconds": 600,
-            "stale_queued_backlog": True,
-        }
+        assert configured_concurrency == 8
+        return QueueHealth(
+            queued=3,
+            recent_active_runs=0,
+            configured_concurrency=8,
+            oldest_queued_at=None,
+            oldest_queued_age_seconds=900,
+            watchdog_after_seconds=600,
+            queue_moving_at_capacity=False,
+            stale_queued_backlog=True,
+        )
 
     monkeypatch.setattr(
-        queue_health,
+        agent_run_queue_health,
         "queued_backlog_health_snapshot_async",
         fake_health,
     )
 
-    assert queue_health.main(["--stale-after-seconds", "600"]) == 1
+    assert (
+        agent_run_queue_health.main(
+            [
+                "--stale-after-seconds",
+                "600",
+                "--runner-concurrency",
+                "8",
+            ]
+        )
+        == 1
+    )
     captured = capsys.readouterr()
     assert "AgentRun queue starvation" in captured.err
     assert "No worker is claiming the queued backlog" in captured.err
