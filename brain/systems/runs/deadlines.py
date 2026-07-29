@@ -132,6 +132,17 @@ async def _expire_after_closeout(
     if closeout_expires_at is None or _as_utc(closeout_expires_at) > now:
         return False
     store = AsyncAgentRunStore(session)
+    anchor_run_id = int(row.parent_run_id or row.id)
+    await store.commit_event_boundary(int(run_id))
+    row = await store.lock_terminal_boundary(
+        int(run_id),
+        anchor_run_id=anchor_run_id,
+    )
+    if str(row.status or "") not in _OPEN_STATUS_VALUES:
+        return False
+    closeout_expires_at = row.closeout_expires_at
+    if closeout_expires_at is None or _as_utc(closeout_expires_at) > now:
+        return False
     expired, changed = await store.set_status_with_result(
         int(run_id),
         RunStatus.EXPIRED,

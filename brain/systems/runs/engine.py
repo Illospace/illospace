@@ -384,8 +384,8 @@ class AsyncAgentRunEngine:
                     root_run_id=row.root_run_id,
                 )
             )
+        row = await self._prepare_terminal_write(run_id)
         async with self._atomic_terminal_write():
-            row = await self.store.require_run(run_id)
             if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
                 return to_domain(row)
             completed = await self.store.set_status(
@@ -426,8 +426,8 @@ class AsyncAgentRunEngine:
         failure_category: RunFailureCategory | str | None = None,
         execution_claim: ExecutionClaim | None = None,
     ) -> AgentRun:
+        row = await self._prepare_terminal_write(run_id)
         async with self._atomic_terminal_write():
-            row = await self.store.require_run(run_id)
             if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
                 return to_domain(row)
             category = coerce_failure_category(failure_category or failure_category_for_error(error))
@@ -481,8 +481,8 @@ class AsyncAgentRunEngine:
         reason: str | None = None,
         execution_claim: ExecutionClaim | None = None,
     ) -> AgentRun:
+        row = await self._prepare_terminal_write(run_id)
         async with self._atomic_terminal_write():
-            row = await self.store.require_run(run_id)
             if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
                 return to_domain(row)
             canceled = await self.store.set_status(
@@ -507,6 +507,19 @@ class AsyncAgentRunEngine:
         return await queue_chantier_continuation_for_terminal_run(
             self.store.session,
             terminal_run_id=run_id,
+        )
+
+    async def _prepare_terminal_write(self, run_id: int):
+        """Start terminal work from a clean, globally ordered lock boundary."""
+
+        snapshot = await self.store.require_run(run_id)
+        if coerce_run_status(snapshot.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
+            return snapshot
+        anchor_run_id = int(snapshot.parent_run_id or snapshot.id)
+        await self.store.commit_event_boundary(run_id)
+        return await self.store.lock_terminal_boundary(
+            run_id,
+            anchor_run_id=anchor_run_id,
         )
 
     @asynccontextmanager

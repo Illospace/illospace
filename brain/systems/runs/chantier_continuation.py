@@ -257,7 +257,7 @@ async def _lock_run(session: AsyncSession, run_id: int) -> AgentRunRow | None:
     stmt = (
         select(AgentRunRow)
         .where(AgentRunRow.id == int(run_id))
-        .with_for_update()
+        .with_for_update(key_share=True)
         .execution_options(populate_existing=True)
     )
     return (await session.scalars(stmt)).one_or_none()
