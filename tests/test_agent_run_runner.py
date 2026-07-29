@@ -303,11 +303,13 @@ def test_runner_health_snapshot_requires_supervisor_and_slots(monkeypatch):
 
 async def test_queued_backlog_health_snapshot_marks_stale_queue(monkeypatch):
     from brain.systems.runs.cortex import queue_health
+    from brain.systems.runs.cortex.queue_health import QueuedBacklogSnapshot
 
     oldest = datetime.now(timezone.utc) - timedelta(seconds=60)
 
-    async def fake_snapshot():
-        return 2, oldest, 0
+    async def fake_snapshot(*, stale_after_seconds):
+        assert stale_after_seconds == 10
+        return QueuedBacklogSnapshot(2, oldest, 0)
 
     monkeypatch.setattr(queue_health, "queued_backlog_snapshot_async", fake_snapshot)
     monkeypatch.setattr(queue_health, "queued_watchdog_after_seconds", lambda: 10)
@@ -315,18 +317,20 @@ async def test_queued_backlog_health_snapshot_marks_stale_queue(monkeypatch):
 
     health = await queue_health.queued_backlog_health_snapshot_async()
 
-    assert health["queued"] == 2
-    assert health["active_runs"] == 0
-    assert health["stale_queued_backlog"] is True
+    assert health.queued == 2
+    assert health.recent_active_runs == 0
+    assert health.stale_queued_backlog is True
 
 
 async def test_queued_backlog_health_snapshot_respects_full_capacity(monkeypatch):
     from brain.systems.runs.cortex import queue_health
+    from brain.systems.runs.cortex.queue_health import QueuedBacklogSnapshot
 
     oldest = datetime.now(timezone.utc) - timedelta(seconds=60)
 
-    async def fake_snapshot():
-        return 2, oldest, 4
+    async def fake_snapshot(*, stale_after_seconds):
+        assert stale_after_seconds == 10
+        return QueuedBacklogSnapshot(2, oldest, 4)
 
     monkeypatch.setattr(queue_health, "queued_backlog_snapshot_async", fake_snapshot)
     monkeypatch.setattr(queue_health, "queued_watchdog_after_seconds", lambda: 10)
@@ -334,9 +338,32 @@ async def test_queued_backlog_health_snapshot_respects_full_capacity(monkeypatch
 
     health = await queue_health.queued_backlog_health_snapshot_async()
 
-    assert health["queued"] == 2
-    assert health["active_runs"] == 4
-    assert health["stale_queued_backlog"] is False
+    assert health.queued == 2
+    assert health.recent_active_runs == 4
+    assert health.stale_queued_backlog is False
+
+
+async def test_queued_backlog_health_snapshot_accepts_doctor_threshold(monkeypatch):
+    from brain.systems.runs.cortex import queue_health
+    from brain.systems.runs.cortex.queue_health import QueuedBacklogSnapshot
+
+    oldest = datetime.now(timezone.utc) - timedelta(seconds=900)
+    received_thresholds = []
+
+    async def fake_snapshot(*, stale_after_seconds):
+        received_thresholds.append(stale_after_seconds)
+        return QueuedBacklogSnapshot(1, oldest, 0)
+
+    monkeypatch.setattr(queue_health, "queued_backlog_snapshot_async", fake_snapshot)
+    monkeypatch.setattr(queue_health, "runner_concurrency", lambda: 4)
+
+    health = await queue_health.queued_backlog_health_snapshot_async(
+        stale_after_seconds=600,
+    )
+
+    assert received_thresholds == [600.0]
+    assert health.watchdog_after_seconds == 600
+    assert health.stale_queued_backlog is True
 
 
 async def test_supervisor_starts_runner_slots_before_stale_reconcile_finishes(monkeypatch):
@@ -405,13 +432,14 @@ async def test_runner_slot_logs_and_survives_queue_errors(monkeypatch, caplog):
 
 async def test_queued_watchdog_nudges_stale_queue_when_capacity_available(monkeypatch, caplog):
     from brain.systems.runs.cortex import runner
+    from brain.systems.runs.cortex.queue_health import QueuedBacklogSnapshot
 
     calls = 0
     oldest = datetime.now(timezone.utc) - timedelta(seconds=60)
     release = asyncio.Event()
 
     async def fake_snapshot():
-        return 1, oldest, 0
+        return QueuedBacklogSnapshot(1, oldest, 0)
 
     async def fake_run_queued_once(*, limit=1):
         nonlocal calls
@@ -442,11 +470,12 @@ async def test_queued_watchdog_nudges_stale_queue_when_capacity_available(monkey
 
 async def test_queued_watchdog_respects_configured_capacity(monkeypatch):
     from brain.systems.runs.cortex import runner
+    from brain.systems.runs.cortex.queue_health import QueuedBacklogSnapshot
 
     oldest = datetime.now(timezone.utc) - timedelta(seconds=60)
 
     async def fake_snapshot():
-        return 1, oldest, 4
+        return QueuedBacklogSnapshot(1, oldest, 4)
 
     async def fail_run_queued_once(*, limit=1):
         raise AssertionError("watchdog should not run when capacity is full")

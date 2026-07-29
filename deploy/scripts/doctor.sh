@@ -9,6 +9,7 @@ ENV_FILE="${ILLO_COMPOSE_ENV_FILE:-$COMPOSE_DIR/.env}"
 
 # Provides compose() plus the shared stack invariants (assert_stack_not_inert).
 source "$SCRIPT_DIR/compose-runtime-lib.sh"
+source "$SCRIPT_DIR/agent-run-queue-health-lib.sh"
 
 # Doctor runs after a deploy, so it holds the updater to the same standard as
 # the always-on services; a bare monitor does not (a missing updater does not
@@ -239,6 +240,15 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
           ;;
       esac
     done
+
+    queue_health_output=""
+    queue_health_status=0
+    queue_health_output="$(assert_agent_run_queue_not_starved 2>&1)" || queue_health_status=$?
+    if [ "$queue_health_status" -eq 0 ]; then
+      pass "$queue_health_output"
+    else
+      fail "$queue_health_output"
+    fi
 
     if printf '%s\n' "$running" | grep -qx postgres; then
       if compose exec -T postgres psql -U "${DB_USER:-}" -d "${DB_NAME:-}" -tAc "SELECT extname FROM pg_extension WHERE extname = 'vector'" 2>/dev/null | grep -qx vector; then

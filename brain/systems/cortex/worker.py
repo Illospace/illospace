@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 import logging
 import os
 import signal
@@ -228,7 +229,14 @@ def main() -> None:
                         logger.error(
                             "agent-run worker queue stalled; exiting for restart",
                             extra={
-                                "queue_health": queue_health,
+                                "queue_health": {
+                                    **asdict(queue_health),
+                                    "oldest_queued_at": (
+                                        queue_health.oldest_queued_at.isoformat()
+                                        if queue_health.oldest_queued_at
+                                        else None
+                                    ),
+                                },
                                 "stale_for_seconds": stale_for_seconds,
                             },
                         )

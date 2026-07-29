@@ -5,6 +5,21 @@ import pytest
 from unittest.mock import patch
 
 
+def _queue_health(*, stale_queued_backlog: bool):
+    from brain.systems.runs.cortex.queue_health import QueueHealth
+
+    return QueueHealth(
+        queued=1 if stale_queued_backlog else 0,
+        recent_active_runs=0,
+        configured_concurrency=4,
+        oldest_queued_at=None,
+        oldest_queued_age_seconds=None,
+        watchdog_after_seconds=15,
+        queue_moving_at_capacity=False,
+        stale_queued_backlog=stale_queued_backlog,
+    )
+
+
 def test_require_embedding_backend_ready_skips_non_gpu():
     from brain.systems.cortex.worker import _require_embedding_backend_ready
 
@@ -85,7 +100,7 @@ def test_queue_stall_monitor_checks_on_interval():
 
     assert monitor.should_check(now=4.0) is False
     assert monitor.should_check(now=5.0) is True
-    monitor.observe({"stale_queued_backlog": False}, now=5.0)
+    monitor.observe(_queue_health(stale_queued_backlog=False), now=5.0)
     assert monitor.should_check(now=9.0) is False
     assert monitor.should_check(now=10.0) is True
 
@@ -95,11 +110,14 @@ def test_queue_stall_monitor_tracks_stale_backlog():
 
     monitor = QueueStallMonitor(check_interval_seconds=5.0, stall_grace_seconds=10.0)
 
-    assert monitor.observe({"stale_queued_backlog": True}, now=10.0) is None
+    stalled = _queue_health(stale_queued_backlog=True)
+    healthy = _queue_health(stale_queued_backlog=False)
+
+    assert monitor.observe(stalled, now=10.0) is None
     assert monitor.stale_since == 10.0
-    assert monitor.observe({"stale_queued_backlog": True}, now=19.0) is None
-    assert monitor.observe({"stale_queued_backlog": True}, now=20.0) == 10
-    assert monitor.observe({"stale_queued_backlog": False}, now=21.0) is None
+    assert monitor.observe(stalled, now=19.0) is None
+    assert monitor.observe(stalled, now=20.0) == 10
+    assert monitor.observe(healthy, now=21.0) is None
     assert monitor.stale_since is None
 
 
