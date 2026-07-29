@@ -72,7 +72,7 @@ def test_strict_credentials_uses_current_db_tables_without_legacy_user_keys(tmp_
                   echo 2
                   exit 0
                   ;;
-                *"brain.systems.runs.cortex.queue_health"*"--stale-after-seconds 600"*)
+                *"brain.app.cli.agent_run_queue_health"*"--stale-after-seconds 600"*"--runner-concurrency 4"*)
                   echo "AgentRun queue healthy: no stale queued backlog."
                   exit 0
                   ;;
