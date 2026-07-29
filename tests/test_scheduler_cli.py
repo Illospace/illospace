@@ -27,6 +27,7 @@ def _daemon_args(**overrides):
         "once": False,
         "poll_interval_seconds": 15,
         "now": None,
+        "cold_start_gap_threshold_seconds": 3600,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
