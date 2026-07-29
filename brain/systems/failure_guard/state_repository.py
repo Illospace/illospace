@@ -1,7 +1,7 @@
 """Shared SQLAlchemy repository for failure-guard trigger state."""
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 import json
 from typing import Generic, Protocol, TypeVar, cast
@@ -49,15 +49,27 @@ class SqlAlchemyFailureGuardStateStore(Generic[RecordT]):
         init=False,
     )
 
+    @staticmethod
+    def _index_records(
+        records: Iterable[RecordT],
+    ) -> dict[FailureGuardTriggerKind, RecordT]:
+        return {
+            FailureGuardTriggerKind(record.trigger_kind): record
+            for record in records
+        }
+
+    def preload_records(self, records: Iterable[RecordT]) -> None:
+        """Hydrate this store from a repository-owned bulk read."""
+        if self._records is not None:
+            raise RuntimeError("Failure-guard trigger states are already loaded")
+        self._records = self._index_records(records)
+
     async def _load_records(
         self,
     ) -> dict[FailureGuardTriggerKind, RecordT]:
         if self._records is None:
             result = await self.session.scalars(self.statement)
-            self._records = {
-                FailureGuardTriggerKind(record.trigger_kind): record
-                for record in result.all()
-            }
+            self._records = self._index_records(result.all())
         return self._records
 
     async def load_trigger_states(

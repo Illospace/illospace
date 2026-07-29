@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 
 import brain.app.scheduler.executor as scheduler_executor
 import brain.app.scheduler.scheduler_failure_guard as scheduler_failure_guard
@@ -34,6 +34,7 @@ from brain.app.scheduler.executor import async_run_scheduler_run
 from brain.platform.db.models.scheduler import (
     SchedulerFailureGuardLatch,
     SchedulerFailureGuardTriggerState,
+    SchedulerJob,
     SchedulerRun,
 )
 from tests.scheduler_test_support import (
@@ -215,33 +216,7 @@ async def test_health_projection_preserves_each_jobs_latches_and_trigger_output(
     ]
 
 
-async def test_catalog_projection_batches_failure_guard_queries_across_jobs(
-    session,
-    monkeypatch,
-):
-    now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(
-        scheduler_failure_guard,
-        "_FAILURE_GUARD_TRIGGER_PROVIDERS",
-        (
-            *scheduler_failure_guard._FAILURE_GUARD_TRIGGER_PROVIDERS,
-            lambda: _RuntimeDurationTrigger(
-                minimum_runtime_minutes=30
-            ),
-        ),
-    )
-    session.add_all(
-        [
-            _make_scheduler_job(
-                job_key=f"batch-query-{index}",
-                family=f"batch-query-{index}",
-                last_started_at=now - timedelta(minutes=index),
-                next_run_at=now + timedelta(hours=index),
-            )
-            for index in range(1, 4)
-        ]
-    )
-    await session.flush()
+async def _list_scheduler_jobs_with_statement_count(session, *, now):
     statements: list[str] = []
 
     def capture_statement(
@@ -261,25 +236,94 @@ async def test_catalog_projection_batches_failure_guard_queries_across_jobs(
         jobs = await async_list_scheduler_jobs(session, now=now)
     finally:
         event.remove(engine, "before_cursor_execute", capture_statement)
+    return jobs, len(statements)
 
-    assert len(jobs) == 3
-    assert all(
-        len(job["failure_guard"]["triggers"]) == 3
-        for job in jobs
-    )
-    guard_queries = {
-        table: sum(table in statement for statement in statements)
-        for table in (
-            "scheduler_failure_guard_trigger_states",
-            "scheduler_runs",
-            "scheduler_failure_guard_latches",
+
+async def test_catalog_projection_batches_failure_guard_queries_across_jobs(
+    session,
+):
+    now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+    session.add(
+        _make_scheduler_job(
+            job_key="batch-query-1",
+            family="batch-query-1",
+            last_started_at=now - timedelta(minutes=1),
+            next_run_at=now + timedelta(hours=1),
         )
-    }
-    assert guard_queries == {
-        "scheduler_failure_guard_trigger_states": 1,
-        "scheduler_runs": 1,
-        "scheduler_failure_guard_latches": 1,
-    }
+    )
+    await session.flush()
+    single_job_projection, single_job_statements = (
+        await _list_scheduler_jobs_with_statement_count(session, now=now)
+    )
+
+    session.add_all(
+        [
+            _make_scheduler_job(
+                job_key=f"batch-query-{index}",
+                family=f"batch-query-{index}",
+                last_started_at=now - timedelta(minutes=index),
+                next_run_at=now + timedelta(hours=index),
+            )
+            for index in range(2, 5)
+        ]
+    )
+    await session.flush()
+    several_job_projection, several_job_statements = (
+        await _list_scheduler_jobs_with_statement_count(session, now=now)
+    )
+
+    assert len(single_job_projection) == 1
+    assert len(several_job_projection) == 4
+    assert all(
+        len(job["failure_guard"]["triggers"]) == 2
+        for job in several_job_projection
+    )
+    assert single_job_statements == several_job_statements == 4
+
+
+async def test_registered_database_trigger_projects_once_across_jobs(
+    session,
+    monkeypatch,
+):
+    now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+    database_trigger = _DatabaseBackedTrigger(projected_job_counts=[])
+    monkeypatch.setattr(
+        scheduler_failure_guard,
+        "_FAILURE_GUARD_TRIGGER_PROVIDERS",
+        (
+            *scheduler_failure_guard._FAILURE_GUARD_TRIGGER_PROVIDERS,
+            lambda: database_trigger,
+        ),
+    )
+    session.add(
+        _make_scheduler_job(
+            job_key="database-trigger-query-1",
+            family="database-trigger-query-1",
+            next_run_at=now + timedelta(hours=1),
+        )
+    )
+    await session.flush()
+    _, single_job_statements = (
+        await _list_scheduler_jobs_with_statement_count(session, now=now)
+    )
+
+    session.add_all(
+        [
+            _make_scheduler_job(
+                job_key=f"database-trigger-query-{index}",
+                family=f"database-trigger-query-{index}",
+                next_run_at=now + timedelta(hours=index),
+            )
+            for index in range(2, 5)
+        ]
+    )
+    await session.flush()
+    _, several_job_statements = (
+        await _list_scheduler_jobs_with_statement_count(session, now=now)
+    )
+
+    assert single_job_statements == several_job_statements == 5
+    assert database_trigger.projected_job_counts == [1, 4]
 
 
 async def test_scheduler_failure_alert_bytes_are_unchanged_through_shared_delivery(
@@ -888,6 +932,55 @@ async def test_consecutive_and_rate_edges_coexist_without_duplicate_delivery(
     ] == ["consecutive", "rolling_window"]
 
 
+_DATABASE_BACKED_TRIGGER_KIND = FailureGuardTriggerKind("database_backed")
+
+
+@dataclass(frozen=True)
+class _DatabaseBackedTrigger:
+    """A proof trigger whose facts require one database projection."""
+
+    projected_job_counts: list[int]
+    kind: FailureGuardTriggerKind = field(
+        default=_DATABASE_BACKED_TRIGGER_KIND,
+        init=False,
+    )
+
+    async def evaluate(self, context) -> FailureGuardTriggerResult:
+        return (await self.evaluate_many((context,)))[context.job.id]
+
+    async def evaluate_many(self, contexts):
+        self.projected_job_counts.append(len(contexts))
+        if not contexts:
+            return {}
+        session = contexts[0].session
+        job_ids = [context.job.id for context in contexts]
+        result = await session.scalars(
+            select(SchedulerJob.id).where(SchedulerJob.id.in_(job_ids))
+        )
+        loaded_job_ids = set(result.all())
+        return {
+            context.job.id: FailureGuardTriggerResult(
+                kind=self.kind,
+                active=context.job.id in loaded_job_ids,
+                public_details={
+                    "database_row_loaded": context.job.id in loaded_job_ids,
+                },
+                alert_title="Scheduler job row loaded",
+                alert_summary="Scheduler job exists in the projection",
+            )
+            for context in contexts
+        }
+
+    async def should_reset(
+        self,
+        context,
+        *,
+        event: SchedulerFailureGuardResetEvent,
+    ) -> bool:
+        del context, event
+        return True
+
+
 _RUNTIME_DURATION_TRIGGER_KIND = FailureGuardTriggerKind("runtime_duration")
 
 
@@ -905,6 +998,15 @@ class _RuntimeDurationTrigger:
         self,
         context,
     ) -> FailureGuardTriggerResult:
+        return (await self.evaluate_many((context,)))[context.job.id]
+
+    async def evaluate_many(self, contexts):
+        return {
+            context.job.id: self._result(context)
+            for context in contexts
+        }
+
+    def _result(self, context) -> FailureGuardTriggerResult:
         assert context.job.last_started_at is not None
         started_at = context.job.last_started_at
         if started_at.tzinfo is None:

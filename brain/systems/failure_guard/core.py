@@ -173,25 +173,16 @@ async def async_evaluate_failure_guard_triggers(
     ],
     context: FailureGuardContextT,
     store: FailureGuardStateStore,
-    states: Mapping[
-        FailureGuardTriggerKind,
-        FailureGuardTriggerState,
-    ]
-    | None = None,
 ) -> tuple[FailureGuardTriggerResult, ...]:
     """Evaluate registered triggers through their declared public contract."""
-    loaded_states = dict(
-        await store.load_trigger_states()
-        if states is None
-        else states
-    )
+    states = dict(await store.load_trigger_states())
     results: list[FailureGuardTriggerResult] = []
     for trigger in triggers:
         if isinstance(trigger, FailureGuardStatefulTrigger):
             results.append(
                 await trigger.evaluate_with_state(
                     context,
-                    state=dict(loaded_states.get(trigger.kind, {})),
+                    state=dict(states.get(trigger.kind, {})),
                 )
             )
         else:
@@ -303,29 +294,20 @@ async def async_evaluate_failure_edges(
     now: datetime,
     store: FailureGuardStore,
     latch_new_edges: bool,
-    latches: Mapping[
-        FailureGuardTriggerKind,
-        FailureGuardLatch,
-    ]
-    | None = None,
 ) -> FailureGuardEvaluation:
     """Apply durable latches to caller-evaluated trigger results."""
     kinds = [str(result.kind) for result in results]
     if len(kinds) != len(set(kinds)):
         raise ValueError("Failure-guard trigger kinds must be unique")
 
-    loaded_latches = dict(
-        await store.load_latches()
-        if latches is None
-        else latches
-    )
+    latches = dict(await store.load_latches())
     edges: list[FailureGuardEdge] = []
     for result in results:
-        latch = loaded_latches.get(result.kind)
+        latch = latches.get(result.kind)
         crossed = latch_new_edges and result.active and latch is None
         if crossed:
             latch = await store.create_latch(result.kind, now)
-            loaded_latches[result.kind] = latch
+            latches[result.kind] = latch
         edges.append(
             FailureGuardEdge(
                 kind=result.kind,

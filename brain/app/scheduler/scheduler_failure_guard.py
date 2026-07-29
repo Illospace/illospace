@@ -11,7 +11,6 @@ from typing import (
     Protocol,
     Sequence,
     TypeAlias,
-    runtime_checkable,
 )
 
 from sqlalchemy import delete, func, select
@@ -168,20 +167,7 @@ class RollingWindowFailuresTrigger:
         self,
         context: SchedulerFailureGuardLifecycleContext,
     ) -> FailureGuardTriggerResult:
-        count = int(
-            await context.session.scalar(
-                select(func.count())
-                .select_from(SchedulerRun)
-                .where(
-                    SchedulerRun.job_id == context.job.id,
-                    SchedulerRun.status == "settled_failure",
-                    SchedulerRun.started_at
-                    > context.now - timedelta(hours=self.window_hours),
-                )
-            )
-            or 0
-        )
-        return self._result(count)
+        return (await self.evaluate_many((context,)))[context.job.id]
 
     async def evaluate_many(
         self,
@@ -267,7 +253,13 @@ class SchedulerFailureGuardTrigger(
     FailureGuardTrigger[SchedulerFailureGuardLifecycleContext],
     Protocol,
 ):
-    """One stateless scheduler failure trigger."""
+    """One stateless scheduler trigger with mandatory bulk projection."""
+
+    async def evaluate_many(
+        self,
+        contexts: Sequence[SchedulerFailureGuardLifecycleContext],
+    ) -> Mapping[int, FailureGuardTriggerResult]:
+        """Evaluate this trigger for every projected job."""
 
 
 class SchedulerFailureGuardStatefulTrigger(
@@ -276,19 +268,6 @@ class SchedulerFailureGuardStatefulTrigger(
     Protocol,
 ):
     """One state-owning scheduler failure trigger."""
-
-
-@runtime_checkable
-class SchedulerFailureGuardBulkTrigger(Protocol):
-    """A stateless trigger that can batch its catalog projection reads."""
-
-    kind: FailureGuardTriggerKind
-
-    async def evaluate_many(
-        self,
-        contexts: Sequence[SchedulerFailureGuardLifecycleContext],
-    ) -> Mapping[int, FailureGuardTriggerResult]:
-        """Evaluate this trigger for every projected job."""
 
 
 SchedulerRegisteredFailureGuardTrigger: TypeAlias = (
@@ -331,25 +310,61 @@ def scheduler_failure_guard_registry() -> SchedulerFailureGuardRegistry:
     )
 
 
-@dataclass(frozen=True)
+@dataclass
 class SchedulerFailureGuardStore:
     """Persist scheduler trigger latches behind the shared store contract."""
 
     session: AsyncSession
     job_id: int
+    _latches: dict[
+        FailureGuardTriggerKind,
+        SchedulerFailureGuardLatch,
+    ] | None = field(default=None, init=False, repr=False)
+
+    @staticmethod
+    def _statement(job_ids: Sequence[int]):
+        return select(SchedulerFailureGuardLatch).where(
+            SchedulerFailureGuardLatch.job_id.in_(job_ids)
+        )
+
+    @staticmethod
+    def _index_latches(
+        latches: Sequence[SchedulerFailureGuardLatch],
+    ) -> dict[FailureGuardTriggerKind, SchedulerFailureGuardLatch]:
+        return {
+            FailureGuardTriggerKind(latch.trigger_kind): latch
+            for latch in latches
+        }
+
+    @classmethod
+    async def preload_many(
+        cls,
+        session: AsyncSession,
+        job_ids: Sequence[int],
+    ) -> dict[int, SchedulerFailureGuardStore]:
+        """Return per-job stores hydrated by one latch query."""
+        stores = {
+            job_id: cls(session=session, job_id=job_id)
+            for job_id in job_ids
+        }
+        latches_by_job: dict[int, list[SchedulerFailureGuardLatch]] = {
+            job_id: []
+            for job_id in job_ids
+        }
+        result = await session.scalars(cls._statement(job_ids))
+        for latch in result.all():
+            latches_by_job[latch.job_id].append(latch)
+        for job_id, store in stores.items():
+            store._latches = store._index_latches(latches_by_job[job_id])
+        return stores
 
     async def load_latches(
         self,
     ) -> dict[FailureGuardTriggerKind, SchedulerFailureGuardLatch]:
-        result = await self.session.scalars(
-            select(SchedulerFailureGuardLatch).where(
-                SchedulerFailureGuardLatch.job_id == self.job_id,
-            )
-        )
-        return {
-            FailureGuardTriggerKind(latch.trigger_kind): latch
-            for latch in result.all()
-        }
+        if self._latches is None:
+            result = await self.session.scalars(self._statement((self.job_id,)))
+            self._latches = self._index_latches(result.all())
+        return dict(self._latches)
 
     async def create_latch(
         self,
@@ -362,6 +377,8 @@ class SchedulerFailureGuardStore:
             alerted_at=alerted_at,
         )
         self.session.add(latch)
+        if self._latches is not None:
+            self._latches[trigger_kind] = latch
         return latch
 
     async def delete_latch(
@@ -374,71 +391,63 @@ class SchedulerFailureGuardStore:
                 SchedulerFailureGuardLatch.trigger_kind == str(trigger_kind),
             )
         )
+        if self._latches is not None:
+            self._latches.pop(trigger_kind, None)
 
 
-def _scheduler_failure_guard_state_store(
-    session: AsyncSession,
-    job_id: int,
-) -> SqlAlchemyFailureGuardStateStore[SchedulerFailureGuardTriggerState]:
-    return SqlAlchemyFailureGuardStateStore(
-        session=session,
-        statement=select(SchedulerFailureGuardTriggerState).where(
-            SchedulerFailureGuardTriggerState.job_id == job_id
-        ),
-        create_record=lambda trigger_kind, trigger_state: (
-            SchedulerFailureGuardTriggerState(
-                job_id=job_id,
-                trigger_kind=trigger_kind,
-                trigger_state=trigger_state,
-            )
-        ),
-    )
+class SchedulerFailureGuardStateStore(
+    SqlAlchemyFailureGuardStateStore[SchedulerFailureGuardTriggerState]
+):
+    """Persist scheduler trigger state through singular or prehydrated reads."""
 
-
-async def _async_load_scheduler_failure_guard_latches(
-    session: AsyncSession,
-    job_ids: Sequence[int],
-) -> dict[
-    int,
-    dict[FailureGuardTriggerKind, SchedulerFailureGuardLatch],
-]:
-    latches_by_job: dict[
-        int,
-        dict[FailureGuardTriggerKind, SchedulerFailureGuardLatch],
-    ] = {job_id: {} for job_id in job_ids}
-    result = await session.scalars(
-        select(SchedulerFailureGuardLatch).where(
-            SchedulerFailureGuardLatch.job_id.in_(job_ids)
-        )
-    )
-    for latch in result.all():
-        latches_by_job[latch.job_id][
-            FailureGuardTriggerKind(latch.trigger_kind)
-        ] = latch
-    return latches_by_job
-
-
-async def _async_load_scheduler_failure_guard_trigger_states(
-    session: AsyncSession,
-    job_ids: Sequence[int],
-) -> dict[
-    int,
-    dict[FailureGuardTriggerKind, FailureGuardTriggerState],
-]:
-    states_by_job: dict[
-        int,
-        dict[FailureGuardTriggerKind, FailureGuardTriggerState],
-    ] = {job_id: {} for job_id in job_ids}
-    result = await session.scalars(
-        select(SchedulerFailureGuardTriggerState).where(
+    @staticmethod
+    def _statement(job_ids: Sequence[int]):
+        return select(SchedulerFailureGuardTriggerState).where(
             SchedulerFailureGuardTriggerState.job_id.in_(job_ids)
         )
-    )
-    for state in result.all():
-        states_by_job[state.job_id][
-            FailureGuardTriggerKind(state.trigger_kind)
-        ] = dict(state.trigger_state)
-    return states_by_job
+
+    @classmethod
+    def for_job(
+        cls,
+        session: AsyncSession,
+        job_id: int,
+    ) -> SchedulerFailureGuardStateStore:
+        return cls(
+            session=session,
+            statement=cls._statement((job_id,)),
+            create_record=lambda trigger_kind, trigger_state: (
+                SchedulerFailureGuardTriggerState(
+                    job_id=job_id,
+                    trigger_kind=trigger_kind,
+                    trigger_state=trigger_state,
+                )
+            ),
+        )
+
+    @classmethod
+    async def preload_many(
+        cls,
+        session: AsyncSession,
+        job_ids: Sequence[int],
+    ) -> dict[int, SchedulerFailureGuardStateStore]:
+        """Return per-job stores hydrated by one trigger-state query."""
+        stores = {
+            job_id: cls.for_job(session, job_id)
+            for job_id in job_ids
+        }
+        records_by_job: dict[
+            int,
+            list[SchedulerFailureGuardTriggerState],
+        ] = {
+            job_id: []
+            for job_id in job_ids
+        }
+        result = await session.scalars(cls._statement(job_ids))
+        for record in result.all():
+            records_by_job[record.job_id].append(record)
+        for job_id, store in stores.items():
+            store.preload_records(records_by_job[job_id])
+        return stores
 
 
 async def async_read_scheduler_failure_guards(
@@ -465,57 +474,53 @@ async def async_read_scheduler_failure_guards(
         )
         for job in jobs
     )
-    latches_by_job = await _async_load_scheduler_failure_guard_latches(
+    latch_stores = await SchedulerFailureGuardStore.preload_many(
         session,
         job_ids,
     )
-    states_by_job = (
-        await _async_load_scheduler_failure_guard_trigger_states(
-            session,
-            job_ids,
-        )
+    state_stores = await SchedulerFailureGuardStateStore.preload_many(
+        session,
+        job_ids,
     )
 
-    bulk_results: dict[
-        FailureGuardTriggerKind,
-        Mapping[int, FailureGuardTriggerResult],
-    ] = {}
+    results_by_job: dict[
+        int,
+        dict[FailureGuardTriggerKind, FailureGuardTriggerResult],
+    ] = {
+        job_id: {}
+        for job_id in job_ids
+    }
     for trigger in registry.triggers:
         if isinstance(trigger, FailureGuardStatefulTrigger):
             continue
-        if isinstance(trigger, SchedulerFailureGuardBulkTrigger):
-            results = dict(await trigger.evaluate_many(contexts))
-            missing_job_ids = set(job_ids).difference(results)
-            if missing_job_ids:
-                raise ValueError(
-                    f"Bulk scheduler trigger {trigger.kind} omitted jobs: "
-                    + ", ".join(
-                        str(job_id)
-                        for job_id in sorted(missing_job_ids)
-                    )
+        trigger_results = dict(await trigger.evaluate_many(contexts))
+        missing_job_ids = set(job_ids).difference(trigger_results)
+        if missing_job_ids:
+            raise ValueError(
+                f"Bulk scheduler trigger {trigger.kind} omitted jobs: "
+                + ", ".join(
+                    str(job_id)
+                    for job_id in sorted(missing_job_ids)
                 )
-            bulk_results[trigger.kind] = results
+            )
+        for job_id in job_ids:
+            results_by_job[job_id][trigger.kind] = trigger_results[job_id]
 
-    non_bulk_triggers = tuple(
+    stateful_triggers = tuple(
         trigger
         for trigger in registry.triggers
-        if trigger.kind not in bulk_results
+        if isinstance(trigger, FailureGuardStatefulTrigger)
     )
     evaluations: dict[int, FailureGuardEvaluation] = {}
     for job, context in zip(jobs, contexts, strict=True):
-        results_by_kind = {
-            result.kind: result
-            for result in await async_evaluate_failure_guard_triggers(
-                triggers=non_bulk_triggers,
-                context=context,
-                store=_scheduler_failure_guard_state_store(session, job.id),
-                states=states_by_job[job.id],
-            )
-        }
-        for kind, results in bulk_results.items():
-            results_by_kind[kind] = results[job.id]
+        for result in await async_evaluate_failure_guard_triggers(
+            triggers=stateful_triggers,
+            context=context,
+            store=state_stores[job.id],
+        ):
+            results_by_job[job.id][result.kind] = result
         ordered_results = tuple(
-            results_by_kind[trigger.kind]
+            results_by_job[job.id][trigger.kind]
             for trigger in registry.triggers
         )
         evaluations[job.id] = await async_evaluate_failure_edges(
@@ -523,12 +528,8 @@ async def async_read_scheduler_failure_guards(
             failure_signature=job.failure_signature,
             last_error=job.last_failure_error,
             now=now,
-            store=SchedulerFailureGuardStore(
-                session=session,
-                job_id=job.id,
-            ),
+            store=latch_stores[job.id],
             latch_new_edges=False,
-            latches=latches_by_job[job.id],
         )
     return evaluations
 
@@ -540,29 +541,14 @@ async def async_read_scheduler_failure_guard(
     now: datetime | None = None,
     registry: SchedulerFailureGuardRegistry | None = None,
 ) -> FailureGuardEvaluation:
-    """Evaluate scheduler triggers and read their durable latch edges."""
-    now = ensure_utc(now)
-    registry = registry or scheduler_failure_guard_registry()
-    latch_store = SchedulerFailureGuardStore(session=session, job_id=job.id)
-    context = SchedulerFailureGuardLifecycleContext(
-        session=session,
-        job=job,
+    """Evaluate one scheduler guard through the canonical bulk reader."""
+    evaluations = await async_read_scheduler_failure_guards(
+        session,
+        (job,),
         now=now,
-        record=None,
+        registry=registry,
     )
-    results = await async_evaluate_failure_guard_triggers(
-        triggers=registry.triggers,
-        context=context,
-        store=_scheduler_failure_guard_state_store(session, job.id),
-    )
-    return await async_evaluate_failure_edges(
-        results=results,
-        failure_signature=job.failure_signature,
-        last_error=job.last_failure_error,
-        now=now,
-        store=latch_store,
-        latch_new_edges=False,
-    )
+    return evaluations[job.id]
 
 
 async def async_record_scheduler_job_failure(
@@ -593,7 +579,10 @@ async def async_record_scheduler_job_failure(
         session=session,
         job_id=locked_job.id,
     )
-    state_store = _scheduler_failure_guard_state_store(session, locked_job.id)
+    state_store = SchedulerFailureGuardStateStore.for_job(
+        session,
+        locked_job.id,
+    )
     context = SchedulerFailureGuardLifecycleContext(
         session=session,
         job=locked_job,
@@ -664,7 +653,10 @@ async def async_reset_scheduler_job_failure_guard(
         session=session,
         job_id=locked_job.id,
     )
-    state_store = _scheduler_failure_guard_state_store(session, locked_job.id)
+    state_store = SchedulerFailureGuardStateStore.for_job(
+        session,
+        locked_job.id,
+    )
     context = SchedulerFailureGuardLifecycleContext(
         session=session,
         job=locked_job,
