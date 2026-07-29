@@ -8,9 +8,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import event
 
 import brain.app.scheduler.executor as scheduler_executor
 import brain.app.scheduler.scheduler_failure_guard as scheduler_failure_guard
+from brain.app.scheduler.catalog import async_list_scheduler_jobs
 from brain.app.scheduler.daemon import (
     async_scheduler_health_snapshot,
 )
@@ -211,6 +213,73 @@ async def test_health_projection_preserves_each_jobs_latches_and_trigger_output(
             ],
         },
     ]
+
+
+async def test_catalog_projection_batches_failure_guard_queries_across_jobs(
+    session,
+    monkeypatch,
+):
+    now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        scheduler_failure_guard,
+        "_FAILURE_GUARD_TRIGGER_PROVIDERS",
+        (
+            *scheduler_failure_guard._FAILURE_GUARD_TRIGGER_PROVIDERS,
+            lambda: _RuntimeDurationTrigger(
+                minimum_runtime_minutes=30
+            ),
+        ),
+    )
+    session.add_all(
+        [
+            _make_scheduler_job(
+                job_key=f"batch-query-{index}",
+                family=f"batch-query-{index}",
+                last_started_at=now - timedelta(minutes=index),
+                next_run_at=now + timedelta(hours=index),
+            )
+            for index in range(1, 4)
+        ]
+    )
+    await session.flush()
+    statements: list[str] = []
+
+    def capture_statement(
+        conn,
+        cursor,
+        statement,
+        parameters,
+        context,
+        executemany,
+    ):
+        del conn, cursor, parameters, context, executemany
+        statements.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", capture_statement)
+    try:
+        jobs = await async_list_scheduler_jobs(session, now=now)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_statement)
+
+    assert len(jobs) == 3
+    assert all(
+        len(job["failure_guard"]["triggers"]) == 3
+        for job in jobs
+    )
+    guard_queries = {
+        table: sum(table in statement for statement in statements)
+        for table in (
+            "scheduler_failure_guard_trigger_states",
+            "scheduler_runs",
+            "scheduler_failure_guard_latches",
+        )
+    }
+    assert guard_queries == {
+        "scheduler_failure_guard_trigger_states": 1,
+        "scheduler_runs": 1,
+        "scheduler_failure_guard_latches": 1,
+    }
 
 
 async def test_scheduler_failure_alert_bytes_are_unchanged_through_shared_delivery(

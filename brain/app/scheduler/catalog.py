@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.scheduler import OWNER_MODE_SCHEDULER, SchedulerJob, SchedulerRun
 from brain.app.scheduler.scheduler_failure_guard import (
-    async_read_scheduler_failure_guard,
+    async_read_scheduler_failure_guards,
     scheduler_failure_guard_registry,
 )
 from brain.systems.failure_guard.core import (
@@ -523,16 +523,17 @@ async def async_list_scheduler_jobs(
     result = await session.scalars(
         select(SchedulerJob).order_by(SchedulerJob.family.asc(), SchedulerJob.id.asc())
     )
-    jobs = []
-    for job in result.all():
-        failure_guard = await async_read_scheduler_failure_guard(
-            session,
-            job,
-            now=now,
-            registry=registry,
-        )
-        jobs.append(_serialize_job(job, failure_guard))
-    return jobs
+    job_rows = result.all()
+    failure_guards = await async_read_scheduler_failure_guards(
+        session,
+        job_rows,
+        now=now,
+        registry=registry,
+    )
+    return [
+        _serialize_job(job, failure_guards[job.id])
+        for job in job_rows
+    ]
 
 
 async def async_list_scheduler_runs(

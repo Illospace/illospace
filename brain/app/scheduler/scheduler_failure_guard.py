@@ -4,7 +4,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import os
-from typing import Callable, Literal, Protocol, TypeAlias
+from typing import (
+    Callable,
+    Literal,
+    Mapping,
+    Protocol,
+    Sequence,
+    TypeAlias,
+    runtime_checkable,
+)
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -173,6 +181,47 @@ class RollingWindowFailuresTrigger:
             )
             or 0
         )
+        return self._result(count)
+
+    async def evaluate_many(
+        self,
+        contexts: Sequence[SchedulerFailureGuardLifecycleContext],
+    ) -> Mapping[int, FailureGuardTriggerResult]:
+        """Evaluate one rolling-window count query for a job projection."""
+        if not contexts:
+            return {}
+        session = contexts[0].session
+        now = contexts[0].now
+        if any(
+            context.session is not session or context.now != now
+            for context in contexts
+        ):
+            raise ValueError(
+                "Bulk scheduler trigger contexts must share a session and time"
+            )
+        job_ids = [context.job.id for context in contexts]
+        result = await session.execute(
+            select(SchedulerRun.job_id, func.count())
+            .where(
+                SchedulerRun.job_id.in_(job_ids),
+                SchedulerRun.status == "settled_failure",
+                SchedulerRun.started_at
+                > now - timedelta(hours=self.window_hours),
+            )
+            .group_by(SchedulerRun.job_id)
+        )
+        counts = {
+            int(job_id): int(count)
+            for job_id, count in result.all()
+        }
+        return {
+            context.job.id: self._result(
+                counts.get(context.job.id, 0)
+            )
+            for context in contexts
+        }
+
+    def _result(self, count: int) -> FailureGuardTriggerResult:
         return FailureGuardTriggerResult(
             kind=self.kind,
             active=count >= self.threshold,
@@ -227,6 +276,19 @@ class SchedulerFailureGuardStatefulTrigger(
     Protocol,
 ):
     """One state-owning scheduler failure trigger."""
+
+
+@runtime_checkable
+class SchedulerFailureGuardBulkTrigger(Protocol):
+    """A stateless trigger that can batch its catalog projection reads."""
+
+    kind: FailureGuardTriggerKind
+
+    async def evaluate_many(
+        self,
+        contexts: Sequence[SchedulerFailureGuardLifecycleContext],
+    ) -> Mapping[int, FailureGuardTriggerResult]:
+        """Evaluate this trigger for every projected job."""
 
 
 SchedulerRegisteredFailureGuardTrigger: TypeAlias = (
@@ -331,6 +393,144 @@ def _scheduler_failure_guard_state_store(
             )
         ),
     )
+
+
+async def _async_load_scheduler_failure_guard_latches(
+    session: AsyncSession,
+    job_ids: Sequence[int],
+) -> dict[
+    int,
+    dict[FailureGuardTriggerKind, SchedulerFailureGuardLatch],
+]:
+    latches_by_job: dict[
+        int,
+        dict[FailureGuardTriggerKind, SchedulerFailureGuardLatch],
+    ] = {job_id: {} for job_id in job_ids}
+    result = await session.scalars(
+        select(SchedulerFailureGuardLatch).where(
+            SchedulerFailureGuardLatch.job_id.in_(job_ids)
+        )
+    )
+    for latch in result.all():
+        latches_by_job[latch.job_id][
+            FailureGuardTriggerKind(latch.trigger_kind)
+        ] = latch
+    return latches_by_job
+
+
+async def _async_load_scheduler_failure_guard_trigger_states(
+    session: AsyncSession,
+    job_ids: Sequence[int],
+) -> dict[
+    int,
+    dict[FailureGuardTriggerKind, FailureGuardTriggerState],
+]:
+    states_by_job: dict[
+        int,
+        dict[FailureGuardTriggerKind, FailureGuardTriggerState],
+    ] = {job_id: {} for job_id in job_ids}
+    result = await session.scalars(
+        select(SchedulerFailureGuardTriggerState).where(
+            SchedulerFailureGuardTriggerState.job_id.in_(job_ids)
+        )
+    )
+    for state in result.all():
+        states_by_job[state.job_id][
+            FailureGuardTriggerKind(state.trigger_kind)
+        ] = dict(state.trigger_state)
+    return states_by_job
+
+
+async def async_read_scheduler_failure_guards(
+    session: AsyncSession,
+    jobs: Sequence[SchedulerJob],
+    *,
+    now: datetime | None = None,
+    registry: SchedulerFailureGuardRegistry | None = None,
+) -> dict[int, FailureGuardEvaluation]:
+    """Project every job's guard from bulk-loaded state and latches."""
+    jobs = tuple(jobs)
+    if not jobs:
+        return {}
+
+    now = ensure_utc(now)
+    registry = registry or scheduler_failure_guard_registry()
+    job_ids = [job.id for job in jobs]
+    contexts = tuple(
+        SchedulerFailureGuardLifecycleContext(
+            session=session,
+            job=job,
+            now=now,
+            record=None,
+        )
+        for job in jobs
+    )
+    latches_by_job = await _async_load_scheduler_failure_guard_latches(
+        session,
+        job_ids,
+    )
+    states_by_job = (
+        await _async_load_scheduler_failure_guard_trigger_states(
+            session,
+            job_ids,
+        )
+    )
+
+    bulk_results: dict[
+        FailureGuardTriggerKind,
+        Mapping[int, FailureGuardTriggerResult],
+    ] = {}
+    for trigger in registry.triggers:
+        if isinstance(trigger, FailureGuardStatefulTrigger):
+            continue
+        if isinstance(trigger, SchedulerFailureGuardBulkTrigger):
+            results = dict(await trigger.evaluate_many(contexts))
+            missing_job_ids = set(job_ids).difference(results)
+            if missing_job_ids:
+                raise ValueError(
+                    f"Bulk scheduler trigger {trigger.kind} omitted jobs: "
+                    + ", ".join(
+                        str(job_id)
+                        for job_id in sorted(missing_job_ids)
+                    )
+                )
+            bulk_results[trigger.kind] = results
+
+    non_bulk_triggers = tuple(
+        trigger
+        for trigger in registry.triggers
+        if trigger.kind not in bulk_results
+    )
+    evaluations: dict[int, FailureGuardEvaluation] = {}
+    for job, context in zip(jobs, contexts, strict=True):
+        results_by_kind = {
+            result.kind: result
+            for result in await async_evaluate_failure_guard_triggers(
+                triggers=non_bulk_triggers,
+                context=context,
+                store=_scheduler_failure_guard_state_store(session, job.id),
+                states=states_by_job[job.id],
+            )
+        }
+        for kind, results in bulk_results.items():
+            results_by_kind[kind] = results[job.id]
+        ordered_results = tuple(
+            results_by_kind[trigger.kind]
+            for trigger in registry.triggers
+        )
+        evaluations[job.id] = await async_evaluate_failure_edges(
+            results=ordered_results,
+            failure_signature=job.failure_signature,
+            last_error=job.last_failure_error,
+            now=now,
+            store=SchedulerFailureGuardStore(
+                session=session,
+                job_id=job.id,
+            ),
+            latch_new_edges=False,
+            latches=latches_by_job[job.id],
+        )
+    return evaluations
 
 
 async def async_read_scheduler_failure_guard(
