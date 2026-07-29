@@ -38,6 +38,17 @@ class _AsyncUoW:
         return False
 
 
+class _AsyncScalarUoW:
+    def __init__(self, value):
+        self.session = SimpleNamespace(scalar=AsyncMock(return_value=value))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 @pytest.mark.asyncio
 async def test_record_run_event_allocates_next_sequence_and_normalizes_payload():
     session = MagicMock()
@@ -615,6 +626,55 @@ async def test_run_event_backbone_status_reports_lag_and_health(monkeypatch):
     assert status["lag"] == 3
     assert status["caught_up"] is False
     assert status["replay_safe"] is True
+
+
+@pytest.mark.asyncio
+async def test_live_fanout_starts_after_existing_history(monkeypatch):
+    import brain.app.api.ws.run_events as run_events
+
+    event = SimpleNamespace(
+        id=11,
+        run_id=42,
+        root_run_id=42,
+        sequence_no=2,
+        event_type="run.activity",
+        payload={"label": "New work"},
+    )
+    run = SimpleNamespace(id=42, org_id="org-1", thread_id="idea-1", profile="fast")
+    cursor_uow = _AsyncScalarUoW(10)
+    fanout_uow = _AsyncUoW([(event, run)])
+    uows = iter((cursor_uow, fanout_uow))
+    monkeypatch.setattr(run_events, "UnitOfWork", lambda: next(uows))
+    monkeypatch.setattr(run_events, "_last_event_id", 0)
+    ws_manager = SimpleNamespace(broadcast_run_event=AsyncMock())
+
+    initialized_at = await run_events.initialize_live_fanout_cursor()
+    delivered, had_error = await run_events.fanout_run_events_once(ws_manager)
+
+    assert initialized_at == 10
+    statement = fanout_uow.session.execute.await_args.args[0]
+    sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+    assert "agent_run_events.id > 10" in sql
+    assert delivered == 1
+    assert had_error is False
+    ws_manager.broadcast_run_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_live_fanout_initializes_cursor_before_polling(monkeypatch):
+    import brain.app.api.ws.run_events as run_events
+
+    initialize = AsyncMock(return_value=10)
+    poll_once = AsyncMock(side_effect=asyncio.CancelledError)
+    monkeypatch.setattr(run_events, "initialize_live_fanout_cursor", initialize)
+    monkeypatch.setattr(run_events, "fanout_run_events_once", poll_once)
+    ws_manager = SimpleNamespace()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_events.fanout_run_events(ws_manager)
+
+    initialize.assert_awaited_once()
+    poll_once.assert_awaited_once()
 
 
 @pytest.mark.asyncio
