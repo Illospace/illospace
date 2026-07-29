@@ -16,12 +16,18 @@ from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.main import app
 from brain.kernel.config import KNOWLEDGE_EMBEDDING_DIM
+from brain.platform.db.models.agent_run import (
+    AgentRunArtifactRow,
+    AgentRunEventRow,
+    AgentRunRow,
+)
 from brain.platform.db.models.domain import Domain, DomainObjectType, DomainRecord
 from brain.platform.db.models.knowledge import (
     KnowledgeItem,
     KnowledgeItemEmbedding,
     KnowledgeSyncState,
 )
+from brain.platform.db.models.org import Org, User
 from brain.systems.knowledge.connectors.base import KnowledgeDraft
 from brain.systems.knowledge.connectors.domain_records import DomainRecordsConnector
 from brain.systems.knowledge.search import reciprocal_rank_fusion, search_knowledge
@@ -165,6 +171,11 @@ async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
     SQLiteTypeCompiler.visit_Vector = lambda self, type_, **kw: "TEXT"
     return await async_sqlite_session_factory(
         [
+            Org.__table__,
+            User.__table__,
+            AgentRunRow.__table__,
+            AgentRunEventRow.__table__,
+            AgentRunArtifactRow.__table__,
             Domain.__table__,
             DomainObjectType.__table__,
             DomainRecord.__table__,
@@ -486,3 +497,172 @@ async def test_sync_connector_accounts_for_truncated_raw_text(
     }
     assert state is not None
     assert state.last_stats == result.stats
+
+
+async def test_distillation_admission_is_restart_safe_and_holds_cursor_until_harvest(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    user_id = "22222222-2222-4222-8222-222222222222"
+    session.add(Org(id=_ORG_ID, name="Knowledge Org", slug="knowledge-org"))
+    session.add(
+        User(
+            id=user_id,
+            org_id=_ORG_ID,
+            name="Knowledge Worker",
+            email="knowledge@example.com",
+        )
+    )
+    await session.flush()
+    connector = _StubConnector(
+        source_key="slack",
+        drafts=[
+            KnowledgeDraft(
+                source="slack",
+                kind="slack_thread",
+                source_ref="slack:T1:C1:1700000000.000001",
+                title="Release thread",
+                summary="Structural fallback summary",
+                raw_text="Why did release 42 fail? It was fixed in deploy.py.",
+                extra={"org_id": _ORG_ID, "actor_user_id": user_id},
+                distill=True,
+            )
+        ],
+        new_cursor={"latest_reply": "1700000001.000001"},
+    )
+
+    dispatched = await sync_connector(session, connector)
+    repeated = await sync_connector(session, connector)
+    runs = list((await session.scalars(select(AgentRunRow))).all())
+    state = await session.get(KnowledgeSyncState, "slack")
+
+    assert dispatched.status == "pending"
+    assert dispatched.cursor == {}
+    assert dispatched.stats["pending"] == 1
+    assert repeated.status == "pending"
+    assert connector.seen_cursors == [{}]
+    assert len(runs) == 1
+    assert runs[0].model_policy == {}
+    assert runs[0].source_idempotency_scope == "knowledge"
+    assert state is not None
+    assert state.cursor["_distillation_pending"]["proposed_cursor"] == {
+        "latest_reply": "1700000001.000001"
+    }
+
+    runs[0].status = "completed"
+    session.add(
+        AgentRunArtifactRow(
+            run_id=runs[0].id,
+            root_run_id=runs[0].root_run_id,
+            artifact_type="final_answer",
+            text=json.dumps(
+                {
+                    "question": "Why did release 42 fail?",
+                    "summary": "Release 42 failed during deployment.",
+                    "resolution": "The deployment path was fixed.",
+                    "systems": ["deployment"],
+                    "code_references": ["deploy.py"],
+                }
+            ),
+        )
+    )
+    await session.flush()
+
+    harvested = await sync_connector(session, connector)
+    item = await session.scalar(
+        select(KnowledgeItem).where(
+            KnowledgeItem.source_ref == "slack:T1:C1:1700000000.000001"
+        )
+    )
+
+    assert harvested.status == "ok"
+    assert harvested.cursor == {"latest_reply": "1700000001.000001"}
+    assert harvested.stats["distilled"] == 1
+    assert connector.seen_cursors == [{}]
+    assert item is not None
+    assert item.summary == "Release 42 failed during deployment."
+    assert item.resolution == "The deployment path was fixed."
+    assert item.entities == ["deployment", "deploy.py"]
+    assert "Why did release 42 fail?" in item.search_text
+    assert (
+        await session.scalar(
+            select(func.count()).select_from(KnowledgeItemEmbedding)
+        )
+        == 1
+    )
+
+
+async def test_distillation_exhaustion_lands_lexical_fallback_without_embedding(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    user_id = "33333333-3333-4333-8333-333333333333"
+    session.add(Org(id=_ORG_ID, name="Fallback Org", slug="fallback-org"))
+    session.add(
+        User(
+            id=user_id,
+            org_id=_ORG_ID,
+            name="Fallback Worker",
+            email="fallback@example.com",
+        )
+    )
+    await session.flush()
+    connector = _StubConnector(
+        source_key="github",
+        drafts=[
+            KnowledgeDraft(
+                source="github",
+                kind="issue",
+                source_ref="github:Illospace/illospace#577",
+                title="Distill this issue",
+                summary="Structural fallback survives poison output.",
+                raw_text="Original issue body remains lexically searchable.",
+                extra={"org_id": _ORG_ID, "actor_user_id": user_id},
+                distill=True,
+            )
+        ],
+        new_cursor={"id": 577},
+    )
+
+    await sync_connector(session, connector)
+    first = (await session.scalars(select(AgentRunRow).order_by(AgentRunRow.id))).one()
+    first.status = "completed"
+    session.add(
+        AgentRunArtifactRow(
+            run_id=first.id,
+            root_run_id=first.root_run_id,
+            artifact_type="final_answer",
+            text="This is not JSON.",
+        )
+    )
+    await session.flush()
+
+    retry = await sync_connector(session, connector)
+    runs = list((await session.scalars(select(AgentRunRow).order_by(AgentRunRow.id))).all())
+    assert retry.status == "pending"
+    assert len(runs) == 2
+    runs[-1].status = "failed"
+    await session.flush()
+
+    exhausted = await sync_connector(session, connector)
+    item = await session.scalar(
+        select(KnowledgeItem).where(
+            KnowledgeItem.source_ref == "github:Illospace/illospace#577"
+        )
+    )
+
+    assert exhausted.status == "degraded"
+    assert exhausted.cursor == {"id": 577}
+    assert exhausted.stats["failed"] == 1
+    assert item is not None
+    assert item.summary == "Structural fallback survives poison output."
+    assert "Original issue body" in item.search_text
+    assert item.extra["distillation"]["status"] == "failed"
+    assert (
+        await session.scalar(
+            select(func.count()).select_from(KnowledgeItemEmbedding)
+        )
+        == 0
+    )

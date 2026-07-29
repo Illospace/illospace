@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -20,6 +20,15 @@ from brain.platform.db.models.knowledge import (
     KnowledgeSyncState,
 )
 from brain.systems.knowledge.connectors.base import KnowledgeConnector, KnowledgeDraft
+from brain.systems.knowledge.distillation import (
+    DISTILLATION_CURSOR_KEY,
+    DISTILLATION_MANIFEST_VERSION,
+    DISTILLATION_MAX_ATTEMPTS,
+    DistillationEntry,
+    admit_distillation,
+    fallback_draft,
+    inspect_distillation,
+)
 from brain.systems.memory import embeddings as embedding_client
 from brain.systems.reconstructive_memory.embeddings import embedding_model_identity
 from brain.systems.runtime_settings import memory as runtime_settings
@@ -36,14 +45,21 @@ class KnowledgeSyncStats:
     skipped: int = 0
     failed: int = 0
     truncated: int = 0
+    pending: int = 0
+    distilled: int = 0
 
     def to_dict(self) -> dict[str, int]:
-        return {
+        payload = {
             "ingested": self.ingested,
             "skipped": self.skipped,
             "failed": self.failed,
             "truncated": self.truncated,
         }
+        if self.pending:
+            payload["pending"] = self.pending
+        if self.distilled:
+            payload["distilled"] = self.distilled
+        return payload
 
 
 @dataclass(frozen=True)
@@ -113,7 +129,9 @@ def _bounded_raw_text(draft: KnowledgeDraft) -> tuple[str, dict[str, Any], bool]
     raw_text = str(draft.raw_text or "")
     extra = dict(draft.extra or {})
     if len(raw_text) <= RAW_TEXT_MAX_CHARS:
-        return raw_text, extra, bool(extra.get("body_truncated"))
+        return raw_text, extra, bool(
+            extra.get("body_truncated") or extra.get("raw_text_truncated")
+        )
     extra.update(
         {
             "raw_text_truncated": True,
@@ -121,6 +139,141 @@ def _bounded_raw_text(draft: KnowledgeDraft) -> tuple[str, dict[str, Any], bool]
         }
     )
     return raw_text[:RAW_TEXT_MAX_CHARS], extra, True
+
+
+def _bounded_draft(draft: KnowledgeDraft) -> tuple[KnowledgeDraft, bool]:
+    raw_text, extra, truncated = _bounded_raw_text(draft)
+    return replace(draft, raw_text=raw_text, extra=extra), truncated
+
+
+def _distillation_manifest(cursor: dict[str, Any]) -> dict[str, Any] | None:
+    value = cursor.get(DISTILLATION_CURSOR_KEY)
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _manifest_cursor(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _pending_cursor(
+    *,
+    committed_cursor: dict[str, Any],
+    proposed_cursor: dict[str, Any],
+    entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        **committed_cursor,
+        DISTILLATION_CURSOR_KEY: {
+            "version": DISTILLATION_MANIFEST_VERSION,
+            "committed_cursor": dict(committed_cursor),
+            "proposed_cursor": dict(proposed_cursor),
+            "entries": entries,
+        },
+    }
+
+
+async def _start_distillations(
+    session: AsyncSession,
+    drafts: list[KnowledgeDraft],
+) -> tuple[list[dict[str, Any]], list[KnowledgeDraft]]:
+    entries: list[dict[str, Any]] = []
+    fallbacks: list[KnowledgeDraft] = []
+    for draft in drafts:
+        digest = content_digest(
+            draft,
+            raw_text=draft.raw_text,
+            extra=dict(draft.extra or {}),
+        )
+        try:
+            entry = await admit_distillation(
+                session,
+                draft,
+                input_digest=digest,
+                attempt=1,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Knowledge distillation admission failed for %s %s",
+                draft.source,
+                draft.source_ref,
+            )
+            fallbacks.append(
+                fallback_draft(
+                    draft,
+                    input_digest=digest,
+                    attempt=1,
+                    error=str(exc),
+                )
+            )
+            continue
+        entries.append(entry.to_dict())
+    return entries, fallbacks
+
+
+async def _harvest_distillations(
+    session: AsyncSession,
+    raw_entries: list[Any],
+) -> tuple[list[dict[str, Any]], list[tuple[KnowledgeDraft, bool]], int]:
+    pending: list[dict[str, Any]] = []
+    resolved: list[tuple[KnowledgeDraft, bool]] = []
+    failures = 0
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            failures += 1
+            logger.error("Ignoring malformed knowledge distillation manifest entry")
+            continue
+        try:
+            entry = DistillationEntry.from_mapping(raw_entry)
+            outcome = await inspect_distillation(session, entry)
+        except Exception as exc:
+            logger.exception("Knowledge distillation harvest failed")
+            failures += 1
+            continue
+        else:
+            error = str(outcome.error or "")
+
+        if outcome is not None and outcome.status == "completed" and outcome.draft:
+            resolved.append((outcome.draft, True))
+            continue
+        if outcome is not None and outcome.status == "pending":
+            pending.append(entry.to_dict())
+            continue
+
+        retry_draft = outcome.draft if outcome is not None else None
+        if retry_draft is None:
+            failures += 1
+            logger.error(
+                "Knowledge distillation run %s cannot be retried without its draft snapshot",
+                entry.run_id,
+            )
+            continue
+        if entry.attempt < DISTILLATION_MAX_ATTEMPTS:
+            try:
+                replacement = await admit_distillation(
+                    session,
+                    retry_draft,
+                    input_digest=entry.input_digest,
+                    attempt=entry.attempt + 1,
+                )
+            except Exception as exc:
+                error = str(exc)
+            else:
+                pending.append(replacement.to_dict())
+                continue
+
+        failures += 1
+        resolved.append(
+            (
+                fallback_draft(
+                    retry_draft,
+                    input_digest=entry.input_digest,
+                    attempt=entry.attempt,
+                    error=error or "knowledge distillation attempts exhausted",
+                ),
+                False,
+            )
+        )
+    return pending, resolved, failures
 
 
 async def _upsert_item(
@@ -252,19 +405,141 @@ async def _sync_state(
     await session.flush()
 
 
+async def _ingest_drafts(
+    session: AsyncSession,
+    *,
+    source: str,
+    drafts: list[tuple[KnowledgeDraft, bool]],
+    stats: KnowledgeSyncStats,
+    run_at: datetime,
+) -> None:
+    if not drafts:
+        return
+    runtime: EmbeddingRuntimeConfig | None = None
+    runtime_error: Exception | None = None
+    if any(should_embed for _draft, should_embed in drafts):
+        try:
+            runtime = await runtime_settings.async_get_embedding_runtime_config(
+                session,
+                include_secret=True,
+            )
+        except Exception as exc:
+            runtime_error = exc
+            logger.warning(
+                "Knowledge embeddings unavailable for %s; items remain lexical-searchable: %s",
+                source,
+                exc,
+            )
+
+    for draft, should_embed in drafts:
+        try:
+            async with session.begin_nested():
+                item, changed, truncated = await _upsert_item(
+                    session,
+                    draft=draft,
+                    ingested_at=run_at,
+                )
+                if changed:
+                    stats.ingested += 1
+                else:
+                    stats.skipped += 1
+                if truncated:
+                    stats.truncated += 1
+                if should_embed:
+                    if runtime is None:
+                        raise runtime_error or RuntimeError(
+                            "embedding runtime unavailable"
+                        )
+                    await _ensure_embedding(session, item=item, runtime=runtime)
+        except Exception as exc:
+            # A nested transaction only surrounds this draft. Re-land the item
+            # without its vector if the savepoint rolled back an embedding error.
+            try:
+                async with session.begin_nested():
+                    await _upsert_item(session, draft=draft, ingested_at=run_at)
+            except Exception:
+                logger.exception(
+                    "Knowledge item write failed for %s %s",
+                    source,
+                    draft.source_ref,
+                )
+            stats.failed += 1
+            logger.warning(
+                "Knowledge embedding/write degraded for %s %s; lexical row retained: %s",
+                source,
+                draft.source_ref,
+                exc,
+            )
+
+
 async def sync_connector(
     session: AsyncSession,
     connector: KnowledgeConnector,
 ) -> KnowledgeSyncResult:
-    """Run one connector without allowing embedding outages to hide rows."""
+    """Run one connector with restart-safe distillation and honest accounting."""
 
     source = str(connector.source_key).strip()
     if not source:
         raise ValueError("Knowledge connectors require source_key")
     run_at = datetime.now(timezone.utc)
     state = await session.get(KnowledgeSyncState, source)
-    cursor = dict(state.cursor or {}) if state is not None else {}
+    stored_cursor = dict(state.cursor or {}) if state is not None else {}
     stats = KnowledgeSyncStats()
+    manifest = _distillation_manifest(stored_cursor)
+    if manifest is not None:
+        committed_cursor = _manifest_cursor(manifest.get("committed_cursor"))
+        proposed_cursor = _manifest_cursor(manifest.get("proposed_cursor"))
+        pending, resolved, failures = await _harvest_distillations(
+            session,
+            list(manifest.get("entries") or []),
+        )
+        stats.failed += failures
+        if pending:
+            stats.pending = len(pending)
+            await _sync_state(
+                session,
+                source=source,
+                cursor=_pending_cursor(
+                    committed_cursor=committed_cursor,
+                    proposed_cursor=proposed_cursor,
+                    entries=pending,
+                ),
+                status="pending",
+                stats=stats,
+                run_at=run_at,
+            )
+            return KnowledgeSyncResult(
+                source=source,
+                status="pending",
+                stats=stats.to_dict(),
+                cursor=committed_cursor,
+            )
+
+        stats.distilled = sum(1 for _draft, should_embed in resolved if should_embed)
+        await _ingest_drafts(
+            session,
+            source=source,
+            drafts=resolved,
+            stats=stats,
+            run_at=run_at,
+        )
+        status = "ok" if stats.failed == 0 else "degraded"
+        await _sync_state(
+            session,
+            source=source,
+            cursor=proposed_cursor,
+            status=status,
+            stats=stats,
+            run_at=run_at,
+        )
+        return KnowledgeSyncResult(
+            source=source,
+            status=status,
+            stats=stats.to_dict(),
+            cursor=proposed_cursor,
+        )
+
+    cursor = dict(stored_cursor)
     try:
         drafts, new_cursor = await connector.enumerate_changed(session, cursor)
     except Exception as exc:
@@ -286,22 +561,10 @@ async def sync_connector(
             error=str(exc),
         )
 
-    runtime: EmbeddingRuntimeConfig | None = None
-    runtime_error: Exception | None = None
-    try:
-        runtime = await runtime_settings.async_get_embedding_runtime_config(
-            session,
-            include_secret=True,
-        )
-    except Exception as exc:
-        runtime_error = exc
-        logger.warning(
-            "Knowledge embeddings unavailable for %s; items remain lexical-searchable: %s",
-            source,
-            exc,
-        )
-
-    for draft in drafts:
+    structural: list[tuple[KnowledgeDraft, bool]] = []
+    distillable: list[KnowledgeDraft] = []
+    for original_draft in drafts:
+        draft, truncated = _bounded_draft(original_draft)
         if draft.source != source:
             stats.failed += 1
             logger.error(
@@ -310,41 +573,59 @@ async def sync_connector(
                 draft.source,
             )
             continue
-        try:
-            async with session.begin_nested():
-                item, changed, truncated = await _upsert_item(
-                    session,
-                    draft=draft,
-                    ingested_at=run_at,
-                )
-                if changed:
-                    stats.ingested += 1
-                else:
-                    stats.skipped += 1
-                if truncated:
-                    stats.truncated += 1
-                if runtime is None:
-                    raise runtime_error or RuntimeError("embedding runtime unavailable")
-                await _ensure_embedding(session, item=item, runtime=runtime)
-        except Exception as exc:
-            # A nested transaction only surrounds this draft. Re-land the item
-            # without its vector if the savepoint rolled back an embedding error.
-            try:
-                async with session.begin_nested():
-                    await _upsert_item(session, draft=draft, ingested_at=run_at)
-            except Exception:
-                logger.exception(
-                    "Knowledge item write failed for %s %s",
-                    source,
-                    draft.source_ref,
-                )
-            stats.failed += 1
-            logger.warning(
-                "Knowledge embedding/write degraded for %s %s; lexical row retained: %s",
-                source,
-                draft.source_ref,
-                exc,
-            )
+        if draft.distill:
+            if truncated:
+                stats.truncated += 1
+            distillable.append(draft)
+        else:
+            structural.append((draft, True))
+
+    await _ingest_drafts(
+        session,
+        source=source,
+        drafts=structural,
+        stats=stats,
+        run_at=run_at,
+    )
+    entries, admission_fallbacks = await _start_distillations(session, distillable)
+    if entries:
+        stats.failed += len(admission_fallbacks)
+        stats.pending = len(entries)
+        await _ingest_drafts(
+            session,
+            source=source,
+            drafts=[(draft, False) for draft in admission_fallbacks],
+            stats=stats,
+            run_at=run_at,
+        )
+        await _sync_state(
+            session,
+            source=source,
+            cursor=_pending_cursor(
+                committed_cursor=cursor,
+                proposed_cursor=dict(new_cursor),
+                entries=entries,
+            ),
+            status="pending",
+            stats=stats,
+            run_at=run_at,
+        )
+        return KnowledgeSyncResult(
+            source=source,
+            status="pending",
+            stats=stats.to_dict(),
+            cursor=cursor,
+        )
+
+    if admission_fallbacks:
+        stats.failed += len(admission_fallbacks)
+        await _ingest_drafts(
+            session,
+            source=source,
+            drafts=[(draft, False) for draft in admission_fallbacks],
+            stats=stats,
+            run_at=run_at,
+        )
 
     status = "ok" if stats.failed == 0 else "degraded"
     await _sync_state(

@@ -199,7 +199,9 @@ def _source_idempotency_parts(request: AgentRunRequest) -> tuple[str | None, str
     # chantier and opted-in worker continuation hooks can race across terminal
     # workers. Lock those canonical event identities at the run boundary
     # without changing idempotency semantics for unrelated sources.
-    if not key.startswith(("slack:", "chantier:", "worker:continuation:")):
+    if not key.startswith(
+        ("slack:", "chantier:", "worker:continuation:", "knowledge:")
+    ):
         return None, None
 
     work_intake = metadata.get("work_intake")
