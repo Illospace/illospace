@@ -8,9 +8,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import event, select
 
 import brain.app.scheduler.executor as scheduler_executor
 import brain.app.scheduler.scheduler_failure_guard as scheduler_failure_guard
+from brain.app.scheduler.catalog import async_list_scheduler_jobs
 from brain.app.scheduler.daemon import (
     async_scheduler_health_snapshot,
 )
@@ -30,6 +32,9 @@ from brain.app.scheduler.programs import nightly_heuristic_review_command
 from brain.app.scheduler.runtime import RUN_STATUS_SETTLED_SUCCESS
 from brain.app.scheduler.executor import async_run_scheduler_run
 from brain.platform.db.models.scheduler import (
+    SchedulerFailureGuardLatch,
+    SchedulerFailureGuardTriggerState,
+    SchedulerJob,
     SchedulerRun,
 )
 from tests.scheduler_test_support import (
@@ -61,6 +66,264 @@ RuntimeError: worker=<Worker object at 0x8e23cd01> coroutine=<coroutine object r
 """
 
     assert scheduler_failure_signature(first) == scheduler_failure_signature(second)
+
+
+async def test_health_projection_preserves_each_jobs_latches_and_trigger_output(
+    session,
+    monkeypatch,
+):
+    monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "3")
+    monkeypatch.setenv("SCHEDULER_FAILURE_RATE_THRESHOLD", "2")
+    monkeypatch.setenv("SCHEDULER_FAILURE_RATE_WINDOW_HOURS", "24")
+    now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+    consecutive_alerted_at = now - timedelta(hours=2)
+    rolling_alerted_at = now - timedelta(hours=1)
+    consecutive_job = _make_scheduler_job(
+        job_key="consecutive_failure",
+        family="consecutive_failure",
+        failure_signature="consecutive-signature",
+        last_failure_error="RuntimeError: repeated failure",
+        next_run_at=now + timedelta(hours=1),
+    )
+    rolling_job = _make_scheduler_job(
+        job_key="rolling_failure",
+        family="rolling_failure",
+        failure_signature="rolling-signature",
+        last_failure_error="TimeoutError: intermittent failure",
+        next_run_at=now + timedelta(hours=2),
+    )
+    session.add_all([consecutive_job, rolling_job])
+    await session.flush()
+    session.add_all(
+        [
+            SchedulerFailureGuardTriggerState(
+                job_id=consecutive_job.id,
+                trigger_kind="consecutive",
+                trigger_state={"count": 3},
+            ),
+            SchedulerFailureGuardTriggerState(
+                job_id=rolling_job.id,
+                trigger_kind="consecutive",
+                trigger_state={"count": 1},
+            ),
+            SchedulerFailureGuardLatch(
+                job_id=consecutive_job.id,
+                trigger_kind="consecutive",
+                alerted_at=consecutive_alerted_at,
+            ),
+            SchedulerFailureGuardLatch(
+                job_id=rolling_job.id,
+                trigger_kind="rolling_window",
+                alerted_at=rolling_alerted_at,
+            ),
+        ]
+    )
+    for job, offset in (
+        (consecutive_job, 3),
+        (rolling_job, 4),
+        (rolling_job, 5),
+    ):
+        started_at = now - timedelta(hours=offset)
+        session.add(
+            SchedulerRun(
+                job_id=job.id,
+                scheduled_for=started_at,
+                window_start=started_at,
+                window_end=started_at + timedelta(hours=1),
+                status="settled_failure",
+                idempotency_key=f"projection-pin:{job.id}:{offset}",
+                started_at=started_at,
+                finished_at=started_at,
+            )
+        )
+    await session.flush()
+
+    snapshot = await async_scheduler_health_snapshot(session, now=now)
+    guards = {
+        job["job_key"]: job["failure_guard"]
+        for job in snapshot["jobs"]
+    }
+
+    assert guards == {
+        "consecutive_failure": {
+            "failure_signature": "consecutive-signature",
+            "last_error": "RuntimeError: repeated failure",
+            "triggers": [
+                {
+                    "kind": "consecutive",
+                    "count": 3,
+                    "threshold": 3,
+                    "window_hours": None,
+                    "alerted_at": consecutive_alerted_at.replace(
+                        tzinfo=None
+                    ).isoformat(),
+                    "crossed": False,
+                },
+                {
+                    "kind": "rolling_window",
+                    "count": 1,
+                    "threshold": 2,
+                    "window_hours": 24,
+                    "alerted_at": None,
+                    "crossed": False,
+                },
+            ],
+        },
+        "rolling_failure": {
+            "failure_signature": "rolling-signature",
+            "last_error": "TimeoutError: intermittent failure",
+            "triggers": [
+                {
+                    "kind": "consecutive",
+                    "count": 1,
+                    "threshold": 3,
+                    "window_hours": None,
+                    "alerted_at": None,
+                    "crossed": False,
+                },
+                {
+                    "kind": "rolling_window",
+                    "count": 2,
+                    "threshold": 2,
+                    "window_hours": 24,
+                    "alerted_at": rolling_alerted_at.replace(
+                        tzinfo=None
+                    ).isoformat(),
+                    "crossed": False,
+                },
+            ],
+        },
+    }
+    assert snapshot["alerts"] == [
+        {
+            "type": "scheduler_job_failure_guard",
+            "job_key": "consecutive_failure",
+            "failure_signature": "consecutive-signature",
+            "last_error": "RuntimeError: repeated failure",
+            "triggers": [
+                guards["consecutive_failure"]["triggers"][0],
+            ],
+        },
+        {
+            "type": "scheduler_job_failure_guard",
+            "job_key": "rolling_failure",
+            "failure_signature": "rolling-signature",
+            "last_error": "TimeoutError: intermittent failure",
+            "triggers": [
+                guards["rolling_failure"]["triggers"][1],
+            ],
+        },
+    ]
+
+
+async def _list_scheduler_jobs_with_statement_count(session, *, now):
+    statements: list[str] = []
+
+    def capture_statement(
+        conn,
+        cursor,
+        statement,
+        parameters,
+        context,
+        executemany,
+    ):
+        del conn, cursor, parameters, context, executemany
+        statements.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", capture_statement)
+    try:
+        jobs = await async_list_scheduler_jobs(session, now=now)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_statement)
+    return jobs, len(statements)
+
+
+async def test_catalog_projection_batches_failure_guard_queries_across_jobs(
+    session,
+):
+    now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+    session.add(
+        _make_scheduler_job(
+            job_key="batch-query-1",
+            family="batch-query-1",
+            last_started_at=now - timedelta(minutes=1),
+            next_run_at=now + timedelta(hours=1),
+        )
+    )
+    await session.flush()
+    single_job_projection, single_job_statements = (
+        await _list_scheduler_jobs_with_statement_count(session, now=now)
+    )
+
+    session.add_all(
+        [
+            _make_scheduler_job(
+                job_key=f"batch-query-{index}",
+                family=f"batch-query-{index}",
+                last_started_at=now - timedelta(minutes=index),
+                next_run_at=now + timedelta(hours=index),
+            )
+            for index in range(2, 5)
+        ]
+    )
+    await session.flush()
+    several_job_projection, several_job_statements = (
+        await _list_scheduler_jobs_with_statement_count(session, now=now)
+    )
+
+    assert len(single_job_projection) == 1
+    assert len(several_job_projection) == 4
+    assert all(
+        len(job["failure_guard"]["triggers"]) == 2
+        for job in several_job_projection
+    )
+    assert single_job_statements == several_job_statements == 4
+
+
+async def test_registered_database_trigger_projects_once_across_jobs(
+    session,
+    monkeypatch,
+):
+    now = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+    database_trigger = _DatabaseBackedTrigger(projected_job_counts=[])
+    monkeypatch.setattr(
+        scheduler_failure_guard,
+        "_FAILURE_GUARD_TRIGGER_PROVIDERS",
+        (
+            *scheduler_failure_guard._FAILURE_GUARD_TRIGGER_PROVIDERS,
+            lambda: database_trigger,
+        ),
+    )
+    session.add(
+        _make_scheduler_job(
+            job_key="database-trigger-query-1",
+            family="database-trigger-query-1",
+            next_run_at=now + timedelta(hours=1),
+        )
+    )
+    await session.flush()
+    _, single_job_statements = (
+        await _list_scheduler_jobs_with_statement_count(session, now=now)
+    )
+
+    session.add_all(
+        [
+            _make_scheduler_job(
+                job_key=f"database-trigger-query-{index}",
+                family=f"database-trigger-query-{index}",
+                next_run_at=now + timedelta(hours=index),
+            )
+            for index in range(2, 5)
+        ]
+    )
+    await session.flush()
+    _, several_job_statements = (
+        await _list_scheduler_jobs_with_statement_count(session, now=now)
+    )
+
+    assert single_job_statements == several_job_statements == 5
+    assert database_trigger.projected_job_counts == [1, 4]
 
 
 async def test_scheduler_failure_alert_bytes_are_unchanged_through_shared_delivery(
@@ -669,6 +932,55 @@ async def test_consecutive_and_rate_edges_coexist_without_duplicate_delivery(
     ] == ["consecutive", "rolling_window"]
 
 
+_DATABASE_BACKED_TRIGGER_KIND = FailureGuardTriggerKind("database_backed")
+
+
+@dataclass(frozen=True)
+class _DatabaseBackedTrigger:
+    """A proof trigger whose facts require one database projection."""
+
+    projected_job_counts: list[int]
+    kind: FailureGuardTriggerKind = field(
+        default=_DATABASE_BACKED_TRIGGER_KIND,
+        init=False,
+    )
+
+    async def evaluate(self, context) -> FailureGuardTriggerResult:
+        return (await self.evaluate_many((context,)))[context.job.id]
+
+    async def evaluate_many(self, contexts):
+        self.projected_job_counts.append(len(contexts))
+        if not contexts:
+            return {}
+        session = contexts[0].session
+        job_ids = [context.job.id for context in contexts]
+        result = await session.scalars(
+            select(SchedulerJob.id).where(SchedulerJob.id.in_(job_ids))
+        )
+        loaded_job_ids = set(result.all())
+        return {
+            context.job.id: FailureGuardTriggerResult(
+                kind=self.kind,
+                active=context.job.id in loaded_job_ids,
+                public_details={
+                    "database_row_loaded": context.job.id in loaded_job_ids,
+                },
+                alert_title="Scheduler job row loaded",
+                alert_summary="Scheduler job exists in the projection",
+            )
+            for context in contexts
+        }
+
+    async def should_reset(
+        self,
+        context,
+        *,
+        event: SchedulerFailureGuardResetEvent,
+    ) -> bool:
+        del context, event
+        return True
+
+
 _RUNTIME_DURATION_TRIGGER_KIND = FailureGuardTriggerKind("runtime_duration")
 
 
@@ -686,6 +998,15 @@ class _RuntimeDurationTrigger:
         self,
         context,
     ) -> FailureGuardTriggerResult:
+        return (await self.evaluate_many((context,)))[context.job.id]
+
+    async def evaluate_many(self, contexts):
+        return {
+            context.job.id: self._result(context)
+            for context in contexts
+        }
+
+    def _result(self, context) -> FailureGuardTriggerResult:
         assert context.job.last_started_at is not None
         started_at = context.job.last_started_at
         if started_at.tzinfo is None:
