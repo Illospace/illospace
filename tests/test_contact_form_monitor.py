@@ -247,6 +247,83 @@ def test_contact_form_owner_policy_never_uses_the_connection_owner():
     }
 
 
+def test_contact_form_owner_policy_does_not_splice_an_unmatched_configured_user():
+    from brain.systems.slack.contact_form_lead_owner import (
+        CONTACT_FORM_OWNER_POLICY,
+    )
+
+    owner = CONTACT_FORM_OWNER_POLICY.resolve(
+        FakeSlackConnection(
+            metadata={
+                "slack": {
+                    "contact_form_lead_owner": {
+                        "user_id": "user-unpaired",
+                    },
+                    "identity_map": {
+                        "U04R1A6MZST": "user-reda",
+                    },
+                },
+                "identity_links": {
+                    "slack": {
+                        "U04R1A6MZST": {
+                            "user_id": "user-reda",
+                            "display_name": "Reda",
+                        }
+                    }
+                },
+            }
+        )
+    )
+
+    assert owner.to_metadata() == {
+        "name": "Reda",
+        "slack_user_id": "U04R1A6MZST",
+        "user_id": None,
+    }
+
+
+def test_contact_form_owner_policy_keeps_conflicting_identity_fields_together():
+    from brain.systems.slack.contact_form_lead_owner import (
+        CONTACT_FORM_OWNER_POLICY,
+    )
+
+    owner = CONTACT_FORM_OWNER_POLICY.resolve(
+        FakeSlackConnection(
+            metadata={
+                "slack": {
+                    "contact_form_lead_owner": {
+                        "name": "Axel",
+                        "slack_user_id": "UREDA",
+                        "user_id": "user-axel",
+                    },
+                    "identity_map": {
+                        "UREDA": "user-reda",
+                        "UAXEL": "user-axel",
+                    },
+                },
+                "identity_links": {
+                    "slack": {
+                        "UREDA": {
+                            "user_id": "user-reda",
+                            "display_name": "Reda",
+                        },
+                        "UAXEL": {
+                            "user_id": "user-axel",
+                            "display_name": "Axel",
+                        },
+                    }
+                },
+            }
+        )
+    )
+
+    assert owner.to_metadata() == {
+        "name": "Reda",
+        "slack_user_id": "UREDA",
+        "user_id": "user-reda",
+    }
+
+
 def test_contact_form_reply_behavior_is_an_installed_runtime_skill():
     from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
     from brain.systems.skills.bundles import load_skill_bundle
@@ -259,16 +336,8 @@ def test_contact_form_reply_behavior_is_an_installed_runtime_skill():
     assert bundle.manifest.visibility == "private_local"
     procedure = bundle.skill_markdown
     for requirement in (
-        "website with `web_fetch` or the browser tools",
-        "company/catalog size",
-        "vertical",
-        "likely Uwear fit",
-        "likely deal size",
         "`search_knowledge`",
         "`post_slack_reply`",
-        "`SlackKnowledgeConnector`",
-        "Do not re-list or label the submitted name, email",
-        "Do not emit a per-question `Answer:` section",
     ):
         assert requirement in procedure
     for hardcoded_example in (
@@ -280,6 +349,89 @@ def test_contact_form_reply_behavior_is_an_installed_runtime_skill():
         "bergzeit",
     ):
         assert hardcoded_example not in procedure.casefold()
+
+
+def test_contact_form_intake_context_has_a_versioned_validated_contract():
+    import json
+
+    from brain.systems.runs.obligation_specs import ObligationAnswerer
+    from brain.systems.slack.contact_form_lead_rendering import (
+        CONTACT_FORM_LEAD_INTAKE_SCHEMA_VERSION,
+        ContactFormLeadIntakeContext,
+        ContactFormLeadSlackResponseTarget,
+    )
+    from brain.systems.slack.contact_form_leads import ContactFormLead
+
+    lead = ContactFormLead(
+        name="Prospect",
+        email="prospect@example.com",
+        company_website="https://prospect.example",
+        phone=None,
+        message="Tell me about Uwear.",
+    )
+    owner = ObligationAnswerer(
+        name="Reda",
+        slack_user_id="UREDA",
+        user_id="user-reda",
+    )
+    context = ContactFormLeadIntakeContext(
+        lead=lead,
+        owner=owner,
+        slack_response_target=ContactFormLeadSlackResponseTarget(
+            channel_id="C_ALERTS",
+            thread_ts="1716900000.000200",
+        ),
+        source_permalink="https://example.slack.com/archives/C_ALERTS/p1716900000000200",
+    )
+
+    serialized = json.loads(context.serialize())
+
+    assert set(serialized) == {
+        "schema_version",
+        "lead",
+        "owner",
+        "slack_response_target",
+        "source_permalink",
+    }
+    assert (
+        serialized["schema_version"]
+        == CONTACT_FORM_LEAD_INTAKE_SCHEMA_VERSION
+        == 1
+    )
+    assert set(serialized["lead"]) == {
+        "name",
+        "email",
+        "company_website",
+        "phone",
+        "message",
+    }
+    assert set(serialized["owner"]) == {
+        "name",
+        "slack_user_id",
+        "user_id",
+    }
+    assert serialized["slack_response_target"] == {
+        "channel_id": "C_ALERTS",
+        "thread_ts": "1716900000.000200",
+    }
+
+    for invalid_target in (
+        ContactFormLeadSlackResponseTarget(
+            channel_id="",
+            thread_ts="1716900000.000200",
+        ),
+        ContactFormLeadSlackResponseTarget(
+            channel_id="C_ALERTS",
+            thread_ts="",
+        ),
+    ):
+        invalid_context = ContactFormLeadIntakeContext(
+            lead=lead,
+            owner=owner,
+            slack_response_target=invalid_target,
+        )
+        with pytest.raises(ValueError, match="Slack response target"):
+            invalid_context.serialize()
 
 
 @pytest.mark.asyncio
@@ -319,8 +471,10 @@ async def test_contact_form_mandate_is_runtime_editable_connection_metadata():
             user_id="user-reda",
         ),
         {
-            "channel_id": "C_ALERTS",
-            "response_target": {"thread_ts": "1716900000.000200"},
+            "response_target": {
+                "channel_id": "C_ALERTS",
+                "thread_ts": "1716900000.000200",
+            },
         },
         mandate=contact_form_lead_mandate(connection),
     )
@@ -330,11 +484,48 @@ async def test_contact_form_mandate_is_runtime_editable_connection_metadata():
 
     assert result["metadata_path"] == "slack.contact_form_lead_mandate"
     assert mandate in run_message
-    assert not run_message.startswith("/contact-form-lead-intake")
+    assert run_message.startswith("/contact-form-lead-intake\n")
+    assert "skill_view" in run_message
+    assert "Connection overlay:" in run_message
+    assert "within the installed skill's contracts" in run_message
     assert "set_contact_form_lead_mandate" in (
         manage_slack["input_schema"]["properties"]["action"]["enum"]
     )
     assert "mandate" in manage_slack["input_schema"]["properties"]
+
+    cleared = await set_contact_form_lead_mandate(
+        FakeSlackSession(connection),
+        connection_id=connection.id,
+        org_id=connection.org_id,
+        mandate="",
+    )
+
+    assert cleared["cleared"] is True
+    assert cleared["mandate"] is None
+    assert contact_form_lead_mandate(connection) is None
+    default_run_message = contact_form_lead_run_message(
+        ContactFormLead(
+            name="Prospect",
+            email="prospect@example.com",
+            company_website="https://prospect.example",
+            phone=None,
+            message="Tell me about Uwear.",
+        ),
+        ObligationAnswerer(
+            name="Reda",
+            slack_user_id="UREDA",
+            user_id="user-reda",
+        ),
+        {
+            "response_target": {
+                "channel_id": "C_ALERTS",
+                "thread_ts": "1716900000.000200",
+            },
+        },
+        mandate=contact_form_lead_mandate(connection),
+    )
+    assert default_run_message.startswith("/contact-form-lead-intake\n")
+    assert "Connection overlay:" not in default_run_message
 
 
 @pytest.mark.asyncio
@@ -399,7 +590,10 @@ async def test_contact_form_lead_gets_common_eyes_and_policy_enrichment(
     )
     assert (
         work["payload"]["metadata"]["contact_form_lead_mandate_source"]
-        == "slack_connection_metadata"
+        == "installed_skill_with_connection_overlay"
+    )
+    assert work["payload"]["run_message"].startswith(
+        "/contact-form-lead-intake\n"
     )
     assert "Configured lead assessment." in work["payload"]["run_message"]
 

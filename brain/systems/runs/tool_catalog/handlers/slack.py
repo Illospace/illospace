@@ -21,6 +21,7 @@ from brain.systems.cycles.exception_ping import (
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _current_runtime_secret_context
 from brain.systems.slack.client import SlackApiError, SlackDeliveryError
+from brain.systems.slack.contact_form_leads import CONTACT_FORM_LEAD_ORIGIN
 from brain.systems.slack.exception_ping_posting import post_exception_ping
 from brain.systems.slack.provider_alert_posting import post_provider_alert
 from brain.systems.slack.thread_mute import read_thread_post_mute
@@ -84,6 +85,16 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "n", "off"}:
             return False
     return bool(value)
+
+
+def _is_contact_form_lead_intake() -> bool:
+    illo_trigger = _execution_metadata().get("illo_trigger")
+    if not isinstance(illo_trigger, dict):
+        return False
+    return (
+        str(illo_trigger.get("event_type") or "").strip()
+        == CONTACT_FORM_LEAD_ORIGIN
+    )
 
 
 _PERSISTENCE_CLAIM_PATTERNS = (
@@ -446,6 +457,8 @@ async def _handle_post_slack_reply(
     """Post an Illo-authored reply to the originating Slack surface."""
 
     answers_open_ask = _coerce_bool(answers_open_ask, default=False)
+    if _is_contact_form_lead_intake():
+        answers_open_ask = False
     submitted_text = str(body or "")
     text = submitted_text
     try:

@@ -88,7 +88,7 @@ def monitored_channel_ids(connection: ExternalAgentConnectionRow) -> set[str]:
 def contact_form_lead_mandate(
     connection: ExternalAgentConnectionRow,
 ) -> str | None:
-    """Return the optional runtime override for contact-form lead behavior."""
+    """Return the optional connection overlay for contact-form lead behavior."""
 
     value = _clean(
         _slack_metadata(connection).get(CONTACT_FORM_LEAD_MANDATE_KEY)
@@ -126,11 +126,9 @@ async def set_contact_form_lead_mandate(
     mandate: str,
     org_id: str | None = None,
 ) -> dict[str, Any]:
-    """Persist an operator-editable mandate on the Slack connection."""
+    """Persist or clear an operator-editable skill overlay."""
 
     clean_mandate = _clean(mandate)
-    if not clean_mandate:
-        raise SlackMonitorConfigError("mandate is required")
     if len(clean_mandate) > CONTACT_FORM_LEAD_MANDATE_MAX_CHARS:
         raise SlackMonitorConfigError(
             "mandate exceeds "
@@ -139,14 +137,18 @@ async def set_contact_form_lead_mandate(
     connection = await _connection_for_org(session, connection_id, org_id)
     root = dict(connection.metadata_ or {})
     slack_metadata = _slack_metadata(connection)
-    slack_metadata[CONTACT_FORM_LEAD_MANDATE_KEY] = clean_mandate
+    if clean_mandate:
+        slack_metadata[CONTACT_FORM_LEAD_MANDATE_KEY] = clean_mandate
+    else:
+        slack_metadata.pop(CONTACT_FORM_LEAD_MANDATE_KEY, None)
     root["slack"] = slack_metadata
     connection.metadata_ = root
     await session.flush()
     return {
         "connection_id": str(connection.id),
         "metadata_path": f"slack.{CONTACT_FORM_LEAD_MANDATE_KEY}",
-        "mandate": clean_mandate,
+        "mandate": clean_mandate or None,
+        "cleared": not bool(clean_mandate),
     }
 
 

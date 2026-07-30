@@ -523,8 +523,8 @@ CHAT_TOOLS = [
             "users. To make Illo watch a channel's every message (acknowledging each with a 👀 reaction and "
             "triaging automated alerts or user-reported issues into tickets), use action='monitor_channel' "
             "with the channel_id; action='unmonitor_channel' to stop; action='list_monitored' to review. The "
-            "action='set_contact_form_lead_mandate' replaces the runtime prompt used to assess contact-form "
-            "leads on this connection immediately. The "
+            "action='set_contact_form_lead_mandate' adds a connection-specific overlay to the installed "
+            "contact-form lead skill immediately; pass an empty mandate to clear the overlay. The "
             "read-only action='open_alert_surges' returns material provider-alert incidents that are still "
             "inside their rolling window, for scheduled digest ordering. The "
             "bot must be a member of the channel and the Slack app needs the channels:history and "
@@ -602,8 +602,8 @@ CHAT_TOOLS = [
                 "mandate": {
                     "type": "string",
                     "description": (
-                        "Complete runtime contact-form assessment mandate, required "
-                        "for set_contact_form_lead_mandate."
+                        "Extra contact-form assessment instruction for "
+                        "set_contact_form_lead_mandate; an empty value clears it."
                     ),
                 },
                 "channel_types": {

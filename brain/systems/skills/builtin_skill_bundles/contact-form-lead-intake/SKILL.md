@@ -47,8 +47,7 @@ not product-capability sources.
    source supports a claim, leave the capability unresolved and route it to the
    resolved owner once; do not fabricate an answer.
 5. Post one concise assessment with `post_slack_reply` to the supplied channel
-   and thread. Set `answers_open_ask=false`, because Illo's own assessment must
-   not settle the obligation that waits for the owner's reply.
+   and thread.
 6. Treat a successful thread post as the knowledge write. The registered
    `SlackKnowledgeConnector` refreshes monitored Slack threads as complete,
    replaceable records, so the form fields in the root message and the

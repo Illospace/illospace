@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
@@ -105,6 +107,67 @@ def _lead_admission_event():
         },
     )
     return WorkIntakeEvent.from_trigger_payload(trigger)
+
+
+@pytest.mark.asyncio
+async def test_contact_form_intake_run_cannot_settle_its_open_ask(
+    monkeypatch,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.open_asks import DeliveredSlackReplyCounts
+    from brain.systems.runs.tool_catalog.handlers.slack import (
+        _handle_post_slack_reply,
+    )
+
+    class _SlackClient:
+        async def post_message(self, **kwargs):
+            return {
+                "ok": True,
+                "ts": "1785149500.000300",
+                "channel": kwargs["channel"],
+            }
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+        AsyncMock(return_value=_SlackClient()),
+    )
+    recorder = AsyncMock(return_value=DeliveredSlackReplyCounts.empty())
+    monkeypatch.setattr(
+        "brain.systems.runs.slack_delivery.persist_delivered_slack_answer",
+        recorder,
+    )
+    context = {
+        "run_id": 9,
+        "org_id": ORG_ID,
+        "execution_metadata": {
+            "run_id": 9,
+            "org_id": ORG_ID,
+            "illo_trigger": {
+                "event_type": "contact_form_lead",
+            },
+        },
+        "slack_trigger": {
+            "response_target": {
+                "channel_id": "CALERTS",
+                "thread_ts": THREAD_TS,
+                "visibility": "public",
+            }
+        },
+    }
+
+    with bind_agent_context(context):
+        result = json.loads(
+            await _handle_post_slack_reply(
+                body="Verified lead assessment.",
+                answers_open_ask=True,
+            )
+        )
+
+    assert result["answers_open_ask"] is False
+    assert result["answered_open_asks"] == 0
+    recorder.assert_awaited_once()
+    delivered = recorder.await_args.args[0]
+    assert delivered.is_answer is False
 
 
 @pytest.mark.asyncio

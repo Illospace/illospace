@@ -307,7 +307,7 @@ def _render_contact_form(
             "contact_form_lead": lead_payload,
             "contact_form_lead_skill": CONTACT_FORM_LEAD_SKILL,
             "contact_form_lead_mandate_source": (
-                "slack_connection_metadata"
+                "installed_skill_with_connection_overlay"
                 if configured_mandate
                 else "installed_skill"
             ),
