@@ -2394,8 +2394,14 @@ async def test_slack_identity_link_supplies_explicit_dm_communication_preference
 
 def test_slack_person_context_rejects_mismatched_identity_link_and_shared_address():
     from brain.systems.slack.inbound import _linked_slack_person_context
+    from brain.systems.slack.identity import normalize_slack_identities
 
     metadata = {
+        "slack": {
+            "identity_map": {
+                "U123": MAPPED_USER_ID,
+            }
+        },
         "identity_links": {
             "slack": {
                 "U123": {
@@ -2406,18 +2412,16 @@ def test_slack_person_context_rejects_mismatched_identity_link_and_shared_addres
             }
         }
     }
+    records, _conflicts = normalize_slack_identities(metadata)
     assert _linked_slack_person_context(
-        metadata,
-        slack_user_id="U123",
-        mapped_user_id=MAPPED_USER_ID,
+        records["U123"],
         channel_type="im",
     ) is None
 
     metadata["identity_links"]["slack"]["U123"]["user_id"] = MAPPED_USER_ID
+    records, _conflicts = normalize_slack_identities(metadata)
     person = _linked_slack_person_context(
-        metadata,
-        slack_user_id="U123",
-        mapped_user_id=MAPPED_USER_ID,
+        records["U123"],
         channel_type="channel",
     )
     assert person["preferences"] == {"tone": "warm"}
