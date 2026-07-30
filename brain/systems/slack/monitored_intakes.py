@@ -477,6 +477,16 @@ MONITORED_INTAKE_POLICIES: tuple[MonitoredIntakePolicy, ...] = (
 )
 
 
+def typed_monitored_intake_origins() -> frozenset[str]:
+    """Return registry origins that precede the channel-message fallback."""
+
+    return frozenset(
+        policy.origin
+        for policy in MONITORED_INTAKE_POLICIES
+        if policy.origin != SLACK_CHANNEL_MESSAGE_ORIGIN
+    )
+
+
 def _bounded_text(value: Any, *, limit: int | None = 4000) -> str:
     text = str(value or "")
     return text if limit is None else text[:limit]
@@ -562,5 +572,6 @@ __all__ = [
     "recognize_monitored_intake",
     "route_monitored_intake",
     "slack_response_thread_ts",
+    "typed_monitored_intake_origins",
     "visible_slack_content",
 ]

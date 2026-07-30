@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Mapping
 
 from brain.systems.slack.monitored_intakes import (
@@ -9,8 +10,11 @@ from brain.systems.slack.monitored_intakes import (
     enrich_monitored_intake_payload,
     recognize_monitored_intake,
     slack_response_thread_ts,
+    typed_monitored_intake_origins,
     visible_slack_content,
 )
+
+logger = logging.getLogger(__name__)
 
 SLACK_MESSAGE_ENVELOPE_KIND = "slack_message"
 MAX_SLACK_TEXT_CHARS = 4000
@@ -148,6 +152,7 @@ def normalize_slack_socket_event(
     *,
     bot_user_id: str | None = None,
     monitored_channels: frozenset[str] | set[str] | list[str] | None = None,
+    disabled_intakes: frozenset[str] | set[str] | list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Return a shared inbound envelope for actionable Slack Socket Mode events.
 
@@ -161,6 +166,11 @@ def normalize_slack_socket_event(
     event = _slack_event(socket_payload)
     visible_content = visible_slack_content(event)
     monitored_intake = recognize_monitored_intake(event, visible_content)
+    disabled = frozenset(
+        str(intake).strip()
+        for intake in (disabled_intakes or ())
+        if str(intake).strip()
+    )
     resolved_bot_user_id = _bot_user_id(socket_payload, bot_user_id)
     api_app_id = str(payload.get("api_app_id") or "").strip() or None
     monitored = frozenset(
@@ -174,6 +184,21 @@ def normalize_slack_socket_event(
         monitored_intake=monitored_intake,
     )
     if origin is None:
+        return None
+    # A disabled intake silences only the passive monitored-channel lane —
+    # explicit mentions and DMs resolve their own origin above and stay
+    # actionable even when their text happens to decode as a typed intake.
+    if (
+        origin == monitored_intake.policy.origin
+        and origin in typed_monitored_intake_origins()
+        and origin in disabled
+    ):
+        logger.info(
+            "slack_monitored_intake_disabled: intake=%s channel_id=%s message_ts=%s",
+            origin,
+            str(event.get("channel") or "").strip(),
+            str(event.get("ts") or event.get("event_ts") or "").strip(),
+        )
         return None
     message_text = (
         monitored_intake.text

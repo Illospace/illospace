@@ -523,6 +523,9 @@ CHAT_TOOLS = [
             "users. To make Illo watch a channel's every message (acknowledging each with a 👀 reaction and "
             "triaging automated alerts or user-reported issues into tickets), use action='monitor_channel' "
             "with the channel_id; action='unmonitor_channel' to stop; action='list_monitored' to review. The "
+            "action='disable_intake' pauses a typed intake such as contact_form_lead while preserving other "
+            "routing in its monitored channel; action='enable_intake' resumes it. list_monitored reports "
+            "the currently disabled intakes. The "
             "action='set_contact_form_lead_mandate' writes a non-empty mandate as a connection-specific "
             "overlay for the installed contact-form lead skill immediately; "
             "action='clear_contact_form_lead_mandate' removes that overlay. The "
@@ -545,6 +548,8 @@ CHAT_TOOLS = [
                         "list_monitored",
                         "monitor_channel",
                         "unmonitor_channel",
+                        "disable_intake",
+                        "enable_intake",
                         "set_contact_form_lead_mandate",
                         "clear_contact_form_lead_mandate",
                         "open_alert_surges",
@@ -600,6 +605,13 @@ CHAT_TOOLS = [
                 "channel_name": {
                     "type": "string",
                     "description": "Optional human-readable channel name stored alongside a monitored channel for readability.",
+                },
+                "intake": {
+                    "type": "string",
+                    "description": (
+                        "Typed monitored intake identifier, such as contact_form_lead; "
+                        "required for disable_intake and enable_intake."
+                    ),
                 },
                 "mandate": {
                     "type": "string",

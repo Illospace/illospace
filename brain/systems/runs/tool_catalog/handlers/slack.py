@@ -1067,6 +1067,7 @@ async def _handle_manage_slack(
     channel_types: str | list[str] | None = None,
     channel_id: str | None = None,
     channel_name: str | None = None,
+    intake: str | None = None,
     mandate: str | None = None,
     limit: int = 200,
     cursor: str | None = None,
@@ -1090,6 +1091,9 @@ async def _handle_manage_slack(
         SlackMonitorConfigError,
         add_monitored_channel,
         clear_contact_form_lead_mandate,
+        disable_intake,
+        disabled_intake_origins,
+        enable_intake,
         list_monitored_channels,
         remove_monitored_channel,
         set_contact_form_lead_mandate,
@@ -1242,6 +1246,9 @@ async def _handle_manage_slack(
                     "ok": True,
                     "connection": _slack_connection_payload(connection),
                     "monitored_channels": channels,
+                    "disabled_intakes": sorted(
+                        disabled_intake_origins(connection)
+                    ),
                 },
                 default=str,
             )
@@ -1272,6 +1279,26 @@ async def _handle_manage_slack(
             except SlackMonitorConfigError as exc:
                 return json.dumps({"error": str(exc)})
             return json.dumps({"ok": True, **result}, default=str)
+        if normalized_action in {"disable_intake", "enable_intake"}:
+            if not str(intake or "").strip():
+                return json.dumps(
+                    {"error": f"{normalized_action} requires: intake"}
+                )
+            try:
+                operation = (
+                    enable_intake
+                    if normalized_action == "enable_intake"
+                    else disable_intake
+                )
+                result = await operation(
+                    uow.session,
+                    connection_id=str(connection.id),
+                    intake=str(intake),
+                    org_id=org_id,
+                )
+            except SlackMonitorConfigError as exc:
+                return json.dumps({"error": str(exc)})
+            return json.dumps({"ok": True, **result}, default=str)
         if normalized_action in {"set_contact_form_lead_mandate", "clear_contact_form_lead_mandate"}:
             try:
                 operation = (
@@ -1293,7 +1320,8 @@ async def _handle_manage_slack(
             "error": (
                 "manage_slack action must be status, list_channels, list_mappings, "
                 "link_identity, unlink_identity, list_monitored, monitor_channel, "
-                "unmonitor_channel, set_contact_form_lead_mandate, "
+                "unmonitor_channel, disable_intake, enable_intake, "
+                "set_contact_form_lead_mandate, "
                 "clear_contact_form_lead_mandate, or "
                 "open_alert_surges"
             )
