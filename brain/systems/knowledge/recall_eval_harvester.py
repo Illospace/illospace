@@ -24,9 +24,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.contracts.statuses import LEGACY_AGENT_RUN_STATUS_VALUES
-from brain.jobs.evals.knowledge_recall import EvidencePointer
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.knowledge import KnowledgeItem
+from brain.systems.knowledge.recall_eval import EvidencePointer
 
 _QUESTION_PREFIXES = (
     "can ",
@@ -87,7 +87,8 @@ class KnowledgeRecallCandidateSet:
             for candidate in self.candidates
         )
         return {
-            "suite": "knowledge-recall-candidates",
+            "artifact_type": "knowledge-recall-candidates",
+            "schema_version": 1,
             "generated_at": self.generated_at,
             "summary": {
                 "total": len(self.candidates),

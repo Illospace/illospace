@@ -6,18 +6,25 @@ import json
 import pytest
 from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler
 
-from brain.jobs.evals.knowledge_recall import (
+from brain.platform.db.models.agent_run import AgentRunRow
+from brain.platform.db.models.knowledge import KnowledgeItem
+from brain.systems.knowledge.recall_eval import (
     EvidencePointer,
+    KnowledgeRecallEvaluationError,
     KnowledgeRecallQuestion,
     KnowledgeRecallQuestionSet,
     load_knowledge_recall_question_set,
     run_knowledge_recall_eval,
 )
-from brain.jobs.evals.knowledge_recall_harvester import (
+from brain.systems.knowledge.recall_eval_harvester import (
     harvest_knowledge_recall_candidates,
 )
-from brain.platform.db.models.agent_run import AgentRunRow
-from brain.platform.db.models.knowledge import KnowledgeItem
+from brain.systems.knowledge.search import (
+    KNOWLEDGE_SEARCH_MAX_RESULTS,
+    LEXICAL_WEIGHT,
+    RECENCY_WEIGHT,
+    SEMANTIC_WEIGHT,
+)
 
 _ORG_ID = "11111111-1111-4111-8111-111111111111"
 _FIXED_TIME = "2026-07-30T12:00:00+00:00"
@@ -44,10 +51,17 @@ def _item(item_id: int, source_ref: str, title: str) -> KnowledgeItem:
 
 def _search_row(item: KnowledgeItem, *, rank: int) -> dict:
     return {
+        "id": item.id,
         "source": item.source,
         "kind": item.kind,
         "source_ref": item.source_ref,
         "title": item.title,
+        "summary": item.summary,
+        "resolution": item.resolution,
+        "entities": list(item.entities or []),
+        "extra": dict(item.extra or {}),
+        "source_created_at": item.source_created_at.isoformat(),
+        "source_updated_at": item.source_updated_at.isoformat(),
         "scores": {
             "rrf": round(1 / (60 + rank), 8),
             "channels": {
@@ -57,13 +71,45 @@ def _search_row(item: KnowledgeItem, *, rank: int) -> dict:
                     "weight": 1.0,
                     "contribution": round(1 / (60 + rank), 8),
                 },
+                "semantic": None,
                 "recency": {
                     "rank": rank,
+                    "score": None,
                     "weight": 0.5,
                     "contribution": round(0.5 / (60 + rank), 8),
                 },
             },
         },
+    }
+
+
+def _search_response(
+    query: str,
+    rows: list[KnowledgeItem],
+    *,
+    requested_limit: int,
+    effective_limit: int | None = None,
+    semantic_available: bool = True,
+    semantic_degraded_reason: str | None = None,
+) -> dict:
+    return {
+        "query": query,
+        "org_id": _ORG_ID,
+        "sources": [],
+        "kinds": [],
+        "semantic_available": semantic_available,
+        "semantic_degraded_reason": semantic_degraded_reason,
+        "weights": {
+            "lexical": LEXICAL_WEIGHT,
+            "semantic": SEMANTIC_WEIGHT,
+            "recency": RECENCY_WEIGHT,
+        },
+        "requested_limit": requested_limit,
+        "effective_limit": effective_limit or requested_limit,
+        "results": [
+            _search_row(item, rank=rank)
+            for rank, item in enumerate(rows, start=1)
+        ],
     }
 
 
@@ -116,13 +162,7 @@ async def test_known_rankings_compute_recall_at_k_and_mrr_with_misses_in_denomin
             rows = [*distractors[:3], rank_four, distractors[3]]
         else:
             rows = distractors
-        return {
-            "semantic_available": True,
-            "semantic_degraded_reason": None,
-            "results": [
-                _search_row(item, rank=rank) for rank, item in enumerate(rows, start=1)
-            ],
-        }
+        return _search_response(query, rows, requested_limit=limit)
 
     report = await run_knowledge_recall_eval(
         object(),
@@ -136,6 +176,7 @@ async def test_known_rankings_compute_recall_at_k_and_mrr_with_misses_in_denomin
     payload = report.to_dict()
 
     assert payload["summary"] == {
+        "evaluation_valid": True,
         "total": 3,
         "missed": 1,
         "search_errors": 0,
@@ -157,14 +198,16 @@ async def test_known_rankings_compute_recall_at_k_and_mrr_with_misses_in_denomin
 async def test_report_preserves_channel_attribution_and_marks_semantic_degradation():
     evidence = _item(1, "github:Illospace/illospace#1", "Alpha evidence")
 
-    async def degraded_search(_session, _query, *, org_id, limit):
+    async def degraded_search(_session, query, *, org_id, limit):
         assert org_id == _ORG_ID
-        assert limit == 50
-        return {
-            "semantic_available": False,
-            "semantic_degraded_reason": "embedding runtime unavailable",
-            "results": [_search_row(evidence, rank=1)],
-        }
+        assert limit == KNOWLEDGE_SEARCH_MAX_RESULTS
+        return _search_response(
+            query,
+            [evidence],
+            requested_limit=limit,
+            semantic_available=False,
+            semantic_degraded_reason="embedding runtime unavailable",
+        )
 
     single_case = KnowledgeRecallQuestionSet(
         question_set_id="degraded",
@@ -199,6 +242,113 @@ async def test_report_preserves_channel_attribution_and_marks_semantic_degradati
         "weight": 0.5,
         "contribution": 0.00819672,
     }
+
+
+async def test_malformed_search_hit_is_an_evaluation_error_not_a_miss():
+    evidence = _item(1, "github:Illospace/illospace#1", "Alpha evidence")
+
+    async def malformed_search(_session, query, *, org_id, limit):
+        assert org_id == _ORG_ID
+        payload = _search_response(query, [evidence], requested_limit=limit)
+        payload["results"][0]["renamed_source_ref"] = payload["results"][0].pop(
+            "source_ref"
+        )
+        return payload
+
+    single_case = KnowledgeRecallQuestionSet(
+        question_set_id="malformed",
+        version="1",
+        description="Producer drift fixture.",
+        cases=(_question_set().cases[0],),
+    )
+    payload = (
+        await run_knowledge_recall_eval(
+            object(),
+            org_id=_ORG_ID,
+            question_set=single_case,
+            k_values=(1,),
+            search_limit=1,
+            search=malformed_search,
+            generated_at=_FIXED_TIME,
+        )
+    ).to_dict()
+
+    assert payload["summary"]["evaluation_valid"] is False
+    assert payload["summary"]["search_errors"] == 1
+    assert payload["summary"]["missed"] == 0
+    assert payload["summary"]["recall_at_k"] == {"1": None}
+    assert payload["summary"]["mean_reciprocal_rank"] is None
+    assert payload["summary"]["mean_reciprocal_rank_cutoff"] is None
+    assert payload["results"][0]["missed"] is False
+    assert "missing fields: source_ref" in payload["results"][0]["error"]
+
+
+async def test_eval_rejects_effective_depth_that_cannot_support_requested_k():
+    evidence = _item(1, "github:Illospace/illospace#1", "Alpha evidence")
+
+    async def shallow_search(_session, query, *, org_id, limit):
+        assert org_id == _ORG_ID
+        return _search_response(
+            query,
+            [evidence],
+            requested_limit=limit,
+            effective_limit=2,
+        )
+
+    single_case = KnowledgeRecallQuestionSet(
+        question_set_id="shallow",
+        version="1",
+        description="Retrieval-depth fixture.",
+        cases=(_question_set().cases[0],),
+    )
+    with pytest.raises(
+        KnowledgeRecallEvaluationError,
+        match="effective_limit 2 cannot support recall@3",
+    ):
+        await run_knowledge_recall_eval(
+            object(),
+            org_id=_ORG_ID,
+            question_set=single_case,
+            k_values=(3,),
+            search_limit=5,
+            search=shallow_search,
+            generated_at=_FIXED_TIME,
+        )
+
+
+async def test_mrr_cutoff_uses_effective_retrieval_depth():
+    evidence = _item(1, "github:Illospace/illospace#1", "Alpha evidence")
+
+    async def shallower_search(_session, query, *, org_id, limit):
+        assert org_id == _ORG_ID
+        return _search_response(
+            query,
+            [evidence],
+            requested_limit=limit,
+            effective_limit=4,
+        )
+
+    single_case = KnowledgeRecallQuestionSet(
+        question_set_id="shallower",
+        version="1",
+        description="Actual MRR cutoff fixture.",
+        cases=(_question_set().cases[0],),
+    )
+    payload = (
+        await run_knowledge_recall_eval(
+            object(),
+            org_id=_ORG_ID,
+            question_set=single_case,
+            k_values=(3,),
+            search_limit=5,
+            search=shallower_search,
+            generated_at=_FIXED_TIME,
+        )
+    ).to_dict()
+
+    assert payload["configuration"]["requested_search_limit"] == 5
+    assert payload["configuration"]["effective_search_limit"] == 4
+    assert payload["summary"]["mean_reciprocal_rank_cutoff"] == 4
 
 
 def test_question_set_is_data_backed_versioned_and_supports_multiple_evidence():
@@ -295,6 +445,9 @@ async def test_harvester_uses_indexed_github_provenance_and_labels_runs_for_revi
         )
     ).to_dict()
 
+    assert payload["artifact_type"] == "knowledge-recall-candidates"
+    assert payload["schema_version"] == 1
+    assert "suite" not in payload
     assert payload["summary"] == {
         "total": 2,
         "closed_github_issues": 1,

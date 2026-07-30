@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import re
@@ -21,6 +22,449 @@ RRF_K = 60
 LEXICAL_WEIGHT = 1.0
 SEMANTIC_WEIGHT = 1.0
 RECENCY_WEIGHT = 0.5
+KNOWLEDGE_SEARCH_DEFAULT_RESULTS = 10
+KNOWLEDGE_SEARCH_MAX_RESULTS = 50
+
+_CHANNEL_NAMES = ("lexical", "semantic", "recency")
+_HIT_FIELDS = frozenset(
+    {
+        "id",
+        "source",
+        "kind",
+        "source_ref",
+        "title",
+        "summary",
+        "resolution",
+        "entities",
+        "extra",
+        "source_created_at",
+        "source_updated_at",
+        "scores",
+    }
+)
+_RESPONSE_FIELDS = frozenset(
+    {
+        "query",
+        "org_id",
+        "sources",
+        "kinds",
+        "semantic_available",
+        "semantic_degraded_reason",
+        "weights",
+        "requested_limit",
+        "effective_limit",
+        "results",
+    }
+)
+
+
+class KnowledgeSearchContractError(ValueError):
+    """Raised when a knowledge-search payload violates its response contract."""
+
+
+def normalize_knowledge_search_limit(
+    limit: int | None,
+    *,
+    default: int = KNOWLEDGE_SEARCH_DEFAULT_RESULTS,
+) -> int:
+    """Return the canonical bounded retrieval depth for knowledge search."""
+
+    requested = int(limit or default)
+    return max(1, min(requested, KNOWLEDGE_SEARCH_MAX_RESULTS))
+
+
+def _contract_mapping(value: Any, *, path: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise KnowledgeSearchContractError(f"{path} must be an object")
+    return value
+
+
+def _contract_exact_fields(
+    value: Mapping[str, Any],
+    *,
+    expected: frozenset[str],
+    path: str,
+) -> None:
+    fields = frozenset(value)
+    if fields == expected:
+        return
+    details: list[str] = []
+    missing = sorted(expected - fields)
+    unexpected = sorted(fields - expected)
+    if missing:
+        details.append(f"missing fields: {', '.join(missing)}")
+    if unexpected:
+        details.append(f"unexpected fields: {', '.join(unexpected)}")
+    raise KnowledgeSearchContractError(
+        f"{path} has invalid fields ({'; '.join(details)})"
+    )
+
+
+def _contract_text(
+    value: Any,
+    *,
+    path: str,
+    allow_empty: bool = False,
+) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
+        suffix = "a string" if allow_empty else "a non-empty string"
+        raise KnowledgeSearchContractError(f"{path} must be {suffix}")
+    return value
+
+
+def _contract_optional_text(value: Any, *, path: str) -> str | None:
+    if value is None:
+        return None
+    return _contract_text(value, path=path, allow_empty=True)
+
+
+def _contract_int(value: Any, *, path: str, positive: bool = False) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise KnowledgeSearchContractError(f"{path} must be an integer")
+    if positive and value < 1:
+        raise KnowledgeSearchContractError(f"{path} must be positive")
+    return value
+
+
+def _contract_float(value: Any, *, path: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise KnowledgeSearchContractError(f"{path} must be numeric")
+    return float(value)
+
+
+@dataclass(frozen=True)
+class KnowledgeSearchChannelScore:
+    """One channel's contribution to a fused knowledge result."""
+
+    rank: int
+    score: float | None
+    weight: float
+    contribution: float
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: Any,
+        *,
+        path: str,
+    ) -> KnowledgeSearchChannelScore:
+        value = _contract_mapping(payload, path=path)
+        _contract_exact_fields(
+            value,
+            expected=frozenset({"rank", "score", "weight", "contribution"}),
+            path=path,
+        )
+        raw_score = value["score"]
+        return cls(
+            rank=_contract_int(value["rank"], path=f"{path}.rank", positive=True),
+            score=(
+                None
+                if raw_score is None
+                else _contract_float(raw_score, path=f"{path}.score")
+            ),
+            weight=_contract_float(value["weight"], path=f"{path}.weight"),
+            contribution=_contract_float(
+                value["contribution"],
+                path=f"{path}.contribution",
+            ),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "rank": self.rank,
+            "score": self.score,
+            "weight": self.weight,
+            "contribution": self.contribution,
+        }
+
+
+@dataclass(frozen=True)
+class KnowledgeSearchScores:
+    """Canonical fused score and per-channel attribution."""
+
+    rrf: float
+    lexical: KnowledgeSearchChannelScore | None
+    semantic: KnowledgeSearchChannelScore | None
+    recency: KnowledgeSearchChannelScore | None
+
+    @classmethod
+    def from_payload(cls, payload: Any, *, path: str) -> KnowledgeSearchScores:
+        value = _contract_mapping(payload, path=path)
+        _contract_exact_fields(
+            value,
+            expected=frozenset({"rrf", "channels"}),
+            path=path,
+        )
+        raw_channels = _contract_mapping(
+            value["channels"],
+            path=f"{path}.channels",
+        )
+        _contract_exact_fields(
+            raw_channels,
+            expected=frozenset(_CHANNEL_NAMES),
+            path=f"{path}.channels",
+        )
+        channels: dict[str, KnowledgeSearchChannelScore | None] = {}
+        for channel_name in _CHANNEL_NAMES:
+            raw_channel = raw_channels[channel_name]
+            channels[channel_name] = (
+                None
+                if raw_channel is None
+                else KnowledgeSearchChannelScore.from_payload(
+                    raw_channel,
+                    path=f"{path}.channels.{channel_name}",
+                )
+            )
+        return cls(
+            rrf=_contract_float(value["rrf"], path=f"{path}.rrf"),
+            lexical=channels["lexical"],
+            semantic=channels["semantic"],
+            recency=channels["recency"],
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "rrf": self.rrf,
+            "channels": {
+                channel_name: (
+                    channel.to_payload() if channel is not None else None
+                )
+                for channel_name, channel in (
+                    ("lexical", self.lexical),
+                    ("semantic", self.semantic),
+                    ("recency", self.recency),
+                )
+            },
+        }
+
+
+@dataclass(frozen=True)
+class KnowledgeSearchHit:
+    """Validated knowledge result with stable provenance and score attribution."""
+
+    id: int
+    source: str
+    kind: str
+    source_ref: str
+    title: str
+    summary: str
+    resolution: str | None
+    entities: tuple[Any, ...]
+    extra: dict[str, Any]
+    source_created_at: str | None
+    source_updated_at: str | None
+    scores: KnowledgeSearchScores
+
+    @classmethod
+    def from_payload(cls, payload: Any, *, path: str) -> KnowledgeSearchHit:
+        value = _contract_mapping(payload, path=path)
+        _contract_exact_fields(value, expected=_HIT_FIELDS, path=path)
+        raw_entities = value["entities"]
+        if not isinstance(raw_entities, list):
+            raise KnowledgeSearchContractError(f"{path}.entities must be a list")
+        raw_extra = value["extra"]
+        if not isinstance(raw_extra, Mapping):
+            raise KnowledgeSearchContractError(f"{path}.extra must be an object")
+        return cls(
+            id=_contract_int(value["id"], path=f"{path}.id", positive=True),
+            source=_contract_text(value["source"], path=f"{path}.source"),
+            kind=_contract_text(value["kind"], path=f"{path}.kind"),
+            source_ref=_contract_text(
+                value["source_ref"],
+                path=f"{path}.source_ref",
+            ),
+            title=_contract_text(
+                value["title"],
+                path=f"{path}.title",
+                allow_empty=True,
+            ),
+            summary=_contract_text(
+                value["summary"],
+                path=f"{path}.summary",
+                allow_empty=True,
+            ),
+            resolution=_contract_optional_text(
+                value["resolution"],
+                path=f"{path}.resolution",
+            ),
+            entities=tuple(raw_entities),
+            extra=dict(raw_extra),
+            source_created_at=_contract_optional_text(
+                value["source_created_at"],
+                path=f"{path}.source_created_at",
+            ),
+            source_updated_at=_contract_optional_text(
+                value["source_updated_at"],
+                path=f"{path}.source_updated_at",
+            ),
+            scores=KnowledgeSearchScores.from_payload(
+                value["scores"],
+                path=f"{path}.scores",
+            ),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "source": self.source,
+            "kind": self.kind,
+            "source_ref": self.source_ref,
+            "title": self.title,
+            "summary": self.summary,
+            "resolution": self.resolution,
+            "entities": list(self.entities),
+            "extra": dict(self.extra),
+            "source_created_at": self.source_created_at,
+            "source_updated_at": self.source_updated_at,
+            "scores": self.scores.to_payload(),
+        }
+
+
+@dataclass(frozen=True)
+class KnowledgeSearchResponse:
+    """Validated envelope returned by the knowledge search producer."""
+
+    query: str
+    org_id: str
+    sources: tuple[str, ...]
+    kinds: tuple[str, ...]
+    semantic_available: bool
+    semantic_degraded_reason: str | None
+    lexical_weight: float
+    semantic_weight: float
+    recency_weight: float
+    requested_limit: int
+    effective_limit: int
+    results: tuple[KnowledgeSearchHit, ...]
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> KnowledgeSearchResponse:
+        value = _contract_mapping(payload, path="knowledge_search")
+        _contract_exact_fields(
+            value,
+            expected=_RESPONSE_FIELDS,
+            path="knowledge_search",
+        )
+        raw_sources = value["sources"]
+        raw_kinds = value["kinds"]
+        if not isinstance(raw_sources, list) or not all(
+            isinstance(item, str) for item in raw_sources
+        ):
+            raise KnowledgeSearchContractError(
+                "knowledge_search.sources must be a list of strings"
+            )
+        if not isinstance(raw_kinds, list) or not all(
+            isinstance(item, str) for item in raw_kinds
+        ):
+            raise KnowledgeSearchContractError(
+                "knowledge_search.kinds must be a list of strings"
+            )
+        semantic_available = value["semantic_available"]
+        if not isinstance(semantic_available, bool):
+            raise KnowledgeSearchContractError(
+                "knowledge_search.semantic_available must be a boolean"
+            )
+        degraded_reason = _contract_optional_text(
+            value["semantic_degraded_reason"],
+            path="knowledge_search.semantic_degraded_reason",
+        )
+        if semantic_available and degraded_reason is not None:
+            raise KnowledgeSearchContractError(
+                "semantic_degraded_reason must be null when semantic search is available"
+            )
+        if not semantic_available and not degraded_reason:
+            raise KnowledgeSearchContractError(
+                "semantic_degraded_reason is required when semantic search is unavailable"
+            )
+        raw_weights = _contract_mapping(
+            value["weights"],
+            path="knowledge_search.weights",
+        )
+        _contract_exact_fields(
+            raw_weights,
+            expected=frozenset(_CHANNEL_NAMES),
+            path="knowledge_search.weights",
+        )
+        raw_results = value["results"]
+        if not isinstance(raw_results, list):
+            raise KnowledgeSearchContractError(
+                "knowledge_search.results must be a list"
+            )
+        requested_limit = _contract_int(
+            value["requested_limit"],
+            path="knowledge_search.requested_limit",
+        )
+        effective_limit = _contract_int(
+            value["effective_limit"],
+            path="knowledge_search.effective_limit",
+            positive=True,
+        )
+        if effective_limit > KNOWLEDGE_SEARCH_MAX_RESULTS:
+            raise KnowledgeSearchContractError(
+                "knowledge_search.effective_limit cannot exceed "
+                f"{KNOWLEDGE_SEARCH_MAX_RESULTS}"
+            )
+        return cls(
+            query=_contract_text(value["query"], path="knowledge_search.query"),
+            org_id=_contract_text(value["org_id"], path="knowledge_search.org_id"),
+            sources=tuple(raw_sources),
+            kinds=tuple(raw_kinds),
+            semantic_available=semantic_available,
+            semantic_degraded_reason=degraded_reason,
+            lexical_weight=_contract_float(
+                raw_weights["lexical"],
+                path="knowledge_search.weights.lexical",
+            ),
+            semantic_weight=_contract_float(
+                raw_weights["semantic"],
+                path="knowledge_search.weights.semantic",
+            ),
+            recency_weight=_contract_float(
+                raw_weights["recency"],
+                path="knowledge_search.weights.recency",
+            ),
+            requested_limit=requested_limit,
+            effective_limit=effective_limit,
+            results=tuple(
+                KnowledgeSearchHit.from_payload(
+                    item,
+                    path=f"knowledge_search.results[{index}]",
+                )
+                for index, item in enumerate(raw_results)
+            ),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "query": self.query,
+            "org_id": self.org_id,
+            "sources": list(self.sources),
+            "kinds": list(self.kinds),
+            "semantic_available": self.semantic_available,
+            "semantic_degraded_reason": self.semantic_degraded_reason,
+            "weights": {
+                "lexical": self.lexical_weight,
+                "semantic": self.semantic_weight,
+                "recency": self.recency_weight,
+            },
+            "requested_limit": self.requested_limit,
+            "effective_limit": self.effective_limit,
+            "results": [result.to_payload() for result in self.results],
+        }
+
+
+def parse_knowledge_search_response(payload: Any) -> KnowledgeSearchResponse:
+    """Validate and type a serialized knowledge-search response."""
+
+    return KnowledgeSearchResponse.from_payload(payload)
+
+
+def serialize_knowledge_search_response(
+    response: KnowledgeSearchResponse,
+) -> dict[str, Any]:
+    """Serialize the canonical typed knowledge-search response."""
+
+    return KnowledgeSearchResponse.from_payload(response.to_payload()).to_payload()
 
 _QUERY_TERM_RE = re.compile(r"[a-zA-Z0-9_/-]{3,}")
 _QUERY_STOP_WORDS = {
@@ -224,12 +668,13 @@ async def _semantic_channel(
             )
         model = embedding_model_identity(runtime)
     except Exception as exc:
+        degraded_reason = str(exc).strip() or type(exc).__name__
         logger.warning(
             "Semantic knowledge recall unavailable; using lexical ranking for query %r: %s",
             query[:120],
-            exc,
+            degraded_reason,
         )
-        return [], {}, str(exc)
+        return [], {}, degraded_reason
 
     embedding_filters = [
         KnowledgeItemEmbedding.embedding_kind == "summary",
@@ -306,35 +751,62 @@ def _iso(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat()
 
 
-def _serialize_result(
+def _channel_score(
+    debug: Mapping[str, Any],
+    *,
+    channel_name: str,
+    raw_score: float | None,
+) -> KnowledgeSearchChannelScore | None:
+    channel_debug = debug["channels"]
+    if channel_name not in channel_debug:
+        return None
+    channel = channel_debug[channel_name]
+    return KnowledgeSearchChannelScore(
+        rank=int(channel["rank"]),
+        score=raw_score,
+        weight=float(channel["weight"]),
+        contribution=float(channel["contribution"]),
+    )
+
+
+def _result_contract(
     item: KnowledgeItem,
     *,
     debug: dict[str, Any],
     lexical_scores: Mapping[int, float],
     semantic_scores: Mapping[int, float],
-) -> dict[str, Any]:
-    channel_debug = debug["channels"]
-    if item.id in lexical_scores:
-        channel_debug["lexical"]["score"] = lexical_scores[item.id]
-    if item.id in semantic_scores:
-        channel_debug["semantic"]["score"] = semantic_scores[item.id]
-    return {
-        "id": item.id,
-        "source": item.source,
-        "kind": item.kind,
-        "source_ref": item.source_ref,
-        "title": item.title,
-        "summary": item.summary,
-        "resolution": item.resolution,
-        "entities": list(item.entities or []),
-        "extra": dict(item.extra or {}),
-        "source_created_at": _iso(item.source_created_at),
-        "source_updated_at": _iso(item.source_updated_at),
-        "scores": {
-            "rrf": round(float(debug["rrf"]), 8),
-            "channels": channel_debug,
-        },
-    }
+) -> KnowledgeSearchHit:
+    return KnowledgeSearchHit(
+        id=item.id,
+        source=item.source,
+        kind=item.kind,
+        source_ref=item.source_ref,
+        title=item.title,
+        summary=item.summary,
+        resolution=item.resolution,
+        entities=tuple(item.entities or []),
+        extra=dict(item.extra or {}),
+        source_created_at=_iso(item.source_created_at),
+        source_updated_at=_iso(item.source_updated_at),
+        scores=KnowledgeSearchScores(
+            rrf=round(float(debug["rrf"]), 8),
+            lexical=_channel_score(
+                debug,
+                channel_name="lexical",
+                raw_score=lexical_scores.get(item.id),
+            ),
+            semantic=_channel_score(
+                debug,
+                channel_name="semantic",
+                raw_score=semantic_scores.get(item.id),
+            ),
+            recency=_channel_score(
+                debug,
+                channel_name="recency",
+                raw_score=None,
+            ),
+        ),
+    )
 
 
 async def search_knowledge(
@@ -351,7 +823,8 @@ async def search_knowledge(
     clean_query = str(query or "").strip()
     if not clean_query:
         raise ValueError("query is required")
-    max_results = max(1, min(int(limit or 10), 50))
+    requested_limit = int(limit or KNOWLEDGE_SEARCH_DEFAULT_RESULTS)
+    max_results = normalize_knowledge_search_limit(limit)
     channel_limit = min(200, max(20, max_results * 4))
     clean_org_id = str(org_id or "").strip()
     filters = _item_filters(
@@ -386,7 +859,7 @@ async def search_knowledge(
         }
     )
     results = [
-        _serialize_result(
+        _result_contract(
             candidates[item_id],
             debug=debug[item_id],
             lexical_scores=lexical_scores,
@@ -394,27 +867,38 @@ async def search_knowledge(
         )
         for item_id in ordered_ids[:max_results]
     ]
-    return {
-        "query": clean_query,
-        "org_id": clean_org_id,
-        "sources": [str(value) for value in sources or []],
-        "kinds": [str(value) for value in kinds or []],
-        "semantic_available": semantic_error is None,
-        "semantic_degraded_reason": semantic_error,
-        "weights": {
-            "lexical": LEXICAL_WEIGHT,
-            "semantic": SEMANTIC_WEIGHT,
-            "recency": RECENCY_WEIGHT,
-        },
-        "results": results,
-    }
+    response = KnowledgeSearchResponse(
+        query=clean_query,
+        org_id=clean_org_id,
+        sources=tuple(str(value) for value in sources or []),
+        kinds=tuple(str(value) for value in kinds or []),
+        semantic_available=semantic_error is None,
+        semantic_degraded_reason=semantic_error,
+        lexical_weight=LEXICAL_WEIGHT,
+        semantic_weight=SEMANTIC_WEIGHT,
+        recency_weight=RECENCY_WEIGHT,
+        requested_limit=requested_limit,
+        effective_limit=max_results,
+        results=tuple(results),
+    )
+    return serialize_knowledge_search_response(response)
 
 
 __all__ = [
+    "KNOWLEDGE_SEARCH_DEFAULT_RESULTS",
+    "KNOWLEDGE_SEARCH_MAX_RESULTS",
+    "KnowledgeSearchChannelScore",
+    "KnowledgeSearchContractError",
+    "KnowledgeSearchHit",
+    "KnowledgeSearchResponse",
+    "KnowledgeSearchScores",
     "LEXICAL_WEIGHT",
     "RECENCY_WEIGHT",
     "RRF_K",
     "SEMANTIC_WEIGHT",
+    "normalize_knowledge_search_limit",
+    "parse_knowledge_search_response",
     "reciprocal_rank_fusion",
     "search_knowledge",
+    "serialize_knowledge_search_response",
 ]

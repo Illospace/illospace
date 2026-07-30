@@ -6,7 +6,10 @@ import json
 from typing import Any
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.knowledge.search import search_knowledge
+from brain.systems.knowledge.search import (
+    normalize_knowledge_search_limit,
+    search_knowledge,
+)
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
 
 
@@ -29,7 +32,7 @@ async def _handle_search_knowledge(
             org_id=org_id,
             sources=sources,
             kinds=kinds,
-            limit=max(1, min(int(limit or 10), 50)),
+            limit=normalize_knowledge_search_limit(limit),
         )
     return json.dumps(result, default=str)
 

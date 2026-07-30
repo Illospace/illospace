@@ -12,20 +12,31 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.systems.knowledge.search import search_knowledge
-
-DEFAULT_K_VALUES = (3, 10)
-DEFAULT_SEARCH_LIMIT = 50
-DEFAULT_QUESTION_SET_PATH = (
-    Path(__file__).resolve().parent / "data" / "knowledge_recall_seed_v1.json"
+from brain.systems.knowledge.search import (
+    KNOWLEDGE_SEARCH_MAX_RESULTS,
+    KnowledgeSearchContractError,
+    KnowledgeSearchResponse,
+    KnowledgeSearchScores,
+    normalize_knowledge_search_limit,
+    parse_knowledge_search_response,
+    search_knowledge,
 )
 
-KnowledgeSearch = Callable[..., Awaitable[dict[str, Any]]]
+DEFAULT_K_VALUES = (3, 10)
+DEFAULT_QUESTION_SET_PATH = (
+    Path(__file__).parent / "knowledge_recall_seed_v1.json"
+)
+
+KnowledgeSearch = Callable[..., Awaitable[Any]]
+
+
+class KnowledgeRecallEvaluationError(ValueError):
+    """Raised when retrieval depth makes the requested metrics invalid."""
 
 
 @dataclass(frozen=True)
 class EvidencePointer:
-    """Stable provenance for an acceptable known-best knowledge item."""
+    """Stable provenance identity for expected or observed knowledge evidence."""
 
     source: str
     source_ref: str
@@ -96,7 +107,7 @@ class RankedKnowledgeResult:
     kind: str
     title: str
     matched: bool
-    scores: dict[str, Any]
+    scores: KnowledgeSearchScores
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -105,7 +116,7 @@ class RankedKnowledgeResult:
             "kind": self.kind,
             "title": self.title,
             "matched": self.matched,
-            "scores": dict(self.scores),
+            "scores": self.scores.to_payload(),
         }
 
 
@@ -125,7 +136,7 @@ class KnowledgeRecallCaseResult:
 
     @property
     def missed(self) -> bool:
-        return self.best_evidence_rank is None
+        return self.error is None and self.best_evidence_rank is None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -158,7 +169,8 @@ class KnowledgeRecallSuiteResult:
     org_id: str
     question_set: KnowledgeRecallQuestionSet
     k_values: tuple[int, ...]
-    search_limit: int
+    requested_search_limit: int
+    effective_search_limit: int | None
     results: tuple[KnowledgeRecallCaseResult, ...]
 
     @property
@@ -179,14 +191,19 @@ class KnowledgeRecallSuiteResult:
 
     def to_dict(self) -> dict[str, Any]:
         total = len(self.results)
+        search_errors = sum(result.error is not None for result in self.results)
         hits = {
             str(k): sum(1 for result in self.results if result.hits_at_k[k])
             for k in self.k_values
         }
-        recall_at_k = {
-            str(k): _metric(hits[str(k)] / total if total else 0.0)
-            for k in self.k_values
-        }
+        recall_at_k = (
+            {
+                str(k): _metric(hits[str(k)] / total if total else 0.0)
+                for k in self.k_values
+            }
+            if search_errors == 0
+            else {str(k): None for k in self.k_values}
+        )
         reasons = self.semantic_degraded_reasons
         return {
             "suite": self.suite,
@@ -196,25 +213,31 @@ class KnowledgeRecallSuiteResult:
             "configuration": {
                 "org_id": self.org_id,
                 "k_values": list(self.k_values),
-                "search_limit": self.search_limit,
+                "requested_search_limit": self.requested_search_limit,
+                "effective_search_limit": self.effective_search_limit,
             },
             "semantic_available": self.semantic_available,
             "semantic_degraded_reason": " | ".join(reasons) if reasons else None,
             "summary": {
+                "evaluation_valid": search_errors == 0,
                 "total": total,
                 "missed": sum(result.missed for result in self.results),
-                "search_errors": sum(result.error is not None for result in self.results),
+                "search_errors": search_errors,
                 "semantic_degraded_cases": sum(
                     not result.semantic_available for result in self.results
                 ),
                 "hits_at_k": hits,
                 "recall_at_k": recall_at_k,
-                "mean_reciprocal_rank": _metric(
-                    sum(result.reciprocal_rank for result in self.results) / total
-                    if total
-                    else 0.0
+                "mean_reciprocal_rank": (
+                    _metric(
+                        sum(result.reciprocal_rank for result in self.results) / total
+                        if total
+                        else 0.0
+                    )
+                    if search_errors == 0
+                    else None
                 ),
-                "mean_reciprocal_rank_cutoff": self.search_limit,
+                "mean_reciprocal_rank_cutoff": self.effective_search_limit,
             },
             "results": [result.to_dict() for result in self.results],
         }
@@ -324,8 +347,11 @@ def normalize_k_values(k_values: Sequence[int]) -> tuple[int, ...]:
     normalized = tuple(sorted({int(value) for value in k_values}))
     if not normalized:
         raise ValueError("at least one k value is required")
-    if normalized[0] < 1 or normalized[-1] > 50:
-        raise ValueError("k values must be between 1 and 50")
+    if normalized[0] < 1 or normalized[-1] > KNOWLEDGE_SEARCH_MAX_RESULTS:
+        raise ValueError(
+            "k values must be between 1 and "
+            f"{KNOWLEDGE_SEARCH_MAX_RESULTS}"
+        )
     return normalized
 
 
@@ -333,55 +359,28 @@ def _metric(value: float) -> float:
     return round(float(value), 8)
 
 
-def _scores(raw_scores: Any) -> dict[str, Any]:
-    scores = raw_scores if isinstance(raw_scores, Mapping) else {}
-    raw_channels = scores.get("channels")
-    channels = raw_channels if isinstance(raw_channels, Mapping) else {}
-    normalized_channels: dict[str, Any] = {}
-    for channel_name in ("lexical", "semantic", "recency"):
-        raw_channel = channels.get(channel_name)
-        if not isinstance(raw_channel, Mapping):
-            normalized_channels[channel_name] = None
-            continue
-        channel = dict(raw_channel)
-        channel.setdefault("rank", None)
-        # Recency currently has no independent raw score. Keep that absence
-        # explicit while preserving its weighted RRF contribution.
-        channel.setdefault("score", None)
-        channel.setdefault("weight", None)
-        channel.setdefault("contribution", None)
-        normalized_channels[channel_name] = channel
-    return {
-        "rrf": scores.get("rrf"),
-        "channels": normalized_channels,
-    }
-
-
 def _ranked_results(
-    raw_results: Any,
+    response: KnowledgeSearchResponse,
     *,
     acceptable_evidence: tuple[EvidencePointer, ...],
 ) -> tuple[RankedKnowledgeResult, ...]:
-    rows = raw_results if isinstance(raw_results, list) else []
     acceptable = {
         (pointer.source, pointer.source_ref) for pointer in acceptable_evidence
     }
     ranked: list[RankedKnowledgeResult] = []
-    for rank, raw_result in enumerate(rows, start=1):
-        if not isinstance(raw_result, Mapping):
-            continue
+    for rank, result in enumerate(response.results, start=1):
         evidence = EvidencePointer(
-            source=str(raw_result.get("source") or ""),
-            source_ref=str(raw_result.get("source_ref") or ""),
+            source=result.source,
+            source_ref=result.source_ref,
         )
         ranked.append(
             RankedKnowledgeResult(
                 rank=rank,
                 evidence=evidence,
-                kind=str(raw_result.get("kind") or ""),
-                title=str(raw_result.get("title") or ""),
+                kind=result.kind,
+                title=result.title,
                 matched=(evidence.source, evidence.source_ref) in acceptable,
-                scores=_scores(raw_result.get("scores")),
+                scores=result.scores,
             )
         )
     return tuple(ranked)
@@ -393,7 +392,7 @@ async def run_knowledge_recall_eval(
     org_id: str,
     question_set: KnowledgeRecallQuestionSet | None = None,
     k_values: Sequence[int] = DEFAULT_K_VALUES,
-    search_limit: int = DEFAULT_SEARCH_LIMIT,
+    search_limit: int = KNOWLEDGE_SEARCH_MAX_RESULTS,
     search: KnowledgeSearch = search_knowledge,
     generated_at: str | None = None,
     live_database: bool = False,
@@ -403,37 +402,63 @@ async def run_knowledge_recall_eval(
     clean_org_id = _required_text(org_id, field_name="org_id")
     loaded_question_set = question_set or load_knowledge_recall_question_set()
     normalized_k = normalize_k_values(k_values)
-    normalized_search_limit = int(search_limit)
-    if normalized_search_limit < max(normalized_k) or normalized_search_limit > 50:
+    requested_search_limit = int(search_limit)
+    normalized_search_limit = normalize_knowledge_search_limit(
+        requested_search_limit,
+        default=KNOWLEDGE_SEARCH_MAX_RESULTS,
+    )
+    if (
+        requested_search_limit != normalized_search_limit
+        or normalized_search_limit < max(normalized_k)
+    ):
         raise ValueError(
-            "search_limit must be at least the largest k value and no greater than 50"
+            "search_limit must be at least the largest k value and between "
+            f"1 and {KNOWLEDGE_SEARCH_MAX_RESULTS}"
         )
     case_results: list[KnowledgeRecallCaseResult] = []
+    effective_limits: set[int] = set()
 
     for case in loaded_question_set.cases:
         error = None
         try:
-            response = await search(
+            raw_response = await search(
                 session,
                 case.question,
                 org_id=clean_org_id,
                 limit=normalized_search_limit,
             )
-            if not isinstance(response, Mapping):
-                raise TypeError("knowledge search returned a non-object payload")
+            response = parse_knowledge_search_response(raw_response)
+            if response.query != case.question:
+                raise KnowledgeSearchContractError(
+                    "knowledge_search.query does not match the evaluated question"
+                )
+            if response.org_id != clean_org_id:
+                raise KnowledgeSearchContractError(
+                    "knowledge_search.org_id does not match the evaluated organization"
+                )
+            if response.requested_limit != normalized_search_limit:
+                raise KnowledgeSearchContractError(
+                    "knowledge_search.requested_limit does not match the evaluator request"
+                )
+            if response.effective_limit < max(normalized_k):
+                raise KnowledgeRecallEvaluationError(
+                    "knowledge search effective_limit "
+                    f"{response.effective_limit} cannot support recall@"
+                    f"{max(normalized_k)}"
+                )
+            effective_limits.add(response.effective_limit)
+            if len(effective_limits) > 1:
+                raise KnowledgeRecallEvaluationError(
+                    "knowledge search returned inconsistent effective retrieval depths"
+                )
             ranked = _ranked_results(
-                response.get("results"),
+                response,
                 acceptable_evidence=case.acceptable_evidence,
             )
-            semantic_available = response.get("semantic_available") is True
-            raw_reason = response.get("semantic_degraded_reason")
-            semantic_degraded_reason = (
-                str(raw_reason) if raw_reason is not None else None
-            )
-            if not semantic_available and not semantic_degraded_reason:
-                semantic_degraded_reason = (
-                    "semantic channel unavailable without a reported reason"
-                )
+            semantic_available = response.semantic_available
+            semantic_degraded_reason = response.semantic_degraded_reason
+        except KnowledgeRecallEvaluationError:
+            raise
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             ranked = ()
@@ -466,7 +491,12 @@ async def run_knowledge_recall_eval(
         org_id=clean_org_id,
         question_set=loaded_question_set,
         k_values=normalized_k,
-        search_limit=normalized_search_limit,
+        requested_search_limit=requested_search_limit,
+        effective_search_limit=(
+            next(iter(effective_limits))
+            if effective_limits
+            else None
+        ),
         results=tuple(case_results),
     )
 
@@ -474,9 +504,9 @@ async def run_knowledge_recall_eval(
 __all__ = [
     "DEFAULT_K_VALUES",
     "DEFAULT_QUESTION_SET_PATH",
-    "DEFAULT_SEARCH_LIMIT",
     "EvidencePointer",
     "KnowledgeRecallCaseResult",
+    "KnowledgeRecallEvaluationError",
     "KnowledgeRecallQuestion",
     "KnowledgeRecallQuestionSet",
     "KnowledgeRecallSuiteResult",
