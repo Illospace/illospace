@@ -331,7 +331,7 @@ def test_contact_form_owner_policy_warns_and_omits_conflicting_user_id(caplog):
 
     with caplog.at_level(
         "WARNING",
-        logger="brain.systems.slack.contact_form_lead_owner",
+        logger="brain.systems.slack.identity",
     ):
         owner = CONTACT_FORM_OWNER_POLICY.resolve(
             FakeSlackConnection(
@@ -640,6 +640,60 @@ async def test_contact_form_lead_gets_common_eyes_and_policy_enrichment(
         "/contact-form-lead-intake\n"
     )
     assert "Configured lead assessment." in work["payload"]["run_message"]
+
+
+@pytest.mark.asyncio
+async def test_contact_form_lead_intake_completes_with_conflicted_owner_identity(
+    monkeypatch,
+):
+    connector_module, reactions, submitted = patch_slack_connector(monkeypatch)
+    connection = FakeSlackConnection(
+        metadata={
+            "slack": {
+                "monitored_channels": ["C_ALERTS"],
+                "contact_form_lead_owner": {
+                    "slack_user_id": "UREDA",
+                },
+                "identity_map": {
+                    "UREDA": "user-mapped",
+                },
+            },
+            "identity_links": {
+                "slack": {
+                    "UREDA": {
+                        "user_id": "user-linked",
+                        "display_name": "Reda",
+                    }
+                }
+            },
+        }
+    )
+    config = connector_module.SlackConnectorConfig(
+        bot_token="xoxb-x",
+        app_token="xapp-x",
+        bot_user_id="BILLO",
+    )
+
+    result = await connector_module.process_socket_payload(
+        None,
+        connection=connection,
+        socket_payload=socket_mode_channel_message(
+            user="",
+            bot_id="B_CONTACT_FORM",
+            app_id="A_CONTACT_FORM",
+            text=_contact_form_text(),
+        ),
+        config=config,
+    )
+
+    assert result["ignored"] is False
+    assert reactions == [("C_ALERTS", "1716900000.000200", "eyes")]
+    assert len(submitted) == 1
+    assert submitted[0]["payload"]["contact_form_lead"]["owner"] == {
+        "name": "Reda",
+        "slack_user_id": "UREDA",
+        "user_id": None,
+    }
 
 
 @pytest.mark.asyncio

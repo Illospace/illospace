@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.org import User, UserCodexConnection
 from brain.systems.external_agents import service as external_agents
+from brain.systems.slack.identity import normalize_slack_identities
 
 
 def _clean(value: Any) -> str:
@@ -67,6 +68,8 @@ def _connection_identity_links(connection: ExternalAgentConnectionRow) -> list[d
     identities: list[dict[str, Any]] = []
     links = _links_root(connection)
     for provider, provider_links in links.items():
+        if _provider(provider) == "slack":
+            continue
         if not isinstance(provider_links, Mapping):
             continue
         for external_user_id, raw_link in provider_links.items():
@@ -87,19 +90,43 @@ def _connection_identity_links(connection: ExternalAgentConnectionRow) -> list[d
                 )
             )
 
-    slack_metadata = _metadata(_metadata(connection.metadata_).get("slack"))
-    slack_map = slack_metadata.get("identity_map")
-    if isinstance(slack_map, Mapping):
-        for slack_user_id, user_id in slack_map.items():
-            clean_slack_user_id = _clean(slack_user_id)
-            clean_user_id = _clean(user_id)
-            if not clean_slack_user_id or not clean_user_id:
-                continue
+    connection_metadata = _metadata(connection.metadata_)
+    slack_metadata = _metadata(connection_metadata.get("slack"))
+    slack_map = {
+        _clean(slack_user_id): user_id
+        for slack_user_id, user_id in _metadata(
+            slack_metadata.get("identity_map")
+        ).items()
+        if _clean(slack_user_id)
+    }
+    slack_links = {
+        _clean(slack_user_id): raw_link
+        for slack_user_id, raw_link in _metadata(links.get("slack")).items()
+        if _clean(slack_user_id)
+    }
+    normalization = normalize_slack_identities(connection_metadata)
+    for record in normalization.records:
+        if record.user_id is None:
+            continue
+        raw_link = _metadata(slack_links.get(record.slack_user_id))
+        if _clean(raw_link.get("user_id")):
             identities.append(
                 _identity_payload(
                     provider="slack",
-                    external_user_id=clean_slack_user_id,
-                    user_id=clean_user_id,
+                    external_user_id=record.slack_user_id,
+                    user_id=record.user_id,
+                    display_name=_clean(raw_link.get("display_name")) or None,
+                    metadata=_metadata(raw_link.get("metadata")),
+                    source="external_connection.identity_links",
+                    connection=connection,
+                )
+            )
+        if _clean(slack_map.get(record.slack_user_id)):
+            identities.append(
+                _identity_payload(
+                    provider="slack",
+                    external_user_id=record.slack_user_id,
+                    user_id=record.user_id,
                     source="external_connection.slack.identity_map",
                     connection=connection,
                     metadata={

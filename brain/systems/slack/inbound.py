@@ -26,6 +26,7 @@ from brain.systems.slack.chantier_declare import (
     apply_chantier_declare_run_contract,
     maybe_declare_chantier_from_slack,
 )
+from brain.systems.slack.identity import normalize_slack_identities
 from brain.systems.slack.triggers import (
     SLACK_MESSAGE_ENVELOPE_KIND,
     build_slack_work_intake_payload,
@@ -180,21 +181,20 @@ async def _slack_run_identity(
         connection = await session.get(ExternalAgentConnectionRow, context.connection_id)
         if connection is not None:
             metadata = dict(connection.metadata_ or {})
-            slack_metadata = metadata.get("slack")
-            if isinstance(slack_metadata, Mapping):
-                identity_map = slack_metadata.get("identity_map")
-                if isinstance(identity_map, Mapping):
-                    mapped_user_id = optional_text(identity_map.get(slack_user_id))
-                    if mapped_user_id:
-                        user = await session.get(User, mapped_user_id)
-                        if user is not None and str(user.org_id) == str(context.org_id):
-                            person_context = _linked_slack_person_context(
-                                metadata,
-                                slack_user_id=slack_user_id,
-                                mapped_user_id=mapped_user_id,
-                                channel_type=payload.get("channel_type"),
-                            )
-                            return mapped_user_id, person_context
+            record = normalize_slack_identities(
+                metadata
+            ).record_for_slack_user_id(slack_user_id)
+            mapped_user_id = record.user_id if record is not None else None
+            if mapped_user_id:
+                user = await session.get(User, mapped_user_id)
+                if user is not None and str(user.org_id) == str(context.org_id):
+                    person_context = _linked_slack_person_context(
+                        metadata,
+                        slack_user_id=slack_user_id,
+                        mapped_user_id=mapped_user_id,
+                        channel_type=payload.get("channel_type"),
+                    )
+                    return mapped_user_id, person_context
     return context.owner_user_id, None
 
 

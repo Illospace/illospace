@@ -2276,6 +2276,63 @@ async def test_slack_identity_mapping_uses_linked_illospace_user_for_run(session
 
 
 @pytest.mark.asyncio
+async def test_slack_identity_conflict_does_not_authorize_either_user_for_run(
+    session,
+):
+    from brain.systems.inbound.service import submit_inbound_envelope
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    connection = await _seed_slack_connection(session)
+    session.add(
+        User(
+            id=MAPPED_USER_ID,
+            org_id=ORG_ID,
+            name="Mapped user",
+            email="mapped@example.com",
+        )
+    )
+    session.add(
+        User(
+            id=OTHER_MAPPED_USER_ID,
+            org_id=ORG_ID,
+            name="Linked user",
+            email="linked@example.com",
+        )
+    )
+    connection.metadata_ = {
+        "slack": {
+            "team_id": "T789",
+            "bot_user_id": "BILLO",
+            "identity_map": {"U123": MAPPED_USER_ID},
+        },
+        "identity_links": {
+            "slack": {
+                "U123": {
+                    "user_id": OTHER_MAPPED_USER_ID,
+                    "display_name": "Conflicted user",
+                }
+            }
+        },
+    }
+    await session.flush()
+
+    envelope = normalize_slack_socket_event(
+        _socket_mode_app_mention(),
+        bot_user_id="BILLO",
+    )
+
+    await submit_inbound_envelope(
+        session,
+        connection=connection,
+        envelope=envelope,
+    )
+
+    run = (await session.scalars(select(AgentRunRow))).one()
+    assert run.user_id == USER_ID
+    assert "person_context" not in run.metadata_
+
+
+@pytest.mark.asyncio
 async def test_slack_identity_link_supplies_explicit_dm_communication_preferences(session):
     from brain.systems.inbound.service import submit_inbound_envelope
     from brain.systems.slack.ingress import normalize_slack_socket_event
