@@ -38,6 +38,32 @@ class _PostgresBind:
     dialect = postgresql.dialect()
 
 
+async def test_inbound_slack_obligation_answer_only_locks_mutated_tables():
+    from brain.systems.runs.open_asks import (
+        record_inbound_slack_obligation_answer,
+    )
+
+    session = SimpleNamespace(execute=AsyncMock(return_value=_Rows([])))
+
+    settled = await record_inbound_slack_obligation_answer(
+        session,
+        org_id="11111111-1111-4111-8111-111111111111",
+        channel_id="CALERTS",
+        thread_ts="1784741786.046759",
+        slack_user_id="UREDA",
+        message_ts="1784743141.000100",
+        answer_text="Issue #1221 is filed.",
+    )
+
+    statement = session.execute.await_args.args[0]
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+    lock_clause = sql.rsplit("FOR UPDATE", maxsplit=1)[1].strip()
+
+    assert settled == 0
+    assert "FOR UPDATE OF open_asks, obligation_notices" in sql
+    assert lock_clause == "OF open_asks, obligation_notices"
+
+
 class _SharedRowLocks:
     def __init__(self):
         self._condition = asyncio.Condition()
