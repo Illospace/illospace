@@ -45,6 +45,7 @@ class KnowledgeSyncStats:
     skipped: int = 0
     failed: int = 0
     truncated: int = 0
+    empty: int = 0
     pending: int = 0
     distilled: int = 0
 
@@ -59,6 +60,8 @@ class KnowledgeSyncStats:
             payload["pending"] = self.pending
         if self.distilled:
             payload["distilled"] = self.distilled
+        if self.empty:
+            payload["empty"] = self.empty
         return payload
 
 
@@ -495,6 +498,25 @@ async def _sync_state(
     await session.flush()
 
 
+async def _record_empty_corpus(
+    session: AsyncSession,
+    *,
+    source: str,
+    stats: KnowledgeSyncStats,
+) -> None:
+    """Expose a successfully scanned source with no searchable index rows."""
+
+    active_item_id = await session.scalar(
+        select(KnowledgeItem.id)
+        .where(
+            KnowledgeItem.source == source,
+            KnowledgeItem.archived_at.is_(None),
+        )
+        .limit(1)
+    )
+    stats.empty = int(active_item_id is None)
+
+
 async def _ingest_drafts(
     session: AsyncSession,
     *,
@@ -616,6 +638,7 @@ async def sync_connector(
             )
 
         status = "ok" if stats.failed == 0 else "degraded"
+        await _record_empty_corpus(session, source=source, stats=stats)
         await _sync_state(
             session,
             source=source,
@@ -723,6 +746,7 @@ async def sync_connector(
         )
 
     status = "ok" if stats.failed == 0 else "degraded"
+    await _record_empty_corpus(session, source=source, stats=stats)
     await _sync_state(
         session,
         source=source,

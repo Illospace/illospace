@@ -30,13 +30,21 @@ from brain.platform.db.models.knowledge import (
     KnowledgeSyncState,
 )
 from brain.platform.db.models.org import Org, User
-from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
+from brain.platform.db.models.reconstructive_memory import (
+    MemoryAssertionNode,
+    MemoryEdgeNode,
+    MemoryNode,
+    MemoryNodeEmbedding,
+    MemorySource,
+    MemorySpan,
+)
 from brain.systems.knowledge.connectors.base import KnowledgeDraft
 from brain.systems.knowledge.connectors.domain_records import DomainRecordsConnector
 from brain.systems.knowledge.connectors.github import GitHubConnector, _draft_for_issue
 from brain.systems.knowledge.connectors.memory import MemoryConnector
 from brain.systems.knowledge.search import reciprocal_rank_fusion, search_knowledge
 from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS, sync_connector
+from brain.systems.reconstructive_memory.ingestion import ingest_memory_source
 from brain.systems.external_agents import service as external_agents
 from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
 from brain.systems.cortex.project_context.github import (
@@ -147,7 +155,7 @@ def _memory_node(
     node_id: int,
     at: datetime,
     *,
-    node_kind: str = "summary",
+    node_kind: str = "content",
     content_kind: str = "decision",
     title: str | None = None,
     text: str | None = None,
@@ -290,7 +298,11 @@ async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
             KnowledgeItem.__table__,
             KnowledgeItemEmbedding.__table__,
             KnowledgeSyncState.__table__,
+            MemorySource.__table__,
+            MemorySpan.__table__,
             MemoryNode.__table__,
+            MemoryNodeEmbedding.__table__,
+            MemoryAssertionNode.__table__,
             MemoryEdgeNode.__table__,
         ]
     )
@@ -409,7 +421,7 @@ async def test_domain_records_connector_advances_and_resumes_watermark_with_id_t
     ) == ["domain_record:1", "domain_record:2", "domain_record:3"]
 
 
-async def test_memory_connector_mirrors_only_shared_consolidated_memories(
+async def test_memory_connector_mirrors_only_shared_source_backed_memories(
     session,
     embedding_runtime,
 ):
@@ -429,10 +441,10 @@ async def test_memory_connector_mirrors_only_shared_consolidated_memories(
             _memory_node(
                 12,
                 updated_at,
-                node_kind="content",
+                node_kind="summary",
                 content_kind="decision",
-                title="Unconsolidated source",
-                text="This source memory must not be mirrored yet.",
+                title="Unproduced derived summary",
+                text="This hypothetical derived node must not define the mirror contract.",
                 visibility="org",
                 confidence=0.7,
             ),
@@ -475,19 +487,103 @@ async def test_memory_connector_mirrors_only_shared_consolidated_memories(
     assert items[0].entities == ["decision", "engineering"]
     assert items[0].extra == {
         "archived": False,
-        "consolidated": True,
         "confidence": 0.92,
         "freshness_status": "fresh",
         "memory_type": "decision",
-        "node_kind": "summary",
+        "node_kind": "content",
         "org_id": _ORG_ID,
         "scope": "engineering",
         "sensitivity": "low",
+        "source_backed": True,
         "source_type": "reconstructive_memory_node",
         "superseded": False,
         "superseded_by": None,
         "truth_status": "active",
         "visibility": "org",
+    }
+
+
+async def test_memory_connector_reports_an_empty_searchable_corpus(session):
+    result = await sync_connector(session, MemoryConnector(max_items=10))
+    state = await session.get(KnowledgeSyncState, "memory")
+
+    assert result.status == "ok"
+    assert result.stats == {
+        "ingested": 0,
+        "skipped": 0,
+        "failed": 0,
+        "truncated": 0,
+        "empty": 1,
+    }
+    assert state is not None
+    assert state.last_stats == result.stats
+
+
+async def test_memory_connector_indexes_the_content_kind_produced_by_ingestion(
+    session,
+    embedding_runtime,
+    monkeypatch,
+):
+    del embedding_runtime
+    from brain.systems.reconstructive_memory import embeddings as memory_embeddings
+
+    monkeypatch.setattr(memory_embeddings, "embed_node_texts", AsyncMock())
+    ingested = await ingest_memory_source(
+        session,
+        content=(
+            "Release ownership stays with the agent already working the ticket. "
+            "New workers must inspect active assignments before claiming it."
+        ),
+        content_kind="decision",
+        source_kind="contract_test",
+        source_ref="knowledge-memory-contract",
+        org_id=_ORG_ID,
+        visibility="team",
+        scope_key="engineering",
+        confidence=0.9,
+    )
+
+    first = await sync_connector(session, MemoryConnector(max_items=20))
+    mirrored_refs = list(
+        (
+            await session.scalars(
+                select(KnowledgeItem.source_ref).where(
+                    KnowledgeItem.source == "memory"
+                )
+            )
+        ).all()
+    )
+    produced_kinds = set(
+        (
+            await session.scalars(
+                select(MemoryNode.node_kind).where(
+                    MemoryNode.id.in_(
+                        [
+                            ingested.content_node_id,
+                            *ingested.tag_node_ids,
+                            *ingested.cue_node_ids,
+                        ]
+                    )
+                )
+            )
+        ).all()
+    )
+
+    assert produced_kinds == {"content", "tag", "cue"}
+    assert mirrored_refs == [f"memory_node:{ingested.content_node_id}"]
+    assert first.stats == {
+        "ingested": 1,
+        "skipped": 0,
+        "failed": 0,
+        "truncated": 0,
+    }
+
+    unchanged = await sync_connector(session, MemoryConnector(max_items=20))
+    assert unchanged.stats == {
+        "ingested": 0,
+        "skipped": 0,
+        "failed": 0,
+        "truncated": 0,
     }
 
 
@@ -646,6 +742,7 @@ async def test_memory_connector_scrubs_a_mirror_when_visibility_becomes_private(
         "skipped": 0,
         "failed": 0,
         "truncated": 0,
+        "empty": 1,
     }
     assert result.cursor == {"updated_at": withdrawn_at.isoformat(), "id": 41}
     assert mirrored is not None
@@ -653,14 +750,14 @@ async def test_memory_connector_scrubs_a_mirror_when_visibility_becomes_private(
     assert mirrored.title == "Memory no longer shared"
     assert (
         mirrored.summary
-        == "This consolidated memory is no longer shared with the workspace."
+        == "This memory is no longer shared with the workspace."
     )
     assert mirrored.raw_text == ""
     assert "launch detail" not in mirrored.search_text
     assert mirrored.extra == {
         "archived": True,
         "mirror_status": "visibility_withdrawn",
-        "node_kind": "summary",
+        "node_kind": "content",
         "org_id": _ORG_ID,
         "truth_status": "active",
         "visibility": "private",

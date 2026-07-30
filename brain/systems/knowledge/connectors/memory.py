@@ -1,7 +1,7 @@
-"""Bounded mirror of shared consolidated memory into Illo Knowledge.
+"""Bounded mirror of shared source-backed memory into Illo Knowledge.
 
 Knowledge search does not yet enforce per-user memory visibility.  This
-connector therefore mirrors only ``org`` and ``team`` summaries; private
+connector therefore mirrors only ``org`` and ``team`` content nodes; private
 memory remains exclusively owned by the memory subsystem until the knowledge
 index has an ACL-aware read path.  The mirror is derived and additive: it reads
 ``MemoryNode`` rows and never participates in memory recall or mutation.
@@ -21,6 +21,7 @@ from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, Memor
 from brain.systems.knowledge.connectors.base import KnowledgeDraft
 
 _SHARED_VISIBILITIES = ("org", "team")
+_KNOWLEDGE_NODE_KINDS = ("content",)
 
 
 def _cursor_datetime(value: Any) -> datetime | None:
@@ -46,7 +47,7 @@ def _draft_for_memory(
     *,
     superseded_by: int | None,
 ) -> KnowledgeDraft:
-    summary = str(node.text or node.canonical_label).strip()
+    content = str(node.text or node.canonical_label).strip()
     memory_kind = str(node.content_kind or node.node_kind).strip()
     scope = str(node.scope_key or "default").strip()
     superseded = node.truth_status == "superseded" or superseded_by is not None
@@ -56,12 +57,11 @@ def _draft_for_memory(
         kind="memory",
         source_ref=f"memory_node:{node.id}",
         title=str(node.canonical_label).strip(),
-        summary=summary,
+        summary=content,
         entities=list(dict.fromkeys((memory_kind, scope))),
-        raw_text=summary,
+        raw_text=content,
         extra={
             "archived": node.archived_at is not None,
-            "consolidated": True,
             "confidence": float(node.confidence or 0.0),
             "freshness_status": node.freshness_status,
             "memory_type": memory_kind,
@@ -69,6 +69,7 @@ def _draft_for_memory(
             "org_id": str(node.org_id) if node.org_id is not None else None,
             "scope": scope,
             "sensitivity": node.sensitivity,
+            "source_backed": True,
             "source_type": "reconstructive_memory_node",
             "superseded": superseded,
             "superseded_by": superseded_by,
@@ -89,7 +90,7 @@ def _withdrawn_draft(node: MemoryNode) -> KnowledgeDraft:
         kind="memory",
         source_ref=f"memory_node:{node.id}",
         title="Memory no longer shared",
-        summary="This consolidated memory is no longer shared with the workspace.",
+        summary="This memory is no longer shared with the workspace.",
         raw_text="",
         extra={
             "archived": True,
@@ -106,7 +107,7 @@ def _withdrawn_draft(node: MemoryNode) -> KnowledgeDraft:
 
 
 class MemoryConnector:
-    """Enumerate shared consolidated memory nodes by update watermark."""
+    """Enumerate shared source-backed memory content by update watermark."""
 
     source_key = "memory"
 
@@ -122,7 +123,7 @@ class MemoryConnector:
         marker_id = max(0, int(cursor.get("id") or 0))
         statement = (
             select(MemoryNode)
-            .where(MemoryNode.node_kind == "summary")
+            .where(MemoryNode.node_kind.in_(_KNOWLEDGE_NODE_KINDS))
             .order_by(MemoryNode.updated_at.asc(), MemoryNode.id.asc())
             .limit(self.max_items)
         )
