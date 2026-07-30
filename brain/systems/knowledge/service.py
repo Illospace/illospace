@@ -68,6 +68,7 @@ class KnowledgeSyncResult:
     status: str
     stats: dict[str, int]
     cursor: dict[str, Any]
+    corpus_empty: bool
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -76,6 +77,7 @@ class KnowledgeSyncResult:
             "status": self.status,
             "stats": self.stats,
             "cursor": self.cursor,
+            "corpus_empty": self.corpus_empty,
         }
         if self.error:
             payload["error"] = self.error
@@ -481,7 +483,7 @@ async def _sync_state(
     source: str,
     cursor: dict[str, Any],
     status: str,
-    stats: KnowledgeSyncStats,
+    stats: dict[str, int],
     run_at: datetime,
 ) -> None:
     state = await session.get(KnowledgeSyncState, source)
@@ -491,8 +493,49 @@ async def _sync_state(
     state.cursor = dict(cursor)
     state.last_run_at = run_at
     state.last_status = status
-    state.last_stats = stats.to_dict()
+    state.last_stats = dict(stats)
     await session.flush()
+
+
+async def _finalize_sync(
+    session: AsyncSession,
+    *,
+    source: str,
+    state_cursor: dict[str, Any],
+    result_cursor: dict[str, Any],
+    status: str,
+    stats: KnowledgeSyncStats,
+    run_at: datetime,
+    error: str | None = None,
+) -> KnowledgeSyncResult:
+    """Persist one sync outcome and expose its current searchable corpus state."""
+
+    stats_payload = stats.to_dict()
+    active_item_id = await session.scalar(
+        select(KnowledgeItem.id)
+        .where(
+            KnowledgeItem.source == source,
+            KnowledgeItem.archived_at.is_(None),
+        )
+        .limit(1)
+    )
+    corpus_empty = active_item_id is None
+    await _sync_state(
+        session,
+        source=source,
+        cursor=state_cursor,
+        status=status,
+        stats=stats_payload,
+        run_at=run_at,
+    )
+    return KnowledgeSyncResult(
+        source=source,
+        status=status,
+        stats=stats_payload,
+        cursor=result_cursor,
+        corpus_empty=corpus_empty,
+        error=error,
+    )
 
 
 async def _ingest_drafts(
@@ -596,39 +639,29 @@ async def sync_connector(
         )
         if pending:
             stats.pending = len(pending)
-            await _sync_state(
+            return await _finalize_sync(
                 session,
                 source=source,
-                cursor=_pending_cursor(
+                state_cursor=_pending_cursor(
                     committed_cursor=committed_cursor,
                     proposed_cursor=proposed_cursor,
                     entries=pending,
                 ),
+                result_cursor=committed_cursor,
                 status="pending",
                 stats=stats,
                 run_at=run_at,
             )
-            return KnowledgeSyncResult(
-                source=source,
-                status="pending",
-                stats=stats.to_dict(),
-                cursor=committed_cursor,
-            )
 
         status = "ok" if stats.failed == 0 else "degraded"
-        await _sync_state(
+        return await _finalize_sync(
             session,
             source=source,
-            cursor=proposed_cursor,
+            state_cursor=proposed_cursor,
+            result_cursor=proposed_cursor,
             status=status,
             stats=stats,
             run_at=run_at,
-        )
-        return KnowledgeSyncResult(
-            source=source,
-            status=status,
-            stats=stats.to_dict(),
-            cursor=proposed_cursor,
         )
 
     cursor = dict(stored_cursor)
@@ -636,20 +669,15 @@ async def sync_connector(
         drafts, new_cursor = await connector.enumerate_changed(session, cursor)
     except Exception as exc:
         stats.failed = 1
-        await _sync_state(
+        logger.exception("Knowledge connector %s enumeration failed", source)
+        return await _finalize_sync(
             session,
             source=source,
-            cursor=cursor,
+            state_cursor=cursor,
+            result_cursor=cursor,
             status="failed",
             stats=stats,
             run_at=run_at,
-        )
-        logger.exception("Knowledge connector %s enumeration failed", source)
-        return KnowledgeSyncResult(
-            source=source,
-            status="failed",
-            stats=stats.to_dict(),
-            cursor=cursor,
             error=str(exc),
         )
 
@@ -693,23 +721,18 @@ async def sync_connector(
             stats=stats,
             run_at=run_at,
         )
-        await _sync_state(
+        return await _finalize_sync(
             session,
             source=source,
-            cursor=_pending_cursor(
+            state_cursor=_pending_cursor(
                 committed_cursor=cursor,
                 proposed_cursor=dict(new_cursor),
                 entries=entries,
             ),
+            result_cursor=cursor,
             status="pending",
             stats=stats,
             run_at=run_at,
-        )
-        return KnowledgeSyncResult(
-            source=source,
-            status="pending",
-            stats=stats.to_dict(),
-            cursor=cursor,
         )
 
     if admission_fallbacks:
@@ -723,19 +746,14 @@ async def sync_connector(
         )
 
     status = "ok" if stats.failed == 0 else "degraded"
-    await _sync_state(
+    return await _finalize_sync(
         session,
         source=source,
-        cursor=dict(new_cursor),
+        state_cursor=dict(new_cursor),
+        result_cursor=dict(new_cursor),
         status=status,
         stats=stats,
         run_at=run_at,
-    )
-    return KnowledgeSyncResult(
-        source=source,
-        status=status,
-        stats=stats.to_dict(),
-        cursor=dict(new_cursor),
     )
 
 

@@ -147,7 +147,7 @@ def _memory_node(
     node_id: int,
     at: datetime,
     *,
-    node_kind: str = "summary",
+    node_kind: str = "content",
     content_kind: str = "decision",
     title: str | None = None,
     text: str | None = None,
@@ -409,7 +409,7 @@ async def test_domain_records_connector_advances_and_resumes_watermark_with_id_t
     ) == ["domain_record:1", "domain_record:2", "domain_record:3"]
 
 
-async def test_memory_connector_mirrors_only_shared_consolidated_memories(
+async def test_memory_connector_mirrors_only_shared_source_backed_memories(
     session,
     embedding_runtime,
 ):
@@ -429,10 +429,10 @@ async def test_memory_connector_mirrors_only_shared_consolidated_memories(
             _memory_node(
                 12,
                 updated_at,
-                node_kind="content",
+                node_kind="summary",
                 content_kind="decision",
-                title="Unconsolidated source",
-                text="This source memory must not be mirrored yet.",
+                title="Unproduced derived summary",
+                text="This hypothetical derived node must not define the mirror contract.",
                 visibility="org",
                 confidence=0.7,
             ),
@@ -441,7 +441,7 @@ async def test_memory_connector_mirrors_only_shared_consolidated_memories(
                 updated_at,
                 content_kind="preference",
                 title="Private preference",
-                text="This user-private summary must remain in memory only.",
+                text="This private content must remain in memory only.",
                 scope="personal",
                 org_id=None,
                 user_id="22222222-2222-4222-8222-222222222222",
@@ -462,6 +462,7 @@ async def test_memory_connector_mirrors_only_shared_consolidated_memories(
         "failed": 0,
         "truncated": 0,
     }
+    assert result.to_dict()["corpus_empty"] is False
     assert result.cursor == {"updated_at": updated_at.isoformat(), "id": 13}
     assert [item.source_ref for item in items] == ["memory_node:11"]
     assert items[0].source == "memory"
@@ -475,20 +476,37 @@ async def test_memory_connector_mirrors_only_shared_consolidated_memories(
     assert items[0].entities == ["decision", "engineering"]
     assert items[0].extra == {
         "archived": False,
-        "consolidated": True,
         "confidence": 0.92,
         "freshness_status": "fresh",
         "memory_type": "decision",
-        "node_kind": "summary",
+        "node_kind": "content",
         "org_id": _ORG_ID,
         "scope": "engineering",
         "sensitivity": "low",
+        "source_backed": True,
         "source_type": "reconstructive_memory_node",
         "superseded": False,
         "superseded_by": None,
         "truth_status": "active",
         "visibility": "org",
     }
+
+
+async def test_memory_connector_reports_an_empty_searchable_corpus(session):
+    result = await sync_connector(session, MemoryConnector(max_items=10))
+    state = await session.get(KnowledgeSyncState, "memory")
+
+    assert result.status == "ok"
+    assert result.stats == {
+        "ingested": 0,
+        "skipped": 0,
+        "failed": 0,
+        "truncated": 0,
+    }
+    assert result.corpus_empty is True
+    assert result.to_dict()["corpus_empty"] is True
+    assert state is not None
+    assert state.last_stats == result.stats
 
 
 async def test_memory_connector_resumes_a_bounded_same_timestamp_backfill(
@@ -503,7 +521,7 @@ async def test_memory_connector_resumes_a_bounded_same_timestamp_backfill(
                 node_id,
                 updated_at,
                 content_kind="lesson",
-                title=f"Consolidated lesson {node_id}",
+                title=f"Source-backed lesson {node_id}",
                 text=f"Durable lesson body {node_id}",
                 visibility="team",
             )
@@ -647,20 +665,21 @@ async def test_memory_connector_scrubs_a_mirror_when_visibility_becomes_private(
         "failed": 0,
         "truncated": 0,
     }
+    assert result.corpus_empty is True
     assert result.cursor == {"updated_at": withdrawn_at.isoformat(), "id": 41}
     assert mirrored is not None
     assert mirrored.archived_at.replace(tzinfo=timezone.utc) == withdrawn_at
     assert mirrored.title == "Memory no longer shared"
     assert (
         mirrored.summary
-        == "This consolidated memory is no longer shared with the workspace."
+        == "This memory is no longer shared with the workspace."
     )
     assert mirrored.raw_text == ""
     assert "launch detail" not in mirrored.search_text
     assert mirrored.extra == {
         "archived": True,
         "mirror_status": "visibility_withdrawn",
-        "node_kind": "summary",
+        "node_kind": "content",
         "org_id": _ORG_ID,
         "truth_status": "active",
         "visibility": "private",
