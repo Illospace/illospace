@@ -26,11 +26,36 @@ class ContactFormOwnerPolicy:
         configured_slack_id = _clean(configured.get("slack_user_id")) or None
         configured_name = _clean(configured.get("name")) or None
         if configured_slack_id:
+            link = _mapping(identity_links.get(configured_slack_id))
             return ObligationAnswerer(
-                name=configured_name or self.default_name,
+                name=(
+                    configured_name
+                    or _clean(link.get("display_name"))
+                    or self.default_name
+                ),
                 slack_user_id=configured_slack_id,
-                user_id=configured_user_id,
+                user_id=(
+                    configured_user_id
+                    or _clean(link.get("user_id"))
+                    or _clean(identity_map.get(configured_slack_id))
+                    or None
+                ),
             )
+
+        if configured_user_id:
+            for slack_user_id, mapped_user_id in identity_map.items():
+                if _clean(mapped_user_id) != configured_user_id:
+                    continue
+                link = _mapping(identity_links.get(slack_user_id))
+                return ObligationAnswerer(
+                    name=(
+                        configured_name
+                        or _clean(link.get("display_name"))
+                        or self.default_name
+                    ),
+                    slack_user_id=_clean(slack_user_id),
+                    user_id=configured_user_id,
+                )
 
         for slack_user_id, raw_link in identity_links.items():
             link = _mapping(raw_link)
@@ -43,26 +68,16 @@ class ContactFormOwnerPolicy:
                 user_id=_clean(link.get("user_id")) or None,
             )
 
-        owner_user_id = (
-            configured_user_id
-            or _clean(_connection_value(connection, "owner_user_id"))
-            or None
-        )
-        if owner_user_id:
-            for slack_user_id, mapped_user_id in identity_map.items():
-                if _clean(mapped_user_id) != owner_user_id:
-                    continue
-                link = _mapping(identity_links.get(slack_user_id))
-                return ObligationAnswerer(
-                    name=_clean(link.get("display_name")) or self.default_name,
-                    slack_user_id=_clean(slack_user_id),
-                    user_id=owner_user_id,
-                )
-
+        default_link = _mapping(identity_links.get(self.default_slack_user_id))
         return ObligationAnswerer(
-            name=self.default_name,
+            name=_clean(default_link.get("display_name")) or self.default_name,
             slack_user_id=self.default_slack_user_id,
-            user_id=owner_user_id,
+            user_id=(
+                configured_user_id
+                or _clean(default_link.get("user_id"))
+                or _clean(identity_map.get(self.default_slack_user_id))
+                or None
+            ),
         )
 
 

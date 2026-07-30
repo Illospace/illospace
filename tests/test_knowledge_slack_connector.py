@@ -27,6 +27,7 @@ from brain.platform.db.models.org import Org, User
 from brain.jobs.pipelines.knowledge_index_sync import CONNECTOR_FACTORIES
 from brain.kernel.config import KNOWLEDGE_EMBEDDING_DIM
 from brain.systems.knowledge.connectors.slack import SlackKnowledgeConnector
+from brain.systems.knowledge.search import search_knowledge
 from brain.systems.knowledge.service import sync_connector
 from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
 
@@ -206,7 +207,86 @@ def embedding_runtime(monkeypatch):
         "embed_document",
         lambda text, runtime_config=None: vector,
     )
+    monkeypatch.setattr(
+        embedding_client,
+        "embed_query",
+        lambda text, runtime_config=None: vector,
+    )
     return runtime
+
+
+async def test_contact_form_thread_fields_and_assessment_are_retrievable(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    await _seed_monitored_slack(session)
+    slack = _SlackHistory()
+    slack.messages = [
+        {
+            "ts": "1785283200.000100",
+            "bot_id": "B_CONTACT_FORM",
+            "text": "\n".join(
+                [
+                    "New Contact Form Submission",
+                    "Name: Prospect",
+                    "Email: prospect@example.com",
+                    "Company Website: https://prospect.example",
+                    "Message: Can Uwear support our catalog?",
+                ]
+            ),
+        },
+        {
+            "ts": "1785283260.000200",
+            "bot_id": "BILLO",
+            "text": (
+                "Assessment: first-party category pages show about 480 products "
+                "in a specialist apparel catalog. Likely strong mid-market fit."
+            ),
+        },
+    ]
+    connector = SlackKnowledgeConnector(client=slack, max_items=1)
+
+    dispatched = await sync_connector(session, connector)
+    run = (await session.scalars(select(AgentRunRow))).one()
+    run.status = "completed"
+    session.add(
+        AgentRunArtifactRow(
+            run_id=run.id,
+            root_run_id=run.root_run_id,
+            artifact_type="final_answer",
+            text=json.dumps(
+                {
+                    "question": "What is the assessment of this inbound lead?",
+                    "summary": (
+                        "The prospect has about 480 products in specialist apparel "
+                        "and is likely a strong mid-market fit."
+                    ),
+                    "resolution": None,
+                    "systems": ["slack", "sales"],
+                    "code_references": [],
+                }
+            ),
+        )
+    )
+    await session.flush()
+
+    indexed = await sync_connector(session, connector)
+    item = (await session.scalars(select(KnowledgeItem))).one()
+    result = await search_knowledge(
+        session,
+        "prospect 480 products mid-market fit",
+        org_id=_ORG_ID,
+        sources=["slack"],
+    )
+
+    assert dispatched.status == "pending"
+    assert indexed.status == "ok"
+    assert "prospect@example.com" in item.raw_text
+    assert "about 480 products" in item.raw_text
+    assert [row["source_ref"] for row in result["results"]] == [
+        "slack:T789:CINCIDENTS:1785283200.000100"
+    ]
 
 
 async def test_slack_backfill_is_bounded_and_reports_each_page_through_shared_stats(

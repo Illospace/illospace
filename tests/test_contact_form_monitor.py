@@ -131,7 +131,7 @@ def test_contact_form_lead_is_decoded_from_slack_blocks():
     )
 
 
-def test_contact_form_policy_builds_threaded_dossier_route_and_obligation():
+def test_contact_form_policy_builds_threaded_mandate_route_and_obligation():
     from brain.systems.runs.obligation_specs import (
         obligation_spec_from_metadata,
     )
@@ -179,25 +179,23 @@ def test_contact_form_policy_builds_threaded_dossier_route_and_obligation():
     assert metadata["required_response_tool"] == "post_slack_reply"
     assert metadata["headless"] is True
     assert metadata["contact_form_lead"]["owner"]["slack_user_id"] == "UREDA"
+    assert metadata["contact_form_lead_skill"] == "contact-form-lead-intake"
+    assert metadata["contact_form_lead_mandate_source"] == "installed_skill"
     spec = obligation_spec_from_metadata(metadata["obligation_spec"])
     assert spec is not None
     assert spec.answerer.slack_user_id == "UREDA"
     assert spec.notice_after.total_seconds() == 24 * 60 * 60
-    assert metadata["contact_form_lead_dossier"].startswith(
-        "*Contact-form lead*"
-    )
+    assert "contact_form_lead_dossier" not in metadata
     assert work["payload"]["slack"]["response_target"]["thread_ts"] == (
         "1716900000.000200"
     )
-    dossier = metadata["contact_form_lead_dossier"]
-    assert "Aline Athaydes" in dossier
-    assert "https://www.madamedusk.com" in dossier
-    assert "1. Can Uwear generate consistent models wearing lingerie?" in dossier
-    assert "<@UREDA>" in dossier
-    assert "*Next action:*" in dossier
-    assert "reply in this thread with verified answers" in dossier
-    assert "on-call" not in dossier.casefold()
-    assert "answers_open_ask=false" in work["payload"]["run_message"]
+    run_message = work["payload"]["run_message"]
+    assert run_message.startswith("/contact-form-lead-intake\n")
+    assert "skill_view" in run_message
+    assert '"company_website": "https://www.madamedusk.com"' in run_message
+    assert '"slack_user_id": "UREDA"' in run_message
+    assert "*Contact-form lead*" not in run_message
+    assert "*Answer:*" not in run_message
 
 
 def test_contact_form_owner_policy_defaults_once_without_identity_mapping():
@@ -212,80 +210,147 @@ def test_contact_form_owner_policy_defaults_once_without_identity_mapping():
     assert owner.to_metadata() == {
         "name": "Reda",
         "slack_user_id": "U04R1A6MZST",
-        "user_id": "user-reda",
+        "user_id": None,
     }
 
 
-def test_aline_athaydes_replay_keeps_all_capabilities_human_answered():
+def test_contact_form_owner_policy_never_uses_the_connection_owner():
+    from brain.systems.slack.contact_form_lead_owner import (
+        CONTACT_FORM_OWNER_POLICY,
+    )
+
+    owner = CONTACT_FORM_OWNER_POLICY.resolve(
+        FakeSlackConnection(
+            owner_user_id="user-axel",
+            metadata={
+                "slack": {
+                    "identity_map": {
+                        "UAXEL": "user-axel",
+                    }
+                },
+                "identity_links": {
+                    "slack": {
+                        "UAXEL": {
+                            "user_id": "user-axel",
+                            "display_name": "Axel",
+                        }
+                    }
+                },
+            },
+        )
+    )
+
+    assert owner.to_metadata() == {
+        "name": "Reda",
+        "slack_user_id": "U04R1A6MZST",
+        "user_id": None,
+    }
+
+
+def test_contact_form_reply_behavior_is_an_installed_runtime_skill():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(
+        BUILTIN_SKILL_BUNDLE_ROOT / "contact-form-lead-intake"
+    )
+
+    assert bundle.manifest.source == "self_hosted"
+    assert bundle.manifest.visibility == "private_local"
+    procedure = bundle.skill_markdown
+    for requirement in (
+        "website with `web_fetch` or the browser tools",
+        "company/catalog size",
+        "vertical",
+        "likely Uwear fit",
+        "likely deal size",
+        "`search_knowledge`",
+        "`post_slack_reply`",
+        "`SlackKnowledgeConnector`",
+        "Do not re-list or label the submitted name, email",
+        "Do not emit a per-question `Answer:` section",
+    ):
+        assert requirement in procedure
+    for hardcoded_example in (
+        "madamedusk",
+        "lingerie",
+        "bikini",
+        "corset",
+        "thong",
+        "bergzeit",
+    ):
+        assert hardcoded_example not in procedure.casefold()
+
+
+@pytest.mark.asyncio
+async def test_contact_form_mandate_is_runtime_editable_connection_metadata():
     from brain.systems.runs.obligation_specs import ObligationAnswerer
+    from brain.systems.runs.tool_catalog.definitions.cortex_thread import (
+        CHAT_TOOLS,
+    )
     from brain.systems.slack.contact_form_lead_rendering import (
-        contact_form_lead_dossier,
+        contact_form_lead_run_message,
     )
     from brain.systems.slack.contact_form_leads import ContactFormLead
+    from brain.systems.slack.monitors import (
+        contact_form_lead_mandate,
+        set_contact_form_lead_mandate,
+    )
 
-    dossier = contact_form_lead_dossier(
+    connection = FakeSlackConnection()
+    mandate = "Post a two-line commercial assessment with source links."
+    result = await set_contact_form_lead_mandate(
+        FakeSlackSession(connection),
+        connection_id=connection.id,
+        org_id=connection.org_id,
+        mandate=mandate,
+    )
+    run_message = contact_form_lead_run_message(
         ContactFormLead(
-            name="Aline Athaydes",
-            email="aline@madamedusk.com",
-            company_website="www.madamedusk.com",
+            name="Prospect",
+            email="prospect@example.com",
+            company_website="https://prospect.example",
             phone=None,
-            message="\n".join(
-                [
-                    "I have four questions before signing up:",
-                    (
-                        "1. Can it generate AI models wearing lingerie and bikinis, "
-                        "including sheer and lace pieces?"
-                    ),
-                    (
-                        "2. Does it support back and rear-view shots (thong, "
-                        "lace-up corset back from behind)?"
-                    ),
-                    (
-                        "3. Does it preserve the real lace/embroidery rather than "
-                        "substituting a garment?"
-                    ),
-                    (
-                        "4. Can a consistent model carry across multiple products "
-                        "for catalog cohesion?"
-                    ),
-                    (
-                        "I understand your Qwen Intimate feature may require a "
-                        "verification step for intimate apparel. Could you let me know "
-                        "what's involved and how to get it enabled for my store?"
-                    ),
-                ]
-            ),
+            message="Tell me about Uwear.",
         ),
         ObligationAnswerer(
             name="Reda",
             slack_user_id="UREDA",
             user_id="user-reda",
         ),
+        {
+            "channel_id": "C_ALERTS",
+            "response_target": {"thread_ts": "1716900000.000200"},
+        },
+        mandate=contact_form_lead_mandate(connection),
+    )
+    manage_slack = next(
+        tool for tool in CHAT_TOOLS if tool["name"] == "manage_slack"
     )
 
-    expected_asks = [
-        "generate AI models wearing lingerie and bikinis",
-        "support back and rear-view shots",
-        "preserve the real lace/embroidery",
-        "consistent model carry across multiple products",
-        "Qwen Intimate feature may require a verification step",
-    ]
-    for index, ask in enumerate(expected_asks, start=1):
-        assert f"{index}." in dossier
-        assert ask in dossier
-    assert dossier.count("*Answer:* needs a human answer") == 5
+    assert result["metadata_path"] == "slack.contact_form_lead_mandate"
+    assert mandate in run_message
+    assert not run_message.startswith("/contact-form-lead-intake")
+    assert "set_contact_form_lead_mandate" in (
+        manage_slack["input_schema"]["properties"]["action"]["enum"]
+    )
+    assert "mandate" in manage_slack["input_schema"]["properties"]
 
 
 @pytest.mark.asyncio
 async def test_contact_form_lead_gets_common_eyes_and_policy_enrichment(
     monkeypatch,
 ):
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
     connector_module, reactions, submitted = patch_slack_connector(monkeypatch)
     connection = FakeSlackConnection(
+        owner_user_id="user-axel",
         metadata={
             "slack": {
                 "monitored_channels": ["C_ALERTS"],
                 "identity_map": {"UREDA": "user-reda"},
+                "contact_form_lead_mandate": "Configured lead assessment.",
             },
             "identity_links": {
                 "slack": {
@@ -317,12 +382,26 @@ async def test_contact_form_lead_gets_common_eyes_and_policy_enrichment(
 
     assert reactions == [("C_ALERTS", "1716900000.000200", "eyes")]
     assert submitted[0]["origin"] == "contact_form_lead"
+    assert (
+        submitted[0]["payload"]["contact_form_lead_mandate"]
+        == "Configured lead assessment."
+    )
     owner = submitted[0]["payload"]["contact_form_lead"]["owner"]
     assert owner == {
         "name": "Reda",
         "slack_user_id": "UREDA",
         "user_id": "user-reda",
     }
+    work = build_slack_work_intake_payload(
+        org_id=connection.org_id,
+        authority_user_id="user-reda",
+        payload=submitted[0]["payload"],
+    )
+    assert (
+        work["payload"]["metadata"]["contact_form_lead_mandate_source"]
+        == "slack_connection_metadata"
+    )
+    assert "Configured lead assessment." in work["payload"]["run_message"]
 
 
 @pytest.mark.asyncio

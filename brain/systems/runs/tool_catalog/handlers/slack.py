@@ -1063,6 +1063,7 @@ async def _handle_manage_slack(
     channel_types: str | list[str] | None = None,
     channel_id: str | None = None,
     channel_name: str | None = None,
+    mandate: str | None = None,
     limit: int = 200,
     cursor: str | None = None,
     include_archived: bool = False,
@@ -1086,6 +1087,7 @@ async def _handle_manage_slack(
         add_monitored_channel,
         list_monitored_channels,
         remove_monitored_channel,
+        set_contact_form_lead_mandate,
     )
 
     async with UnitOfWork() as uow:
@@ -1265,13 +1267,25 @@ async def _handle_manage_slack(
             except SlackMonitorConfigError as exc:
                 return json.dumps({"error": str(exc)})
             return json.dumps({"ok": True, **result}, default=str)
+        if normalized_action == "set_contact_form_lead_mandate":
+            try:
+                result = await set_contact_form_lead_mandate(
+                    uow.session,
+                    connection_id=str(connection.id),
+                    mandate=str(mandate or ""),
+                    org_id=org_id,
+                )
+            except SlackMonitorConfigError as exc:
+                return json.dumps({"error": str(exc)})
+            return json.dumps({"ok": True, **result}, default=str)
 
     return json.dumps(
         {
             "error": (
                 "manage_slack action must be status, list_channels, list_mappings, "
                 "link_identity, unlink_identity, list_monitored, monitor_channel, "
-                "unmonitor_channel, or open_alert_surges"
+                "unmonitor_channel, set_contact_form_lead_mandate, or "
+                "open_alert_surges"
             )
         }
     )

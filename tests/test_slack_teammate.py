@@ -1768,9 +1768,12 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
         "list_monitored",
         "monitor_channel",
         "unmonitor_channel",
+        "set_contact_form_lead_mandate",
         "open_alert_surges",
     ]
-    assert {"display_name", "communication_preferences"} <= set(properties)
+    assert {"display_name", "communication_preferences", "mandate"} <= set(
+        properties
+    )
     assert properties["communication_preferences"]["properties"]["humour"]["enum"] == [
         "none",
         "light",

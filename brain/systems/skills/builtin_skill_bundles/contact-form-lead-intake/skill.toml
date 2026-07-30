@@ -1,0 +1,28 @@
+schema_version = 1
+name = "contact-form-lead-intake"
+display_name = "Contact-form Lead Intake"
+version = "1.0.0"
+description = "Assess a monitored website contact-form lead from website evidence, post a concise commercial read to the source Slack thread, and leave the complete thread queryable through the Slack knowledge connector."
+license = "UNLICENSED"
+source = "self_hosted"
+visibility = "private_local"
+maturity = "emerging"
+
+[routing]
+triggers = [
+  { pattern = "New Contact Form Submission", direction = "for" },
+  { pattern = "assess this contact-form lead", direction = "for" },
+  { pattern = "website inbound sales lead", direction = "for" },
+  { pattern = "ordinary monitored Slack alert", direction = "against" },
+  { pattern = "customer support generation complaint", direction = "against" },
+]
+
+[runtime]
+default_thinking_tier = "high"
+
+[permissions]
+toolsets = ["brain"]
+
+[loading]
+summary = "SKILL.md#role"
+procedure = "SKILL.md"
