@@ -7,7 +7,7 @@ COMPOSE_DIR="$ROOT/deploy/compose"
 COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
 ENV_FILE="${ILLO_COMPOSE_ENV_FILE:-$COMPOSE_DIR/.env}"
 
-# Provides compose() plus the shared stack invariants (assert_stack_not_inert).
+# Provides compose() plus the shared stack invariants.
 source "$SCRIPT_DIR/compose-runtime-lib.sh"
 source "$SCRIPT_DIR/agent-run-queue-health-lib.sh"
 
@@ -223,6 +223,16 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
       pass "every always-on service is running"
     else
       fail "Compose stack is missing an always-on service; see the report above"
+    fi
+
+    if printf '%s\n' "$running" | grep -qx worker; then
+      worker_lifecycle_status=0
+      assert_worker_not_drained || worker_lifecycle_status=$?
+      if [ "$worker_lifecycle_status" -eq 0 ]; then
+        pass "worker lifecycle phase is not drained"
+      else
+        fail "worker cannot claim new AgentRuns; see the lifecycle report above"
+      fi
     fi
 
     for service in $DOCTOR_REQUIRED_SERVICES; do

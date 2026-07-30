@@ -465,6 +465,55 @@ def test_restarted_container_cannot_reuse_a_stale_claiming_record(tmp_path):
     assert "last cover observation: pending" in result.stderr
 
 
+def test_draining_worker_fails_the_shared_capacity_assertion(tmp_path):
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        body=(
+            "publish_phase worker-1 draining\n"
+            "assert_worker_not_drained"
+        ),
+    )
+    result = _run(script)
+
+    assert "STATUS=5" in result.stdout
+    assert "worker-1" in result.stderr
+    assert "draining" in result.stderr
+    assert "cannot claim new AgentRuns" in result.stderr
+
+
+def test_claiming_worker_passes_the_shared_capacity_assertion(tmp_path):
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        body=(
+            "publish_phase worker-1 claiming\n"
+            "assert_worker_not_drained"
+        ),
+    )
+    result = _run(script)
+
+    assert "STATUS=0" in result.stdout
+    assert result.stderr == ""
+
+
+def test_stale_draining_record_is_not_accepted_as_the_live_worker_phase(tmp_path):
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        body=(
+            "publish_phase worker-1 draining\n"
+            'printf "worker-generation-2\\n" > "$STATE/worker-1.generation"\n'
+            "assert_worker_not_drained"
+        ),
+    )
+    result = _run(script)
+
+    assert "STATUS=0" in result.stdout
+    assert "DRAINED" not in result.stderr
+    assert "draining" not in result.stderr
+
+
 def test_a_confirmed_handoff_exit_ends_the_drain_wait(tmp_path):
     """A definite Docker exit is lost cover; only an unanswered inspect is pending."""
 

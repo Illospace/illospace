@@ -55,6 +55,10 @@ def _fake_docker(tmp_path: Path) -> Path:
               echo healthy
               exit 0
             fi
+            if [ "${{1:-}}" = "exec" ] && [[ "$args" == *"brain.contracts.worker_lifecycle read"* ]]; then
+              echo "${{FAKE_WORKER_PHASE:-claiming}}"
+              exit 0
+            fi
             if [ "${{1:-}}" = "compose" ]; then
               case "$args" in
                 *" config")
@@ -69,8 +73,12 @@ def _fake_docker(tmp_path: Path) -> Path:
                   exit 0
                   ;;
                 *"brain.app.cli.agent_run_queue_health"*"--stale-after-seconds 725"*"--runner-concurrency 8")
-                  echo "{QUEUE_STARVATION_DIAGNOSTIC}" >&2
-                  exit 1
+                  if [ "${{FAKE_QUEUE_STARVED:-1}}" = "1" ]; then
+                    echo "{QUEUE_STARVATION_DIAGNOSTIC}" >&2
+                    exit 1
+                  fi
+                  echo "AgentRun queue healthy: no stale queued backlog."
+                  exit 0
                   ;;
                 *"pg_extension"*)
                   echo vector
@@ -92,10 +100,17 @@ def _fake_docker(tmp_path: Path) -> Path:
     return bin_dir
 
 
-def _entrypoint_env(tmp_path: Path) -> dict[str, str]:
+def _entrypoint_env(
+    tmp_path: Path,
+    *,
+    worker_phase: str = "claiming",
+    queue_starved: bool = True,
+) -> dict[str, str]:
     env = os.environ.copy()
     env["ILLO_COMPOSE_ENV_FILE"] = str(_deploy_env_file(tmp_path))
     env["PATH"] = f"{_fake_docker(tmp_path)}:{env['PATH']}"
+    env["FAKE_WORKER_PHASE"] = worker_phase
+    env["FAKE_QUEUE_STARVED"] = "1" if queue_starved else "0"
     return env
 
 
@@ -120,6 +135,49 @@ def test_deploy_entrypoint_fails_when_agent_run_queue_is_starved(
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert QUEUE_STARVATION_DIAGNOSTIC in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "expected_exit_code"),
+    [
+        ("deploy/scripts/doctor.sh", 1),
+        ("deploy/scripts/inert-stack-check.sh", 5),
+    ],
+)
+def test_deploy_entrypoint_fails_when_worker_is_draining(
+    entrypoint: str,
+    expected_exit_code: int,
+    tmp_path: Path,
+):
+    result = subprocess.run(
+        [str(ROOT / entrypoint)],
+        cwd=ROOT,
+        env=_entrypoint_env(
+            tmp_path,
+            worker_phase="draining",
+            queue_starved=False,
+        ),
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == expected_exit_code, result.stdout + result.stderr
+    assert "container-id" in result.stderr
+    assert "draining" in result.stderr
+    assert "cannot claim new AgentRuns" in result.stderr
+
+
+def test_drained_worker_verdict_has_one_owner_and_both_entrypoints_call_it():
+    runtime_lib = (ROOT / "deploy" / "scripts" / "compose-runtime-lib.sh").read_text()
+    doctor = (ROOT / "deploy" / "scripts" / "doctor.sh").read_text()
+    inert_check = (ROOT / "deploy" / "scripts" / "inert-stack-check.sh").read_text()
+
+    assert runtime_lib.count("assert_worker_not_drained() {") == 1
+    assert "assert_worker_not_drained" in doctor
+    assert "assert_worker_not_drained" in inert_check
+    assert "draining" not in doctor
+    assert "draining" not in inert_check
+    assert "$STACK_DRAINED_EXIT_CODE  DRAINED" in inert_check
 
 
 def test_queue_health_adapter_passes_deploy_policy_to_api_cli():
