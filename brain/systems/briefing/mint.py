@@ -16,13 +16,14 @@ Load-bearing stances:
 - **Noise gate.** ``create_launch_handoff_with_status`` reuse
   (``created=False``) means this content already went out — mint records
   NO Slack delivery on reuse. Re-triage of unchanged truth is silent.
-- **Post-commit delivery.** Mint never posts to Slack itself: the write
-  phase records a pending ``PacketBriefDelivery`` (one per handoff id)
-  inside its savepoint, and ``brain.systems.briefing.deliver`` posts it
-  strictly after the enclosing transaction commits — a rolled-back mint
-  leaves no Slack message, a crash-retry cannot double-post (the
-  deterministic ``packet-brief:<handoff_id>`` identity plus the
-  thread-read disambiguation own that).
+- **No Slack briefs (Reda, 2026-07-30).** The ticket IS the handoff, so
+  the live lanes record no ``PacketBriefDelivery`` — packets mint silently
+  and their launch URLs are reached from tickets and digests. The
+  ``deliver_to`` mechanism below survives for callers that still owe a
+  post (none today) and for draining legacy outbox rows via
+  ``brain.systems.briefing.deliver``; the post-commit outbox invariants it
+  enforces (rolled-back mint leaves no message, crash-retry cannot
+  double-post) still hold for those.
 - **Supersede, existing vocabulary only.** When the job's truth changes,
   the new revision is a NEW row (new idempotency key); the prior row —
   found via the idea's packet stamp — becomes ``archived`` +
@@ -60,18 +61,15 @@ from brain.systems.briefing.deliver import (
     DeliveryTarget,
     record_brief_delivery,
     refresh_pending_delivery_brief,
-    schedule_post_commit_delivery,
     transfer_pending_delivery,
 )
 from brain.systems.briefing.gather import (
-    PUBLIC_CHANNEL_TYPE,
     DefaultGithubReader,
     DefaultSlackReader,
     GithubReader,
     SlackReader,
     gather_pieces,
     load_inbound_event,
-    slack_provenance,
 )
 from brain.systems.inbound.attribution import durable_work_refs
 from brain.systems.launch_handoffs import (
@@ -594,25 +592,6 @@ def _record_job_ref(attribution: dict[str, Any] | None, idea: Any) -> str:
     return f"idea:{getattr(idea, 'id', '')}"
 
 
-def _delivery_target_for_event(event: Any) -> tuple[DeliveryTarget | None, str]:
-    """Origin-thread delivery target — same provenance and public-only
-    allowlist the deleted in-transaction post used, but resolved at MINT
-    time so the outbox row snapshots channel/thread_ts and delivery never
-    needs the event again. Returns (target, "") or (None, why)."""
-    provenance = slack_provenance(event) if event is not None else None
-    if not provenance:
-        return None, "no_slack_provenance"
-    if provenance["channel_type"] != PUBLIC_CHANNEL_TYPE:
-        return None, "non_public"
-    return DeliveryTarget(
-        channel=provenance["channel"],
-        thread_ts=provenance["thread_ts"],
-        # Crash disambiguation trusts only Illo-authored thread messages —
-        # the same identity gather's echo filter already keys on.
-        bot_user_id=str(provenance.get("bot_user_id") or "") or None,
-    ), ""
-
-
 async def _mint_for_idea_and_event(
     session: Any,
     *,
@@ -624,16 +603,19 @@ async def _mint_for_idea_and_event(
     job_ref: str | None = None,
 ) -> MintResult:
     """Shared stage for every inbound-completion lane once the job-home idea
-    is resolved: owner → target → mint → record-delivery-once. Raises upward;
-    the lane-facing wrappers own containment. The Slack reply itself is
-    post-commit: the savepoint records the obligation, the after-commit fast
-    path (or the notify-cycle sweep) sends it."""
+    is resolved: owner → target → mint. Raises upward; the lane-facing
+    wrappers own containment.
+
+    No Slack brief is recorded: the ticket IS the handoff (Reda,
+    2026-07-30 — "we don't need handoffs anymore, the tickets are enough").
+    Packets still mint so their launch URLs stay reachable from tickets and
+    digests; only the origin-thread "→ owner · Launch: …" post is retired.
+    """
     details = dict(getattr(idea, "agent_details", None) or {})
     assignment = dict(details.get("assignment") or {})
     owner_user_id = str(assignment.get("owner_id") or "") or None
     owner_label = await _owner_label(session, owner_user_id)
     target_tool = agent_target_for_member(owner_user_id, _member_targets())
-    deliver_to, delivery_skip = _delivery_target_for_event(event)
     actionable_lane = (
         dict(details.get("inbound_triage") or {}).get("reason")
         == "actionable_run_completion"
@@ -660,19 +642,9 @@ async def _mint_for_idea_and_event(
         source_ref=packet_source_ref,
         readers=readers,
         reader_user_id=str(getattr(event, "authority_user_id", "") or "") or None,
-        deliver_to=deliver_to,
     )
     if result.ok and result.created:
-        if deliver_to is None:
-            result.delivery = f"skipped:{delivery_skip}"
-        elif result.delivery == "recorded":
-            try:
-                schedule_post_commit_delivery(
-                    session, org_id=org_id, handoff_ids=[str(result.handoff.id)]
-                )
-            except Exception as exc:  # noqa: BLE001 — the sweep remains the guaranteed path
-                logger.warning("packet %s minted but fast-path dispatch failed to arm: %s",
-                               getattr(result.handoff, "id", "?"), exc)
+        result.delivery = "skipped:briefs_retired"
     return result
 
 
