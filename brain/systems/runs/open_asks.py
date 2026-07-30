@@ -760,7 +760,7 @@ async def record_inbound_slack_obligation_answer(
                     OpenAsk.status == OPEN_ASK_STATUS,
                 )
                 .order_by(OpenAsk.id.asc())
-                .with_for_update()
+                .with_for_update(of=[OpenAsk, ObligationNotice])
             )
         ).all()
     )
