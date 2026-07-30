@@ -87,6 +87,12 @@ OPEN_RUN_STATUS_VALUES = (
     RunStatus.QUEUED.value,
     *ACTIVE_RUN_STATUS_VALUES,
 )
+TERMINAL_RUN_STATUS_VALUES = (
+    RunStatus.COMPLETED.value,
+    RunStatus.FAILED.value,
+    RunStatus.CANCELED.value,
+    RunStatus.EXPIRED.value,
+)
 PROCESSING_RUN_STATUS_VALUES = (
     RunStatus.STARTING.value,
     RunStatus.RUNNING.value,

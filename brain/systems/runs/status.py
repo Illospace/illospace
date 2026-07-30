@@ -12,17 +12,15 @@ from brain.contracts.statuses import (
     RUN_FAILED_STATUS_VALUE,
     RUN_STATUS_ALIASES,
     RUN_STATUS_VALUES,
+    TERMINAL_RUN_STATUS_VALUES,
     RunStatus,
     project_run_status_value,
 )
 
 
-TERMINAL_RUN_STATUSES = frozenset({
-    RunStatus.COMPLETED,
-    RunStatus.FAILED,
-    RunStatus.CANCELED,
-    RunStatus.EXPIRED,
-})
+TERMINAL_RUN_STATUSES = frozenset(
+    RunStatus(status) for status in TERMINAL_RUN_STATUS_VALUES
+)
 
 ACTIVE_RUN_STATUSES = frozenset({
     RunStatus.STARTING,
@@ -44,6 +42,9 @@ assert ACTIVE_RUN_STATUS_VALUES == tuple(
     status.value for status in RunStatus if status in ACTIVE_RUN_STATUSES
 )
 assert OPEN_RUN_STATUS_VALUES == tuple(status.value for status in RunStatus if status in OPEN_RUN_STATUSES)
+assert TERMINAL_RUN_STATUS_VALUES == tuple(
+    status.value for status in RunStatus if status in TERMINAL_RUN_STATUSES
+)
 assert PROCESSING_RUN_STATUS_VALUES == tuple(
     status.value for status in RunStatus if status in PROCESSING_RUN_STATUSES
 )
@@ -148,6 +149,7 @@ __all__ = [
     "RunTransitionError",
     "RUN_STATUS_VALUES",
     "TERMINAL_RUN_STATUSES",
+    "TERMINAL_RUN_STATUS_VALUES",
     "coerce_run_status",
     "ensure_run_transition",
     "project_run_status_value",
