@@ -11,6 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.org import User, UserCodexConnection
 from brain.systems.external_agents import service as external_agents
+from brain.systems.slack.identity import (
+    SlackIdentitySource,
+    link_slack_identity,
+    normalize_slack_identities,
+    unlink_slack_identity,
+)
 
 
 def _clean(value: Any) -> str:
@@ -67,6 +73,8 @@ def _connection_identity_links(connection: ExternalAgentConnectionRow) -> list[d
     identities: list[dict[str, Any]] = []
     links = _links_root(connection)
     for provider, provider_links in links.items():
+        if _provider(provider) == "slack":
+            continue
         if not isinstance(provider_links, Mapping):
             continue
         for external_user_id, raw_link in provider_links.items():
@@ -87,25 +95,34 @@ def _connection_identity_links(connection: ExternalAgentConnectionRow) -> list[d
                 )
             )
 
-    slack_metadata = _metadata(_metadata(connection.metadata_).get("slack"))
-    slack_map = slack_metadata.get("identity_map")
-    if isinstance(slack_map, Mapping):
-        for slack_user_id, user_id in slack_map.items():
-            clean_slack_user_id = _clean(slack_user_id)
-            clean_user_id = _clean(user_id)
-            if not clean_slack_user_id or not clean_user_id:
-                continue
+    records, _conflicts = normalize_slack_identities(
+        _metadata(connection.metadata_)
+    )
+    for record in records.values():
+        if record.user_id is None:
+            continue
+        user_id = record.user_id
+        if SlackIdentitySource.LINK in record.sources and record.linked_user_id:
             identities.append(
                 _identity_payload(
                     provider="slack",
-                    external_user_id=clean_slack_user_id,
-                    user_id=clean_user_id,
-                    source="external_connection.slack.identity_map",
+                    external_user_id=record.slack_user_id,
+                    user_id=user_id,
+                    display_name=record.link_display_name,
+                    metadata=record.link_metadata,
+                    source=SlackIdentitySource.LINK.value,
                     connection=connection,
-                    metadata={
-                        "team_id": slack_metadata.get("team_id"),
-                        "bot_user_id": slack_metadata.get("bot_user_id"),
-                    },
+                )
+            )
+        if SlackIdentitySource.MAP in record.sources and record.mapped_user_id:
+            identities.append(
+                _identity_payload(
+                    provider="slack",
+                    external_user_id=record.slack_user_id,
+                    user_id=user_id,
+                    source=SlackIdentitySource.MAP.value,
+                    connection=connection,
+                    metadata=record.map_metadata,
                 )
             )
     return identities
@@ -291,41 +308,63 @@ async def manage_identity(
     if connection is None or str(connection.org_id) != principal.org_id:
         raise ValueError("External source connection not found")
 
-    links = _links_root(connection)
-    provider_links = dict(links.get(provider) or {})
     removed = False
-    if action == "unlink":
-        removed = external_user_id in provider_links
-        provider_links.pop(external_user_id, None)
-    else:
+    is_slack_connection = provider == "slack" and connection.agent_kind == "slack"
+    if is_slack_connection and action == "unlink":
+        records, _conflicts = normalize_slack_identities(
+            _metadata(connection.metadata_)
+        )
+        record = records.get(external_user_id)
+        removed = bool(
+            record is not None
+            and SlackIdentitySource.LINK in record.sources
+        )
+        await unlink_slack_identity(
+            db,
+            connection_id=connection_id,
+            slack_user_id=external_user_id,
+            org_id=principal.org_id,
+        )
+    elif is_slack_connection:
         user_id = _clean(arguments.get("user_id"))
         if not user_id:
             raise ValueError("identity.manage action link requires user_id")
         user = await db.get(User, user_id)
         if user is None or str(user.org_id) != principal.org_id:
             raise ValueError("Illospace user not found")
-        provider_links[external_user_id] = {
-            "user_id": user_id,
-            "display_name": _clean(arguments.get("display_name")) or None,
-            "metadata": _metadata(arguments.get("metadata")),
-        }
-    if provider_links:
-        links[provider] = provider_links
+        await link_slack_identity(
+            db,
+            connection_id=connection_id,
+            slack_user_id=external_user_id,
+            user_id=user_id,
+            org_id=principal.org_id,
+            display_name=_clean(arguments.get("display_name")) or None,
+            link_metadata=_metadata(arguments.get("metadata")),
+            replace_profile=True,
+        )
     else:
-        links.pop(provider, None)
-    _set_links_root(connection, links)
-
-    if provider == "slack" and connection.agent_kind == "slack":
-        metadata = _metadata(connection.metadata_)
-        slack_metadata = _metadata(metadata.get("slack"))
-        identity_map = dict(slack_metadata.get("identity_map") or {})
+        links = _links_root(connection)
+        provider_links = dict(links.get(provider) or {})
         if action == "unlink":
-            identity_map.pop(external_user_id, None)
+            removed = external_user_id in provider_links
+            provider_links.pop(external_user_id, None)
         else:
-            identity_map[external_user_id] = _clean(arguments.get("user_id"))
-        slack_metadata["identity_map"] = identity_map
-        metadata["slack"] = slack_metadata
-        connection.metadata_ = metadata
+            user_id = _clean(arguments.get("user_id"))
+            if not user_id:
+                raise ValueError("identity.manage action link requires user_id")
+            user = await db.get(User, user_id)
+            if user is None or str(user.org_id) != principal.org_id:
+                raise ValueError("Illospace user not found")
+            provider_links[external_user_id] = {
+                "user_id": user_id,
+                "display_name": _clean(arguments.get("display_name")) or None,
+                "metadata": _metadata(arguments.get("metadata")),
+            }
+        if provider_links:
+            links[provider] = provider_links
+        else:
+            links.pop(provider, None)
+        _set_links_root(connection, links)
 
     await db.flush()
     return {

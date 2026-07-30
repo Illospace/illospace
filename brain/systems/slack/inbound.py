@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.kernel.common.coercion import optional_text
+from brain.kernel.common.coercion import as_mapping, optional_text
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.inbound import InboundEventRow
 from brain.platform.db.models.org import User
@@ -25,6 +25,11 @@ from brain.systems.slack.chantier_declare import (
     ChantierDeclareResult,
     apply_chantier_declare_run_contract,
     maybe_declare_chantier_from_slack,
+)
+from brain.systems.slack.identity import (
+    SlackIdentityRecord,
+    SlackIdentitySource,
+    normalize_slack_identities,
 )
 from brain.systems.slack.triggers import (
     SLACK_MESSAGE_ENVELOPE_KIND,
@@ -179,65 +184,53 @@ async def _slack_run_identity(
     if slack_user_id:
         connection = await session.get(ExternalAgentConnectionRow, context.connection_id)
         if connection is not None:
-            metadata = dict(connection.metadata_ or {})
-            slack_metadata = metadata.get("slack")
-            if isinstance(slack_metadata, Mapping):
-                identity_map = slack_metadata.get("identity_map")
-                if isinstance(identity_map, Mapping):
-                    mapped_user_id = optional_text(identity_map.get(slack_user_id))
-                    if mapped_user_id:
-                        user = await session.get(User, mapped_user_id)
-                        if user is not None and str(user.org_id) == str(context.org_id):
-                            person_context = _linked_slack_person_context(
-                                metadata,
-                                slack_user_id=slack_user_id,
-                                mapped_user_id=mapped_user_id,
-                                channel_type=payload.get("channel_type"),
-                            )
-                            return mapped_user_id, person_context
+            records, _conflicts = normalize_slack_identities(
+                connection.metadata_ or {}
+            )
+            record = records.get(slack_user_id)
+            mapped_user_id = record.user_id if record is not None else None
+            if mapped_user_id:
+                user = await session.get(User, mapped_user_id)
+                if user is not None and str(user.org_id) == str(context.org_id):
+                    person_context = _linked_slack_person_context(
+                        record,
+                        channel_type=payload.get("channel_type"),
+                    )
+                    return mapped_user_id, person_context
     return context.owner_user_id, None
 
 
 def _linked_slack_person_context(
-    connection_metadata: Mapping[str, Any],
+    record: SlackIdentityRecord,
     *,
-    slack_user_id: str,
-    mapped_user_id: str,
     channel_type: Any,
 ) -> dict[str, Any] | None:
-    """Read explicit Slack preferences only after authority mapping."""
+    """Use normalized Slack preferences only after authority reconciliation."""
 
-    identity_links = connection_metadata.get("identity_links")
-    if not isinstance(identity_links, Mapping):
-        return None
-    slack_links = identity_links.get("slack")
-    if not isinstance(slack_links, Mapping):
-        return None
-    raw_link = slack_links.get(slack_user_id)
-    if not isinstance(raw_link, Mapping):
-        return None
-    if optional_text(raw_link.get("user_id")) != mapped_user_id:
+    if (
+        SlackIdentitySource.LINK not in record.sources
+        or record.user_id is None
+        or record.linked_user_id != record.user_id
+    ):
         return None
 
-    link_metadata = raw_link.get("metadata")
-    link_metadata = dict(link_metadata) if isinstance(link_metadata, Mapping) else {}
-    raw_preferences = link_metadata.get("communication_preferences")
-    preferences = dict(raw_preferences) if isinstance(raw_preferences, Mapping) else {}
-    if str(channel_type or "").strip().lower() == "im":
-        address_as = optional_text(raw_link.get("display_name"))
-        if address_as:
-            preferences.setdefault("address_as", address_as)
+    preferences = as_mapping(
+        record.link_metadata.get("communication_preferences")
+    )
+    if (optional_text(channel_type) or "").lower() == "im":
+        if record.link_display_name:
+            preferences.setdefault("address_as", record.link_display_name)
     else:
         preferences.pop("address_as", None)
 
     person_context = normalize_person_context(
         {
             "mapping": "verified",
-            "user_id": mapped_user_id,
+            "user_id": record.user_id,
             "source": "slack_identity_link",
             "preferences": preferences,
         },
-        verified_user_id=mapped_user_id,
+        verified_user_id=record.user_id,
     )
     return person_context or None
 

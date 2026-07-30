@@ -2367,6 +2367,63 @@ async def test_slack_identity_mapping_uses_linked_illospace_user_for_run(session
 
 
 @pytest.mark.asyncio
+async def test_slack_identity_conflict_does_not_authorize_either_user_for_run(
+    session,
+):
+    from brain.systems.inbound.service import submit_inbound_envelope
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    connection = await _seed_slack_connection(session)
+    session.add(
+        User(
+            id=MAPPED_USER_ID,
+            org_id=ORG_ID,
+            name="Mapped user",
+            email="mapped@example.com",
+        )
+    )
+    session.add(
+        User(
+            id=OTHER_MAPPED_USER_ID,
+            org_id=ORG_ID,
+            name="Linked user",
+            email="linked@example.com",
+        )
+    )
+    connection.metadata_ = {
+        "slack": {
+            "team_id": "T789",
+            "bot_user_id": "BILLO",
+            "identity_map": {"U123": MAPPED_USER_ID},
+        },
+        "identity_links": {
+            "slack": {
+                "U123": {
+                    "user_id": OTHER_MAPPED_USER_ID,
+                    "display_name": "Conflicted user",
+                }
+            }
+        },
+    }
+    await session.flush()
+
+    envelope = normalize_slack_socket_event(
+        _socket_mode_app_mention(),
+        bot_user_id="BILLO",
+    )
+
+    await submit_inbound_envelope(
+        session,
+        connection=connection,
+        envelope=envelope,
+    )
+
+    run = (await session.scalars(select(AgentRunRow))).one()
+    assert run.user_id == USER_ID
+    assert "person_context" not in run.metadata_
+
+
+@pytest.mark.asyncio
 async def test_slack_identity_link_supplies_explicit_dm_communication_preferences(session):
     from brain.systems.inbound.service import submit_inbound_envelope
     from brain.systems.slack.ingress import normalize_slack_socket_event
@@ -2428,8 +2485,14 @@ async def test_slack_identity_link_supplies_explicit_dm_communication_preference
 
 def test_slack_person_context_rejects_mismatched_identity_link_and_shared_address():
     from brain.systems.slack.inbound import _linked_slack_person_context
+    from brain.systems.slack.identity import normalize_slack_identities
 
     metadata = {
+        "slack": {
+            "identity_map": {
+                "U123": MAPPED_USER_ID,
+            }
+        },
         "identity_links": {
             "slack": {
                 "U123": {
@@ -2440,18 +2503,16 @@ def test_slack_person_context_rejects_mismatched_identity_link_and_shared_addres
             }
         }
     }
+    records, _conflicts = normalize_slack_identities(metadata)
     assert _linked_slack_person_context(
-        metadata,
-        slack_user_id="U123",
-        mapped_user_id=MAPPED_USER_ID,
+        records["U123"],
         channel_type="im",
     ) is None
 
     metadata["identity_links"]["slack"]["U123"]["user_id"] = MAPPED_USER_ID
+    records, _conflicts = normalize_slack_identities(metadata)
     person = _linked_slack_person_context(
-        metadata,
-        slack_user_id="U123",
-        mapped_user_id=MAPPED_USER_ID,
+        records["U123"],
         channel_type="channel",
     )
     assert person["preferences"] == {"tone": "warm"}
@@ -2499,6 +2560,54 @@ async def test_slack_identity_mapping_service_links_user(session):
             }
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_list_slack_identity_mappings_keeps_conflicted_pair_for_operator(
+    session,
+):
+    """A conflict must stay visible at the surface an operator actually uses.
+
+    ``normalize_slack_identities`` resolves a linked-vs-mapped disagreement to
+    ``user_id=None`` so two identities can never be spliced. That is only
+    repairable if the unresolved pair still appears in the mapping listing the
+    Slack tool handler reads -- dropping it would hide the misconfiguration
+    rather than report it.
+    """
+
+    from brain.systems.slack.identity import list_slack_identity_mappings
+
+    connection = await _seed_slack_connection(session)
+    connection.metadata_ = {
+        "slack": {
+            "identity_map": {
+                "UCONFLICT": MAPPED_USER_ID,
+            }
+        },
+        "identity_links": {
+            "slack": {
+                "UCONFLICT": {
+                    "user_id": OTHER_MAPPED_USER_ID,
+                    "display_name": "Conflicted user",
+                }
+            }
+        },
+    }
+    await session.flush()
+
+    mappings = await list_slack_identity_mappings(
+        session,
+        connection_id=str(connection.id),
+        org_id=ORG_ID,
+    )
+
+    assert mappings == [
+        {
+            "slack_user_id": "UCONFLICT",
+            "user_id": None,
+            "user_name": None,
+        }
+    ]
 
 
 @pytest.mark.asyncio
