@@ -1,0 +1,120 @@
+{
+  "question_set_id": "illospace-knowledge-recall-seed",
+  "version": "1",
+  "description": "Hand-seeded questions from real closed Illospace incidents and their resolving GitHub PRs. These are not claimed to be verbatim query-log entries. Acceptable-evidence pointers are the items that actually ANSWER the question; an issue merely closed by the same PR is not automatically evidence.",
+  "cases": [
+    {
+      "case_id": "memory-mirror-produced-node-kind",
+      "question": "Which reconstructive-memory node kind should the knowledge mirror index, and why?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#586"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#607"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#586",
+          "github:Illospace/illospace#607"
+        ]
+      }
+    },
+    {
+      "case_id": "agent-run-zero-capacity-detection",
+      "question": "How do deploy checks detect that the worker has zero AgentRun claiming capacity?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#549"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#579"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#608"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_prs",
+        "source_refs": [
+          "github:Illospace/illospace#549",
+          "github:Illospace/illospace#579",
+          "github:Illospace/illospace#608"
+        ]
+      }
+    },
+    {
+      "case_id": "tool-event-transaction-boundary",
+      "question": "Why could a completed tool block AgentRun follow-up settlement, and what transaction boundary fixed it?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#593"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#606"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#593",
+          "github:Illospace/illospace#606"
+        ]
+      }
+    },
+    {
+      "case_id": "agent-run-deadline-contract",
+      "question": "What deadline and graceful close-out contract prevents AgentRuns from running forever?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#505"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#580"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#505",
+          "github:Illospace/illospace#580"
+        ],
+        "excluded_evidence": {
+          "github:Illospace/illospace#510": "Closed alongside #580 in the timeline, but #510 is an observability ticket (my_activity dead fields, worker self-monitoring, pushing token budget into context) and does not answer the deadline/close-out question. Listing it as acceptable evidence would score an unrelated hit as a success and inflate recall."
+        }
+      }
+    },
+    {
+      "case_id": "sibling-agent-run-deadlock",
+      "question": "What lock ordering prevents sibling AgentRuns from deadlocking on their shared parent?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#567"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#575"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#567",
+          "github:Illospace/illospace#575"
+        ]
+      }
+    }
+  ]
+}
