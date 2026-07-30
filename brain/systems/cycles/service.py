@@ -20,6 +20,8 @@ from brain.systems.cycles.auth_preflight import (
 )
 from brain.systems.cycles.common import (
     MANUAL_CYCLE_ORIGIN,
+    MAX_CYCLE_TIMEOUT_SECONDS,
+    MIN_CYCLE_TIMEOUT_SECONDS,
     REUSABLE_THREAD_EXECUTION_MODE,
     SCHEDULED_CYCLE_ORIGIN,
     SCHEDULED_DIGEST_RUN_KIND,
@@ -135,6 +137,7 @@ async def _async_admit_cycle_run(
     metadata: dict | None,
     cycle_run_id: int,
     model_policy: dict | None = None,
+    deadline_at: datetime | None = None,
 ) -> int | None:
     result = await admit_work(
         session,
@@ -148,6 +151,7 @@ async def _async_admit_cycle_run(
                 "message": message,
                 "metadata": dict(metadata or {}),
                 "model_policy": dict(model_policy or {}),
+                **({"deadline_at": deadline_at} if deadline_at is not None else {}),
             },
             policy={
                 "priority": priority,
@@ -158,6 +162,33 @@ async def _async_admit_cycle_run(
         ),
     )
     return result.run_id if result.ok else None
+
+
+def _cycle_run_deadline_at(
+    cycle: Cycle,
+    *,
+    now: datetime | None = None,
+) -> datetime | None:
+    raw_timeout = cycle.timeout_seconds
+    if raw_timeout is None:
+        return None
+    timeout_seconds = min(
+        max(int(raw_timeout), MIN_CYCLE_TIMEOUT_SECONDS),
+        MAX_CYCLE_TIMEOUT_SECONDS,
+    )
+    if timeout_seconds != raw_timeout:
+        logger.warning(
+            "Clamping out-of-range Cycle timeout_seconds at run admission",
+            extra={
+                "cycle_id": cycle.id,
+                "stored_timeout_seconds": raw_timeout,
+                "effective_timeout_seconds": timeout_seconds,
+            },
+        )
+    # This operational policy is read live from the Cycle row at admission.
+    # CycleRevision deliberately snapshots mission content, not run deadlines.
+    admitted_at = now or datetime.now(timezone.utc)
+    return admitted_at + timedelta(seconds=timeout_seconds)
 
 
 def _cycle_run_model_policy(cycle: Cycle, run: CycleRun) -> dict[str, str]:
@@ -873,6 +904,7 @@ async def async_execute_cycle_run(run_id: int) -> None:
                 metadata=run_metadata,
                 cycle_run_id=run.id,
                 model_policy=run_model_policy,
+                deadline_at=_cycle_run_deadline_at(cycle),
             )
             if agent_run_id is None:
                 await _finalize_cycle_run(

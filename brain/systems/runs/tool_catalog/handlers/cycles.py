@@ -19,6 +19,7 @@ from brain.systems.cycles.access import (
 from brain.systems.cycles.common import (
     AGENT_TRIGGERED_CYCLE_ORIGIN,
     OFF_SLOT_MATERIAL_ALERT_RUN_KIND,
+    validate_cycle_timeout_seconds,
 )
 from brain.systems.cycles.contracts import normalize_cycle_run_kind
 from brain.systems.cycles.commands import (
@@ -56,6 +57,7 @@ class ManageCycleArgs:
     run_at: str | None = None
     timezone: str | None = None
     enabled: bool | None = None
+    timeout_seconds: Any = UNSET_CYCLE_FIELD
     model_override: str | None = None
     thinking_override: str | None = None
     target_idea_id: str | None = None
@@ -89,6 +91,7 @@ async def _handle_manage_cycle(
     run_at: str | None = None,
     timezone: str | None = None,
     enabled: bool | None = None,
+    timeout_seconds=UNSET_CYCLE_FIELD,
     model_override: str | None = None,
     thinking_override: str | None = None,
     target_idea_id: str | None = None,
@@ -112,6 +115,7 @@ async def _handle_manage_cycle(
         run_at=run_at,
         timezone=timezone,
         enabled=enabled,
+        timeout_seconds=timeout_seconds,
         model_override=model_override,
         thinking_override=thinking_override,
         target_idea_id=target_idea_id,
@@ -137,6 +141,7 @@ async def _handle_manage_cycle_async(
     run_at: str | None = None,
     timezone: str | None = None,
     enabled: bool | None = None,
+    timeout_seconds=UNSET_CYCLE_FIELD,
     model_override: str | None = None,
     thinking_override: str | None = None,
     target_idea_id: str | None = None,
@@ -171,6 +176,7 @@ async def _handle_manage_cycle_async(
         run_at=run_at,
         timezone=timezone,
         enabled=enabled,
+        timeout_seconds=timeout_seconds,
         model_override=model_override,
         thinking_override=thinking_override,
         target_idea_id=target_idea_id,
@@ -283,6 +289,11 @@ async def _action_usage_summary(ctx: ManageCycleContext) -> dict[str, Any]:
 
 async def _action_create(ctx: ManageCycleContext) -> dict[str, Any]:
     args = ctx.args
+    timeout_seconds = (
+        None
+        if args.timeout_seconds is UNSET_CYCLE_FIELD
+        else validate_cycle_timeout_seconds(args.timeout_seconds)
+    )
     async with UnitOfWork() as uow:
         await _validate_target_idea(uow.session, args.target_idea_id, ctx.actor)
         cycle = await async_create_cycle(
@@ -294,6 +305,7 @@ async def _action_create(ctx: ManageCycleContext) -> dict[str, Any]:
             schedule_expr=_optional_text(args.schedule_expr),
             run_at=_optional_text(args.run_at),
             enabled=True if args.enabled is None else args.enabled,
+            timeout_seconds=timeout_seconds,
             model_override=args.model_override,
             thinking_override=args.thinking_override,
             target_idea_id=_optional_text(args.target_idea_id),
@@ -307,6 +319,9 @@ async def _action_create(ctx: ManageCycleContext) -> dict[str, Any]:
 
 async def _action_update(ctx: ManageCycleContext) -> dict[str, Any]:
     args = ctx.args
+    timeout_seconds = args.timeout_seconds
+    if timeout_seconds is not UNSET_CYCLE_FIELD:
+        timeout_seconds = validate_cycle_timeout_seconds(timeout_seconds)
     async with UnitOfWork() as uow:
         cycle = await _load_cycle(uow.session, ctx.actor, args.id)
         update_target_idea_id = _optional_text(args.target_idea_id)
@@ -322,6 +337,7 @@ async def _action_update(ctx: ManageCycleContext) -> dict[str, Any]:
             schedule_expr=_patch_text(args.schedule_expr),
             run_at=_patch_text(args.run_at),
             enabled=_patch_value(args.enabled),
+            timeout_seconds=timeout_seconds,
             model_override=_patch_value(args.model_override),
             thinking_override=_patch_text(args.thinking_override),
             target_idea_id=_patch_text(args.target_idea_id),

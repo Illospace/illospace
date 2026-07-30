@@ -7,6 +7,7 @@ from brain.platform.db.models.cycle import Cycle
 from brain.systems.cycles.access import CycleActor
 from brain.systems.cycles.common import (
     canonical_execution_mode,
+    validate_cycle_timeout_seconds,
     validate_model_override,
     validate_nonempty_trimmed,
     validate_thinking_override,
@@ -50,6 +51,7 @@ async def async_create_cycle(
     run_at=None,
     enabled: bool = True,
     max_concurrency: int = 1,
+    timeout_seconds: int | None = None,
     model_override: str | None = None,
     thinking_override: str | None = None,
     target_idea_id: str | None = None,
@@ -71,6 +73,7 @@ async def async_create_cycle(
         timezone=tz_name,
         enabled=enabled,
         max_concurrency=_validated_max_concurrency(max_concurrency),
+        timeout_seconds=validate_cycle_timeout_seconds(timeout_seconds),
         model_override=validate_model_override(model_override),
         thinking_override=validate_thinking_override(thinking_override),
         execution_mode=canonical_execution_mode(),
@@ -118,6 +121,7 @@ async def async_update_cycle(
     run_at=UNSET_CYCLE_FIELD,
     enabled=UNSET_CYCLE_FIELD,
     max_concurrency=UNSET_CYCLE_FIELD,
+    timeout_seconds=UNSET_CYCLE_FIELD,
     model_override=UNSET_CYCLE_FIELD,
     thinking_override=UNSET_CYCLE_FIELD,
     target_idea_id=UNSET_CYCLE_FIELD,
@@ -136,6 +140,11 @@ async def async_update_cycle(
         if _is_patch_field_set(thinking_override)
         else UNSET_CYCLE_FIELD
     )
+    next_timeout_seconds = (
+        validate_cycle_timeout_seconds(timeout_seconds)
+        if _is_patch_field_set(timeout_seconds)
+        else UNSET_CYCLE_FIELD
+    )
     if _has_patch_value(run_at):
         next_schedule_expr = build_one_time_schedule_expr(run_at, next_timezone)
     elif _has_patch_value(schedule_expr):
@@ -151,6 +160,8 @@ async def async_update_cycle(
         cycle.enabled = enabled
     if _is_patch_field_set(max_concurrency):
         cycle.max_concurrency = _validated_max_concurrency(max_concurrency)
+    if _is_patch_field_set(next_timeout_seconds):
+        cycle.timeout_seconds = next_timeout_seconds
     if _is_patch_field_set(next_model_override):
         cycle.model_override = next_model_override
     if _is_patch_field_set(next_thinking_override):

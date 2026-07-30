@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+# Tool definitions stay import-leaf: importing brain.systems.cycles here runs
+# that package's __init__ mid runs-package init and closes an import cycle.
+# Bounds owned by brain.systems.cycles.common MIN/MAX_CYCLE_TIMEOUT_SECONDS.
+MIN_CYCLE_TIMEOUT_SECONDS = 60
+MAX_CYCLE_TIMEOUT_SECONDS = 14_400
+
 
 _WORKSPACE_TIME_WINDOW_VALUES = [
     "all",
@@ -861,6 +867,7 @@ BRAIN_TOOLS = [
             "which Cycles exist or what ran recently, prefer read_cycles first. Actions: 'create', "
             "'list', 'usage_summary', 'update', 'delete', 'run', 'add_guidance', 'add_output_target', "
             "'remove_output_target'. usage_summary is read-only and reports real token/cost burn from model API calls. "
+            "Use timeout_seconds to set the live per-Cycle agent-run deadline policy. "
             "Use action='help' or action='schema' with operation to inspect "
             "arguments before mutating."
         ),
@@ -913,6 +920,21 @@ BRAIN_TOOLS = [
                 },
                 "timezone": {"type": "string", "description": "IANA timezone name"},
                 "enabled": {"type": "boolean", "description": "Whether the cycle is active"},
+                "timeout_seconds": {
+                    "oneOf": [
+                        {
+                            "type": "integer",
+                            "minimum": MIN_CYCLE_TIMEOUT_SECONDS,
+                            "maximum": MAX_CYCLE_TIMEOUT_SECONDS,
+                        },
+                        {"type": "null"},
+                    ],
+                    "description": (
+                        "Live agent-run deadline for each Cycle run, from "
+                        f"{MIN_CYCLE_TIMEOUT_SECONDS} to {MAX_CYCLE_TIMEOUT_SECONDS} seconds. "
+                        "Set null to clear it and use the global default."
+                    ),
+                },
                 "model_override": {"type": "string", "description": "Optional model override"},
                 "thinking_override": {
                     "type": "string",

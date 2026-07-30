@@ -67,12 +67,12 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         },
         "create": {
             "required": ["name", "prompt", "timezone", "schedule_expr or run_at"],
-            "optional": ["enabled", "target_idea_id", "model_override", "thinking_override", "guidance", "rationale"],
+            "optional": ["enabled", "timeout_seconds", "target_idea_id", "model_override", "thinking_override", "guidance", "rationale"],
             "effect": "create a recurring cycle or one-time reminder",
         },
         "update": {
             "required": ["id"],
-            "optional": ["name", "prompt", "timezone", "schedule_expr", "run_at", "enabled", "target_idea_id", "guidance", "rationale"],
+            "optional": ["name", "prompt", "timezone", "schedule_expr", "run_at", "enabled", "timeout_seconds", "target_idea_id", "guidance", "rationale"],
             "effect": "change an existing cycle",
         },
         "delete": {"required": ["id"], "optional": [], "effect": "archive/disable a cycle"},

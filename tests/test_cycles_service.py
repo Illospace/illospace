@@ -544,6 +544,7 @@ def _cycle_execution_objects(*, model_override: str | None) -> tuple[CycleRun, C
     cycle.timezone = "America/Toronto"
     cycle.target_idea_id = idea_id
     cycle.deleted_at = None
+    cycle.timeout_seconds = None
     cycle.model_override = model_override
     cycle.thinking_override = None
 
@@ -999,6 +1000,7 @@ def _cycle_for_serialization(*, schedule_expr: str, timezone_name: str) -> Cycle
     cycle.timezone = timezone_name
     cycle.enabled = True
     cycle.max_concurrency = 1
+    cycle.timeout_seconds = None
     cycle.model_override = None
     cycle.thinking_override = None
     cycle.execution_mode = "new_idea_per_run"
@@ -1043,6 +1045,30 @@ def test_cycle_create_and_update_validate_max_concurrency():
         cycles_router.CycleUpdate(max_concurrency=True)
 
 
+def test_cycle_create_and_update_validate_timeout_seconds():
+    create = CycleCreate(
+        name="Long-running digest",
+        prompt="Run the full digest.",
+        schedule_expr="0 9 * * *",
+        timezone="UTC",
+        timeout_seconds=3600,
+    )
+
+    assert create.timeout_seconds == 3600
+    assert cycles_router.CycleUpdate(timeout_seconds=None).timeout_seconds is None
+    for invalid_timeout in (59, 14_401, True):
+        with pytest.raises(ValidationError):
+            CycleCreate(
+                name="Invalid timeout",
+                prompt="Run safely.",
+                schedule_expr="0 9 * * *",
+                timezone="UTC",
+                timeout_seconds=invalid_timeout,
+            )
+        with pytest.raises(ValidationError):
+            cycles_router.CycleUpdate(timeout_seconds=invalid_timeout)
+
+
 @pytest.mark.asyncio
 async def test_cycle_create_persists_and_serializes_max_concurrency(monkeypatch):
     cycle = _cycle_for_serialization(
@@ -1055,6 +1081,7 @@ async def test_cycle_create_persists_and_serializes_max_concurrency(monkeypatch)
     async def fake_create_cycle(_db, **kwargs):
         captured.update(kwargs)
         cycle.max_concurrency = kwargs["max_concurrency"]
+        cycle.timeout_seconds = kwargs["timeout_seconds"]
         return cycle
 
     monkeypatch.setattr(cycles_router, "command_create_cycle", fake_create_cycle)
@@ -1071,13 +1098,16 @@ async def test_cycle_create_persists_and_serializes_max_concurrency(monkeypatch)
             schedule_expr=cycle.schedule_expr,
             timezone=cycle.timezone,
             max_concurrency=3,
+            timeout_seconds=3600,
         ),
         db=db,
         user={"id": cycle.user_id, "org_id": cycle.org_id},
     )
 
     assert captured["max_concurrency"] == 3
+    assert captured["timeout_seconds"] == 3600
     assert response["max_concurrency"] == 3
+    assert response["timeout_seconds"] == 3600
     CycleRead.model_validate(response)
 
 
@@ -1098,6 +1128,37 @@ async def test_cycle_update_persists_and_serializes_max_concurrency():
 
     assert cycle.max_concurrency == 4
     assert response["max_concurrency"] == 4
+    CycleRead.model_validate(response)
+
+
+@pytest.mark.asyncio
+async def test_cycle_update_sets_and_clears_timeout_seconds():
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="UTC",
+    )
+    db = _RouterCycleSession(cycle)
+
+    response = await cycles_router.update_cycle(
+        cycle.id,
+        cycles_router.CycleUpdate(timeout_seconds=3600),
+        db=db,
+        user={"id": cycle.user_id, "org_id": None},
+    )
+
+    assert cycle.timeout_seconds == 3600
+    assert response["timeout_seconds"] == 3600
+    CycleRead.model_validate(response)
+
+    response = await cycles_router.update_cycle(
+        cycle.id,
+        cycles_router.CycleUpdate(timeout_seconds=None),
+        db=db,
+        user={"id": cycle.user_id, "org_id": None},
+    )
+
+    assert cycle.timeout_seconds is None
+    assert response["timeout_seconds"] is None
     CycleRead.model_validate(response)
 
 
@@ -1749,6 +1810,7 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
         }
     }
     model_policy = service._cycle_run_model_policy(cycle, cycle_run)
+    deadline_at = datetime(2026, 7, 30, 19, 0, tzinfo=timezone.utc)
 
     run_id = await service._async_admit_cycle_run(
         session,
@@ -1759,6 +1821,7 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
         metadata={"source": "cycle", "cycle_run_id": 12},
         cycle_run_id=12,
         model_policy=model_policy,
+        deadline_at=deadline_at,
     )
 
     assert run_id == 77
@@ -1773,13 +1836,56 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
         "model": "openai/gpt-5.4-mini",
         "thinking": "high",
     }
+    assert event.payload["deadline_at"] == deadline_at
     assert event.policy["producer"] == "cycle"
     assert event.policy["idempotency_key"] == "cycle_run:12"
     assert event.policy["run_event"] == "thread_reply"
 
+    await service._async_admit_cycle_run(
+        session,
+        idea_id="idea-1",
+        message="cycle prompt",
+        priority=1,
+        user_id="user-1",
+        metadata={"source": "cycle", "cycle_run_id": 13},
+        cycle_run_id=13,
+        model_policy=model_policy,
+    )
+
+    _, default_deadline_event = calls[1]
+    assert "deadline_at" not in default_deadline_event.payload
+
+
+@pytest.mark.parametrize(
+    ("stored_timeout", "effective_timeout"),
+    [(30, 60), (20_000, 14_400)],
+)
+def test_cycle_run_deadline_clamps_invalid_stored_timeout(
+    stored_timeout,
+    effective_timeout,
+    caplog,
+):
+    cycle = Cycle()
+    cycle.id = 5
+    cycle.timeout_seconds = stored_timeout
+    now = datetime(2026, 7, 30, 18, 0, tzinfo=timezone.utc)
+
+    deadline_at = service._cycle_run_deadline_at(cycle, now=now)
+
+    assert deadline_at == now + timedelta(seconds=effective_timeout)
+    record = next(
+        record
+        for record in caplog.records
+        if record.getMessage()
+        == "Clamping out-of-range Cycle timeout_seconds at run admission"
+    )
+    assert record.cycle_id == cycle.id
+    assert record.stored_timeout_seconds == stored_timeout
+    assert record.effective_timeout_seconds == effective_timeout
+
 
 @pytest.mark.asyncio
-async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeypatch):
+async def test_execute_cycle_run_passes_live_timeout_deadline_and_uuid_idea_id(monkeypatch):
     idea_id = uuid4()
 
     run = CycleRun()
@@ -1799,6 +1905,7 @@ async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeyp
     cycle.timezone = "America/Toronto"
     cycle.target_idea_id = idea_id
     cycle.deleted_at = None
+    cycle.timeout_seconds = 120
     cycle.model_override = "anthropic/claude-sonnet-5"
     cycle.thinking_override = None
 
@@ -1838,12 +1945,18 @@ async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeyp
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
     monkeypatch.setattr(service, "_capture_cycle_emotion", lambda *args, **kwargs: None, raising=False)
 
+    before_admission = datetime.now(timezone.utc)
     await service.async_execute_cycle_run(run.id)
 
     assert run.idea_id == idea_id
     assert run.run_id == 77
     assert run.status == "running"
     assert cycle.last_status == "running"
+    assert (
+        before_admission + timedelta(seconds=120)
+        <= admissions[0]["deadline_at"]
+        <= datetime.now(timezone.utc) + timedelta(seconds=120)
+    )
     assert admissions[0]["metadata"]["origin"] == "cycle"
     assert admissions[0]["metadata"]["launch_envelope"]["origin"] == "scheduled_cycle"
     assert (
@@ -1904,6 +2017,7 @@ async def test_async_execute_cycle_run_uses_native_uow_without_sync_bridges(monk
     cycle.timezone = "America/Toronto"
     cycle.target_idea_id = idea_id
     cycle.deleted_at = None
+    cycle.timeout_seconds = None
     cycle.model_override = "anthropic/claude-sonnet-5"
     cycle.thinking_override = None
 
@@ -1949,6 +2063,7 @@ async def test_async_execute_cycle_run_uses_native_uow_without_sync_bridges(monk
     assert run.status == "running"
     assert cycle.last_status == "running"
     assert admissions[0]["metadata"]["origin"] == "cycle"
+    assert admissions[0]["deadline_at"] is None
     assert "tool_policy" not in admissions[0]["metadata"]
 
 
@@ -2183,6 +2298,39 @@ async def test_execute_cycle_run_creates_execution_thread_when_target_thread_is_
     }
     assert str(target_idea_id) in target_ids
     assert str(created_ideas[0].id) in target_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_timeout", [59, 14_401])
+async def test_manage_cycle_rejects_out_of_range_timeout_before_database_access(
+    monkeypatch,
+    invalid_timeout,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import cycles as cycle_handlers
+
+    def forbidden_unit_of_work():
+        raise AssertionError("invalid timeout_seconds must fail before database access")
+
+    monkeypatch.setattr(cycle_handlers, "UnitOfWork", forbidden_unit_of_work)
+
+    with bind_agent_context({"user_id": "user-1", "org_id": "org-1"}):
+        payload = json.loads(
+            await cycle_handlers._handle_manage_cycle_async(
+                action="create",
+                name="Invalid timeout",
+                prompt="Run safely.",
+                schedule_expr="0 9 * * *",
+                timezone="UTC",
+                timeout_seconds=invalid_timeout,
+            )
+        )
+
+    assert payload == {
+        "error": (
+            "timeout_seconds must be an integer between 60 and 14400, or null"
+        )
+    }
 
 
 @pytest.mark.asyncio

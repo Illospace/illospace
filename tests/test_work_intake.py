@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -509,6 +510,7 @@ async def test_cycle_payload_model_policy_reaches_cortex_run_request(monkeypatch
         fake_thread_context,
     )
 
+    deadline_at = datetime(2026, 7, 30, 19, 0, tzinfo=timezone.utc)
     trigger = _trigger_payload(
         source="cycle",
         event_type="cycle.due_run",
@@ -517,6 +519,7 @@ async def test_cycle_payload_model_policy_reaches_cortex_run_request(monkeypatch
             "message": "Run the mission",
             "metadata": {"source": "cycle", "cycle_run_id": 12},
             "model_policy": {"model": "openai/gpt-5.4-mini", "thinking": "low"},
+            "deadline_at": deadline_at,
         },
         policy={"priority": 1, "run_event": "thread_reply"},
         idempotency_key="cycle_run:12",
@@ -525,6 +528,7 @@ async def test_cycle_payload_model_policy_reaches_cortex_run_request(monkeypatch
     request = await build_agent_run_request(_Session(), WorkIntakeEvent.from_trigger_payload(trigger))
 
     assert request.model_policy == {"model": "openai/gpt-5.4-mini", "thinking": "low"}
+    assert request.deadline_at == deadline_at
 
 
 @pytest.mark.asyncio

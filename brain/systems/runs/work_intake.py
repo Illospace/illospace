@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -819,7 +820,8 @@ async def _build_agent_run_request(
     idea_id = str(target.get("idea_id") or "")
     if not idea_id:
         raise ValueError("Work intake target requires idea_id for Cortex run admission")
-    payload_model_policy = dict(event.payload or {}).get("model_policy")
+    payload = dict(event.payload or {})
+    payload_model_policy = payload.get("model_policy")
     return await _agent_run_request_for_cortex(
         session,
         idea_id=idea_id,
@@ -834,6 +836,7 @@ async def _build_agent_run_request(
         payload_model_policy=(
             payload_model_policy if isinstance(payload_model_policy, dict) else None
         ),
+        deadline_at=payload.get("deadline_at"),
     )
 
 
@@ -954,6 +957,7 @@ async def _agent_run_request_for_cortex(
     producer: str | None = None,
     idempotency_key: str | None = None,
     payload_model_policy: dict[str, Any] | None = None,
+    deadline_at: datetime | None = None,
 ) -> AgentRunRequest:
     idea = await _a_get_idea_for_intake(session, idea_id, fallback_user_id=user_id)
     if idea is None:
@@ -1014,6 +1018,7 @@ async def _agent_run_request_for_cortex(
             if payload_model_policy
             else model_policy_from_metadata(metadata)
         ),
+        deadline_at=deadline_at,
         metadata={
             **metadata,
             "event": event,
