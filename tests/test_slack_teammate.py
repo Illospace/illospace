@@ -1768,11 +1768,13 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
         "list_monitored",
         "monitor_channel",
         "unmonitor_channel",
+        "disable_intake",
+        "enable_intake",
         "set_contact_form_lead_mandate",
         "clear_contact_form_lead_mandate",
         "open_alert_surges",
     ]
-    assert {"display_name", "communication_preferences", "mandate"} <= set(
+    assert {"display_name", "communication_preferences", "intake", "mandate"} <= set(
         properties
     )
     assert properties["communication_preferences"]["properties"]["humour"]["enum"] == [
@@ -1790,6 +1792,7 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
     assert "cannot" not in serialized_tool.lower()
     assert "non-empty mandate" in serialized_tool
     assert "clear_contact_form_lead_mandate" in serialized_tool
+    assert "contact_form_lead" in properties["intake"]["description"]
 
 
 @pytest.mark.asyncio
@@ -1848,6 +1851,94 @@ async def test_manage_slack_omitted_mandate_preserves_it_until_explicit_clear(
     assert cleared["ok"] is True
     assert cleared["cleared"] is True
     assert "contact_form_lead_mandate" not in connection.metadata_["slack"]
+
+
+@pytest.mark.asyncio
+async def test_manage_slack_runtime_intake_policy_roundtrip_and_validation(
+    session,
+    monkeypatch,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_manage_slack
+
+    connection = await _seed_slack_connection(session)
+
+    class _UnitOfWork:
+        def __init__(self):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            await session.flush()
+            return False
+
+    monkeypatch.setattr(
+        "brain.platform.db.repositories.unit_of_work.UnitOfWork",
+        _UnitOfWork,
+    )
+
+    with bind_agent_context({"org_id": ORG_ID}):
+        initial = json.loads(
+            await _handle_manage_slack(
+                action="list_monitored",
+                connection_id=str(connection.id),
+            )
+        )
+        disabled = json.loads(
+            await _handle_manage_slack(
+                action="disable_intake",
+                connection_id=str(connection.id),
+                intake="contact_form_lead",
+            )
+        )
+        listed = json.loads(
+            await _handle_manage_slack(
+                action="list_monitored",
+                connection_id=str(connection.id),
+            )
+        )
+        unknown = json.loads(
+            await _handle_manage_slack(
+                action="disable_intake",
+                connection_id=str(connection.id),
+                intake="sales_lead",
+            )
+        )
+        fallback = json.loads(
+            await _handle_manage_slack(
+                action="disable_intake",
+                connection_id=str(connection.id),
+                intake="slack.channel_message",
+            )
+        )
+        enabled = json.loads(
+            await _handle_manage_slack(
+                action="enable_intake",
+                connection_id=str(connection.id),
+                intake="contact_form_lead",
+            )
+        )
+
+    assert initial["disabled_intakes"] == []
+    assert disabled == {
+        "ok": True,
+        "connection_id": str(connection.id),
+        "metadata_path": "slack.disabled_intakes",
+        "intake": "contact_form_lead",
+        "enabled": False,
+        "disabled_intakes": ["contact_form_lead"],
+    }
+    assert listed["disabled_intakes"] == ["contact_form_lead"]
+    assert "Unknown monitored intake 'sales_lead'" in unknown["error"]
+    assert "valid typed intakes: contact_form_lead" in unknown["error"]
+    assert "fallback intake" in fallback["error"]
+    assert "unmonitor_channel" in fallback["error"]
+    assert enabled["ok"] is True
+    assert enabled["enabled"] is True
+    assert enabled["disabled_intakes"] == []
+    assert "disabled_intakes" not in connection.metadata_["slack"]
 
 
 def test_manage_slack_connection_payload_redacts_private_identity_profiles():

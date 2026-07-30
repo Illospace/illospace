@@ -17,6 +17,7 @@ from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 
 CONTACT_FORM_LEAD_MANDATE_KEY = "contact_form_lead_mandate"
 CONTACT_FORM_LEAD_MANDATE_MAX_CHARS = 20_000
+DISABLED_INTAKES_KEY = "disabled_intakes"
 
 
 class SlackMonitorConfigError(ValueError):
@@ -94,6 +95,30 @@ def contact_form_lead_mandate(
         _slack_metadata(connection).get(CONTACT_FORM_LEAD_MANDATE_KEY)
     )
     return value or None
+
+
+def _typed_intake_origins() -> frozenset[str]:
+    from brain.systems.slack.monitored_intakes import (
+        typed_monitored_intake_origins,
+    )
+
+    return typed_monitored_intake_origins()
+
+
+def disabled_intake_origins(
+    connection: ExternalAgentConnectionRow,
+) -> set[str]:
+    """Return disabled typed-intake origins; all typed intakes default enabled."""
+
+    raw = _slack_metadata(connection).get(DISABLED_INTAKES_KEY)
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        return set()
+    valid_origins = _typed_intake_origins()
+    return {
+        origin
+        for item in raw
+        if (origin := _clean(item)) in valid_origins
+    }
 
 
 async def _connection_for_org(
@@ -187,6 +212,99 @@ async def clear_contact_form_lead_mandate(
     )
 
 
+def _validated_typed_intake_origin(intake: str) -> str:
+    from brain.systems.slack.monitored_intakes import (
+        SLACK_CHANNEL_MESSAGE_ORIGIN,
+    )
+
+    clean_intake = _clean(intake)
+    if not clean_intake:
+        raise SlackMonitorConfigError("intake is required")
+    if clean_intake == SLACK_CHANNEL_MESSAGE_ORIGIN:
+        raise SlackMonitorConfigError(
+            f"{SLACK_CHANNEL_MESSAGE_ORIGIN} is the fallback intake; "
+            "use unmonitor_channel for channel-level monitoring"
+        )
+    valid_origins = _typed_intake_origins()
+    if clean_intake not in valid_origins:
+        valid = ", ".join(sorted(valid_origins)) or "(none)"
+        raise SlackMonitorConfigError(
+            f"Unknown monitored intake {clean_intake!r}; "
+            f"valid typed intakes: {valid}"
+        )
+    return clean_intake
+
+
+async def _write_intake_enabled(
+    session,
+    *,
+    connection_id: str,
+    intake: str,
+    enabled: bool,
+    org_id: str | None = None,
+) -> dict[str, Any]:
+    clean_intake = _validated_typed_intake_origin(intake)
+    connection = await _connection_for_org(session, connection_id, org_id)
+    disabled_intakes = disabled_intake_origins(connection)
+    if enabled:
+        disabled_intakes.discard(clean_intake)
+    else:
+        disabled_intakes.add(clean_intake)
+
+    root = dict(connection.metadata_ or {})
+    slack_metadata = _slack_metadata(connection)
+    if disabled_intakes:
+        slack_metadata[DISABLED_INTAKES_KEY] = sorted(disabled_intakes)
+    else:
+        slack_metadata.pop(DISABLED_INTAKES_KEY, None)
+    root["slack"] = slack_metadata
+    connection.metadata_ = root
+    await session.flush()
+    return {
+        "connection_id": str(connection.id),
+        "metadata_path": f"slack.{DISABLED_INTAKES_KEY}",
+        "intake": clean_intake,
+        "enabled": enabled,
+        "disabled_intakes": sorted(disabled_intakes),
+    }
+
+
+async def disable_intake(
+    session,
+    *,
+    connection_id: str,
+    intake: str,
+    org_id: str | None = None,
+) -> dict[str, Any]:
+    """Disable one typed monitored intake without unmonitoring its channel."""
+
+    return await _write_intake_enabled(
+        session,
+        connection_id=connection_id,
+        intake=intake,
+        enabled=False,
+        org_id=org_id,
+    )
+
+
+async def enable_intake(
+    session,
+    *,
+    connection_id: str,
+    intake: str,
+    org_id: str | None = None,
+) -> dict[str, Any]:
+    """Restore the default-enabled routing for one typed monitored intake."""
+
+    return await _write_intake_enabled(
+        session,
+        connection_id=connection_id,
+        intake=intake,
+        enabled=True,
+        org_id=org_id,
+    )
+
+
 async def list_monitored_channels(
     session,
     *,
@@ -259,10 +377,14 @@ async def remove_monitored_channel(
 
 __all__ = [
     "CONTACT_FORM_LEAD_MANDATE_KEY",
+    "DISABLED_INTAKES_KEY",
     "SlackMonitorConfigError",
     "add_monitored_channel",
     "clear_contact_form_lead_mandate",
     "contact_form_lead_mandate",
+    "disable_intake",
+    "disabled_intake_origins",
+    "enable_intake",
     "list_monitored_channels",
     "monitored_channel_ids",
     "monitored_channels",
