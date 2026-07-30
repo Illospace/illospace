@@ -255,7 +255,7 @@ async def _ideas(session) -> list[Idea]:
     return list((await session.scalars(select(Idea))).all())
 
 
-async def test_slack_filed_issue_mints_packet_and_records_delivery(session, posts, caplog):
+async def test_slack_filed_issue_mints_packet_silently(session, posts, caplog):
     event_id, run_id = await _seed_slack_lane(
         session, tool_results=[("create_github_issue", _ISSUE_RESULT),
                                ("post_slack_reply", _REPLY_RESULT)],
@@ -281,22 +281,16 @@ async def test_slack_filed_issue_mints_packet_and_records_delivery(session, post
     assert "uwear-ai/uwear-backend#616" in (idea.description or "")
     assert (row.metadata_ or {}).get("job_ref") == f"idea:{idea.id}"
 
-    # In-transaction: NO Slack post — the outbox row carries the obligation.
+    # Briefs retired: no Slack post, no outbox obligation — the ticket IS
+    # the handoff.
     assert posts == []
-    deliveries = await _deliveries(session)
-    assert len(deliveries) == 1
-    delivery = deliveries[0]
-    assert delivery.state == "pending"
-    assert delivery.handoff_id == str(row.id)
-    assert delivery.idempotency_key == f"packet-brief:{row.id}"
-    assert delivery.channel == "C0ALERTS" and delivery.thread_ts == "1752600000.0"
-    assert str(row.id) in delivery.brief  # launch URL = the crash-dedup marker
+    assert await _deliveries(session) == []
 
     mint_lines = [r for r in caplog.records if "packet mint:" in r.getMessage()]
     assert len(mint_lines) == 1
     assert "lane=slack_teammate_run" in mint_lines[0].getMessage()
     assert "ok=True" in mint_lines[0].getMessage()
-    assert "delivery=recorded" in mint_lines[0].getMessage()
+    assert "delivery=skipped:briefs_retired" in mint_lines[0].getMessage()
 
     # The admission receipt and event stay exactly as the slack lane wrote them.
     stored = (await session.scalars(select(InboundDecisionReceiptRow))).one()
@@ -306,26 +300,12 @@ async def test_slack_filed_issue_mints_packet_and_records_delivery(session, post
     assert event.status == "processed"
     assert "triage" not in dict(event.action_result or {})
 
-    # Post-commit: the deliverer sends exactly the recorded brief to the
-    # recorded target and marks the row posted.
-    summary = await deliver_pending_briefs(
-        org_id=_ORG, session_factory=_lease_factory(session)
-    )
-    assert summary["posted"] == 1
-    assert len(posts) == 1
-    assert posts[0]["channel"] == "C0ALERTS"
-    assert posts[0]["thread_ts"] == "1752600000.0"
-    assert posts[0]["text"] == delivery.brief
-    deliveries = await _deliveries(session)
-    assert deliveries[0].state == "posted"
-    assert deliveries[0].posted_at is not None
-
-    # A second pass finds nothing to do — crash-retry safe at the sweep level.
+    # The drain sweep still runs for legacy rows and finds nothing new.
     summary = await deliver_pending_briefs(
         org_id=_ORG, session_factory=_lease_factory(session)
     )
     assert summary["selected"] == 0
-    assert len(posts) == 1
+    assert posts == []
 
 
 async def test_slack_reply_only_run_skips_with_log_line(session, posts, caplog):
@@ -353,7 +333,7 @@ async def test_slack_lane_mint_is_one_shot(session, posts, caplog):
         await reconcile_inbound_triage_run(session, run_id)  # duplicate reconcile
 
     assert len(await _handoffs(session)) == 1
-    assert len(await _deliveries(session)) == 1  # one obligation, ever
+    assert await _deliveries(session) == []  # briefs retired: none, ever
     second = [r for r in caplog.records if "packet mint:" in r.getMessage()]
     assert len(second) == 1
     assert "reason=packet already minted for event" in second[0].getMessage()
@@ -615,8 +595,7 @@ async def test_triage_lane_still_mints_unconditionally(session, posts):
     assert len(rows) == 1
     assert rows[0].source_surface == "inbound_triage"
     assert posts == []
-    deliveries = await _deliveries(session)
-    assert len(deliveries) == 1 and deliveries[0].state == "pending"
+    assert await _deliveries(session) == []  # briefs retired
 
 
 async def test_submit_mint_failure_is_retried_by_next_poll(session, posts, monkeypatch):
@@ -674,12 +653,10 @@ async def test_submit_mint_failure_is_retried_by_next_poll(session, posts, monke
     assert ideas[0].agent_details["packet"]["handoff_id"] == str(rows[0].id)
 
 
-async def test_mint_arms_fast_path_that_fires_only_after_commit(session, posts, monkeypatch):
-    """The post-commit fast path: the mint arms a one-shot after-commit
-    dispatch; nothing runs before the enclosing transaction commits (the
-    whole point — no Slack side effect can precede the terminal-status
-    write), and the commit triggers a delivery targeted at the minted
-    handoff."""
+async def test_mint_arms_no_fast_path_and_commit_dispatches_nothing(session, posts, monkeypatch):
+    """Briefs retired (Reda, 2026-07-30): the mint no longer arms the
+    after-commit dispatch, so committing the reconcile transaction must
+    trigger NO delivery attempt — the ticket is the handoff."""
     import asyncio
 
     import brain.systems.briefing.deliver as deliver_module
@@ -697,22 +674,10 @@ async def test_mint_arms_fast_path_that_fires_only_after_commit(session, posts, 
     )
     await reconcile_inbound_triage_run(session, run_id)
     rows = await _handoffs(session)
-    assert len(rows) == 1
-
-    await asyncio.sleep(0)
-    assert dispatched == []  # armed, not fired: the transaction is still open
+    assert len(rows) == 1  # the packet still mints
 
     await session.commit()
-    for _ in range(5):  # after_commit → call_soon → task; give the loop a few turns
+    for _ in range(5):  # give after_commit → call_soon → task turns to fire
         await asyncio.sleep(0)
-        if dispatched:
-            break
-    assert len(dispatched) == 1
-    assert dispatched[0]["org_id"] == _ORG
-    assert dispatched[0]["handoff_ids"] == [str(rows[0].id)]
-
-    # once=True: a later commit must not re-dispatch
-    await session.commit()
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert len(dispatched) == 1
+    assert dispatched == []
+    assert posts == []

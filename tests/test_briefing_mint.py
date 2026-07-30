@@ -257,7 +257,7 @@ async def test_create_with_status_flags_created_vs_reused():
     assert str(again.id) == str(row.id)
 
 
-async def test_triage_mint_records_one_delivery_and_stamps_idea(posts):
+async def test_triage_mint_is_silent_and_stamps_idea(posts):
     idea = _idea()
     session = FakeSession(ideas=[idea], events=[_event()],
                           users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
@@ -265,17 +265,15 @@ async def test_triage_mint_records_one_delivery_and_stamps_idea(posts):
         session, event=_event(), run_row=SimpleNamespace(id=1), attribution=None,
         readers=_readers(),
     )
-    assert result.ok and result.created and result.delivery == "recorded"
-    assert posts == []  # NOTHING goes to Slack inside the mint transaction
-    assert len(session.deliveries) == 1
-    delivery = session.deliveries[0]
-    assert delivery.state == "pending"
-    assert delivery.channel == "C0PROD" and delivery.thread_ts == "1751964840.0"
-    assert delivery.handoff_id == str(result.handoff.id)
-    assert delivery.idempotency_key == f"packet-brief:{result.handoff.id}"
-    assert "Launch: http" in delivery.brief
-    assert "→ Axel" in delivery.brief
-    assert str(result.handoff.id) in delivery.brief  # the crash-dedup marker
+    assert result.ok and result.created
+    # Briefs retired (Reda, 2026-07-30): the ticket IS the handoff, so the
+    # lanes owe NO Slack post and record NO delivery — the packet minting,
+    # stamping and launch URL are the whole contract.
+    assert result.delivery == "skipped:briefs_retired"
+    assert posts == []
+    assert session.deliveries == []
+    assert "Launch: http" in result.human_brief
+    assert "→ Axel" in result.human_brief
     stamp = idea.agent_details["packet"]
     assert stamp["handoff_id"] == str(result.handoff.id)
     assert stamp["owner_user_id"] == _OWNER
@@ -293,7 +291,7 @@ async def test_remint_of_unchanged_truth_is_silent(posts):
     assert first.created and second.ok and not second.created
     assert second.reason == "reused"
     assert second.delivery == "none"
-    assert len(session.deliveries) == 1  # the noise gate: one obligation, ever
+    assert session.deliveries == []  # briefs retired: no lane ever records one
     assert len(session.handoffs) == 1
     assert posts == []
 
@@ -308,20 +306,16 @@ async def test_changed_truth_supersedes_with_existing_vocabulary(posts):
     idea.title = "Maison L. melted hands — rerun requested"
     second = await mint_packet_after_triage(
         session, event=_event(), run_row=SimpleNamespace(id=2), readers=_readers())
-    assert second.created and second.delivery == "recorded"
+    assert second.created and second.delivery == "skipped:briefs_retired"
     old = next(h for h in session.handoffs if str(h.id) == str(first.handoff.id))
     new = next(h for h in session.handoffs if str(h.id) == str(second.handoff.id))
     assert old.status == "archived"  # NEVER an invented status
     assert (old.metadata_ or {}).get("superseded_by") == str(new.id)
     assert (new.metadata_ or {}).get("supersedes") == str(old.id)
     assert idea.agent_details["packet"]["handoff_id"] == str(new.id)
-    # The undelivered first brief is retired by the transfer; the new mint's
-    # own obligation is the one that posts (a changed-truth re-mint owes a
-    # fresh reply — the old brief would have posted a dead launch link).
-    by_handoff = {str(d.handoff_id): d for d in session.deliveries}
-    assert by_handoff[str(old.id)].state == "superseded"
-    assert by_handoff[str(new.id)].state == "pending"
-    assert str(new.id) in by_handoff[str(new.id)].brief
+    # Briefs retired: neither mint records an obligation, and the supersede
+    # transfer finds nothing pending to carry.
+    assert session.deliveries == []
     assert posts == []
 
 
@@ -354,7 +348,9 @@ async def test_non_public_provenance_mints_but_never_records_delivery(posts):
         readers=_readers(),
     )
     assert result.ok and result.created
-    assert result.delivery == "skipped:non_public"
+    # With briefs retired the provenance never matters — every lane mint is
+    # silent, public channel or not.
+    assert result.delivery == "skipped:briefs_retired"
     assert session.deliveries == []  # nothing owed, ever — not even later
     assert posts == []
     assert len(session.handoffs) == 1  # the packet still exists for the digest
@@ -429,15 +425,14 @@ async def test_own_brief_in_thread_does_not_rotate_revision(posts):
     readers = Readers(slack=slack, github=NoGithub())
     first = await mint_packet_after_triage(
         session, event=_event(), run_row=SimpleNamespace(id=1), readers=readers)
-    assert first.created and len(session.deliveries) == 1
-    # Illo's brief (delivered post-commit) lands in the thread under the BOT
-    # user id from provenance.
+    assert first.created and session.deliveries == []
+    # A historical Illo brief (from the pre-retirement era) sitting in the
+    # thread under the BOT user id must still be echo-filtered.
     slack.extra.append({"ts": "1751964900.0", "user": "B0ILLO",
-                        "text": session.deliveries[0].brief})
+                        "text": first.human_brief})
     second = await mint_packet_after_triage(
         session, event=_event(), run_row=SimpleNamespace(id=2), readers=readers)
     assert not second.created  # bot message filtered → same dossier → same key
-    assert len(session.deliveries) == 1  # no echo re-record
     assert len(session.handoffs) == 1
 
 
@@ -451,7 +446,7 @@ async def test_integrity_race_reselects_as_reused_and_stamps(posts):
                                  users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
     first = await mint_packet_after_triage(
         winner_session, event=_event(), run_row=SimpleNamespace(id=1), readers=_readers())
-    assert first.created and len(winner_session.deliveries) == 1
+    assert first.created and winner_session.deliveries == []
 
     # The loser: same content, but its insert flush raises IntegrityError.
     idea.agent_details = {**idea.agent_details}
@@ -501,6 +496,21 @@ def _clean_readers():
     return Readers(slack=FakeSlackReader(), github=CleanGithub())
 
 
+async def _seed_legacy_brief(session, handoff, brief: str):
+    """Record a pre-retirement pending brief the way the lanes used to.
+
+    The live lanes record no deliveries anymore; these rows exist only as
+    legacy outbox state whose drain/transfer semantics must keep holding."""
+    from brain.systems.briefing.deliver import DeliveryTarget, record_brief_delivery
+
+    await record_brief_delivery(
+        session, org_id=_ORG, handoff_id=str(handoff.id),
+        target=DeliveryTarget(channel="C0PROD", thread_ts="1751964840.0",
+                              bot_user_id="B0ILLO"),
+        brief=brief,
+    )
+
+
 async def test_refresh_unchanged_truth_is_silent_reuse(posts):
     from brain.systems.briefing.mint import refresh_packet_for_job
 
@@ -509,11 +519,12 @@ async def test_refresh_unchanged_truth_is_silent_reuse(posts):
                           users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
     first = await mint_packet_after_triage(
         session, event=_event(), run_row=SimpleNamespace(id=1), readers=_clean_readers())
+    await _seed_legacy_brief(session, first.handoff, first.human_brief)
     result = await refresh_packet_for_job(
         session, org_id=_ORG, handoff_row=first.handoff, readers=_clean_readers())
     assert result.ok and not result.created
     assert result.delivery == "none"  # refresh never records a new post
-    assert len(session.deliveries) == 1  # the original obligation, untouched
+    assert len(session.deliveries) == 1  # the legacy obligation, untouched
     assert session.deliveries[0].state == "pending"
     assert len(session.handoffs) == 1
     assert posts == []
@@ -540,10 +551,9 @@ async def test_refresh_skips_on_degraded_gather(posts):
 
 
 async def test_refresh_changed_truth_supersedes_and_carries_pending_brief(posts):
-    """Refresh never creates a NEW post — but a triage-moment brief that
-    never went out must follow the superseding row (fresh brief, fresh
-    launch URL), or the thread would either stay silent forever or later
-    get a dead link."""
+    """Refresh never creates a NEW post — but a LEGACY pre-retirement brief
+    that never went out must still follow the superseding row (fresh brief,
+    fresh launch URL), or the drain would later post a dead link."""
     from brain.systems.briefing.mint import refresh_packet_for_job
 
     idea = _idea()
@@ -551,6 +561,7 @@ async def test_refresh_changed_truth_supersedes_and_carries_pending_brief(posts)
                           users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
     first = await mint_packet_after_triage(
         session, event=_event(), run_row=SimpleNamespace(id=1), readers=_clean_readers())
+    await _seed_legacy_brief(session, first.handoff, first.human_brief)
     idea.title = "Maison L. melted hands — rerun verified"
     result = await refresh_packet_for_job(
         session, org_id=_ORG, handoff_row=first.handoff, readers=_clean_readers())
@@ -578,6 +589,7 @@ async def test_refresh_supersede_of_posted_brief_carries_nothing(posts):
                           users=[SimpleNamespace(id=_OWNER, name="Axel", email=None)])
     first = await mint_packet_after_triage(
         session, event=_event(), run_row=SimpleNamespace(id=1), readers=_clean_readers())
+    await _seed_legacy_brief(session, first.handoff, first.human_brief)
     session.deliveries[0].state = "posted"  # the deliverer already sent it
     idea.title = "Maison L. melted hands — rerun verified"
     result = await refresh_packet_for_job(
@@ -657,7 +669,7 @@ def _hermetic_assignment_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
-async def test_actionable_run_mints_job_home_and_records_delivery(posts):
+async def test_actionable_run_mints_job_home_silently(posts):
     from brain.systems.briefing.mint import mint_packet_after_actionable_run
 
     session = FakeSession(events=[_actionable_event()])
@@ -666,7 +678,8 @@ async def test_actionable_run_mints_job_home_and_records_delivery(posts):
         attribution=_attribution(), readers=_readers(),
     )
 
-    assert result.ok and result.created and result.delivery == "recorded"
+    assert result.ok and result.created
+    assert result.delivery == "skipped:briefs_retired"
     assert len(session.handoffs) == 1
     row = session.handoffs[0]
     assert row.source_surface == "inbound_triage"
@@ -684,12 +697,9 @@ async def test_actionable_run_mints_job_home_and_records_delivery(posts):
     assert "uwear-ai/uwear-backend#616" in (idea.description or "")
     assert details["packet"]["handoff_id"] == str(row.id)  # stamped
 
-    assert posts == []  # post-commit delivery, never in-transaction
-    assert len(session.deliveries) == 1
-    assert session.deliveries[0].channel == "C0PROD"
-    assert session.deliveries[0].thread_ts == "1751964840.0"
-    assert session.deliveries[0].state == "pending"
-    brief = session.deliveries[0].brief
+    assert posts == []  # briefs retired: the ticket IS the handoff
+    assert session.deliveries == []
+    brief = result.human_brief  # still composed for tracker/digest surfaces
     assert "half the batch melted" in brief
     assert "Illo run" not in brief
     assert "task_domain:" not in brief
@@ -697,7 +707,7 @@ async def test_actionable_run_mints_job_home_and_records_delivery(posts):
     assert _RUN_USER not in brief
 
 
-async def test_actionable_run_with_existing_reply_records_compact_human_follow_up(posts):
+async def test_actionable_run_with_existing_reply_composes_compact_follow_up(posts):
     from brain.systems.briefing.mint import mint_packet_after_actionable_run
 
     issue_title = "[Prod][Batch] POST /batch exceeds 25s while inner task keeps running"
@@ -738,12 +748,16 @@ async def test_actionable_run_with_existing_reply_records_compact_human_follow_u
         readers=Readers(slack=RollbarThread(), github=FiledIssue()),
     )
 
-    assert result.ok and result.created and result.delivery == "recorded"
+    assert result.ok and result.created
+    assert result.delivery == "skipped:briefs_retired"
     assert result.handoff.title == issue_title
     assert issue_title in result.handoff.instructions
     assert raw_alert not in result.handoff.instructions
 
-    brief = session.deliveries[0].brief
+    # No Slack delivery exists anymore; the compact form survives only as
+    # the composed human_brief for tracker/digest surfaces.
+    assert session.deliveries == []
+    brief = result.human_brief
     assert brief == f"→ Axel · Launch: {result.launch_url}"
     assert "Illo run" not in brief
     assert "task_domain:" not in brief
@@ -790,7 +804,7 @@ async def test_actionable_run_mint_is_one_shot_per_event(posts):
     assert second.reason == "packet already minted for event"
     assert len(session.handoffs) == 1
     assert len(session._ideas) == 1
-    assert len(session.deliveries) == 1
+    assert session.deliveries == []
 
 
 async def test_actionable_run_non_public_provenance_never_records_delivery(posts):
@@ -802,7 +816,7 @@ async def test_actionable_run_non_public_provenance_never_records_delivery(posts
         attribution=_attribution(), readers=_readers(),
     )
     assert result.ok and result.created
-    assert result.delivery == "skipped:non_public"
+    assert result.delivery == "skipped:briefs_retired"
     assert len(session.handoffs) == 1  # persistence is never suppressed
     assert session.deliveries == []
     assert posts == []
