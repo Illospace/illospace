@@ -11,7 +11,6 @@ from brain.systems.slack.contact_form_leads import ContactFormLead
 
 
 CONTACT_FORM_LEAD_SKILL = "contact-form-lead-intake"
-CONTACT_FORM_LEAD_INTAKE_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +20,17 @@ class ContactFormLeadSlackResponseTarget:
     channel_id: str
     thread_ts: str
 
+    def __post_init__(self) -> None:
+        channel_id = _clean(self.channel_id)
+        thread_ts = _clean(self.thread_ts)
+        if not channel_id or not thread_ts:
+            missing = "channel_id" if not channel_id else "thread_ts"
+            raise ValueError(
+                f"contact-form lead intake requires a Slack response target {missing}"
+            )
+        object.__setattr__(self, "channel_id", channel_id)
+        object.__setattr__(self, "thread_ts", thread_ts)
+
     @classmethod
     def from_slack_trigger(
         cls,
@@ -29,34 +39,28 @@ class ContactFormLeadSlackResponseTarget:
         response_target = slack_trigger_payload.get("response_target")
         target = response_target if isinstance(response_target, Mapping) else {}
         return cls(
-            channel_id=_clean(target.get("channel_id")),
-            thread_ts=_clean(target.get("thread_ts")),
+            channel_id=target.get("channel_id"),
+            thread_ts=target.get("thread_ts"),
         )
 
     def to_payload(self) -> dict[str, str]:
-        if not _clean(self.channel_id):
-            raise ValueError(
-                "contact-form lead intake requires a Slack response target channel_id"
-            )
-        if not _clean(self.thread_ts):
-            raise ValueError(
-                "contact-form lead intake requires a Slack response target thread_ts"
-            )
         return {
-            "channel_id": _clean(self.channel_id),
-            "thread_ts": _clean(self.thread_ts),
+            "channel_id": self.channel_id,
+            "thread_ts": self.thread_ts,
         }
 
 
 @dataclass(frozen=True, slots=True)
 class ContactFormLeadIntakeContext:
-    """Versioned model input for one decoded contact-form lead."""
+    """Canonical model input for one decoded contact-form lead."""
 
     lead: ContactFormLead
     owner: ObligationAnswerer
     slack_response_target: ContactFormLeadSlackResponseTarget
     source_permalink: str | None = None
-    schema_version: int = CONTACT_FORM_LEAD_INTAKE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_permalink", _clean(self.source_permalink) or None)
 
     @classmethod
     def from_slack_trigger(
@@ -73,17 +77,11 @@ class ContactFormLeadIntakeContext:
                     slack_trigger_payload
                 )
             ),
-            source_permalink=_clean(slack_trigger_payload.get("permalink")) or None,
+            source_permalink=slack_trigger_payload.get("permalink"),
         )
 
     def to_payload(self) -> dict[str, Any]:
-        if self.schema_version != CONTACT_FORM_LEAD_INTAKE_SCHEMA_VERSION:
-            raise ValueError(
-                "unsupported contact-form lead intake schema_version "
-                f"{self.schema_version}"
-            )
         return {
-            "schema_version": self.schema_version,
             "lead": self.lead.to_payload(),
             "owner": self.owner.to_metadata(),
             "slack_response_target": self.slack_response_target.to_payload(),
@@ -91,13 +89,9 @@ class ContactFormLeadIntakeContext:
         }
 
     def serialize(self) -> str:
-        """Validate and serialize the internal prompt contract."""
+        """Serialize the internal prompt contract."""
 
-        return json.dumps(
-            self.to_payload(),
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        return json.dumps(self.to_payload(), ensure_ascii=False, sort_keys=True)
 
 
 def contact_form_lead_run_message(
@@ -164,10 +158,7 @@ def _clean(value: Any) -> str:
 
 
 __all__ = [
-    "CONTACT_FORM_LEAD_INTAKE_SCHEMA_VERSION",
     "CONTACT_FORM_LEAD_SKILL",
-    "ContactFormLeadIntakeContext",
     "ContactFormLeadReminderRenderer",
-    "ContactFormLeadSlackResponseTarget",
     "contact_form_lead_run_message",
 ]

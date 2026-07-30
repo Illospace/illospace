@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, Mapping
 
 from brain.systems.runs.obligation_specs import ObligationAnswerer
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +105,13 @@ def _slack_identity_records(
         linked_user_id = _clean(link.get("user_id")) or None
         mapped_user_id = _clean(identity_map.get(slack_user_id)) or None
         if linked_user_id and mapped_user_id and linked_user_id != mapped_user_id:
+            logger.warning(
+                "Conflicting Slack identity for %s: linked user_id %s disagrees "
+                "with mapped user_id %s; omitting user_id",
+                slack_user_id,
+                linked_user_id,
+                mapped_user_id,
+            )
             user_id = None
         else:
             user_id = linked_user_id or mapped_user_id

@@ -1769,6 +1769,7 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
         "monitor_channel",
         "unmonitor_channel",
         "set_contact_form_lead_mandate",
+        "clear_contact_form_lead_mandate",
         "open_alert_surges",
     ]
     assert {"display_name", "communication_preferences", "mandate"} <= set(
@@ -1787,6 +1788,66 @@ def test_manage_slack_tool_definition_has_no_operator_setup_action():
     assert "secret" not in serialized_tool
     assert "does not" not in serialized_tool.lower()
     assert "cannot" not in serialized_tool.lower()
+    assert "non-empty mandate" in serialized_tool
+    assert "clear_contact_form_lead_mandate" in serialized_tool
+
+
+@pytest.mark.asyncio
+async def test_manage_slack_omitted_mandate_preserves_it_until_explicit_clear(
+    session,
+    monkeypatch,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.slack import _handle_manage_slack
+
+    connection = await _seed_slack_connection(session)
+    connection.metadata_ = {
+        **connection.metadata_,
+        "slack": {
+            **connection.metadata_["slack"],
+            "contact_form_lead_mandate": "Keep this overlay.",
+        },
+    }
+    await session.flush()
+
+    class _UnitOfWork:
+        def __init__(self):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            await session.flush()
+            return False
+
+    monkeypatch.setattr(
+        "brain.platform.db.repositories.unit_of_work.UnitOfWork",
+        _UnitOfWork,
+    )
+
+    with bind_agent_context({"org_id": ORG_ID}):
+        omitted = json.loads(
+            await _handle_manage_slack(
+                action="set_contact_form_lead_mandate",
+                connection_id=str(connection.id),
+            )
+        )
+        assert omitted["error"].endswith("requires a non-empty mandate")
+        assert (
+            connection.metadata_["slack"]["contact_form_lead_mandate"]
+            == "Keep this overlay."
+        )
+        cleared = json.loads(
+            await _handle_manage_slack(
+                action="clear_contact_form_lead_mandate",
+                connection_id=str(connection.id),
+            )
+        )
+
+    assert cleared["ok"] is True
+    assert cleared["cleared"] is True
+    assert "contact_form_lead_mandate" not in connection.metadata_["slack"]
 
 
 def test_manage_slack_connection_payload_redacts_private_identity_profiles():

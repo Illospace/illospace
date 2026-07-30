@@ -324,6 +324,48 @@ def test_contact_form_owner_policy_keeps_conflicting_identity_fields_together():
     }
 
 
+def test_contact_form_owner_policy_warns_and_omits_conflicting_user_id(caplog):
+    from brain.systems.slack.contact_form_lead_owner import (
+        CONTACT_FORM_OWNER_POLICY,
+    )
+
+    with caplog.at_level(
+        "WARNING",
+        logger="brain.systems.slack.contact_form_lead_owner",
+    ):
+        owner = CONTACT_FORM_OWNER_POLICY.resolve(
+            FakeSlackConnection(
+                metadata={
+                    "slack": {
+                        "contact_form_lead_owner": {
+                            "slack_user_id": "UREDA",
+                        },
+                        "identity_map": {
+                            "UREDA": "user-mapped",
+                        },
+                    },
+                    "identity_links": {
+                        "slack": {
+                            "UREDA": {
+                                "user_id": "user-linked",
+                                "display_name": "Reda",
+                            },
+                        }
+                    },
+                }
+            )
+        )
+
+    assert owner.to_metadata() == {
+        "name": "Reda",
+        "slack_user_id": "UREDA",
+        "user_id": None,
+    }
+    assert "UREDA" in caplog.text
+    assert "user-linked" in caplog.text
+    assert "user-mapped" in caplog.text
+
+
 def test_contact_form_reply_behavior_is_an_installed_runtime_skill():
     from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
     from brain.systems.skills.bundles import load_skill_bundle
@@ -351,12 +393,11 @@ def test_contact_form_reply_behavior_is_an_installed_runtime_skill():
         assert hardcoded_example not in procedure.casefold()
 
 
-def test_contact_form_intake_context_has_a_versioned_validated_contract():
+def test_contact_form_intake_context_is_normalized_and_valid_at_construction():
     import json
 
     from brain.systems.runs.obligation_specs import ObligationAnswerer
     from brain.systems.slack.contact_form_lead_rendering import (
-        CONTACT_FORM_LEAD_INTAKE_SCHEMA_VERSION,
         ContactFormLeadIntakeContext,
         ContactFormLeadSlackResponseTarget,
     )
@@ -378,25 +419,29 @@ def test_contact_form_intake_context_has_a_versioned_validated_contract():
         lead=lead,
         owner=owner,
         slack_response_target=ContactFormLeadSlackResponseTarget(
-            channel_id="C_ALERTS",
-            thread_ts="1716900000.000200",
+            channel_id=" C_ALERTS ",
+            thread_ts=" 1716900000.000200 ",
         ),
-        source_permalink="https://example.slack.com/archives/C_ALERTS/p1716900000000200",
+        source_permalink=(
+            " https://example.slack.com/archives/C_ALERTS/p1716900000000200 "
+        ),
     )
 
     serialized = json.loads(context.serialize())
 
     assert set(serialized) == {
-        "schema_version",
         "lead",
         "owner",
         "slack_response_target",
         "source_permalink",
     }
+    assert context.slack_response_target == ContactFormLeadSlackResponseTarget(
+        channel_id="C_ALERTS",
+        thread_ts="1716900000.000200",
+    )
     assert (
-        serialized["schema_version"]
-        == CONTACT_FORM_LEAD_INTAKE_SCHEMA_VERSION
-        == 1
+        context.source_permalink
+        == "https://example.slack.com/archives/C_ALERTS/p1716900000000200"
     )
     assert set(serialized["lead"]) == {
         "name",
@@ -416,22 +461,11 @@ def test_contact_form_intake_context_has_a_versioned_validated_contract():
     }
 
     for invalid_target in (
-        ContactFormLeadSlackResponseTarget(
-            channel_id="",
-            thread_ts="1716900000.000200",
-        ),
-        ContactFormLeadSlackResponseTarget(
-            channel_id="C_ALERTS",
-            thread_ts="",
-        ),
+        {"channel_id": "", "thread_ts": "1716900000.000200"},
+        {"channel_id": "C_ALERTS", "thread_ts": ""},
     ):
-        invalid_context = ContactFormLeadIntakeContext(
-            lead=lead,
-            owner=owner,
-            slack_response_target=invalid_target,
-        )
         with pytest.raises(ValueError, match="Slack response target"):
-            invalid_context.serialize()
+            ContactFormLeadSlackResponseTarget(**invalid_target)
 
 
 @pytest.mark.asyncio
@@ -445,6 +479,8 @@ async def test_contact_form_mandate_is_runtime_editable_connection_metadata():
     )
     from brain.systems.slack.contact_form_leads import ContactFormLead
     from brain.systems.slack.monitors import (
+        SlackMonitorConfigError,
+        clear_contact_form_lead_mandate,
         contact_form_lead_mandate,
         set_contact_form_lead_mandate,
     )
@@ -493,11 +529,19 @@ async def test_contact_form_mandate_is_runtime_editable_connection_metadata():
     )
     assert "mandate" in manage_slack["input_schema"]["properties"]
 
-    cleared = await set_contact_form_lead_mandate(
+    with pytest.raises(SlackMonitorConfigError, match="non-empty mandate"):
+        await set_contact_form_lead_mandate(
+            FakeSlackSession(connection),
+            connection_id=connection.id,
+            org_id=connection.org_id,
+            mandate="",
+        )
+    assert contact_form_lead_mandate(connection) == mandate
+
+    cleared = await clear_contact_form_lead_mandate(
         FakeSlackSession(connection),
         connection_id=connection.id,
         org_id=connection.org_id,
-        mandate="",
     )
 
     assert cleared["cleared"] is True
