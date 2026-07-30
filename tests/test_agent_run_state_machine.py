@@ -19,8 +19,15 @@ from sqlalchemy.schema import CreateTable
 
 from brain.systems.runs.domain import AgentRunRequest as _AgentRunRequest, RunRecipe
 from brain.systems.runs.engine import AsyncAgentRunEngine, RunRecipeResult, RunRuntime, StaticAnswerRecipe
+from brain.contracts.statuses import (
+    OPEN_RUN_STATUS_VALUES,
+    RUN_STATUS_VALUES,
+    TERMINAL_RUN_STATUS_VALUES,
+)
+from brain.systems.runs import status as run_status_contract
 from brain.systems.runs.status import (
     ALLOWED_RUN_TRANSITIONS,
+    TERMINAL_RUN_STATUSES,
     RunStatus,
     RunTransitionError,
     ensure_run_transition,
@@ -92,6 +99,29 @@ def test_interrupted_requeue_transition_is_declared_but_scoped(from_status: RunS
     ) == (from_status, RunStatus.QUEUED)
     with pytest.raises(RunTransitionError, match="outside interrupted requeue"):
         ensure_run_transition(from_status, RunStatus.QUEUED)
+
+
+def test_terminal_run_status_contract_preserves_canonical_membership():
+    assert TERMINAL_RUN_STATUS_VALUES == (
+        "completed",
+        "failed",
+        "canceled",
+        "expired",
+    )
+    assert type(TERMINAL_RUN_STATUSES) is frozenset
+    assert TERMINAL_RUN_STATUSES == frozenset(
+        RunStatus(status) for status in TERMINAL_RUN_STATUS_VALUES
+    )
+    assert all(isinstance(status, RunStatus) for status in TERMINAL_RUN_STATUSES)
+    assert "TERMINAL_RUN_STATUSES" in run_status_contract.__all__
+
+
+def test_open_and_terminal_run_statuses_partition_canonical_values():
+    open_statuses = set(OPEN_RUN_STATUS_VALUES)
+    terminal_statuses = set(TERMINAL_RUN_STATUS_VALUES)
+
+    assert set(RUN_STATUS_VALUES) == open_statuses | terminal_statuses
+    assert open_statuses.isdisjoint(terminal_statuses)
 
 
 async def test_concurrent_event_appends_are_sequential_and_leave_session_usable(session_factory):

@@ -27,7 +27,6 @@ from brain.contracts.worker_swap import (
     worker_swap_snapshot,
 )
 
-
 def _shell_function_body(content: str, name: str) -> str:
     match = re.search(
         rf"^{re.escape(name)}\(\) \{{\n(?P<body>.*?)^}}\n",

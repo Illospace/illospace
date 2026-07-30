@@ -30,7 +30,7 @@ from brain.app.api.routers.cortex._helpers import (
     _row_to_dict,
 )
 from brain.app.api.routers.cortex._router import router
-from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
+from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES, TERMINAL_RUN_STATUS_VALUES
 from brain.systems.runs.events import run_event
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore as _AgentRunStore
@@ -923,7 +923,7 @@ async def idea_audit_analysis_result(
         if failure is not None:
             result["failure"] = dict(failure)
 
-        if public_status in ("completed", "failed", "canceled", "expired"):
+        if public_status in TERMINAL_RUN_STATUS_VALUES:
             msg = (
                 await uow.session.scalars(
                     select(IdeaThread)
