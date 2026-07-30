@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -24,6 +24,7 @@ from brain.platform.db.models.inbound import (
     InboundEventRow,
     InboundSourcePolicyRow,
 )
+from brain.platform.provider_alerts import parse_rollbar_alert
 from brain.systems.external_agents import service as external_agents
 from brain.systems.cortex.thread_links import thread_link_payload
 from brain.systems.inbound.handlers import (
@@ -43,6 +44,7 @@ from brain.systems.inbound.preservation import (
     submission_preservation_prompt_lines,
 )
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
+from brain.systems.slack.monitored_intakes import SLACK_CHANNEL_MESSAGE_ORIGIN
 from brain.systems.task_domain import classify_task_domain
 from brain.systems.user_domains.service import AsyncDomainService, DomainError, DomainNotFound
 
@@ -52,6 +54,8 @@ ACTION_DOMAIN_PROJECTION_UPSERT = "domain_projection.upsert"
 ACTION_ILO_REQUIRED = "ilo_required"
 SUBMISSION_ENVELOPE_KIND = "submission"
 ACTION_ILLO_SUBMIT_QUEUED = "illo.submit_queued"
+ACTION_ALERT_SIGNATURE_DEDUPLICATED = "alert_signature.deduplicated"
+ALERT_SIGNATURE_DEDUP_WINDOW = timedelta(minutes=60)
 
 DOMAIN_PROJECTION_ACTIONS = frozenset(
     {ACTION_DOMAIN_PROJECTION_UPSERT, "domain_projection", "create_domain_record"}
@@ -64,6 +68,8 @@ MAX_INBOUND_KIND_LENGTH = 40
 MAX_INBOUND_ORIGIN_LENGTH = 240
 MAX_TRIAGE_MESSAGE_CHARS = 8000
 MAX_TRIAGE_PAYLOAD_CHARS = 5000
+
+logger = logging.getLogger(__name__)
 
 
 class InboundValidationError(ValueError):
@@ -168,6 +174,14 @@ async def submit_inbound_envelope(
     context = await _resolve_connection_context(session, connection)
     _require_signal_scope(context)
     normalized = _normalize_envelope(envelope)
+    alert_signature = _alert_signature_from_envelope(normalized)
+    if alert_signature is not None:
+        normalized["alert_signature"] = alert_signature
+        await _acquire_alert_signature_lock(
+            session,
+            org_id=context.org_id,
+            alert_signature=alert_signature,
+        )
     existing = await _find_idempotent_event(session, context, normalized.get("idempotency_key"))
     if existing is not None:
         return _result_from_event(existing, idempotent_replay=True)
@@ -190,6 +204,52 @@ async def submit_inbound_envelope(
     event, idempotent_replay = await _store_inbound_event(session, context, event)
     if idempotent_replay:
         return _result_from_event(event, idempotent_replay=True)
+    if alert_signature is not None:
+        original_event = await _find_recent_alert_signature_event(
+            session,
+            org_id=context.org_id,
+            alert_signature=alert_signature,
+            exclude_event_id=str(event.id),
+        )
+        if original_event is not None:
+            original_event_id = str(
+                dict(original_event.action_result or {}).get("original_event_id")
+                or original_event.id
+            )
+            logger.info(
+                "inbound_alert_signature_deduplicated",
+                extra={
+                    "org_id": context.org_id,
+                    "alert_signature": alert_signature,
+                    "event_id": str(event.id),
+                    "original_event_id": original_event_id,
+                    "dedup_window_minutes": int(
+                        ALERT_SIGNATURE_DEDUP_WINDOW.total_seconds() // 60
+                    ),
+                },
+            )
+            return await _complete_event(
+                session,
+                event,
+                policy=None,
+                status=STATUS_PROCESSED,
+                action_type=ACTION_ALERT_SIGNATURE_DEDUPLICATED,
+                action_result={
+                    "reason": "alert_signature_deduplicated",
+                    "deduplicated": True,
+                    "alert_signature": alert_signature,
+                    "original_event_id": original_event_id,
+                },
+                confidence=1.0,
+                target={
+                    "kind": "inbound_event",
+                    "event_id": original_event_id,
+                },
+                tool_use={"type": ACTION_ALERT_SIGNATURE_DEDUPLICATED},
+                reasoning_summary=(
+                    "A recent monitored-channel event already admitted this provider alert."
+                ),
+            )
 
     policy: InboundSourcePolicyRow | None = None
     projection: InboundDomainProjectionRow | None = None
@@ -458,6 +518,48 @@ def _normalize_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _rollbar_alert_signature(text: str) -> str | None:
+    parsed = parse_rollbar_alert(text)
+    if parsed is None:
+        return None
+    return f"rollbar:{parsed.project}:{parsed.item_number}"
+
+
+# PostHog is intentionally absent until its Slack alerts expose a stable issue
+# identity. Add provider extractors here only when they can fail closed.
+ALERT_SIGNATURE_EXTRACTORS: tuple[Callable[[str], str | None], ...] = (
+    _rollbar_alert_signature,
+)
+
+
+def extract_alert_signature(text: str | None) -> str | None:
+    """Extract a high-confidence provider issue identity from alert text."""
+
+    if not text:
+        return None
+    for extractor in ALERT_SIGNATURE_EXTRACTORS:
+        try:
+            signature = extractor(str(text))
+        except Exception:  # noqa: BLE001 — a broken extractor must never block admission
+            logger.warning(
+                "alert signature extractor %s failed; skipping",
+                getattr(extractor, "__name__", extractor),
+                exc_info=True,
+            )
+            continue
+        if signature is not None:
+            return signature
+    return None
+
+
+def _alert_signature_from_envelope(envelope: Mapping[str, Any]) -> str | None:
+    if envelope.get("origin") != SLACK_CHANNEL_MESSAGE_ORIGIN:
+        return None
+    payload = envelope.get("payload")
+    text = payload.get("text") if isinstance(payload, Mapping) else None
+    return extract_alert_signature(optional_text(text) or optional_text(envelope.get("summary")))
+
+
 def _normalize_submission_fields(data: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
     message = optional_text(data.get("message")) or optional_text(payload.get("message"))
     source = data.get("source", payload.get("source", {}))
@@ -530,6 +632,52 @@ async def _store_inbound_event(
             return existing, True
         raise
     return event, False
+
+
+async def _acquire_alert_signature_lock(
+    session: Any,
+    *,
+    org_id: str,
+    alert_signature: str,
+) -> None:
+    """Postgres advisory xact lock keyed on (org, signature) — released at the
+    caller's commit/rollback. Non-postgres sessions (unit tests on sqlite,
+    fakes) skip it: the races it closes are cross-connection, which those
+    environments don't exercise."""
+    try:
+        dialect = getattr(getattr(session, "bind", None), "dialect", None)
+        if getattr(dialect, "name", "") != "postgresql":
+            return
+    except Exception:  # noqa: BLE001 — no bind info → assume no lock support
+        return
+    from sqlalchemy import text as sql_text
+
+    await session.execute(
+        sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"inbound-alert-signature:{org_id}:{alert_signature}"},
+    )
+
+
+async def _find_recent_alert_signature_event(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    alert_signature: str,
+    exclude_event_id: str,
+) -> InboundEventRow | None:
+    stmt = (
+        select(InboundEventRow)
+        .where(
+            InboundEventRow.org_id == str(org_id),
+            InboundEventRow.id != str(exclude_event_id),
+            InboundEventRow.created_at >= utcnow() - ALERT_SIGNATURE_DEDUP_WINDOW,
+            InboundEventRow.envelope["alert_signature"].as_string()
+            == alert_signature,
+        )
+        .order_by(InboundEventRow.created_at.asc(), InboundEventRow.id.asc())
+        .limit(1)
+    )
+    return (await session.scalars(stmt)).first()
 
 
 async def _process_registered_envelope(

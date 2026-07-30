@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
@@ -52,6 +53,17 @@ USER_ID = "22222222-2222-4222-8222-222222222222"
 CONNECTION_ID = "33333333-3333-4333-8333-333333333333"
 TOKEN_ID = "44444444-4444-4444-8444-444444444444"
 RAW_TOKEN = "illo_conn_test_webhook_token"
+ROLLBAR_ITEM_2328_URL = "https://app.rollbar.com/a/uwear/fix/item/Uwear-API/2328"
+ROLLBAR_ITEM_2328_TENTH_ERROR = (
+    f"<{ROLLBAR_ITEM_2328_URL}|#2328 10th error: "
+    "ValidationError: 1 validation error for GenerationPlan\n"
+    "Value error, Generation clothing snapshot identity is inconsistent>"
+)
+ROLLBAR_ITEM_2328_RATE_ALERT = (
+    f"<{ROLLBAR_ITEM_2328_URL}|#2328 10 occurrences in 5 minutes: "
+    "ValidationError: 1 validation error for GenerationPlan\n"
+    "Value error, Generation clothing snapshot identity is inconsistent>"
+)
 
 
 def _patch_sqlite_for_pg_types():
@@ -206,6 +218,15 @@ async def _post_mcp_raw(session, *, headers: dict[str, str] | None = None, conte
         app.dependency_overrides.update(overrides)
 
 
+def _slack_channel_alert_envelope(text: str, *, idempotency_key: str) -> dict:
+    return {
+        "origin": "slack.channel_message",
+        "payload": {"text": text},
+        "summary": text,
+        "idempotency_key": idempotency_key,
+    }
+
+
 async def _assert_queued_triage(session, outcome: dict, *, reason: str) -> dict:
     assert outcome["reason"] == reason
     triage = outcome["triage"]
@@ -232,6 +253,156 @@ async def _assert_queued_triage(session, outcome: dict, *, reason: str) -> dict:
     assert run.metadata_["producer"] == "inbound"
     assert run.metadata_["inbound_event"]["event_id"] == triage["event_id"]
     return triage
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            ROLLBAR_ITEM_2328_URL,
+            "rollbar:Uwear-API:2328",
+        ),
+        (
+            ROLLBAR_ITEM_2328_TENTH_ERROR,
+            "rollbar:Uwear-API:2328",
+        ),
+        (
+            "https://app.posthog.com/project/1/alerts/2328",
+            None,
+        ),
+    ],
+)
+async def test_alert_signature_extraction_is_provider_specific(text, expected):
+    assert inbound.extract_alert_signature(text) == expected
+
+
+async def test_same_rollbar_signature_deduplicates_channel_triage_run(session, caplog):
+    principal = await _seed_connection(session)
+    caplog.set_level(logging.INFO, logger="brain.systems.inbound.service")
+
+    first = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope=_slack_channel_alert_envelope(
+            ROLLBAR_ITEM_2328_TENTH_ERROR,
+            idempotency_key="slack:rollbar:2328:tenth",
+        ),
+    )
+    second = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope=_slack_channel_alert_envelope(
+            ROLLBAR_ITEM_2328_RATE_ALERT,
+            idempotency_key="slack:rollbar:2328:rate",
+        ),
+    )
+
+    assert first["status"] == "review_required"
+    assert second["status"] == "processed"
+    assert second["ilo_outcome"] == {
+        "reason": "alert_signature_deduplicated",
+        "deduplicated": True,
+        "alert_signature": "rollbar:Uwear-API:2328",
+        "original_event_id": first["event_id"],
+    }
+    assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 1
+    assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 2
+    first_event = await session.get(InboundEventRow, first["event_id"])
+    second_event = await session.get(InboundEventRow, second["event_id"])
+    assert first_event is not None
+    assert second_event is not None
+    assert first_event.envelope["alert_signature"] == "rollbar:Uwear-API:2328"
+    assert second_event.envelope["alert_signature"] == "rollbar:Uwear-API:2328"
+    assert second_event.action_type == "alert_signature.deduplicated"
+    assert second_event.action_result["original_event_id"] == first["event_id"]
+    assert (
+        await session.scalar(select(func.count()).select_from(InboundDecisionReceiptRow))
+        == 2
+    )
+    dedup_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "inbound_alert_signature_deduplicated"
+    ]
+    assert len(dedup_logs) == 1
+    assert dedup_logs[0].alert_signature == "rollbar:Uwear-API:2328"
+    assert dedup_logs[0].original_event_id == first["event_id"]
+
+
+async def test_different_rollbar_items_queue_distinct_triage_runs(session):
+    principal = await _seed_connection(session)
+    other_item = ROLLBAR_ITEM_2328_RATE_ALERT.replace(
+        "/2328|#2328",
+        "/2329|#2329",
+    )
+
+    for index, text in enumerate((ROLLBAR_ITEM_2328_TENTH_ERROR, other_item)):
+        await inbound.submit_inbound_envelope(
+            session,
+            connection=principal,
+            envelope=_slack_channel_alert_envelope(
+                text,
+                idempotency_key=f"slack:rollbar:different:{index}",
+            ),
+        )
+
+    assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 2
+
+
+async def test_rollbar_signature_outside_window_queues_new_triage_run(session):
+    principal = await _seed_connection(session)
+    first = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope=_slack_channel_alert_envelope(
+            ROLLBAR_ITEM_2328_TENTH_ERROR,
+            idempotency_key="slack:rollbar:outside:first",
+        ),
+    )
+    first_event = await session.get(InboundEventRow, first["event_id"])
+    assert first_event is not None
+    first_event.created_at = (
+        inbound.utcnow()
+        - inbound.ALERT_SIGNATURE_DEDUP_WINDOW
+        - timedelta(seconds=1)
+    )
+    await session.flush()
+
+    second = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope=_slack_channel_alert_envelope(
+            ROLLBAR_ITEM_2328_RATE_ALERT,
+            idempotency_key="slack:rollbar:outside:second",
+        ),
+    )
+
+    assert second["status"] == "review_required"
+    assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 2
+
+
+async def test_unsigned_channel_alerts_preserve_existing_triage_behavior(session):
+    principal = await _seed_connection(session)
+
+    for index, text in enumerate(
+        (
+            "Production error threshold reached.",
+            "Production error rate threshold reached.",
+        )
+    ):
+        await inbound.submit_inbound_envelope(
+            session,
+            connection=principal,
+            envelope=_slack_channel_alert_envelope(
+                text,
+                idempotency_key=f"slack:plain-alert:{index}",
+            ),
+        )
+
+    events = (await session.scalars(select(InboundEventRow))).all()
+    assert len(events) == 2
+    assert all("alert_signature" not in event.envelope for event in events)
+    assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 2
 
 
 async def _assert_queued_submission(session, outcome: dict) -> dict:
