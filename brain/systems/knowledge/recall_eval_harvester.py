@@ -23,7 +23,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.contracts.statuses import LEGACY_AGENT_RUN_STATUS_VALUES
+from brain.contracts.statuses import (
+    LEGACY_AGENT_RUN_STATUS_VALUES,
+    TERMINAL_RUN_STATUS_VALUES,
+)
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.knowledge import KnowledgeItem
 from brain.systems.knowledge.recall_eval import EvidencePointer
@@ -45,10 +48,7 @@ _QUESTION_PREFIXES = (
     "why ",
 )
 _TERMINAL_RUN_STATUSES = (
-    "completed",
-    "failed",
-    "canceled",
-    "expired",
+    *TERMINAL_RUN_STATUS_VALUES,
     *LEGACY_AGENT_RUN_STATUS_VALUES,
 )
 
