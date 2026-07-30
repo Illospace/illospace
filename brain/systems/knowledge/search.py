@@ -14,6 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.config import KNOWLEDGE_EMBEDDING_DIM
 from brain.platform.db.models.knowledge import KnowledgeItem, KnowledgeItemEmbedding
+from brain.systems.knowledge.search_contract import (
+    KNOWLEDGE_SEARCH_DEFAULT_RESULTS,
+    KnowledgeSearchResponse,
+    normalize_knowledge_search_limit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -314,10 +319,21 @@ def _serialize_result(
     semantic_scores: Mapping[int, float],
 ) -> dict[str, Any]:
     channel_debug = debug["channels"]
-    if item.id in lexical_scores:
-        channel_debug["lexical"]["score"] = lexical_scores[item.id]
-    if item.id in semantic_scores:
-        channel_debug["semantic"]["score"] = semantic_scores[item.id]
+    channel_scores = {
+        channel_name: (
+            {
+                **channel_debug[channel_name],
+                "score": raw_score,
+            }
+            if channel_name in channel_debug
+            else None
+        )
+        for channel_name, raw_score in (
+            ("lexical", lexical_scores.get(item.id)),
+            ("semantic", semantic_scores.get(item.id)),
+            ("recency", None),
+        )
+    }
     return {
         "id": item.id,
         "source": item.source,
@@ -332,7 +348,7 @@ def _serialize_result(
         "source_updated_at": _iso(item.source_updated_at),
         "scores": {
             "rrf": round(float(debug["rrf"]), 8),
-            "channels": channel_debug,
+            "channels": channel_scores,
         },
     }
 
@@ -351,7 +367,8 @@ async def search_knowledge(
     clean_query = str(query or "").strip()
     if not clean_query:
         raise ValueError("query is required")
-    max_results = max(1, min(int(limit or 10), 50))
+    requested_limit = int(limit or KNOWLEDGE_SEARCH_DEFAULT_RESULTS)
+    max_results = normalize_knowledge_search_limit(limit)
     channel_limit = min(200, max(20, max_results * 4))
     clean_org_id = str(org_id or "").strip()
     filters = _item_filters(
@@ -394,20 +411,23 @@ async def search_knowledge(
         )
         for item_id in ordered_ids[:max_results]
     ]
-    return {
-        "query": clean_query,
-        "org_id": clean_org_id,
-        "sources": [str(value) for value in sources or []],
-        "kinds": [str(value) for value in kinds or []],
-        "semantic_available": semantic_error is None,
-        "semantic_degraded_reason": semantic_error,
-        "weights": {
+    response = KnowledgeSearchResponse(
+        query=clean_query,
+        org_id=clean_org_id,
+        sources=[str(value) for value in sources or []],
+        kinds=[str(value) for value in kinds or []],
+        semantic_available=semantic_error is None,
+        semantic_degraded_reason=semantic_error,
+        weights={
             "lexical": LEXICAL_WEIGHT,
             "semantic": SEMANTIC_WEIGHT,
             "recency": RECENCY_WEIGHT,
         },
-        "results": results,
-    }
+        requested_limit=requested_limit,
+        effective_limit=max_results,
+        results=results,
+    )
+    return response.model_dump(mode="json")
 
 
 __all__ = [

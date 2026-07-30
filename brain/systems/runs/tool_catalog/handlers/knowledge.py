@@ -29,7 +29,7 @@ async def _handle_search_knowledge(
             org_id=org_id,
             sources=sources,
             kinds=kinds,
-            limit=max(1, min(int(limit or 10), 50)),
+            limit=limit,
         )
     return json.dumps(result, default=str)
 

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from brain.systems.knowledge.search_contract import (
+    KNOWLEDGE_SEARCH_DEFAULT_RESULTS,
+    KNOWLEDGE_SEARCH_MAX_RESULTS,
+)
 
 KNOWLEDGE_TOOLS = [
     {
@@ -31,8 +35,8 @@ KNOWLEDGE_TOOLS = [
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 50,
-                    "default": 10,
+                    "maximum": KNOWLEDGE_SEARCH_MAX_RESULTS,
+                    "default": KNOWLEDGE_SEARCH_DEFAULT_RESULTS,
                     "description": "Maximum fused results to return.",
                 },
             },
