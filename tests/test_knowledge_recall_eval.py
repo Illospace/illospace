@@ -6,13 +6,15 @@ import json
 import pytest
 from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler
 
+from brain.app.cli import knowledge_recall as knowledge_recall_cli
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.knowledge import KnowledgeItem
 from brain.systems.knowledge.recall_eval import (
     EvidencePointer,
-    KnowledgeRecallEvaluationError,
+    KnowledgeRecallInvalidResult,
     KnowledgeRecallQuestion,
     KnowledgeRecallQuestionSet,
+    KnowledgeRecallSuiteResult,
     load_knowledge_recall_question_set,
     run_knowledge_recall_eval,
 )
@@ -20,10 +22,12 @@ from brain.systems.knowledge.recall_eval_harvester import (
     harvest_knowledge_recall_candidates,
 )
 from brain.systems.knowledge.search import (
-    KNOWLEDGE_SEARCH_MAX_RESULTS,
     LEXICAL_WEIGHT,
     RECENCY_WEIGHT,
     SEMANTIC_WEIGHT,
+)
+from brain.systems.knowledge.search_contract import (
+    KNOWLEDGE_SEARCH_MAX_RESULTS,
 )
 
 _ORG_ID = "11111111-1111-4111-8111-111111111111"
@@ -173,13 +177,13 @@ async def test_known_rankings_compute_recall_at_k_and_mrr_with_misses_in_denomin
         search=stub_search,
         generated_at=_FIXED_TIME,
     )
+    assert isinstance(report, KnowledgeRecallSuiteResult)
     payload = report.to_dict()
 
+    assert payload["result_type"] == "valid"
     assert payload["summary"] == {
-        "evaluation_valid": True,
         "total": 3,
         "missed": 1,
-        "search_errors": 0,
         "semantic_degraded_cases": 0,
         "hits_at_k": {"1": 1, "5": 2},
         "recall_at_k": {"1": 0.33333333, "5": 0.66666667},
@@ -261,26 +265,55 @@ async def test_malformed_search_hit_is_an_evaluation_error_not_a_miss():
         description="Producer drift fixture.",
         cases=(_question_set().cases[0],),
     )
-    payload = (
-        await run_knowledge_recall_eval(
-            object(),
-            org_id=_ORG_ID,
-            question_set=single_case,
-            k_values=(1,),
-            search_limit=1,
-            search=malformed_search,
-            generated_at=_FIXED_TIME,
-        )
-    ).to_dict()
+    report = await run_knowledge_recall_eval(
+        object(),
+        org_id=_ORG_ID,
+        question_set=single_case,
+        k_values=(1,),
+        search_limit=1,
+        search=malformed_search,
+        generated_at=_FIXED_TIME,
+    )
+    assert isinstance(report, KnowledgeRecallInvalidResult)
+    payload = report.to_dict()
 
-    assert payload["summary"]["evaluation_valid"] is False
-    assert payload["summary"]["search_errors"] == 1
-    assert payload["summary"]["missed"] == 0
-    assert payload["summary"]["recall_at_k"] == {"1": None}
-    assert payload["summary"]["mean_reciprocal_rank"] is None
-    assert payload["summary"]["mean_reciprocal_rank_cutoff"] is None
-    assert payload["results"][0]["missed"] is False
-    assert "missing fields: source_ref" in payload["results"][0]["error"]
+    assert payload["result_type"] == "invalid"
+    assert "summary" not in payload
+    assert "results" not in payload
+    assert payload["errors"][0]["case_id"] == "rank-one"
+    assert "source_ref" in payload["errors"][0]["cause"]
+    assert "renamed_source_ref" in payload["errors"][0]["cause"]
+
+
+async def test_one_search_failure_invalidates_the_whole_question_set():
+    evidence = _item(1, "github:Illospace/illospace#1", "Alpha evidence")
+
+    async def partly_failing_search(_session, query, *, org_id, limit):
+        assert org_id == _ORG_ID
+        if query == "Where is beta?":
+            raise RuntimeError("database unavailable")
+        return _search_response(query, [evidence], requested_limit=limit)
+
+    report = await run_knowledge_recall_eval(
+        object(),
+        org_id=_ORG_ID,
+        question_set=_question_set(),
+        k_values=(1,),
+        search_limit=1,
+        search=partly_failing_search,
+        generated_at=_FIXED_TIME,
+    )
+
+    assert isinstance(report, KnowledgeRecallInvalidResult)
+    payload = report.to_dict()
+    assert "summary" not in payload
+    assert "results" not in payload
+    assert payload["errors"] == [
+        {
+            "case_id": "rank-four",
+            "cause": "RuntimeError: database unavailable",
+        }
+    ]
 
 
 async def test_eval_rejects_effective_depth_that_cannot_support_requested_k():
@@ -301,19 +334,68 @@ async def test_eval_rejects_effective_depth_that_cannot_support_requested_k():
         description="Retrieval-depth fixture.",
         cases=(_question_set().cases[0],),
     )
-    with pytest.raises(
-        KnowledgeRecallEvaluationError,
-        match="effective_limit 2 cannot support recall@3",
-    ):
-        await run_knowledge_recall_eval(
-            object(),
-            org_id=_ORG_ID,
-            question_set=single_case,
-            k_values=(3,),
-            search_limit=5,
-            search=shallow_search,
-            generated_at=_FIXED_TIME,
+    report = await run_knowledge_recall_eval(
+        object(),
+        org_id=_ORG_ID,
+        question_set=single_case,
+        k_values=(3,),
+        search_limit=5,
+        search=shallow_search,
+        generated_at=_FIXED_TIME,
+    )
+
+    assert isinstance(report, KnowledgeRecallInvalidResult)
+    assert report.to_dict()["errors"] == [
+        {
+            "case_id": "rank-one",
+            "cause": (
+                "ValueError: knowledge search effective_limit 2 "
+                "cannot support recall@3"
+            ),
+        }
+    ]
+
+
+async def test_inconsistent_effective_depths_return_one_invalid_result():
+    evidence = _item(1, "github:Illospace/illospace#1", "Alpha evidence")
+    cases = _question_set().cases[:2]
+
+    async def inconsistent_search(_session, query, *, org_id, limit):
+        assert org_id == _ORG_ID
+        effective_limit = 4 if query == cases[0].question else 5
+        return _search_response(
+            query,
+            [evidence],
+            requested_limit=limit,
+            effective_limit=effective_limit,
         )
+
+    report = await run_knowledge_recall_eval(
+        object(),
+        org_id=_ORG_ID,
+        question_set=KnowledgeRecallQuestionSet(
+            question_set_id="inconsistent-depth",
+            version="1",
+            description="Inconsistent retrieval-depth fixture.",
+            cases=cases,
+        ),
+        k_values=(3,),
+        search_limit=5,
+        search=inconsistent_search,
+        generated_at=_FIXED_TIME,
+    )
+
+    assert isinstance(report, KnowledgeRecallInvalidResult)
+    payload = report.to_dict()
+    assert "summary" not in payload
+    assert [error["case_id"] for error in payload["errors"]] == [
+        "rank-one",
+        "rank-four",
+    ]
+    assert all(
+        "observed depths: 4, 5" in error["cause"]
+        for error in payload["errors"]
+    )
 
 
 async def test_mrr_cutoff_uses_effective_retrieval_depth():
@@ -349,6 +431,29 @@ async def test_mrr_cutoff_uses_effective_retrieval_depth():
     assert payload["configuration"]["requested_search_limit"] == 5
     assert payload["configuration"]["effective_search_limit"] == 4
     assert payload["summary"]["mean_reciprocal_rank_cutoff"] == 4
+
+
+def test_cli_emits_invalid_result_and_returns_nonzero(monkeypatch, capsys):
+    invalid_payload = {
+        "result_type": "invalid",
+        "suite": "knowledge-recall",
+        "errors": [
+            {
+                "case_id": "rank-one",
+                "cause": "RuntimeError: database unavailable",
+            }
+        ],
+    }
+
+    async def fake_run(_args):
+        return invalid_payload
+
+    monkeypatch.setattr(knowledge_recall_cli, "_run", fake_run)
+
+    exit_code = knowledge_recall_cli.main(["eval", "--org-id", _ORG_ID])
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == invalid_payload
 
 
 def test_question_set_is_data_backed_versioned_and_supports_multiple_evidence():

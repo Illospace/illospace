@@ -8,18 +8,16 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.systems.knowledge.search import (
+from brain.systems.knowledge.search import search_knowledge
+from brain.systems.knowledge.search_contract import (
     KNOWLEDGE_SEARCH_MAX_RESULTS,
-    KnowledgeSearchContractError,
     KnowledgeSearchResponse,
     KnowledgeSearchScores,
     normalize_knowledge_search_limit,
-    parse_knowledge_search_response,
-    search_knowledge,
 )
 
 DEFAULT_K_VALUES = (3, 10)
@@ -28,10 +26,6 @@ DEFAULT_QUESTION_SET_PATH = (
 )
 
 KnowledgeSearch = Callable[..., Awaitable[Any]]
-
-
-class KnowledgeRecallEvaluationError(ValueError):
-    """Raised when retrieval depth makes the requested metrics invalid."""
 
 
 @dataclass(frozen=True)
@@ -116,7 +110,7 @@ class RankedKnowledgeResult:
             "kind": self.kind,
             "title": self.title,
             "matched": self.matched,
-            "scores": self.scores.to_payload(),
+            "scores": self.scores.model_dump(mode="json"),
         }
 
 
@@ -132,11 +126,10 @@ class KnowledgeRecallCaseResult:
     semantic_available: bool
     semantic_degraded_reason: str | None
     ranked_results: tuple[RankedKnowledgeResult, ...]
-    error: str | None = None
 
     @property
     def missed(self) -> bool:
-        return self.error is None and self.best_evidence_rank is None
+        return self.best_evidence_rank is None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -154,14 +147,29 @@ class KnowledgeRecallCaseResult:
             },
             "semantic_available": self.semantic_available,
             "semantic_degraded_reason": self.semantic_degraded_reason,
-            "error": self.error,
             "ranked_results": [result.to_dict() for result in self.ranked_results],
         }
 
 
 @dataclass(frozen=True)
-class KnowledgeRecallSuiteResult:
-    """Eval report envelope extended for ranked retrieval rather than pass/fail."""
+class KnowledgeRecallCaseError:
+    """Cause that prevented one question from participating in the evaluation."""
+
+    case_id: str
+    cause: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "case_id": self.case_id,
+            "cause": self.cause,
+        }
+
+
+@dataclass(frozen=True)
+class KnowledgeRecallInvalidResult:
+    """An unscored run whose case errors make metrics incomparable."""
+
+    result_type: ClassVar[Literal["invalid"]] = "invalid"
 
     suite: str
     generated_at: str
@@ -170,7 +178,38 @@ class KnowledgeRecallSuiteResult:
     question_set: KnowledgeRecallQuestionSet
     k_values: tuple[int, ...]
     requested_search_limit: int
-    effective_search_limit: int | None
+    errors: tuple[KnowledgeRecallCaseError, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "result_type": self.result_type,
+            "suite": self.suite,
+            "generated_at": self.generated_at,
+            "live_database": self.live_database,
+            "question_set": self.question_set.identity_dict(),
+            "configuration": {
+                "org_id": self.org_id,
+                "k_values": list(self.k_values),
+                "requested_search_limit": self.requested_search_limit,
+            },
+            "errors": [error.to_dict() for error in self.errors],
+        }
+
+
+@dataclass(frozen=True)
+class KnowledgeRecallSuiteResult:
+    """Valid ranked-retrieval metrics computed over the complete question set."""
+
+    result_type: ClassVar[Literal["valid"]] = "valid"
+
+    suite: str
+    generated_at: str
+    live_database: bool
+    org_id: str
+    question_set: KnowledgeRecallQuestionSet
+    k_values: tuple[int, ...]
+    requested_search_limit: int
+    effective_search_limit: int
     results: tuple[KnowledgeRecallCaseResult, ...]
 
     @property
@@ -191,21 +230,17 @@ class KnowledgeRecallSuiteResult:
 
     def to_dict(self) -> dict[str, Any]:
         total = len(self.results)
-        search_errors = sum(result.error is not None for result in self.results)
         hits = {
             str(k): sum(1 for result in self.results if result.hits_at_k[k])
             for k in self.k_values
         }
-        recall_at_k = (
-            {
-                str(k): _metric(hits[str(k)] / total if total else 0.0)
-                for k in self.k_values
-            }
-            if search_errors == 0
-            else {str(k): None for k in self.k_values}
-        )
+        recall_at_k = {
+            str(k): _metric(hits[str(k)] / total if total else 0.0)
+            for k in self.k_values
+        }
         reasons = self.semantic_degraded_reasons
         return {
+            "result_type": self.result_type,
             "suite": self.suite,
             "generated_at": self.generated_at,
             "live_database": self.live_database,
@@ -219,28 +254,27 @@ class KnowledgeRecallSuiteResult:
             "semantic_available": self.semantic_available,
             "semantic_degraded_reason": " | ".join(reasons) if reasons else None,
             "summary": {
-                "evaluation_valid": search_errors == 0,
                 "total": total,
                 "missed": sum(result.missed for result in self.results),
-                "search_errors": search_errors,
                 "semantic_degraded_cases": sum(
                     not result.semantic_available for result in self.results
                 ),
                 "hits_at_k": hits,
                 "recall_at_k": recall_at_k,
-                "mean_reciprocal_rank": (
-                    _metric(
-                        sum(result.reciprocal_rank for result in self.results) / total
-                        if total
-                        else 0.0
-                    )
-                    if search_errors == 0
-                    else None
+                "mean_reciprocal_rank": _metric(
+                    sum(result.reciprocal_rank for result in self.results) / total
+                    if total
+                    else 0.0
                 ),
                 "mean_reciprocal_rank_cutoff": self.effective_search_limit,
             },
             "results": [result.to_dict() for result in self.results],
         }
+
+
+KnowledgeRecallEvaluationResult = (
+    KnowledgeRecallInvalidResult | KnowledgeRecallSuiteResult
+)
 
 
 def _required_text(value: Any, *, field_name: str) -> str:
@@ -396,13 +430,36 @@ async def run_knowledge_recall_eval(
     search: KnowledgeSearch = search_knowledge,
     generated_at: str | None = None,
     live_database: bool = False,
-) -> KnowledgeRecallSuiteResult:
-    """Score known-best provenance with recall@k and mean reciprocal rank."""
+) -> KnowledgeRecallEvaluationResult:
+    """Score the complete question set, or return an unscored invalid result.
+
+    A search, contract, or retrieval-depth failure on even one case invalidates
+    the whole run. Metrics computed over only the successful subset would not
+    be comparable with complete runs, and comparability is this artifact's job.
+    """
 
     clean_org_id = _required_text(org_id, field_name="org_id")
     loaded_question_set = question_set or load_knowledge_recall_question_set()
     normalized_k = normalize_k_values(k_values)
     requested_search_limit = int(search_limit)
+    report_generated_at = generated_at or datetime.now(timezone.utc).isoformat()
+    if not loaded_question_set.cases:
+        return KnowledgeRecallInvalidResult(
+            suite="knowledge-recall",
+            generated_at=report_generated_at,
+            live_database=live_database,
+            org_id=clean_org_id,
+            question_set=loaded_question_set,
+            k_values=normalized_k,
+            requested_search_limit=requested_search_limit,
+            errors=(
+                KnowledgeRecallCaseError(
+                    case_id=loaded_question_set.question_set_id,
+                    cause="question set contains no evaluable cases",
+                ),
+            ),
+        )
+
     normalized_search_limit = normalize_knowledge_search_limit(
         requested_search_limit,
         default=KNOWLEDGE_SEARCH_MAX_RESULTS,
@@ -411,15 +468,29 @@ async def run_knowledge_recall_eval(
         requested_search_limit != normalized_search_limit
         or normalized_search_limit < max(normalized_k)
     ):
-        raise ValueError(
+        cause = (
             "search_limit must be at least the largest k value and between "
             f"1 and {KNOWLEDGE_SEARCH_MAX_RESULTS}"
         )
+        return KnowledgeRecallInvalidResult(
+            suite="knowledge-recall",
+            generated_at=report_generated_at,
+            live_database=live_database,
+            org_id=clean_org_id,
+            question_set=loaded_question_set,
+            k_values=normalized_k,
+            requested_search_limit=requested_search_limit,
+            errors=tuple(
+                KnowledgeRecallCaseError(case_id=case.case_id, cause=cause)
+                for case in loaded_question_set.cases
+            ),
+        )
+
     case_results: list[KnowledgeRecallCaseResult] = []
-    effective_limits: set[int] = set()
+    case_errors: list[KnowledgeRecallCaseError] = []
+    observed_depths: list[tuple[str, int]] = []
 
     for case in loaded_question_set.cases:
-        error = None
         try:
             raw_response = await search(
                 session,
@@ -427,43 +498,40 @@ async def run_knowledge_recall_eval(
                 org_id=clean_org_id,
                 limit=normalized_search_limit,
             )
-            response = parse_knowledge_search_response(raw_response)
+            response = KnowledgeSearchResponse.model_validate(raw_response)
             if response.query != case.question:
-                raise KnowledgeSearchContractError(
+                raise ValueError(
                     "knowledge_search.query does not match the evaluated question"
                 )
             if response.org_id != clean_org_id:
-                raise KnowledgeSearchContractError(
+                raise ValueError(
                     "knowledge_search.org_id does not match the evaluated organization"
                 )
             if response.requested_limit != normalized_search_limit:
-                raise KnowledgeSearchContractError(
+                raise ValueError(
                     "knowledge_search.requested_limit does not match the evaluator request"
                 )
             if response.effective_limit < max(normalized_k):
-                raise KnowledgeRecallEvaluationError(
+                raise ValueError(
                     "knowledge search effective_limit "
                     f"{response.effective_limit} cannot support recall@"
                     f"{max(normalized_k)}"
                 )
-            effective_limits.add(response.effective_limit)
-            if len(effective_limits) > 1:
-                raise KnowledgeRecallEvaluationError(
-                    "knowledge search returned inconsistent effective retrieval depths"
-                )
+            observed_depths.append((case.case_id, response.effective_limit))
             ranked = _ranked_results(
                 response,
                 acceptable_evidence=case.acceptable_evidence,
             )
             semantic_available = response.semantic_available
             semantic_degraded_reason = response.semantic_degraded_reason
-        except KnowledgeRecallEvaluationError:
-            raise
         except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            ranked = ()
-            semantic_available = False
-            semantic_degraded_reason = f"search failed: {error}"
+            case_errors.append(
+                KnowledgeRecallCaseError(
+                    case_id=case.case_id,
+                    cause=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            continue
 
         best_rank = next((result.rank for result in ranked if result.matched), None)
         case_results.append(
@@ -480,23 +548,44 @@ async def run_knowledge_recall_eval(
                 semantic_available=semantic_available,
                 semantic_degraded_reason=semantic_degraded_reason,
                 ranked_results=ranked,
-                error=error,
             )
+        )
+
+    effective_limits = {depth for _case_id, depth in observed_depths}
+    if len(effective_limits) > 1:
+        observed = ", ".join(str(depth) for depth in sorted(effective_limits))
+        case_errors.extend(
+            KnowledgeRecallCaseError(
+                case_id=case_id,
+                cause=(
+                    "knowledge search returned inconsistent effective retrieval "
+                    f"depth {depth}; observed depths: {observed}"
+                ),
+            )
+            for case_id, depth in observed_depths
+        )
+
+    if case_errors:
+        return KnowledgeRecallInvalidResult(
+            suite="knowledge-recall",
+            generated_at=report_generated_at,
+            live_database=live_database,
+            org_id=clean_org_id,
+            question_set=loaded_question_set,
+            k_values=normalized_k,
+            requested_search_limit=requested_search_limit,
+            errors=tuple(case_errors),
         )
 
     return KnowledgeRecallSuiteResult(
         suite="knowledge-recall",
-        generated_at=generated_at or datetime.now(timezone.utc).isoformat(),
+        generated_at=report_generated_at,
         live_database=live_database,
         org_id=clean_org_id,
         question_set=loaded_question_set,
         k_values=normalized_k,
         requested_search_limit=requested_search_limit,
-        effective_search_limit=(
-            next(iter(effective_limits))
-            if effective_limits
-            else None
-        ),
+        effective_search_limit=observed_depths[0][1],
         results=tuple(case_results),
     )
 
@@ -505,8 +594,10 @@ __all__ = [
     "DEFAULT_K_VALUES",
     "DEFAULT_QUESTION_SET_PATH",
     "EvidencePointer",
+    "KnowledgeRecallCaseError",
     "KnowledgeRecallCaseResult",
-    "KnowledgeRecallEvaluationError",
+    "KnowledgeRecallEvaluationResult",
+    "KnowledgeRecallInvalidResult",
     "KnowledgeRecallQuestion",
     "KnowledgeRecallQuestionSet",
     "KnowledgeRecallSuiteResult",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from brain.systems.knowledge.search import (
+from brain.systems.knowledge.search_contract import (
     KNOWLEDGE_SEARCH_DEFAULT_RESULTS,
     KNOWLEDGE_SEARCH_MAX_RESULTS,
 )

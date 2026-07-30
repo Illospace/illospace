@@ -849,6 +849,58 @@ async def test_agent_mcp_exposes_and_dispatches_knowledge_search():
     }
 
 
+async def test_agent_tool_passes_raw_knowledge_search_limit_to_search_boundary():
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.knowledge import (
+        _handle_search_knowledge,
+    )
+
+    class StubUnitOfWork:
+        session = object()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            del exc_type, exc, traceback
+
+    captured: dict[str, object] = {}
+
+    async def fake_search(_session, query, *, org_id, sources, kinds, limit):
+        captured.update(
+            query=query,
+            org_id=org_id,
+            sources=sources,
+            kinds=kinds,
+            limit=limit,
+        )
+        return {
+            "requested_limit": limit,
+            "effective_limit": 50,
+        }
+
+    with (
+        bind_agent_context({"org_id": _ORG_ID}),
+        patch(
+            "brain.systems.runs.tool_catalog.handlers.knowledge.UnitOfWork",
+            return_value=StubUnitOfWork(),
+        ),
+        patch(
+            "brain.systems.runs.tool_catalog.handlers.knowledge.search_knowledge",
+            new=AsyncMock(side_effect=fake_search),
+        ),
+    ):
+        payload = json.loads(
+            await _handle_search_knowledge("roadmap", limit=75)
+        )
+
+    assert captured["limit"] == 75
+    assert payload == {
+        "requested_limit": 75,
+        "effective_limit": 50,
+    }
+
+
 async def test_sync_connector_accounts_for_truncated_raw_text(
     session,
     embedding_runtime,

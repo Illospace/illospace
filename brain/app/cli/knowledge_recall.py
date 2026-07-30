@@ -19,7 +19,7 @@ from brain.systems.knowledge.recall_eval import (
 from brain.systems.knowledge.recall_eval_harvester import (
     harvest_knowledge_recall_candidates,
 )
-from brain.systems.knowledge.search import (
+from brain.systems.knowledge.search_contract import (
     KNOWLEDGE_SEARCH_MAX_RESULTS,
     normalize_knowledge_search_limit,
 )
@@ -146,7 +146,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    if args.command == "eval" and payload["summary"]["search_errors"]:
+    if args.command == "eval" and payload["result_type"] == "invalid":
         return 1
     return 0
 
