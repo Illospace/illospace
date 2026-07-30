@@ -2472,6 +2472,54 @@ async def test_slack_identity_mapping_service_links_user(session):
 
 
 @pytest.mark.asyncio
+async def test_list_slack_identity_mappings_keeps_conflicted_pair_for_operator(
+    session,
+):
+    """A conflict must stay visible at the surface an operator actually uses.
+
+    ``normalize_slack_identities`` resolves a linked-vs-mapped disagreement to
+    ``user_id=None`` so two identities can never be spliced. That is only
+    repairable if the unresolved pair still appears in the mapping listing the
+    Slack tool handler reads -- dropping it would hide the misconfiguration
+    rather than report it.
+    """
+
+    from brain.systems.slack.identity import list_slack_identity_mappings
+
+    connection = await _seed_slack_connection(session)
+    connection.metadata_ = {
+        "slack": {
+            "identity_map": {
+                "UCONFLICT": MAPPED_USER_ID,
+            }
+        },
+        "identity_links": {
+            "slack": {
+                "UCONFLICT": {
+                    "user_id": OTHER_MAPPED_USER_ID,
+                    "display_name": "Conflicted user",
+                }
+            }
+        },
+    }
+    await session.flush()
+
+    mappings = await list_slack_identity_mappings(
+        session,
+        connection_id=str(connection.id),
+        org_id=ORG_ID,
+    )
+
+    assert mappings == [
+        {
+            "slack_user_id": "UCONFLICT",
+            "user_id": None,
+            "user_name": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_slack_identity_relink_clears_previous_person_profile(session):
     from brain.systems.slack.identity import link_slack_identity
 
