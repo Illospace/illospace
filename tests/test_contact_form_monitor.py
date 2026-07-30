@@ -76,6 +76,89 @@ def test_contact_form_lead_is_decoded_once_with_reordered_fields_and_no_phone():
     }
 
 
+def test_disabled_contact_form_is_dropped_without_channel_message_fallback(
+    caplog,
+):
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+    from brain.systems.slack.monitors import disabled_intake_origins
+
+    socket_payload = socket_mode_channel_message(
+        user="",
+        bot_id="B_CONTACT_FORM",
+        app_id="A_CONTACT_FORM",
+        text=_contact_form_text(),
+    )
+
+    assert disabled_intake_origins(FakeSlackConnection()) == set()
+    assert (
+        normalize_slack_socket_event(
+            socket_payload,
+            bot_user_id="BILLO",
+            monitored_channels={"C_ALERTS"},
+        )["origin"]
+        == "contact_form_lead"
+    )
+
+    with caplog.at_level(
+        "INFO",
+        logger="brain.systems.slack.ingress",
+    ):
+        disabled = normalize_slack_socket_event(
+            socket_payload,
+            bot_user_id="BILLO",
+            monitored_channels={"C_ALERTS"},
+            disabled_intakes={"contact_form_lead"},
+        )
+
+    assert disabled is None
+    dropped_records = [
+        record
+        for record in caplog.records
+        if record.name == "brain.systems.slack.ingress"
+        and record.message.startswith("slack_monitored_intake_disabled:")
+    ]
+    assert len(dropped_records) == 1
+    assert "intake=contact_form_lead" in dropped_records[0].message
+
+    fallback = normalize_slack_socket_event(
+        socket_mode_channel_message(),
+        bot_user_id="BILLO",
+        monitored_channels={"C_ALERTS"},
+        disabled_intakes={"slack.channel_message"},
+    )
+    assert fallback is not None
+    assert fallback["origin"] == "slack.channel_message"
+
+
+def test_disabled_contact_form_leaves_mentions_and_dms_actionable():
+    from brain.systems.slack.ingress import normalize_slack_socket_event
+
+    dm = normalize_slack_socket_event(
+        socket_mode_channel_message(
+            text=_contact_form_text(),
+            channel="D_DM",
+            channel_type="im",
+        ),
+        bot_user_id="BILLO",
+        monitored_channels={"C_ALERTS"},
+        disabled_intakes={"contact_form_lead"},
+    )
+    assert dm is not None
+    assert dm["origin"] == "slack.direct_message"
+
+    mention = normalize_slack_socket_event(
+        socket_mode_channel_message(
+            type="app_mention",
+            text=_contact_form_text(),
+        ),
+        bot_user_id="BILLO",
+        monitored_channels={"C_ALERTS"},
+        disabled_intakes={"contact_form_lead"},
+    )
+    assert mention is not None
+    assert mention["origin"] == "slack.app_mention"
+
+
 def test_contact_form_lead_is_decoded_from_slack_blocks():
     from brain.systems.slack.ingress import normalize_slack_socket_event
 
@@ -640,6 +723,40 @@ async def test_contact_form_lead_gets_common_eyes_and_policy_enrichment(
         "/contact-form-lead-intake\n"
     )
     assert "Configured lead assessment." in work["payload"]["run_message"]
+
+
+@pytest.mark.asyncio
+async def test_disabled_contact_form_creates_no_run_or_ack(monkeypatch):
+    connector_module, reactions, submitted = patch_slack_connector(monkeypatch)
+    connection = FakeSlackConnection(
+        metadata={
+            "slack": {
+                "monitored_channels": ["C_ALERTS"],
+                "disabled_intakes": ["contact_form_lead"],
+            }
+        }
+    )
+    config = connector_module.SlackConnectorConfig(
+        bot_token="xoxb-x",
+        app_token="xapp-x",
+        bot_user_id="BILLO",
+    )
+
+    result = await connector_module.process_socket_payload(
+        None,
+        connection=connection,
+        socket_payload=socket_mode_channel_message(
+            user="",
+            bot_id="B_CONTACT_FORM",
+            app_id="A_CONTACT_FORM",
+            text=_contact_form_text(),
+        ),
+        config=config,
+    )
+
+    assert result["ignored"] is True
+    assert reactions == []
+    assert submitted == []
 
 
 @pytest.mark.asyncio

@@ -31,7 +31,10 @@ from brain.systems.slack.monitored_intakes import (
     enrich_monitored_intake,
     is_monitored_intake,
 )
-from brain.systems.slack.monitors import monitored_channel_ids
+from brain.systems.slack.monitors import (
+    disabled_intake_origins,
+    monitored_channel_ids,
+)
 
 logger = logging.getLogger(__name__)
 SLACK_PROCESSING_STATUS = "is working on it..."
@@ -321,6 +324,7 @@ async def process_socket_payload(
         socket_payload,
         bot_user_id=config.bot_user_id,
         monitored_channels=monitored_channels,
+        disabled_intakes=disabled_intake_origins(connection),
     )
     if envelope is None:
         return {"ack": ack, "ignored": True}
@@ -430,6 +434,7 @@ async def process_slack_history_message(
         socket_payload,
         bot_user_id=config.bot_user_id,
         monitored_channels=monitored_channel_ids(connection),
+        disabled_intakes=disabled_intake_origins(connection),
     )
     if envelope is None:
         return {"ignored": True, "acked": False}
