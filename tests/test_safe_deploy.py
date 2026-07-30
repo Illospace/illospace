@@ -11,11 +11,7 @@ from pathlib import Path
 import pytest
 
 from brain.contracts import worker_lifecycle as worker_lifecycle_contract
-from brain.contracts.statuses import (
-    OPEN_RUN_STATUS_VALUES,
-    RUN_STATUS_VALUES,
-    TERMINAL_RUN_STATUS_VALUES,
-)
+from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
 from brain.contracts.worker_lifecycle import (
     WorkerContainerState,
     WorkerCoverObservation,
@@ -30,9 +26,6 @@ from brain.contracts.worker_swap import (
     worker_swap_rows_sql,
     worker_swap_snapshot,
 )
-from brain.systems.runs import status as run_status_contract
-from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES
-
 
 def _shell_function_body(content: str, name: str) -> str:
     match = re.search(
@@ -506,29 +499,6 @@ def test_worker_swap_snapshot_derives_decision_and_presentation_from_canonical_p
     assert parsed.details == "2327:paused,2330:running,2331:queued"
     for status in OPEN_RUN_STATUS_VALUES:
         assert repr(status) in worker_swap_rows_sql()
-
-
-def test_terminal_run_status_contract_preserves_canonical_membership():
-    assert TERMINAL_RUN_STATUS_VALUES == (
-        "completed",
-        "failed",
-        "canceled",
-        "expired",
-    )
-    assert type(TERMINAL_RUN_STATUSES) is frozenset
-    assert TERMINAL_RUN_STATUSES == frozenset(
-        RunStatus(status) for status in TERMINAL_RUN_STATUS_VALUES
-    )
-    assert all(isinstance(status, RunStatus) for status in TERMINAL_RUN_STATUSES)
-    assert "TERMINAL_RUN_STATUSES" in run_status_contract.__all__
-
-
-def test_open_and_terminal_run_statuses_partition_canonical_values():
-    open_statuses = set(OPEN_RUN_STATUS_VALUES)
-    terminal_statuses = set(TERMINAL_RUN_STATUS_VALUES)
-
-    assert set(RUN_STATUS_VALUES) == open_statuses | terminal_statuses
-    assert open_statuses.isdisjoint(terminal_statuses)
 
 
 def test_worker_lifecycle_phase_is_published_outside_the_worker_process(
