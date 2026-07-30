@@ -129,6 +129,22 @@ container_running_known() {
   esac
 }
 
+# Read through the contract inside the worker container so its process-generation
+# validation decides whether the published phase is live. Docker/exec failures
+# remain unknown rather than borrowing a stale fact.
+worker_lifecycle_phase_observation() {
+  local id="$1"
+  local phase
+
+  if phase="$(
+    docker exec "$id" python -m brain.contracts.worker_lifecycle read 2>/dev/null
+  )"; then
+    printf '%s\n' "$phase"
+  else
+    printf 'unknown\n'
+  fi
+}
+
 # Combine Docker liveness and the generation-validated lifecycle phase into the
 # only cover answer consumed by swap waits. The Python contract owns the policy:
 # inspect/exec failures and `starting` are pending, a positive `claiming` record
@@ -139,9 +155,7 @@ worker_cover_observation() {
 
   if container_running_known "$id"; then
     container_state=running
-    phase="$(
-      docker exec "$id" python -m brain.contracts.worker_lifecycle read 2>/dev/null
-    )" || phase=unknown
+    phase="$(worker_lifecycle_phase_observation "$id")"
   else
     running_state=$?
     if [ "$running_state" = "1" ]; then
@@ -294,10 +308,40 @@ assert_single_running_worker() {
 # infers it.
 STACK_REQUIRED_SERVICES="${STACK_REQUIRED_SERVICES:-postgres api web worker scheduler}"
 
-# Distinct exit codes so a monitor can tell an invisible failure from an obvious
-# one: 3 = inert (stack up, required service missing), 4 = fully down.
+# Distinct exit codes so a monitor can tell the failure modes apart:
+# 3 = inert (stack up, required service missing), 4 = fully down,
+# 5 = worker present but drained.
 STACK_INERT_EXIT_CODE=3
 STACK_DOWN_EXIT_CODE=4
+STACK_DRAINED_EXIT_CODE=5
+
+# Presence and effective worker capacity are shared deploy invariants. Keeping
+# both verdicts here means the post-deploy doctor and the continuous monitor
+# cannot disagree about a container that exists but has permanently stopped
+# claiming. The lifecycle contract owns both generation-safe phase reads and
+# phase policy; this assertion only turns its observation into an operator
+# verdict.
+assert_worker_not_drained() {
+  local worker_id phase observation
+
+  worker_id="$(worker_container_id)"
+  if [ -z "$worker_id" ]; then
+    echo "Worker lifecycle check failed: could not identify the Compose-managed worker container." >&2
+    return 1
+  fi
+
+  phase="$(worker_lifecycle_phase_observation "$worker_id")"
+  if ! observation="$(worker_lifecycle_cover_observe running "$phase")"; then
+    echo "Worker lifecycle check failed: could not evaluate container $worker_id phase '${phase:-unknown}'." >&2
+    return 1
+  fi
+  if [ "$observation" = "definitively_not_claiming" ]; then
+    echo "Stack is DRAINED: worker container $worker_id reports lifecycle phase '${phase:-unknown}' and cannot claim new AgentRuns." >&2
+    echo "Recovery: inspect the worker logs, then recreate it with: docker compose --env-file \"$ENV_FILE\" -f \"$COMPOSE_FILE\" up -d --force-recreate --no-deps worker" >&2
+    return "$STACK_DRAINED_EXIT_CODE"
+  fi
+  return 0
+}
 
 assert_stack_not_inert() {
   local required="${*:-$STACK_REQUIRED_SERVICES}"
