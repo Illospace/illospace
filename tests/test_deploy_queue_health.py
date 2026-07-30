@@ -168,15 +168,25 @@ def test_deploy_entrypoint_fails_when_worker_is_draining(
 
 
 def test_drained_worker_verdict_has_one_owner_and_both_entrypoints_call_it():
+    """Both entrypoints must reach the drained verdict through the shared owner.
+
+    Asserted as a dependency boundary, not as phase spelling: an entrypoint that
+    read the lifecycle phase itself could reimplement the policy under any name
+    (`stopped`, `shutting_down`) and evade a check for the word "draining".
+    """
+
     runtime_lib = (ROOT / "deploy" / "scripts" / "compose-runtime-lib.sh").read_text()
     doctor = (ROOT / "deploy" / "scripts" / "doctor.sh").read_text()
     inert_check = (ROOT / "deploy" / "scripts" / "inert-stack-check.sh").read_text()
 
     assert runtime_lib.count("assert_worker_not_drained() {") == 1
-    assert "assert_worker_not_drained" in doctor
-    assert "assert_worker_not_drained" in inert_check
-    assert "draining" not in doctor
-    assert "draining" not in inert_check
+    for entrypoint in (doctor, inert_check):
+        assert "assert_worker_not_drained" in entrypoint
+        # The lifecycle contract and its shell adapter are the owner's dependencies,
+        # never an entrypoint's -- reaching for either means the policy was forked.
+        assert "brain.contracts.worker_lifecycle" not in entrypoint
+        assert "worker_lifecycle_cover_observe" not in entrypoint
+        assert "worker_lifecycle_phase_observation" not in entrypoint
     assert "$STACK_DRAINED_EXIT_CODE  DRAINED" in inert_check
 
 
