@@ -676,6 +676,23 @@ def test_manage_cycle_schema_matches_canonical_runtime_policy():
     assert "usage_summary" in properties["action"]["enum"]
     assert properties["days"]["minimum"] == 1
     assert properties["run_limit"]["maximum"] == 500
+    timeout_variants = properties["timeout_seconds"]["oneOf"]
+    assert timeout_variants[0] == {
+        "type": "integer",
+        "minimum": 60,
+        "maximum": 14400,
+    }
+    assert timeout_variants[1] == {"type": "null"}
+    # The definitions module mirrors these bounds as literals (import-leaf
+    # rule); this pins them to the validator's owning constants.
+    from brain.systems.cycles.common import (
+        MAX_CYCLE_TIMEOUT_SECONDS,
+        MIN_CYCLE_TIMEOUT_SECONDS,
+    )
+
+    assert timeout_variants[0]["minimum"] == MIN_CYCLE_TIMEOUT_SECONDS
+    assert timeout_variants[0]["maximum"] == MAX_CYCLE_TIMEOUT_SECONDS
+    assert "live per-Cycle agent-run deadline" in tool["description"]
     assert "add_guidance" in properties["action"]["enum"]
     assert "add_output_target" in properties["action"]["enum"]
     assert properties["run_kind"]["enum"] == [

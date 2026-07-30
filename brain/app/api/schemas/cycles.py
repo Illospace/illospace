@@ -4,6 +4,11 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from brain.systems.cycles.common import (
+    MAX_CYCLE_TIMEOUT_SECONDS,
+    MIN_CYCLE_TIMEOUT_SECONDS,
+)
+
 
 class CycleCreate(BaseModel):
     name: str = Field(min_length=1, max_length=500)
@@ -13,6 +18,12 @@ class CycleCreate(BaseModel):
     timezone: str = Field(min_length=1, max_length=64)
     enabled: bool = True
     max_concurrency: int = Field(default=1, ge=1, strict=True)
+    timeout_seconds: int | None = Field(
+        default=None,
+        ge=MIN_CYCLE_TIMEOUT_SECONDS,
+        le=MAX_CYCLE_TIMEOUT_SECONDS,
+        strict=True,
+    )
     model_override: str | None = None
     thinking_override: str | None = None
     target_idea_id: str | None = None
@@ -28,6 +39,12 @@ class CycleUpdate(BaseModel):
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
     enabled: bool | None = None
     max_concurrency: int = Field(default=1, ge=1, strict=True)
+    timeout_seconds: int | None = Field(
+        default=None,
+        ge=MIN_CYCLE_TIMEOUT_SECONDS,
+        le=MAX_CYCLE_TIMEOUT_SECONDS,
+        strict=True,
+    )
     model_override: str | None = None
     thinking_override: str | None = None
     target_idea_id: str | None = None
@@ -51,6 +68,7 @@ class CycleRead(BaseModel):
     timezone: str
     enabled: bool
     max_concurrency: int
+    timeout_seconds: int | None = None
     model_override: str | None = None
     thinking_override: str | None = None
     execution_mode: str

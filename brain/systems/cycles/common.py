@@ -19,6 +19,8 @@ AGENT_TRIGGERED_CYCLE_ORIGIN = "agent_triggered_cycle"
 EXTERNAL_AGENT_TRIGGERED_CYCLE_ORIGIN = "external_agent_triggered_cycle"
 SCHEDULED_DIGEST_RUN_KIND = "scheduled_digest"
 OFF_SLOT_MATERIAL_ALERT_RUN_KIND = "off_slot_material_alert"
+MIN_CYCLE_TIMEOUT_SECONDS = 60
+MAX_CYCLE_TIMEOUT_SECONDS = 14_400
 
 _VALID_MODEL_OVERRIDES = frozenset(
     f"{provider}/{model}"
@@ -32,6 +34,21 @@ def validate_nonempty_trimmed(value: str, field_name: str) -> str:
     if not normalized:
         raise ValueError(f"{field_name} is required")
     return normalized
+
+
+def validate_cycle_timeout_seconds(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not MIN_CYCLE_TIMEOUT_SECONDS <= value <= MAX_CYCLE_TIMEOUT_SECONDS
+    ):
+        raise ValueError(
+            "timeout_seconds must be an integer between "
+            f"{MIN_CYCLE_TIMEOUT_SECONDS} and {MAX_CYCLE_TIMEOUT_SECONDS}, or null"
+        )
+    return value
 
 
 def canonical_execution_mode(_mode: str | None = None) -> str:
