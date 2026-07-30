@@ -19,6 +19,7 @@ from brain.systems.cycles.exception_ping import (
     slack_mentioned_teammates,
 )
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
+from brain.systems.runs.obligation_specs import ObligationSettlementPolicy, obligation_spec_from_metadata
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _current_runtime_secret_context
 from brain.systems.slack.client import SlackApiError, SlackDeliveryError
 from brain.systems.slack.exception_ping_posting import post_exception_ping
@@ -446,6 +447,9 @@ async def _handle_post_slack_reply(
     """Post an Illo-authored reply to the originating Slack surface."""
 
     answers_open_ask = _coerce_bool(answers_open_ask, default=False)
+    obligation_spec = obligation_spec_from_metadata(_execution_metadata().get("obligation_spec"))
+    if obligation_spec and obligation_spec.settlement_policy is ObligationSettlementPolicy.ANSWERER_SLACK_REPLY:
+        answers_open_ask = False
     submitted_text = str(body or "")
     text = submitted_text
     try:
@@ -1063,6 +1067,7 @@ async def _handle_manage_slack(
     channel_types: str | list[str] | None = None,
     channel_id: str | None = None,
     channel_name: str | None = None,
+    mandate: str | None = None,
     limit: int = 200,
     cursor: str | None = None,
     include_archived: bool = False,
@@ -1084,8 +1089,10 @@ async def _handle_manage_slack(
     from brain.systems.slack.monitors import (
         SlackMonitorConfigError,
         add_monitored_channel,
+        clear_contact_form_lead_mandate,
         list_monitored_channels,
         remove_monitored_channel,
+        set_contact_form_lead_mandate,
     )
 
     async with UnitOfWork() as uow:
@@ -1265,13 +1272,30 @@ async def _handle_manage_slack(
             except SlackMonitorConfigError as exc:
                 return json.dumps({"error": str(exc)})
             return json.dumps({"ok": True, **result}, default=str)
+        if normalized_action in {"set_contact_form_lead_mandate", "clear_contact_form_lead_mandate"}:
+            try:
+                operation = (
+                    clear_contact_form_lead_mandate
+                    if normalized_action == "clear_contact_form_lead_mandate"
+                    else partial(set_contact_form_lead_mandate, mandate=str(mandate or ""))
+                )
+                result = await operation(
+                    uow.session,
+                    connection_id=str(connection.id),
+                    org_id=org_id,
+                )
+            except SlackMonitorConfigError as exc:
+                return json.dumps({"error": str(exc)})
+            return json.dumps({"ok": True, **result}, default=str)
 
     return json.dumps(
         {
             "error": (
                 "manage_slack action must be status, list_channels, list_mappings, "
                 "link_identity, unlink_identity, list_monitored, monitor_channel, "
-                "unmonitor_channel, or open_alert_surges"
+                "unmonitor_channel, set_contact_form_lead_mandate, "
+                "clear_contact_form_lead_mandate, or "
+                "open_alert_surges"
             )
         }
     )

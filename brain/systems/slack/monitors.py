@@ -15,6 +15,10 @@ from typing import Any, Mapping
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 
 
+CONTACT_FORM_LEAD_MANDATE_KEY = "contact_form_lead_mandate"
+CONTACT_FORM_LEAD_MANDATE_MAX_CHARS = 20_000
+
+
 class SlackMonitorConfigError(ValueError):
     """Raised when a Slack channel monitor cannot be configured."""
 
@@ -81,6 +85,17 @@ def monitored_channel_ids(connection: ExternalAgentConnectionRow) -> set[str]:
     return {entry["channel_id"] for entry in entries if entry.get("enabled", True)}
 
 
+def contact_form_lead_mandate(
+    connection: ExternalAgentConnectionRow,
+) -> str | None:
+    """Return the optional connection overlay for contact-form lead behavior."""
+
+    value = _clean(
+        _slack_metadata(connection).get(CONTACT_FORM_LEAD_MANDATE_KEY)
+    )
+    return value or None
+
+
 async def _connection_for_org(
     session,
     connection_id: str,
@@ -102,6 +117,74 @@ def _write_entries(connection: ExternalAgentConnectionRow, entries: list[dict[st
     slack_metadata["monitored_channels"] = entries
     root["slack"] = slack_metadata
     connection.metadata_ = root
+
+
+async def _write_contact_form_lead_mandate(
+    session,
+    *,
+    connection_id: str,
+    mandate: str | None,
+    org_id: str | None = None,
+) -> dict[str, Any]:
+    connection = await _connection_for_org(session, connection_id, org_id)
+    root = dict(connection.metadata_ or {})
+    slack_metadata = _slack_metadata(connection)
+    if mandate is not None:
+        slack_metadata[CONTACT_FORM_LEAD_MANDATE_KEY] = mandate
+    else:
+        slack_metadata.pop(CONTACT_FORM_LEAD_MANDATE_KEY, None)
+    root["slack"] = slack_metadata
+    connection.metadata_ = root
+    await session.flush()
+    return {
+        "connection_id": str(connection.id),
+        "metadata_path": f"slack.{CONTACT_FORM_LEAD_MANDATE_KEY}",
+        "mandate": mandate,
+        "cleared": mandate is None,
+    }
+
+
+async def set_contact_form_lead_mandate(
+    session,
+    *,
+    connection_id: str,
+    mandate: str,
+    org_id: str | None = None,
+) -> dict[str, Any]:
+    """Persist a non-empty operator-editable skill overlay."""
+
+    clean_mandate = _clean(mandate)
+    if not clean_mandate:
+        raise SlackMonitorConfigError(
+            "set_contact_form_lead_mandate requires a non-empty mandate"
+        )
+    if len(clean_mandate) > CONTACT_FORM_LEAD_MANDATE_MAX_CHARS:
+        raise SlackMonitorConfigError(
+            "mandate exceeds "
+            f"{CONTACT_FORM_LEAD_MANDATE_MAX_CHARS} characters"
+        )
+    return await _write_contact_form_lead_mandate(
+        session,
+        connection_id=connection_id,
+        mandate=clean_mandate,
+        org_id=org_id,
+    )
+
+
+async def clear_contact_form_lead_mandate(
+    session,
+    *,
+    connection_id: str,
+    org_id: str | None = None,
+) -> dict[str, Any]:
+    """Clear the operator-editable skill overlay."""
+
+    return await _write_contact_form_lead_mandate(
+        session,
+        connection_id=connection_id,
+        mandate=None,
+        org_id=org_id,
+    )
 
 
 async def list_monitored_channels(
@@ -175,10 +258,14 @@ async def remove_monitored_channel(
 
 
 __all__ = [
+    "CONTACT_FORM_LEAD_MANDATE_KEY",
     "SlackMonitorConfigError",
     "add_monitored_channel",
+    "clear_contact_form_lead_mandate",
+    "contact_form_lead_mandate",
     "list_monitored_channels",
     "monitored_channel_ids",
     "monitored_channels",
     "remove_monitored_channel",
+    "set_contact_form_lead_mandate",
 ]

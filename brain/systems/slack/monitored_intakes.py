@@ -19,14 +19,15 @@ from brain.systems.slack.contact_form_lead_owner import (
     CONTACT_FORM_OWNER_POLICY,
 )
 from brain.systems.slack.contact_form_lead_rendering import (
+    CONTACT_FORM_LEAD_SKILL,
     ContactFormLeadReminderRenderer,
-    contact_form_lead_dossier,
     contact_form_lead_run_message,
 )
 from brain.systems.slack.contact_form_leads import (
     CONTACT_FORM_LEAD_ORIGIN,
     ContactFormLead,
 )
+from brain.systems.slack.monitors import contact_form_lead_mandate
 
 
 logger = logging.getLogger(__name__)
@@ -279,6 +280,9 @@ async def _enrich_contact_form(
     owner = CONTACT_FORM_OWNER_POLICY.resolve(context.connection)
     lead["owner"] = owner.to_metadata()
     payload["contact_form_lead"] = lead
+    configured_mandate = contact_form_lead_mandate(context.connection)
+    if configured_mandate:
+        payload["contact_form_lead_mandate"] = configured_mandate
     envelope["payload"] = payload
 
 
@@ -291,15 +295,22 @@ def _render_contact_form(
     owner = ObligationAnswerer.from_metadata(
         _mapping(lead_payload.get("owner"))
     )
-    dossier = contact_form_lead_dossier(lead, owner)
+    configured_mandate = _clean(payload.get("contact_form_lead_mandate"))
     return RenderedMonitoredIntake(
         run_message=contact_form_lead_run_message(
-            dossier,
+            lead,
+            owner,
             slack_trigger_payload,
+            mandate=configured_mandate or None,
         ),
         metadata={
             "contact_form_lead": lead_payload,
-            "contact_form_lead_dossier": dossier,
+            "contact_form_lead_skill": CONTACT_FORM_LEAD_SKILL,
+            "contact_form_lead_mandate_source": (
+                "installed_skill_with_connection_overlay"
+                if configured_mandate
+                else "installed_skill"
+            ),
             "obligation_requester": _mapping(
                 payload.get("obligation_requester")
             ),

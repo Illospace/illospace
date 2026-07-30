@@ -1,146 +1,140 @@
-"""Vertical policy and deterministic rendering for contact-form leads."""
+"""Skill handoff and deterministic reminders for contact-form leads."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
+import json
 from typing import Any, Mapping
 
 from brain.systems.runs.obligation_specs import ObligationAnswerer
 from brain.systems.slack.contact_form_leads import ContactFormLead
 
 
-_NUMBERED_ASK_PATTERN = re.compile(
-    r"(?m)^[ \t]*\d+[.)][ \t]*(?P<ask>[^\n]+)"
-)
+CONTACT_FORM_LEAD_SKILL = "contact-form-lead-intake"
 
 
-def extract_contact_form_asks(message: str) -> list[str]:
-    """Break a lead's message into separately actionable questions."""
+@dataclass(frozen=True, slots=True)
+class ContactFormLeadSlackResponseTarget:
+    """Canonical Slack destination supplied to the contact-form lead skill."""
 
-    source = _clean(message)
-    if not source:
-        return []
+    channel_id: str
+    thread_ts: str
 
-    asks: list[str] = []
-    numbered_spans: list[tuple[int, int]] = []
-    for match in _NUMBERED_ASK_PATTERN.finditer(source):
-        ask = " ".join(match.group("ask").split())
-        if ask:
-            asks.append(ask)
-            numbered_spans.append(match.span())
+    def __post_init__(self) -> None:
+        channel_id = _clean(self.channel_id)
+        thread_ts = _clean(self.thread_ts)
+        if not channel_id or not thread_ts:
+            missing = "channel_id" if not channel_id else "thread_ts"
+            raise ValueError(
+                f"contact-form lead intake requires a Slack response target {missing}"
+            )
+        object.__setattr__(self, "channel_id", channel_id)
+        object.__setattr__(self, "thread_ts", thread_ts)
 
-    remainder_parts: list[str] = []
-    cursor = 0
-    for start, end in numbered_spans:
-        remainder_parts.append(source[cursor:start])
-        cursor = end
-    remainder_parts.append(source[cursor:])
-    remainder = "\n".join(remainder_parts)
-    pending_context = ""
-    for sentence in re.split(r"(?<=[.!?])[ \t]+|\n+", remainder):
-        ask = " ".join(sentence.split()).strip(" -•")
-        if "?" in ask:
-            if pending_context:
-                ask = f"{pending_context} {ask}"
-            asks.append(ask)
-            pending_context = ""
-        elif any(
-            marker in ask.casefold()
-            for marker in ("verification", "enablement", "may require", "feature")
-        ):
-            pending_context = ask
-
-    if not asks:
-        asks.append(" ".join(source.split()))
-
-    deduplicated: list[str] = []
-    seen: set[str] = set()
-    for ask in asks:
-        key = ask.casefold()
-        if key in seen:
-            continue
-        deduplicated.append(ask)
-        seen.add(key)
-    return deduplicated
-
-
-def infer_contact_form_vertical(lead: ContactFormLead) -> str:
-    evidence = f"{lead.company_website} {lead.message}".casefold()
-    if any(
-        term in evidence
-        for term in ("lingerie", "bikini", "intimate apparel", "corset", "thong")
-    ):
-        return "Lingerie / intimate-apparel e-commerce"
-    if "bergzeit" in evidence or any(
-        term in evidence for term in ("outdoor apparel", "outdoor retail")
-    ):
-        return "Outdoor retail e-commerce"
-    return "E-commerce / retail"
-
-
-def contact_form_lead_dossier(
-    lead: ContactFormLead,
-    owner: ObligationAnswerer,
-) -> str:
-    """Render safe intake copy without asserting unverified capabilities."""
-
-    owner_mention = f"<@{owner.slack_user_id}>"
-    asks = extract_contact_form_asks(lead.message)
-    lines = [
-        "*Contact-form lead*",
-        f"*Who:* {lead.name} — {lead.email}",
-        f"*Vertical:* {infer_contact_form_vertical(lead)}",
-        f"*Site:* {lead.company_website}",
-    ]
-    if lead.phone:
-        lines.append(f"*Phone:* {lead.phone}")
-    lines.extend(["", "*Asks:*"])
-    for index, ask in enumerate(asks, start=1):
-        lines.extend(
-            [
-                f"{index}. {ask}",
-                (
-                    "   *Answer:* needs a human answer — no verified product "
-                    "capability source is attached to this intake."
-                ),
-            ]
+    @classmethod
+    def from_slack_trigger(
+        cls,
+        slack_trigger_payload: Mapping[str, Any],
+    ) -> ContactFormLeadSlackResponseTarget:
+        response_target = slack_trigger_payload.get("response_target")
+        target = response_target if isinstance(response_target, Mapping) else {}
+        return cls(
+            channel_id=target.get("channel_id"),
+            thread_ts=target.get("thread_ts"),
         )
-    lines.extend(
-        [
-            "",
-            f"*Owner:* {owner_mention} ({owner.name})",
-            (
-                f"*Next action:* {owner_mention}, reply in this thread with verified "
-                f"answers for {lead.name}, then send them to {lead.email}."
+
+    def to_payload(self) -> dict[str, str]:
+        return {
+            "channel_id": self.channel_id,
+            "thread_ts": self.thread_ts,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ContactFormLeadIntakeContext:
+    """Canonical model input for one decoded contact-form lead."""
+
+    lead: ContactFormLead
+    owner: ObligationAnswerer
+    slack_response_target: ContactFormLeadSlackResponseTarget
+    source_permalink: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_permalink", _clean(self.source_permalink) or None)
+
+    @classmethod
+    def from_slack_trigger(
+        cls,
+        lead: ContactFormLead,
+        owner: ObligationAnswerer,
+        slack_trigger_payload: Mapping[str, Any],
+    ) -> ContactFormLeadIntakeContext:
+        return cls(
+            lead=lead,
+            owner=owner,
+            slack_response_target=(
+                ContactFormLeadSlackResponseTarget.from_slack_trigger(
+                    slack_trigger_payload
+                )
             ),
-        ]
-    )
-    return "\n".join(lines)
+            source_permalink=slack_trigger_payload.get("permalink"),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "lead": self.lead.to_payload(),
+            "owner": self.owner.to_metadata(),
+            "slack_response_target": self.slack_response_target.to_payload(),
+            "source_permalink": self.source_permalink,
+        }
+
+    def serialize(self) -> str:
+        """Serialize the internal prompt contract."""
+
+        return json.dumps(self.to_payload(), ensure_ascii=False, sort_keys=True)
 
 
 def contact_form_lead_run_message(
-    dossier: str,
+    lead: ContactFormLead,
+    owner: ObligationAnswerer,
     slack_trigger_payload: Mapping[str, Any],
+    *,
+    mandate: str | None = None,
 ) -> str:
-    response_target = slack_trigger_payload.get("response_target")
-    response_target = response_target if isinstance(response_target, Mapping) else {}
+    """Invoke the installed skill with an optional connection overlay."""
+
+    intake_context = ContactFormLeadIntakeContext.from_slack_trigger(
+        lead,
+        owner,
+        slack_trigger_payload,
+    )
+    invocation = [
+        f"/{CONTACT_FORM_LEAD_SKILL}",
+        "",
+        (
+            "Load the current installed procedure for this skill with "
+            "skill_view, then execute it for this monitored contact-form event."
+        ),
+    ]
+    if mandate:
+        invocation.extend(
+            [
+                "",
+                "Connection overlay:",
+                (
+                    "Apply this extra instruction within the installed skill's "
+                    "contracts:"
+                ),
+                "",
+                mandate,
+            ]
+        )
     return "\n".join(
         [
-            "A qualified website contact-form lead arrived in a monitored Slack channel.",
-            "The connector already acknowledged the source message with 👀.",
-            (
-                "Post the exact dossier below once with post_slack_reply in the source "
-                f"thread (channel_id={slack_trigger_payload.get('channel_id')}, "
-                f"thread_ts={response_target.get('thread_ts')}) and set "
-                "answers_open_ask=false."
-            ),
-            (
-                "Do not research, infer, rephrase, or add product claims in this intake "
-                "run. Unknown capability claims must remain marked needs a human answer."
-            ),
+            *invocation,
             "",
-            dossier,
+            "Intake context:",
+            intake_context.serialize(),
         ]
     )
 
@@ -164,9 +158,7 @@ def _clean(value: Any) -> str:
 
 
 __all__ = [
+    "CONTACT_FORM_LEAD_SKILL",
     "ContactFormLeadReminderRenderer",
-    "contact_form_lead_dossier",
     "contact_form_lead_run_message",
-    "extract_contact_form_asks",
-    "infer_contact_form_vertical",
 ]

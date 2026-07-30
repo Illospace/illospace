@@ -57,7 +57,7 @@ class FakeSlackConnection:
         self,
         metadata=None,
         org_id="org1",
-        owner_user_id="user-reda",
+        owner_user_id="user-connection-owner",
     ):
         self.id = "conn1"
         self.org_id = org_id
