@@ -87,6 +87,9 @@ class GitHubConnectorError(Exception):
     status_code: int
     message: str
 
+    def __post_init__(self) -> None:
+        super().__init__(self.message)
+
 
 @dataclass(frozen=True, slots=True)
 class GithubFixingPullRequest:

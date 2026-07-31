@@ -11,7 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.config import KNOWLEDGE_CONNECTOR_BATCH_SIZE
 from brain.platform.db.models.domain import Domain, DomainObjectType, DomainRecord
-from brain.systems.knowledge.connectors.base import KnowledgeDraft
+from brain.systems.knowledge.connectors.base import (
+    KnowledgeDraft,
+    KnowledgeEnumeration,
+)
 from brain.systems.user_domains.service import AsyncDomainService
 
 
@@ -43,7 +46,7 @@ class DomainRecordsConnector:
         self,
         session: AsyncSession,
         cursor: dict[str, Any],
-    ) -> tuple[list[KnowledgeDraft], dict[str, Any]]:
+    ) -> KnowledgeEnumeration:
         marker = _cursor_datetime(cursor.get("updated_at"))
         marker_id = max(0, int(cursor.get("id") or 0))
         stmt = (
@@ -107,12 +110,15 @@ class DomainRecordsConnector:
             )
 
         if not rows:
-            return drafts, dict(cursor)
+            return KnowledgeEnumeration(drafts=drafts, cursor=dict(cursor))
         last_record = rows[-1][0]
-        return drafts, {
-            "updated_at": _utc_iso(last_record.updated_at),
-            "id": last_record.id,
-        }
+        return KnowledgeEnumeration(
+            drafts=drafts,
+            cursor={
+                "updated_at": _utc_iso(last_record.updated_at),
+                "id": last_record.id,
+            },
+        )
 
 
 __all__ = ["DomainRecordsConnector"]

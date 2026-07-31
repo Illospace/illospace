@@ -15,7 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.kernel.config import KNOWLEDGE_CONNECTOR_BATCH_SIZE
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.inbound import InboundEventRow
-from brain.systems.knowledge.connectors.base import KnowledgeDraft
+from brain.systems.knowledge.connectors.base import (
+    KnowledgeDraft,
+    KnowledgeEnumeration,
+)
 from brain.systems.slack.monitored_intakes import visible_slack_content
 from brain.systems.slack.monitors import monitored_channels
 
@@ -223,10 +226,10 @@ class SlackKnowledgeConnector:
         self,
         session: AsyncSession,
         cursor: dict[str, Any],
-    ) -> tuple[list[KnowledgeDraft], dict[str, Any]]:
+    ) -> KnowledgeEnumeration:
         connection, channels = await _monitored_connection(session)
         if connection is None:
-            return [], dict(cursor)
+            return KnowledgeEnumeration(drafts=[], cursor=dict(cursor))
 
         connection_id = str(connection.id)
         if not _team_id(connection):
@@ -249,19 +252,21 @@ class SlackKnowledgeConnector:
         )
         client = await self._resolve_client(connection)
         if state.get("phase") != "incremental":
-            return await self._backfill(
+            drafts, new_cursor = await self._backfill(
                 client=client,
                 connection=connection,
                 channels=channels,
                 state=state,
             )
-        return await self._incremental(
-            session=session,
-            client=client,
-            connection=connection,
-            channels=channels,
-            state=state,
-        )
+        else:
+            drafts, new_cursor = await self._incremental(
+                session=session,
+                client=client,
+                connection=connection,
+                channels=channels,
+                state=state,
+            )
+        return KnowledgeEnumeration(drafts=drafts, cursor=new_cursor)
 
     async def _backfill(
         self,

@@ -391,14 +391,15 @@ async def test_slack_connector_does_not_inherit_the_monitor_prompt_text_cap(sess
         }
     ]
 
-    drafts, _cursor = await SlackKnowledgeConnector(
+    enumeration = await SlackKnowledgeConnector(
         client=slack,
         max_items=1,
     ).enumerate_changed(session, {})
 
-    assert len(drafts) == 1
-    assert drafts[0].raw_text.endswith("TAIL_MARKER")
-    assert len(drafts[0].raw_text) > 5000
+    assert len(enumeration.drafts) == 1
+    assert enumeration.drafts[0].raw_text.endswith("TAIL_MARKER")
+    assert len(enumeration.drafts[0].raw_text) > 5000
+    assert enumeration.failures == ()
 
 
 async def test_slack_connector_reuses_runtime_transport_under_connection_authority(
@@ -420,12 +421,12 @@ async def test_slack_connector_reuses_runtime_transport_under_connection_authori
         fake_runtime_client,
     )
 
-    drafts, _cursor = await SlackKnowledgeConnector(max_items=1).enumerate_changed(
+    enumeration = await SlackKnowledgeConnector(max_items=1).enumerate_changed(
         session,
         {},
     )
 
-    assert len(drafts) == 1
+    assert len(enumeration.drafts) == 1
     assert calls == [
         {
             "requested_by": "knowledge_index_sync",
@@ -441,7 +442,9 @@ async def test_slack_connector_repulls_one_complete_thread_when_a_reply_arrives(
     slack = _SlackHistory()
     connector = SlackKnowledgeConnector(client=slack, max_items=1)
 
-    first, cursor = await connector.enumerate_changed(session, {})
+    first_enumeration = await connector.enumerate_changed(session, {})
+    first = first_enumeration.drafts
+    cursor = first_enumeration.cursor
 
     assert len(first) == 1
     assert first[0].source_ref == "slack:T789:CINCIDENTS:1785283200.000100"
@@ -502,7 +505,9 @@ async def test_slack_connector_repulls_one_complete_thread_when_a_reply_arrives(
     )
     await session.flush()
 
-    second, new_cursor = await connector.enumerate_changed(session, cursor)
+    second_enumeration = await connector.enumerate_changed(session, cursor)
+    second = second_enumeration.drafts
+    new_cursor = second_enumeration.cursor
 
     assert len(second) == 1
     assert second[0].source_ref == first[0].source_ref
@@ -523,7 +528,9 @@ async def test_slack_connector_repulls_one_complete_thread_when_a_reply_arrives(
         }
     )
 
-    refreshed, refresh_cursor = await connector.enumerate_changed(session, new_cursor)
+    refresh_enumeration = await connector.enumerate_changed(session, new_cursor)
+    refreshed = refresh_enumeration.drafts
+    refresh_cursor = refresh_enumeration.cursor
 
     assert len(refreshed) == 1
     assert refreshed[0].extra["message_count"] == 4

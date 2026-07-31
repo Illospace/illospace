@@ -25,7 +25,11 @@ from brain.systems.cortex.project_context.github import (
     async_list_repo_issues,
     parse_github_repo_slug,
 )
-from brain.systems.knowledge.connectors.base import KnowledgeDraft
+from brain.systems.knowledge.connectors.base import (
+    EnumerationFailure,
+    KnowledgeDraft,
+    KnowledgeEnumeration,
+)
 from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS
 from brain.systems.vault import async_resolve_project_bound_env_tokens
 
@@ -287,6 +291,108 @@ def _draft_for_issue(
     )
 
 
+async def _enumerate_repository(
+    session: AsyncSession,
+    repo: str,
+    state: dict[str, Any],
+    *,
+    remaining: int,
+) -> tuple[list[KnowledgeDraft], dict[str, Any], bool]:
+    """Enumerate one repository without mutating another repository's state."""
+
+    watermark_key = _timestamp_key(
+        state.get("watermark"),
+        state.get("watermark_id"),
+    )
+    high_key = _timestamp_key(
+        state.get("high_watermark") or state.get("watermark"),
+        state.get("high_watermark_id") or state.get("watermark_id"),
+    )
+    authority = await _github_authority(session, repo)
+    token = authority.token
+    payload = await async_list_repo_issues(
+        repo,
+        token=token,
+        state="all",
+        since=state.get("watermark"),
+        include_pull_requests=True,
+        limit=remaining,
+        cursor=state.get("next_page"),
+        # Project-context reads compact bodies to 1000 chars for LLM
+        # budgets; an index wants the whole body and bounds it once,
+        # in the pipeline, at RAW_TEXT_MAX_CHARS.
+        body_limit=RAW_TEXT_MAX_CHARS,
+    )
+    issues = [
+        item
+        for item in payload.get("issues") or []
+        if isinstance(item, Mapping)
+    ]
+    repo_drafts: list[KnowledgeDraft] = []
+    for issue in issues:
+        issue_key = _timestamp_key(issue.get("updated_at"), issue.get("id"))
+        high_key = max(high_key, issue_key)
+        if (
+            not state.get("next_page")
+            and state.get("watermark")
+            and issue_key <= watermark_key
+        ):
+            continue
+        kind = "pr" if issue.get("type") == "pull_request" else "issue"
+        closure = None
+        closure_unavailable_reason = None
+        if str(issue.get("state") or "").lower() == "closed" and kind == "issue":
+            if not token:
+                closure_unavailable_reason = "authentication_required"
+                logger.warning(
+                    "GitHub closure enrichment skipped for %s#%s: "
+                    "authenticated GraphQL access is unavailable",
+                    repo,
+                    issue.get("number"),
+                )
+            else:
+                try:
+                    closure = await async_get_issue_closure_info(
+                        repo,
+                        int(issue.get("number") or 0),
+                        token=token,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "GitHub closure enrichment unavailable for %s#%s: %s",
+                        repo,
+                        issue.get("number"),
+                        exc,
+                    )
+                    raise
+        repo_drafts.append(
+            _draft_for_issue(
+                repo,
+                issue,
+                closure=closure,
+                closure_unavailable_reason=closure_unavailable_reason,
+                org_id=authority.org_id,
+                actor_user_id=authority.actor_user_id,
+            )
+        )
+
+    next_page = payload.get("next_page")
+    if next_page:
+        next_state = {
+            **state,
+            "next_page": next_page,
+            "high_watermark": high_key[0].isoformat(),
+            "high_watermark_id": high_key[1],
+        }
+        return repo_drafts, next_state, True
+
+    next_state = {
+        "watermark": high_key[0].isoformat(),
+        "watermark_id": high_key[1],
+    }
+    return repo_drafts, next_state, False
+
+
 class GitHubConnector:
     source_key = "github"
 
@@ -303,12 +409,15 @@ class GitHubConnector:
         self,
         session: AsyncSession,
         cursor: dict[str, Any],
-    ) -> tuple[list[KnowledgeDraft], dict[str, Any]]:
+    ) -> KnowledgeEnumeration:
         if int(cursor.get("version") or 0) != _CURSOR_VERSION:
             cursor = {}
         repositories = list(self.repositories or await _configured_repositories(session))
         if not repositories:
-            return [], {**dict(cursor), "version": _CURSOR_VERSION}
+            return KnowledgeEnumeration(
+                drafts=[],
+                cursor={**dict(cursor), "version": _CURSOR_VERSION},
+            )
         repo_states = {
             str(key): dict(value)
             for key, value in (cursor.get("repositories") or {}).items()
@@ -319,113 +428,68 @@ class GitHubConnector:
             len(repositories) - 1,
         )
         drafts: list[KnowledgeDraft] = []
+        failures: list[EnumerationFailure] = []
 
         for repo_index in range(active_index, len(repositories)):
             repo = repositories[repo_index]
             state = dict(repo_states.get(repo) or {})
-            watermark_key = _timestamp_key(
-                state.get("watermark"),
-                state.get("watermark_id"),
-            )
-            high_key = _timestamp_key(
-                state.get("high_watermark") or state.get("watermark"),
-                state.get("high_watermark_id") or state.get("watermark_id"),
-            )
             remaining = self.max_items - len(drafts)
             if remaining <= 0:
                 break
-            authority = await _github_authority(session, repo)
-            token = authority.token
-            payload = await async_list_repo_issues(
-                repo,
-                token=token,
-                state="all",
-                since=state.get("watermark"),
-                include_pull_requests=True,
-                limit=remaining,
-                cursor=state.get("next_page"),
-                # Project-context reads compact bodies to 1000 chars for LLM
-                # budgets; an index wants the whole body and bounds it once,
-                # in the pipeline, at RAW_TEXT_MAX_CHARS.
-                body_limit=RAW_TEXT_MAX_CHARS,
-            )
-            issues = [item for item in payload.get("issues") or [] if isinstance(item, Mapping)]
-            for issue in issues:
-                issue_key = _timestamp_key(issue.get("updated_at"), issue.get("id"))
-                high_key = max(high_key, issue_key)
-                if not state.get("next_page") and state.get("watermark") and issue_key <= watermark_key:
-                    continue
-                kind = "pr" if issue.get("type") == "pull_request" else "issue"
-                closure = None
-                closure_unavailable_reason = None
-                if (
-                    str(issue.get("state") or "").lower() == "closed"
-                    and kind == "issue"
-                ):
-                    if not token:
-                        closure_unavailable_reason = "authentication_required"
-                        logger.warning(
-                            "GitHub closure enrichment skipped for %s#%s: "
-                            "authenticated GraphQL access is unavailable",
-                            repo,
-                            issue.get("number"),
-                        )
-                    else:
-                        try:
-                            closure = await async_get_issue_closure_info(
-                                repo,
-                                int(issue.get("number") or 0),
-                                token=token,
-                            )
-                        except Exception as exc:
-                            logger.exception(
-                                "GitHub closure enrichment unavailable for %s#%s: %s",
-                                repo,
-                                issue.get("number"),
-                                exc,
-                            )
-                            raise
-                drafts.append(
-                    _draft_for_issue(
+            try:
+                repo_drafts, next_state, has_next_page = (
+                    await _enumerate_repository(
+                        session,
                         repo,
-                        issue,
-                        closure=closure,
-                        closure_unavailable_reason=closure_unavailable_reason,
-                        org_id=authority.org_id,
-                        actor_user_id=authority.actor_user_id,
+                        state,
+                        remaining=remaining,
                     )
                 )
+            except Exception as exc:
+                message = str(exc).strip() or type(exc).__name__
+                failures.append(EnumerationFailure(scope=repo, message=message))
+                logger.exception(
+                    "GitHub knowledge enumeration skipped repository %s: %s",
+                    repo,
+                    message,
+                )
+                continue
 
-            next_page = payload.get("next_page")
-            if next_page:
-                repo_states[repo] = {
-                    **state,
-                    "next_page": next_page,
-                    "high_watermark": high_key[0].isoformat(),
-                    "high_watermark_id": high_key[1],
-                }
-                return drafts, {
-                    "version": _CURSOR_VERSION,
-                    "active_repository": repo_index,
-                    "repositories": repo_states,
-                }
+            drafts.extend(repo_drafts)
+            repo_states[repo] = next_state
+            if has_next_page:
+                return KnowledgeEnumeration(
+                    drafts=drafts,
+                    cursor={
+                        "version": _CURSOR_VERSION,
+                        "active_repository": repo_index,
+                        "repositories": repo_states,
+                    },
+                    failures=tuple(failures),
+                )
 
-            repo_states[repo] = {
-                "watermark": high_key[0].isoformat(),
-                "watermark_id": high_key[1],
-            }
             if len(drafts) >= self.max_items:
-                return drafts, {
-                    "version": _CURSOR_VERSION,
-                    "active_repository": min(repo_index + 1, len(repositories) - 1),
-                    "repositories": repo_states,
-                }
+                return KnowledgeEnumeration(
+                    drafts=drafts,
+                    cursor={
+                        "version": _CURSOR_VERSION,
+                        "active_repository": (repo_index + 1) % len(repositories),
+                        "repositories": repo_states,
+                    },
+                    failures=tuple(failures),
+                )
 
-        return drafts, {
-            "version": _CURSOR_VERSION,
-            "active_repository": 0,
-            "repositories": repo_states,
-        }
+        # Reaching the end completes this sweep even when one or more repositories
+        # were recorded as skipped, so the next invocation starts from index zero.
+        return KnowledgeEnumeration(
+            drafts=drafts,
+            cursor={
+                "version": _CURSOR_VERSION,
+                "active_repository": 0,
+                "repositories": repo_states,
+            },
+            failures=tuple(failures),
+        )
 
 
 __all__ = ["GitHubConnector"]

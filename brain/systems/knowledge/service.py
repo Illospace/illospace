@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
@@ -19,7 +20,11 @@ from brain.platform.db.models.knowledge import (
     KnowledgeItemEmbedding,
     KnowledgeSyncState,
 )
-from brain.systems.knowledge.connectors.base import KnowledgeConnector, KnowledgeDraft
+from brain.systems.knowledge.connectors.base import (
+    EnumerationFailure,
+    KnowledgeConnector,
+    KnowledgeDraft,
+)
 from brain.systems.knowledge.distillation import (
     DISTILLATION_CURSOR_KEY,
     DISTILLATION_MANIFEST_VERSION,
@@ -37,6 +42,7 @@ from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
 logger = logging.getLogger(__name__)
 
 RAW_TEXT_MAX_CHARS = 20_000
+_ENUMERATION_ERRORS_KEY = "enumeration_errors"
 
 
 @dataclass
@@ -178,20 +184,47 @@ def _manifest_cursor(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _manifest_enumeration_failures(value: Any) -> tuple[EnumerationFailure, ...]:
+    if not isinstance(value, list):
+        return ()
+    failures: list[EnumerationFailure] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        scope = str(item.get("scope") or "").strip()
+        message = str(item.get("message") or "").strip()
+        if scope and message:
+            failures.append(EnumerationFailure(scope=scope, message=message))
+    return tuple(failures)
+
+
+def _enumeration_error(failures: tuple[EnumerationFailure, ...]) -> str | None:
+    return "; ".join(
+        f"{failure.scope}: {failure.message}" for failure in failures
+    ) or None
+
+
 def _pending_cursor(
     *,
     committed_cursor: dict[str, Any],
     proposed_cursor: dict[str, Any],
     entries: list[dict[str, Any]],
+    enumeration_failures: tuple[EnumerationFailure, ...] = (),
 ) -> dict[str, Any]:
+    manifest = {
+        "version": DISTILLATION_MANIFEST_VERSION,
+        "committed_cursor": dict(committed_cursor),
+        "proposed_cursor": dict(proposed_cursor),
+        "entries": entries,
+    }
+    if enumeration_failures:
+        manifest[_ENUMERATION_ERRORS_KEY] = [
+            {"scope": failure.scope, "message": failure.message}
+            for failure in enumeration_failures
+        ]
     return {
         **committed_cursor,
-        DISTILLATION_CURSOR_KEY: {
-            "version": DISTILLATION_MANIFEST_VERSION,
-            "committed_cursor": dict(committed_cursor),
-            "proposed_cursor": dict(proposed_cursor),
-            "entries": entries,
-        },
+        DISTILLATION_CURSOR_KEY: manifest,
     }
 
 
@@ -622,11 +655,15 @@ async def sync_connector(
     if manifest is not None:
         committed_cursor = _manifest_cursor(manifest.get("committed_cursor"))
         proposed_cursor = _manifest_cursor(manifest.get("proposed_cursor"))
+        enumeration_failures = _manifest_enumeration_failures(
+            manifest.get(_ENUMERATION_ERRORS_KEY)
+        )
+        enumeration_error = _enumeration_error(enumeration_failures)
         pending, resolved, failures = await _harvest_distillations(
             session,
             list(manifest.get("entries") or []),
         )
-        stats.failed += failures
+        stats.failed += failures + len(enumeration_failures)
         stats.distilled = sum(
             1 for _draft, should_embed in resolved if should_embed
         )
@@ -646,11 +683,13 @@ async def sync_connector(
                     committed_cursor=committed_cursor,
                     proposed_cursor=proposed_cursor,
                     entries=pending,
+                    enumeration_failures=enumeration_failures,
                 ),
                 result_cursor=committed_cursor,
                 status="pending",
                 stats=stats,
                 run_at=run_at,
+                error=enumeration_error,
             )
 
         status = "ok" if stats.failed == 0 else "degraded"
@@ -662,11 +701,15 @@ async def sync_connector(
             status=status,
             stats=stats,
             run_at=run_at,
+            error=enumeration_error,
         )
 
     cursor = dict(stored_cursor)
     try:
-        drafts, new_cursor = await connector.enumerate_changed(session, cursor)
+        enumeration = await connector.enumerate_changed(session, cursor)
+        drafts = enumeration.drafts
+        new_cursor = enumeration.cursor
+        enumeration_failures = enumeration.failures
     except Exception as exc:
         stats.failed = 1
         logger.exception("Knowledge connector %s enumeration failed", source)
@@ -680,6 +723,9 @@ async def sync_connector(
             run_at=run_at,
             error=str(exc),
         )
+
+    enumeration_error = _enumeration_error(enumeration_failures)
+    stats.failed += len(enumeration_failures)
 
     structural: list[tuple[KnowledgeDraft, bool]] = []
     distillable: list[KnowledgeDraft] = []
@@ -728,11 +774,13 @@ async def sync_connector(
                 committed_cursor=cursor,
                 proposed_cursor=dict(new_cursor),
                 entries=entries,
+                enumeration_failures=enumeration_failures,
             ),
             result_cursor=cursor,
             status="pending",
             stats=stats,
             run_at=run_at,
+            error=enumeration_error,
         )
 
     if admission_fallbacks:
@@ -754,6 +802,7 @@ async def sync_connector(
         status=status,
         stats=stats,
         run_at=run_at,
+        error=enumeration_error,
     )
 
 

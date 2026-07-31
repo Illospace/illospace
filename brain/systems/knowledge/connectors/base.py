@@ -32,6 +32,23 @@ class KnowledgeDraft:
     distill: bool = False
 
 
+@dataclass(frozen=True)
+class EnumerationFailure:
+    """One source scope that could not be enumerated."""
+
+    scope: str
+    message: str
+
+
+@dataclass(frozen=True)
+class KnowledgeEnumeration:
+    """The complete result of one bounded connector enumeration."""
+
+    drafts: list[KnowledgeDraft]
+    cursor: dict[str, Any]
+    failures: tuple[EnumerationFailure, ...] = ()
+
+
 class KnowledgeConnector(Protocol):
     """One bounded source enumerator with a durable resume cursor."""
 
@@ -41,7 +58,12 @@ class KnowledgeConnector(Protocol):
         self,
         session: AsyncSession,
         cursor: dict[str, Any],
-    ) -> tuple[list[KnowledgeDraft], dict[str, Any]]: ...
+    ) -> KnowledgeEnumeration: ...
 
 
-__all__ = ["KnowledgeConnector", "KnowledgeDraft"]
+__all__ = [
+    "EnumerationFailure",
+    "KnowledgeConnector",
+    "KnowledgeDraft",
+    "KnowledgeEnumeration",
+]
