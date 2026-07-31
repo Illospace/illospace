@@ -18,7 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.kernel.config import KNOWLEDGE_CONNECTOR_BATCH_SIZE
 from brain.platform.db.models.knowledge import KnowledgeItem
 from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
-from brain.systems.knowledge.connectors.base import KnowledgeDraft
+from brain.systems.knowledge.connectors.base import (
+    KnowledgeDraft,
+    KnowledgeEnumeration,
+)
 
 _SHARED_VISIBILITIES = ("org", "team")
 _KNOWLEDGE_NODE_KINDS = ("content",)
@@ -118,7 +121,7 @@ class MemoryConnector:
         self,
         session: AsyncSession,
         cursor: dict[str, Any],
-    ) -> tuple[list[KnowledgeDraft], dict[str, Any]]:
+    ) -> KnowledgeEnumeration:
         marker = _cursor_datetime(cursor.get("updated_at"))
         marker_id = max(0, int(cursor.get("id") or 0))
         statement = (
@@ -140,7 +143,7 @@ class MemoryConnector:
 
         rows = list((await session.scalars(statement)).all())
         if not rows:
-            return [], dict(cursor)
+            return KnowledgeEnumeration(drafts=[], cursor=dict(cursor))
         source_refs = [f"memory_node:{node.id}" for node in rows]
         existing_refs = set(
             (
@@ -178,10 +181,13 @@ class MemoryConnector:
             or f"memory_node:{node.id}" in existing_refs
         ]
         last = rows[-1]
-        return drafts, {
-            "updated_at": _utc_iso(last.updated_at),
-            "id": last.id,
-        }
+        return KnowledgeEnumeration(
+            drafts=drafts,
+            cursor={
+                "updated_at": _utc_iso(last.updated_at),
+                "id": last.id,
+            },
+        )
 
 
 __all__ = ["MemoryConnector"]

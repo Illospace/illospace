@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
@@ -19,7 +20,11 @@ from brain.platform.db.models.knowledge import (
     KnowledgeItemEmbedding,
     KnowledgeSyncState,
 )
-from brain.systems.knowledge.connectors.base import KnowledgeConnector, KnowledgeDraft
+from brain.systems.knowledge.connectors.base import (
+    EnumerationFailure,
+    KnowledgeConnector,
+    KnowledgeDraft,
+)
 from brain.systems.knowledge.distillation import (
     DISTILLATION_CURSOR_KEY,
     DISTILLATION_MANIFEST_VERSION,
@@ -179,14 +184,24 @@ def _manifest_cursor(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _error_messages(value: Any) -> list[str]:
-    if not isinstance(value, (list, tuple)):
-        return []
-    return [message for item in value if (message := str(item).strip())]
+def _manifest_enumeration_failures(value: Any) -> tuple[EnumerationFailure, ...]:
+    if not isinstance(value, list):
+        return ()
+    failures: list[EnumerationFailure] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        scope = str(item.get("scope") or "").strip()
+        message = str(item.get("message") or "").strip()
+        if scope and message:
+            failures.append(EnumerationFailure(scope=scope, message=message))
+    return tuple(failures)
 
 
-def _connector_enumeration_errors(connector: KnowledgeConnector) -> list[str]:
-    return _error_messages(getattr(connector, "enumeration_errors", ()))
+def _enumeration_error(failures: tuple[EnumerationFailure, ...]) -> str | None:
+    return "; ".join(
+        f"{failure.scope}: {failure.message}" for failure in failures
+    ) or None
 
 
 def _pending_cursor(
@@ -194,7 +209,7 @@ def _pending_cursor(
     committed_cursor: dict[str, Any],
     proposed_cursor: dict[str, Any],
     entries: list[dict[str, Any]],
-    enumeration_errors: list[str] | None = None,
+    enumeration_failures: tuple[EnumerationFailure, ...] = (),
 ) -> dict[str, Any]:
     manifest = {
         "version": DISTILLATION_MANIFEST_VERSION,
@@ -202,8 +217,11 @@ def _pending_cursor(
         "proposed_cursor": dict(proposed_cursor),
         "entries": entries,
     }
-    if enumeration_errors:
-        manifest[_ENUMERATION_ERRORS_KEY] = list(enumeration_errors)
+    if enumeration_failures:
+        manifest[_ENUMERATION_ERRORS_KEY] = [
+            {"scope": failure.scope, "message": failure.message}
+            for failure in enumeration_failures
+        ]
     return {
         **committed_cursor,
         DISTILLATION_CURSOR_KEY: manifest,
@@ -637,15 +655,15 @@ async def sync_connector(
     if manifest is not None:
         committed_cursor = _manifest_cursor(manifest.get("committed_cursor"))
         proposed_cursor = _manifest_cursor(manifest.get("proposed_cursor"))
-        enumeration_errors = _error_messages(
+        enumeration_failures = _manifest_enumeration_failures(
             manifest.get(_ENUMERATION_ERRORS_KEY)
         )
-        enumeration_error = "; ".join(enumeration_errors) or None
+        enumeration_error = _enumeration_error(enumeration_failures)
         pending, resolved, failures = await _harvest_distillations(
             session,
             list(manifest.get("entries") or []),
         )
-        stats.failed += failures + len(enumeration_errors)
+        stats.failed += failures + len(enumeration_failures)
         stats.distilled = sum(
             1 for _draft, should_embed in resolved if should_embed
         )
@@ -665,7 +683,7 @@ async def sync_connector(
                     committed_cursor=committed_cursor,
                     proposed_cursor=proposed_cursor,
                     entries=pending,
-                    enumeration_errors=enumeration_errors,
+                    enumeration_failures=enumeration_failures,
                 ),
                 result_cursor=committed_cursor,
                 status="pending",
@@ -688,7 +706,10 @@ async def sync_connector(
 
     cursor = dict(stored_cursor)
     try:
-        drafts, new_cursor = await connector.enumerate_changed(session, cursor)
+        enumeration = await connector.enumerate_changed(session, cursor)
+        drafts = enumeration.drafts
+        new_cursor = enumeration.cursor
+        enumeration_failures = enumeration.failures
     except Exception as exc:
         stats.failed = 1
         logger.exception("Knowledge connector %s enumeration failed", source)
@@ -703,9 +724,8 @@ async def sync_connector(
             error=str(exc),
         )
 
-    enumeration_errors = _connector_enumeration_errors(connector)
-    enumeration_error = "; ".join(enumeration_errors) or None
-    stats.failed += len(enumeration_errors)
+    enumeration_error = _enumeration_error(enumeration_failures)
+    stats.failed += len(enumeration_failures)
 
     structural: list[tuple[KnowledgeDraft, bool]] = []
     distillable: list[KnowledgeDraft] = []
@@ -754,7 +774,7 @@ async def sync_connector(
                 committed_cursor=cursor,
                 proposed_cursor=dict(new_cursor),
                 entries=entries,
-                enumeration_errors=enumeration_errors,
+                enumeration_failures=enumeration_failures,
             ),
             result_cursor=cursor,
             status="pending",

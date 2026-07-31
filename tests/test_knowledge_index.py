@@ -31,7 +31,11 @@ from brain.platform.db.models.knowledge import (
 )
 from brain.platform.db.models.org import Org, User
 from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
-from brain.systems.knowledge.connectors.base import KnowledgeDraft
+from brain.systems.knowledge.connectors.base import (
+    EnumerationFailure,
+    KnowledgeDraft,
+    KnowledgeEnumeration,
+)
 from brain.systems.knowledge.connectors.domain_records import DomainRecordsConnector
 from brain.systems.knowledge.connectors.github import GitHubConnector, _draft_for_issue
 from brain.systems.knowledge.connectors.memory import MemoryConnector
@@ -56,16 +60,22 @@ class _StubConnector:
         source_key: str,
         drafts: list[KnowledgeDraft],
         new_cursor: dict | None = None,
+        failures: tuple[EnumerationFailure, ...] = (),
     ):
         self.source_key = source_key
         self.drafts = drafts
         self.new_cursor = dict(new_cursor or {})
+        self.failures = failures
         self.seen_cursors: list[dict] = []
 
     async def enumerate_changed(self, session, cursor):
         del session
         self.seen_cursors.append(dict(cursor))
-        return list(self.drafts), dict(self.new_cursor)
+        return KnowledgeEnumeration(
+            drafts=list(self.drafts),
+            cursor=dict(self.new_cursor),
+            failures=self.failures,
+        )
 
 
 class _McpAsyncSession:
@@ -1449,11 +1459,12 @@ async def test_github_legacy_cursor_is_reset_for_org_scope_backfill(session):
         "brain.systems.knowledge.connectors.github.async_list_repo_issues",
         new=list_issues,
     ):
-        drafts, cursor = await connector.enumerate_changed(session, legacy_cursor)
+        enumeration = await connector.enumerate_changed(session, legacy_cursor)
 
-    assert drafts == []
+    assert enumeration.drafts == []
     assert list_issues.await_args.kwargs["since"] is None
-    assert cursor["version"] == 2
+    assert enumeration.cursor["version"] == 2
+    assert enumeration.failures == ()
 
 
 async def test_github_enumeration_isolates_repo_failures_and_wraps_cursor(
@@ -1519,12 +1530,13 @@ async def test_github_enumeration_isolates_repo_failures_and_wraps_cursor(
         "brain.systems.knowledge.connectors.github.async_list_repo_issues",
         new=AsyncMock(side_effect=list_issues),
     ):
-        drafts, cursor = await connector.enumerate_changed(session, initial_cursor)
+        enumeration = await connector.enumerate_changed(session, initial_cursor)
 
-        assert [draft.source_ref for draft in drafts] == [
+        assert [draft.source_ref for draft in enumeration.drafts] == [
             "github:acme/healthy-one#11",
             "github:acme/healthy-two#33",
         ]
+        cursor = enumeration.cursor
         assert cursor["repositories"]["acme/healthy-one"] == {
             "watermark": "2026-07-30T10:00:00+00:00",
             "watermark_id": 101,
@@ -1538,8 +1550,11 @@ async def test_github_enumeration_isolates_repo_failures_and_wraps_cursor(
             == initial_cursor["repositories"]["acme/missing"]
         )
         assert cursor["active_repository"] == 0
-        assert connector.enumeration_errors == (
-            "acme/missing: Repository not found or not visible to this token.",
+        assert enumeration.failures == (
+            EnumerationFailure(
+                scope="acme/missing",
+                message="Repository not found or not visible to this token.",
+            ),
         )
 
         emit_issues = False
@@ -1627,12 +1642,26 @@ async def test_enumeration_error_survives_pending_distillation_as_degraded(
             )
         ],
         new_cursor=proposed_cursor,
+        failures=(
+            EnumerationFailure(
+                scope="acme/missing",
+                message="Repository not found or not visible to this token.",
+            ),
+        ),
     )
-    connector.enumeration_errors = (
-        "acme/missing: Repository not found or not visible to this token.",
+    expected_error = (
+        "acme/missing: Repository not found or not visible to this token."
     )
 
     pending = await sync_connector(session, connector)
+    state = await session.get(KnowledgeSyncState, "github")
+    assert state is not None
+    assert state.cursor["_distillation_pending"]["enumeration_errors"] == [
+        {
+            "scope": "acme/missing",
+            "message": "Repository not found or not visible to this token.",
+        }
+    ]
     run = (await session.scalars(select(AgentRunRow))).one()
     run.status = "completed"
     session.add(
@@ -1657,11 +1686,11 @@ async def test_enumeration_error_survives_pending_distillation_as_degraded(
 
     assert pending.status == "pending"
     assert pending.stats["failed"] == 1
-    assert pending.to_dict()["error"]
+    assert pending.to_dict()["error"] == expected_error
     assert degraded.status == "degraded"
     assert degraded.stats["failed"] == 1
     assert degraded.cursor == proposed_cursor
-    assert degraded.to_dict()["error"] == connector.enumeration_errors[0]
+    assert degraded.to_dict()["error"] == expected_error
 
 
 async def test_public_github_closure_uses_accounted_structural_fallback(

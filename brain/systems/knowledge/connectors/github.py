@@ -25,7 +25,11 @@ from brain.systems.cortex.project_context.github import (
     async_list_repo_issues,
     parse_github_repo_slug,
 )
-from brain.systems.knowledge.connectors.base import KnowledgeDraft
+from brain.systems.knowledge.connectors.base import (
+    EnumerationFailure,
+    KnowledgeDraft,
+    KnowledgeEnumeration,
+)
 from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS
 from brain.systems.vault import async_resolve_project_bound_env_tokens
 
@@ -400,23 +404,20 @@ class GitHubConnector:
     ):
         self.repositories = tuple(repositories) if repositories is not None else None
         self.max_items = max(1, int(max_items))
-        self._enumeration_errors: list[str] = []
-
-    @property
-    def enumeration_errors(self) -> tuple[str, ...]:
-        return tuple(self._enumeration_errors)
 
     async def enumerate_changed(
         self,
         session: AsyncSession,
         cursor: dict[str, Any],
-    ) -> tuple[list[KnowledgeDraft], dict[str, Any]]:
-        self._enumeration_errors = []
+    ) -> KnowledgeEnumeration:
         if int(cursor.get("version") or 0) != _CURSOR_VERSION:
             cursor = {}
         repositories = list(self.repositories or await _configured_repositories(session))
         if not repositories:
-            return [], {**dict(cursor), "version": _CURSOR_VERSION}
+            return KnowledgeEnumeration(
+                drafts=[],
+                cursor={**dict(cursor), "version": _CURSOR_VERSION},
+            )
         repo_states = {
             str(key): dict(value)
             for key, value in (cursor.get("repositories") or {}).items()
@@ -427,6 +428,7 @@ class GitHubConnector:
             len(repositories) - 1,
         )
         drafts: list[KnowledgeDraft] = []
+        failures: list[EnumerationFailure] = []
 
         for repo_index in range(active_index, len(repositories)):
             repo = repositories[repo_index]
@@ -445,8 +447,7 @@ class GitHubConnector:
                 )
             except Exception as exc:
                 message = str(exc).strip() or type(exc).__name__
-                error = f"{repo}: {message}"
-                self._enumeration_errors.append(error)
+                failures.append(EnumerationFailure(scope=repo, message=message))
                 logger.exception(
                     "GitHub knowledge enumeration skipped repository %s: %s",
                     repo,
@@ -457,26 +458,38 @@ class GitHubConnector:
             drafts.extend(repo_drafts)
             repo_states[repo] = next_state
             if has_next_page:
-                return drafts, {
-                    "version": _CURSOR_VERSION,
-                    "active_repository": repo_index,
-                    "repositories": repo_states,
-                }
+                return KnowledgeEnumeration(
+                    drafts=drafts,
+                    cursor={
+                        "version": _CURSOR_VERSION,
+                        "active_repository": repo_index,
+                        "repositories": repo_states,
+                    },
+                    failures=tuple(failures),
+                )
 
             if len(drafts) >= self.max_items:
-                return drafts, {
-                    "version": _CURSOR_VERSION,
-                    "active_repository": (repo_index + 1) % len(repositories),
-                    "repositories": repo_states,
-                }
+                return KnowledgeEnumeration(
+                    drafts=drafts,
+                    cursor={
+                        "version": _CURSOR_VERSION,
+                        "active_repository": (repo_index + 1) % len(repositories),
+                        "repositories": repo_states,
+                    },
+                    failures=tuple(failures),
+                )
 
         # Reaching the end completes this sweep even when one or more repositories
         # were recorded as skipped, so the next invocation starts from index zero.
-        return drafts, {
-            "version": _CURSOR_VERSION,
-            "active_repository": 0,
-            "repositories": repo_states,
-        }
+        return KnowledgeEnumeration(
+            drafts=drafts,
+            cursor={
+                "version": _CURSOR_VERSION,
+                "active_repository": 0,
+                "repositories": repo_states,
+            },
+            failures=tuple(failures),
+        )
 
 
 __all__ = ["GitHubConnector"]
