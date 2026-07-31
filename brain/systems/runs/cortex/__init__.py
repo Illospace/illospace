@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from brain.systems.runs.cycle_settlement import (
+    async_finalize_cycle_run_if_needed as _async_finalize_cycle_run_if_needed,
+)
 from brain.systems.runs.events import run_event
 from brain.systems.runs.skill_commands import iter_slash_skill_commands, parse_slash_skill_names
 from brain.systems.runs.cortex.runner import (
@@ -89,6 +92,8 @@ async def _get_adaptation_history(run_id: int, *, session=None) -> list[dict[str
         return await _read(session)
     async with _unit_of_work_factory()() as uow:
         return await _read(uow.session)
+
+
 async def async_cancel_runs_for_idea(idea_id: str) -> int:
     from sqlalchemy import select
     from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
@@ -115,7 +120,13 @@ async def async_cancel_runs_for_idea(idea_id: str) -> int:
                     root_run_id=row.root_run_id,
                 )
             )
-            await store.set_status(row.id, RunStatus.CANCELED, reason="canceled_for_thread")
+            canceled = await store.set_status(
+                row.id,
+                RunStatus.CANCELED,
+                reason="canceled_for_thread",
+            )
+            if canceled.status == RunStatus.CANCELED:
+                await _async_finalize_cycle_run_if_needed(int(row.id), status="canceled")
             count += 1
     return count
 

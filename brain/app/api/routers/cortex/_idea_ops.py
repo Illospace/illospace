@@ -32,6 +32,7 @@ from brain.systems.runs.cortex.read_models import (
     public_failure_for_run,
     run_stream_payload,
 )
+from brain.systems.runs.cycle_settlement import async_finalize_cycle_run_if_needed
 from brain.app.api.routers.cortex._helpers import (
     _infer_feedback_tags,
     _parse_message_type,
@@ -496,7 +497,13 @@ async def idea_cancel_all(idea_id: str, user: dict[str, Any] = Depends(get_curre
                     root_run_id=row.root_run_id,
                 )
             )
-            await store.set_status(row.id, RunStatus.CANCELED, reason="canceled_for_thread")
+            canceled = await store.set_status(
+                row.id,
+                RunStatus.CANCELED,
+                reason="canceled_for_thread",
+            )
+            if canceled.status == RunStatus.CANCELED:
+                await async_finalize_cycle_run_if_needed(int(row.id), status="canceled")
             count += 1
     return {"ok": True, "canceled": count, "cancelled": count}
 
