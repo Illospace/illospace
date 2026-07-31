@@ -318,6 +318,45 @@ class AsyncAgentRunStore:
         rows = (await self.session.scalars(statement)).all()
         return {int(run_id) for run_id in rows}
 
+    async def lock_run(
+        self,
+        run_id: int,
+        *,
+        key_share: bool = False,
+        no_key_update: bool = False,
+    ) -> AgentRunRow | None:
+        """Lock a run's root/current pair in ascending id order.
+
+        Direct ``FOR UPDATE`` or ``with_for_update`` queries on
+        ``AgentRunRow`` outside ``RunStore`` are prohibited. ``append_event``
+        depends on every transaction acquiring the root before a nested run;
+        a caller that locks the child directly cannot repair that order later.
+
+        The requested lock strength is applied to both rows. ``key_share`` and
+        ``no_key_update`` use the same lock-mode meanings as
+        ``_acquire_agent_run_locks``; leaving both false requests
+        ``FOR UPDATE``.
+        """
+
+        run_id = int(run_id)
+        try:
+            snapshot = await self.refresh_run(run_id)
+        except LookupError:
+            return None
+        if self._dialect_name() != "postgresql":
+            return snapshot
+
+        root_run_id = int(snapshot.root_run_id or run_id)
+        lock_ids = {root_run_id, run_id}
+        locked_ids = await self._acquire_agent_run_locks(
+            lock_ids,
+            key_share=key_share,
+            no_key_update=no_key_update,
+        )
+        if locked_ids != lock_ids:
+            return None
+        return await self.refresh_run(run_id)
+
     async def _try_locked_run(
         self,
         run_id: int,

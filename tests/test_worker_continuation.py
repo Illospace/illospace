@@ -6,7 +6,6 @@ import asyncio
 from datetime import UTC, datetime
 
 from sqlalchemy import select
-from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateTable
 
@@ -20,7 +19,6 @@ from brain.systems.runs.chantier_continuation import (
     CONTINUATION_QUEUED_EVENT,
     GENERIC_CONTINUATION_QUEUED_EVENT,
     GENERIC_CONTINUATION_SOURCE,
-    _lock_run,
     queue_worker_continuation_for_terminal_run,
 )
 from brain.systems.runs.domain import AgentRunRequest, RunRecipe
@@ -28,7 +26,6 @@ from brain.systems.runs.engine import AsyncAgentRunEngine
 from brain.systems.runs.evidence_health import (
     WorkerEvidenceFailure,
     WorkerEvidenceReceipt,
-    _lock_parent_run,
     record_parent_evidence_failures,
 )
 from brain.systems.runs.status import RunStatus
@@ -565,54 +562,6 @@ def test_spawn_worker_schema_exposes_opt_in_join_flag():
 
     assert join_parent["type"] == "boolean"
     assert join_parent["default"] is False
-
-
-async def test_fanout_anchor_lock_uses_select_for_no_key_update():
-    captured = {}
-    anchor = object()
-
-    class _ScalarResult:
-        def one_or_none(self):
-            return anchor
-
-    class _CapturingSession:
-        async def scalars(self, statement):
-            captured["statement"] = statement
-            return _ScalarResult()
-
-    assert await _lock_run(_CapturingSession(), 482) is anchor
-    sql = str(
-        captured["statement"].compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    )
-    assert "WHERE agent_runs.id = 482" in sql
-    assert sql.rstrip().endswith("FOR NO KEY UPDATE")
-
-
-async def test_evidence_parent_lock_uses_select_for_no_key_update():
-    captured = {}
-    parent = object()
-
-    class _ScalarResult:
-        def one_or_none(self):
-            return parent
-
-    class _CapturingSession:
-        async def scalars(self, statement):
-            captured["statement"] = statement
-            return _ScalarResult()
-
-    assert await _lock_parent_run(_CapturingSession(), 483) is parent
-    sql = str(
-        captured["statement"].compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    )
-    assert "WHERE agent_runs.id = 483" in sql
-    assert sql.rstrip().endswith("FOR NO KEY UPDATE")
 
 
 async def test_evidence_locks_refresh_preloaded_parent_and_cycle_after_concurrent_commit(

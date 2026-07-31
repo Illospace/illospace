@@ -68,7 +68,8 @@ async def queue_chantier_continuation_for_terminal_run(
     anchor_id = await _fanout_anchor_id(session, terminal_run)
     if anchor_id is None:
         return None
-    anchor = await _lock_run(session, anchor_id)
+    store = AsyncAgentRunStore(session)
+    anchor = await store.lock_run(anchor_id, no_key_update=True)
     if anchor is None:
         return None
 
@@ -92,7 +93,6 @@ async def queue_chantier_continuation_for_terminal_run(
     if not anchor_terminal or not all_workers_terminal:
         return None
 
-    store = AsyncAgentRunStore(session)
     if await store.has_event_type(anchor.id, CONTINUATION_QUEUED_EVENT):
         return await _existing_continuation_run_id(session, anchor.id)
 
@@ -251,16 +251,6 @@ async def _fanout_anchor_id(
         return int(terminal_run.parent_run_id)
     spawned = await _spawned_workers(session, terminal_run.id)
     return int(terminal_run.id) if spawned else None
-
-
-async def _lock_run(session: AsyncSession, run_id: int) -> AgentRunRow | None:
-    stmt = (
-        select(AgentRunRow)
-        .where(AgentRunRow.id == int(run_id))
-        .with_for_update(key_share=True)
-        .execution_options(populate_existing=True)
-    )
-    return (await session.scalars(stmt)).one_or_none()
 
 
 async def _spawned_workers(

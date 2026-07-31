@@ -1410,7 +1410,6 @@ async def test_postgres_child_event_key_share_does_not_block_parent_mutation(db_
     import uuid
 
     from brain.platform.db.models.org import Org
-    from brain.systems.runs.evidence_health import _lock_parent_run
     from brain.systems.runs.events import run_event
 
     factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
@@ -1466,7 +1465,10 @@ async def test_postgres_child_event_key_share_does_not_block_parent_mutation(db_
             await parent_session.rollback()
 
             evidence_parent = await asyncio.wait_for(
-                _lock_parent_run(parent_session, root_id),
+                AsyncAgentRunStore(parent_session).lock_run(
+                    root_id,
+                    no_key_update=True,
+                ),
                 timeout=1,
             )
             assert evidence_parent.id == root_id
