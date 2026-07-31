@@ -119,6 +119,7 @@ async def test_split_projects_legacy_failed_message_before_copying_it():
         )
     )
     copied_commands = []
+    cancel_open_runs = AsyncMock(return_value=0)
 
     async def capture_message(_session, *, idea, command, apply_lifecycle):
         copied_commands.append(command)
@@ -133,7 +134,11 @@ async def test_split_projects_legacy_failed_message_before_copying_it():
         ),
         patch.object(_misc, "post_thread_message", side_effect=capture_message),
         patch.object(_misc, "transition_thought_status", AsyncMock()),
-        patch.object(_misc, "_cancel_active_runs_for_idea", AsyncMock(return_value=0)),
+        patch.object(
+            _misc,
+            "async_cancel_open_runs_for_thread",
+            cancel_open_runs,
+        ),
         patch("brain.systems.cortex.events.publish"),
     ):
         result = await _misc.split_idea(
@@ -143,6 +148,11 @@ async def test_split_projects_legacy_failed_message_before_copying_it():
         )
 
     assert result["ok"] is True
+    cancel_open_runs.assert_awaited_once_with(
+        session,
+        "idea-1",
+        reason="Parent split into branches",
+    )
     assert len(copied_commands) == 1
     copied = copied_commands[0]
     assert "raw-secret" not in copied.content

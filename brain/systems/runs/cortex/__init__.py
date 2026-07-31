@@ -104,17 +104,12 @@ async def async_idea_run_history(idea_id: str) -> list[dict[str, Any]]:
     return await serialize_run_history_async(idea_id)
 
 
-cancel_idea_runs = async_cancel_runs_for_idea
-supersede_runs_for_idea = async_cancel_runs_for_idea
-
-
 __all__ = [
     "DrainResult",
     "_get_adaptation_history",
     "_parse_skill_mentions",
     "_parse_skill_override",
     "_record_adaptation",
-    "cancel_idea_runs",
     "async_cancel_runs_for_idea",
     "async_idea_run_history",
     "queue_status",
@@ -122,5 +117,4 @@ __all__ = [
     "ensure_schema",
     "start_runner",
     "stop_runner",
-    "supersede_runs_for_idea",
 ]
