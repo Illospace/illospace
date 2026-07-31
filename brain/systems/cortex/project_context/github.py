@@ -120,11 +120,22 @@ def parse_github_repo_slug(value: str) -> str | None:
     slug = (value or "").strip()
     if not slug:
         return None
+    has_github_prefix = bool(
+        re.match(
+            r"^(?:git@github\.com:|https?://github\.com/|github://|github\.com/)",
+            slug,
+            flags=re.IGNORECASE,
+        )
+    )
     slug = re.sub(r"^git@github\.com:", "", slug, flags=re.IGNORECASE)
     slug = re.sub(r"^https?://github\.com/", "", slug, flags=re.IGNORECASE)
     slug = re.sub(r"^github://", "", slug, flags=re.IGNORECASE)
     slug = re.sub(r"^github\.com/", "", slug, flags=re.IGNORECASE)
-    slug = re.sub(r"[?#].*$", "", slug).strip("/")
+    slug = re.sub(r"[?#].*$", "", slug)
+    if not has_github_prefix:
+        if slug.startswith("/") or len(slug.strip("/").split("/")) != 2:
+            return None
+    slug = slug.strip("/")
     parts = [part for part in slug.split("/") if part]
     if len(parts) < 2:
         return None
