@@ -119,15 +119,26 @@ class GithubIssueClosure:
     fixing_pull_requests: tuple[GithubFixingPullRequest, ...]
 
 
+# The prefixes that mark a value as an explicit GitHub reference. Stated once: the
+# same list decides whether the origin is trusted AND what gets stripped, so the two
+# can never drift apart.
+_GITHUB_PREFIX_RE = re.compile(
+    r"^(?:git@github\.com:|https?://github\.com/|github://|github\.com/)",
+    flags=re.IGNORECASE,
+)
+
+
 def parse_github_repo_slug(value: str) -> str | None:
     slug = (value or "").strip()
     if not slug:
         return None
-    slug = re.sub(r"^git@github\.com:", "", slug, flags=re.IGNORECASE)
-    slug = re.sub(r"^https?://github\.com/", "", slug, flags=re.IGNORECASE)
-    slug = re.sub(r"^github://", "", slug, flags=re.IGNORECASE)
-    slug = re.sub(r"^github\.com/", "", slug, flags=re.IGNORECASE)
-    slug = re.sub(r"[?#].*$", "", slug).strip("/")
+    stripped = _GITHUB_PREFIX_RE.sub("", slug, count=1)
+    has_github_prefix = stripped != slug
+    slug = re.sub(r"[?#].*$", "", stripped)
+    if not has_github_prefix:
+        if slug.startswith("/") or len(slug.strip("/").split("/")) != 2:
+            return None
+    slug = slug.strip("/")
     parts = [part for part in slug.split("/") if part]
     if len(parts) < 2:
         return None
