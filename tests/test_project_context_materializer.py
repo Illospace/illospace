@@ -1526,8 +1526,24 @@ async def test_spawned_reader_materialization_issue_degrades_parent_cycle_eviden
     events = []
 
     class FakeStore:
-        def __init__(self, _session, **_kwargs):
-            pass
+        def __init__(self, session, **_kwargs):
+            self._session = session
+
+        async def lock_run(self, run_id):
+            # Stands in for RunStore.lock_run, whose observable contract here is
+            # a locked read that refreshes the identity map. This parent is its
+            # own root, so the real acquirer also takes exactly one lock.
+            from sqlalchemy import select
+
+            from brain.platform.db.models.agent_run import AgentRunRow
+
+            rows = await self._session.scalars(
+                select(AgentRunRow)
+                .where(AgentRunRow.id == int(run_id))
+                .with_for_update(key_share=True)
+                .execution_options(populate_existing=True)
+            )
+            return rows.one_or_none()
 
         async def append_event(self, event):
             events.append(event)
