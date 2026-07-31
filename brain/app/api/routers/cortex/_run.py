@@ -16,7 +16,10 @@ from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
 from brain.app.api.routers.cortex._helpers import _caller_is_service_principal
 from brain.app.api.routers.cortex._router import router
-from brain.systems.runs.cortex import queue_status_async
+from brain.systems.runs.cortex import (
+    async_finalize_canceled_cycle_run_if_needed,
+    queue_status_async,
+)
 from brain.systems.runs.cortex.permissions import RunReadScope, run_belongs_to_scope
 from brain.systems.runs.cortex.handoff_summary import latest_thread_handoff_summary
 from brain.systems.runs.cortex.recording import (
@@ -89,6 +92,7 @@ async def _cancel_run_with_event(store: AsyncAgentRunStore, run_id: int, *, reas
     await store.append_event(
         run_event(int(run_id), "run.canceled", {"reason": reason}, root_run_id=row.root_run_id)
     )
+    await async_finalize_canceled_cycle_run_if_needed(int(run_id))
 
 
 async def _require_idea_for_run_history(session, idea_id: str, user: dict[str, Any]) -> None:

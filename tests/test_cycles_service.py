@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from brain.app.api.schemas.cycles import CycleCreate, CycleRead, CycleRunRead
+from brain.contracts.statuses import TERMINAL_RUN_STATUS_VALUES
 from brain.systems.cycles import access as cycle_access
 from brain.systems.cycles import execution as cycle_execution
 from brain.systems.cycles import prompts as cycle_prompts
@@ -41,6 +42,8 @@ RAW_PROVIDER_ERROR = (
     "through our help center at help.openai.com if the error persists. Please include the request "
     "ID `a7dd7556-test` in your message. | server_error | server_error"
 )
+
+EXPECTED_CANCELED_RUN_CYCLE_DISPOSITION = "failed"
 
 RESULT_CONTRACT_REQUIRED_OUTPUTS = [
     "answer_the_cycle_mission",
@@ -3567,7 +3570,8 @@ async def test_cycle_contract_provider_error_degrades_without_leaking_and_preser
     assert all("help.openai.com" not in str(artifact.text or "") for artifact in session._artifacts)
 
 
-def test_finalize_cycle_run_from_run_ignores_non_cycle_run(monkeypatch):
+@pytest.mark.parametrize("status", ("failed", "canceled"))
+def test_finalize_cycle_run_from_run_ignores_non_cycle_run(monkeypatch, status):
     agent_run = AgentRun()
     agent_run.metadata_ = {"source": "user"}
 
@@ -3583,10 +3587,67 @@ def test_finalize_cycle_run_from_run_ignores_non_cycle_run(monkeypatch):
         ]),
     )
 
-    service.finalize_cycle_run_from_run(44, status="failed", error="boom")
+    service.finalize_cycle_run_from_run(44, status=status, error="boom")
 
     assert cycle_run.status == "running"
     assert cycle.last_status is None
+
+
+@pytest.mark.parametrize("run_status", TERMINAL_RUN_STATUS_VALUES)
+def test_finalize_cycle_run_from_run_maps_every_terminal_run_status(
+    monkeypatch,
+    run_status,
+):
+    expected_statuses = {
+        "completed": "completed",
+        "failed": "failed",
+        "canceled": EXPECTED_CANCELED_RUN_CYCLE_DISPOSITION,
+        "expired": "failed",
+    }
+    supplied_errors = {
+        "completed": None,
+        "failed": "Agent run failed",
+        "canceled": None,
+        "expired": "Agent run interruption limit exhausted",
+    }
+    assert tuple(expected_statuses) == TERMINAL_RUN_STATUS_VALUES
+    assert service.CANCELED_RUN_CYCLE_DISPOSITION == EXPECTED_CANCELED_RUN_CYCLE_DISPOSITION
+
+    session, cycle_run, cycle, _ = _contract_finalization_scenario(
+        cycle_id=8,
+        mission=REFLEX_MISSION,
+        answer=REFLEX_ANSWER,
+    )
+    if run_status == "canceled":
+        cycle_run.context_snapshot["mission_result_contract_verdict"] = {
+            "settlement_status": "mission_contract_failed",
+            "provider_error": "server_error",
+        }
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+
+    service.finalize_cycle_run_from_run(
+        44,
+        status=run_status,
+        error=supplied_errors[run_status],
+    )
+
+    assert cycle_run.status == expected_statuses[run_status]
+    assert cycle_run.completed_at is not None
+    assert cycle.last_status == expected_statuses[run_status]
+    if run_status == "canceled":
+        if EXPECTED_CANCELED_RUN_CYCLE_DISPOSITION == "failed":
+            assert cycle_run.error == "Agent run was canceled"
+            assert "ended without cycle-run finalization" not in cycle_run.error
+        else:
+            assert cycle_run.error is None
+        assert cycle_run.skip_reason == (
+            "canceled"
+            if EXPECTED_CANCELED_RUN_CYCLE_DISPOSITION == "skipped"
+            else None
+        )
+    else:
+        assert cycle_run.error == supplied_errors[run_status]
+        assert cycle_run.skip_reason is None
 
 
 def test_finalize_cycle_failure_uses_original_run_failed_event(monkeypatch):
@@ -3616,7 +3677,7 @@ def test_finalize_cycle_failure_uses_original_run_failed_event(monkeypatch):
     )
     finalized = []
 
-    async def capture_finalize(run, active_cycle, *, status, error, session):
+    async def capture_finalize(run, active_cycle, *, status, error, skip_reason, session):
         finalized.append((run, active_cycle, status, error, session))
 
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))

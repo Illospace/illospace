@@ -2324,12 +2324,22 @@ async def test_auto_commit_store_finishes_event_transactions(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_cancel_endpoint_helper_records_run_canceled_event(session_factory):
-    from brain.app.api.routers.cortex._run import _cancel_run_with_event
+async def test_cancel_endpoint_helper_records_run_canceled_event(session_factory, monkeypatch):
+    from brain.app.api.routers.cortex import _run as run_routes
 
     session = session_factory()
     store = AsyncAgentRunStore(session)
     run = await store.create_run(_run_request(thread_id="thread-1", message="cancel me"))
+    settled_run_ids = []
+
+    async def capture_cycle_settlement(run_id: int):
+        settled_run_ids.append(run_id)
+
+    monkeypatch.setattr(
+        run_routes,
+        "async_finalize_canceled_cycle_run_if_needed",
+        capture_cycle_settlement,
+    )
 
     class _AsyncStore:
         async def require_run(self, run_id: int):
@@ -2341,24 +2351,69 @@ async def test_cancel_endpoint_helper_records_run_canceled_event(session_factory
         async def set_status(self, run_id: int, status, *, reason: str | None = None):
             return await store.set_status(run_id, status, reason=reason)
 
-    await _cancel_run_with_event(_AsyncStore(), run.id, reason="user_canceled")
+    await run_routes._cancel_run_with_event(_AsyncStore(), run.id, reason="user_canceled")
 
     row = await session.get(AgentRunRow, run.id)
     assert row is not None
     assert row.status == RunStatus.CANCELED.value
+    assert settled_run_ids == [run.id]
     events = await _event_types(session, run.id)
     assert "run.canceled" in events
     assert events.count("run.canceled") == 1
 
 
-async def test_cancel_runs_for_idea_records_run_canceled_event(session_factory):
+async def test_cancel_endpoint_helper_ignores_cycle_settlement_failure(
+    session_factory,
+    monkeypatch,
+    caplog,
+):
+    from brain.app.api.routers.cortex import _run as run_routes
+    from brain.systems.cycles import service as cycle_service
+
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    run = await store.create_run(_run_request(thread_id="thread-1", message="cancel me"))
+
+    async def fail_cycle_settlement(*_args, **_kwargs):
+        raise RuntimeError("cycles unavailable")
+
+    monkeypatch.setattr(
+        cycle_service,
+        "async_finalize_cycle_run_from_run",
+        fail_cycle_settlement,
+    )
+
+    await run_routes._cancel_run_with_event(store, run.id, reason="user_canceled")
+
+    row = await session.get(AgentRunRow, run.id)
+    assert row is not None
+    assert row.status == RunStatus.CANCELED.value
+    assert "run.canceled" in await _event_types(session, run.id)
+    assert "cycle_run_settlement_failed" in caplog.text
+
+
+async def test_cancel_runs_for_idea_records_run_canceled_event(
+    session_factory,
+    monkeypatch,
+):
     from brain.systems.runs.cortex import async_cancel_runs_for_idea
+    from brain.systems.cycles import service as cycle_service
 
     session = session_factory()
     store = AsyncAgentRunStore(session)
     run = await store.create_run(_run_request(thread_id="idea-1", message="cancel me"))
     await store.set_status(run.id, RunStatus.STARTING)
     await store.set_status(run.id, RunStatus.RUNNING)
+    settled = []
+
+    async def capture_cycle_settlement(run_id, *, status, error=None):
+        settled.append((run_id, status, error))
+
+    monkeypatch.setattr(
+        cycle_service,
+        "async_finalize_cycle_run_from_run",
+        capture_cycle_settlement,
+    )
 
     with patch("brain.systems.runs.cortex.UnitOfWork", return_value=_SessionUoW(session)):
         count = await async_cancel_runs_for_idea("idea-1")
@@ -2367,9 +2422,59 @@ async def test_cancel_runs_for_idea_records_run_canceled_event(session_factory):
     assert count == 1
     assert row is not None
     assert row.status == RunStatus.CANCELED.value
+    assert settled == [(run.id, "canceled", None)]
     events = await _event_types(session, run.id)
     assert "run.canceled" in events
     assert events.count("run.canceled") == 1
+
+
+async def test_cancel_all_route_settles_each_canceled_cycle_run(monkeypatch):
+    from brain.app.api.routers.cortex import _idea_ops as idea_routes
+
+    rows = [
+        SimpleNamespace(id=41, root_run_id=41),
+        SimpleNamespace(id=42, root_run_id=42),
+    ]
+    settled_run_ids = []
+
+    async def select_runs(_statement):
+        return SimpleNamespace(all=lambda: rows)
+
+    async def flush():
+        return None
+
+    session = SimpleNamespace(scalars=select_runs, flush=flush)
+
+    class _Store:
+        async def append_event(self, _event):
+            return None
+
+        async def set_status(self, _run_id, _status, *, reason=None):
+            return SimpleNamespace(status=RunStatus.CANCELED)
+
+    async def allow_idea(*_args, **_kwargs):
+        return None
+
+    async def capture_cycle_settlement(run_id):
+        settled_run_ids.append(run_id)
+
+    monkeypatch.setattr(
+        idea_routes,
+        "UnitOfWork",
+        lambda: _SessionUoW(session),
+    )
+    monkeypatch.setattr(idea_routes, "_require_idea_for_user", allow_idea)
+    monkeypatch.setattr(idea_routes, "AsyncAgentRunStore", lambda _session: _Store())
+    monkeypatch.setattr(
+        idea_routes,
+        "async_finalize_canceled_cycle_run_if_needed",
+        capture_cycle_settlement,
+    )
+
+    result = await idea_routes.idea_cancel_all("idea-1", {"id": "user-1"})
+
+    assert result == {"ok": True, "canceled": 2, "cancelled": 2}
+    assert settled_run_ids == [41, 42]
 
 
 async def test_stale_active_run_reaper_interrupts_requeues_and_retries_abandoned_runs(session_factory):
