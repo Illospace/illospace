@@ -1,4 +1,4 @@
-"""Cancellation token for active AgentRun execution."""
+"""Cancellation operations for active AgentRun execution."""
 
 from __future__ import annotations
 
@@ -7,10 +7,51 @@ import time
 from typing import Callable
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
+from brain.systems.runs.cycle_settlement import async_finalize_cycle_run_if_needed
+from brain.systems.runs.events import run_event
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES
+from brain.systems.runs.store import AsyncAgentRunStore
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+
+async def async_cancel_open_runs_for_thread(
+    session: AsyncSession,
+    thread_id: str,
+    *,
+    reason: str = "canceled_for_thread",
+) -> int:
+    """Cancel every open run on a thread within the caller's transaction."""
+
+    result = await session.scalars(
+        select(AgentRunRow).where(
+            AgentRunRow.thread_id == thread_id,
+            AgentRunRow.status.in_(OPEN_RUN_STATUS_VALUES),
+        )
+    )
+    store = AsyncAgentRunStore(session)
+    count = 0
+    for row in result.all():
+        await store.append_event(
+            run_event(
+                int(row.id),
+                "run.canceled",
+                {"reason": reason},
+                root_run_id=row.root_run_id,
+            )
+        )
+        canceled = await store.set_status(
+            row.id,
+            RunStatus.CANCELED,
+            reason=reason,
+        )
+        if canceled.status == RunStatus.CANCELED:
+            await async_finalize_cycle_run_if_needed(int(row.id), status="canceled")
+        count += 1
+    return count
 
 
 @dataclass
@@ -48,4 +89,4 @@ class RunCancelToken:
         return self._canceled
 
 
-__all__ = ["RunCancelToken"]
+__all__ = ["RunCancelToken", "async_cancel_open_runs_for_thread"]

@@ -2391,18 +2391,23 @@ async def test_cancel_endpoint_helper_ignores_cycle_settlement_failure(
     assert "cycle_run_settlement_failed" in caplog.text
 
 
-async def test_cancel_runs_for_idea_records_run_canceled_event(
+@pytest.mark.parametrize("entry_point", ("route", "helper"))
+async def test_cancel_all_entry_points_persist_shared_cancellation_side_effects(
     session_factory,
     monkeypatch,
+    entry_point,
 ):
-    from brain.systems.runs.cortex import async_cancel_runs_for_idea
     from brain.systems.cycles import service as cycle_service
+    from brain.systems.runs import cortex as cortex_runs
 
     session = session_factory()
     store = AsyncAgentRunStore(session)
-    run = await store.create_run(_run_request(thread_id="idea-1", message="cancel me"))
-    await store.set_status(run.id, RunStatus.STARTING)
-    await store.set_status(run.id, RunStatus.RUNNING)
+    runs = [
+        await store.create_run(_run_request(thread_id="idea-1", message="cancel me")),
+        await store.create_run(_run_request(thread_id="idea-1", message="cancel me too")),
+    ]
+    await store.set_status(runs[0].id, RunStatus.STARTING)
+    await store.set_status(runs[0].id, RunStatus.RUNNING)
     settled = []
 
     async def capture_cycle_settlement(run_id, *, status, error=None):
@@ -2414,66 +2419,60 @@ async def test_cancel_runs_for_idea_records_run_canceled_event(
         capture_cycle_settlement,
     )
 
-    with patch("brain.systems.runs.cortex.UnitOfWork", return_value=_SessionUoW(session)):
-        count = await async_cancel_runs_for_idea("idea-1")
+    if entry_point == "helper":
+        monkeypatch.setattr(
+            cortex_runs,
+            "UnitOfWork",
+            lambda: _SessionUoW(session),
+        )
+        count = await cortex_runs.async_cancel_runs_for_idea("idea-1")
+        assert count == 2
+    else:
+        from httpx import ASGITransport, AsyncClient
 
-    row = await session.get(AgentRunRow, run.id)
-    assert count == 1
-    assert row is not None
-    assert row.status == RunStatus.CANCELED.value
-    assert settled == [(run.id, "canceled", None)]
-    events = await _event_types(session, run.id)
-    assert "run.canceled" in events
-    assert events.count("run.canceled") == 1
+        from brain.app.api.auth import get_current_user
+        from brain.app.api.main import app
+        from brain.app.api.routers.cortex import _idea_ops as idea_routes
 
-
-async def test_cancel_all_route_settles_each_canceled_cycle_run(monkeypatch):
-    from brain.app.api.routers.cortex import _idea_ops as idea_routes
-
-    rows = [
-        SimpleNamespace(id=41, root_run_id=41),
-        SimpleNamespace(id=42, root_run_id=42),
-    ]
-    settled = []
-
-    async def select_runs(_statement):
-        return SimpleNamespace(all=lambda: rows)
-
-    async def flush():
-        return None
-
-    session = SimpleNamespace(scalars=select_runs, flush=flush)
-
-    class _Store:
-        async def append_event(self, _event):
+        async def allow_idea(*_args, **_kwargs):
             return None
 
-        async def set_status(self, _run_id, _status, *, reason=None):
-            return SimpleNamespace(status=RunStatus.CANCELED)
+        monkeypatch.setattr(
+            idea_routes,
+            "UnitOfWork",
+            lambda: _SessionUoW(session),
+        )
+        monkeypatch.setattr(idea_routes, "_require_idea_for_user", allow_idea)
+        overrides = dict(app.dependency_overrides)
+        app.dependency_overrides[get_current_user] = lambda: {
+            "id": "user-1",
+            "org_id": "org-1",
+            "role": "owner",
+            "principal_type": "human",
+            "permissions": ["run:manage"],
+        }
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post("/api/cortex/ideas/idea-1/cancel-all")
+        finally:
+            app.dependency_overrides.clear()
+            app.dependency_overrides.update(overrides)
 
-    async def allow_idea(*_args, **_kwargs):
-        return None
+        assert response.status_code == 200
+        assert response.json() == {"ok": True, "canceled": 2, "cancelled": 2}
 
-    async def capture_cycle_settlement(run_id, *, status, error=None):
-        settled.append((run_id, status, error))
-
-    monkeypatch.setattr(
-        idea_routes,
-        "UnitOfWork",
-        lambda: _SessionUoW(session),
-    )
-    monkeypatch.setattr(idea_routes, "_require_idea_for_user", allow_idea)
-    monkeypatch.setattr(idea_routes, "AsyncAgentRunStore", lambda _session: _Store())
-    monkeypatch.setattr(
-        idea_routes,
-        "async_finalize_cycle_run_if_needed",
-        capture_cycle_settlement,
-    )
-
-    result = await idea_routes.idea_cancel_all("idea-1", {"id": "user-1"})
-
-    assert result == {"ok": True, "canceled": 2, "cancelled": 2}
-    assert settled == [(41, "canceled", None), (42, "canceled", None)]
+    assert sorted(settled) == [
+        (run.id, "canceled", None)
+        for run in runs
+    ]
+    for run in runs:
+        row = await session.get(AgentRunRow, run.id)
+        assert row is not None
+        assert row.status == RunStatus.CANCELED.value
+        events = await _event_types(session, run.id)
+        assert "run.canceled" in events
+        assert events.count("run.canceled") == 1
 
 
 async def test_stale_active_run_reaper_interrupts_requeues_and_retries_abandoned_runs(session_factory):
