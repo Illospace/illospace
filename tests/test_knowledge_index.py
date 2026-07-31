@@ -1471,6 +1471,12 @@ async def test_github_enumeration_reserves_capacity_for_stale_lower_index_repo(
     session,
 ):
     repositories = ["acme/stale", "acme/backfill"]
+    initial_backfill_page = (
+        "eyJraW5kIjoiZ2l0aHViX2lzc3VlczphY21lL2JhY2tmaWxsIiwiaW5kZXgiOjkwfQ=="
+    )
+    next_backfill_page = (
+        "eyJraW5kIjoiZ2l0aHViX2lzc3VlczphY21lL2JhY2tmaWxsIiwiaW5kZXgiOjB9"
+    )
     initial_cursor = {
         "version": 2,
         "active_repository": 1,
@@ -1480,7 +1486,7 @@ async def test_github_enumeration_reserves_capacity_for_stale_lower_index_repo(
                 "watermark_id": 100,
             },
             "acme/backfill": {
-                "next_page": {"page": 1, "index": 90},
+                "next_page": initial_backfill_page,
                 "high_watermark": "2026-07-30T12:00:00+00:00",
                 "high_watermark_id": 200,
             },
@@ -1499,7 +1505,7 @@ async def test_github_enumeration_reserves_capacity_for_stale_lower_index_repo(
                 "created_at": "2026-07-30T12:00:00Z",
                 "updated_at": f"2026-07-30T12:0{issue_id - 200}:00Z",
             }
-            for issue_id in (201, 202)
+            for issue_id in (201, 202, 203, 204, 205)
         ],
         "acme/stale": [
             {
@@ -1531,10 +1537,8 @@ async def test_github_enumeration_reserves_capacity_for_stale_lower_index_repo(
     async def list_issues(repo, **kwargs):
         calls[repo] = kwargs
         return {
-            "issues": issues[repo],
-            "next_page": (
-                {"page": 2, "index": 0} if repo == "acme/backfill" else None
-            ),
+            "issues": issues[repo][: kwargs["limit"]],
+            "next_page": next_backfill_page if repo == "acme/backfill" else None,
         }
 
     authority = SimpleNamespace(token=None, org_id=None, actor_user_id=None)
@@ -1553,7 +1557,7 @@ async def test_github_enumeration_reserves_capacity_for_stale_lower_index_repo(
         "github:acme/backfill#202",
         "github:acme/stale#101",
     ]
-    assert calls["acme/backfill"]["cursor"] == {"page": 1, "index": 90}
+    assert calls["acme/backfill"]["cursor"] == initial_backfill_page
     assert calls["acme/backfill"]["since"] is None
     assert calls["acme/stale"]["cursor"] is None
     assert calls["acme/stale"]["since"] == "2026-07-29T12:00:00+00:00"
@@ -1566,7 +1570,7 @@ async def test_github_enumeration_reserves_capacity_for_stale_lower_index_repo(
                 "watermark_id": 101,
             },
             "acme/backfill": {
-                "next_page": {"page": 2, "index": 0},
+                "next_page": next_backfill_page,
                 "high_watermark": "2026-07-30T12:02:00+00:00",
                 "high_watermark_id": 202,
             },
@@ -1576,6 +1580,11 @@ async def test_github_enumeration_reserves_capacity_for_stale_lower_index_repo(
 
 async def test_github_enumeration_advances_every_repo_during_long_backfill(session):
     repositories = ["acme/steady-one", "acme/backfill", "acme/steady-two"]
+    backfill_page_tokens = (
+        "eyJraW5kIjoiZ2l0aHViX2lzc3VlczphY21lL2JhY2tmaWxsIiwiaW5kZXgiOjF9",
+        "eyJraW5kIjoiZ2l0aHViX2lzc3VlczphY21lL2JhY2tmaWxsIiwiaW5kZXgiOjJ9",
+        "eyJraW5kIjoiZ2l0aHViX2lzc3VlczphY21lL2JhY2tmaWxsIiwiaW5kZXgiOjN9",
+    )
     initial_watermarks = {
         "acme/steady-one": ("2026-07-27T08:00:00+00:00", 10),
         "acme/steady-two": ("2026-07-27T08:00:00+00:00", 20),
@@ -1589,19 +1598,19 @@ async def test_github_enumeration_advances_every_repo_during_long_backfill(sessi
         }
         | {
             "acme/backfill": {
-                "next_page": {"page": 1},
+                "next_page": backfill_page_tokens[0],
                 "high_watermark": "2026-07-28T08:00:00+00:00",
                 "high_watermark_id": 30,
             }
         },
     }
     backfill_pages = {
-        1: (31, {"page": 2}),
-        2: (32, {"page": 3}),
-        3: (33, None),
+        backfill_page_tokens[0]: (31, backfill_page_tokens[1]),
+        backfill_page_tokens[1]: (32, backfill_page_tokens[2]),
+        backfill_page_tokens[2]: (33, None),
     }
     steady_calls = {"acme/steady-one": 0, "acme/steady-two": 0}
-    seen_backfill_pages: list[int] = []
+    seen_backfill_pages: list[str] = []
 
     def issue(repo: str, issue_id: int, day: int) -> dict:
         return {
@@ -1619,11 +1628,11 @@ async def test_github_enumeration_advances_every_repo_during_long_backfill(sessi
     async def list_issues(repo, **kwargs):
         assert kwargs["limit"] == 1
         if repo == "acme/backfill":
-            page = kwargs["cursor"]["page"]
+            page = kwargs["cursor"]
             seen_backfill_pages.append(page)
             issue_id, next_page = backfill_pages[page]
             return {
-                "issues": [issue(repo, issue_id, 28 + page)],
+                "issues": [issue(repo, issue_id, issue_id - 2)],
                 "next_page": next_page,
             }
 
@@ -1651,7 +1660,7 @@ async def test_github_enumeration_advances_every_repo_during_long_backfill(sessi
             cursor = enumeration.cursor
 
     assert [len(enumeration.drafts) for enumeration in enumerations] == [3, 3, 3]
-    assert seen_backfill_pages == [1, 2, 3]
+    assert seen_backfill_pages == list(backfill_page_tokens)
     assert steady_calls == {"acme/steady-one": 3, "acme/steady-two": 3}
     for repo, (initial_watermark, _) in initial_watermarks.items():
         assert cursor["repositories"][repo]["watermark"] > initial_watermark

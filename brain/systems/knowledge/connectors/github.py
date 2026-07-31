@@ -297,7 +297,7 @@ async def _enumerate_repository(
     state: dict[str, Any],
     *,
     remaining: int,
-) -> tuple[list[KnowledgeDraft], dict[str, Any], bool]:
+) -> tuple[list[KnowledgeDraft], dict[str, Any]]:
     """Enumerate one repository without mutating another repository's state."""
 
     watermark_key = _timestamp_key(
@@ -384,13 +384,13 @@ async def _enumerate_repository(
             "high_watermark": high_key[0].isoformat(),
             "high_watermark_id": high_key[1],
         }
-        return repo_drafts, next_state, True
+        return repo_drafts, next_state
 
     next_state = {
         "watermark": high_key[0].isoformat(),
         "watermark_id": high_key[1],
     }
-    return repo_drafts, next_state, False
+    return repo_drafts, next_state
 
 
 class GitHubConnector:
@@ -410,6 +410,16 @@ class GitHubConnector:
         session: AsyncSession,
         cursor: dict[str, Any],
     ) -> KnowledgeEnumeration:
+        """Enumerate changes while preserving the version-2 cursor contract.
+
+        ``version`` is 2 and stays 2. Settled ``repositories`` entries contain
+        ``watermark`` and ``watermark_id``; mid-backfill entries contain
+        ``next_page``, ``high_watermark``, and ``high_watermark_id``.
+        ``active_repository`` is the wire name for the repository index where
+        the next sweep begins, and the sweep walks circularly from that index.
+        Rolling deploys are safe because old and new builds both read the
+        integer as a starting index.
+        """
         if int(cursor.get("version") or 0) != _CURSOR_VERSION:
             cursor = {}
         repositories = list(self.repositories or await _configured_repositories(session))
@@ -446,13 +456,11 @@ class GitHubConnector:
             repositories_left = repository_count - offset
             repository_limit = max(1, remaining // repositories_left)
             try:
-                repo_drafts, next_state, _has_next_page = (
-                    await _enumerate_repository(
-                        session,
-                        repo,
-                        state,
-                        remaining=repository_limit,
-                    )
+                repo_drafts, next_state = await _enumerate_repository(
+                    session,
+                    repo,
+                    state,
+                    remaining=repository_limit,
                 )
             except Exception as exc:
                 message = str(exc).strip() or type(exc).__name__
