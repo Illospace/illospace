@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+import inspect
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -69,6 +70,7 @@ class _SharedRowLocks:
         self._condition = asyncio.Condition()
         self._holders: dict[int, dict[str, str]] = defaultdict(dict)
         self.events: dict[str, list[tuple[str, int]]] = defaultdict(list)
+        self.lock_modes: dict[str, list[str]] = defaultdict(list)
         self.contention_observed = asyncio.Event()
 
     async def acquire(self, transaction: str, run_id: int, mode: str) -> None:
@@ -82,6 +84,7 @@ class _SharedRowLocks:
                 return
             self._holders[run_id][transaction] = mode
             self.events[transaction].append(("row", run_id))
+            self.lock_modes[transaction].append(mode)
 
     def advisory(self, transaction: str, run_id: int) -> None:
         self.events[transaction].append(("advisory", run_id))
@@ -112,13 +115,18 @@ class _ContendingPostgresSession:
         *,
         transaction: str,
         root_run_id: int,
+        run_status: str = RunStatus.STARTING.value,
+        run_metadata: dict | None = None,
         pause_after_first_lock: bool = False,
     ):
         self._locks = locks
         self._transaction = transaction
         self._root_run_id = root_run_id
+        self._run_status = run_status
+        self._run_metadata = dict(run_metadata or {})
         self._pause_after_first_lock = pause_after_first_lock
         self._lock_calls = 0
+        self.lock_sql: list[str] = []
         self.first_lock_acquired = asyncio.Event()
         self.resume = asyncio.Event()
 
@@ -129,9 +137,24 @@ class _ContendingPostgresSession:
         compiled = statement.compile(dialect=postgresql.dialect())
         sql = str(compiled)
         if "FOR UPDATE" in sql or "FOR KEY SHARE" in sql or "FOR NO KEY UPDATE" in sql:
+            self.lock_sql.append(sql)
             run_ids = next(
-                value for value in compiled.params.values() if isinstance(value, list)
+                (
+                    value
+                    for value in compiled.params.values()
+                    if isinstance(value, list)
+                ),
+                None,
             )
+            selecting_run = run_ids is None
+            if selecting_run:
+                run_ids = [
+                    next(
+                        int(value)
+                        for value in compiled.params.values()
+                        if isinstance(value, int)
+                    )
+                ]
             if "FOR KEY SHARE" in sql:
                 mode = "key_share"
             elif "FOR NO KEY UPDATE" in sql:
@@ -144,6 +167,17 @@ class _ContendingPostgresSession:
             if self._pause_after_first_lock and self._lock_calls == 1:
                 self.first_lock_acquired.set()
                 await self.resume.wait()
+            if selecting_run:
+                return _Rows(
+                    [
+                        SimpleNamespace(
+                            id=run_ids[0],
+                            root_run_id=self._root_run_id,
+                            status=self._run_status,
+                            metadata_=dict(self._run_metadata),
+                        )
+                    ]
+                )
             return _Rows(run_ids)
 
         run_id = next(
@@ -156,7 +190,8 @@ class _ContendingPostgresSession:
                 SimpleNamespace(
                     id=run_id,
                     root_run_id=self._root_run_id,
-                    status=RunStatus.STARTING.value,
+                    status=self._run_status,
+                    metadata_=dict(self._run_metadata),
                 )
             ]
         )
@@ -176,6 +211,14 @@ class _ContendingPostgresSession:
 
     async def release(self):
         await self._locks.release(self._transaction)
+
+
+def _assert_ordered_root_target_sql(session: _ContendingPostgresSession) -> None:
+    root_sql, target_sql, *_ = session.lock_sql
+    assert "ORDER BY agent_runs.id ASC" in root_sql
+    assert "FOR KEY SHARE" in root_sql
+    assert "ORDER BY agent_runs.id ASC" in target_sql
+    assert "FOR NO KEY UPDATE" in target_sql
 
 
 async def _write_child_event(
@@ -228,6 +271,9 @@ async def test_agent_run_lock_order_is_transaction_wide_and_precedes_advisory_lo
     # so child event persistence no longer creates a parent lock convoy.
     assert not locks.contention_observed.is_set()
 
+    _assert_ordered_root_target_sql(nested_session)
+    _assert_ordered_root_target_sql(outer_session)
+
     for transaction_events in locks.events.values():
         row_lock_ids = [
             run_id for kind, run_id in transaction_events if kind == "row"
@@ -244,6 +290,121 @@ async def test_agent_run_lock_order_is_transaction_wide_and_precedes_advisory_lo
         )
 
 
+async def test_chantier_nested_anchor_locks_root_before_child_event(monkeypatch):
+    import brain.systems.runs.chantier_continuation as continuation
+
+    root_run_id = 3024
+    anchor_run_id = 3065
+    locks = _SharedRowLocks()
+    session = _ContendingPostgresSession(
+        locks,
+        transaction="chantier",
+        root_run_id=root_run_id,
+        run_status=RunStatus.COMPLETED.value,
+    )
+    session.get = AsyncMock(return_value=SimpleNamespace(id=3067))
+    monkeypatch.setattr(
+        continuation,
+        "_fanout_anchor_id",
+        AsyncMock(return_value=anchor_run_id),
+    )
+    monkeypatch.setattr(
+        continuation,
+        "_spawned_workers",
+        AsyncMock(
+            return_value=[SimpleNamespace(status=RunStatus.COMPLETED.value)]
+        ),
+    )
+    monkeypatch.setattr(
+        continuation,
+        "_record_fanout_evidence_health",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        continuation,
+        "_resolve_chantier_scope",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        AsyncAgentRunStore,
+        "has_event_type",
+        AsyncMock(return_value=False),
+    )
+
+    async def append_generic_event(_session, *, store, anchor, workers):
+        assert workers
+        await store.append_event(
+            run_event(
+                anchor.id,
+                "run.worker_continuation_queued",
+                root_run_id=anchor.root_run_id,
+            )
+        )
+        return 3088
+
+    monkeypatch.setattr(
+        continuation,
+        "_queue_generic_continuation",
+        append_generic_event,
+    )
+
+    continuation_id = await continuation.queue_chantier_continuation_for_terminal_run(
+        session,
+        terminal_run_id=3067,
+    )
+
+    assert continuation_id == 3088
+    assert locks.events["chantier"] == [
+        ("row", root_run_id),
+        ("row", anchor_run_id),
+        ("advisory", anchor_run_id),
+    ]
+    assert locks.lock_modes["chantier"] == [
+        "key_share",
+        "no_key_update",
+    ]
+
+
+async def test_evidence_receipt_nested_parent_locks_root_before_parent_event():
+    from brain.systems.runs.evidence_health import (
+        WorkerEvidenceFailure,
+        record_parent_evidence_failures,
+    )
+
+    root_run_id = 3024
+    parent_run_id = 3065
+    locks = _SharedRowLocks()
+    session = _ContendingPostgresSession(
+        locks,
+        transaction="evidence",
+        root_run_id=root_run_id,
+        run_metadata={},
+    )
+    failure = WorkerEvidenceFailure(
+        worker_run_id=3067,
+        shard="repo:brain",
+        stage="worker_execution",
+        error="Worker evidence is unavailable.",
+    )
+
+    added = await record_parent_evidence_failures(
+        session,
+        parent_run_id=parent_run_id,
+        failures=(failure,),
+    )
+
+    assert added == (failure,)
+    assert locks.events["evidence"] == [
+        ("row", root_run_id),
+        ("row", parent_run_id),
+        ("advisory", parent_run_id),
+    ]
+    assert locks.lock_modes["evidence"] == [
+        "key_share",
+        "no_key_update",
+    ]
+
+
 async def test_lock_only_acquisition_does_not_query_non_postgres_dialects():
     session = SimpleNamespace(
         get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="sqlite")),
@@ -257,6 +418,22 @@ async def test_lock_only_acquisition_does_not_query_non_postgres_dialects():
 
     assert locked_ids == set()
     session.scalars.assert_not_awaited()
+
+
+async def test_lock_run_returns_none_for_a_missing_run():
+    # The callers migrated onto lock_run (chantier continuation, evidence
+    # receipts) guard on a None row. A vanished run must stay a clean no-op
+    # rather than raising LookupError out of a terminal-run path.
+    session = SimpleNamespace(
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="sqlite")),
+        scalars=AsyncMock(return_value=_Rows([])),
+    )
+
+    assert list(inspect.signature(AsyncAgentRunStore.lock_run).parameters) == [
+        "self",
+        "run_id",
+    ]
+    assert await AsyncAgentRunStore(session).lock_run(3024) is None
 
 
 class DeadlockDetectedError(RuntimeError):

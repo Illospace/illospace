@@ -450,20 +450,6 @@ def materialization_failures_for_worker(
     return tuple(failures)
 
 
-async def _lock_parent_run(session: Any, parent_run_id: int) -> AgentRunRow | None:
-    rows = await session.scalars(
-        select(AgentRunRow)
-        .where(AgentRunRow.id == int(parent_run_id))
-        # Evidence receipts only mutate non-key parent fields. Keep this
-        # compatible with the FOR KEY SHARE lock held by child event writers;
-        # a stronger FOR UPDATE waiter can otherwise starve behind continuous
-        # child activity and convoy ordered terminal locks behind it.
-        .with_for_update(key_share=True)
-        .execution_options(populate_existing=True)
-    )
-    return rows.one_or_none()
-
-
 async def _lock_cycle_run(
     session: Any,
     parent_metadata: Mapping[str, Any],
@@ -498,7 +484,10 @@ async def _persist_parent_evidence_receipt(
     if not failures and completed_worker_shards is None:
         return None, ()
 
-    parent = await _lock_parent_run(session, parent_run_id)
+    store = AsyncAgentRunStore(session)
+    # Evidence receipts only mutate non-key parent fields. Keep this compatible
+    # with child event writers while the store orders any root/parent pair.
+    parent = await store.lock_run(parent_run_id)
     if parent is None:
         return None, ()
 
@@ -524,7 +513,6 @@ async def _persist_parent_evidence_receipt(
         context_snapshot["evidence_health"] = cycle_receipt.to_payload()
         cycle_run.context_snapshot = context_snapshot
 
-    store = AsyncAgentRunStore(session)
     for failure in added:
         await store.append_event(
             run_event(
