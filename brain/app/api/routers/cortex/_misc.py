@@ -30,10 +30,8 @@ from brain.app.api.routers.cortex._helpers import (
     _row_to_dict,
 )
 from brain.app.api.routers.cortex._router import router
-from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES, TERMINAL_RUN_STATUS_VALUES
-from brain.systems.runs.events import run_event
-from brain.systems.runs.status import RunStatus
-from brain.systems.runs.store import AsyncAgentRunStore as _AgentRunStore
+from brain.contracts.statuses import TERMINAL_RUN_STATUS_VALUES
+from brain.systems.runs.cancel import async_cancel_open_runs_for_thread
 from brain.systems.runs.cortex.analytics import RunAuditNotFound, async_build_idea_audit_summary
 from brain.systems.runs.cortex.read_models import (
     project_run_status,
@@ -113,29 +111,6 @@ async def _public_thread_message_projections(
         )
         projected.append((message, str(content or ""), metadata, failure))
     return projected
-
-
-async def _cancel_active_runs_for_idea(session, idea_id: str, *, reason: str) -> int:
-    result = await session.scalars(
-        select(AgentRun).where(
-            AgentRun.thread_id == idea_id,
-            AgentRun.status.in_(OPEN_RUN_STATUS_VALUES),
-        )
-    )
-    store = _AgentRunStore(session)
-    count = 0
-    for row in result.all():
-        await store.append_event(
-            run_event(
-                int(row.id),
-                "run.canceled",
-                {"reason": reason},
-                root_run_id=row.root_run_id,
-            )
-        )
-        await store.set_status(row.id, RunStatus.CANCELED, reason=reason)
-        count += 1
-    return count
 
 
 async def _store_generated_display_title(
@@ -499,7 +474,11 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
                 actor=user,
             ),
         )
-        await _cancel_active_runs_for_idea(uow.session, idea_id, reason="Parent split into branches")
+        await async_cancel_open_runs_for_thread(
+            uow.session,
+            idea_id,
+            reason="Parent split into branches",
+        )
 
     thought_split_payload = {"parent_id": idea_id, "children": created_ids}
     status_payload = {"idea_id": idea_id, "new_status": "resolved"}

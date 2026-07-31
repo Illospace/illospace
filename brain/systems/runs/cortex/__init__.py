@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from brain.systems.runs.cycle_settlement import (
-    async_finalize_cycle_run_if_needed as _async_finalize_cycle_run_if_needed,
-)
 from brain.systems.runs.events import run_event
 from brain.systems.runs.skill_commands import iter_slash_skill_commands, parse_slash_skill_names
 from brain.systems.runs.cortex.runner import (
@@ -95,40 +92,10 @@ async def _get_adaptation_history(run_id: int, *, session=None) -> list[dict[str
 
 
 async def async_cancel_runs_for_idea(idea_id: str) -> int:
-    from sqlalchemy import select
-    from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
-    from brain.systems.runs.status import RunStatus
-    from brain.platform.db.models.agent_run import AgentRunRow
+    from brain.systems.runs.cancel import async_cancel_open_runs_for_thread
 
-    count = 0
     async with _unit_of_work_factory()() as uow:
-        from brain.systems.runs.store import AsyncAgentRunStore as _AgentRunStore
-
-        store = _AgentRunStore(uow.session)
-        result = await uow.session.scalars(
-            select(AgentRunRow).where(
-                AgentRunRow.thread_id == idea_id,
-                AgentRunRow.status.in_(OPEN_RUN_STATUS_VALUES),
-            )
-        )
-        for row in result.all():
-            await store.append_event(
-                run_event(
-                    int(row.id),
-                    "run.canceled",
-                    {"reason": "canceled_for_thread"},
-                    root_run_id=row.root_run_id,
-                )
-            )
-            canceled = await store.set_status(
-                row.id,
-                RunStatus.CANCELED,
-                reason="canceled_for_thread",
-            )
-            if canceled.status == RunStatus.CANCELED:
-                await _async_finalize_cycle_run_if_needed(int(row.id), status="canceled")
-            count += 1
-    return count
+        return await async_cancel_open_runs_for_thread(uow.session, idea_id)
 
 
 async def async_idea_run_history(idea_id: str) -> list[dict[str, Any]]:
@@ -137,17 +104,12 @@ async def async_idea_run_history(idea_id: str) -> list[dict[str, Any]]:
     return await serialize_run_history_async(idea_id)
 
 
-cancel_idea_runs = async_cancel_runs_for_idea
-supersede_runs_for_idea = async_cancel_runs_for_idea
-
-
 __all__ = [
     "DrainResult",
     "_get_adaptation_history",
     "_parse_skill_mentions",
     "_parse_skill_override",
     "_record_adaptation",
-    "cancel_idea_runs",
     "async_cancel_runs_for_idea",
     "async_idea_run_history",
     "queue_status",
@@ -155,5 +117,4 @@ __all__ = [
     "ensure_schema",
     "start_runner",
     "stop_runner",
-    "supersede_runs_for_idea",
 ]
