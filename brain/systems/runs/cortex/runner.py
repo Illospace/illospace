@@ -23,6 +23,7 @@ from brain.kernel import config as brain_config
 from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, PROCESSING_RUN_STATUS_VALUES
 from brain.systems.cortex.status import PROTECTED_IDEA_STATUSES
 from brain.systems.runs.engine import AsyncAgentRunEngine
+from brain.systems.runs.cycle_settlement import async_finalize_cycle_run_if_needed
 from brain.systems.runs.evidence_health import (
     materialization_failures_for_worker,
     record_parent_evidence_failures,
@@ -785,12 +786,7 @@ async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict
 async def _finalize_cycle_run_if_needed_async(run_id: int, *, status: str, error: str | None = None) -> None:
     if status not in {"completed", "failed"}:
         return
-    try:
-        from brain.systems.cycles.service import async_finalize_cycle_run_from_run
-
-        await async_finalize_cycle_run_from_run(int(run_id), status=status, error=error)
-    except Exception:
-        logger.exception("cycle_run_settlement_failed", extra={"run_id": run_id, "status": status})
+    await async_finalize_cycle_run_if_needed(int(run_id), status=status, error=error)
 
 
 def _run_has_project_context(run: AgentRunRow | None) -> bool:

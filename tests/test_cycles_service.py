@@ -43,8 +43,6 @@ RAW_PROVIDER_ERROR = (
     "ID `a7dd7556-test` in your message. | server_error | server_error"
 )
 
-EXPECTED_CANCELED_RUN_CYCLE_DISPOSITION = "failed"
-
 RESULT_CONTRACT_REQUIRED_OUTPUTS = [
     "answer_the_cycle_mission",
     "summarize_workspace_evidence_or_explicit_gaps",
@@ -3593,6 +3591,10 @@ def test_finalize_cycle_run_from_run_ignores_non_cycle_run(monkeypatch, status):
     assert cycle.last_status is None
 
 
+def test_canceled_run_cycle_disposition_counts_as_failed():
+    assert service.CANCELED_RUN_CYCLE_DISPOSITION == "failed"
+
+
 @pytest.mark.parametrize("run_status", TERMINAL_RUN_STATUS_VALUES)
 def test_finalize_cycle_run_from_run_maps_every_terminal_run_status(
     monkeypatch,
@@ -3601,7 +3603,7 @@ def test_finalize_cycle_run_from_run_maps_every_terminal_run_status(
     expected_statuses = {
         "completed": "completed",
         "failed": "failed",
-        "canceled": EXPECTED_CANCELED_RUN_CYCLE_DISPOSITION,
+        "canceled": service.CANCELED_RUN_CYCLE_DISPOSITION,
         "expired": "failed",
     }
     supplied_errors = {
@@ -3611,7 +3613,6 @@ def test_finalize_cycle_run_from_run_maps_every_terminal_run_status(
         "expired": "Agent run interruption limit exhausted",
     }
     assert tuple(expected_statuses) == TERMINAL_RUN_STATUS_VALUES
-    assert service.CANCELED_RUN_CYCLE_DISPOSITION == EXPECTED_CANCELED_RUN_CYCLE_DISPOSITION
 
     session, cycle_run, cycle, _ = _contract_finalization_scenario(
         cycle_id=8,
@@ -3635,14 +3636,14 @@ def test_finalize_cycle_run_from_run_maps_every_terminal_run_status(
     assert cycle_run.completed_at is not None
     assert cycle.last_status == expected_statuses[run_status]
     if run_status == "canceled":
-        if EXPECTED_CANCELED_RUN_CYCLE_DISPOSITION == "failed":
+        if service.CANCELED_RUN_CYCLE_DISPOSITION == "failed":
             assert cycle_run.error == "Agent run was canceled"
             assert "ended without cycle-run finalization" not in cycle_run.error
         else:
             assert cycle_run.error is None
         assert cycle_run.skip_reason == (
             "canceled"
-            if EXPECTED_CANCELED_RUN_CYCLE_DISPOSITION == "skipped"
+            if service.CANCELED_RUN_CYCLE_DISPOSITION == "skipped"
             else None
         )
     else:
@@ -3677,7 +3678,7 @@ def test_finalize_cycle_failure_uses_original_run_failed_event(monkeypatch):
     )
     finalized = []
 
-    async def capture_finalize(run, active_cycle, *, status, error, skip_reason, session):
+    async def capture_finalize(run, active_cycle, *, status, error, session):
         finalized.append((run, active_cycle, status, error, session))
 
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))

@@ -955,18 +955,6 @@ async def async_finalize_cycle_run_from_run(
     if status not in TERMINAL_RUN_STATUS_VALUES:
         return
     effective_status = RUN_STATUS_TO_CYCLE_RUN_STATUS[status]
-    is_canceled = status == "canceled"
-    canceled_skip_reason = (
-        "canceled"
-        if is_canceled and effective_status == "skipped"
-        else None
-    )
-    if (
-        is_canceled
-        and effective_status == "failed"
-        and not str(error or "").strip()
-    ):
-        error = "Agent run was canceled"
     async with UnitOfWork() as uow:
         agent_run = await uow.session.get(AgentRun, run_id)
         metadata = agent_run.metadata_ if agent_run else None
@@ -979,28 +967,28 @@ async def async_finalize_cycle_run_from_run(
         cycle = await uow.session.get(Cycle, run.cycle_id) if run else None
         if not run or not cycle or run.status in TERMINAL_RUN_STATUSES:
             return
+        if status == "canceled":
+            if effective_status == "failed" and not str(error or "").strip():
+                error = "Agent run was canceled"
+            await _finalize_cycle_run(
+                run,
+                cycle,
+                status=effective_status,
+                error=error if effective_status == "failed" else None,
+                skip_reason="canceled" if effective_status == "skipped" else None,
+                session=uow.session,
+            )
+            return
         verdict = persisted_cycle_contract_verdict(run)
-        if (
-            not is_canceled
-            and effective_status == "completed"
-            and verdict is None
-        ):
+        if effective_status == "completed" and verdict is None:
             verdict = await async_prepare_cycle_run_visible_finalization(uow.session, int(run_id))
-        elif (
-            not is_canceled
-            and effective_status == "failed"
-            and verdict is None
-        ):
+        elif effective_status == "failed" and verdict is None:
             verdict = await async_prepare_cycle_run_visible_finalization(
                 uow.session,
                 int(run_id),
                 provider_errors_only=True,
             )
-        if (
-            not is_canceled
-            and effective_status == "failed"
-            and not str(error or "").strip()
-        ):
+        if effective_status == "failed" and not str(error or "").strip():
             failure_event = (
                 await uow.session.scalars(
                     select(AgentRunEventRow)
@@ -1022,21 +1010,16 @@ async def async_finalize_cycle_run_from_run(
                 or failure_payload.get("reason")
                 or ""
             ).strip() or None
-        if is_canceled:
-            final_status = effective_status
-            final_error = error if effective_status == "failed" else None
-        else:
-            final_status, final_error = cycle_finalization_status_from_verdict(
-                effective_status,
-                verdict=verdict,
-                error=error if effective_status == "failed" else None,
-            )
+        final_status, final_error = cycle_finalization_status_from_verdict(
+            effective_status,
+            verdict=verdict,
+            error=error if effective_status == "failed" else None,
+        )
         await _finalize_cycle_run(
             run,
             cycle,
             status=final_status,
             error=final_error,
-            skip_reason=canceled_skip_reason,
             session=uow.session,
         )
 

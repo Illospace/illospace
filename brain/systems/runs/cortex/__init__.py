@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
+from brain.systems.runs.cycle_settlement import (
+    async_finalize_cycle_run_if_needed as _async_finalize_cycle_run_if_needed,
+)
 from brain.systems.runs.events import run_event
 from brain.systems.runs.skill_commands import iter_slash_skill_commands, parse_slash_skill_names
 from brain.systems.runs.cortex.runner import (
@@ -16,7 +18,6 @@ from brain.systems.runs.cortex.runner import (
 )
 
 UnitOfWork = None
-logger = logging.getLogger(__name__)
 
 
 def _unit_of_work_factory():
@@ -93,18 +94,6 @@ async def _get_adaptation_history(run_id: int, *, session=None) -> list[dict[str
         return await _read(uow.session)
 
 
-async def async_finalize_canceled_cycle_run_if_needed(run_id: int) -> None:
-    try:
-        from brain.systems.cycles.service import async_finalize_cycle_run_from_run
-
-        await async_finalize_cycle_run_from_run(int(run_id), status="canceled")
-    except Exception:
-        logger.exception(
-            "cycle_run_settlement_failed",
-            extra={"run_id": run_id, "status": "canceled"},
-        )
-
-
 async def async_cancel_runs_for_idea(idea_id: str) -> int:
     from sqlalchemy import select
     from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
@@ -137,7 +126,7 @@ async def async_cancel_runs_for_idea(idea_id: str) -> int:
                 reason="canceled_for_thread",
             )
             if canceled.status == RunStatus.CANCELED:
-                await async_finalize_canceled_cycle_run_if_needed(int(row.id))
+                await _async_finalize_cycle_run_if_needed(int(row.id), status="canceled")
             count += 1
     return count
 
@@ -158,7 +147,6 @@ __all__ = [
     "_parse_skill_mentions",
     "_parse_skill_override",
     "_record_adaptation",
-    "async_finalize_canceled_cycle_run_if_needed",
     "cancel_idea_runs",
     "async_cancel_runs_for_idea",
     "async_idea_run_history",

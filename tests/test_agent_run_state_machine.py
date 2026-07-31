@@ -2330,14 +2330,14 @@ async def test_cancel_endpoint_helper_records_run_canceled_event(session_factory
     session = session_factory()
     store = AsyncAgentRunStore(session)
     run = await store.create_run(_run_request(thread_id="thread-1", message="cancel me"))
-    settled_run_ids = []
+    settled = []
 
-    async def capture_cycle_settlement(run_id: int):
-        settled_run_ids.append(run_id)
+    async def capture_cycle_settlement(run_id: int, *, status: str, error=None):
+        settled.append((run_id, status, error))
 
     monkeypatch.setattr(
         run_routes,
-        "async_finalize_canceled_cycle_run_if_needed",
+        "async_finalize_cycle_run_if_needed",
         capture_cycle_settlement,
     )
 
@@ -2356,7 +2356,7 @@ async def test_cancel_endpoint_helper_records_run_canceled_event(session_factory
     row = await session.get(AgentRunRow, run.id)
     assert row is not None
     assert row.status == RunStatus.CANCELED.value
-    assert settled_run_ids == [run.id]
+    assert settled == [(run.id, "canceled", None)]
     events = await _event_types(session, run.id)
     assert "run.canceled" in events
     assert events.count("run.canceled") == 1
@@ -2435,7 +2435,7 @@ async def test_cancel_all_route_settles_each_canceled_cycle_run(monkeypatch):
         SimpleNamespace(id=41, root_run_id=41),
         SimpleNamespace(id=42, root_run_id=42),
     ]
-    settled_run_ids = []
+    settled = []
 
     async def select_runs(_statement):
         return SimpleNamespace(all=lambda: rows)
@@ -2455,8 +2455,8 @@ async def test_cancel_all_route_settles_each_canceled_cycle_run(monkeypatch):
     async def allow_idea(*_args, **_kwargs):
         return None
 
-    async def capture_cycle_settlement(run_id):
-        settled_run_ids.append(run_id)
+    async def capture_cycle_settlement(run_id, *, status, error=None):
+        settled.append((run_id, status, error))
 
     monkeypatch.setattr(
         idea_routes,
@@ -2467,14 +2467,14 @@ async def test_cancel_all_route_settles_each_canceled_cycle_run(monkeypatch):
     monkeypatch.setattr(idea_routes, "AsyncAgentRunStore", lambda _session: _Store())
     monkeypatch.setattr(
         idea_routes,
-        "async_finalize_canceled_cycle_run_if_needed",
+        "async_finalize_cycle_run_if_needed",
         capture_cycle_settlement,
     )
 
     result = await idea_routes.idea_cancel_all("idea-1", {"id": "user-1"})
 
     assert result == {"ok": True, "canceled": 2, "cancelled": 2}
-    assert settled_run_ids == [41, 42]
+    assert settled == [(41, "canceled", None), (42, "canceled", None)]
 
 
 async def test_stale_active_run_reaper_interrupts_requeues_and_retries_abandoned_runs(session_factory):
