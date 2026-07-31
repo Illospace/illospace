@@ -40,6 +40,7 @@ from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS, sync_connector
 from brain.systems.external_agents import service as external_agents
 from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
 from brain.systems.cortex.project_context.github import (
+    GitHubConnectorError,
     GithubFixingPullRequest,
     GithubIssueClosure,
 )
@@ -1406,11 +1407,16 @@ async def test_github_closure_enrichment_failure_retries_without_advancing_curso
         failed = await sync_connector(session, connector)
         retried = await sync_connector(session, connector)
 
-    assert failed.status == "failed"
-    assert failed.cursor == {}
+    assert failed.status == "degraded"
+    assert failed.cursor == {
+        "version": 2,
+        "active_repository": 0,
+        "repositories": {},
+    }
     assert failed.stats["failed"] == 1
+    assert failed.error == "Illospace/illospace: temporary"
     assert retried.status == "pending"
-    assert retried.cursor == {}
+    assert retried.cursor == failed.cursor
     assert get_closure.await_count == 2
     state = await session.get(KnowledgeSyncState, "github")
     assert state is not None
@@ -1448,6 +1454,214 @@ async def test_github_legacy_cursor_is_reset_for_org_scope_backfill(session):
     assert drafts == []
     assert list_issues.await_args.kwargs["since"] is None
     assert cursor["version"] == 2
+
+
+async def test_github_enumeration_isolates_repo_failures_and_wraps_cursor(
+    session,
+    caplog,
+):
+    repositories = ["acme/healthy-one", "acme/missing", "acme/healthy-two"]
+    initial_cursor = {
+        "version": 2,
+        "active_repository": 0,
+        "repositories": {
+            repo: {
+                "watermark": "2026-07-29T12:00:00+00:00",
+                "watermark_id": index,
+            }
+            for index, repo in enumerate(repositories, start=1)
+        },
+    }
+    issues = {
+        "acme/healthy-one": {
+            "id": 101,
+            "number": 11,
+            "title": "First healthy issue",
+            "state": "open",
+            "body": "Healthy repository one advanced.",
+            "labels": [],
+            "user": {"login": "octocat"},
+            "created_at": "2026-07-30T09:00:00Z",
+            "updated_at": "2026-07-30T10:00:00Z",
+        },
+        "acme/healthy-two": {
+            "id": 303,
+            "number": 33,
+            "title": "Second healthy issue",
+            "state": "open",
+            "body": "Healthy repository two advanced.",
+            "labels": [],
+            "user": {"login": "octocat"},
+            "created_at": "2026-07-30T11:00:00Z",
+            "updated_at": "2026-07-30T12:00:00Z",
+        },
+    }
+    emit_issues = True
+
+    async def list_issues(repo, **kwargs):
+        del kwargs
+        if repo == "acme/missing":
+            raise GitHubConnectorError(
+                status_code=404,
+                message="Repository not found or not visible to this token.",
+            )
+        return {
+            "issues": [issues[repo]] if emit_issues else [],
+            "next_page": None,
+        }
+
+    authority = SimpleNamespace(token=None, org_id=None, actor_user_id=None)
+    connector = GitHubConnector(repositories=repositories, max_items=10)
+    with patch(
+        "brain.systems.knowledge.connectors.github._github_authority",
+        new=AsyncMock(return_value=authority),
+    ), patch(
+        "brain.systems.knowledge.connectors.github.async_list_repo_issues",
+        new=AsyncMock(side_effect=list_issues),
+    ):
+        drafts, cursor = await connector.enumerate_changed(session, initial_cursor)
+
+        assert [draft.source_ref for draft in drafts] == [
+            "github:acme/healthy-one#11",
+            "github:acme/healthy-two#33",
+        ]
+        assert cursor["repositories"]["acme/healthy-one"] == {
+            "watermark": "2026-07-30T10:00:00+00:00",
+            "watermark_id": 101,
+        }
+        assert cursor["repositories"]["acme/healthy-two"] == {
+            "watermark": "2026-07-30T12:00:00+00:00",
+            "watermark_id": 303,
+        }
+        assert (
+            cursor["repositories"]["acme/missing"]
+            == initial_cursor["repositories"]["acme/missing"]
+        )
+        assert cursor["active_repository"] == 0
+        assert connector.enumeration_errors == (
+            "acme/missing: Repository not found or not visible to this token.",
+        )
+
+        emit_issues = False
+        result = await sync_connector(
+            session,
+            GitHubConnector(repositories=repositories, max_items=10),
+        )
+
+    payload = result.to_dict()
+    assert result.status == "degraded"
+    assert result.stats["failed"] == 1
+    assert payload["error"] == (
+        "acme/missing: Repository not found or not visible to this token."
+    )
+    assert any(
+        "acme/missing" in record.message
+        and "Repository not found or not visible to this token." in record.message
+        for record in caplog.records
+    )
+
+
+async def test_github_connector_error_message_surfaces_in_failed_sync_payload(session):
+    message = "Repository not found or not visible to this token."
+    error = GitHubConnectorError(status_code=404, message=message)
+
+    assert str(error) == message
+    assert error.args == (message,)
+    assert error.status_code == 404
+    assert error.message == message
+    assert error == GitHubConnectorError(status_code=404, message=message)
+    assert repr(error) == (
+        "GitHubConnectorError(status_code=404, "
+        "message='Repository not found or not visible to this token.')"
+    )
+
+    connector = SimpleNamespace(
+        source_key="github",
+        enumerate_changed=AsyncMock(side_effect=error),
+    )
+    result = await sync_connector(session, connector)
+
+    assert result.status == "failed"
+    assert result.stats["failed"] == 1
+    assert result.to_dict()["error"] == message
+
+
+async def test_enumeration_error_survives_pending_distillation_as_degraded(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    user_id = "88888888-8888-4888-8888-888888888888"
+    session.add(Org(id=_ORG_ID, name="Degraded Org", slug="degraded-org"))
+    session.add(
+        User(
+            id=user_id,
+            org_id=_ORG_ID,
+            name="Degraded Worker",
+            email="degraded@example.com",
+        )
+    )
+    await session.flush()
+    proposed_cursor = {
+        "version": 2,
+        "active_repository": 0,
+        "repositories": {
+            "acme/healthy": {
+                "watermark": "2026-07-30T12:00:00+00:00",
+                "watermark_id": 303,
+            }
+        },
+    }
+    connector = _StubConnector(
+        source_key="github",
+        drafts=[
+            KnowledgeDraft(
+                source="github",
+                kind="issue",
+                source_ref="github:acme/healthy#33",
+                title="Healthy issue",
+                summary="A healthy repository continued indexing.",
+                raw_text="Healthy repository body.",
+                extra={"org_id": _ORG_ID, "actor_user_id": user_id},
+                distill=True,
+            )
+        ],
+        new_cursor=proposed_cursor,
+    )
+    connector.enumeration_errors = (
+        "acme/missing: Repository not found or not visible to this token.",
+    )
+
+    pending = await sync_connector(session, connector)
+    run = (await session.scalars(select(AgentRunRow))).one()
+    run.status = "completed"
+    session.add(
+        AgentRunArtifactRow(
+            run_id=run.id,
+            root_run_id=run.root_run_id,
+            artifact_type="final_answer",
+            text=json.dumps(
+                {
+                    "question": "What changed in the healthy repository?",
+                    "summary": "The healthy repository continued indexing.",
+                    "resolution": None,
+                    "systems": ["knowledge"],
+                    "code_references": [],
+                }
+            ),
+        )
+    )
+    await session.flush()
+
+    degraded = await sync_connector(session, connector)
+
+    assert pending.status == "pending"
+    assert pending.stats["failed"] == 1
+    assert pending.to_dict()["error"]
+    assert degraded.status == "degraded"
+    assert degraded.stats["failed"] == 1
+    assert degraded.cursor == proposed_cursor
+    assert degraded.to_dict()["error"] == connector.enumeration_errors[0]
 
 
 async def test_public_github_closure_uses_accounted_structural_fallback(

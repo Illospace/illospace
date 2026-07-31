@@ -37,6 +37,7 @@ from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
 logger = logging.getLogger(__name__)
 
 RAW_TEXT_MAX_CHARS = 20_000
+_ENUMERATION_ERRORS_KEY = "enumeration_errors"
 
 
 @dataclass
@@ -178,20 +179,34 @@ def _manifest_cursor(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _error_messages(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [message for item in value if (message := str(item).strip())]
+
+
+def _connector_enumeration_errors(connector: KnowledgeConnector) -> list[str]:
+    return _error_messages(getattr(connector, "enumeration_errors", ()))
+
+
 def _pending_cursor(
     *,
     committed_cursor: dict[str, Any],
     proposed_cursor: dict[str, Any],
     entries: list[dict[str, Any]],
+    enumeration_errors: list[str] | None = None,
 ) -> dict[str, Any]:
+    manifest = {
+        "version": DISTILLATION_MANIFEST_VERSION,
+        "committed_cursor": dict(committed_cursor),
+        "proposed_cursor": dict(proposed_cursor),
+        "entries": entries,
+    }
+    if enumeration_errors:
+        manifest[_ENUMERATION_ERRORS_KEY] = list(enumeration_errors)
     return {
         **committed_cursor,
-        DISTILLATION_CURSOR_KEY: {
-            "version": DISTILLATION_MANIFEST_VERSION,
-            "committed_cursor": dict(committed_cursor),
-            "proposed_cursor": dict(proposed_cursor),
-            "entries": entries,
-        },
+        DISTILLATION_CURSOR_KEY: manifest,
     }
 
 
@@ -622,11 +637,15 @@ async def sync_connector(
     if manifest is not None:
         committed_cursor = _manifest_cursor(manifest.get("committed_cursor"))
         proposed_cursor = _manifest_cursor(manifest.get("proposed_cursor"))
+        enumeration_errors = _error_messages(
+            manifest.get(_ENUMERATION_ERRORS_KEY)
+        )
+        enumeration_error = "; ".join(enumeration_errors) or None
         pending, resolved, failures = await _harvest_distillations(
             session,
             list(manifest.get("entries") or []),
         )
-        stats.failed += failures
+        stats.failed += failures + len(enumeration_errors)
         stats.distilled = sum(
             1 for _draft, should_embed in resolved if should_embed
         )
@@ -646,11 +665,13 @@ async def sync_connector(
                     committed_cursor=committed_cursor,
                     proposed_cursor=proposed_cursor,
                     entries=pending,
+                    enumeration_errors=enumeration_errors,
                 ),
                 result_cursor=committed_cursor,
                 status="pending",
                 stats=stats,
                 run_at=run_at,
+                error=enumeration_error,
             )
 
         status = "ok" if stats.failed == 0 else "degraded"
@@ -662,6 +683,7 @@ async def sync_connector(
             status=status,
             stats=stats,
             run_at=run_at,
+            error=enumeration_error,
         )
 
     cursor = dict(stored_cursor)
@@ -680,6 +702,10 @@ async def sync_connector(
             run_at=run_at,
             error=str(exc),
         )
+
+    enumeration_errors = _connector_enumeration_errors(connector)
+    enumeration_error = "; ".join(enumeration_errors) or None
+    stats.failed += len(enumeration_errors)
 
     structural: list[tuple[KnowledgeDraft, bool]] = []
     distillable: list[KnowledgeDraft] = []
@@ -728,11 +754,13 @@ async def sync_connector(
                 committed_cursor=cursor,
                 proposed_cursor=dict(new_cursor),
                 entries=entries,
+                enumeration_errors=enumeration_errors,
             ),
             result_cursor=cursor,
             status="pending",
             stats=stats,
             run_at=run_at,
+            error=enumeration_error,
         )
 
     if admission_fallbacks:
@@ -754,6 +782,7 @@ async def sync_connector(
         status=status,
         stats=stats,
         run_at=run_at,
+        error=enumeration_error,
     )
 
 
