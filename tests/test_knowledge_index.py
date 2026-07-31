@@ -1467,6 +1467,200 @@ async def test_github_legacy_cursor_is_reset_for_org_scope_backfill(session):
     assert enumeration.failures == ()
 
 
+async def test_github_enumeration_reserves_capacity_for_stale_lower_index_repo(
+    session,
+):
+    repositories = ["acme/stale", "acme/backfill"]
+    initial_cursor = {
+        "version": 2,
+        "active_repository": 1,
+        "repositories": {
+            "acme/stale": {
+                "watermark": "2026-07-29T12:00:00+00:00",
+                "watermark_id": 100,
+            },
+            "acme/backfill": {
+                "next_page": {"page": 1, "index": 90},
+                "high_watermark": "2026-07-30T12:00:00+00:00",
+                "high_watermark_id": 200,
+            },
+        },
+    }
+    issues = {
+        "acme/backfill": [
+            {
+                "id": issue_id,
+                "number": issue_id,
+                "title": f"Backfill issue {issue_id}",
+                "state": "open",
+                "body": "Historical backfill item.",
+                "labels": [],
+                "user": {"login": "octocat"},
+                "created_at": "2026-07-30T12:00:00Z",
+                "updated_at": f"2026-07-30T12:0{issue_id - 200}:00Z",
+            }
+            for issue_id in (201, 202)
+        ],
+        "acme/stale": [
+            {
+                "id": 100,
+                "number": 100,
+                "title": "Already settled",
+                "state": "open",
+                "body": "This item is already behind the watermark.",
+                "labels": [],
+                "user": {"login": "octocat"},
+                "created_at": "2026-07-29T12:00:00Z",
+                "updated_at": "2026-07-29T12:00:00Z",
+            },
+            {
+                "id": 101,
+                "number": 101,
+                "title": "Fresh lower-index issue",
+                "state": "open",
+                "body": "The stale repository gets a turn.",
+                "labels": [],
+                "user": {"login": "octocat"},
+                "created_at": "2026-07-31T09:00:00Z",
+                "updated_at": "2026-07-31T10:00:00Z",
+            },
+        ],
+    }
+    calls: dict[str, dict] = {}
+
+    async def list_issues(repo, **kwargs):
+        calls[repo] = kwargs
+        return {
+            "issues": issues[repo],
+            "next_page": (
+                {"page": 2, "index": 0} if repo == "acme/backfill" else None
+            ),
+        }
+
+    authority = SimpleNamespace(token=None, org_id=None, actor_user_id=None)
+    connector = GitHubConnector(repositories=repositories, max_items=4)
+    with patch(
+        "brain.systems.knowledge.connectors.github._github_authority",
+        new=AsyncMock(return_value=authority),
+    ), patch(
+        "brain.systems.knowledge.connectors.github.async_list_repo_issues",
+        new=AsyncMock(side_effect=list_issues),
+    ):
+        enumeration = await connector.enumerate_changed(session, initial_cursor)
+
+    assert [draft.source_ref for draft in enumeration.drafts] == [
+        "github:acme/backfill#201",
+        "github:acme/backfill#202",
+        "github:acme/stale#101",
+    ]
+    assert calls["acme/backfill"]["cursor"] == {"page": 1, "index": 90}
+    assert calls["acme/backfill"]["since"] is None
+    assert calls["acme/stale"]["cursor"] is None
+    assert calls["acme/stale"]["since"] == "2026-07-29T12:00:00+00:00"
+    assert enumeration.cursor == {
+        "version": 2,
+        "active_repository": 0,
+        "repositories": {
+            "acme/stale": {
+                "watermark": "2026-07-31T10:00:00+00:00",
+                "watermark_id": 101,
+            },
+            "acme/backfill": {
+                "next_page": {"page": 2, "index": 0},
+                "high_watermark": "2026-07-30T12:02:00+00:00",
+                "high_watermark_id": 202,
+            },
+        },
+    }
+
+
+async def test_github_enumeration_advances_every_repo_during_long_backfill(session):
+    repositories = ["acme/steady-one", "acme/backfill", "acme/steady-two"]
+    initial_watermarks = {
+        "acme/steady-one": ("2026-07-27T08:00:00+00:00", 10),
+        "acme/steady-two": ("2026-07-27T08:00:00+00:00", 20),
+    }
+    cursor = {
+        "version": 2,
+        "active_repository": 1,
+        "repositories": {
+            repo: {"watermark": watermark, "watermark_id": row_id}
+            for repo, (watermark, row_id) in initial_watermarks.items()
+        }
+        | {
+            "acme/backfill": {
+                "next_page": {"page": 1},
+                "high_watermark": "2026-07-28T08:00:00+00:00",
+                "high_watermark_id": 30,
+            }
+        },
+    }
+    backfill_pages = {
+        1: (31, {"page": 2}),
+        2: (32, {"page": 3}),
+        3: (33, None),
+    }
+    steady_calls = {"acme/steady-one": 0, "acme/steady-two": 0}
+    seen_backfill_pages: list[int] = []
+
+    def issue(repo: str, issue_id: int, day: int) -> dict:
+        return {
+            "id": issue_id,
+            "number": issue_id,
+            "title": f"{repo} issue {issue_id}",
+            "state": "open",
+            "body": "Repository scheduling test item.",
+            "labels": [],
+            "user": {"login": "octocat"},
+            "created_at": f"2026-07-{day:02d}T08:00:00Z",
+            "updated_at": f"2026-07-{day:02d}T08:00:00Z",
+        }
+
+    async def list_issues(repo, **kwargs):
+        assert kwargs["limit"] == 1
+        if repo == "acme/backfill":
+            page = kwargs["cursor"]["page"]
+            seen_backfill_pages.append(page)
+            issue_id, next_page = backfill_pages[page]
+            return {
+                "issues": [issue(repo, issue_id, 28 + page)],
+                "next_page": next_page,
+            }
+
+        steady_calls[repo] += 1
+        call = steady_calls[repo]
+        issue_id = initial_watermarks[repo][1] + call
+        return {
+            "issues": [issue(repo, issue_id, 27 + call)],
+            "next_page": None,
+        }
+
+    authority = SimpleNamespace(token=None, org_id=None, actor_user_id=None)
+    connector = GitHubConnector(repositories=repositories, max_items=3)
+    enumerations = []
+    with patch(
+        "brain.systems.knowledge.connectors.github._github_authority",
+        new=AsyncMock(return_value=authority),
+    ), patch(
+        "brain.systems.knowledge.connectors.github.async_list_repo_issues",
+        new=AsyncMock(side_effect=list_issues),
+    ):
+        for _ in range(3):
+            enumeration = await connector.enumerate_changed(session, cursor)
+            enumerations.append(enumeration)
+            cursor = enumeration.cursor
+
+    assert [len(enumeration.drafts) for enumeration in enumerations] == [3, 3, 3]
+    assert seen_backfill_pages == [1, 2, 3]
+    assert steady_calls == {"acme/steady-one": 3, "acme/steady-two": 3}
+    for repo, (initial_watermark, _) in initial_watermarks.items():
+        assert cursor["repositories"][repo]["watermark"] > initial_watermark
+    assert cursor["repositories"]["acme/backfill"] == {
+        "watermark": "2026-07-31T08:00:00+00:00",
+        "watermark_id": 33,
+    }
+
+
 async def test_github_enumeration_isolates_repo_failures_and_wraps_cursor(
     session,
     caplog,

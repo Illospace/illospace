@@ -430,19 +430,28 @@ class GitHubConnector:
         drafts: list[KnowledgeDraft] = []
         failures: list[EnumerationFailure] = []
 
-        for repo_index in range(active_index, len(repositories)):
+        # ``active_repository`` is the first repository due in this sweep.
+        # Modulo traversal lets existing version-2 cursors wrap immediately.
+        repository_count = len(repositories)
+        for offset in range(repository_count):
+            repo_index = (active_index + offset) % repository_count
             repo = repositories[repo_index]
             state = dict(repo_states.get(repo) or {})
             remaining = self.max_items - len(drafts)
             if remaining <= 0:
                 break
+            # Reserve capacity for every repository that is still due in this
+            # circular sweep. A long page chain can use its share, but cannot
+            # prevent later repositories from checking their watermarks.
+            repositories_left = repository_count - offset
+            repository_limit = max(1, remaining // repositories_left)
             try:
-                repo_drafts, next_state, has_next_page = (
+                repo_drafts, next_state, _has_next_page = (
                     await _enumerate_repository(
                         session,
                         repo,
                         state,
-                        remaining=remaining,
+                        remaining=repository_limit,
                     )
                 )
             except Exception as exc:
@@ -457,30 +466,19 @@ class GitHubConnector:
 
             drafts.extend(repo_drafts)
             repo_states[repo] = next_state
-            if has_next_page:
-                return KnowledgeEnumeration(
-                    drafts=drafts,
-                    cursor={
-                        "version": _CURSOR_VERSION,
-                        "active_repository": repo_index,
-                        "repositories": repo_states,
-                    },
-                    failures=tuple(failures),
-                )
-
             if len(drafts) >= self.max_items:
                 return KnowledgeEnumeration(
                     drafts=drafts,
                     cursor={
                         "version": _CURSOR_VERSION,
-                        "active_repository": (repo_index + 1) % len(repositories),
+                        "active_repository": (repo_index + 1) % repository_count,
                         "repositories": repo_states,
                     },
                     failures=tuple(failures),
                 )
 
-        # Reaching the end completes this sweep even when one or more repositories
-        # were recorded as skipped, so the next invocation starts from index zero.
+        # Considering every repository completes this sweep even when one or more
+        # were skipped, so the next invocation starts from the canonical index zero.
         return KnowledgeEnumeration(
             drafts=drafts,
             cursor={
