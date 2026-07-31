@@ -69,7 +69,7 @@ async def queue_chantier_continuation_for_terminal_run(
     if anchor_id is None:
         return None
     store = AsyncAgentRunStore(session)
-    anchor = await store.lock_run(anchor_id, no_key_update=True)
+    anchor = await store.lock_run(anchor_id)
     if anchor is None:
         return None
 

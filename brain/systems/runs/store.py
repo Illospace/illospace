@@ -322,61 +322,32 @@ class AsyncAgentRunStore:
         self,
         run_id: int,
         *,
-        key_share: bool = False,
-        no_key_update: bool = False,
+        root_run_id: int | None = None,
+        skip_locked: bool = False,
     ) -> AgentRunRow | None:
-        """Lock a run's root/current pair in ascending id order.
+        """Lock a root/current pair in order, with the current row mutable.
 
         Direct ``FOR UPDATE`` or ``with_for_update`` queries on
         ``AgentRunRow`` outside ``RunStore`` are prohibited. ``append_event``
         depends on every transaction acquiring the root before a nested run;
         a caller that locks the child directly cannot repair that order later.
 
-        The requested lock strength is applied to both rows. ``key_share`` and
-        ``no_key_update`` use the same lock-mode meanings as
-        ``_acquire_agent_run_locks``; leaving both false requests
-        ``FOR UPDATE``.
-        """
-
-        run_id = int(run_id)
-        try:
-            snapshot = await self.refresh_run(run_id)
-        except LookupError:
-            return None
-        if self._dialect_name() != "postgresql":
-            return snapshot
-
-        root_run_id = int(snapshot.root_run_id or run_id)
-        lock_ids = {root_run_id, run_id}
-        locked_ids = await self._acquire_agent_run_locks(
-            lock_ids,
-            key_share=key_share,
-            no_key_update=no_key_update,
-        )
-        if locked_ids != lock_ids:
-            return None
-        return await self.refresh_run(run_id)
-
-    async def _try_locked_run(
-        self,
-        run_id: int,
-        *,
-        root_run_id: int | None = None,
-        skip_locked: bool = False,
-    ) -> AgentRunRow | None:
-        """Lock a root/current pair in order, with the current row mutable.
-
         ``FOR NO KEY UPDATE`` still serializes every run mutation while staying
         compatible with child-event ``FOR KEY SHARE`` locks on the root. Run
         primary keys are immutable, so the stronger ``FOR UPDATE`` lock only
         creates unnecessary root/child lock convoys.
+
+        Returns ``None`` when the run does not exist or a lock could not be
+        taken; callers that need a row use ``_locked_run``, which raises.
         """
         run_id = int(run_id)
         if self._dialect_name() != "postgresql":
-            return await self.refresh_run(run_id)
+            return await self._refresh_run_or_none(run_id)
 
         if root_run_id is None:
-            snapshot = await self.refresh_run(run_id)
+            snapshot = await self._refresh_run_or_none(run_id)
+            if snapshot is None:
+                return None
             root_run_id = int(snapshot.root_run_id or run_id)
         else:
             root_run_id = int(root_run_id or run_id)
@@ -390,7 +361,7 @@ class AsyncAgentRunStore:
             )
             if lock_id not in locked_ids:
                 return None
-        return await self.refresh_run(run_id)
+        return await self._refresh_run_or_none(run_id)
 
     async def lock_terminal_boundary(
         self,
@@ -868,6 +839,12 @@ class AsyncAgentRunStore:
         await self.session.commit()
         return ExecutionClaim(run_id=int(row.id), token=str(token), attempt=attempt)
 
+    async def _refresh_run_or_none(self, run_id: int) -> AgentRunRow | None:
+        try:
+            return await self.refresh_run(run_id)
+        except LookupError:
+            return None
+
     async def refresh_run(self, run_id: int) -> AgentRunRow:
         row = (
             await self.session.scalars(
@@ -955,7 +932,7 @@ class AsyncAgentRunStore:
             if not rows:
                 return None
             for row in rows:
-                locked_row = await self._try_locked_run(
+                locked_row = await self.lock_run(
                     int(row.id),
                     root_run_id=row.root_run_id or row.id,
                     skip_locked=self._dialect_name() == "postgresql",
@@ -1713,7 +1690,7 @@ class AsyncAgentRunStore:
         *,
         root_run_id: int | None = None,
     ) -> AgentRunRow:
-        row = await self._try_locked_run(
+        row = await self.lock_run(
             int(run_id),
             root_run_id=root_run_id,
         )

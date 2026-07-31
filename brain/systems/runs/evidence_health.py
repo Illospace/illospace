@@ -487,7 +487,7 @@ async def _persist_parent_evidence_receipt(
     store = AsyncAgentRunStore(session)
     # Evidence receipts only mutate non-key parent fields. Keep this compatible
     # with child event writers while the store orders any root/parent pair.
-    parent = await store.lock_run(parent_run_id, no_key_update=True)
+    parent = await store.lock_run(parent_run_id)
     if parent is None:
         return None, ()
 

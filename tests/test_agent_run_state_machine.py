@@ -1465,10 +1465,7 @@ async def test_postgres_child_event_key_share_does_not_block_parent_mutation(db_
             await parent_session.rollback()
 
             evidence_parent = await asyncio.wait_for(
-                AsyncAgentRunStore(parent_session).lock_run(
-                    root_id,
-                    no_key_update=True,
-                ),
+                AsyncAgentRunStore(parent_session).lock_run(root_id),
                 timeout=1,
             )
             assert evidence_parent.id == root_id

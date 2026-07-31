@@ -342,7 +342,7 @@ async def test_chantier_nested_anchor_locks_root_before_child_event(monkeypatch)
         ("advisory", anchor_run_id),
     ]
     assert locks.lock_modes["chantier"] == [
-        "no_key_update",
+        "key_share",
         "no_key_update",
     ]
 
@@ -360,6 +360,18 @@ async def test_lock_only_acquisition_does_not_query_non_postgres_dialects():
 
     assert locked_ids == set()
     session.scalars.assert_not_awaited()
+
+
+async def test_lock_run_returns_none_for_a_missing_run():
+    # The callers migrated onto lock_run (chantier continuation, evidence
+    # receipts) guard on a None row. A vanished run must stay a clean no-op
+    # rather than raising LookupError out of a terminal-run path.
+    session = SimpleNamespace(
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="sqlite")),
+        scalars=AsyncMock(return_value=_Rows([])),
+    )
+
+    assert await AsyncAgentRunStore(session).lock_run(3024) is None
 
 
 class DeadlockDetectedError(RuntimeError):
