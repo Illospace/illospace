@@ -318,14 +318,23 @@ class AsyncAgentRunStore:
         rows = (await self.session.scalars(statement)).all()
         return {int(run_id) for run_id in rows}
 
-    async def lock_run(
+    async def lock_run(self, run_id: int) -> AgentRunRow | None:
+        """Lock a run through the root-before-child ordering boundary.
+
+        The root is resolved from the stored row; callers cannot override the
+        ordering or opt into the claim loop's skip-locked policy.
+        """
+
+        return await self._lock_run(run_id)
+
+    async def _lock_run(
         self,
         run_id: int,
         *,
         root_run_id: int | None = None,
         skip_locked: bool = False,
     ) -> AgentRunRow | None:
-        """Lock a root/current pair in order, with the current row mutable.
+        """Canonically lock a root/current pair, with the current row mutable.
 
         Direct ``FOR UPDATE`` or ``with_for_update`` queries on
         ``AgentRunRow`` outside ``RunStore`` are prohibited. ``append_event``
@@ -932,7 +941,7 @@ class AsyncAgentRunStore:
             if not rows:
                 return None
             for row in rows:
-                locked_row = await self.lock_run(
+                locked_row = await self._lock_run(
                     int(row.id),
                     root_run_id=row.root_run_id or row.id,
                     skip_locked=self._dialect_name() == "postgresql",
@@ -1690,7 +1699,7 @@ class AsyncAgentRunStore:
         *,
         root_run_id: int | None = None,
     ) -> AgentRunRow:
-        row = await self.lock_run(
+        row = await self._lock_run(
             int(run_id),
             root_run_id=root_run_id,
         )

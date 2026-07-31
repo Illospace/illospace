@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+import inspect
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -115,14 +116,17 @@ class _ContendingPostgresSession:
         transaction: str,
         root_run_id: int,
         run_status: str = RunStatus.STARTING.value,
+        run_metadata: dict | None = None,
         pause_after_first_lock: bool = False,
     ):
         self._locks = locks
         self._transaction = transaction
         self._root_run_id = root_run_id
         self._run_status = run_status
+        self._run_metadata = dict(run_metadata or {})
         self._pause_after_first_lock = pause_after_first_lock
         self._lock_calls = 0
+        self.lock_sql: list[str] = []
         self.first_lock_acquired = asyncio.Event()
         self.resume = asyncio.Event()
 
@@ -133,6 +137,7 @@ class _ContendingPostgresSession:
         compiled = statement.compile(dialect=postgresql.dialect())
         sql = str(compiled)
         if "FOR UPDATE" in sql or "FOR KEY SHARE" in sql or "FOR NO KEY UPDATE" in sql:
+            self.lock_sql.append(sql)
             run_ids = next(
                 (
                     value
@@ -169,6 +174,7 @@ class _ContendingPostgresSession:
                             id=run_ids[0],
                             root_run_id=self._root_run_id,
                             status=self._run_status,
+                            metadata_=dict(self._run_metadata),
                         )
                     ]
                 )
@@ -185,6 +191,7 @@ class _ContendingPostgresSession:
                     id=run_id,
                     root_run_id=self._root_run_id,
                     status=self._run_status,
+                    metadata_=dict(self._run_metadata),
                 )
             ]
         )
@@ -204,6 +211,14 @@ class _ContendingPostgresSession:
 
     async def release(self):
         await self._locks.release(self._transaction)
+
+
+def _assert_ordered_root_target_sql(session: _ContendingPostgresSession) -> None:
+    root_sql, target_sql, *_ = session.lock_sql
+    assert "ORDER BY agent_runs.id ASC" in root_sql
+    assert "FOR KEY SHARE" in root_sql
+    assert "ORDER BY agent_runs.id ASC" in target_sql
+    assert "FOR NO KEY UPDATE" in target_sql
 
 
 async def _write_child_event(
@@ -255,6 +270,9 @@ async def test_agent_run_lock_order_is_transaction_wide_and_precedes_advisory_lo
     # compatible with the nested child's key-share protection of that parent,
     # so child event persistence no longer creates a parent lock convoy.
     assert not locks.contention_observed.is_set()
+
+    _assert_ordered_root_target_sql(nested_session)
+    _assert_ordered_root_target_sql(outer_session)
 
     for transaction_events in locks.events.values():
         row_lock_ids = [
@@ -347,6 +365,46 @@ async def test_chantier_nested_anchor_locks_root_before_child_event(monkeypatch)
     ]
 
 
+async def test_evidence_receipt_nested_parent_locks_root_before_parent_event():
+    from brain.systems.runs.evidence_health import (
+        WorkerEvidenceFailure,
+        record_parent_evidence_failures,
+    )
+
+    root_run_id = 3024
+    parent_run_id = 3065
+    locks = _SharedRowLocks()
+    session = _ContendingPostgresSession(
+        locks,
+        transaction="evidence",
+        root_run_id=root_run_id,
+        run_metadata={},
+    )
+    failure = WorkerEvidenceFailure(
+        worker_run_id=3067,
+        shard="repo:brain",
+        stage="worker_execution",
+        error="Worker evidence is unavailable.",
+    )
+
+    added = await record_parent_evidence_failures(
+        session,
+        parent_run_id=parent_run_id,
+        failures=(failure,),
+    )
+
+    assert added == (failure,)
+    assert locks.events["evidence"] == [
+        ("row", root_run_id),
+        ("row", parent_run_id),
+        ("advisory", parent_run_id),
+    ]
+    assert locks.lock_modes["evidence"] == [
+        "key_share",
+        "no_key_update",
+    ]
+
+
 async def test_lock_only_acquisition_does_not_query_non_postgres_dialects():
     session = SimpleNamespace(
         get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="sqlite")),
@@ -371,6 +429,10 @@ async def test_lock_run_returns_none_for_a_missing_run():
         scalars=AsyncMock(return_value=_Rows([])),
     )
 
+    assert list(inspect.signature(AsyncAgentRunStore.lock_run).parameters) == [
+        "self",
+        "run_id",
+    ]
     assert await AsyncAgentRunStore(session).lock_run(3024) is None
 
 
