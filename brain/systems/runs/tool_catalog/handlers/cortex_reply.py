@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import re
 import json
+import re
+from collections.abc import Mapping
 
 from brain.systems.runs.tool_catalog.handlers.common import *
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
@@ -18,6 +19,22 @@ from brain.systems.runs.failures import failure_category_for_error, public_run_f
 
 
 _MAX_ARTIFACT_CONTRACT_BLOCKS = 2
+
+
+def _current_effective_model() -> str | None:
+    """Read the model from the run's canonical live routing metadata."""
+
+    execution_metadata = _agent_context.execution_metadata
+    if not isinstance(execution_metadata, Mapping):
+        return None
+    routing = execution_metadata.get("routing")
+    if not isinstance(routing, Mapping):
+        return None
+    effective = routing.get("effective")
+    if not isinstance(effective, Mapping):
+        return None
+    model = effective.get("model")
+    return str(model) if model else None
 
 
 def _safe_failure_message(diagnostic: object) -> str:
@@ -241,6 +258,7 @@ def _handle_cortex_reply(content: str) -> dict:
     )
     evidence = FinalReplyEvidence.from_agent_context(_agent_context)
     execution_context = _build_final_reply_check_context(evidence)
+    resolved_llm_context = _agent_context.resolved_llm_context
     review = review_final_reply_once(
         user_request=user_request,
         candidate_output=proposed_reply,
@@ -248,6 +266,9 @@ def _handle_cortex_reply(content: str) -> dict:
         evidence=evidence,
         intent_profile=getattr(_agent_context, "intent_satisfaction", None),
         user_id=getattr(_agent_context, "user_id", None),
+        provider=(resolved_llm_context.provider if resolved_llm_context else None),
+        llm=(resolved_llm_context.llm if resolved_llm_context else None),
+        model=_current_effective_model(),
         session_id=getattr(_agent_context, "session_id", None),
     )
     try:

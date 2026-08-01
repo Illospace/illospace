@@ -1825,6 +1825,7 @@ async def _captured_spawn_worker(
     monkeypatch.setattr(worker_handlers, "AsyncAgentRunStore", _Store)
 
     async def fake_preflight(*_args, **_kwargs):
+        captured["preflight"] = dict(_kwargs)
         return preflight_result or ProviderAuthPreflightResult(
             status="passed",
             provider="openai",
@@ -2081,6 +2082,14 @@ async def test_spawn_worker_auth_preflight_rejects_missing_provider_credential_b
         model="anthropic",
         metadata={"shard": "github:Illospace/illospace"},
     )
+
+    from brain.platform.providers.model_policy import DEFAULT_PROVIDER_MODELS
+
+    assert captured["preflight"] == {
+        "user_id": "user-1",
+        "org_id": "org-1",
+        "model": f"anthropic/{DEFAULT_PROVIDER_MODELS['anthropic']}",
+    }
 
     assert payload == {
         "ok": False,
