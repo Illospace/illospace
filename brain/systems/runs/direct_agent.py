@@ -456,6 +456,10 @@ async def _init_llm_async(
     else:
         llm = resolved_llm
     provider = get_provider(llm.provider, llm.client)
+    if getattr(_agent_context, "session_id", None) == session_id:
+        _agent_context.resolved_llm = llm
+        _agent_context.resolved_provider = provider
+        _agent_context.resolved_model = model
     extra_headers = llm.build_request_headers(session_id=session_id)
     logger.info(
         "Agent %s: provider=%s, source=%s, auth_mode=%s, token=%s…, oauth=%s",

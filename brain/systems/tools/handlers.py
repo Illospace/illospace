@@ -968,7 +968,7 @@ def handle_build_implementation_map(
 
 async def _reader_completion(prompt: str, *, user_id: str | None = None, org_id: str | None = None) -> dict | None:
     """Best-effort configured reader subcall. Returns parsed JSON or None."""
-    from brain.platform.integrations.completions import simple_text_completion
+    from brain.platform.integrations.completions import async_simple_text_completion
     from brain.systems.runs.direct_loop.telemetry import async_record_api_call
     from brain.systems.runs.tool_handlers import _agent_context
 
@@ -977,8 +977,7 @@ async def _reader_completion(prompt: str, *, user_id: str | None = None, org_id:
     response = None
     error = None
     try:
-        response = await run_blocking(
-            simple_text_completion,
+        response = await async_simple_text_completion(
             prompt,
             model=model,
             max_tokens=700,

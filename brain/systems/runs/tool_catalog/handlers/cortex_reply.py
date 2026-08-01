@@ -248,6 +248,9 @@ def _handle_cortex_reply(content: str) -> dict:
         evidence=evidence,
         intent_profile=getattr(_agent_context, "intent_satisfaction", None),
         user_id=getattr(_agent_context, "user_id", None),
+        provider=getattr(_agent_context, "resolved_provider", None),
+        llm=getattr(_agent_context, "resolved_llm", None),
+        model=getattr(_agent_context, "resolved_model", None),
         session_id=getattr(_agent_context, "session_id", None),
     )
     try:

@@ -26,6 +26,32 @@ async def test_async_resolve_llm_client_uses_stored_anthropic_key():
     mock_resolve.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_async_resolve_llm_client_rejects_anthropic_without_any_key():
+    """An explicit Anthropic route cannot produce a client without a credential."""
+    from brain.platform.integrations.llm import async_resolve_llm_client
+
+    with patch(
+        "brain.platform.integrations.llm._async_resolve_key_from_db",
+        new=AsyncMock(return_value=(None, "none")),
+    ), patch(
+        "brain.platform.integrations.llm._resolve_key_from_env",
+        return_value=(None, "none"),
+    ), patch("brain.platform.integrations.llm._build_anthropic_client") as mock_build:
+        with pytest.raises(
+            RuntimeError,
+            match="No API key found for anthropic. Add one in Settings",
+        ):
+            await async_resolve_llm_client(
+                user_id="user-1",
+                org_id="org-1",
+                provider="anthropic",
+                session=object(),
+            )
+
+    mock_build.assert_not_called()
+
+
 def test_resolve_llm_client_falls_back_to_env():
     """The sync resolver only uses local/env fallback auth."""
     from brain.platform.integrations.llm import resolve_llm_client

@@ -25,6 +25,56 @@ class TestToolDefinitions:
         assert "trace_symbol" in names
         assert "build_implementation_map" in names
 
+
+    @pytest.mark.asyncio
+    async def test_reader_subcall_uses_async_completion_with_run_identity(self):
+        from brain.systems.runs.execution_context import bind_agent_context
+        from brain.systems.tools.handlers import _reader_completion
+
+        response = '{"answer":"stored Codex auth works"}'
+        async_completion = AsyncMock(return_value=response)
+        record_api_call = AsyncMock()
+
+        with (
+            patch(
+                "brain.platform.integrations.completions.async_simple_text_completion",
+                new=async_completion,
+            ),
+            patch(
+                "brain.platform.integrations.completions.simple_text_completion",
+                side_effect=RuntimeError(
+                    "No OpenAI auth found. user Codex subscription credentials require "
+                    "async_resolve_llm_client."
+                ),
+            ) as sync_completion,
+            patch(
+                "brain.systems.runs.direct_loop.telemetry.async_record_api_call",
+                new=record_api_call,
+            ),
+            patch(
+                "brain.systems.tools.handlers._reader_model",
+                return_value="openai/gpt-5.6-sol",
+            ),
+            bind_agent_context(
+                session_id="agent-run-7",
+                run=SimpleNamespace(run_id=7),
+            ),
+        ):
+            result = await _reader_completion(
+                "find the auth boundary",
+                user_id="user-1",
+                org_id="org-1",
+            )
+
+        assert result == {"answer": "stored Codex auth works"}
+        async_completion.assert_awaited_once()
+        assert async_completion.await_args.kwargs["user_id"] == "user-1"
+        assert async_completion.await_args.kwargs["org_id"] == "org-1"
+        sync_completion.assert_not_called()
+        record_api_call.assert_awaited_once()
+        assert record_api_call.await_args.kwargs["status"] == "success"
+        assert record_api_call.await_args.kwargs["error"] is None
+
     def test_all_tools_have_schema(self):
         from brain.systems.tools.handlers import EXTENDED_TOOLS
         for tool in EXTENDED_TOOLS:

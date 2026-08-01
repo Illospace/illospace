@@ -151,7 +151,8 @@ class TestProviderInference:
     ):
         from brain.platform.integrations.providers import AnthropicProvider
         from brain.platform.integrations.transports.anthropic import AnthropicMessagesTransport
-        from brain.systems.runs.direct_agent import _init_llm_async
+        from brain.systems.runs.direct_agent import _agent_context, _init_llm_async
+        from brain.systems.runs.execution_context import bind_agent_context
 
         llm = _mock_llm_client(MagicMock(), provider="anthropic")
         resolve = AsyncMock(return_value=llm)
@@ -160,12 +161,16 @@ class TestProviderInference:
             resolve,
         )
 
-        resolved, provider, _headers = await _init_llm_async(
-            "user-1",
-            "worker-session",
-            "anthropic/claude-sonnet-4-6",
-            org_id="org-1",
-        )
+        with bind_agent_context(session_id="worker-session"):
+            resolved, provider, _headers = await _init_llm_async(
+                "user-1",
+                "worker-session",
+                "anthropic/claude-sonnet-4-6",
+                org_id="org-1",
+            )
+            assert _agent_context.resolved_llm is llm
+            assert _agent_context.resolved_provider is provider
+            assert _agent_context.resolved_model == "anthropic/claude-sonnet-4-6"
 
         assert resolved is llm
         assert resolve.await_args.kwargs["provider"] == "anthropic"
@@ -3097,6 +3102,11 @@ class TestCortexReplyHandler:
         _agent_context.user_request = "Say hello"
         _agent_context.reply_contents = []
         _agent_context.final_reply_review = None
+        resolved_llm = MagicMock()
+        resolved_provider = MagicMock()
+        _agent_context.resolved_llm = resolved_llm
+        _agent_context.resolved_provider = resolved_provider
+        _agent_context.resolved_model = "openai/gpt-5.6-sol"
         _agent_context.intent_satisfaction = {
             "intent_type": "quick_answer",
             "completion_mode": "light",
@@ -3115,12 +3125,18 @@ class TestCortexReplyHandler:
             mock_reply.assert_not_called()
             assert _agent_context.reply_contents == ["hello"]
             assert mock_review.call_args.kwargs["intent_profile"]["completion_mode"] == "light"
+            assert mock_review.call_args.kwargs["llm"] is resolved_llm
+            assert mock_review.call_args.kwargs["provider"] is resolved_provider
+            assert mock_review.call_args.kwargs["model"] == "openai/gpt-5.6-sol"
         finally:
             _agent_context.idea_id = None
             _agent_context.run = None
             _agent_context.user_request = None
             _agent_context.reply_contents = []
             _agent_context.final_reply_review = None
+            _agent_context.resolved_llm = None
+            _agent_context.resolved_provider = None
+            _agent_context.resolved_model = None
             _agent_context.intent_satisfaction = None
 
     @patch("brain.systems.runs.direct_agent.review_final_reply_once")
