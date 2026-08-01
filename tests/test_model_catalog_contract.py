@@ -74,3 +74,18 @@ def test_gpt_5_6_sol_uses_provider_context_contract(monkeypatch):
     )
     assert budget.context_window_tokens == 1_050_000
     assert budget.auto_compact_threshold_tokens == 863_690
+
+
+def test_gpt_5_6_luna_uses_subscription_catalog_contract():
+    from brain.platform.model_catalog import get_model_catalog_entry
+    from brain.platform.providers.model_policy import required_openai_auth_mode
+
+    entry = get_model_catalog_entry("openai/gpt-5.6-luna")
+
+    assert entry is not None
+    assert entry.label == "GPT-5.6 Luna"
+    assert entry.availability_fallback == "openai/gpt-5.6-sol"
+    assert entry.context_window_tokens == 1_050_000
+    assert entry.input_price_per_million == 0.20
+    assert entry.output_price_per_million == 1.20
+    assert required_openai_auth_mode(entry.id) == "chatgpt"

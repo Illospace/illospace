@@ -78,7 +78,7 @@ class TestExtractHarvestItems:
         provider.create.return_value = MagicMock(content=[MagicMock(type="text", text=VALID_MODEL_RESPONSE)])
         mock_get_provider.return_value = provider
 
-        items = extract_harvest_items(SAMPLE_MESSAGES, model="openai/gpt-5.4", user_id="user-1", org_id="org-1")
+        items = extract_harvest_items(SAMPLE_MESSAGES, model="openai/gpt-5.6-sol", user_id="user-1", org_id="org-1")
 
         assert len(items) == 2
         request = provider.create.call_args.args[0]

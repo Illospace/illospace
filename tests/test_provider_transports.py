@@ -143,7 +143,7 @@ def test_openai_responses_transport_builds_responses_kwargs():
     from brain.platform.integrations.transports.openai_responses import OpenAIResponsesTransport
 
     request = LLMRequest(
-        model="openai/gpt-5.4",
+        model="openai/gpt-4.1",
         messages=[{"role": "user", "content": "hello"}],
         max_output_tokens=456,
         system=[{"type": "text", "text": "Be precise."}],
@@ -160,7 +160,7 @@ def test_openai_responses_transport_builds_responses_kwargs():
 
     kwargs = OpenAIResponsesTransport().build_kwargs(request)
 
-    assert kwargs["model"] == "gpt-5.4"
+    assert kwargs["model"] == "gpt-4.1"
     assert kwargs["input"] == [{"role": "user", "content": "hello"}]
     assert kwargs["instructions"] == "Be precise."
     assert kwargs["max_output_tokens"] == 456
@@ -180,7 +180,7 @@ def test_openai_responses_transport_can_disable_reasoning_summaries(monkeypatch)
 
     monkeypatch.setenv("ILLO_OPENAI_REASONING_SUMMARY", "none")
     request = LLMRequest(
-        model="openai/gpt-5.4",
+        model="openai/gpt-4.1",
         messages=[{"role": "user", "content": "hello"}],
         reasoning_effort="low",
     )
@@ -234,7 +234,7 @@ def test_openai_responses_transport_converts_typed_tool_blocks():
     from brain.platform.integrations.transports.openai_responses import OpenAIResponsesTransport
 
     request = LLMRequest(
-        model="openai/gpt-5.4",
+        model="openai/gpt-4.1",
         messages=[
             {"role": "assistant", "content": [
                 ToolUseContentBlock(id="call_1", name="brain_recall", input={"query": "memory"}),
@@ -271,7 +271,7 @@ def test_openai_responses_transport_preserves_tool_result_images():
     from brain.platform.integrations.transports.openai_responses import OpenAIResponsesTransport
 
     request = LLMRequest(
-        model="openai/gpt-5.4",
+        model="openai/gpt-4.1",
         messages=[
             {"role": "assistant", "content": [
                 ToolUseContentBlock(id="call_1", name="browser", input={"action": "observe"}),
@@ -319,7 +319,7 @@ def test_openai_responses_transport_converts_user_images():
     from brain.platform.integrations.transports.openai_responses import OpenAIResponsesTransport
 
     request = LLMRequest(
-        model="openai/gpt-5.4",
+        model="openai/gpt-4.1",
         messages=[
             {"role": "user", "content": [
                 TextContentBlock("What is in this image?"),
@@ -344,7 +344,7 @@ def test_openai_responses_transport_validates_message_shape():
     from brain.platform.integrations.transports.openai_responses import OpenAIResponsesTransport
 
     request = LLMRequest(
-        model="openai/gpt-5.4",
+        model="openai/gpt-4.1",
         messages=[{"role": "assistant", "content": [
             {"type": "tool_result", "tool_use_id": "tool_1", "content": "ok"},
         ]}],
@@ -374,7 +374,7 @@ def test_openai_response_helpers_remain_available_from_facade():
     response.usage.output_tokens = 4
     response.usage.input_tokens_details.cached_tokens = 2
     response.incomplete_details = None
-    response.model = "gpt-5.4"
+    response.model = "gpt-4.1"
 
     unified = _openai_response_to_unified(response)
 
@@ -397,7 +397,7 @@ def test_openai_response_tool_call_output_is_typed():
         }],
         "usage": {"input_tokens": 3, "output_tokens": 7},
         "incomplete_details": None,
-        "model": "gpt-5.4",
+        "model": "gpt-4.1",
     }
 
     unified = _openai_response_to_unified(response)
@@ -446,14 +446,14 @@ def test_openai_transport_keeps_canonical_xhigh_and_omits_none():
     from brain.platform.integrations.transports.openai_responses import OpenAIResponsesTransport
 
     ceiling = LLMRequest(
-        model="openai/gpt-5.6-sol",
+        model="openai/gpt-4.1",
         messages=[{"role": "user", "content": "hello"}],
         reasoning_effort="xhigh",
     )
     assert OpenAIResponsesTransport().build_kwargs(ceiling)["reasoning"]["effort"] == "xhigh"
 
     silent = LLMRequest(
-        model="openai/gpt-5.6-sol",
+        model="openai/gpt-4.1",
         messages=[{"role": "user", "content": "hello"}],
         reasoning_effort="none",
     )

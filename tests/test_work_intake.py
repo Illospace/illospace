@@ -20,7 +20,7 @@ def _trigger_payload(**overrides):
             "metadata": {
                 "chat_trigger": {"conversation_id": "conv-1", "message_id": 22},
                 "execution_profile": "deep",
-                "model": "openai:gpt-5.4",
+                "model": "openai:gpt-5.6-sol",
                 "provider": "openai",
                 "thinking": "xhigh",
             },
@@ -56,7 +56,7 @@ async def test_chat_work_intake_builds_agent_run_request_from_normalized_trigger
     }
     assert request.model_policy == {
         "thinking": "xhigh",
-        "model": "openai/gpt-5.4",
+        "model": "openai/gpt-5.6-sol",
         "provider": "openai",
     }
     assert request.metadata["source"] == "chat"
@@ -125,6 +125,80 @@ async def test_cortex_work_intake_builds_agent_run_request_from_normalized_trigg
     assert request.metadata["introspection_message"] == "@illo go"
     assert request.metadata["thread_context"]["formatted"] == "Earlier thread context"
     assert request.metadata["work_intake"]["source"] == "cortex"
+
+
+@pytest.mark.asyncio
+async def test_api_key_openai_metadata_model_is_coerced_with_structured_log(caplog):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    trigger = _trigger_payload()
+    trigger["payload"]["metadata"]["model"] = "openai/gpt-4.1"
+
+    with caplog.at_level("WARNING", logger="work_intake"):
+        request = await build_agent_run_request(
+            object(),
+            WorkIntakeEvent.from_trigger_payload(trigger),
+        )
+
+    assert request.model_policy["model"] == "openai/gpt-5.6-sol"
+    record = next(
+        record for record in caplog.records if record.event == "api_key_model_coerced"
+    )
+    assert record.routing_source == "chat"
+    assert record.requested_value == "openai/gpt-4.1"
+    assert record.coerced_value == "openai/gpt-5.6-sol"
+
+
+@pytest.mark.asyncio
+async def test_bare_api_key_model_is_normalized_away_with_structured_log(caplog):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    trigger = _trigger_payload()
+    trigger["payload"]["metadata"]["model"] = "gpt-4.1"
+
+    with caplog.at_level("WARNING", logger="work_intake"):
+        request = await build_agent_run_request(
+            object(),
+            WorkIntakeEvent.from_trigger_payload(trigger),
+        )
+
+    assert request.model_policy["model"] == "openai/gpt-5.5"
+    record = next(
+        record for record in caplog.records if record.event == "api_key_model_coerced"
+    )
+    assert record.requested_value == "gpt-4.1"
+    assert record.coerced_value == "openai/gpt-5.5"
+
+
+@pytest.mark.asyncio
+async def test_admitted_model_policy_stores_the_normalized_id():
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    trigger = _trigger_payload()
+    trigger["payload"]["metadata"]["model"] = " OPENAI/GPT-5.6-SOL "
+
+    request = await build_agent_run_request(
+        object(),
+        WorkIntakeEvent.from_trigger_payload(trigger),
+    )
+
+    assert request.model_policy["model"] == "openai/gpt-5.6-sol"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_metadata_model_passes_admission_guard_untouched():
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    trigger = _trigger_payload()
+    trigger["payload"]["metadata"]["model"] = "anthropic/claude-sonnet-5"
+    trigger["payload"]["metadata"]["provider"] = "anthropic"
+
+    request = await build_agent_run_request(
+        object(),
+        WorkIntakeEvent.from_trigger_payload(trigger),
+    )
+
+    assert request.model_policy["model"] == "anthropic/claude-sonnet-5"
     assert request.metadata["work_intake"]["actor"] == {"id": "user-1", "org_id": "org-1", "internal": False}
 
 
@@ -486,7 +560,7 @@ def test_cortex_thread_binding_compatibility_shell_is_removed():
 
 
 @pytest.mark.asyncio
-async def test_cycle_payload_model_policy_reaches_cortex_run_request(monkeypatch):
+async def test_cycle_api_key_payload_model_policy_is_coerced(monkeypatch):
     from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
 
     class _Session:
@@ -518,7 +592,7 @@ async def test_cycle_payload_model_policy_reaches_cortex_run_request(monkeypatch
         payload={
             "message": "Run the mission",
             "metadata": {"source": "cycle", "cycle_run_id": 12},
-            "model_policy": {"model": "openai/gpt-5.4-mini", "thinking": "low"},
+            "model_policy": {"model": "openai/gpt-4.1", "thinking": "low"},
             "deadline_at": deadline_at,
         },
         policy={"priority": 1, "run_event": "thread_reply"},
@@ -527,7 +601,7 @@ async def test_cycle_payload_model_policy_reaches_cortex_run_request(monkeypatch
 
     request = await build_agent_run_request(_Session(), WorkIntakeEvent.from_trigger_payload(trigger))
 
-    assert request.model_policy == {"model": "openai/gpt-5.4-mini", "thinking": "low"}
+    assert request.model_policy == {"model": "openai/gpt-5.6-sol", "thinking": "low"}
     assert request.deadline_at == deadline_at
 
 

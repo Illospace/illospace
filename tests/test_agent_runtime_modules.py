@@ -131,8 +131,8 @@ def test_request_runtime_preserves_cache_policy_and_facade_wrappers():
         operation_type="coordinator",
     )
     assert _get_extended_prompt_cache_retention("openai/gpt-5.5") is None
-    assert _get_extended_prompt_cache_retention("openai/gpt-5.4") == "24h"
-    assert _get_openai_cache_retention("openai/gpt-5.4") == "24h"
+    assert _get_extended_prompt_cache_retention("openai/gpt-4.1") == "24h"
+    assert _get_openai_cache_retention("openai/gpt-4.1") == "24h"
     assert _get_openai_cache_retention("openai/gpt-4.1-mini") == "24h"
     assert _get_openai_cache_retention("openai/gpt-4o-mini") is None
 

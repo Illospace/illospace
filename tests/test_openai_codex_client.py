@@ -20,7 +20,7 @@ def test_codex_client_posts_to_native_responses_endpoint():
             originator="illo-test",
         )
         result = client.responses.create(
-            model="gpt-5.4",
+            model="gpt-5.6-sol",
             input=[{"role": "user", "content": "hi"}],
             max_output_tokens=512,
             store=False,
@@ -64,7 +64,7 @@ def test_codex_client_stream_parses_sse_events():
             base_url="https://chatgpt.com/backend-api/codex",
         )
         stream = client.responses.create(
-            model="gpt-5.4",
+            model="gpt-5.6-sol",
             input=[{"role": "user", "content": "hi"}],
             max_output_tokens=256,
             store=False,
@@ -123,7 +123,7 @@ def test_codex_client_normalizes_oversized_session_id_header():
             base_url="https://chatgpt.com/backend-api/codex",
         )
         client.responses.create(
-            model="gpt-5.4",
+            model="gpt-5.6-sol",
             input=[{"role": "user", "content": "hi"}],
             extra_headers={
                 "session_id": "coordinator-idea-12345678-1234-5678-90ab-cdef12345678:final-reply-checker",
@@ -162,7 +162,7 @@ def test_codex_client_accepts_output_text_done_event_without_warning():
                 base_url="https://chatgpt.com/backend-api/codex",
             )
             stream = client.responses.create(
-                model="gpt-5.4",
+                model="gpt-5.6-sol",
                 input=[{"role": "user", "content": "hi"}],
                 stream=True,
             )
@@ -201,7 +201,7 @@ def test_codex_client_accepts_reasoning_summary_part_events_without_warning():
                 base_url="https://chatgpt.com/backend-api/codex",
             )
             stream = client.responses.create(
-                model="gpt-5.4",
+                model="gpt-5.6-sol",
                 input=[{"role": "user", "content": "hi"}],
                 stream=True,
             )

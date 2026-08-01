@@ -154,7 +154,7 @@ class TestResponseConversion:
         resp.usage.input_tokens = 100
         resp.usage.output_tokens = 50
         resp.usage.input_tokens_details.cached_tokens = 12
-        resp.model = "gpt-5.4"
+        resp.model = "gpt-5.6-sol"
         resp.incomplete_details = MagicMock()
         resp.incomplete_details.reason = incomplete_reason
         return resp
@@ -195,7 +195,7 @@ class TestResponseConversion:
         resp.usage.input_tokens = 100
         resp.usage.output_tokens = 50
         resp.usage.input_tokens_details.cached_tokens = 0
-        resp.model = "gpt-5.4"
+        resp.model = "gpt-5.6-sol"
         resp.incomplete_details = None
 
         unified = _openai_response_to_unified(resp)
@@ -206,7 +206,7 @@ class TestResponseConversion:
     def test_logs_when_openai_response_parses_to_empty_content(self, caplog):
         resp = self._mock_openai_response(content=None)
         with caplog.at_level("WARNING"):
-            unified = _openai_response_to_unified(resp, "openai/gpt-5.4")
+            unified = _openai_response_to_unified(resp, "openai/gpt-5.6-sol")
 
         assert unified.content == []
         assert "OpenAI response parsed to empty content" in caplog.text
@@ -224,7 +224,7 @@ class TestResponseConversion:
         ])
 
         request = LLMRequest(
-            model="openai/gpt-5.4",
+            model="openai/gpt-5.6-sol",
             messages=[{"role": "user", "content": "Hello"}],
             max_output_tokens=512,
             system=[{"type": "text", "text": "You are helpful."}],
@@ -236,7 +236,7 @@ class TestResponseConversion:
 
         assert unified.content == []
         assert "OpenAI response completed with empty output array: request=" in caplog.text
-        assert "\"model\": \"gpt-5.4\"" in caplog.text
+        assert "\"model\": \"gpt-5.6-sol\"" in caplog.text
         assert "\"reasoning\": {\"effort\": \"medium\", \"summary\": \"auto\"}" in caplog.text
 
 
@@ -426,7 +426,7 @@ class TestOpenAIProvider:
 
         p = OpenAIProvider(client)
         with p.stream(LLMRequest(
-            model="openai/gpt-5.4",
+            model="openai/gpt-5.6-sol",
             messages=[{"role": "user", "content": "hi"}],
             reasoning_effort="high",
         )) as stream:
@@ -644,7 +644,7 @@ class TestOpenAIProvider:
             content=[ContentBlock(type="text", text="Hi from Codex")],
             stop_reason="end_turn",
             usage=Usage(input_tokens=1, output_tokens=1),
-            model="openai/gpt-5.4",
+            model="openai/gpt-5.6-sol",
         )
 
         class _FakeStream:
@@ -660,7 +660,7 @@ class TestOpenAIProvider:
         p = OpenAIProvider(client)
         with patch.object(p, "stream", return_value=_FakeStream()) as mock_stream:
             result = p.create(LLMRequest(
-                model="openai/gpt-5.4",
+                model="openai/gpt-5.6-sol",
                 messages=[{"role": "user", "content": "hi"}],
                 max_output_tokens=100,
             ))
@@ -691,7 +691,7 @@ class TestOpenAIProvider:
 
         p = OpenAIProvider(client)
         with p.stream(LLMRequest(
-            model="openai/gpt-5.4",
+            model="openai/gpt-5.6-sol",
             messages=[{"role": "user", "content": "hi"}],
             max_output_tokens=1000,
             cache_key="illo:test-cache-key",
@@ -729,7 +729,7 @@ class TestOpenAIProvider:
 
         p = OpenAIProvider(client)
         with p.stream(LLMRequest(
-            model="openai/gpt-5.4",
+            model="openai/gpt-5.6-sol",
             messages=[{"role": "user", "content": "hi"}],
             max_output_tokens=1000,
             reasoning_effort="high",
@@ -750,7 +750,7 @@ class TestOpenAIProvider:
         mock_resp.usage.output_tokens = 5
         mock_resp.usage.input_tokens_details.cached_tokens = 0
         mock_resp.incomplete_details = None
-        mock_resp.model = "gpt-5.4"
+        mock_resp.model = "gpt-5.6-sol"
         mock_resp.id = "resp_123"
         client.responses.create.return_value = iter([
             {"type": "response.output_text.delta", "delta": "Hi"},
@@ -759,7 +759,7 @@ class TestOpenAIProvider:
 
         p = OpenAIProvider(client)
         with p.stream(LLMRequest(
-            model="openai/gpt-5.4",
+            model="openai/gpt-5.6-sol",
             messages=[{"role": "user", "content": "hi"}],
             max_output_tokens=100,
         )) as stream:
@@ -776,7 +776,7 @@ class TestOpenAIProvider:
         mock_resp.usage.output_tokens = 5
         mock_resp.usage.input_tokens_details.cached_tokens = 0
         mock_resp.incomplete_details = None
-        mock_resp.model = "gpt-5.4"
+        mock_resp.model = "gpt-5.6-sol"
         client.responses.create.return_value = iter([
             {"type": "response.text.delta", "delta": "Hi"},
             {"type": "response.completed", "response": mock_resp},
@@ -784,7 +784,7 @@ class TestOpenAIProvider:
 
         p = OpenAIProvider(client)
         with p.stream(LLMRequest(
-            model="openai/gpt-5.4",
+            model="openai/gpt-5.6-sol",
             messages=[{"role": "user", "content": "hi"}],
             max_output_tokens=100,
         )) as stream:
@@ -800,7 +800,7 @@ class TestOpenAIProvider:
         mock_resp.usage.output_tokens = 5
         mock_resp.usage.input_tokens_details.cached_tokens = 0
         mock_resp.incomplete_details = None
-        mock_resp.model = "gpt-5.4"
+        mock_resp.model = "gpt-5.6-sol"
         client.responses.create.return_value = iter([
             {
                 "type": "response.content_part.done",
@@ -811,7 +811,7 @@ class TestOpenAIProvider:
 
         p = OpenAIProvider(client)
         with p.stream(LLMRequest(
-            model="openai/gpt-5.4",
+            model="openai/gpt-5.6-sol",
             messages=[{"role": "user", "content": "hi"}],
             max_output_tokens=100,
         )) as stream:
@@ -827,7 +827,7 @@ class TestOpenAIProvider:
         mock_resp.usage.output_tokens = 5
         mock_resp.usage.input_tokens_details.cached_tokens = 0
         mock_resp.incomplete_details = None
-        mock_resp.model = "gpt-5.4"
+        mock_resp.model = "gpt-5.6-sol"
         client.responses.create.return_value = iter([
             {
                 "type": "response.output_item.done",
@@ -842,7 +842,7 @@ class TestOpenAIProvider:
 
         p = OpenAIProvider(client)
         with p.stream(LLMRequest(
-            model="openai/gpt-5.4",
+            model="openai/gpt-5.6-sol",
             messages=[{"role": "user", "content": "hi"}],
             max_output_tokens=100,
         )) as stream:
@@ -858,7 +858,7 @@ class TestOpenAIProvider:
         mock_resp.usage.output_tokens = 5
         mock_resp.usage.input_tokens_details.cached_tokens = 0
         mock_resp.incomplete_details = None
-        mock_resp.model = "gpt-5.4"
+        mock_resp.model = "gpt-5.6-sol"
         client.responses.create.return_value = iter([
             {
                 "type": "response.output_item.added",
@@ -873,7 +873,7 @@ class TestOpenAIProvider:
 
         p = OpenAIProvider(client)
         with p.stream(LLMRequest(
-            model="openai/gpt-5.4",
+            model="openai/gpt-5.6-sol",
             messages=[{"role": "user", "content": "hi"}],
             max_output_tokens=100,
         )) as stream:
@@ -889,7 +889,7 @@ class TestOpenAIProvider:
         mock_resp.usage.output_tokens = 5
         mock_resp.usage.input_tokens_details.cached_tokens = 0
         mock_resp.incomplete_details = None
-        mock_resp.model = "gpt-5.4"
+        mock_resp.model = "gpt-5.6-sol"
         client.responses.create.return_value = iter([
             {
                 "type": "response.output_item.added",
@@ -916,7 +916,7 @@ class TestOpenAIProvider:
 
         p = OpenAIProvider(client)
         with p.stream(LLMRequest(
-            model="openai/gpt-5.4",
+            model="openai/gpt-5.6-sol",
             messages=[{"role": "user", "content": "hi"}],
             max_output_tokens=100,
         )) as stream:
@@ -946,7 +946,7 @@ class TestModelCatalog:
             import os
             os.environ.pop("ILLO_LLM_PROVIDER", None)
             options = get_provider_model_options()
-            assert "gpt-5.4" in options
+            assert "gpt-5.6-sol" in options
 
     def test_model_catalog_has_both_providers(self):
         from brain.platform.providers.model_policy import get_provider_model_catalogs

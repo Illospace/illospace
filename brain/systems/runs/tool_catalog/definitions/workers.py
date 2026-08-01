@@ -14,11 +14,12 @@ WORKER_SPAWN_TOOLS = [
             "file/report an internal bug or blocker in the background. Set headless=true for "
             "background reporting or investigation that should not create visible thread content; "
             "leave headless=false when the delegated run should be able to report visible progress "
-            "or a final update back through the inherited originating surface. Route primarily with "
-            "effort: xhigh for costly judgment, high for standard work, medium for clear execution, "
-            "and low for reflex work. Use the director/workhorse split: a high-effort coordinator "
-            "should fan out cheaper low/medium readers. Reserve model for a cross-provider verifier, "
-            "preferably using a bare provider such as model='anthropic' to select its default model."
+            "or a final update back through the inherited originating surface. Two lanes. "
+            "Reasoning/judgment/review/long-context/chatty tool loops: gpt-5.6-sol, routed by effort "
+            "(xhigh judgment, high standard). Bulk/mechanical/single-shot/small-context execution: "
+            "openai/gpt-5.6-luna at xhigh. Luna caveats: quality collapses above ~200K context; "
+            "xhigh pays a long first-token pause per turn — never use Luna xhigh for many-short-turn "
+            "loops. Reserve non-OpenAI models for a cross-provider verifier."
         ),
         "input_schema": {
             "type": "object",
@@ -43,7 +44,7 @@ WORKER_SPAWN_TOOLS = [
                 },
                 "model": {
                     "type": "string",
-                    "description": "Exceptional cross-provider override: a provider-prefixed catalog id or a bare provider name selecting that provider's default model.",
+                    "description": "Optional lane or cross-provider override: a provider-prefixed catalog id or a bare provider name selecting that provider's default model.",
                 },
                 "headless": {
                     "type": "boolean",

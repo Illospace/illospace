@@ -937,7 +937,7 @@ async def test_runtime_settings_snapshot_exposes_provider_health(monkeypatch):
     record_provider_failure(
         operation_type="scout",
         provider="openai",
-        model="gpt-5.4-mini",
+        model="gpt-5.6-luna",
         exc="provider timed out",
     )
 
@@ -964,8 +964,8 @@ async def test_get_llm_info_uses_default_background_models(monkeypatch):
 
     org = SimpleNamespace(memory_model_config={
         "default_provider": "openai",
-        "session_harvest": "openai:gpt-5.4-mini",
-        "depth_0": "openai/gpt-5.4",
+        "session_harvest": "openai:gpt-5.6-luna",
+        "depth_0": "openai/gpt-5.6-sol",
     })
     user_obj = SimpleNamespace(default_provider="openai")
 
@@ -1022,7 +1022,7 @@ async def test_get_llm_info_exposes_provider_health(monkeypatch):
     record_provider_failure(
         operation_type="verifier",
         provider="openai",
-        model="gpt-5.4-mini",
+        model="gpt-5.6-luna",
         exc="verifier unavailable",
     )
 

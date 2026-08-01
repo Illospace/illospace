@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunRow
 from brain.platform.db.models.org import User
+from brain.platform.providers.model_policy import async_get_bulk_route
 from brain.systems.knowledge.connectors.base import KnowledgeDraft
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
@@ -246,6 +247,11 @@ async def admit_distillation(
     attempt: int,
 ) -> DistillationEntry:
     actor = await _resolve_actor(session, draft)
+    bulk_route = await async_get_bulk_route(
+        session,
+        user_id=str(actor.id),
+        org_id=str(actor.org_id),
+    )
     scoped_draft = replace(
         draft,
         extra={
@@ -276,6 +282,7 @@ async def admit_distillation(
             payload={
                 "message": _distillation_prompt(scoped_draft),
                 "workspace_ref": {"source": "knowledge_index", "mode": "headless"},
+                "model_policy": bulk_route,
                 "metadata": {
                     "origin": "knowledge_index",
                     "originating_surface": "scheduler",

@@ -11,7 +11,7 @@ async def test_routing_marketplace_snapshot_exposes_historical_fallback_reason()
 
     health_row = SimpleNamespace(
         provider="openai",
-        model="gpt-5.4",
+        model="gpt-5.6-sol",
         window_start=datetime.now(timezone.utc),
         window_end=datetime.now(timezone.utc),
         p50_latency_ms=1200,
@@ -28,7 +28,7 @@ async def test_routing_marketplace_snapshot_exposes_historical_fallback_reason()
         lane="worker",
         decision_mode="active",
         selected_provider="openai",
-        selected_model="gpt-5.4",
+        selected_model="gpt-5.6-sol",
         applied=True,
         fallback_used=True,
         created_at=datetime.now(timezone.utc),

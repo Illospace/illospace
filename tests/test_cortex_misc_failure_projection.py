@@ -398,7 +398,7 @@ async def test_audit_eval_returns_real_api_call_count_without_legacy_attempts_ke
         ),
         patch(
             "brain.platform.providers.model_policy.get_default_model",
-            return_value="openai/gpt-5.4",
+            return_value="openai/gpt-5.6-sol",
         ),
     ):
         result = await _misc.audit_eval(

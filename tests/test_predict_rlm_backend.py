@@ -31,7 +31,7 @@ def test_get_agent_worker_backend_settings_prefers_predict_rlm_when_ready(monkey
 
     org = SimpleNamespace(memory_model_config={
         "agent_worker_backend": "auto",
-        "predict_rlm_sub_lm": "openai/gpt-5-mini",
+        "predict_rlm_sub_lm": "openai/gpt-5.6-luna",
         "predict_rlm_max_iterations": 12,
         "predict_rlm_max_llm_calls": 20,
     })
@@ -69,7 +69,7 @@ def test_get_agent_worker_backend_settings_prefers_predict_rlm_when_ready(monkey
     assert settings.requested_backend == "auto"
     assert settings.effective_backend == "predict_rlm"
     assert settings.predict_rlm_ready is True
-    assert settings.predict_rlm_sub_lm == "openai/gpt-5-mini"
+    assert settings.predict_rlm_sub_lm == "openai/gpt-5.6-luna"
     assert settings.predict_rlm_max_iterations == 12
     assert settings.predict_rlm_max_llm_calls == 20
 
@@ -204,7 +204,7 @@ def test_instrument_predict_rlm_lm_records_internal_calls(monkeypatch):
     recorded = []
 
     class FakeLM:
-        model = "openai/gpt-5.4"
+        model = "openai/gpt-5.6-sol"
 
         def forward(self, **kwargs):
             return SimpleNamespace(
@@ -237,7 +237,7 @@ def test_instrument_predict_rlm_lm_records_internal_calls(monkeypatch):
     assert call["session_id"] == "sess-123"
     assert call["run_id"] == 77
     assert call["turn"] == 1
-    assert call["model"] == "openai/gpt-5.4"
+    assert call["model"] == "openai/gpt-5.6-sol"
     assert call["tokens_input"] == 11
     assert call["tokens_output"] == 5
     assert call["cache_read"] == 0
@@ -300,7 +300,7 @@ def test_invoke_predict_rlm_agent_returns_internal_usage_totals(monkeypatch):
     monkeypatch.setitem(sys.modules, "predict_rlm.rlm_skills", skills_mod)
 
     def fake_build_lm(*, model, **_kwargs):
-        if model.endswith("mini"):
+        if model.endswith("luna"):
             return FakeLM(model, {
                 "input_tokens": 7,
                 "output_tokens": 3,
@@ -341,7 +341,7 @@ def test_invoke_predict_rlm_agent_returns_internal_usage_totals(monkeypatch):
         predict_rlm_deno_available=True,
         predict_rlm_ready=True,
         predict_rlm_version="0.2.2",
-        predict_rlm_sub_lm="openai/gpt-5-mini",
+        predict_rlm_sub_lm="openai/gpt-5.6-luna",
         predict_rlm_max_iterations=4,
         predict_rlm_max_llm_calls=6,
     )
@@ -409,7 +409,7 @@ def test_build_predict_rlm_lm_uses_openai_api_key_auth(monkeypatch):
                 {
                     "type": "response.completed",
                     "response": {
-                        "model": "gpt-5.4",
+                        "model": "gpt-4.1",
                         "usage": {"input_tokens": 2, "output_tokens": 1},
                         "output": [],
                     },
@@ -426,7 +426,7 @@ def test_build_predict_rlm_lm_uses_openai_api_key_auth(monkeypatch):
     )
 
     lm = _build_predict_rlm_lm(
-        model="openai/gpt-5.4",
+        model="openai/gpt-4.1",
         provider="openai",
         user_id="user-1",
         org_id="org-1",
@@ -439,14 +439,14 @@ def test_build_predict_rlm_lm_uses_openai_api_key_auth(monkeypatch):
     )
 
     assert captured["lm_init"] == {
-        "model": "openai/gpt-5.4",
+        "model": "openai/gpt-4.1",
         "model_type": "responses",
         "cache": False,
         "max_tokens": None,
         "kwargs": {},
     }
     request = captured["translated_requests"][0]
-    assert request.model == "openai/gpt-5.4"
+    assert request.model == "openai/gpt-4.1"
     assert request.messages == [{"role": "user", "content": "hello"}]
     assert request.reasoning_effort == "high"
     assert request.response_format == {"type": "json_schema", "name": "Answer", "schema": {"type": "object"}}
@@ -509,7 +509,7 @@ async def test_build_predict_rlm_lm_uses_provider_backed_codex_auth(monkeypatch)
                 {
                     "type": "response.completed",
                     "response": {
-                        "model": "gpt-5.4",
+                        "model": "gpt-5.6-sol",
                         "usage": {"input_tokens": 11, "output_tokens": 7},
                         "output": [],
                     },
@@ -526,7 +526,7 @@ async def test_build_predict_rlm_lm_uses_provider_backed_codex_auth(monkeypatch)
     )
 
     lm = _build_predict_rlm_lm(
-        model="openai/gpt-5.4",
+        model="openai/gpt-5.6-sol",
         provider="openai",
         user_id="user-1",
         org_id="org-1",
@@ -543,7 +543,7 @@ async def test_build_predict_rlm_lm_uses_provider_backed_codex_auth(monkeypatch)
     )
 
     assert captured["lm_init"] == {
-        "model": "openai/gpt-5.4",
+        "model": "openai/gpt-5.6-sol",
         "model_type": "responses",
         "cache": False,
         "max_tokens": None,
@@ -558,7 +558,7 @@ async def test_build_predict_rlm_lm_uses_provider_backed_codex_auth(monkeypatch)
         "session_id": "sess_123",
     }
     assert request.response_format == {"type": "json_schema", "name": "Answer", "schema": {"type": "object"}}
-    assert captured["payload"]["model"] == "gpt-5.4"
+    assert captured["payload"]["model"] == "gpt-5.6-sol"
     assert captured["payload"]["instructions"] == "Be precise."
     assert captured["payload"]["stream"] is True
     assert response.output[0].content[0].text == "codex output"
@@ -610,7 +610,7 @@ def test_build_predict_rlm_lm_caps_long_codex_session_header(monkeypatch):
                 {
                     "type": "response.completed",
                     "response": {
-                        "model": "gpt-5.4",
+                        "model": "gpt-5.6-sol",
                         "usage": {"input_tokens": 11, "output_tokens": 7},
                         "output": [],
                     },
@@ -628,7 +628,7 @@ def test_build_predict_rlm_lm_caps_long_codex_session_header(monkeypatch):
 
     session_id = "coordinator-idea-12345678-1234-5678-90ab-cdef12345678:final-reply-checker"
     lm = _build_predict_rlm_lm(
-        model="openai/gpt-5.4",
+        model="openai/gpt-5.6-sol",
         provider="openai",
         user_id="user-1",
         org_id="org-1",
