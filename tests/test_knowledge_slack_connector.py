@@ -27,6 +27,7 @@ from brain.platform.db.models.org import Org, User
 from brain.jobs.pipelines.knowledge_index_sync import CONNECTOR_FACTORIES
 from brain.kernel.config import KNOWLEDGE_EMBEDDING_DIM
 from brain.systems.knowledge.connectors.slack import SlackKnowledgeConnector
+from brain.systems.slack.client import SlackApiError
 from brain.systems.knowledge.search import search_knowledge
 from brain.systems.knowledge.service import sync_connector
 from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
@@ -537,3 +538,228 @@ async def test_slack_connector_repulls_one_complete_thread_when_a_reply_arrives(
     assert refreshed[0].extra["participants"] == ["BILLO", "U1", "U2"]
     assert "Confirmed healthy after the timeout change" in refreshed[0].raw_text
     assert refresh_cursor["phase"] == "incremental"
+
+
+class _DeletedThreadSlack:
+    """Replies raise per-thread Slack errors; history serves configured roots."""
+
+    def __init__(
+        self,
+        *,
+        threads: dict[str, list[dict] | str],
+        roots: list[dict] | None = None,
+    ) -> None:
+        # threads maps thread_ts to reply messages, or to an error string.
+        self.threads = threads
+        self.roots = list(roots or [])
+
+    async def conversation_history(self, *, channel, limit, cursor=None):
+        del channel, limit, cursor
+        return {
+            "messages": list(self.roots),
+            "response_metadata": {"next_cursor": ""},
+        }
+
+    async def conversation_replies(self, *, channel, thread_ts, limit, cursor=None):
+        del channel, limit, cursor
+        outcome = self.threads[thread_ts]
+        if isinstance(outcome, str):
+            raise SlackApiError(outcome)
+        return {
+            "messages": list(outcome),
+            "response_metadata": {"next_cursor": ""},
+        }
+
+
+def _incremental_cursor() -> dict:
+    return {
+        "version": 1,
+        "connection_id": _CONNECTION_ID,
+        "channel_set_digest": hashlib.sha256(b"CINCIDENTS").hexdigest(),
+        "phase": "incremental",
+        "channel_id": None,
+        "history_cursor": None,
+        "event_created_at": None,
+        "event_id": None,
+    }
+
+
+def _slack_message_event(*, event_id: str, thread_ts: str, created_at: datetime):
+    return InboundEventRow(
+        id=event_id,
+        org_id=_ORG_ID,
+        connection_id=_CONNECTION_ID,
+        kind="slack_message",
+        origin="slack.channel_message",
+        idempotency_key=f"slack:T789:CINCIDENTS:{thread_ts}:{event_id}",
+        raw_payload={},
+        normalized_payload={
+            "kind": "slack_message",
+            "origin": "slack.channel_message",
+            "payload": {
+                "team_id": "T789",
+                "channel_id": "CINCIDENTS",
+                "thread_ts": thread_ts,
+                "message_ts": thread_ts,
+            },
+        },
+        envelope={},
+        ingress_context={},
+        source_actor={},
+        status="processed",
+        created_at=created_at,
+    )
+
+
+async def test_deleted_thread_becomes_a_tombstone_and_the_cursor_still_advances(
+    session,
+):
+    await _seed_monitored_slack(session)
+    slack = _DeletedThreadSlack(
+        threads={
+            "1785283200.000100": "thread_not_found",
+            "1785283260.000200": [
+                {"ts": "1785283260.000200", "user": "U2", "text": "Still here"}
+            ],
+        }
+    )
+    session.add(
+        _slack_message_event(
+            event_id="55555555-5555-4555-8555-555555555555",
+            thread_ts="1785283200.000100",
+            created_at=datetime(2026, 7, 29, 0, 1, tzinfo=timezone.utc),
+        )
+    )
+    session.add(
+        _slack_message_event(
+            event_id="66666666-6666-4666-8666-666666666666",
+            thread_ts="1785283260.000200",
+            created_at=datetime(2026, 7, 29, 0, 2, tzinfo=timezone.utc),
+        )
+    )
+    await session.flush()
+
+    enumeration = await SlackKnowledgeConnector(
+        client=slack,
+        max_items=10,
+    ).enumerate_changed(session, _incremental_cursor())
+
+    assert [draft.source_ref for draft in enumeration.drafts] == [
+        "slack:T789:CINCIDENTS:1785283200.000100",
+        "slack:T789:CINCIDENTS:1785283260.000200",
+    ]
+    tombstone, alive = enumeration.drafts
+    assert tombstone.archived_at is not None
+    assert tombstone.distill is False
+    assert tombstone.raw_text == ""
+    assert tombstone.extra["deleted"] is True
+    assert alive.archived_at is None
+    assert alive.distill is True
+    assert "Still here" in alive.raw_text
+    assert enumeration.cursor["event_id"] == "66666666-6666-4666-8666-666666666666"
+    assert enumeration.cursor["event_created_at"] == "2026-07-29T00:02:00+00:00"
+
+
+async def test_deleted_thread_tombstone_archives_the_indexed_item(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    await _seed_monitored_slack(session)
+    session.add(
+        KnowledgeItem(
+            source="slack",
+            kind="slack_thread",
+            source_ref="slack:T789:CINCIDENTS:1785283200.000100",
+            title="Slack #incidents: Checkout is failing",
+            summary="Indexed before the thread was deleted.",
+            entities=[],
+            raw_text="Checkout is failing",
+            search_text="Checkout is failing",
+            extra={},
+            content_digest="stale",
+            ingested_at=datetime(2026, 7, 29, tzinfo=timezone.utc),
+        )
+    )
+    session.add(
+        _slack_message_event(
+            event_id="55555555-5555-4555-8555-555555555555",
+            thread_ts="1785283200.000100",
+            created_at=datetime(2026, 7, 29, 0, 1, tzinfo=timezone.utc),
+        )
+    )
+    session.add(
+        KnowledgeSyncState(
+            source="slack",
+            cursor=_incremental_cursor(),
+            last_stats={},
+        )
+    )
+    await session.flush()
+
+    result = await sync_connector(
+        session,
+        SlackKnowledgeConnector(
+            client=_DeletedThreadSlack(
+                threads={"1785283200.000100": "thread_not_found"}
+            ),
+            max_items=10,
+        ),
+    )
+
+    assert result.status == "ok"
+    item = (
+        await session.scalars(
+            select(KnowledgeItem).where(
+                KnowledgeItem.source_ref
+                == "slack:T789:CINCIDENTS:1785283200.000100"
+            )
+        )
+    ).one()
+    assert item.archived_at is not None
+    state = await session.get(KnowledgeSyncState, "slack")
+    assert state.cursor["event_id"] == "55555555-5555-4555-8555-555555555555"
+
+
+async def test_backfill_tombstones_a_root_deleted_between_history_and_replies(
+    session,
+):
+    await _seed_monitored_slack(session)
+    root = {"ts": "1785283200.000100", "user": "U1", "text": "Just deleted"}
+    slack = _DeletedThreadSlack(
+        threads={"1785283200.000100": "thread_not_found"},
+        roots=[root],
+    )
+
+    enumeration = await SlackKnowledgeConnector(
+        client=slack,
+        max_items=10,
+    ).enumerate_changed(session, {})
+
+    assert len(enumeration.drafts) == 1
+    draft = enumeration.drafts[0]
+    assert draft.archived_at is not None
+    assert draft.distill is False
+    assert draft.raw_text == ""
+    assert enumeration.cursor["phase"] == "incremental"
+
+
+@pytest.mark.parametrize("error", ["ratelimited", "channel_not_found"])
+async def test_non_deletion_slack_errors_still_fail_the_enumeration(session, error):
+    await _seed_monitored_slack(session)
+    session.add(
+        _slack_message_event(
+            event_id="55555555-5555-4555-8555-555555555555",
+            thread_ts="1785283200.000100",
+            created_at=datetime(2026, 7, 29, 0, 1, tzinfo=timezone.utc),
+        )
+    )
+    await session.flush()
+
+    with pytest.raises(SlackApiError):
+        await SlackKnowledgeConnector(
+            client=_DeletedThreadSlack(
+                threads={"1785283200.000100": error}
+            ),
+            max_items=10,
+        ).enumerate_changed(session, _incremental_cursor())
