@@ -674,8 +674,52 @@ async def async_resolve_project_bound_env_tokens(
     """
     if not project_slug and not project_slugs and target_registry_id is None:
         return {}
+    return await _async_resolve_project_bound_env_tokens(
+        actor_user_id=_require_actor_user_id(actor_user_id),
+        org_id=org_id,
+        project_slug=project_slug,
+        project_slugs=project_slugs,
+        target_registry_id=target_registry_id,
+        github_app_only=github_app_only,
+        github_app_permissions=github_app_permissions,
+    )
+
+
+async def async_resolve_org_project_bound_env_tokens(
+    *,
+    org_id: str,
+    project_slug: str | None = None,
+    project_slugs: list[str] | tuple[str, ...] | set[str] | None = None,
+    target_registry_id: int | None = None,
+    github_app_only: bool = False,
+    github_app_permissions: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve bound tokens for an org-scoped backend maintenance caller."""
+
+    return await _async_resolve_project_bound_env_tokens(
+        actor_user_id=None,
+        org_id=org_id,
+        project_slug=project_slug,
+        project_slugs=project_slugs,
+        target_registry_id=target_registry_id,
+        github_app_only=github_app_only,
+        github_app_permissions=github_app_permissions,
+    )
+
+
+async def _async_resolve_project_bound_env_tokens(
+    *,
+    actor_user_id: str | None,
+    org_id: str | None,
+    project_slug: str | None,
+    project_slugs: list[str] | tuple[str, ...] | set[str] | None,
+    target_registry_id: int | None,
+    github_app_only: bool,
+    github_app_permissions: dict[str, str] | None,
+) -> dict[str, str]:
+    if not project_slug and not project_slugs and target_registry_id is None:
+        return {}
     clean_org_id = _require_org_id(org_id)
-    clean_actor_user_id = _require_actor_user_id(actor_user_id)
     env_assignments: list[tuple[str, str | None, list[str] | None, str | None]] = []
     github_app_assignments: dict[tuple[str, int], dict[str, Any]] = {}
     async with UnitOfWork() as uow:
@@ -700,7 +744,7 @@ async def async_resolve_project_bound_env_tokens(
                     secret.access_count = (secret.access_count or 0) + 1
                     await _async_log_access(
                         org_id=clean_org_id,
-                        actor_user_id=clean_actor_user_id,
+                        actor_user_id=actor_user_id,
                         secret_id=secret.id,
                         key_name=secret.key_name,
                         action="read",
@@ -723,7 +767,7 @@ async def async_resolve_project_bound_env_tokens(
             secret.access_count = (secret.access_count or 0) + 1
             await _async_log_access(
                 org_id=clean_org_id,
-                actor_user_id=clean_actor_user_id,
+                actor_user_id=actor_user_id,
                 secret_id=secret.id,
                 key_name=secret.key_name,
                 action="read",

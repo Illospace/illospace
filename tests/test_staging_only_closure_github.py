@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from brain.systems.cortex.project_context.github import (
+    GitHubConnectorError,
     GithubFixingPullRequest,
     GithubIssueClosure,
     async_get_issue_closure_info,
@@ -78,7 +79,83 @@ async def test_issue_closure_read_resolves_closer_and_fixing_pr_deploy_facts():
         ("GET", "/repos/uwear-ai/uwear-backend/issues/1281"),
         ("POST", "/graphql"),
     ]
-    assert request.await_args_list[1].kwargs["token"] == "read-token"
+    assert [call.kwargs["token"] for call in request.await_args_list] == [
+        "read-token",
+        "read-token",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_org_only_backend_closure_read_resolves_authenticated_project_token(
+    monkeypatch,
+):
+    import brain.systems.runs.tool_catalog.handlers.github as handler
+
+    closure = GithubIssueClosure(
+        repo="uwear-ai/uwear-backend",
+        number=1281,
+        title="PostgreSQL deadlock",
+        state="closed",
+        closed_at=datetime(2026, 7, 27, 9, 8, 19, tzinfo=timezone.utc),
+        closed_by="uwear-claw",
+        fixing_pull_requests=(),
+    )
+    resolve_bound = AsyncMock(
+        return_value={"GITHUB_TOKEN": "installation-token"}
+    )
+    closure_read = AsyncMock(return_value=closure)
+    monkeypatch.setattr(
+        handler,
+        "async_resolve_org_project_bound_env_tokens",
+        resolve_bound,
+    )
+    monkeypatch.setattr(handler, "async_get_issue_closure_info", closure_read)
+
+    result = await handler.github_issue_closure_for_backend(
+        repo_slug="uwear-ai/uwear-backend",
+        issue_number=1281,
+        org_id="org-1",
+    )
+
+    assert result is closure
+    resolve_bound.assert_awaited_once_with(
+        org_id="org-1",
+        project_slug="uwear-ai/uwear-backend",
+        project_slugs=None,
+        github_app_only=False,
+    )
+    closure_read.assert_awaited_once_with(
+        "uwear-ai/uwear-backend",
+        1281,
+        token="installation-token",
+    )
+
+
+@pytest.mark.asyncio
+async def test_org_only_backend_closure_read_never_falls_back_to_public(
+    monkeypatch,
+):
+    import brain.systems.runs.tool_catalog.handlers.github as handler
+
+    monkeypatch.setattr(
+        handler,
+        "async_resolve_org_project_bound_env_tokens",
+        AsyncMock(return_value={}),
+    )
+    closure_read = AsyncMock()
+    monkeypatch.setattr(handler, "async_get_issue_closure_info", closure_read)
+
+    with pytest.raises(
+        GitHubConnectorError,
+        match="No GitHub token candidates were available",
+    ):
+        await handler.github_issue_closure_for_backend(
+            repo_slug="uwear-ai/uwear-backend",
+            issue_number=1281,
+            org_id="org-1",
+        )
+
+    closure_read.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -54,6 +54,7 @@ from brain.systems.vault import (
     VAULT_AGENT_ACCESS_AVAILABLE,
     async_get_secret,
     async_list_secrets,
+    async_resolve_org_project_bound_env_tokens,
     async_resolve_project_bound_env_tokens,
     normalize_agent_access_level,
 )
@@ -195,6 +196,7 @@ async def _github_token_candidates(
     token_secret_key: str | None,
     repo_slugs: list[str] | None = None,
     for_write: bool = False,
+    require_authenticated: bool = False,
     org_id: str | None = None,
     user_id: str | None = None,
 ) -> list[dict[str, str | None]]:
@@ -206,6 +208,9 @@ async def _github_token_candidates(
     ``for_write`` restricts automatic identity selection to GitHub App project
     bindings. Writes may also use an explicit ``token_secret_key``. Reads keep
     the broader project-binding and vault-inventory fallback behavior.
+
+    ``require_authenticated`` prevents backend maintenance reads from spending
+    GitHub's shared unauthenticated per-IP budget.
 
     ``repo_slugs`` lets a cross-repository operation mint one installation
     token down-scoped to every participating repository binding.
@@ -244,22 +249,32 @@ async def _github_token_candidates(
 
     await add_secret_key(token_secret_key, "explicit")
 
-    if user_id and org_id:
+    if org_id:
         try:
-            bound_env = await async_resolve_project_bound_env_tokens(
-                actor_user_id=user_id,
-                org_id=org_id,
-                project_slug=repo_slug,
-                project_slugs=repo_slugs,
-                github_app_only=for_write,
-            )
+            if user_id:
+                bound_env = await async_resolve_project_bound_env_tokens(
+                    actor_user_id=user_id,
+                    org_id=org_id,
+                    project_slug=repo_slug,
+                    project_slugs=repo_slugs,
+                    github_app_only=for_write,
+                )
+            elif require_authenticated:
+                bound_env = await async_resolve_org_project_bound_env_tokens(
+                    org_id=org_id,
+                    project_slug=repo_slug,
+                    project_slugs=repo_slugs,
+                    github_app_only=for_write,
+                )
+            else:
+                bound_env = {}
         except Exception:
             bound_env = {}
         for env_name in ("GITHUB_TOKEN", "GH_TOKEN"):
             await add_token(bound_env.get(env_name), f"project_binding:{env_name}")
 
         sorted_secrets: list[dict[str, Any]] = []
-        if not for_write:
+        if user_id and not for_write:
             try:
                 secrets = await async_list_secrets(actor_user_id=user_id, org_id=org_id)
             except Exception:
@@ -295,13 +310,13 @@ async def _github_token_candidates(
                 continue
             await add_token(token, f"project_binding:{env_name}")
 
-        if not for_write:
+        if user_id and not for_write:
             for secret in sorted_secrets:
                 if str(secret.get("key_name") or "") == "GITHUB_TOKEN":
                     continue
                 await add_secret_key(str(secret.get("key_name") or ""), "vault_inventory")
 
-    if not candidates:
+    if not candidates and not require_authenticated:
         candidates.append({"key_name": None, "token": None, "source": "public"})
     return candidates
 
@@ -1542,7 +1557,10 @@ async def github_read_ref_for_backend(
     )
 
     candidates = await _github_token_candidates(
-        repo_slug=repo_slug, token_secret_key=None, org_id=org_id, user_id=user_id
+        repo_slug=repo_slug,
+        token_secret_key=None,
+        org_id=org_id,
+        user_id=user_id,
     )
     read_candidates = _ordered_read_candidates(
         candidates, repo_slug=repo_slug, state=_github_read_state()
@@ -1610,6 +1628,7 @@ async def github_issue_closure_for_backend(
     candidates = await _github_token_candidates(
         repo_slug=repo_slug,
         token_secret_key=None,
+        require_authenticated=True,
         org_id=org_id,
         user_id=user_id,
     )
@@ -1675,6 +1694,7 @@ async def github_deploy_states_for_backend(
             candidates = await _github_token_candidates(
                 repo_slug=repo_slug,
                 token_secret_key=None,
+                require_authenticated=True,
                 org_id=org_id,
                 user_id=user_id,
             )
@@ -1683,9 +1703,14 @@ async def github_deploy_states_for_backend(
                 repo_slug=repo_slug,
                 state=_github_read_state(),
             )
+            if not ordered:
+                raise GitHubConnectorError(
+                    status_code=401,
+                    message="No GitHub token candidates were available",
+                )
             tokens_by_repo[repo_slug] = tuple(
                 candidate.get("token") for candidate in ordered
-            ) or (None,)
+            )
         except Exception as exc:  # noqa: BLE001
             failure = ancestry_failure("credentials", exc)
             resolution_failures[repo_slug] = DeployStateObservation(

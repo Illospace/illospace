@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any
 
 from brain.platform.db.models.domain import DomainRecord
 from brain.systems import deploy_tracker
+from brain.systems.cortex.project_context.github import GitHubConnectorError
 from brain.systems.deploy_state import DeployStateBatch
 from brain.systems.production_gate_evidence import (
     ProductionEvidenceReader,
@@ -36,6 +38,14 @@ from brain.systems.production_gate_policy import (
 TRACKER_DOMAIN_ID = 1
 TRACKER_DOMAIN_SLUG = "github-ticket-tracker"
 logger = logging.getLogger("illo.staging_only_closure")
+
+
+@dataclass(frozen=True, slots=True)
+class _ClosureReadOutcome:
+    repo: str
+    issue_number: int
+    candidate: tuple[DomainRecord, IssueClosure] | None = None
+    error: Exception | None = None
 
 
 async def run_staging_only_closure_sweep(
@@ -179,7 +189,7 @@ async def _read_closed_issues(
 
     async def read(
         record: DomainRecord,
-    ) -> tuple[DomainRecord, IssueClosure] | None:
+    ) -> _ClosureReadOutcome | None:
         identity = tracked_issue_identity(
             dict(record.data or {}),
             title=record.title,
@@ -194,24 +204,66 @@ async def _read_closed_issues(
                     issue_number=issue_number,
                 )
         except Exception as exc:  # noqa: BLE001 - isolate one repository read
-            logger.warning(
-                "closure read failed for %s#%s: %s",
-                repo,
-                issue_number,
-                exc,
+            return _ClosureReadOutcome(
+                repo=repo,
+                issue_number=issue_number,
+                error=exc,
             )
-            errors.append(f"github_issue:{repo}#{issue_number}:{exc}")
-            return None
         if (
             closure is None
             or closure.state.casefold() != "closed"
             or not closure.fixing_pull_requests
         ):
-            return None
-        return record, closure
+            return _ClosureReadOutcome(repo=repo, issue_number=issue_number)
+        return _ClosureReadOutcome(
+            repo=repo,
+            issue_number=issue_number,
+            candidate=(record, closure),
+        )
 
     results = await asyncio.gather(*(read(record) for record in records))
-    return [result for result in results if result is not None]
+    attempts = [result for result in results if result is not None]
+    failures = [result for result in attempts if result.error is not None]
+    if failures and len(failures) == len(attempts):
+        auth_failures = {
+            _authentication_failure(result.error)
+            for result in failures
+            if result.error is not None
+        }
+        auth_failure = next(iter(auth_failures)) if len(auth_failures) == 1 else None
+        if auth_failure is not None:
+            status_code, message = auth_failure
+            logger.error(
+                "closure authentication failed for all %s GitHub issue reads: %s",
+                len(failures),
+                message,
+            )
+            errors.append(
+                "github_issue_authentication_all_reads_failed:"
+                f"count={len(failures)}:status={status_code}:{message}"
+            )
+            return []
+    for failure in failures:
+        logger.warning(
+            "closure read failed for %s#%s: %s",
+            failure.repo,
+            failure.issue_number,
+            failure.error,
+        )
+        errors.append(
+            f"github_issue:{failure.repo}#{failure.issue_number}:{failure.error}"
+        )
+    return [
+        result.candidate
+        for result in attempts
+        if result.candidate is not None
+    ]
+
+
+def _authentication_failure(exc: Exception) -> tuple[int, str] | None:
+    if isinstance(exc, GitHubConnectorError) and exc.status_code in {401, 403}:
+        return exc.status_code, str(exc)
+    return None
 
 
 async def _read_deploy_states(
@@ -220,6 +272,12 @@ async def _read_deploy_states(
     github: ClosureGithubClient,
     errors: list[str],
 ) -> DeployStateBatch:
+    if not candidates:
+        return DeployStateBatch(
+            {},
+            observations_by_key={},
+            observations_by_ref={},
+        )
     refs = {
         (closure.repo, closure.number, pull_request.number): (
             pull_request.repo,
