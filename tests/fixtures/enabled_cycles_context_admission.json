@@ -15,7 +15,7 @@
     {
       "cycle_id": 8,
       "name": "GitHub Reflex — event fast lane",
-      "model": "openai/gpt-5.4-mini",
+      "model": "openai/gpt-5.6-luna",
       "thinking": "low",
       "timezone": "America/Toronto",
       "prompt_chars": 4138,

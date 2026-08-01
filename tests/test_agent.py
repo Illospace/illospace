@@ -77,7 +77,7 @@ class TestProviderInference:
 
         assert required_openai_auth_mode("openai/gpt-5.5") == "chatgpt"
         assert required_openai_auth_mode("openai/gpt-5.6-sol") == "chatgpt"
-        assert required_openai_auth_mode("openai/gpt-5.4") is None
+        assert required_openai_auth_mode("openai/gpt-4.1") is None
 
     def test_preview_model_falls_back_only_for_model_availability_errors(self):
         from brain.systems.runs.direct_loop.model_fallback import (
@@ -312,7 +312,7 @@ class TestCachePolicy:
     def test_openai_cache_retention_matches_extended_cache_support(self):
         from brain.systems.runs.direct_agent import _get_openai_cache_retention
 
-        assert _get_openai_cache_retention("openai/gpt-5.4") == "24h"
+        assert _get_openai_cache_retention("openai/gpt-4.1") == "24h"
         assert _get_openai_cache_retention("openai/gpt-4.1-mini") == "24h"
         assert _get_openai_cache_retention("openai/gpt-4o-mini") is None
 

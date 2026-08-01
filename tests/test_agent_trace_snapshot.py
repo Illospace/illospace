@@ -32,7 +32,7 @@ def _run(**overrides):
         "input_message": "Explain the activity panel",
         "target_ref": {"event": "thread_reply"},
         "workspace_ref": {"cwd": "/repo"},
-        "model_policy": {"model": "openai:gpt-5.4"},
+        "model_policy": {"model": "openai:gpt-5.6-sol"},
         "context_summary": "Used recent thread context.",
         "metadata_": {"source": "test"},
         "created_at": now,

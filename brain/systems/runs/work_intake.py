@@ -16,7 +16,9 @@ from brain.platform.integrations.provider_auth_preflight import async_probe_prov
 from brain.platform.providers.model_policy import (
     EFFORT_TIER_SET,
     async_get_default_model,
+    coerce_openai_api_key_model,
     infer_provider_from_model,
+    normalize_model_name,
 )
 from brain.systems.cortex.project_context.resolution import resolve_effective_project_context
 from brain.systems.cortex.thread_context import async_build_agent_visible_thread_context
@@ -251,6 +253,27 @@ def _warn_retired_recipe_coercion(
             "routing_field": field,
             "requested_value": requested_value,
             "coerced_value": "fast",
+        },
+    )
+
+
+def _warn_api_key_model_coercion(
+    metadata: dict[str, Any],
+    *,
+    requested_value: str,
+    coerced_value: str,
+) -> None:
+    source = _routing_metadata_source(metadata)
+    logger.warning(
+        "Coercing API-key OpenAI model %s to %s (source=%s)",
+        requested_value,
+        coerced_value,
+        source,
+        extra={
+            "event": "api_key_model_coerced",
+            "routing_source": source,
+            "requested_value": requested_value,
+            "coerced_value": coerced_value,
         },
     )
 
@@ -665,6 +688,23 @@ async def build_agent_run_request(
     event: WorkIntakeEvent,
 ) -> AgentRunRequest:
     request = await _build_agent_run_request(session, event)
+    model_policy = dict(request.model_policy or {})
+    requested_model = str(
+        model_policy.get("model") or model_policy.get("model_override") or ""
+    ).strip()
+    if requested_model:
+        coerced_model = coerce_openai_api_key_model(
+            normalize_model_name(requested_model)
+        )
+        if coerced_model:
+            _warn_api_key_model_coercion(
+                request.metadata,
+                requested_value=requested_model,
+                coerced_value=coerced_model,
+            )
+            model_policy["model"] = coerced_model
+            model_policy.pop("model_override", None)
+            request = replace(request, model_policy=model_policy)
     status_context = await build_status_question_context(
         session,
         thread_id=request.thread_id,

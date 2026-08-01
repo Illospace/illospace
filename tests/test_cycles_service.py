@@ -663,26 +663,26 @@ def test_cycle_run_model_policy_uses_bound_revision_instead_of_live_cycle():
     run = CycleRun()
     run.context_snapshot = {
         "revision": {
-            "model_override": "gpt-5.4-mini",
+            "model_override": "gpt-5.6-luna",
             "thinking_override": "xhigh",
         }
     }
 
     assert service._cycle_run_model_policy(cycle, run) == {
-        "model": "openai/gpt-5.4-mini",
+        "model": "openai/gpt-5.6-luna",
         "thinking": "xhigh",
     }
 
 
 def test_cycle_run_model_policy_falls_back_to_live_cycle_without_snapshot():
     cycle = Cycle()
-    cycle.model_override = "openai/gpt-5.4-mini"
+    cycle.model_override = "openai/gpt-5.6-luna"
     cycle.thinking_override = "low"
     run = CycleRun()
     run.context_snapshot = None
 
     assert service._cycle_run_model_policy(cycle, run) == {
-        "model": "openai/gpt-5.4-mini",
+        "model": "openai/gpt-5.6-luna",
         "thinking": "low",
     }
 
@@ -1275,7 +1275,7 @@ async def test_cycle_update_rejects_unknown_model_with_valid_options():
 
     assert caught.value.status_code == 400
     assert "Unknown model_override 'openai/not-a-model'" in caught.value.detail
-    assert "openai/gpt-5.4-mini" in caught.value.detail
+    assert "openai/gpt-5.6-luna" in caught.value.detail
     assert cycle.model_override is None
     assert db.flushed is False
 
@@ -1290,11 +1290,11 @@ async def test_cycle_update_stores_canonical_model_and_clears_default():
 
     response = await cycles_router.update_cycle(
         cycle.id,
-        cycles_router.CycleUpdate(model_override="gpt-5.4-mini"),
+        cycles_router.CycleUpdate(model_override="gpt-5.6-luna"),
         db=db,
         user={"id": cycle.user_id, "org_id": None},
     )
-    assert response["model_override"] == "openai/gpt-5.4-mini"
+    assert response["model_override"] == "openai/gpt-5.6-luna"
 
     response = await cycles_router.update_cycle(
         cycle.id,
@@ -1806,7 +1806,7 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
     cycle_run = CycleRun()
     cycle_run.context_snapshot = {
         "revision": {
-            "model_override": "gpt-5.4-mini",
+            "model_override": "gpt-5.6-luna",
             "thinking_override": "high",
         }
     }
@@ -1834,7 +1834,7 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
     assert event.payload["metadata"]["source"] == "cycle"
     assert event.payload["metadata"]["cycle_run_id"] == 12
     assert event.payload["model_policy"] == {
-        "model": "openai/gpt-5.4-mini",
+        "model": "openai/gpt-5.6-luna",
         "thinking": "high",
     }
     assert event.payload["deadline_at"] == deadline_at
@@ -2075,7 +2075,7 @@ async def test_execute_cycle_run_auth_blocks_expired_codex_before_agent_admissio
         encode_codex_auth_payload,
     )
 
-    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.4")
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
     expired_payload = json.dumps(encode_codex_auth_payload(OpenAICodexCredential(
         access_token="expired-access",
         refresh_token="refresh-token-123",
@@ -2169,7 +2169,7 @@ async def test_execute_cycle_run_valid_codex_preflight_proceeds_to_agent_admissi
         encode_codex_auth_payload,
     )
 
-    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.4")
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
     valid_payload = json.dumps(encode_codex_auth_payload(OpenAICodexCredential(
         access_token="fresh-access",
         refresh_token="refresh-token-123",
@@ -3780,11 +3780,11 @@ def test_cycle_run_model_policy_ignores_live_cycle_when_snapshot_pins_a_model():
     cycle.thinking_override = "low"
     run = CycleRun()
     run.context_snapshot = {
-        "revision": {"model_override": "gpt-5.4-mini", "thinking_override": "low"}
+        "revision": {"model_override": "gpt-5.6-luna", "thinking_override": "low"}
     }
 
     assert service._cycle_run_model_policy(cycle, run) == {
-        "model": "openai/gpt-5.4-mini",
+        "model": "openai/gpt-5.6-luna",
         "thinking": "low",
     }
 

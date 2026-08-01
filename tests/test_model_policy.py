@@ -40,9 +40,9 @@ class TestModelPolicy:
 
         options = get_provider_model_options("openai")
         assert "gpt-5.6-sol" in options
+        assert "gpt-5.6-luna" in options
         assert "gpt-5.5" in options
-        assert "gpt-5.4" in options
-        assert "gpt-5-mini" in options
+        assert set(options) == {"gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5"}
 
     @pytest.mark.asyncio
     async def test_org_default_thinking_overrides_runtime_default(self):
@@ -89,10 +89,9 @@ class TestModelPolicy:
     def test_infer_provider_recognizes_new_openai_models(self):
         from brain.platform.providers.model_policy import infer_provider_from_model
 
-        assert infer_provider_from_model("gpt-5.4") == "openai"
-        assert infer_provider_from_model("gpt-5.4-mini") == "openai"
-        assert infer_provider_from_model("openai:gpt-5.4") == "openai"
-        assert infer_provider_from_model("gpt-5.4-pro") == "openai"
+        assert infer_provider_from_model("gpt-5.6-sol") == "openai"
+        assert infer_provider_from_model("gpt-5.6-luna") == "openai"
+        assert infer_provider_from_model("openai:gpt-5.6-luna") == "openai"
         assert infer_provider_from_model("gpt-5.5") == "openai"
 
     def test_infer_provider_recognizes_claude_family_names(self):
@@ -104,21 +103,18 @@ class TestModelPolicy:
     def test_cost_normalizes_openai_models(self):
         from brain.platform.providers.model_policy import calculate_model_cost, normalize_model_name
 
-        cost = calculate_model_cost("gpt-5-mini", 1_000_000, 1_000_000)
-        assert abs(cost - 2.25) < 0.001
-        assert normalize_model_name("gpt-5.4-mini") == "openai/gpt-5.4-mini"
-        assert normalize_model_name("gpt-5.4-nano") == "openai/gpt-5.4-nano"
+        cost = calculate_model_cost("gpt-5.6-luna", 1_000_000, 1_000_000)
+        assert abs(cost - 1.4) < 0.001
+        assert normalize_model_name("gpt-5.6-luna") == "openai/gpt-5.6-luna"
+        assert normalize_model_name("gpt-5.6") == "openai/gpt-5.6-sol"
         assert normalize_model_name("gpt-5.5") == "openai/gpt-5.5"
 
     def test_cost_uses_native_pricing_for_default_openai_models(self):
         from brain.platform.providers.model_policy import calculate_model_cost
 
-        assert abs(calculate_model_cost("gpt-5.4", 1_000_000, 1_000_000) - 17.5) < 0.001
+        assert abs(calculate_model_cost("gpt-5.6-sol", 1_000_000, 1_000_000) - 35.0) < 0.001
+        assert abs(calculate_model_cost("gpt-5.6-luna", 1_000_000, 1_000_000) - 1.4) < 0.001
         assert abs(calculate_model_cost("gpt-5.5", 1_000_000, 1_000_000) - 35.0) < 0.001
-        assert abs(calculate_model_cost("gpt-5.4-pro", 1_000_000, 1_000_000) - 210.0) < 0.001
-        assert abs(calculate_model_cost("gpt-5.4-mini", 1_000_000, 1_000_000) - 5.25) < 0.001
-        assert abs(calculate_model_cost("gpt-5-mini", 1_000_000, 1_000_000) - 2.25) < 0.001
-        assert abs(calculate_model_cost("gpt-5-nano", 1_000_000, 1_000_000) - 0.45) < 0.001
 
     def test_cost_applies_cached_input_discount_to_cached_subset(self):
         from brain.platform.providers.model_policy import calculate_model_cost
@@ -256,7 +252,7 @@ class TestModelPolicy:
             if "SELECT org_id FROM users" in sql:
                 return _AsyncMappingResult(first={"org_id": "org-1"})
             if "SELECT memory_model_config FROM orgs" in sql:
-                return _AsyncMappingResult(first={"memory_model_config": {"default_model": "openai:gpt-5.4-mini"}})
+                return _AsyncMappingResult(first={"memory_model_config": {"default_model": "openai:gpt-5.6-luna"}})
             raise AssertionError(f"Unexpected SQL: {sql}")
 
         model = await async_get_default_model(
@@ -266,14 +262,59 @@ class TestModelPolicy:
             user_id="user-1",
         )
 
-        assert model == "gpt-5.4-mini"
+        assert model == "gpt-5.6-luna"
+
+    @pytest.mark.asyncio
+    async def test_bulk_route_uses_valid_org_overrides(self):
+        from brain.platform.providers.model_policy import async_get_bulk_route
+
+        def execute_side_effect(stmt, params=None):
+            sql = str(stmt)
+            if "SELECT org_id FROM users" in sql:
+                return _AsyncMappingResult(first={"org_id": "org-1"})
+            if "SELECT memory_model_config FROM orgs" in sql:
+                return _AsyncMappingResult(
+                    first={
+                        "memory_model_config": {
+                            "bulk_model": "openai:gpt-5.6-sol",
+                            "bulk_thinking": "high",
+                        }
+                    }
+                )
+            raise AssertionError(f"Unexpected SQL: {sql}")
+
+        route = await async_get_bulk_route(
+            _AsyncPolicySession(execute_side_effect),
+            user_id="user-1",
+        )
+
+        assert route == {"model": "openai/gpt-5.6-sol", "thinking": "high"}
+
+    @pytest.mark.asyncio
+    async def test_bulk_route_rejects_invalid_org_overrides(self):
+        from brain.platform.providers.model_policy import async_get_bulk_route
+
+        session = _AsyncPolicySession(
+            lambda _stmt, _params=None: _AsyncMappingResult(
+                first={
+                    "memory_model_config": {
+                        "bulk_model": "not-a-model",
+                        "bulk_thinking": "ultra",
+                    }
+                }
+            )
+        )
+
+        route = await async_get_bulk_route(session, org_id="org-1")
+
+        assert route == {"model": "openai/gpt-5.6-luna", "thinking": "xhigh"}
 
     def test_llm_request_normalized_model_strips_colon_prefix(self):
         from brain.platform.integrations.providers import LLMRequest
 
-        request = LLMRequest(model="openai:gpt-5.4", messages=[])
+        request = LLMRequest(model="openai:gpt-5.6-luna", messages=[])
 
-        assert request.normalized_model == "gpt-5.4"
+        assert request.normalized_model == "gpt-5.6-luna"
 
     def test_provider_degradation_policy_defines_operation_fallbacks(self):
         from brain.platform.provider_health import get_degradation_policy

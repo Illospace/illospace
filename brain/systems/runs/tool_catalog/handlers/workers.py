@@ -21,7 +21,9 @@ from brain.platform.providers.model_policy import (
     PROVIDER_MODEL_OPTIONS,
     async_get_default_model,
     async_get_default_thinking,
+    coerce_openai_api_key_model,
     infer_provider_from_model,
+    normalize_model_name,
 )
 from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.domain import RunRecipe
@@ -210,6 +212,12 @@ def _validate_spawn_model(value: Any) -> tuple[str | None, str | None]:
             "spawn_worker model must be a provider name "
             f"({providers}) or a provider-prefixed catalog id such as "
             "'anthropic/claude-sonnet-4-6'"
+        )
+    allowed_route = coerce_openai_api_key_model(normalize_model_name(normalized))
+    if allowed_route:
+        raise ValueError(
+            f"spawn_worker model {normalized!r} requires an OpenAI API key; "
+            f"use the allowed subscription route {allowed_route!r}"
         )
     provider, model_name = normalized.split("/", 1)
     if provider not in PROVIDER_MODEL_OPTIONS:

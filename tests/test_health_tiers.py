@@ -162,7 +162,7 @@ async def test_deep_health_reports_degradation_without_secrets(monkeypatch):
     record_provider_failure(
         operation_type="scout",
         provider="openai",
-        model="gpt-5.4-mini",
+        model="gpt-5.6-luna",
         exc="provider failed with sk-test-secret-token",
     )
 

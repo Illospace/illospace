@@ -84,7 +84,7 @@ def test_run_envelope_projects_to_run_agent_kwargs_with_metadata():
         run_id=7,
         idea_id="idea-1",
         session_id="agent-1",
-        model="openai/gpt-5.4",
+        model="openai/gpt-5.6-sol",
         tools=[],
         persist_session=False,
         max_turns=3,

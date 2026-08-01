@@ -262,13 +262,14 @@ or resources as another active slice.
 
 - `spawn_worker` queues a child run and returns immediately with
   `status="queued"` and a `child_run_id`; queued is not completed.
-- Omitted `model` and `effort` inherit the parent's effective routing. Route
-  primarily with effort: `xhigh` for costly judgment, `high` for standard work,
-  `medium` for clear execution, and `low` for reflex work. Use a high-effort
-  director with cheaper low/medium workhorse readers; use `none` only when the
-  child should request no reasoning. Override `model` only for an intentional
-  cross-provider verifier; a bare provider selects its default, while a
-  provider-prefixed catalog id selects a specific model.
+- Omitted `model` and `effort` inherit the parent's effective routing.
+- Two lanes. Reasoning/judgment/review/long-context/chatty tool loops:
+  `gpt-5.6-sol`, routed by effort (`xhigh` judgment, `high` standard).
+  Bulk/mechanical/single-shot/small-context execution:
+  `openai/gpt-5.6-luna` at `xhigh`. Luna caveats: quality collapses above ~200K
+  context; `xhigh` pays a long first-token pause per turn — never use Luna
+  `xhigh` for many-short-turn loops. Reserve non-OpenAI models for a
+  cross-provider verifier.
 - Set `headless=true` when the child needs no user input or visible thread
   updates. Headless children use a hidden thread and have visible reply tools
   disabled.

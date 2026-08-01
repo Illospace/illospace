@@ -41,7 +41,8 @@ def test_spawn_worker_description_teaches_routing_patterns():
 
     assert "xhigh" in description and "judgment" in description
     assert "high" in description and "standard" in description
-    assert "medium" in description and "execution" in description
-    assert "low" in description and "reflex" in description
-    assert "director" in description and "workhorse" in description
+    assert "gpt-5.6-sol" in description
+    assert "openai/gpt-5.6-luna" in description
+    assert "~200k context" in description
+    assert "many-short-turn loops" in description
     assert "cross-provider verifier" in description

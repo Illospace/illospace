@@ -2021,7 +2021,7 @@ async def test_interactive_slack_transport_failure_never_persists_raw_error_as_f
             thread_id="slack:T789:C456:1716900000.000100",
             message="Continue the design conversation",
             target_ref={"kind": "slack_message", "originating_surface": "slack"},
-            model_policy={"model": "openai/gpt-5.4", "thinking": "high"},
+            model_policy={"model": "openai/gpt-5.6-sol", "thinking": "high"},
             metadata={"origin": "slack_teammate", "originating_surface": "slack"},
         )
     )

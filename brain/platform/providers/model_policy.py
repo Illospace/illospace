@@ -23,6 +23,8 @@ from brain.platform.model_catalog import (
 
 DEFAULT_RUNTIME_PROVIDER = "openai"
 DEFAULT_THINKING_TIER = "high"
+DEFAULT_BULK_MODEL = "openai/gpt-5.6-luna"
+DEFAULT_BULK_THINKING_TIER = "xhigh"
 DEFAULT_PROVIDER_MODELS: dict[str, str] = {
     entry.provider: entry.model_name
     for entry in MODEL_CATALOG
@@ -264,6 +266,23 @@ def required_openai_auth_mode(model: str | None) -> str | None:
     return "chatgpt" if value == "gpt-5.5" or value.startswith("gpt-5.6") else None
 
 
+def coerce_openai_api_key_model(model: str) -> str | None:
+    """Return the subscription route when an OpenAI model would use an API key."""
+    value = str(model or "").strip().lower().replace(":", "/", 1)
+    if "/" in value:
+        provider = value.split("/", 1)[0]
+    elif value.startswith(("gpt-", "o1", "o3", "o4")):
+        provider = "openai"
+    else:
+        return None
+    if provider != "openai":
+        return None
+    if required_openai_auth_mode(model) is not None:
+        return None
+    default_model = DEFAULT_PROVIDER_MODELS["openai"]
+    return f"openai/{default_model}"
+
+
 def get_model_catalog_contract(
     *,
     workspace_default: str | None = None,
@@ -408,6 +427,53 @@ async def async_get_default_thinking(
     return DEFAULT_THINKING_TIER
 
 
+async def async_get_bulk_route(
+    session: AsyncSession,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict[str, str]:
+    """Return the workspace bulk-execution model and reasoning effort."""
+    model = DEFAULT_BULK_MODEL
+    thinking = DEFAULT_BULK_THINKING_TIER
+    effective_org_id = await async_resolve_effective_org_id(
+        session,
+        user_id=user_id,
+        org_id=org_id,
+    )
+    if effective_org_id:
+        try:
+            row = (
+                await session.execute(
+                    text("SELECT memory_model_config FROM orgs WHERE id = :org_id LIMIT 1"),
+                    {"org_id": effective_org_id},
+                )
+            ).mappings().first()
+            config = dict((row or {}).get("memory_model_config") or {})
+            raw_model = config.get("bulk_model")
+            if isinstance(raw_model, str) and raw_model.strip():
+                normalized_model = normalize_model_name(raw_model)
+                catalog_model = canonical_catalog_model_id(normalized_model)
+                if (
+                    catalog_model == "openai/gpt-5.5"
+                    and "gpt-5.5" not in raw_model.strip().lower()
+                ):
+                    catalog_model = None
+                if (
+                    catalog_model
+                    and coerce_openai_api_key_model(normalized_model) is None
+                ):
+                    model = normalized_model
+            configured_thinking = (
+                str(config.get("bulk_thinking") or "").strip().lower()
+            )
+            if configured_thinking in EFFORT_TIER_SET:
+                thinking = configured_thinking
+        except Exception:
+            pass
+    return {"model": model, "thinking": thinking}
+
+
 def normalize_model_name(model: str | None) -> str:
     """Normalize a model string to the canonical priced identifier."""
     if not model:
@@ -436,20 +502,12 @@ def normalize_model_name(model: str | None) -> str:
             return "anthropic/claude-sonnet-5"
     if "gpt-5.5" in lower:
         return "openai/gpt-5.5"
+    if "gpt-5.6-luna" in lower:
+        return "openai/gpt-5.6-luna"
     if "gpt-5.6-sol" in lower:
         return "openai/gpt-5.6-sol"
-    if "gpt-5.4-mini" in lower:
-        return "openai/gpt-5.4-mini"
-    if "gpt-5.4-nano" in lower:
-        return "openai/gpt-5.4-nano"
-    if "gpt-5.4-pro" in lower:
-        return "openai/gpt-5.4-pro"
-    if "gpt-5.4" in lower:
-        return "openai/gpt-5.4"
-    if "gpt-5-mini" in lower:
-        return "openai/gpt-5-mini"
-    if "gpt-5-nano" in lower:
-        return "openai/gpt-5-nano"
+    if "gpt-5.6" in lower:
+        return "openai/gpt-5.6-sol"
     return "openai/gpt-5.5"
 
 

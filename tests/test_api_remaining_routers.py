@@ -228,13 +228,13 @@ async def test_list_costs(client, mock_session_factory):
 @pytest.mark.asyncio
 async def test_system_info_omits_cortex_concurrency_settings(client, mock_session_factory):
     with patch("brain.app.api.routers.system._get_llm_info", new=AsyncMock(return_value={
-        "harvest_model": "gpt-5-mini",
-        "consolidation_model": "gpt-5-mini",
+        "harvest_model": "gpt-5.6-luna",
+        "consolidation_model": "gpt-5.6-luna",
     })):
         resp = await client.get("/api/system")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["llm"]["harvest_model"] == "gpt-5-mini"
+    assert data["llm"]["harvest_model"] == "gpt-5.6-luna"
     assert "cortex_default_concurrency" not in data["llm"]
 
 

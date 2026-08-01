@@ -252,7 +252,7 @@ def _runtime(recipe: str = "fast", *, message: str = "Read the README", store=No
         profile=run.profile,
         recipe=run.recipe,
         workspace_ref=workspace_ref if workspace_ref is not None else {"workspace_root": "/tmp/work"},
-        model_policy={"model": "openai/gpt-5.4", "thinking": "high"},
+        model_policy={"model": "openai/gpt-5.6-sol", "thinking": "high"},
         metadata={
             "worker_scope": {
                 "objective": "Inspect README setup steps",
@@ -1144,7 +1144,7 @@ async def test_scheduled_cycle_handoff_identity_summary_does_not_override_missio
     result = await direct_agent.run_agent_async(
         message,
         session_id="agent-run-44",
-        model="openai/gpt-5.4",
+        model="openai/gpt-5.6-sol",
         thinking="low",
         tools=[],
         tool_handlers={},
@@ -2215,6 +2215,11 @@ async def test_cycle_auth_policy_blocks_anthropic_without_credentials(monkeypatc
         (
             {"model": "anthropic/not-a-real-model"},
             "model for provider 'anthropic' must be one of",
+        ),
+        (
+            {"model": "openai/gpt-4.1"},
+            "requires an OpenAI API key; use the allowed subscription route "
+            "'openai/gpt-5.6-sol'",
         ),
     ],
 )
@@ -4504,12 +4509,12 @@ async def test_work_intake_applies_model_and_effort_overrides():
         event="thread_reply",
         message="Use cheaper settings",
         user_id="u1",
-        metadata={"execution_profile": "fast", "model": "openai/gpt-5.4", "effort": "xhigh"},
+        metadata={"execution_profile": "fast", "model": "openai/gpt-5.6-sol", "effort": "xhigh"},
     )
 
     assert request.profile == "fast"
     assert request.recipe == "fast"
-    assert request.model_policy == {"model": "openai/gpt-5.4", "thinking": "xhigh"}
+    assert request.model_policy == {"model": "openai/gpt-5.6-sol", "thinking": "xhigh"}
 
 
 async def test_work_intake_applies_explicit_model_override():

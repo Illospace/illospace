@@ -124,19 +124,19 @@ class TestGetCosts:
     @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_by_model_normalizes_provider_prefixes(self, mock_usage, client):
         runs = [
-            _fake_run(id=1, model_used="openai:gpt-5.4", estimated_cost=0.10),
-            _fake_run(id=2, model_used="openai/gpt-5.4", estimated_cost=0.02),
-            _fake_run(id=3, model_used="gpt-5.4", estimated_cost=0.03),
+            _fake_run(id=1, model_used="openai:gpt-5.6-sol", estimated_cost=0.10),
+            _fake_run(id=2, model_used="openai/gpt-5.6-sol", estimated_cost=0.02),
+            _fake_run(id=3, model_used="gpt-5.6-sol", estimated_cost=0.03),
         ]
         mock_usage.return_value = runs
 
         result = client.get("/api/costs/")
         data = result.json()
         models = {m["model"]: m for m in data["by_model"]}
-        assert set(models) == {"openai/gpt-5.4"}
-        assert models["openai/gpt-5.4"]["provider"] == "openai"
-        assert models["openai/gpt-5.4"]["normalized_model"] == "gpt-5.4"
-        assert models["openai/gpt-5.4"]["runs"] == 3
+        assert set(models) == {"openai/gpt-5.6-sol"}
+        assert models["openai/gpt-5.6-sol"]["provider"] == "openai"
+        assert models["openai/gpt-5.6-sol"]["normalized_model"] == "gpt-5.6-sol"
+        assert models["openai/gpt-5.6-sol"]["runs"] == 3
 
     @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_by_skill_groups(self, mock_usage, client):
@@ -252,7 +252,7 @@ async def test_async_summarize_recent_run_usage_uses_async_session():
     )
     low_call = SimpleNamespace(
         run_id=7,
-        model="openai/gpt-5.4",
+        model="openai/gpt-5.6-sol",
         effort="low",
         api_calls=2,
         tokens_input=10,
@@ -263,7 +263,7 @@ async def test_async_summarize_recent_run_usage_uses_async_session():
     )
     high_call = SimpleNamespace(
         run_id=7,
-        model="openai/gpt-5.4",
+        model="openai/gpt-5.6-sol",
         effort="high",
         api_calls=1,
         tokens_input=20,
@@ -286,8 +286,8 @@ async def test_async_summarize_recent_run_usage_uses_async_session():
     assert rows[0]["tokens_output"] == 15
     assert rows[0]["tokens_total"] == 45
     assert rows[0]["api_calls"] == 3
-    assert rows[0]["estimated_cost"] == 0.000296
-    assert rows[0]["model_used"] == "openai/gpt-5.4"
+    assert rows[0]["estimated_cost"] == 0.000593
+    assert rows[0]["model_used"] == "openai/gpt-5.6-sol"
     assert rows[0]["by_effort"] == [
         {
             "effort": "high",
@@ -297,7 +297,7 @@ async def test_async_summarize_recent_run_usage_uses_async_session():
             "tokens_total": 30,
             "cache_read": 0,
             "cache_write": 0,
-            "estimated_cost": 0.0002,
+            "estimated_cost": 0.0004,
         },
         {
             "effort": "low",
@@ -307,7 +307,7 @@ async def test_async_summarize_recent_run_usage_uses_async_session():
             "tokens_total": 15,
             "cache_read": 3,
             "cache_write": 1,
-            "estimated_cost": 0.000096,
+            "estimated_cost": 0.000193,
         },
     ]
 

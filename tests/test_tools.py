@@ -440,13 +440,13 @@ class TestPredictiveReading:
 
         with patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)):
             with patch("brain.systems.tools.handlers._reader_completion", new=AsyncMock(return_value=llm_payload)):
-                with patch("brain.systems.tools.handlers._reader_model", return_value="openai/gpt-5-mini"):
+                with patch("brain.systems.tools.handlers._reader_model", return_value="openai/gpt-5.6-luna"):
                     result = await handle_summarize_files_for_task(
                         [str(file_path)],
                         "Which file owns child run creation?",
                     )
 
-        assert result["model"] == "openai/gpt-5-mini"
+        assert result["model"] == "openai/gpt-5.6-luna"
         assert result["confidence"] == 0.88
         assert result["files_ranked"][0]["path"] == str(file_path)
 

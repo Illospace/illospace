@@ -39,7 +39,7 @@ async def test_trace_summary_returns_privacy_filtered_skeleton():
         status="completed",
         profile="fast",
         recipe="fast",
-        model_policy={"model": "openai:gpt-5.4"},
+        model_policy={"model": "openai:gpt-5.6-sol"},
         started_at=now,
         completed_at=now,
         created_at=now,
@@ -71,7 +71,7 @@ async def test_trace_summary_returns_privacy_filtered_skeleton():
     db.execute = AsyncMock(side_effect=[
         _mapping_all([
             {
-                "model": "openai:gpt-5.4",
+                "model": "openai:gpt-5.6-sol",
                 "calls": 1,
                 "input_tokens": 100,
                 "output_tokens": 50,
@@ -100,7 +100,7 @@ async def test_trace_summary_returns_privacy_filtered_skeleton():
     )
 
     assert summary["trace_id"] == "run:42"
-    assert summary["run"]["provider_model"] == "openai/gpt-5.4"
+    assert summary["run"]["provider_model"] == "openai/gpt-5.6-sol"
     assert summary["llm_calls"]["count"] == 1
     assert summary["tool_calls"]["tools"] == [
         {"tool_name": "run_script", "source": "worker:develop", "calls": 1}
