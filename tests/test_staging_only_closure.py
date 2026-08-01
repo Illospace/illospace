@@ -22,7 +22,6 @@ from brain.platform.db.models.domain import (
     DomainRelationType,
 )
 from brain.platform.db.models.provider_alert import ProviderAlertOccurrence
-from brain.systems.cortex.project_context.github import GitHubConnectorError
 from brain.systems.deploy_state import (
     DeployState,
     DeployStateBatch,
@@ -32,6 +31,12 @@ from brain.systems.deploy_state_github import AncestryObservation
 from brain.systems.deploy_tracker import (
     PRODUCTION_GATE_FIELD,
     PRODUCTION_GATE_PENDING,
+)
+from brain.systems.production_gate_github import (
+    CLOSURE_READ_ACCESS_FORBIDDEN,
+    CLOSURE_READ_AUTHENTICATION_REQUIRED,
+    CLOSURE_READ_CONNECTOR_ERROR,
+    ClosureReadFailure,
 )
 from brain.systems.staging_only_closure import (
     FixingPullRequest,
@@ -252,10 +257,25 @@ class _AuthFailingGithub:
 
     async def get_issue_closure(self, *, repo: str, issue_number: int):
         self.reads.append((repo, issue_number))
-        raise GitHubConnectorError(
+        raise ClosureReadFailure(
+            reason_code=CLOSURE_READ_ACCESS_FORBIDDEN,
             status_code=403,
             message="API rate limit exceeded for 207.134.142.114.",
         )
+
+    async def derive_deploy_states(self, refs):
+        raise AssertionError("No deploy-state reads are expected")
+
+
+class _PerIssueGithub:
+    def __init__(self, outcomes):
+        self.outcomes = dict(outcomes)
+
+    async def get_issue_closure(self, *, repo: str, issue_number: int):
+        outcome = self.outcomes[(repo, issue_number)]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
     async def derive_deploy_states(self, refs):
         raise AssertionError("No deploy-state reads are expected")
@@ -305,7 +325,8 @@ async def test_all_issue_reads_failing_same_auth_reason_surface_one_sweep_error(
     assert summary["closed"] == 0
     assert summary["errors"] == [
         "github_issue_authentication_all_reads_failed:"
-        "count=2:status=403:API rate limit exceeded for 207.134.142.114."
+        "count=2:reason=github_access_forbidden:"
+        "status=403:API rate limit exceeded for 207.134.142.114."
     ]
     closure_logs = [
         record.getMessage()
@@ -315,6 +336,102 @@ async def test_all_issue_reads_failing_same_auth_reason_surface_one_sweep_error(
     assert closure_logs == [
         "closure authentication failed for all 2 GitHub issue reads: "
         "API rate limit exceeded for 207.134.142.114."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mixed_success_and_auth_failure_does_not_report_all_reads_failed(
+    session,
+):
+    domain = await _tracker(session)
+    await _tracked_issue(session, domain, number=1281, title="Readable issue")
+    await _tracked_issue(session, domain, number=1282, title="Unreadable issue")
+    github = _PerIssueGithub(
+        {
+            (REPO, 1281): None,
+            (REPO, 1282): ClosureReadFailure(
+                reason_code=CLOSURE_READ_ACCESS_FORBIDDEN,
+                status_code=403,
+                message="Access forbidden",
+            ),
+        }
+    )
+
+    summary = await run_staging_only_closure_sweep(
+        session,
+        org_id=ORG_ID,
+        github=github,
+        production_evidence=_Evidence(()),
+        notify=False,
+        now=CLOSED_AT,
+    )
+
+    assert summary["closed"] == 0
+    assert summary["errors"] == [
+        f"github_issue:{REPO}#1282:Access forbidden"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_different_auth_reasons_do_not_report_one_all_reads_failure(session):
+    domain = await _tracker(session)
+    await _tracked_issue(session, domain, number=1281, title="Missing credentials")
+    await _tracked_issue(session, domain, number=1282, title="Forbidden credentials")
+    github = _PerIssueGithub(
+        {
+            (REPO, 1281): ClosureReadFailure(
+                reason_code=CLOSURE_READ_AUTHENTICATION_REQUIRED,
+                status_code=401,
+                message="Authentication required",
+            ),
+            (REPO, 1282): ClosureReadFailure(
+                reason_code=CLOSURE_READ_ACCESS_FORBIDDEN,
+                status_code=403,
+                message="Access forbidden",
+            ),
+        }
+    )
+
+    summary = await run_staging_only_closure_sweep(
+        session,
+        org_id=ORG_ID,
+        github=github,
+        production_evidence=_Evidence(()),
+        notify=False,
+        now=CLOSED_AT,
+    )
+
+    assert summary["errors"] == [
+        f"github_issue:{REPO}#1281:Authentication required",
+        f"github_issue:{REPO}#1282:Access forbidden",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_auth_closure_failure_does_not_report_authentication_error(session):
+    domain = await _tracker(session)
+    await _tracked_issue(session, domain, number=1281, title="GitHub unavailable")
+    github = _PerIssueGithub(
+        {
+            (REPO, 1281): ClosureReadFailure(
+                reason_code=CLOSURE_READ_CONNECTOR_ERROR,
+                status_code=503,
+                message="GitHub unavailable",
+            )
+        }
+    )
+
+    summary = await run_staging_only_closure_sweep(
+        session,
+        org_id=ORG_ID,
+        github=github,
+        production_evidence=_Evidence(()),
+        notify=False,
+        now=CLOSED_AT,
+    )
+
+    assert summary["errors"] == [
+        f"github_issue:{REPO}#1281:GitHub unavailable"
     ]
 
 

@@ -41,6 +41,7 @@ VAULT_AGENT_GRANT_TTL = timedelta(minutes=15)
 VAULT_ACCESS_ACTORS = {"user", "agent", "api"}
 VAULT_ACCESS_ACTOR_ALIASES = {
     "github_connector": "api",
+    "staging_only_closure_sweep": "api",
 }
 VAULT_AGENT_ACCESS_AVAILABLE = "available"
 VAULT_AGENT_ACCESS_ASK = "ask"
@@ -676,6 +677,7 @@ async def async_resolve_project_bound_env_tokens(
         return {}
     return await _async_resolve_project_bound_env_tokens(
         actor_user_id=_require_actor_user_id(actor_user_id),
+        accessed_by="agent",
         org_id=org_id,
         project_slug=project_slug,
         project_slugs=project_slugs,
@@ -688,16 +690,18 @@ async def async_resolve_project_bound_env_tokens(
 async def async_resolve_org_project_bound_env_tokens(
     *,
     org_id: str,
+    accessed_by: str,
     project_slug: str | None = None,
     project_slugs: list[str] | tuple[str, ...] | set[str] | None = None,
     target_registry_id: int | None = None,
     github_app_only: bool = False,
     github_app_permissions: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Resolve bound tokens for an org-scoped backend maintenance caller."""
+    """Resolve bound tokens and audit the org-scoped maintenance caller."""
 
     return await _async_resolve_project_bound_env_tokens(
         actor_user_id=None,
+        accessed_by=accessed_by,
         org_id=org_id,
         project_slug=project_slug,
         project_slugs=project_slugs,
@@ -710,6 +714,7 @@ async def async_resolve_org_project_bound_env_tokens(
 async def _async_resolve_project_bound_env_tokens(
     *,
     actor_user_id: str | None,
+    accessed_by: str,
     org_id: str | None,
     project_slug: str | None,
     project_slugs: list[str] | tuple[str, ...] | set[str] | None,
@@ -748,8 +753,7 @@ async def _async_resolve_project_bound_env_tokens(
                         secret_id=secret.id,
                         key_name=secret.key_name,
                         action="read",
-                        # github_app mint reads audit as agent on the binding lane.
-                        accessed_by="agent",
+                        accessed_by=accessed_by,
                         uow=uow,
                     )
                     assignment = {
@@ -771,7 +775,7 @@ async def _async_resolve_project_bound_env_tokens(
                 secret_id=secret.id,
                 key_name=secret.key_name,
                 action="read",
-                accessed_by="agent",
+                accessed_by=accessed_by,
                 uow=uow,
             )
             env_assignments.append((binding.env_name, _decrypt(bytes(secret.encrypted_value)), None, None))

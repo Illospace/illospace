@@ -10,7 +10,6 @@ from typing import Any
 
 from brain.platform.db.models.domain import DomainRecord
 from brain.systems import deploy_tracker
-from brain.systems.cortex.project_context.github import GitHubConnectorError
 from brain.systems.deploy_state import DeployStateBatch
 from brain.systems.production_gate_evidence import (
     ProductionEvidenceReader,
@@ -18,6 +17,8 @@ from brain.systems.production_gate_evidence import (
 )
 from brain.systems.production_gate_github import (
     BackendClosureGithubClient,
+    CLOSURE_READ_AUTH_FAILURE_REASONS,
+    ClosureReadFailure,
     ClosureGithubClient,
     FixingPullRequest,
     IssueClosure,
@@ -62,7 +63,10 @@ async def run_staging_only_closure_sweep(
 
     current_time = _utc(now) or datetime.now(timezone.utc)
     evidence_since = current_time - timedelta(hours=24)
-    github = github or BackendClosureGithubClient(org_id=str(org_id))
+    github = github or BackendClosureGithubClient(
+        org_id=str(org_id),
+        caller_label="staging_only_closure_sweep",
+    )
     errors: list[str] = []
     field_summary = await deploy_tracker.ensure_production_gate_fields(
         session,
@@ -225,22 +229,27 @@ async def _read_closed_issues(
     attempts = [result for result in results if result is not None]
     failures = [result for result in attempts if result.error is not None]
     if failures and len(failures) == len(attempts):
-        auth_failures = {
-            _authentication_failure(result.error)
+        typed_failures = [
+            result.error
             for result in failures
-            if result.error is not None
-        }
-        auth_failure = next(iter(auth_failures)) if len(auth_failures) == 1 else None
-        if auth_failure is not None:
-            status_code, message = auth_failure
+            if isinstance(result.error, ClosureReadFailure)
+        ]
+        reason_codes = {failure.reason_code for failure in typed_failures}
+        if (
+            len(typed_failures) == len(failures)
+            and len(reason_codes) == 1
+            and reason_codes <= CLOSURE_READ_AUTH_FAILURE_REASONS
+        ):
+            failure = typed_failures[0]
             logger.error(
                 "closure authentication failed for all %s GitHub issue reads: %s",
                 len(failures),
-                message,
+                failure.message,
             )
             errors.append(
                 "github_issue_authentication_all_reads_failed:"
-                f"count={len(failures)}:status={status_code}:{message}"
+                f"count={len(failures)}:reason={failure.reason_code}:"
+                f"status={failure.status_code}:{failure.message}"
             )
             return []
     for failure in failures:
@@ -258,12 +267,6 @@ async def _read_closed_issues(
         for result in attempts
         if result.candidate is not None
     ]
-
-
-def _authentication_failure(exc: Exception) -> tuple[int, str] | None:
-    if isinstance(exc, GitHubConnectorError) and exc.status_code in {401, 403}:
-        return exc.status_code, str(exc)
-    return None
 
 
 async def _read_deploy_states(

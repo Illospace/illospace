@@ -346,6 +346,7 @@ async def test_resolve_org_project_bound_env_tokens_for_backend(patch_uow, sessi
 
     env = await async_resolve_org_project_bound_env_tokens(
         org_id=ORG_ID,
+        accessed_by="staging_only_closure_sweep",
         project_slug="uwear-ai/uwear-backend",
     )
 
@@ -361,7 +362,7 @@ async def test_resolve_org_project_bound_env_tokens_for_backend(patch_uow, sessi
         )
     ).one()
     assert access_log.actor_user_id is None
-    assert access_log.accessed_by == "agent"
+    assert access_log.accessed_by == "api"
 
 
 async def test_github_app_project_binding_mints_before_manual_skip(patch_uow, session, monkeypatch):

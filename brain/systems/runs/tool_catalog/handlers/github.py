@@ -197,6 +197,7 @@ async def _github_token_candidates(
     repo_slugs: list[str] | None = None,
     for_write: bool = False,
     require_authenticated: bool = False,
+    caller_label: str | None = None,
     org_id: str | None = None,
     user_id: str | None = None,
 ) -> list[dict[str, str | None]]:
@@ -211,6 +212,8 @@ async def _github_token_candidates(
 
     ``require_authenticated`` prevents backend maintenance reads from spending
     GitHub's shared unauthenticated per-IP budget.
+
+    ``caller_label`` names an org-scoped backend reader for vault auditing.
 
     ``repo_slugs`` lets a cross-repository operation mint one installation
     token down-scoped to every participating repository binding.
@@ -262,6 +265,7 @@ async def _github_token_candidates(
             elif require_authenticated:
                 bound_env = await async_resolve_org_project_bound_env_tokens(
                     org_id=org_id,
+                    accessed_by=caller_label or "github_connector",
                     project_slug=repo_slug,
                     project_slugs=repo_slugs,
                     github_app_only=for_write,
@@ -1622,6 +1626,7 @@ async def github_issue_closure_for_backend(
     issue_number: int,
     org_id: str,
     user_id: str | None = None,
+    caller_label: str = "github_connector",
 ) -> GithubIssueClosure | None:
     """Read one issue's closure/closing-PR facts with backend identities."""
 
@@ -1629,6 +1634,7 @@ async def github_issue_closure_for_backend(
         repo_slug=repo_slug,
         token_secret_key=None,
         require_authenticated=True,
+        caller_label=caller_label,
         org_id=org_id,
         user_id=user_id,
     )
@@ -1676,6 +1682,7 @@ async def github_deploy_states_for_backend(
     *,
     org_id: str,
     user_id: str | None = None,
+    caller_label: str = "github_connector",
 ) -> DeployStateBatch[Hashable]:
     """Batch ancestry reads using the backend caller's ordered identities."""
     normalized_refs = {
@@ -1695,6 +1702,7 @@ async def github_deploy_states_for_backend(
                 repo_slug=repo_slug,
                 token_secret_key=None,
                 require_authenticated=True,
+                caller_label=caller_label,
                 org_id=org_id,
                 user_id=user_id,
             )

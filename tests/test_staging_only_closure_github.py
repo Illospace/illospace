@@ -14,7 +14,14 @@ from brain.systems.cortex.project_context.github import (
     async_get_issue_closure_info,
 )
 from brain.systems.deploy_state import DeployStateBatch
-from brain.systems.staging_only_closure import BackendClosureGithubClient
+from brain.systems.deploy_state_github import ancestry_failure
+from brain.systems.production_gate_github import (
+    CLOSURE_READ_ACCESS_FORBIDDEN,
+    CLOSURE_READ_AUTHENTICATION_REQUIRED,
+    CLOSURE_READ_CONNECTOR_ERROR,
+    BackendClosureGithubClient,
+    ClosureReadFailure,
+)
 
 
 @pytest.mark.asyncio
@@ -115,11 +122,13 @@ async def test_org_only_backend_closure_read_resolves_authenticated_project_toke
         repo_slug="uwear-ai/uwear-backend",
         issue_number=1281,
         org_id="org-1",
+        caller_label="staging_only_closure_sweep",
     )
 
     assert result is closure
     resolve_bound.assert_awaited_once_with(
         org_id="org-1",
+        accessed_by="staging_only_closure_sweep",
         project_slug="uwear-ai/uwear-backend",
         project_slugs=None,
         github_app_only=False,
@@ -153,6 +162,7 @@ async def test_org_only_backend_closure_read_never_falls_back_to_public(
             repo_slug="uwear-ai/uwear-backend",
             issue_number=1281,
             org_id="org-1",
+            caller_label="staging_only_closure_sweep",
         )
 
     closure_read.assert_not_awaited()
@@ -197,7 +207,11 @@ async def test_backend_adapter_uses_shared_closure_and_deploy_state_reads(monkey
         "github_deploy_states_for_backend",
         deploy_read,
     )
-    client = BackendClosureGithubClient(org_id="org-1", user_id="user-1")
+    client = BackendClosureGithubClient(
+        org_id="org-1",
+        user_id="user-1",
+        caller_label="staging_only_closure_sweep",
+    )
 
     closure = await client.get_issue_closure(
         repo="uwear-ai/uwear-backend",
@@ -216,9 +230,90 @@ async def test_backend_adapter_uses_shared_closure_and_deploy_state_reads(monkey
         issue_number=1281,
         org_id="org-1",
         user_id="user-1",
+        caller_label="staging_only_closure_sweep",
     )
     deploy_read.assert_awaited_once_with(
         {"key": ("uwear-ai/uwear-backend", "a" * 40)},
         org_id="org-1",
         user_id="user-1",
+        caller_label="staging_only_closure_sweep",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "reason_code"),
+    [
+        (401, CLOSURE_READ_AUTHENTICATION_REQUIRED),
+        (403, CLOSURE_READ_ACCESS_FORBIDDEN),
+        (503, CLOSURE_READ_CONNECTOR_ERROR),
+    ],
+)
+async def test_backend_adapter_translates_connector_errors(
+    monkeypatch,
+    status_code,
+    reason_code,
+):
+    import brain.systems.runs.tool_catalog.handlers.github as handler
+
+    monkeypatch.setattr(
+        handler,
+        "github_issue_closure_for_backend",
+        AsyncMock(
+            side_effect=GitHubConnectorError(
+                status_code=status_code,
+                message="stable test message",
+            )
+        ),
+    )
+    client = BackendClosureGithubClient(
+        org_id="org-1",
+        caller_label="staging_only_closure_sweep",
+    )
+
+    with pytest.raises(ClosureReadFailure) as exc_info:
+        await client.get_issue_closure(
+            repo="uwear-ai/uwear-backend",
+            issue_number=1281,
+        )
+
+    assert exc_info.value.reason_code == reason_code
+    assert exc_info.value.status_code == status_code
+    assert exc_info.value.message == "stable test message"
+
+
+@pytest.mark.asyncio
+async def test_backend_deploy_state_empty_candidates_raise_credential_failure(
+    monkeypatch,
+):
+    import brain.systems.runs.tool_catalog.handlers.github as handler
+
+    candidates = AsyncMock(return_value=[])
+    healthy_batch = DeployStateBatch(
+        {},
+        observations_by_key={},
+        observations_by_ref={},
+    )
+    derive = AsyncMock(return_value=healthy_batch)
+    captured_errors = []
+
+    def capture_failure(branch, exc):
+        captured_errors.append(exc)
+        return ancestry_failure(branch, exc)
+
+    monkeypatch.setattr(handler, "_github_token_candidates", candidates)
+    monkeypatch.setattr(handler, "derive_deploy_states", derive)
+    monkeypatch.setattr(handler, "ancestry_failure", capture_failure)
+
+    batch = await handler.github_deploy_states_for_backend(
+        {"fix": ("uwear-ai/uwear-backend", "a" * 40)},
+        org_id="org-1",
+        caller_label="staging_only_closure_sweep",
+    )
+
+    assert batch["fix"] is None
+    assert len(captured_errors) == 1
+    assert isinstance(captured_errors[0], GitHubConnectorError)
+    assert captured_errors[0].status_code == 401
+    assert captured_errors[0].message == "No GitHub token candidates were available"
+    derive.assert_awaited_once_with({}, tokens={})
