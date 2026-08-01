@@ -168,9 +168,8 @@ class TestProviderInference:
                 "anthropic/claude-sonnet-4-6",
                 org_id="org-1",
             )
-            assert _agent_context.resolved_llm is llm
-            assert _agent_context.resolved_provider is provider
-            assert _agent_context.resolved_model == "anthropic/claude-sonnet-4-6"
+            assert _agent_context.resolved_llm_context.llm is llm
+            assert _agent_context.resolved_llm_context.provider is provider
 
         assert resolved is llm
         assert resolve.await_args.kwargs["provider"] == "anthropic"
@@ -235,6 +234,96 @@ async def test_agent_retries_gpt_5_6_on_gpt_5_5_when_account_lacks_entitlement(m
         "provider": "openai",
         "auth_mode": "chatgpt",
     }
+
+
+@pytest.mark.asyncio
+async def test_cortex_reply_checker_reuses_run_client_with_model_after_fallback(monkeypatch):
+    from brain.platform.integrations.openai_codex_client import OpenAICodexError
+    from brain.platform.integrations.providers import (
+        LLMResponse,
+        ToolUseContentBlock,
+        Usage,
+    )
+    from brain.systems.runs.direct_agent import (
+        CORTEX_REPLY_TOOL,
+        _handle_cortex_reply,
+        run_agent_async,
+    )
+    from brain.systems.runs.execution_context import (
+        AgentExecutionContext,
+        bind_agent_context,
+    )
+
+    llm = _mock_llm_client(MagicMock(), provider="openai")
+    llm.auth_mode = "chatgpt"
+    llm.is_oauth = True
+    requests = []
+
+    async def fake_api_call(_provider, request, *_args, **_kwargs):
+        requests.append(request)
+        if len(requests) == 1:
+            raise OpenAICodexError(
+                "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+                status_code=400,
+            )
+        return LLMResponse(
+            content=[
+                ToolUseContentBlock(
+                    id="reply-1",
+                    name="cortex_reply",
+                    input={"content": "Fallback reply"},
+                )
+            ],
+            stop_reason="tool_use",
+            usage=Usage(input_tokens=3, output_tokens=2),
+            model="gpt-5.5",
+        )
+
+    review = MagicMock(return_value={
+        "status": "resolved",
+        "approved": True,
+        "rationale": "done",
+        "missing_requirements": [],
+        "raw_output": "",
+    })
+    resolved_provider = MagicMock()
+    monkeypatch.setattr(
+        "brain.systems.runs.direct_agent.get_provider",
+        lambda *_args: resolved_provider,
+    )
+    monkeypatch.setattr("brain.systems.runs.direct_agent._api_call_with_retry_async", fake_api_call)
+    monkeypatch.setattr("brain.systems.runs.direct_agent._async_record_api_call", AsyncMock())
+    monkeypatch.setattr(
+        "brain.systems.runs.direct_agent._runtime_async_apply_agent_session_side_effects",
+        AsyncMock(),
+    )
+    monkeypatch.setattr("brain.systems.runs.direct_agent.review_final_reply_once", review)
+
+    context = AgentExecutionContext(
+        run=SimpleNamespace(run_id=42),
+        idea_id="idea-123",
+        user_request="Reply after fallback",
+    )
+    with bind_agent_context(context):
+        result = await run_agent_async(
+            "Reply after fallback",
+            model="openai/gpt-5.6-sol",
+            thinking="xhigh",
+            tools=[CORTEX_REPLY_TOOL],
+            tool_handlers={"cortex_reply": _handle_cortex_reply},
+            max_turns=1,
+            persist_session=False,
+            skip_harvest=True,
+            brain_context_preloaded=True,
+            resolved_llm=llm,
+        )
+
+    assert result.success is True
+    assert [request.model for request in requests] == ["gpt-5.6-sol", "gpt-5.5"]
+    review.assert_called_once()
+    assert review.call_args.kwargs["llm"] is llm
+    assert review.call_args.kwargs["provider"] is resolved_provider
+    assert review.call_args.kwargs["model"] == "openai/gpt-5.5"
 
 
 @pytest.mark.asyncio
@@ -2719,6 +2808,16 @@ class TestFinalReplyReview:
 
 
 class TestCortexReplyHandler:
+    @pytest.fixture(autouse=True)
+    def _set_declared_llm_context_default(self):
+        from brain.systems.runs.direct_agent import _agent_context
+
+        _agent_context.resolved_llm_context = None
+        _agent_context.execution_metadata = None
+        yield
+        _agent_context.resolved_llm_context = None
+        _agent_context.execution_metadata = None
+
     def test_read_capabilities_reports_slack_manifest(self):
         from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
 
@@ -3102,11 +3201,17 @@ class TestCortexReplyHandler:
         _agent_context.user_request = "Say hello"
         _agent_context.reply_contents = []
         _agent_context.final_reply_review = None
+        from brain.systems.runs.execution_context import ResolvedLLMContext
+
         resolved_llm = MagicMock()
         resolved_provider = MagicMock()
-        _agent_context.resolved_llm = resolved_llm
-        _agent_context.resolved_provider = resolved_provider
-        _agent_context.resolved_model = "openai/gpt-5.6-sol"
+        _agent_context.resolved_llm_context = ResolvedLLMContext(
+            llm=resolved_llm,
+            provider=resolved_provider,
+        )
+        _agent_context.execution_metadata = {
+            "routing": {"effective": {"model": "openai/gpt-5.6-sol"}}
+        }
         _agent_context.intent_satisfaction = {
             "intent_type": "quick_answer",
             "completion_mode": "light",
@@ -3134,9 +3239,8 @@ class TestCortexReplyHandler:
             _agent_context.user_request = None
             _agent_context.reply_contents = []
             _agent_context.final_reply_review = None
-            _agent_context.resolved_llm = None
-            _agent_context.resolved_provider = None
-            _agent_context.resolved_model = None
+            _agent_context.resolved_llm_context = None
+            _agent_context.execution_metadata = None
             _agent_context.intent_satisfaction = None
 
     @patch("brain.systems.runs.direct_agent.review_final_reply_once")

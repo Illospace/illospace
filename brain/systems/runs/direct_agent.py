@@ -104,6 +104,7 @@ from brain.systems.runs.direct_loop.streaming import (
     async_streaming_call as _runtime_async_streaming_call,
 )
 from brain.systems.runs.execution_context import (
+    ResolvedLLMContext,
     bind_agent_context,
     current_agent_context,
 )
@@ -457,9 +458,10 @@ async def _init_llm_async(
         llm = resolved_llm
     provider = get_provider(llm.provider, llm.client)
     if getattr(_agent_context, "session_id", None) == session_id:
-        _agent_context.resolved_llm = llm
-        _agent_context.resolved_provider = provider
-        _agent_context.resolved_model = model
+        _agent_context.resolved_llm_context = ResolvedLLMContext(
+            llm=llm,
+            provider=provider,
+        )
     extra_headers = llm.build_request_headers(session_id=session_id)
     logger.info(
         "Agent %s: provider=%s, source=%s, auth_mode=%s, token=%s…, oauth=%s",
@@ -1379,6 +1381,7 @@ async def run_agent_async(
         "recent_tool_results": [],
         "loop_control": state.loop_control,
         "final_reply_review": None,
+        "resolved_llm_context": None,
         "artifact_contract_block_count": 0,
     }
     if workspace_root:

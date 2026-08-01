@@ -8,6 +8,8 @@ from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Callable, Iterator, Mapping, TypeVar, cast
 
 if TYPE_CHECKING:
+    from brain.platform.integrations.llm import LLMClient
+    from brain.platform.integrations.providers import Provider
     from brain.systems.runs.direct_loop.final_reply_evidence import ToolResultEvidence
 
 
@@ -19,6 +21,14 @@ class _AgentRunState:
     """Mutable namespaces intentionally shared by cloned tool-call contexts."""
 
     values: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ResolvedLLMContext:
+    """Resolved client objects shared with run-scoped LLM subcalls."""
+
+    llm: LLMClient
+    provider: Provider
 
 
 def _clone_context_value(value: object) -> object:
@@ -102,6 +112,7 @@ class AgentExecutionContext:
     recent_tool_results: list[ToolResultEvidence] = field(default_factory=list)
     execution_artifacts: list[dict] = field(default_factory=list)
     execution_metadata: dict | None = None
+    resolved_llm_context: ResolvedLLMContext | None = None
     intent_satisfaction: dict | None = None
     final_reply_review: dict | None = None
     artifact_contract_block_count: int = 0
@@ -169,6 +180,7 @@ def bind_agent_context(
 
 __all__ = [
     "AgentExecutionContext",
+    "ResolvedLLMContext",
     "bind_agent_context",
     "clone_agent_context_mapping",
     "current_agent_context",
