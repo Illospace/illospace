@@ -1907,6 +1907,20 @@ async def test_spawn_worker_effort_override_merges_over_materialized_parent_poli
     assert events[0].payload["routing"]["effort"] == "low"
 
 
+async def test_spawn_worker_coerces_inherited_api_key_model(monkeypatch):
+    payload, captured, _events = await _captured_spawn_worker(
+        monkeypatch,
+        parent_model_policy={
+            "model": "openai/gpt-5.4-mini",
+            "thinking": "low",
+        },
+    )
+
+    assert captured["model_policy"]["model"] == "openai/gpt-5.6-sol"
+    assert payload["model"] == "openai/gpt-5.6-sol"
+    assert payload["routing"]["auth_mode"] == "chatgpt"
+
+
 async def test_spawn_worker_without_overrides_materializes_parent_effective_defaults(monkeypatch):
     import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
 

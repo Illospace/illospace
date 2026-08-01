@@ -150,6 +150,42 @@ async def test_api_key_openai_metadata_model_is_coerced_with_structured_log(capl
 
 
 @pytest.mark.asyncio
+async def test_bare_api_key_model_is_normalized_away_with_structured_log(caplog):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    trigger = _trigger_payload()
+    trigger["payload"]["metadata"]["model"] = "gpt-4.1"
+
+    with caplog.at_level("WARNING", logger="work_intake"):
+        request = await build_agent_run_request(
+            object(),
+            WorkIntakeEvent.from_trigger_payload(trigger),
+        )
+
+    assert request.model_policy["model"] == "openai/gpt-5.5"
+    record = next(
+        record for record in caplog.records if record.event == "api_key_model_coerced"
+    )
+    assert record.requested_value == "gpt-4.1"
+    assert record.coerced_value == "openai/gpt-5.5"
+
+
+@pytest.mark.asyncio
+async def test_admitted_model_policy_stores_the_normalized_id():
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    trigger = _trigger_payload()
+    trigger["payload"]["metadata"]["model"] = " OPENAI/GPT-5.6-SOL "
+
+    request = await build_agent_run_request(
+        object(),
+        WorkIntakeEvent.from_trigger_payload(trigger),
+    )
+
+    assert request.model_policy["model"] == "openai/gpt-5.6-sol"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_metadata_model_passes_admission_guard_untouched():
     from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
 

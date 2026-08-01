@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from hashlib import sha256
 import json
+import logging
 import re
 import uuid
 from typing import Any
@@ -37,6 +38,8 @@ from brain.systems.runs.routing_metadata import effective_routing_snapshot
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.tool_policy import normalize_tool_policy
 
+
+logger = logging.getLogger(__name__)
 
 _HEADLESS_BLOCKED_TOOLS = frozenset({
     "cortex_reply",
@@ -259,7 +262,22 @@ async def _materialized_parent_policy(session: Any, parent: Any) -> dict[str, An
             user_id=parent.user_id,
             org_id=parent.org_id,
         )
-    policy["model"] = _canonical_inherited_model(model)
+    inherited_model = _canonical_inherited_model(model)
+    coerced_model = coerce_openai_api_key_model(normalize_model_name(inherited_model))
+    if coerced_model:
+        logger.warning(
+            "Coercing inherited API-key OpenAI model %s to %s for spawned worker",
+            inherited_model,
+            coerced_model,
+            extra={
+                "event": "api_key_model_coerced",
+                "routing_source": "spawn_worker.inherited",
+                "requested_value": inherited_model,
+                "coerced_value": coerced_model,
+            },
+        )
+        inherited_model = coerced_model
+    policy["model"] = inherited_model
 
     thinking = str(
         live_routing.get("effort")

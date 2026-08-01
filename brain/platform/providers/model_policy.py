@@ -452,18 +452,14 @@ async def async_get_bulk_route(
             config = dict((row or {}).get("memory_model_config") or {})
             raw_model = config.get("bulk_model")
             if isinstance(raw_model, str) and raw_model.strip():
-                normalized_model = normalize_model_name(raw_model)
-                catalog_model = canonical_catalog_model_id(normalized_model)
-                if (
-                    catalog_model == "openai/gpt-5.5"
-                    and "gpt-5.5" not in raw_model.strip().lower()
-                ):
-                    catalog_model = None
+                # Strict catalog lookup only — never normalize_model_name here,
+                # whose pricing fallbacks would launder junk into gpt-5.5.
+                catalog_model = canonical_catalog_model_id(raw_model)
                 if (
                     catalog_model
-                    and coerce_openai_api_key_model(normalized_model) is None
+                    and coerce_openai_api_key_model(catalog_model) is None
                 ):
-                    model = normalized_model
+                    model = catalog_model
             configured_thinking = (
                 str(config.get("bulk_thinking") or "").strip().lower()
             )

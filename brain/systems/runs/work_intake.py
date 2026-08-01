@@ -693,16 +693,22 @@ async def build_agent_run_request(
         model_policy.get("model") or model_policy.get("model_override") or ""
     ).strip()
     if requested_model:
-        coerced_model = coerce_openai_api_key_model(
-            normalize_model_name(requested_model)
-        )
-        if coerced_model:
+        normalized_model = normalize_model_name(requested_model)
+        coerced_model = coerce_openai_api_key_model(normalized_model)
+        # A bare API-key name (e.g. "gpt-4.1") is re-routed by normalization
+        # itself; store the normalized id so the raw value never executes.
+        target_model = coerced_model or normalized_model
+        if coerced_model or coerce_openai_api_key_model(requested_model):
             _warn_api_key_model_coercion(
                 request.metadata,
                 requested_value=requested_model,
-                coerced_value=coerced_model,
+                coerced_value=target_model,
             )
-            model_policy["model"] = coerced_model
+        if (
+            model_policy.get("model") != target_model
+            or "model_override" in model_policy
+        ):
+            model_policy["model"] = target_model
             model_policy.pop("model_override", None)
             request = replace(request, model_policy=model_policy)
     status_context = await build_status_question_context(
