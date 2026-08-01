@@ -327,6 +327,44 @@ async def test_resolve_project_bound_env_tokens_returns_org_bound_tokens_for_mem
     assert github.access_count == 1
 
 
+async def test_resolve_org_project_bound_env_tokens_for_backend(patch_uow, session):
+    from brain.systems.vault import async_resolve_org_project_bound_env_tokens
+
+    github = await _secret(
+        session,
+        "GITHUB_TOKEN",
+        "backend-github-token",
+        org_id=ORG_ID,
+        access_level="ask",
+    )
+    await _binding(
+        session,
+        github,
+        project_slug="uwear-ai/uwear-backend",
+        env_name="GITHUB_TOKEN",
+    )
+
+    env = await async_resolve_org_project_bound_env_tokens(
+        org_id=ORG_ID,
+        accessed_by="staging_only_closure_sweep",
+        project_slug="uwear-ai/uwear-backend",
+    )
+
+    assert env == {"GITHUB_TOKEN": "backend-github-token"}
+    await session.refresh(github)
+    assert github.access_count == 1
+    access_log = (
+        await session.scalars(
+            select(VaultAccessLog).where(
+                VaultAccessLog.secret_id == github.id,
+                VaultAccessLog.action == "read",
+            )
+        )
+    ).one()
+    assert access_log.actor_user_id is None
+    assert access_log.accessed_by == "api"
+
+
 async def test_github_app_project_binding_mints_before_manual_skip(patch_uow, session, monkeypatch):
     from brain.systems.vault import async_resolve_project_bound_env_tokens
 

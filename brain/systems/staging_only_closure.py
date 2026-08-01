@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any
@@ -16,6 +17,8 @@ from brain.systems.production_gate_evidence import (
 )
 from brain.systems.production_gate_github import (
     BackendClosureGithubClient,
+    CLOSURE_READ_AUTH_FAILURE_REASONS,
+    ClosureReadFailure,
     ClosureGithubClient,
     FixingPullRequest,
     IssueClosure,
@@ -38,6 +41,14 @@ TRACKER_DOMAIN_SLUG = "github-ticket-tracker"
 logger = logging.getLogger("illo.staging_only_closure")
 
 
+@dataclass(frozen=True, slots=True)
+class _ClosureReadOutcome:
+    repo: str
+    issue_number: int
+    candidate: tuple[DomainRecord, IssueClosure] | None = None
+    error: Exception | None = None
+
+
 async def run_staging_only_closure_sweep(
     session: Any,
     *,
@@ -52,7 +63,10 @@ async def run_staging_only_closure_sweep(
 
     current_time = _utc(now) or datetime.now(timezone.utc)
     evidence_since = current_time - timedelta(hours=24)
-    github = github or BackendClosureGithubClient(org_id=str(org_id))
+    github = github or BackendClosureGithubClient(
+        org_id=str(org_id),
+        caller_label="staging_only_closure_sweep",
+    )
     errors: list[str] = []
     field_summary = await deploy_tracker.ensure_production_gate_fields(
         session,
@@ -179,7 +193,7 @@ async def _read_closed_issues(
 
     async def read(
         record: DomainRecord,
-    ) -> tuple[DomainRecord, IssueClosure] | None:
+    ) -> _ClosureReadOutcome | None:
         identity = tracked_issue_identity(
             dict(record.data or {}),
             title=record.title,
@@ -194,24 +208,65 @@ async def _read_closed_issues(
                     issue_number=issue_number,
                 )
         except Exception as exc:  # noqa: BLE001 - isolate one repository read
-            logger.warning(
-                "closure read failed for %s#%s: %s",
-                repo,
-                issue_number,
-                exc,
+            return _ClosureReadOutcome(
+                repo=repo,
+                issue_number=issue_number,
+                error=exc,
             )
-            errors.append(f"github_issue:{repo}#{issue_number}:{exc}")
-            return None
         if (
             closure is None
             or closure.state.casefold() != "closed"
             or not closure.fixing_pull_requests
         ):
-            return None
-        return record, closure
+            return _ClosureReadOutcome(repo=repo, issue_number=issue_number)
+        return _ClosureReadOutcome(
+            repo=repo,
+            issue_number=issue_number,
+            candidate=(record, closure),
+        )
 
     results = await asyncio.gather(*(read(record) for record in records))
-    return [result for result in results if result is not None]
+    attempts = [result for result in results if result is not None]
+    failures = [result for result in attempts if result.error is not None]
+    if failures and len(failures) == len(attempts):
+        typed_failures = [
+            result.error
+            for result in failures
+            if isinstance(result.error, ClosureReadFailure)
+        ]
+        reason_codes = {failure.reason_code for failure in typed_failures}
+        if (
+            len(typed_failures) == len(failures)
+            and len(reason_codes) == 1
+            and reason_codes <= CLOSURE_READ_AUTH_FAILURE_REASONS
+        ):
+            failure = typed_failures[0]
+            logger.error(
+                "closure authentication failed for all %s GitHub issue reads: %s",
+                len(failures),
+                failure.message,
+            )
+            errors.append(
+                "github_issue_authentication_all_reads_failed:"
+                f"count={len(failures)}:reason={failure.reason_code}:"
+                f"status={failure.status_code}:{failure.message}"
+            )
+            return []
+    for failure in failures:
+        logger.warning(
+            "closure read failed for %s#%s: %s",
+            failure.repo,
+            failure.issue_number,
+            failure.error,
+        )
+        errors.append(
+            f"github_issue:{failure.repo}#{failure.issue_number}:{failure.error}"
+        )
+    return [
+        result.candidate
+        for result in attempts
+        if result.candidate is not None
+    ]
 
 
 async def _read_deploy_states(
@@ -220,6 +275,12 @@ async def _read_deploy_states(
     github: ClosureGithubClient,
     errors: list[str],
 ) -> DeployStateBatch:
+    if not candidates:
+        return DeployStateBatch(
+            {},
+            observations_by_key={},
+            observations_by_ref={},
+        )
     refs = {
         (closure.repo, closure.number, pull_request.number): (
             pull_request.repo,
