@@ -19,6 +19,7 @@ from brain.systems.knowledge.connectors.base import (
     KnowledgeDraft,
     KnowledgeEnumeration,
 )
+from brain.systems.slack.client import SlackApiError
 from brain.systems.slack.monitored_intakes import visible_slack_content
 from brain.systems.slack.monitors import monitored_channels
 
@@ -26,6 +27,12 @@ from brain.systems.slack.monitors import monitored_channels
 _CURSOR_VERSION = 1
 _SLACK_MESSAGE_KIND = "slack_message"
 _THREAD_PAGE_SIZE = 200
+
+# The one Slack error that proves the thread root no longer exists. Broader
+# errors (channel_not_found, auth faults) stay fatal: they can mean a stale
+# channel id or a wrong-workspace token, and archiving reachable content on a
+# configuration fault would be silent data loss.
+_GONE_THREAD_ERRORS = frozenset({"thread_not_found"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +204,10 @@ class SlackKnowledgeConnector:
     event queue is caught up, the same bounded history cursor continuously
     refreshes monitored channels so message edits and Illo-authored replies that
     intake intentionally ignores cannot leave the index stale forever.
+
+    A thread whose root was deleted at the source is archived through a
+    tombstone draft instead of raising, so one deleted message can never pin
+    the cursor and wedge the whole sync.
     """
 
     source_key = "slack"
@@ -430,12 +441,24 @@ class SlackKnowledgeConnector:
         cursor: str | None = None
         seen_cursors: set[str] = set()
         while True:
-            response = await client.conversation_replies(
-                channel=channel.id,
-                thread_ts=thread_ts,
-                limit=_THREAD_PAGE_SIZE,
-                cursor=cursor,
-            )
+            try:
+                response = await client.conversation_replies(
+                    channel=channel.id,
+                    thread_ts=thread_ts,
+                    limit=_THREAD_PAGE_SIZE,
+                    cursor=cursor,
+                )
+            except SlackApiError as exc:
+                if _clean(getattr(exc, "error", "")) not in _GONE_THREAD_ERRORS:
+                    raise
+                # The thread root was deleted. One gone thread must not wedge
+                # the cursor forever — and partially fetched pages or a
+                # just-deleted history root must not be indexed as live.
+                return self._deleted_thread_draft(
+                    connection=connection,
+                    channel=channel,
+                    thread_ts=thread_ts,
+                )
             for message in response.get("messages") or []:
                 if isinstance(message, Mapping) and _clean(message.get("ts")):
                     messages_by_ts[_clean(message.get("ts"))] = dict(message)
@@ -455,8 +478,10 @@ class SlackKnowledgeConnector:
                 messages_by_ts.setdefault(root_ts, dict(root_fallback))
         messages = sorted(messages_by_ts.values(), key=_slack_timestamp_key)
         if not messages:
-            raise RuntimeError(
-                f"Slack returned no messages for {channel.id}:{thread_ts}"
+            return self._deleted_thread_draft(
+                connection=connection,
+                channel=channel,
+                thread_ts=thread_ts,
             )
 
         root = messages[0]
@@ -496,6 +521,44 @@ class SlackKnowledgeConnector:
             source_created_at=source_created_at,
             source_updated_at=source_updated_at,
             distill=True,
+        )
+
+    def _deleted_thread_draft(
+        self,
+        *,
+        connection: ExternalAgentConnectionRow,
+        channel: _Channel,
+        thread_ts: str,
+    ) -> KnowledgeDraft:
+        """Archive a thread Slack no longer serves so recall cannot cite it."""
+
+        team_id = _team_id(connection)
+        channel_label = f"#{channel.name}" if channel.name else channel.id
+        thread_at = _slack_datetime(thread_ts)
+        return KnowledgeDraft(
+            source=self.source_key,
+            kind="slack_thread",
+            source_ref=f"slack:{team_id}:{channel.id}:{thread_ts}",
+            title=f"Slack {channel_label}: deleted thread {thread_ts}",
+            summary=(
+                f"Slack thread {thread_ts} in {channel_label} was deleted at "
+                "the source. Its indexed content is archived."
+            ),
+            entities=[channel.id, *([channel.name] if channel.name else [])],
+            raw_text="",
+            extra={
+                "org_id": str(connection.org_id),
+                "actor_user_id": str(connection.owner_user_id),
+                "connection_id": str(connection.id),
+                "team_id": team_id,
+                "channel_id": channel.id,
+                "channel_name": channel.name,
+                "thread_ts": thread_ts,
+                "deleted": True,
+            },
+            source_created_at=thread_at,
+            source_updated_at=thread_at,
+            archived_at=datetime.now(timezone.utc),
         )
 
 
