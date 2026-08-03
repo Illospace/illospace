@@ -342,6 +342,23 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         },
     },
     {
+        "key": "meetings",
+        "name": "Meeting Notetaker",
+        "category": "external_action",
+        "summary": (
+            "Illo can join one Google Meet through the optional meetbot service, "
+            "observe honest session state, leave, and post visible meeting chat."
+        ),
+        "aliases": ("meeting", "meetbot", "google meet", "notetaker"),
+        "tools": (
+            "join_meeting",
+            "leave_meeting",
+            "meeting_status",
+            "send_meeting_chat",
+        ),
+        "setup": {"mode": "optional_service", "guide_ref": "docs/meetings.md"},
+    },
+    {
         "key": "code_execution",
         "name": "Code and File Execution",
         "category": "runtime_surface",

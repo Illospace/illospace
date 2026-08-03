@@ -111,6 +111,10 @@ register_inbound_envelope_handler(
     "slack_message",
     "brain.systems.slack.inbound:process_slack_message_envelope",
 )
+register_inbound_envelope_handler(
+    "meeting_transcript",
+    "brain.systems.meetings.inbound:process_meeting_transcript_envelope",
+)
 
 
 __all__ = [

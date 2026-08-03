@@ -78,6 +78,11 @@ class SurfaceAdmissionSpec:
     outcome_target_key: str | None = None
     payload_error_types: tuple[type[Exception], ...] = ()
     invalid_payload_reason: str = "invalid_payload"
+    payload_failure_operation: str | None = None
+    missing_authority_reason: str = "missing_authority_user"
+    missing_authority_failure_operation: str | None = None
+    include_origin_in_outcome: bool = True
+    action_result_target_fields: tuple[str, ...] = ()
 
 
 async def admit_surface_envelope(
@@ -97,10 +102,11 @@ async def admit_surface_envelope(
             complete,
             spec=spec,
             event=event,
-            reason="missing_authority_user",
+            reason=spec.missing_authority_reason,
             error=spec.missing_authority_error,
             target={"kind": spec.kind},
             reasoning_summary=spec.missing_authority_reasoning,
+            operation=spec.missing_authority_failure_operation,
         )
 
     try:
@@ -120,6 +126,7 @@ async def admit_surface_envelope(
             error=str(exc),
             target={"kind": spec.kind},
             reasoning_summary=str(exc),
+            operation=spec.payload_failure_operation,
         )
 
     surface_target = spec.build_target(trigger_payload, normalized)
@@ -138,7 +145,11 @@ async def admit_surface_envelope(
             error=reason,
             target=target,
             reasoning_summary=admission.skipped_reason or spec.admission_failure_reasoning,
-            origin=normalized.get("origin"),
+            origin=(
+                normalized.get("origin")
+                if spec.include_origin_in_outcome
+                else None
+            ),
             include_target_copy=True,
         )
 
@@ -148,10 +159,14 @@ async def admit_surface_envelope(
         "operation": spec.success_operation,
         "run_id": admission.run_id,
         "event_id": str(event.id),
-        "origin": normalized.get("origin"),
     }
+    if spec.include_origin_in_outcome:
+        action_result["origin"] = normalized.get("origin")
     if spec.outcome_target_key:
         action_result[spec.outcome_target_key] = target
+    for field_name in spec.action_result_target_fields:
+        if field_name in target:
+            action_result[field_name] = target[field_name]
     if spec.build_ack is not None:
         action_result.update(
             spec.build_ack(
@@ -201,9 +216,10 @@ async def _complete_failure(
     reasoning_summary: str,
     origin: Any = None,
     include_target_copy: bool = False,
+    operation: str | None = None,
 ) -> dict[str, Any]:
     action_result: dict[str, Any] = {
-        "operation": spec.failure_operation,
+        "operation": operation or spec.failure_operation,
         "reason": reason,
         "event_id": str(event.id),
     }
@@ -211,6 +227,9 @@ async def _complete_failure(
         action_result["origin"] = origin
     if include_target_copy and spec.outcome_target_key:
         action_result[spec.outcome_target_key] = dict(target)
+    for field_name in spec.action_result_target_fields:
+        if field_name in target:
+            action_result[field_name] = target[field_name]
     return await complete(
         InboundCompletion(
             status=STATUS_FAILED,
