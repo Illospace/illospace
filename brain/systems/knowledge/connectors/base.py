@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,12 +33,22 @@ class KnowledgeDraft:
     distill: bool = False
 
 
+class EnumerationFailureKind(StrEnum):
+    """How the sync service must account for an enumeration failure."""
+
+    TRANSIENT = "transient"
+    CONFIGURATION = "configuration"
+
+
 @dataclass(frozen=True)
 class EnumerationFailure:
     """One source scope that could not be enumerated."""
 
     scope: str
     message: str
+    kind: EnumerationFailureKind = EnumerationFailureKind.TRANSIENT
+    reason_code: str | None = None
+    remediation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +74,7 @@ class KnowledgeConnector(Protocol):
 
 __all__ = [
     "EnumerationFailure",
+    "EnumerationFailureKind",
     "KnowledgeConnector",
     "KnowledgeDraft",
     "KnowledgeEnumeration",

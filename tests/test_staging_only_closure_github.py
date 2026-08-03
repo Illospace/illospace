@@ -15,10 +15,12 @@ from brain.systems.cortex.project_context.github import (
 )
 from brain.systems.deploy_state import DeployStateBatch
 from brain.systems.deploy_state_github import ancestry_failure
+from brain.systems.github_read_failures import (
+    GITHUB_READ_ACCESS_FORBIDDEN,
+    GITHUB_READ_AUTHENTICATION_REQUIRED,
+    GITHUB_READ_CONNECTOR_ERROR,
+)
 from brain.systems.production_gate_github import (
-    CLOSURE_READ_ACCESS_FORBIDDEN,
-    CLOSURE_READ_AUTHENTICATION_REQUIRED,
-    CLOSURE_READ_CONNECTOR_ERROR,
     BackendClosureGithubClient,
     ClosureReadFailure,
 )
@@ -244,9 +246,9 @@ async def test_backend_adapter_uses_shared_closure_and_deploy_state_reads(monkey
 @pytest.mark.parametrize(
     ("status_code", "reason_code"),
     [
-        (401, CLOSURE_READ_AUTHENTICATION_REQUIRED),
-        (403, CLOSURE_READ_ACCESS_FORBIDDEN),
-        (503, CLOSURE_READ_CONNECTOR_ERROR),
+        (401, GITHUB_READ_AUTHENTICATION_REQUIRED),
+        (403, GITHUB_READ_ACCESS_FORBIDDEN),
+        (503, GITHUB_READ_CONNECTOR_ERROR),
     ],
 )
 async def test_backend_adapter_translates_connector_errors(

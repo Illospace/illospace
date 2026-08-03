@@ -12,17 +12,7 @@ from brain.systems.cortex.project_context.github import (
     GithubIssueClosure as IssueClosure,
 )
 from brain.systems.deploy_state import DeployStateBatch
-
-
-CLOSURE_READ_AUTHENTICATION_REQUIRED = "github_authentication_required"
-CLOSURE_READ_ACCESS_FORBIDDEN = "github_access_forbidden"
-CLOSURE_READ_CONNECTOR_ERROR = "github_connector_error"
-CLOSURE_READ_AUTH_FAILURE_REASONS = frozenset(
-    {
-        CLOSURE_READ_AUTHENTICATION_REQUIRED,
-        CLOSURE_READ_ACCESS_FORBIDDEN,
-    }
-)
+from brain.systems.github_read_failures import github_read_reason_code
 
 
 @dataclass(slots=True)
@@ -103,14 +93,8 @@ class BackendClosureGithubClient:
 
 
 def _closure_read_failure(exc: GitHubConnectorError) -> ClosureReadFailure:
-    if exc.status_code == 401:
-        reason_code = CLOSURE_READ_AUTHENTICATION_REQUIRED
-    elif exc.status_code == 403:
-        reason_code = CLOSURE_READ_ACCESS_FORBIDDEN
-    else:
-        reason_code = CLOSURE_READ_CONNECTOR_ERROR
     return ClosureReadFailure(
-        reason_code=reason_code,
+        reason_code=github_read_reason_code(exc),
         status_code=exc.status_code,
         message=exc.message,
     )

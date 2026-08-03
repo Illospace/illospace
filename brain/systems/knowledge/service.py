@@ -22,6 +22,7 @@ from brain.platform.db.models.knowledge import (
 )
 from brain.systems.knowledge.connectors.base import (
     EnumerationFailure,
+    EnumerationFailureKind,
     KnowledgeConnector,
     KnowledgeDraft,
 )
@@ -53,6 +54,7 @@ class KnowledgeSyncStats:
     truncated: int = 0
     pending: int = 0
     distilled: int = 0
+    config_faults: int = 0
 
     def to_dict(self) -> dict[str, int]:
         payload = {
@@ -65,6 +67,8 @@ class KnowledgeSyncStats:
             payload["pending"] = self.pending
         if self.distilled:
             payload["distilled"] = self.distilled
+        if self.config_faults:
+            payload["config_faults"] = self.config_faults
         return payload
 
 
@@ -76,6 +80,7 @@ class KnowledgeSyncResult:
     cursor: dict[str, Any]
     corpus_empty: bool
     error: str | None = None
+    config_faults: tuple[EnumerationFailure, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -87,6 +92,11 @@ class KnowledgeSyncResult:
         }
         if self.error:
             payload["error"] = self.error
+        if self.config_faults:
+            payload["config_faults"] = [
+                _enumeration_failure_payload(failure)
+                for failure in self.config_faults
+            ]
         return payload
 
 
@@ -194,14 +204,66 @@ def _manifest_enumeration_failures(value: Any) -> tuple[EnumerationFailure, ...]
         scope = str(item.get("scope") or "").strip()
         message = str(item.get("message") or "").strip()
         if scope and message:
-            failures.append(EnumerationFailure(scope=scope, message=message))
+            try:
+                kind = EnumerationFailureKind(
+                    str(item.get("kind") or EnumerationFailureKind.TRANSIENT)
+                )
+            except ValueError:
+                kind = EnumerationFailureKind.TRANSIENT
+            failures.append(
+                EnumerationFailure(
+                    scope=scope,
+                    message=message,
+                    kind=kind,
+                    reason_code=(
+                        str(item.get("reason_code") or "").strip() or None
+                    ),
+                    remediation=(
+                        str(item.get("remediation") or "").strip() or None
+                    ),
+                )
+            )
     return tuple(failures)
+
+
+def _enumeration_failure_payload(failure: EnumerationFailure) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "scope": failure.scope,
+        "message": failure.message,
+        "kind": failure.kind.value,
+    }
+    if failure.reason_code:
+        payload["reason_code"] = failure.reason_code
+    if failure.remediation:
+        payload["remediation"] = failure.remediation
+    return payload
 
 
 def _enumeration_error(failures: tuple[EnumerationFailure, ...]) -> str | None:
     return "; ".join(
-        f"{failure.scope}: {failure.message}" for failure in failures
+        f"{failure.scope}: "
+        f"{f'[{failure.reason_code}] ' if failure.reason_code else ''}"
+        f"{failure.message}"
+        for failure in failures
     ) or None
+
+
+def _account_enumeration_failures(
+    stats: KnowledgeSyncStats,
+    failures: tuple[EnumerationFailure, ...],
+) -> tuple[EnumerationFailure, ...]:
+    config_faults = tuple(
+        failure
+        for failure in failures
+        if failure.kind is EnumerationFailureKind.CONFIGURATION
+    )
+    stats.config_faults += len(config_faults)
+    stats.failed += len(failures) - len(config_faults)
+    return config_faults
+
+
+def _sync_status(stats: KnowledgeSyncStats) -> str:
+    return "ok" if stats.failed == 0 and stats.config_faults == 0 else "degraded"
 
 
 def _pending_cursor(
@@ -219,7 +281,7 @@ def _pending_cursor(
     }
     if enumeration_failures:
         manifest[_ENUMERATION_ERRORS_KEY] = [
-            {"scope": failure.scope, "message": failure.message}
+            _enumeration_failure_payload(failure)
             for failure in enumeration_failures
         ]
     return {
@@ -540,6 +602,7 @@ async def _finalize_sync(
     stats: KnowledgeSyncStats,
     run_at: datetime,
     error: str | None = None,
+    config_faults: tuple[EnumerationFailure, ...] = (),
 ) -> KnowledgeSyncResult:
     """Persist one sync outcome and expose its current searchable corpus state."""
 
@@ -568,6 +631,7 @@ async def _finalize_sync(
         cursor=result_cursor,
         corpus_empty=corpus_empty,
         error=error,
+        config_faults=config_faults,
     )
 
 
@@ -663,7 +727,11 @@ async def sync_connector(
             session,
             list(manifest.get("entries") or []),
         )
-        stats.failed += failures + len(enumeration_failures)
+        stats.failed += failures
+        config_faults = _account_enumeration_failures(
+            stats,
+            enumeration_failures,
+        )
         stats.distilled = sum(
             1 for _draft, should_embed in resolved if should_embed
         )
@@ -690,9 +758,10 @@ async def sync_connector(
                 stats=stats,
                 run_at=run_at,
                 error=enumeration_error,
+                config_faults=config_faults,
             )
 
-        status = "ok" if stats.failed == 0 else "degraded"
+        status = _sync_status(stats)
         return await _finalize_sync(
             session,
             source=source,
@@ -702,6 +771,7 @@ async def sync_connector(
             stats=stats,
             run_at=run_at,
             error=enumeration_error,
+            config_faults=config_faults,
         )
 
     cursor = dict(stored_cursor)
@@ -725,7 +795,7 @@ async def sync_connector(
         )
 
     enumeration_error = _enumeration_error(enumeration_failures)
-    stats.failed += len(enumeration_failures)
+    config_faults = _account_enumeration_failures(stats, enumeration_failures)
 
     structural: list[tuple[KnowledgeDraft, bool]] = []
     distillable: list[KnowledgeDraft] = []
@@ -781,6 +851,7 @@ async def sync_connector(
             stats=stats,
             run_at=run_at,
             error=enumeration_error,
+            config_faults=config_faults,
         )
 
     if admission_fallbacks:
@@ -793,7 +864,7 @@ async def sync_connector(
             run_at=run_at,
         )
 
-    status = "ok" if stats.failed == 0 else "degraded"
+    status = _sync_status(stats)
     return await _finalize_sync(
         session,
         source=source,
@@ -803,6 +874,7 @@ async def sync_connector(
         stats=stats,
         run_at=run_at,
         error=enumeration_error,
+        config_faults=config_faults,
     )
 
 
