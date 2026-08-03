@@ -309,12 +309,16 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
         "worker",
         "scheduler",
         "slack-connector",
+        "meetbot",
         "updater",
         "web",
     ]
-    slack_section = services_section.split("  slack-connector:", 1)[1].split("\n  updater:", 1)[0]
+    slack_section = services_section.split("  slack-connector:", 1)[1].split("\n  meetbot:", 1)[0]
     assert 'profiles: ["slack"]' in slack_section
     assert "\n    ports:" not in slack_section
+    meetbot_section = services_section.split("  meetbot:", 1)[1].split("\n  updater:", 1)[0]
+    assert 'profiles: ["meetbot"]' in meetbot_section
+    assert "\n    ports:" not in meetbot_section
     assert "127.0.0.1:${ILLO_WEB_PORT:-8080}:8080" in compose
     assert "ILLO_SELF_UPDATE_REQUEST_FILE" in compose
     assert "ILLO_SELF_UPDATE_HEARTBEAT_FILE" in compose
