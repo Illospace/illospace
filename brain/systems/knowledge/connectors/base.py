@@ -38,6 +38,8 @@ class EnumerationFailure:
 
     scope: str
     message: str
+    reason_code: str | None = None
+    configuration_fault: bool = False
 
 
 @dataclass(frozen=True)

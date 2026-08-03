@@ -246,6 +246,7 @@ async def test_backend_adapter_uses_shared_closure_and_deploy_state_reads(monkey
     [
         (401, CLOSURE_READ_AUTHENTICATION_REQUIRED),
         (403, CLOSURE_READ_ACCESS_FORBIDDEN),
+        (404, CLOSURE_READ_ACCESS_FORBIDDEN),
         (503, CLOSURE_READ_CONNECTOR_ERROR),
     ],
 )

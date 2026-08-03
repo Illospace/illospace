@@ -69,6 +69,7 @@ async def test_read_github_source_handler_lists_issues_with_canonical_repo_and_b
     assert list_issues.await_args.kwargs["labels"] == ["bug"]
     assert list_issues.await_args.kwargs["assignee"] == "redawear"
     assert list_issues.await_args.kwargs["limit"] == 100
+    assert list_issues.await_args.kwargs["token"] is None
 
 
 @pytest.mark.asyncio

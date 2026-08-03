@@ -37,7 +37,11 @@ from brain.systems.knowledge.connectors.base import (
     KnowledgeEnumeration,
 )
 from brain.systems.knowledge.connectors.domain_records import DomainRecordsConnector
-from brain.systems.knowledge.connectors.github import GitHubConnector, _draft_for_issue
+from brain.systems.knowledge.connectors.github import (
+    GitHubConnector,
+    _draft_for_issue,
+    _github_authority,
+)
 from brain.systems.knowledge.connectors.memory import MemoryConnector
 from brain.systems.knowledge.search import reciprocal_rank_fusion, search_knowledge
 from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS, sync_connector
@@ -1544,7 +1548,7 @@ async def test_github_enumeration_reserves_capacity_for_stale_lower_index_repo(
             "next_page": next_backfill_page if repo == "acme/backfill" else None,
         }
 
-    authority = SimpleNamespace(token=None, org_id=None, actor_user_id=None)
+    authority = SimpleNamespace(token="token", org_id=None, actor_user_id=None)
     connector = GitHubConnector(repositories=repositories, max_items=4)
     with patch(
         "brain.systems.knowledge.connectors.github._github_authority",
@@ -1647,7 +1651,7 @@ async def test_github_enumeration_advances_every_repo_during_long_backfill(sessi
             "next_page": None,
         }
 
-    authority = SimpleNamespace(token=None, org_id=None, actor_user_id=None)
+    authority = SimpleNamespace(token="token", org_id=None, actor_user_id=None)
     connector = GitHubConnector(repositories=repositories, max_items=3)
     enumerations = []
     with patch(
@@ -1727,7 +1731,7 @@ async def test_github_enumeration_isolates_repo_failures_and_wraps_cursor(
             "next_page": None,
         }
 
-    authority = SimpleNamespace(token=None, org_id=None, actor_user_id=None)
+    authority = SimpleNamespace(token="token", org_id=None, actor_user_id=None)
     connector = GitHubConnector(repositories=repositories, max_items=10)
     with patch(
         "brain.systems.knowledge.connectors.github._github_authority",
@@ -1759,7 +1763,14 @@ async def test_github_enumeration_isolates_repo_failures_and_wraps_cursor(
         assert enumeration.failures == (
             EnumerationFailure(
                 scope="acme/missing",
-                message="Repository not found or not visible to this token.",
+                message=(
+                    "Repository not found or not visible to this token. "
+                    "Remediation: Grant the installed GitHub App access to "
+                    "acme/missing, then reconnect or update its active Vault "
+                    "project binding for this exact repository slug."
+                ),
+                reason_code="github_access_forbidden",
+                configuration_fault=True,
             ),
         )
 
@@ -1771,10 +1782,27 @@ async def test_github_enumeration_isolates_repo_failures_and_wraps_cursor(
 
     payload = result.to_dict()
     assert result.status == "degraded"
-    assert result.stats["failed"] == 1
+    assert result.stats["failed"] == 0
+    assert result.stats["config_faults"] == 1
     assert payload["error"] == (
-        "acme/missing: Repository not found or not visible to this token."
+        "acme/missing: [github_access_forbidden] Repository not found or not "
+        "visible to this token. Remediation: Grant the installed GitHub App "
+        "access to acme/missing, then reconnect or update its active Vault "
+        "project binding for this exact repository slug."
     )
+    assert payload["config_faults"] == [
+        {
+            "scope": "acme/missing",
+            "message": (
+                "Repository not found or not visible to this token. Remediation: "
+                "Grant the installed GitHub App access to acme/missing, then "
+                "reconnect or update its active Vault project binding for this "
+                "exact repository slug."
+            ),
+            "reason_code": "github_access_forbidden",
+            "configuration_fault": True,
+        }
+    ]
     assert any(
         "acme/missing" in record.message
         and "Repository not found or not visible to this token." in record.message
@@ -1899,25 +1927,11 @@ async def test_enumeration_error_survives_pending_distillation_as_degraded(
     assert degraded.to_dict()["error"] == expected_error
 
 
-async def test_public_github_closure_uses_accounted_structural_fallback(
+async def test_github_knowledge_sweep_refuses_anonymous_read_without_binding(
     session,
-    embedding_runtime,
 ):
-    del embedding_runtime
     repo = "Illospace/illospace"
-    issue = {
-        "id": 577,
-        "number": 577,
-        "title": "Knowledge slice 2",
-        "state": "closed",
-        "body": "Implement the conversational knowledge layer.",
-        "labels": [],
-        "user": {"login": "redawear"},
-        "created_at": "2026-07-28T18:00:00Z",
-        "updated_at": "2026-07-28T20:10:00Z",
-        "closed_at": "2026-07-28T20:10:00Z",
-    }
-    list_issues = AsyncMock(return_value={"issues": [issue], "next_page": None})
+    list_issues = AsyncMock()
     get_closure = AsyncMock()
     authority = SimpleNamespace(token=None, org_id=None, actor_user_id=None)
     connector = GitHubConnector(repositories=[repo])
@@ -1941,12 +1955,63 @@ async def test_public_github_closure_uses_accounted_structural_fallback(
     )
     assert result.status == "degraded"
     assert result.cursor["version"] == 2
-    assert result.stats["failed"] == 1
-    assert get_closure.await_count == 0
-    assert item is not None
-    assert item.resolution == "Closed at 2026-07-28T20:10:00Z"
-    assert item.extra["closure_enrichment"] == {
-        "status": "unavailable",
-        "reason": "authentication_required",
-    }
-    assert item.extra["distillation"]["status"] == "failed"
+    assert result.stats["failed"] == 0
+    assert result.stats["config_faults"] == 1
+    assert result.to_dict()["config_faults"] == [
+        {
+            "scope": repo,
+            "message": (
+                "The knowledge GitHub connector refused an anonymous request. "
+                "Remediation: Install or reconnect the GitHub App for "
+                "Illospace/illospace, then create an active VaultProjectBinding to "
+                "a github_app secret for this exact repository slug."
+            ),
+            "reason_code": "github_authentication_required",
+            "configuration_fault": True,
+        }
+    ]
+    list_issues.assert_not_awaited()
+    get_closure.assert_not_awaited()
+    assert item is None
+
+
+async def test_github_knowledge_authority_reports_missing_binding():
+    session = SimpleNamespace(scalar=AsyncMock(return_value=None))
+
+    with pytest.raises(
+        GitHubConnectorError,
+        match="No active GitHub App Vault project binding exists",
+    ) as exc_info:
+        await _github_authority(session, "Illospace/illospace")
+
+    assert exc_info.value.status_code == 401
+
+
+async def test_github_knowledge_authority_mints_without_user_actor():
+    repo = "uwear-ai/uwear-backend"
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=SimpleNamespace(org_id=_ORG_ID))
+    )
+    resolve = AsyncMock(return_value={"GITHUB_TOKEN": "installation-token"})
+
+    with patch(
+        "brain.systems.knowledge.connectors.github."
+        "async_resolve_org_project_bound_env_tokens",
+        new=resolve,
+    ):
+        authority = await _github_authority(session, repo)
+
+    assert authority.token == "installation-token"
+    assert authority.org_id == _ORG_ID
+    assert authority.actor_user_id is None
+    resolve.assert_awaited_once_with(
+        org_id=_ORG_ID,
+        accessed_by="knowledge_index_sync",
+        project_slug=repo,
+        github_app_only=True,
+        github_app_permissions={
+            "contents": "read",
+            "issues": "read",
+            "pull_requests": "read",
+        },
+    )
