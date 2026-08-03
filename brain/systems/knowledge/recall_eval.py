@@ -42,7 +42,7 @@ from brain.systems.knowledge.search_contract import (
 
 DEFAULT_K_VALUES = (3, 10)
 DEFAULT_QUESTION_SET_PATH = (
-    Path(__file__).parent / "knowledge_recall_seed_v1.json"
+    Path(__file__).parent / "knowledge_recall_seed_v2.json"
 )
 
 KnowledgeSearch = Callable[..., Awaitable[Any]]

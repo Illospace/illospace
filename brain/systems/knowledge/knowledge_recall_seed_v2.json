@@ -1,0 +1,624 @@
+{
+  "question_set_id": "illospace-knowledge-recall-seed",
+  "version": "2",
+  "description": "Hand-seeded questions from real closed Illospace incidents and their resolving GitHub PRs. These are not claimed to be verbatim query-log entries. Questions are written from the PROBLEM as an engineer hitting it would phrase it, never copied from the document's own distilled question -- a question derived from its answer retrieves trivially and inflates recall. Acceptable-evidence pointers are the items that actually ANSWER the question; an issue merely closed by the same PR is not automatically evidence.",
+  "cases": [
+    {
+      "case_id": "memory-mirror-produced-node-kind",
+      "question": "Which reconstructive-memory node kind should the knowledge mirror index, and why?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#586"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#607"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#586",
+          "github:Illospace/illospace#607"
+        ]
+      }
+    },
+    {
+      "case_id": "agent-run-zero-capacity-detection",
+      "question": "How do deploy checks detect that the worker has zero AgentRun claiming capacity?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#549"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#579"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#608"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_prs",
+        "source_refs": [
+          "github:Illospace/illospace#549",
+          "github:Illospace/illospace#579",
+          "github:Illospace/illospace#608"
+        ]
+      }
+    },
+    {
+      "case_id": "tool-event-transaction-boundary",
+      "question": "Why could a completed tool block AgentRun follow-up settlement, and what transaction boundary fixed it?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#593"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#606"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#593",
+          "github:Illospace/illospace#606"
+        ]
+      }
+    },
+    {
+      "case_id": "agent-run-deadline-contract",
+      "question": "What deadline and graceful close-out contract prevents AgentRuns from running forever?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#505"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#580"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#505",
+          "github:Illospace/illospace#580"
+        ],
+        "excluded_evidence": {
+          "github:Illospace/illospace#510": "Closed alongside #580 in the timeline, but #510 is an observability ticket (my_activity dead fields, worker self-monitoring, pushing token budget into context) and does not answer the deadline/close-out question. Listing it as acceptable evidence would score an unrelated hit as a success and inflate recall."
+        }
+      }
+    },
+    {
+      "case_id": "sibling-agent-run-deadlock",
+      "question": "What lock ordering prevents sibling AgentRuns from deadlocking on their shared parent?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#567"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#575"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#567",
+          "github:Illospace/illospace#575"
+        ]
+      }
+    },
+    {
+      "case_id": "scheduler-inline-job-starves-tick-loop",
+      "question": "Why did one long-running scheduled job stop every other scheduled job on the box, and what execution change fixed it?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#566"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#570"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#566",
+          "github:Illospace/illospace#570"
+        ]
+      }
+    },
+    {
+      "case_id": "cold-start-gap-reconciliation",
+      "question": "After Illo has been offline for many hours, how does it recover the work that arrived during the outage instead of reading forward from now?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#516"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#569"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#516",
+          "github:Illospace/illospace#569"
+        ]
+      }
+    },
+    {
+      "case_id": "scheduler-single-command-program-registry",
+      "question": "What is the single place to register a new single-command scheduler program, and why was declaring it in two dispatch paths a problem?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#501"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#540"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#501",
+          "github:Illospace/illospace#540"
+        ]
+      }
+    },
+    {
+      "case_id": "failure-guard-projection-query-cost",
+      "question": "Why did the scheduler's failure-guard health projection get slower with every trigger added, and how was the per-job query count reduced?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#539"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#583"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#539",
+          "github:Illospace/illospace#583"
+        ]
+      }
+    },
+    {
+      "case_id": "deploy-signal-trap-must-terminate",
+      "question": "If a worker swap is interrupted by Ctrl-C or a dropped SSH session, what stops the deploy from carrying on and resurrecting the outgoing worker?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#552"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#564"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#552",
+          "github:Illospace/illospace#564"
+        ]
+      }
+    },
+    {
+      "case_id": "claiming-versus-drained-worker-signal",
+      "question": "How can something outside the worker process tell a worker that is still claiming runs from one that received SIGTERM and never will again?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#548"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#558"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#548",
+          "github:Illospace/illospace#558"
+        ]
+      }
+    },
+    {
+      "case_id": "drain-wait-must-watch-real-cover",
+      "question": "During a worker swap, what evidence proves the replacement worker actually has run capacity before the draining worker is allowed to go?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#556"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#557"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#556",
+          "github:Illospace/illospace#557"
+        ]
+      }
+    },
+    {
+      "case_id": "worker-does-not-survive-host-reboot",
+      "question": "Why did the worker stay down after a host reboot while docker ps, the health endpoint and the dashboard all still looked green?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#527"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#529"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#527",
+          "github:Illospace/illospace#529"
+        ]
+      }
+    },
+    {
+      "case_id": "spawn-worker-fanout-failure-visibility",
+      "question": "When a spawned reader dies, how does its parent run learn about it instead of reporting healthy evidence from a near-empty sweep?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#547"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#561"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#547",
+          "github:Illospace/illospace#561"
+        ]
+      }
+    },
+    {
+      "case_id": "semantic-tool-loop-detection",
+      "question": "How does loop detection catch an agent that repeats the same tool call with slightly reworded arguments each time?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#506"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#533"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#506",
+          "github:Illospace/illospace#533"
+        ]
+      }
+    },
+    {
+      "case_id": "agent-loop-failure-breaker-rolling-window",
+      "question": "Why did the agent-loop failure breaker never trip for a tool that fails intermittently, and what replaced the consecutive-failure count?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#508"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#519"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#508",
+          "github:Illospace/illospace#519"
+        ]
+      }
+    },
+    {
+      "case_id": "deferral-promise-obligation-record",
+      "question": "When Illo tells a person it will come back with an answer, what record makes that promise ageable and enforceable rather than just a sentence?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#514"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#523"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#514",
+          "github:Illospace/illospace#523"
+        ]
+      }
+    },
+    {
+      "case_id": "human-ask-survives-a-dead-run",
+      "question": "If the run handling a person's question dies and a later run does the work, how does the answer reach the person who originally asked?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#436"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#450"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#436",
+          "github:Illospace/illospace#450"
+        ]
+      }
+    },
+    {
+      "case_id": "joined-select-locks-agent-runs-implicitly",
+      "question": "How can a joined SELECT take an agent_runs row lock without any code naming AgentRunRow, and how was that lock scoped away?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#609"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#610"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#609",
+          "github:Illospace/illospace#610"
+        ]
+      }
+    },
+    {
+      "case_id": "cycle-failure-alert-path",
+      "question": "Why did repeated Cycle failures produce no notification anywhere while scheduler-job failures alerted normally, and what gave them one alert path?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#546"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#555"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#546",
+          "github:Illospace/illospace#555"
+        ]
+      }
+    },
+    {
+      "case_id": "context-floor-exceeds-token-ceiling",
+      "question": "What happens when a run's minimum required context is larger than its own token ceiling, and how is that wedge surfaced instead of retried forever?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#545"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#553"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#545",
+          "github:Illospace/illospace#553"
+        ]
+      }
+    },
+    {
+      "case_id": "canceled-run-settles-cyclerun-at-cancel-time",
+      "question": "When a cycle-backed run is canceled, what settles its CycleRun at cancel time instead of leaving it to the stale sweeper to mark as an anomaly?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#622"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#625"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#622",
+          "github:Illospace/illospace#625"
+        ]
+      }
+    },
+    {
+      "case_id": "forward-only-sweep-starves-other-repos",
+      "question": "Why did one repository's backfill stop every other repository's knowledge from staying fresh, and what sweep order fixed it?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#633"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#634"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#633",
+          "github:Illospace/illospace#634"
+        ]
+      }
+    },
+    {
+      "case_id": "stale-corpus-answers-without-warning",
+      "question": "Why did knowledge search keep answering confidently from a corpus that had stopped updating days earlier?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#627"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#629"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#627",
+          "github:Illospace/illospace#629"
+        ]
+      }
+    },
+    {
+      "case_id": "closure-sweep-unauthenticated-github-read",
+      "question": "Why did the staging-only closure sweep silently examine nothing, and what did it need in order to read GitHub at all?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#637"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#638"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#637",
+          "github:Illospace/illospace#638"
+        ]
+      }
+    },
+    {
+      "case_id": "websocket-replays-event-history-on-restart",
+      "question": "Why did restarting the API replay the entire run-event history over the live websocket, and what made the cursor survive a restart?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#590"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#591"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#590",
+          "github:Illospace/illospace#591"
+        ]
+      }
+    },
+    {
+      "case_id": "openai-stream-server-error-retryable",
+      "question": "Which OpenAI streaming error value was being treated as fatal when it should have been retried?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#585"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#587"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#585",
+          "github:Illospace/illospace#587"
+        ]
+      }
+    },
+    {
+      "case_id": "slack-identity-normalization-owner",
+      "question": "Where does canonical Slack identity normalization belong so that a second consumer cannot re-derive it differently?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#612"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#617"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#612",
+          "github:Illospace/illospace#617"
+        ]
+      }
+    },
+    {
+      "case_id": "deploy-state-derived-from-git-ancestry",
+      "question": "Why did the stored deploy-state machine mis-track promotions, and what replaced it at read time?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#473"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#526"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#473",
+          "github:Illospace/illospace#526"
+        ]
+      }
+    }
+  ]
+}
