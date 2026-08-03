@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
+from meetbot.browser_diagnostics import capture_failure_evidence
 from meetbot.config import MeetbotConfig
 from meetbot.engine import (
     PlaywrightMeetEngine,
@@ -95,16 +99,181 @@ async def test_lobby_wait_is_bounded_and_returns_not_admitted_failure() -> None:
 @pytest.mark.asyncio
 async def test_caption_language_failure_emits_transcript_risk_warning(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     async def no_sleep(_: float) -> None:
         return None
 
     monkeypatch.setattr("meetbot.engine.asyncio.sleep", no_sleep)
     events = _WarningEvents()
-    engine = PlaywrightMeetEngine(MeetbotConfig(caption_language="fr-FR"))
+    engine = PlaywrightMeetEngine(
+        MeetbotConfig(caption_language="fr-FR", private_root=tmp_path)
+    )
 
-    await engine._enable_captions(_NeverAdmittedPage(), events)
+    await engine._enable_captions(_NeverAdmittedPage(), events, "session-1")
 
+    assert events.messages == [
+        "Could not confirm the caption language is fr-FR; "
+        "the transcript may be translated or empty."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_caption_failure_capture_precedes_each_strategy_escape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captures: list[tuple[str, bool]] = []
+
+    class _RecordingPage(_NeverAdmittedPage):
+        def __init__(self) -> None:
+            self.overlay_open = False
+
+        class _RecordingKeyboard:
+            def __init__(self, page: _RecordingPage) -> None:
+                self.page = page
+
+            async def press(self, key: str) -> None:
+                assert key == "Escape"
+                self.page.overlay_open = False
+
+        @property
+        def keyboard(self) -> _RecordingKeyboard:
+            return self._RecordingKeyboard(self)
+
+    async def failed_strategy(page: Any) -> bool:
+        assert not page.overlay_open
+        page.overlay_open = True
+        return False
+
+    async def capture(
+        page: Any,
+        session_id: str,
+        label: str,
+        *,
+        debug_dir: Path,
+    ) -> None:
+        assert session_id == "session-1"
+        assert debug_dir == tmp_path / "debug"
+        captures.append((label, page.overlay_open))
+
+    engine = PlaywrightMeetEngine(MeetbotConfig(private_root=tmp_path))
+    monkeypatch.setattr(engine, "_set_visible_caption_language", failed_strategy)
+    monkeypatch.setattr(engine, "_set_via_caption_settings_control", failed_strategy)
+    monkeypatch.setattr(engine, "_set_via_meet_settings", failed_strategy)
+    monkeypatch.setattr("meetbot.engine.capture_failure_evidence", capture)
+
+    result = await engine._set_caption_language(_RecordingPage(), "session-1")
+
+    assert result is None
+    assert all(overlay_open for _, overlay_open in captures)
+    labels = {label for label, _ in captures}
+    assert "visible-language-control" in labels
+    assert "caption-settings-control" in labels
+    assert "more-options-settings-captions" in labels
+
+
+@pytest.mark.asyncio
+async def test_failure_capture_names_are_distinct_by_session_and_label(
+    tmp_path: Path,
+) -> None:
+    class _CapturePage:
+        def __init__(self) -> None:
+            self.screenshot_paths: list[Path] = []
+
+        async def screenshot(self, *, path: str, full_page: bool) -> None:
+            assert full_page
+            self.screenshot_paths.append(Path(path))
+
+        async def evaluate(self, script: str) -> list[dict[str, str | None]]:
+            assert "menuitemradio" in script
+            return [
+                {
+                    "tag": "button",
+                    "role": None,
+                    "aria-label": "Caption settings",
+                    "data-tooltip": None,
+                    "text": "",
+                }
+            ]
+
+    page = _CapturePage()
+    debug_dir = tmp_path / "debug"
+    captures = (
+        ("session-1", "join-failure"),
+        ("session-1", "visible-language-control"),
+        ("session-1", "caption-settings-control"),
+        ("session-2", "caption-settings-control"),
+    )
+
+    for session_id, label in captures:
+        await capture_failure_evidence(
+            page,
+            session_id,
+            label,
+            debug_dir=debug_dir,
+        )
+
+    expected_stems = {f"{session_id}-{label}" for session_id, label in captures}
+    assert {path.stem for path in page.screenshot_paths} == expected_stems
+    assert {path.stem for path in debug_dir.glob("*.json")} == expected_stems
+    assert len(page.screenshot_paths) == len(captures)
+    assert len(list(debug_dir.glob("*.json"))) == len(captures)
+    inventory = json.loads(
+        (debug_dir / "session-1-visible-language-control.json").read_text()
+    )
+    assert inventory == [
+        {
+            "tag": "button",
+            "role": None,
+            "aria-label": "Caption settings",
+            "data-tooltip": None,
+            "text": "",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_capture_errors_do_not_interrupt_caption_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _BrokenCapturePage(_NeverAdmittedPage):
+        def __init__(self) -> None:
+            self.escape_count = 0
+            self.screenshot_count = 0
+            self.evaluate_count = 0
+
+            class _Keyboard:
+                async def press(inner_self, key: str) -> None:
+                    if key == "Escape":
+                        self.escape_count += 1
+
+            self.keyboard = _Keyboard()
+
+        async def screenshot(self, *, path: str, full_page: bool) -> None:
+            self.screenshot_count += 1
+            raise RuntimeError("screenshot failed")
+
+        async def evaluate(self, script: str) -> object:
+            self.evaluate_count += 1
+            raise RuntimeError("evaluate failed")
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("meetbot.engine.asyncio.sleep", no_sleep)
+    page = _BrokenCapturePage()
+    events = _WarningEvents()
+    engine = PlaywrightMeetEngine(
+        MeetbotConfig(caption_language="fr-FR", private_root=tmp_path)
+    )
+
+    await engine._enable_captions(page, events, "session-1")
+
+    assert page.escape_count == 3
+    assert page.screenshot_count == 3
+    assert page.evaluate_count == 3
     assert events.messages == [
         "Could not confirm the caption language is fr-FR; "
         "the transcript may be translated or empty."
