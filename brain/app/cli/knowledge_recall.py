@@ -19,6 +19,10 @@ from brain.systems.knowledge.recall_eval import (
 from brain.systems.knowledge.recall_eval_comparison import (
     compare_knowledge_recall_artifacts,
 )
+from brain.systems.knowledge.recall_eval_contract import (
+    KnowledgeRecallArtifact,
+    parse_knowledge_recall_artifact_json,
+)
 from brain.systems.knowledge.recall_eval_harvester import (
     harvest_knowledge_recall_candidates,
 )
@@ -161,14 +165,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         return candidates.to_dict()
 
 
-def _load_artifact(path: Path, *, label: str) -> dict[str, Any]:
+def _load_artifact(path: Path, *, label: str) -> KnowledgeRecallArtifact:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid {label} artifact JSON at {path}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"{label} artifact must be a JSON object")
-    return payload
+        return parse_knowledge_recall_artifact_json(
+            path.read_text(encoding="utf-8")
+        )
+    except ValueError as exc:
+        raise ValueError(f"Invalid {label} artifact at {path}: {exc}") from exc
 
 
 def _compare(args: argparse.Namespace) -> dict[str, Any]:
@@ -195,8 +198,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if args.command == "eval" and payload["result_type"] == "invalid":
         return 1
-    if args.command == "compare" and not payload["comparability"]["comparable"]:
-        return 1
+    if args.command == "compare":
+        verdict = payload["comparability"]["verdict"]
+        if verdict != "ranking-attributable":
+            return 1
     return 0
 
 

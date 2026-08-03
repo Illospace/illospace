@@ -3,106 +3,31 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any, Literal
 
-from brain.systems.knowledge.recall_eval import KnowledgeRecallCorpusFingerprint
-
-
-@dataclass(frozen=True)
-class _ValidArtifact:
-    question_set_digest: str
-    org_id: str
-    k_values: tuple[int, ...]
-    effective_search_limit: int
-    corpus_fingerprint: KnowledgeRecallCorpusFingerprint | None
-    summary: Mapping[str, Any]
-    results: tuple[Mapping[str, Any], ...]
-
-
-def _mapping(value: Any, *, field_name: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{field_name} must be an object")
-    return value
-
-
-def _required_text(value: Any, *, field_name: str) -> str:
-    clean = str(value or "").strip()
-    if not clean:
-        raise ValueError(f"{field_name} is required")
-    return clean
-
-
-def _result_type(artifact: Mapping[str, Any], *, label: str) -> str:
-    result_type = artifact.get("result_type")
-    if result_type not in {"valid", "invalid"}:
-        raise ValueError(f"{label}.result_type must be valid or invalid")
-    return str(result_type)
-
-
-def _load_valid_artifact(
-    artifact: Mapping[str, Any],
-    *,
-    label: str,
-) -> _ValidArtifact:
-    question_set = _mapping(
-        artifact.get("question_set"),
-        field_name=f"{label}.question_set",
-    )
-    configuration = _mapping(
-        artifact.get("configuration"),
-        field_name=f"{label}.configuration",
-    )
-    raw_k_values = configuration.get("k_values")
-    if not isinstance(raw_k_values, list):
-        raise ValueError(f"{label}.configuration.k_values must be a list")
-    try:
-        k_values = tuple(int(value) for value in raw_k_values)
-        effective_search_limit = int(configuration["effective_search_limit"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f"invalid {label} search configuration: {exc}") from exc
-
-    raw_fingerprint = artifact.get("corpus_fingerprint")
-    corpus_fingerprint = None
-    if raw_fingerprint is not None:
-        corpus_fingerprint = KnowledgeRecallCorpusFingerprint.from_dict(
-            _mapping(
-                raw_fingerprint,
-                field_name=f"{label}.corpus_fingerprint",
-            )
-        )
-
-    raw_results = artifact.get("results")
-    if not isinstance(raw_results, list):
-        raise ValueError(f"{label}.results must be a list")
-    return _ValidArtifact(
-        question_set_digest=_required_text(
-            question_set.get("digest"),
-            field_name=f"{label}.question_set.digest",
-        ),
-        org_id=_required_text(
-            configuration.get("org_id"),
-            field_name=f"{label}.configuration.org_id",
-        ),
-        k_values=k_values,
-        effective_search_limit=effective_search_limit,
-        corpus_fingerprint=corpus_fingerprint,
-        summary=_mapping(
-            artifact.get("summary"),
-            field_name=f"{label}.summary",
-        ),
-        results=tuple(
-            _mapping(result, field_name=f"{label}.results[{index}]")
-            for index, result in enumerate(raw_results)
-        ),
-    )
+from brain.systems.knowledge.recall_eval_contract import (
+    KnowledgeRecallArtifact,
+    KnowledgeRecallArtifactCaseResult,
+    KnowledgeRecallCorpusFingerprint,
+    KnowledgeRecallInvalidArtifact,
+    KnowledgeRecallLegacyInvalidArtifact,
+    KnowledgeRecallLegacyValidArtifact,
+    KnowledgeRecallValidArtifact,
+    KnowledgeRecallValidArtifactContract,
+)
 
 
 def _check(baseline: Any, candidate: Any) -> dict[str, Any]:
+    if baseline is None or candidate is None:
+        state = "unknown"
+    elif baseline == candidate:
+        state = "match"
+    else:
+        state = "different"
     return {
         "baseline": baseline,
         "candidate": candidate,
-        "matches": baseline == candidate,
+        "state": state,
     }
 
 
@@ -136,31 +61,24 @@ def _delta(baseline: float, candidate: float) -> dict[str, float]:
 
 
 def _case_rank_deltas(
-    baseline_results: Sequence[Mapping[str, Any]],
-    candidate_results: Sequence[Mapping[str, Any]],
+    baseline_results: Sequence[KnowledgeRecallArtifactCaseResult],
+    candidate_results: Sequence[KnowledgeRecallArtifactCaseResult],
 ) -> list[dict[str, Any]]:
-    candidate_by_case = {
-        _required_text(result.get("case_id"), field_name="candidate case_id"): result
-        for result in candidate_results
-    }
+    candidate_by_case = {result.case_id: result for result in candidate_results}
     if len(candidate_by_case) != len(candidate_results):
         raise ValueError("candidate results contain duplicate case_id values")
 
     comparisons: list[dict[str, Any]] = []
     baseline_case_ids: set[str] = set()
     for result in baseline_results:
-        case_id = _required_text(result.get("case_id"), field_name="baseline case_id")
+        case_id = result.case_id
         if case_id in baseline_case_ids:
             raise ValueError("baseline results contain duplicate case_id values")
         baseline_case_ids.add(case_id)
         if case_id not in candidate_by_case:
             raise ValueError(f"candidate artifact is missing case_id {case_id}")
-        baseline_rank = result.get("best_evidence_rank")
-        candidate_rank = candidate_by_case[case_id].get("best_evidence_rank")
-        if baseline_rank is not None:
-            baseline_rank = int(baseline_rank)
-        if candidate_rank is not None:
-            candidate_rank = int(candidate_rank)
+        baseline_rank = result.best_evidence_rank
+        candidate_rank = candidate_by_case[case_id].best_evidence_rank
         if baseline_rank is None and candidate_rank is not None:
             change = "miss-to-hit"
         elif baseline_rank is not None and candidate_rank is None:
@@ -194,95 +112,146 @@ def _case_rank_deltas(
 
 
 def _metric_deltas(
-    baseline: _ValidArtifact,
-    candidate: _ValidArtifact,
+    baseline: KnowledgeRecallValidArtifactContract,
+    candidate: KnowledgeRecallValidArtifactContract,
 ) -> dict[str, Any]:
-    baseline_recall = _mapping(
-        baseline.summary.get("recall_at_k"),
-        field_name="baseline.summary.recall_at_k",
-    )
-    candidate_recall = _mapping(
-        candidate.summary.get("recall_at_k"),
-        field_name="candidate.summary.recall_at_k",
-    )
-    shared_k_values = sorted(set(baseline.k_values) & set(candidate.k_values))
     recall_at_k = {
         str(k): _delta(
-            float(baseline_recall[str(k)]),
-            float(candidate_recall[str(k)]),
+            baseline.summary.recall_at_k[k],
+            candidate.summary.recall_at_k[k],
         )
-        for k in shared_k_values
+        for k in baseline.configuration.k_values
     }
     return {
         "recall_at_k": recall_at_k,
         "mean_reciprocal_rank": _delta(
-            float(baseline.summary["mean_reciprocal_rank"]),
-            float(candidate.summary["mean_reciprocal_rank"]),
+            baseline.summary.mean_reciprocal_rank,
+            candidate.summary.mean_reciprocal_rank,
         ),
+    }
+
+
+def _fingerprint(
+    artifact: KnowledgeRecallValidArtifactContract,
+) -> KnowledgeRecallCorpusFingerprint | None:
+    if isinstance(artifact, KnowledgeRecallValidArtifact):
+        return artifact.corpus_fingerprint
+    return None
+
+
+def _computed_comparison(
+    *,
+    baseline: KnowledgeRecallValidArtifactContract,
+    candidate: KnowledgeRecallValidArtifactContract,
+    verdict: Literal["corpus-unknown", "corpus-changed", "ranking-attributable"],
+    reason: str,
+    differences: Sequence[str],
+    checks: Mapping[str, Any],
+    corpus_changed_fields: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "comparison_type": "knowledge-recall",
+        "comparability": {
+            "comparable": True,
+            "computed": True,
+            "verdict": verdict,
+            "reason": reason,
+            "differences": list(differences),
+            "checks": dict(checks),
+            "corpus_changed_fields": dict(corpus_changed_fields or {}),
+        },
+        "case_rank_deltas": _case_rank_deltas(
+            baseline.results,
+            candidate.results,
+        ),
+        "metric_deltas": _metric_deltas(baseline, candidate),
     }
 
 
 def compare_knowledge_recall_artifacts(
-    baseline_artifact: Mapping[str, Any],
-    candidate_artifact: Mapping[str, Any],
+    baseline_artifact: KnowledgeRecallArtifact,
+    candidate_artifact: KnowledgeRecallArtifact,
 ) -> dict[str, Any]:
-    """Compare two eval reports without accessing the knowledge database."""
+    """Compare two strict artifacts without accessing the knowledge database.
 
-    baseline_type = _result_type(baseline_artifact, label="baseline")
-    candidate_type = _result_type(candidate_artifact, label="candidate")
+    A corpus change is a confounder, not proof of causation. True corpus-versus-
+    ranking attribution needs a controlled comparison that holds the ranker
+    constant across two corpus snapshots.
+    """
+
+    invalid_types = (
+        KnowledgeRecallInvalidArtifact,
+        KnowledgeRecallLegacyInvalidArtifact,
+    )
     invalid_labels = [
         label
-        for label, result_type in (
-            ("baseline", baseline_type),
-            ("candidate", candidate_type),
+        for label, artifact in (
+            ("baseline", baseline_artifact),
+            ("candidate", candidate_artifact),
         )
-        if result_type == "invalid"
+        if isinstance(artifact, invalid_types)
     ]
     if invalid_labels:
-        if len(invalid_labels) == 1:
-            invalid_reason = f"{invalid_labels[0]} artifact is invalid."
-        else:
-            invalid_reason = "baseline and candidate artifacts are invalid."
+        invalid_reason = (
+            f"{invalid_labels[0]} artifact is invalid."
+            if len(invalid_labels) == 1
+            else "baseline and candidate artifacts are invalid."
+        )
         return _invalid_comparison(
             verdict="invalid-artifact",
-            reason=(
-                "Metric deltas were not computed because "
-                + invalid_reason
-            ),
+            reason="Metric deltas were not computed because " + invalid_reason,
         )
 
-    baseline = _load_valid_artifact(baseline_artifact, label="baseline")
-    candidate = _load_valid_artifact(candidate_artifact, label="candidate")
-    baseline_fingerprint = (
-        baseline.corpus_fingerprint.fingerprint
-        if baseline.corpus_fingerprint is not None
-        else None
-    )
-    candidate_fingerprint = (
-        candidate.corpus_fingerprint.fingerprint
-        if candidate.corpus_fingerprint is not None
-        else None
-    )
+    if not isinstance(
+        baseline_artifact,
+        (KnowledgeRecallValidArtifact, KnowledgeRecallLegacyValidArtifact),
+    ) or not isinstance(
+        candidate_artifact,
+        (KnowledgeRecallValidArtifact, KnowledgeRecallLegacyValidArtifact),
+    ):
+        raise TypeError("comparison requires knowledge-recall artifacts")
+    baseline = baseline_artifact
+    candidate = candidate_artifact
+    baseline_corpus = _fingerprint(baseline)
+    candidate_corpus = _fingerprint(candidate)
     checks = {
         "question_set_digest": _check(
-            baseline.question_set_digest,
-            candidate.question_set_digest,
+            baseline.question_set.digest,
+            candidate.question_set.digest,
         ),
-        "org_id": _check(baseline.org_id, candidate.org_id),
-        "k_values": _check(list(baseline.k_values), list(candidate.k_values)),
+        "org_id": _check(
+            baseline.configuration.org_id,
+            candidate.configuration.org_id,
+        ),
+        "k_values": _check(
+            list(baseline.configuration.k_values),
+            list(candidate.configuration.k_values),
+        ),
+        "requested_search_limit": _check(
+            baseline.configuration.requested_search_limit,
+            candidate.configuration.requested_search_limit,
+        ),
         "effective_search_limit": _check(
-            baseline.effective_search_limit,
-            candidate.effective_search_limit,
+            baseline.configuration.effective_search_limit,
+            candidate.configuration.effective_search_limit,
         ),
         "corpus_fingerprint": _check(
-            baseline_fingerprint,
-            candidate_fingerprint,
+            baseline_corpus.fingerprint if baseline_corpus is not None else None,
+            candidate_corpus.fingerprint if candidate_corpus is not None else None,
         ),
     }
-    differences = [name for name, check in checks.items() if not check["matches"]]
+    differences = [
+        name for name, check in checks.items() if check["state"] == "different"
+    ]
     blocking_differences = [
         name
-        for name in ("question_set_digest", "org_id")
+        for name in (
+            "question_set_digest",
+            "org_id",
+            "k_values",
+            "requested_search_limit",
+            "effective_search_limit",
+        )
         if name in differences
     ]
     if blocking_differences:
@@ -296,50 +265,49 @@ def compare_knowledge_recall_artifacts(
             differences=differences,
             checks=checks,
         )
-    if baseline.corpus_fingerprint is None or candidate.corpus_fingerprint is None:
-        return _invalid_comparison(
-            verdict="not-comparable",
+
+    if baseline_corpus is None or candidate_corpus is None:
+        return _computed_comparison(
+            baseline=baseline,
+            candidate=candidate,
+            verdict="corpus-unknown",
             reason=(
-                "Metric deltas were not computed because both artifacts need a "
-                "corpus fingerprint."
+                "Metric deltas were computed, but one or both artifacts have no "
+                "corpus fingerprint. The corpus state is unknown, so no "
+                "attribution is possible."
             ),
             differences=differences,
             checks=checks,
         )
 
-    corpus_changed_fields = candidate.corpus_fingerprint.changed_fields_from(
-        baseline.corpus_fingerprint
-    )
-    if corpus_changed_fields:
-        verdict = "corpus-attributable"
-        reason = (
-            "Metric deltas were computed, but they are not attributable to code "
-            "or ranking because the corpus moved."
+    if baseline_corpus.fingerprint != candidate_corpus.fingerprint:
+        corpus_changed_fields = candidate_corpus.changed_fields_from(
+            baseline_corpus
         )
-    else:
-        verdict = "ranking-attributable"
-        reason = (
-            "The question set, organization, and corpus match. Metric deltas are "
-            "attributable to code or ranking."
+        return _computed_comparison(
+            baseline=baseline,
+            candidate=candidate,
+            verdict="corpus-changed",
+            reason=(
+                "The corpus changed. Metric deltas may combine corpus and code "
+                "movement, so these runs cannot separate them."
+            ),
+            differences=differences,
+            checks=checks,
+            corpus_changed_fields=corpus_changed_fields,
         )
 
-    return {
-        "comparison_type": "knowledge-recall",
-        "comparability": {
-            "comparable": True,
-            "computed": True,
-            "verdict": verdict,
-            "reason": reason,
-            "differences": differences,
-            "checks": checks,
-            "corpus_changed_fields": corpus_changed_fields,
-        },
-        "case_rank_deltas": _case_rank_deltas(
-            baseline.results,
-            candidate.results,
+    return _computed_comparison(
+        baseline=baseline,
+        candidate=candidate,
+        verdict="ranking-attributable",
+        reason=(
+            "The question set, organization, measurement configuration, and "
+            "corpus match. Metric deltas are attributable to code or ranking."
         ),
-        "metric_deltas": _metric_deltas(baseline, candidate),
-    }
+        differences=differences,
+        checks=checks,
+    )
 
 
 __all__ = ["compare_knowledge_recall_artifacts"]

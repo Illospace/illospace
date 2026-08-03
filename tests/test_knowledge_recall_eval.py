@@ -11,6 +11,8 @@ from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.knowledge import KnowledgeItem
 from brain.systems.knowledge.recall_eval import (
     EvidencePointer,
+    KnowledgeRecallCaseError,
+    KnowledgeRecallCaseResult,
     KnowledgeRecallCorpusFingerprint,
     KnowledgeRecallInvalidResult,
     KnowledgeRecallQuestion,
@@ -19,6 +21,10 @@ from brain.systems.knowledge.recall_eval import (
     build_knowledge_recall_corpus_fingerprint,
     load_knowledge_recall_question_set,
     run_knowledge_recall_eval,
+)
+from brain.systems.knowledge.recall_eval_contract import (
+    KnowledgeRecallArtifact,
+    parse_knowledge_recall_artifact_json,
 )
 from brain.systems.knowledge.recall_eval_harvester import (
     harvest_knowledge_recall_candidates,
@@ -35,6 +41,28 @@ from brain.systems.knowledge.search_contract import (
 
 _ORG_ID = "11111111-1111-4111-8111-111111111111"
 _FIXED_TIME = "2026-07-30T12:00:00+00:00"
+
+
+def _corpus_fingerprint(
+    *,
+    fingerprint: str = "0" * 64,
+    total_item_count: int = 2,
+    source_counts: dict[str, int] | None = None,
+    newest_source_updated_at: str | None = "2026-07-30T12:00:00+00:00",
+    newest_ingested_at: str | None = "2026-07-30T12:05:00+00:00",
+) -> KnowledgeRecallCorpusFingerprint:
+    counts = (
+        source_counts
+        if source_counts is not None
+        else ({"github": total_item_count} if total_item_count else {})
+    )
+    return KnowledgeRecallCorpusFingerprint(
+        total_item_count=total_item_count,
+        source_counts=counts,
+        newest_source_updated_at=newest_source_updated_at,
+        newest_ingested_at=newest_ingested_at,
+        fingerprint=fingerprint,
+    )
 
 
 def _item(item_id: int, source_ref: str, title: str) -> KnowledgeItem:
@@ -186,12 +214,14 @@ async def test_known_rankings_compute_recall_at_k_and_mrr_with_misses_in_denomin
     payload = report.to_dict()
 
     assert payload["result_type"] == "valid"
-    assert payload["corpus_fingerprint"] == KnowledgeRecallCorpusFingerprint(
+    assert payload["schema_version"] == 1
+    assert payload["corpus_fingerprint"] == _corpus_fingerprint(
+        fingerprint=payload["corpus_fingerprint"]["fingerprint"],
         total_item_count=0,
-        source_counts=(),
         newest_source_updated_at=None,
         newest_ingested_at=None,
-    ).to_dict()
+    ).model_dump(mode="json")
+    assert len(payload["corpus_fingerprint"]["fingerprint"]) == 64
     assert payload["summary"] == {
         "total": 3,
         "missed": 1,
@@ -293,12 +323,12 @@ async def test_malformed_search_hit_is_an_evaluation_error_not_a_miss(
     payload = report.to_dict()
 
     assert payload["result_type"] == "invalid"
-    assert payload["corpus_fingerprint"] == KnowledgeRecallCorpusFingerprint(
+    assert payload["corpus_fingerprint"] == _corpus_fingerprint(
+        fingerprint=payload["corpus_fingerprint"]["fingerprint"],
         total_item_count=0,
-        source_counts=(),
         newest_source_updated_at=None,
         newest_ingested_at=None,
-    ).to_dict()
+    ).model_dump(mode="json")
     assert "summary" not in payload
     assert "results" not in payload
     assert payload["errors"][0]["case_id"] == "rank-one"
@@ -483,69 +513,87 @@ def test_cli_emits_invalid_result_and_returns_nonzero(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == invalid_payload
 
 
-def _comparison_artifact(
+def _comparison_report(
     *,
     corpus_fingerprint: KnowledgeRecallCorpusFingerprint,
-    digest: str = "question-set-digest",
+    question_set_marker: str = "same-question-set",
     org_id: str = _ORG_ID,
     k_values: tuple[int, ...] = (3, 10),
+    requested_search_limit: int = 50,
     effective_search_limit: int = 50,
     ranks: tuple[int | None, ...] = (1, 4),
-    recall_at_k: tuple[float, ...] = (0.5, 1.0),
-    mean_reciprocal_rank: float = 0.625,
-) -> dict:
-    return {
-        "result_type": "valid",
-        "suite": "knowledge-recall",
-        "generated_at": _FIXED_TIME,
-        "question_set": {"digest": digest},
-        "configuration": {
-            "org_id": org_id,
-            "k_values": list(k_values),
-            "requested_search_limit": effective_search_limit,
-            "effective_search_limit": effective_search_limit,
-        },
-        "corpus_fingerprint": corpus_fingerprint.to_dict(),
-        "summary": {
-            "recall_at_k": {
-                str(k): value for k, value in zip(k_values, recall_at_k, strict=True)
+) -> KnowledgeRecallSuiteResult:
+    questions = tuple(
+        KnowledgeRecallQuestion(
+            case_id=f"case-{index}",
+            question=f"Question {index}?",
+            acceptable_evidence=(
+                EvidencePointer("github", f"github:example/repo#{index}"),
+            ),
+        )
+        for index in range(1, len(ranks) + 1)
+    )
+    results = tuple(
+        KnowledgeRecallCaseResult(
+            case_id=question.case_id,
+            question=question.question,
+            acceptable_evidence=question.acceptable_evidence,
+            origin={},
+            best_evidence_rank=rank,
+            reciprocal_rank=round(1.0 / rank, 8) if rank is not None else 0.0,
+            hits_at_k={
+                k: rank is not None and rank <= k for k in k_values
             },
-            "mean_reciprocal_rank": mean_reciprocal_rank,
-        },
-        "results": [
-            {
-                "case_id": f"case-{index}",
-                "best_evidence_rank": rank,
-            }
-            for index, rank in enumerate(ranks, start=1)
-        ],
-    }
+            semantic_available=True,
+            semantic_degraded_reason=None,
+            ranked_results=(),
+        )
+        for question, rank in zip(questions, ranks, strict=True)
+    )
+    return KnowledgeRecallSuiteResult(
+        suite="knowledge-recall",
+        generated_at=_FIXED_TIME,
+        live_database=True,
+        org_id=org_id,
+        question_set=KnowledgeRecallQuestionSet(
+            question_set_id="comparison-fixture",
+            version="1",
+            description=question_set_marker,
+            cases=questions,
+        ),
+        k_values=k_values,
+        requested_search_limit=requested_search_limit,
+        effective_search_limit=effective_search_limit,
+        corpus_fingerprint=corpus_fingerprint,
+        results=results,
+    )
 
 
-def _write_artifact(path, payload: dict) -> None:
-    path.write_text(json.dumps(payload), encoding="utf-8")
+def _legacy_artifact(report: KnowledgeRecallSuiteResult) -> KnowledgeRecallArtifact:
+    payload = report.to_dict()
+    payload.pop("schema_version")
+    payload.pop("corpus_fingerprint")
+    return parse_knowledge_recall_artifact_json(json.dumps(payload))
+
+
+def _write_artifact(path, artifact) -> None:
+    contract = artifact.to_artifact() if hasattr(artifact, "to_artifact") else artifact
+    path.write_text(contract.model_dump_json(indent=2), encoding="utf-8")
 
 
 def test_compare_labels_same_corpus_metric_change_as_ranking_attributable(
     tmp_path,
     capsys,
 ):
-    corpus = KnowledgeRecallCorpusFingerprint(
-        total_item_count=2,
-        source_counts=(("github", 2),),
-        newest_source_updated_at="2026-07-30T12:00:00+00:00",
-        newest_ingested_at="2026-07-30T12:05:00+00:00",
-    )
+    corpus = _corpus_fingerprint()
     baseline_path = tmp_path / "baseline.json"
     candidate_path = tmp_path / "candidate.json"
-    _write_artifact(baseline_path, _comparison_artifact(corpus_fingerprint=corpus))
+    _write_artifact(baseline_path, _comparison_report(corpus_fingerprint=corpus))
     _write_artifact(
         candidate_path,
-        _comparison_artifact(
+        _comparison_report(
             corpus_fingerprint=corpus,
             ranks=(4, 2),
-            recall_at_k=(0.5, 1.0),
-            mean_reciprocal_rank=0.375,
         ),
     )
 
@@ -563,6 +611,7 @@ def test_compare_labels_same_corpus_metric_change_as_ranking_attributable(
     assert exit_code == 0
     assert payload["comparability"]["verdict"] == "ranking-attributable"
     assert payload["comparability"]["differences"] == []
+    assert payload["comparability"]["checks"]["corpus_fingerprint"]["state"] == "match"
     assert payload["case_rank_deltas"][0]["best_evidence_rank"] == {
         "baseline": 1,
         "candidate": 4,
@@ -572,16 +621,12 @@ def test_compare_labels_same_corpus_metric_change_as_ranking_attributable(
     assert payload["metric_deltas"]["mean_reciprocal_rank"]["delta"] == -0.25
 
 
-def test_compare_labels_changed_corpus_and_names_changed_fields(tmp_path, capsys):
-    baseline_corpus = KnowledgeRecallCorpusFingerprint(
-        total_item_count=2,
-        source_counts=(("github", 2),),
-        newest_source_updated_at="2026-07-30T12:00:00+00:00",
-        newest_ingested_at="2026-07-30T12:05:00+00:00",
-    )
-    candidate_corpus = KnowledgeRecallCorpusFingerprint(
+def test_compare_reports_changed_corpus_without_claiming_causation(tmp_path, capsys):
+    baseline_corpus = _corpus_fingerprint()
+    candidate_corpus = _corpus_fingerprint(
+        fingerprint="1" * 64,
         total_item_count=3,
-        source_counts=(("github", 2), ("slack", 1)),
+        source_counts={"github": 2, "slack": 1},
         newest_source_updated_at="2026-07-30T12:00:00+00:00",
         newest_ingested_at="2026-07-31T09:00:00+00:00",
     )
@@ -589,15 +634,13 @@ def test_compare_labels_changed_corpus_and_names_changed_fields(tmp_path, capsys
     candidate_path = tmp_path / "candidate.json"
     _write_artifact(
         baseline_path,
-        _comparison_artifact(corpus_fingerprint=baseline_corpus),
+        _comparison_report(corpus_fingerprint=baseline_corpus),
     )
     _write_artifact(
         candidate_path,
-        _comparison_artifact(
+        _comparison_report(
             corpus_fingerprint=candidate_corpus,
             ranks=(2, 6),
-            recall_at_k=(0.5, 1.0),
-            mean_reciprocal_rank=0.33333333,
         ),
     )
 
@@ -612,34 +655,64 @@ def test_compare_labels_changed_corpus_and_names_changed_fields(tmp_path, capsys
     )
     payload = json.loads(capsys.readouterr().out)
 
-    assert exit_code == 0
+    assert exit_code == 1
     comparability = payload["comparability"]
-    assert comparability["verdict"] == "corpus-attributable"
+    assert comparability["verdict"] == "corpus-changed"
     assert comparability["differences"] == ["corpus_fingerprint"]
+    assert comparability["checks"]["corpus_fingerprint"]["state"] == "different"
+    assert "may combine corpus and code movement" in comparability["reason"]
     assert set(comparability["corpus_changed_fields"]) == {
         "total_item_count",
         "source_counts",
         "newest_ingested_at",
         "fingerprint",
     }
-    assert payload["metric_deltas"]["mean_reciprocal_rank"]["delta"] == -0.29166667
+    assert payload["metric_deltas"]["mean_reciprocal_rank"]["delta"] == -0.29166666
 
 
-def test_compare_refuses_question_set_digest_mismatch(tmp_path, capsys):
-    corpus = KnowledgeRecallCorpusFingerprint(
-        total_item_count=0,
-        source_counts=(),
-        newest_source_updated_at=None,
-        newest_ingested_at=None,
+def test_compare_uses_digest_not_diagnostics_for_corpus_match(tmp_path, capsys):
+    baseline_corpus = _corpus_fingerprint()
+    candidate_corpus = _corpus_fingerprint(
+        newest_ingested_at="2026-07-31T09:00:00+00:00",
     )
     baseline_path = tmp_path / "baseline.json"
     candidate_path = tmp_path / "candidate.json"
-    _write_artifact(baseline_path, _comparison_artifact(corpus_fingerprint=corpus))
+    _write_artifact(
+        baseline_path,
+        _comparison_report(corpus_fingerprint=baseline_corpus),
+    )
     _write_artifact(
         candidate_path,
-        _comparison_artifact(
+        _comparison_report(corpus_fingerprint=candidate_corpus),
+    )
+
+    exit_code = knowledge_recall_cli.main(
+        [
+            "compare",
+            "--baseline",
+            str(baseline_path),
+            "--candidate",
+            str(candidate_path),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["comparability"]["verdict"] == "ranking-attributable"
+    assert payload["comparability"]["checks"]["corpus_fingerprint"]["state"] == "match"
+    assert payload["comparability"]["corpus_changed_fields"] == {}
+
+
+def test_compare_refuses_question_set_digest_mismatch(tmp_path, capsys):
+    corpus = _corpus_fingerprint()
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    _write_artifact(baseline_path, _comparison_report(corpus_fingerprint=corpus))
+    _write_artifact(
+        candidate_path,
+        _comparison_report(
             corpus_fingerprint=corpus,
-            digest="different-question-set-digest",
+            question_set_marker="different-question-set",
         ),
     )
 
@@ -661,24 +734,169 @@ def test_compare_refuses_question_set_digest_mismatch(tmp_path, capsys):
     assert "case_rank_deltas" not in payload
 
 
-def test_compare_refuses_invalid_artifact(tmp_path, capsys):
-    corpus = KnowledgeRecallCorpusFingerprint(
-        total_item_count=0,
-        source_counts=(),
-        newest_source_updated_at=None,
-        newest_ingested_at=None,
+@pytest.mark.parametrize(
+    ("candidate_configuration", "different_fields"),
+    [
+        ({"k_values": (3,)}, ["k_values"]),
+        ({"effective_search_limit": 25}, ["effective_search_limit"]),
+        (
+            {"requested_search_limit": 25, "effective_search_limit": 25},
+            ["requested_search_limit", "effective_search_limit"],
+        ),
+    ],
+)
+def test_compare_refuses_measurement_configuration_mismatch(
+    tmp_path,
+    capsys,
+    candidate_configuration,
+    different_fields,
+):
+    corpus = _corpus_fingerprint()
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    _write_artifact(baseline_path, _comparison_report(corpus_fingerprint=corpus))
+    _write_artifact(
+        candidate_path,
+        _comparison_report(
+            corpus_fingerprint=corpus,
+            **candidate_configuration,
+        ),
+    )
+
+    exit_code = knowledge_recall_cli.main(
+        [
+            "compare",
+            "--baseline",
+            str(baseline_path),
+            "--candidate",
+            str(candidate_path),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert payload["comparability"]["verdict"] == "not-comparable"
+    assert payload["comparability"]["differences"] == different_fields
+    assert all(
+        field in payload["comparability"]["reason"] for field in different_fields
+    )
+    assert "metric_deltas" not in payload
+    assert "case_rank_deltas" not in payload
+
+
+def test_compare_emits_deltas_without_attribution_when_corpus_is_unknown(
+    tmp_path,
+    capsys,
+):
+    corpus = _corpus_fingerprint()
+    baseline = _legacy_artifact(
+        _comparison_report(
+            corpus_fingerprint=corpus,
+            ranks=(1, 1, None),
+        )
+    )
+    candidate = _legacy_artifact(
+        _comparison_report(
+            corpus_fingerprint=corpus,
+            ranks=(4, 6, 2),
+        )
     )
     baseline_path = tmp_path / "baseline.json"
     candidate_path = tmp_path / "candidate.json"
-    invalid_baseline = _comparison_artifact(corpus_fingerprint=corpus)
-    invalid_baseline["result_type"] = "invalid"
-    invalid_baseline.pop("summary")
-    invalid_baseline.pop("results")
-    invalid_baseline["errors"] = [
-        {"case_id": "case-1", "cause": "RuntimeError: search failed"}
+    _write_artifact(baseline_path, baseline)
+    _write_artifact(candidate_path, candidate)
+
+    exit_code = knowledge_recall_cli.main(
+        [
+            "compare",
+            "--baseline",
+            str(baseline_path),
+            "--candidate",
+            str(candidate_path),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    comparability = payload["comparability"]
+    assert comparability["comparable"] is True
+    assert comparability["computed"] is True
+    assert comparability["verdict"] == "corpus-unknown"
+    assert comparability["differences"] == []
+    assert comparability["checks"]["corpus_fingerprint"] == {
+        "baseline": None,
+        "candidate": None,
+        "state": "unknown",
+    }
+    assert "no attribution is possible" in comparability["reason"]
+    assert [
+        delta["best_evidence_rank"] for delta in payload["case_rank_deltas"]
+    ] == [
+        {"baseline": 1, "candidate": 4, "delta": 3, "change": "rank-changed"},
+        {"baseline": 1, "candidate": 6, "delta": 5, "change": "rank-changed"},
+        {"baseline": None, "candidate": 2, "delta": None, "change": "miss-to-hit"},
     ]
+    assert payload["metric_deltas"]["mean_reciprocal_rank"]["delta"] == -0.36111111
+
+
+def test_compare_rejects_a_renamed_producer_field_instead_of_scoring_a_miss(
+    tmp_path,
+    capsys,
+):
+    corpus = _corpus_fingerprint()
+    malformed = _comparison_report(corpus_fingerprint=corpus).to_dict()
+    rank = malformed["results"][0].pop("best_evidence_rank")
+    malformed["results"][0]["renamed_best_evidence_rank"] = rank
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    baseline_path.write_text(json.dumps(malformed), encoding="utf-8")
+    _write_artifact(
+        candidate_path,
+        _comparison_report(corpus_fingerprint=corpus),
+    )
+
+    exit_code = knowledge_recall_cli.main(
+        [
+            "compare",
+            "--baseline",
+            str(baseline_path),
+            "--candidate",
+            str(candidate_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert captured.out == ""
+    assert "best_evidence_rank" in captured.err
+    assert "Field required" in captured.err
+    assert "renamed_best_evidence_rank" in captured.err
+    assert "Extra inputs are not permitted" in captured.err
+
+
+def test_compare_refuses_invalid_artifact(tmp_path, capsys):
+    corpus = _corpus_fingerprint()
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    question_set = _question_set()
+    invalid_baseline = KnowledgeRecallInvalidResult(
+        suite="knowledge-recall",
+        generated_at=_FIXED_TIME,
+        live_database=True,
+        org_id=_ORG_ID,
+        question_set=question_set,
+        k_values=(3, 10),
+        requested_search_limit=50,
+        corpus_fingerprint=corpus,
+        errors=(
+            KnowledgeRecallCaseError(
+                case_id=question_set.cases[0].case_id,
+                cause="RuntimeError: search failed",
+            ),
+        ),
+    )
     _write_artifact(baseline_path, invalid_baseline)
-    _write_artifact(candidate_path, _comparison_artifact(corpus_fingerprint=corpus))
+    _write_artifact(candidate_path, _comparison_report(corpus_fingerprint=corpus))
 
     exit_code = knowledge_recall_cli.main(
         [
@@ -791,13 +1009,43 @@ async def test_corpus_fingerprint_uses_the_same_visible_rows_as_search(
     )
 
     assert {result["id"] for result in response["results"]} == {1, 2}
-    assert fingerprint.to_dict() == {
+    assert fingerprint.model_dump(mode="json") == {
         "total_item_count": 2,
         "source_counts": {"github": 1, "slack": 1},
         "newest_source_updated_at": "2026-07-30T13:00:00+00:00",
         "newest_ingested_at": "2026-07-30T14:00:00+00:00",
         "fingerprint": fingerprint.fingerprint,
     }
+    assert len(fingerprint.fingerprint) == 64
+
+
+async def test_corpus_fingerprint_changes_for_content_only_corpus_move(
+    knowledge_session,
+):
+    item = _item(1, "same-ref", "Original searchable content")
+    knowledge_session.add(item)
+    await knowledge_session.flush()
+
+    baseline = await build_knowledge_recall_corpus_fingerprint(
+        knowledge_session,
+        org_id=_ORG_ID,
+    )
+    item.content_digest = "redistilled-content-digest"
+    item.search_text = "Replacement searchable content"
+    await knowledge_session.flush()
+    candidate = await build_knowledge_recall_corpus_fingerprint(
+        knowledge_session,
+        org_id=_ORG_ID,
+    )
+
+    assert candidate.total_item_count == baseline.total_item_count
+    assert candidate.source_counts == baseline.source_counts
+    assert (
+        candidate.newest_source_updated_at
+        == baseline.newest_source_updated_at
+    )
+    assert candidate.newest_ingested_at == baseline.newest_ingested_at
+    assert candidate.fingerprint != baseline.fingerprint
 
 
 async def test_harvester_uses_indexed_github_provenance_and_labels_runs_for_review(
