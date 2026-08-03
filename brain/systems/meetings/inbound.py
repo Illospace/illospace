@@ -334,6 +334,7 @@ def _build_meeting_work_intake_payload(
     metadata = {
         "execution_profile": "fast",
         "origin": "meeting_transcript",
+        "obligation": "none",
         "inbound_event": {
             "event_id": str(event.id),
             "origin": normalized.get("origin"),
@@ -363,9 +364,7 @@ def _build_meeting_work_intake_payload(
     if slack_route:
         delivery_trigger = build_delivery_trigger(
             slack_route,
-            message_ts=str(
-                slack_route.thread_ts or f"meeting-{payload['session_id']}"
-            ),
+            message_ts=slack_route.thread_ts,
             slack_user_id=payload.get("requested_by"),
             text="Meetbot transcript completion",
             triggering_surface="meeting",

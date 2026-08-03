@@ -121,9 +121,11 @@ def _slack_thread_id(slack_trigger: dict[str, Any], target: dict[str, Any]) -> s
         or target.get("message_ts")
         or ""
     )
-    if not team_id or not channel_id or not message_ts:
-        raise ValueError("Slack run triggers require team_id, channel_id, and message timestamp")
-    return f"slack:{team_id}:{channel_id}:{message_ts}"
+    if not team_id or not channel_id:
+        raise ValueError("Slack run triggers require team_id and channel_id")
+    if message_ts:
+        return f"slack:{team_id}:{channel_id}:{message_ts}"
+    return f"slack:{team_id}:{channel_id}"
 
 
 __all__ = ["agent_run_request_for_slack"]

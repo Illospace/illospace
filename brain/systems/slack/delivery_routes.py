@@ -94,7 +94,7 @@ async def resolve_delivery_route(
 def build_delivery_trigger(
     route: SlackDeliveryRoute,
     *,
-    message_ts: str,
+    message_ts: str | None,
     slack_user_id: str | None,
     text: str,
     triggering_surface: str,

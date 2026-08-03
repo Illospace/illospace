@@ -130,6 +130,7 @@ async def test_meeting_transcript_admits_same_thread_run_and_is_idempotent(
     assert first["ilo_outcome"]["routing"] == "slack_origin"
     assert second["idempotent_replay"] is True
     assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 1
+    assert await session.scalar(select(func.count()).select_from(OpenAsk)) == 0
     assert run.thread_id == "slack:T-team:C-meetings:1722700000.001"
     assert run.target_ref["slack_trigger"]["response_target"] == {
         "channel_id": "C-meetings",
@@ -142,6 +143,46 @@ async def test_meeting_transcript_admits_same_thread_run_and_is_idempotent(
     assert event.action_type == "meeting.run_admitted"
     assert receipt.tool_use["type"] == "meeting_transcript_intake"
     assert receipt.target["thread_ts"] == "1722700000.001"
+
+
+@pytest.mark.asyncio
+async def test_unthreaded_dm_meeting_admits_without_open_ask(
+    session,
+    tmp_path,
+    monkeypatch,
+):
+    from brain.systems.inbound.service import submit_inbound_envelope
+    from brain.systems.meetings import inbound as meeting_inbound
+
+    meetbot = await _seed(session)
+    upload_root = tmp_path / "meetings"
+    monkeypatch.setattr(meeting_inbound, "MEETING_UPLOAD_ROOT", upload_root)
+    session_id = "1eebef49-253a-4c59-830a-0b18f33f417d"
+    payload = _ended_payload(upload_root, session_id=session_id)
+    payload["origin"] = {"channel": "D-meeting-dm", "thread_ts": ""}
+    payload["requested_by"] = "U04R1A6MZST"
+
+    result = await submit_inbound_envelope(
+        session,
+        connection=meetbot,
+        envelope={
+            "kind": "meeting_transcript",
+            "origin": "meetbot.session_complete",
+            "payload": payload,
+            "idempotency_key": f"meeting-{session_id}",
+        },
+    )
+
+    run = (await session.scalars(select(AgentRunRow))).one()
+    assert result["status"] == "processed"
+    assert result["ilo_outcome"]["operation"] == "meeting_run_admitted"
+    assert await session.scalar(select(func.count()).select_from(OpenAsk)) == 0
+    assert run.metadata_["slack_trigger"]["message_ts"] is None
+    assert run.metadata_["slack_trigger"]["response_target"] == {
+        "channel_id": "D-meeting-dm",
+        "thread_ts": None,
+        "visibility": "public",
+    }
 
 
 @pytest.mark.asyncio
