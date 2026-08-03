@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from meetbot.browser_diagnostics import capture_failure_evidence
 from meetbot.config import MeetbotConfig
 from meetbot.models import EngineResult, SessionEvents
 
@@ -238,10 +239,15 @@ class PlaywrightMeetEngine:
                     return admission_result
                 await events.status("admitted")
                 await self._attach_caption_observer(page, events)
-                await self._enable_captions(page, events)
+                await self._enable_captions(page, events, session_id)
                 return await self._monitor_call(page, runtime.leave_requested, events)
             except Exception:
-                await _capture_failure_screenshot(page, session_id)
+                await capture_failure_evidence(
+                    page,
+                    session_id,
+                    "join-failure",
+                    debug_dir=self._config.debug_dir,
+                )
                 raise
             finally:
                 self._runtimes.pop(session_id, None)
@@ -412,7 +418,12 @@ class PlaywrightMeetEngine:
         await page.expose_function("__illoMeetbotCaption", on_caption)
         await page.evaluate(_CAPTION_OBSERVER_SCRIPT)
 
-    async def _enable_captions(self, page: Any, events: SessionEvents) -> None:
+    async def _enable_captions(
+        self,
+        page: Any,
+        events: SessionEvents,
+        session_id: str,
+    ) -> None:
         await page.keyboard.press("c")
         await asyncio.sleep(1.0)
         enabled = await _first_visible(
@@ -434,7 +445,7 @@ class PlaywrightMeetEngine:
             if not clicked:
                 logger.warning("Meetbot could not verify or click the Google Meet captions control")
 
-        strategy = await self._set_caption_language(page)
+        strategy = await self._set_caption_language(page, session_id)
         if strategy:
             logger.info(
                 "Meetbot confirmed caption language %s with selector strategy %s",
@@ -447,9 +458,14 @@ class PlaywrightMeetEngine:
             "the transcript may be translated or empty."
         )
         logger.warning("%s", warning)
+        logger.info(
+            "Meetbot caption-language diagnostic evidence for session %s is under %s",
+            session_id,
+            self._config.debug_dir,
+        )
         await events.warning(warning)
 
-    async def _set_caption_language(self, page: Any) -> str | None:
+    async def _set_caption_language(self, page: Any, session_id: str) -> str | None:
         strategies = (
             ("visible-language-control", self._set_visible_caption_language),
             ("caption-settings-control", self._set_via_caption_settings_control),
@@ -465,6 +481,14 @@ class PlaywrightMeetEngine:
                     name,
                     exc_info=True,
                 )
+            # Meet closes the menu on Escape, so live selector evidence must be
+            # recorded while the failed strategy's last overlay is still open.
+            await capture_failure_evidence(
+                page,
+                session_id,
+                name,
+                debug_dir=self._config.debug_dir,
+            )
             try:
                 await page.keyboard.press("Escape")
             except Exception:
@@ -576,20 +600,6 @@ async def _click_leave(page: Any) -> None:
             '[role="button"][data-tooltip*="Leave call" i]',
         ),
     )
-
-
-async def _capture_failure_screenshot(page: Any, session_id: str) -> None:
-    """Best-effort page snapshot so a live selector failure diagnoses itself."""
-
-    from pathlib import Path
-
-    try:
-        debug_dir = Path("/data/private/meetbot/debug")
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        await page.screenshot(path=str(debug_dir / f"{session_id}.png"), full_page=True)
-        logger.info("Meetbot saved a failure screenshot for session %s", session_id)
-    except Exception:
-        logger.debug("Meetbot could not capture a failure screenshot", exc_info=True)
 
 
 JOIN_BLOCKED_ERROR = (

@@ -24,6 +24,12 @@ class MeetbotConfig:
     storage_state_path: Path = Path("/data/private/meetbot/google-storage-state.json")
     caption_warning_seconds: int = 90
 
+    @property
+    def debug_dir(self) -> Path:
+        """Return the private directory for live browser diagnostics."""
+
+        return self.private_root / "debug"
+
     @classmethod
     def from_env(cls) -> MeetbotConfig:
         """Build configuration from the public meetbot environment contract."""

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from meetbot.config import MeetbotConfig
@@ -28,6 +30,13 @@ def test_config_uses_the_spec_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.caption_language == "fr-FR"
     assert config.ui_locale == "en-US"
     assert config.lobby_timeout_seconds == 600
+    assert config.debug_dir == Path("/data/private/meetbot/debug")
+
+
+def test_debug_directory_resolves_from_private_root(tmp_path: Path) -> None:
+    config = MeetbotConfig(private_root=tmp_path / "private")
+
+    assert config.debug_dir == tmp_path / "private" / "debug"
 
 
 def test_config_reads_language_locale_and_lobby_timeout_overrides(
