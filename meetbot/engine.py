@@ -230,6 +230,7 @@ class PlaywrightMeetEngine:
                 if not using_storage_state:
                     await self._fill_guest_name(page, display_name)
                 if not await self._click_join(page):
+                    await _raise_if_join_blocked(page)
                     raise RuntimeError("Google Meet did not show an Ask to join or Join now button.")
 
                 admission_result = await self._wait_for_admission(page, runtime.leave_requested)
@@ -239,6 +240,9 @@ class PlaywrightMeetEngine:
                 await self._attach_caption_observer(page, events)
                 await self._enable_captions(page, events)
                 return await self._monitor_call(page, runtime.leave_requested, events)
+            except Exception:
+                await _capture_failure_screenshot(page, session_id)
+                raise
             finally:
                 self._runtimes.pop(session_id, None)
                 await context.close()
@@ -332,17 +336,23 @@ class PlaywrightMeetEngine:
         )
 
     async def _fill_guest_name(self, page: Any, display_name: str) -> None:
-        field = await _first_visible(
-            page,
-            (
-                'input[aria-label*="Your name" i]',
-                'input[placeholder*="Your name" i]',
-                'input[aria-label="Name"]',
-            ),
-        )
-        if field is None:
-            raise RuntimeError("Google Meet did not show the anonymous guest name field.")
-        await field.fill(display_name)
+        # The prejoin UI renders progressively; poll briefly before concluding
+        # the field is absent, and distinguish "blocked" from "not rendered".
+        for _ in range(20):
+            field = await _first_visible(
+                page,
+                (
+                    'input[aria-label*="Your name" i]',
+                    'input[placeholder*="Your name" i]',
+                    'input[aria-label="Name"]',
+                ),
+            )
+            if field is not None:
+                await field.fill(display_name)
+                return
+            await _raise_if_join_blocked(page)
+            await asyncio.sleep(0.5)
+        raise RuntimeError("Google Meet did not show the anonymous guest name field.")
 
     async def _click_join(self, page: Any) -> bool:
         role_button = page.get_by_role(
@@ -566,6 +576,44 @@ async def _click_leave(page: Any) -> None:
             '[role="button"][data-tooltip*="Leave call" i]',
         ),
     )
+
+
+async def _capture_failure_screenshot(page: Any, session_id: str) -> None:
+    """Best-effort page snapshot so a live selector failure diagnoses itself."""
+
+    from pathlib import Path
+
+    try:
+        debug_dir = Path("/data/private/meetbot/debug")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        await page.screenshot(path=str(debug_dir / f"{session_id}.png"), full_page=True)
+        logger.info("Meetbot saved a failure screenshot for session %s", session_id)
+    except Exception:
+        logger.debug("Meetbot could not capture a failure screenshot", exc_info=True)
+
+
+JOIN_BLOCKED_ERROR = (
+    "Google Meet refused the join outright: this meeting does not allow "
+    "anonymous guests (\"You can't join this video call\"). Sign the bot in "
+    "by installing its Google storage state, or invite the bot's account to "
+    "the calendar event."
+)
+
+
+async def _raise_if_join_blocked(page: Any) -> None:
+    """Detect Meet's hard block page, observed live on 2026-08-03.
+
+    Workspace-hosted meetings can require signed-in participants; anonymous
+    visitors then get "You can't join this video call" with no name field
+    and no way to knock. Naming the real cause beats reporting whichever
+    downstream selector happened to miss.
+    """
+
+    blocked = page.get_by_text(
+        re.compile(r"You can.?t join this (video )?call", re.IGNORECASE)
+    )
+    if await blocked.count() and await blocked.first.is_visible():
+        raise RuntimeError(JOIN_BLOCKED_ERROR)
 
 
 async def _ensure_media_muted(

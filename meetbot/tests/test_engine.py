@@ -128,3 +128,28 @@ def test_missing_mute_controls_do_not_block_the_join() -> None:
             on_selectors=('button[aria-label*="Turn on microphone" i]',),
         )
     )
+
+
+class _BlockedPage(_NeverAdmittedPage):
+    class _VisibleLocator:
+        def __init__(self) -> None:
+            self.first = self
+
+        async def count(self) -> int:
+            return 1
+
+        async def is_visible(self) -> bool:
+            return True
+
+    def get_by_text(self, pattern: object) -> object:
+        return self._VisibleLocator()
+
+
+def test_blocked_meeting_reports_the_real_cause() -> None:
+    """Anonymous-join hard block (seen live 2026-08-03) must name itself."""
+
+    from meetbot.engine import JOIN_BLOCKED_ERROR, _raise_if_join_blocked
+
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(_raise_if_join_blocked(_BlockedPage()))
+    assert str(excinfo.value) == JOIN_BLOCKED_ERROR
