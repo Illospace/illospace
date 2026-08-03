@@ -138,7 +138,7 @@ def reciprocal_rank_fusion(
     return ordered, debug
 
 
-def _item_filters(
+def knowledge_item_filters(
     *,
     org_id: str,
     sources: Sequence[str] | None,
@@ -371,7 +371,7 @@ async def search_knowledge(
     max_results = normalize_knowledge_search_limit(limit)
     channel_limit = min(200, max(20, max_results * 4))
     clean_org_id = str(org_id or "").strip()
-    filters = _item_filters(
+    filters = knowledge_item_filters(
         org_id=clean_org_id,
         sources=sources,
         kinds=kinds,
@@ -435,6 +435,7 @@ __all__ = [
     "RECENCY_WEIGHT",
     "RRF_K",
     "SEMANTIC_WEIGHT",
+    "knowledge_item_filters",
     "reciprocal_rank_fusion",
     "search_knowledge",
 ]

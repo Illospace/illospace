@@ -2,17 +2,37 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import hashlib
-import json
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.systems.knowledge.search import search_knowledge
+from brain.platform.db.models.knowledge import KnowledgeItem
+from brain.systems.knowledge.recall_eval_contract import (
+    KNOWLEDGE_RECALL_ARTIFACT_SCHEMA_VERSION,
+    KnowledgeRecallArtifactCaseError,
+    KnowledgeRecallArtifactCaseResult,
+    KnowledgeRecallArtifactConfiguration,
+    KnowledgeRecallArtifactEvidence,
+    KnowledgeRecallArtifactQuestionSet,
+    KnowledgeRecallArtifactRankedResult,
+    KnowledgeRecallArtifactSummary,
+    KnowledgeRecallCorpusFingerprint,
+    KnowledgeRecallInvalidArtifact,
+    KnowledgeRecallInvalidArtifactConfiguration,
+    KnowledgeRecallValidArtifact,
+)
+from brain.systems.knowledge.search import (
+    knowledge_item_filters,
+    search_knowledge,
+)
 from brain.systems.knowledge.search_contract import (
     KNOWLEDGE_SEARCH_MAX_RESULTS,
     KnowledgeSearchResponse,
@@ -28,6 +48,79 @@ DEFAULT_QUESTION_SET_PATH = (
 KnowledgeSearch = Callable[..., Awaitable[Any]]
 
 
+def _iso_utc(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+async def build_knowledge_recall_corpus_fingerprint(
+    session: AsyncSession,
+    *,
+    org_id: str,
+) -> KnowledgeRecallCorpusFingerprint:
+    """Summarize the same organization-visible rows used by knowledge search."""
+
+    rows = (
+        await session.execute(
+            select(
+                KnowledgeItem.id,
+                KnowledgeItem.source,
+                KnowledgeItem.source_ref,
+                KnowledgeItem.content_digest,
+                KnowledgeItem.search_text,
+                KnowledgeItem.source_created_at,
+                KnowledgeItem.source_updated_at,
+                KnowledgeItem.ingested_at,
+            )
+            .where(
+                *knowledge_item_filters(
+                    org_id=org_id,
+                    sources=None,
+                    kinds=None,
+                )
+            )
+            .order_by(KnowledgeItem.source.asc(), KnowledgeItem.source_ref.asc())
+        )
+    ).all()
+    canonical_rows = [
+        {
+            "id": int(row.id),
+            "source": str(row.source),
+            "source_ref": str(row.source_ref),
+            "content_digest": str(row.content_digest),
+            "search_text": str(row.search_text),
+            "source_created_at": _iso_utc(row.source_created_at),
+            "source_updated_at": _iso_utc(row.source_updated_at),
+        }
+        for row in rows
+    ]
+    encoded_rows = json.dumps(
+        canonical_rows,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    source_counts = Counter(str(row.source) for row in rows)
+    source_updated_values = [
+        row.source_updated_at for row in rows if row.source_updated_at is not None
+    ]
+    ingested_values = [row.ingested_at for row in rows if row.ingested_at is not None]
+    return KnowledgeRecallCorpusFingerprint(
+        total_item_count=len(rows),
+        source_counts=dict(sorted(source_counts.items())),
+        newest_source_updated_at=_iso_utc(
+            max(source_updated_values) if source_updated_values else None
+        ),
+        newest_ingested_at=_iso_utc(
+            max(ingested_values) if ingested_values else None
+        ),
+        fingerprint=hashlib.sha256(encoded_rows).hexdigest(),
+    )
+
+
 @dataclass(frozen=True)
 class EvidencePointer:
     """Stable provenance identity for expected or observed knowledge evidence."""
@@ -40,6 +133,12 @@ class EvidencePointer:
             "source": self.source,
             "source_ref": self.source_ref,
         }
+
+    def to_artifact(self) -> KnowledgeRecallArtifactEvidence:
+        return KnowledgeRecallArtifactEvidence(
+            source=self.source,
+            source_ref=self.source_ref,
+        )
 
 
 @dataclass(frozen=True)
@@ -85,13 +184,13 @@ class KnowledgeRecallQuestionSet:
             "cases": [case.to_dict() for case in self.cases],
         }
 
-    def identity_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.question_set_id,
-            "version": self.version,
-            "digest": self.digest,
-            "case_count": len(self.cases),
-        }
+    def to_artifact(self) -> KnowledgeRecallArtifactQuestionSet:
+        return KnowledgeRecallArtifactQuestionSet(
+            id=self.question_set_id,
+            version=self.version,
+            digest=self.digest,
+            case_count=len(self.cases),
+        )
 
 
 @dataclass(frozen=True)
@@ -103,15 +202,15 @@ class RankedKnowledgeResult:
     matched: bool
     scores: KnowledgeSearchScores
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "rank": self.rank,
-            "evidence": self.evidence.to_dict(),
-            "kind": self.kind,
-            "title": self.title,
-            "matched": self.matched,
-            "scores": self.scores.model_dump(mode="json"),
-        }
+    def to_artifact(self) -> KnowledgeRecallArtifactRankedResult:
+        return KnowledgeRecallArtifactRankedResult(
+            rank=self.rank,
+            evidence=self.evidence.to_artifact(),
+            kind=self.kind,
+            title=self.title,
+            matched=self.matched,
+            scores=self.scores,
+        )
 
 
 @dataclass(frozen=True)
@@ -131,24 +230,24 @@ class KnowledgeRecallCaseResult:
     def missed(self) -> bool:
         return self.best_evidence_rank is None
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "case_id": self.case_id,
-            "question": self.question,
-            "acceptable_evidence": [
-                pointer.to_dict() for pointer in self.acceptable_evidence
-            ],
-            "origin": dict(self.origin),
-            "best_evidence_rank": self.best_evidence_rank,
-            "missed": self.missed,
-            "reciprocal_rank": self.reciprocal_rank,
-            "hits_at_k": {
-                str(k): hit for k, hit in sorted(self.hits_at_k.items())
-            },
-            "semantic_available": self.semantic_available,
-            "semantic_degraded_reason": self.semantic_degraded_reason,
-            "ranked_results": [result.to_dict() for result in self.ranked_results],
-        }
+    def to_artifact(self) -> KnowledgeRecallArtifactCaseResult:
+        return KnowledgeRecallArtifactCaseResult(
+            case_id=self.case_id,
+            question=self.question,
+            acceptable_evidence=tuple(
+                pointer.to_artifact() for pointer in self.acceptable_evidence
+            ),
+            origin=dict(self.origin),
+            best_evidence_rank=self.best_evidence_rank,
+            missed=self.missed,
+            reciprocal_rank=self.reciprocal_rank,
+            hits_at_k=dict(sorted(self.hits_at_k.items())),
+            semantic_available=self.semantic_available,
+            semantic_degraded_reason=self.semantic_degraded_reason,
+            ranked_results=tuple(
+                result.to_artifact() for result in self.ranked_results
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -158,11 +257,11 @@ class KnowledgeRecallCaseError:
     case_id: str
     cause: str
 
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "case_id": self.case_id,
-            "cause": self.cause,
-        }
+    def to_artifact(self) -> KnowledgeRecallArtifactCaseError:
+        return KnowledgeRecallArtifactCaseError(
+            case_id=self.case_id,
+            cause=self.cause,
+        )
 
 
 @dataclass(frozen=True)
@@ -178,22 +277,28 @@ class KnowledgeRecallInvalidResult:
     question_set: KnowledgeRecallQuestionSet
     k_values: tuple[int, ...]
     requested_search_limit: int
+    corpus_fingerprint: KnowledgeRecallCorpusFingerprint
     errors: tuple[KnowledgeRecallCaseError, ...]
 
+    def to_artifact(self) -> KnowledgeRecallInvalidArtifact:
+        return KnowledgeRecallInvalidArtifact(
+            schema_version=KNOWLEDGE_RECALL_ARTIFACT_SCHEMA_VERSION,
+            result_type=self.result_type,
+            suite=self.suite,
+            generated_at=self.generated_at,
+            live_database=self.live_database,
+            question_set=self.question_set.to_artifact(),
+            configuration=KnowledgeRecallInvalidArtifactConfiguration(
+                org_id=self.org_id,
+                k_values=self.k_values,
+                requested_search_limit=self.requested_search_limit,
+            ),
+            corpus_fingerprint=self.corpus_fingerprint,
+            errors=tuple(error.to_artifact() for error in self.errors),
+        )
+
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "result_type": self.result_type,
-            "suite": self.suite,
-            "generated_at": self.generated_at,
-            "live_database": self.live_database,
-            "question_set": self.question_set.identity_dict(),
-            "configuration": {
-                "org_id": self.org_id,
-                "k_values": list(self.k_values),
-                "requested_search_limit": self.requested_search_limit,
-            },
-            "errors": [error.to_dict() for error in self.errors],
-        }
+        return self.to_artifact().model_dump(mode="json")
 
 
 @dataclass(frozen=True)
@@ -210,6 +315,7 @@ class KnowledgeRecallSuiteResult:
     k_values: tuple[int, ...]
     requested_search_limit: int
     effective_search_limit: int
+    corpus_fingerprint: KnowledgeRecallCorpusFingerprint
     results: tuple[KnowledgeRecallCaseResult, ...]
 
     @property
@@ -228,48 +334,53 @@ class KnowledgeRecallSuiteResult:
             )
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_artifact(self) -> KnowledgeRecallValidArtifact:
         total = len(self.results)
         hits = {
-            str(k): sum(1 for result in self.results if result.hits_at_k[k])
+            k: sum(1 for result in self.results if result.hits_at_k[k])
             for k in self.k_values
         }
         recall_at_k = {
-            str(k): _metric(hits[str(k)] / total if total else 0.0)
+            k: _metric(hits[k] / total if total else 0.0)
             for k in self.k_values
         }
         reasons = self.semantic_degraded_reasons
-        return {
-            "result_type": self.result_type,
-            "suite": self.suite,
-            "generated_at": self.generated_at,
-            "live_database": self.live_database,
-            "question_set": self.question_set.identity_dict(),
-            "configuration": {
-                "org_id": self.org_id,
-                "k_values": list(self.k_values),
-                "requested_search_limit": self.requested_search_limit,
-                "effective_search_limit": self.effective_search_limit,
-            },
-            "semantic_available": self.semantic_available,
-            "semantic_degraded_reason": " | ".join(reasons) if reasons else None,
-            "summary": {
-                "total": total,
-                "missed": sum(result.missed for result in self.results),
-                "semantic_degraded_cases": sum(
+        return KnowledgeRecallValidArtifact(
+            schema_version=KNOWLEDGE_RECALL_ARTIFACT_SCHEMA_VERSION,
+            result_type=self.result_type,
+            suite=self.suite,
+            generated_at=self.generated_at,
+            live_database=self.live_database,
+            question_set=self.question_set.to_artifact(),
+            configuration=KnowledgeRecallArtifactConfiguration(
+                org_id=self.org_id,
+                k_values=self.k_values,
+                requested_search_limit=self.requested_search_limit,
+                effective_search_limit=self.effective_search_limit,
+            ),
+            corpus_fingerprint=self.corpus_fingerprint,
+            semantic_available=self.semantic_available,
+            semantic_degraded_reason=" | ".join(reasons) if reasons else None,
+            summary=KnowledgeRecallArtifactSummary(
+                total=total,
+                missed=sum(result.missed for result in self.results),
+                semantic_degraded_cases=sum(
                     not result.semantic_available for result in self.results
                 ),
-                "hits_at_k": hits,
-                "recall_at_k": recall_at_k,
-                "mean_reciprocal_rank": _metric(
+                hits_at_k=hits,
+                recall_at_k=recall_at_k,
+                mean_reciprocal_rank=_metric(
                     sum(result.reciprocal_rank for result in self.results) / total
                     if total
                     else 0.0
                 ),
-                "mean_reciprocal_rank_cutoff": self.effective_search_limit,
-            },
-            "results": [result.to_dict() for result in self.results],
-        }
+                mean_reciprocal_rank_cutoff=self.effective_search_limit,
+            ),
+            results=tuple(result.to_artifact() for result in self.results),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.to_artifact().model_dump(mode="json")
 
 
 KnowledgeRecallEvaluationResult = (
@@ -443,6 +554,10 @@ async def run_knowledge_recall_eval(
     normalized_k = normalize_k_values(k_values)
     requested_search_limit = int(search_limit)
     report_generated_at = generated_at or datetime.now(timezone.utc).isoformat()
+    corpus_fingerprint = await build_knowledge_recall_corpus_fingerprint(
+        session,
+        org_id=clean_org_id,
+    )
     if not loaded_question_set.cases:
         return KnowledgeRecallInvalidResult(
             suite="knowledge-recall",
@@ -452,6 +567,7 @@ async def run_knowledge_recall_eval(
             question_set=loaded_question_set,
             k_values=normalized_k,
             requested_search_limit=requested_search_limit,
+            corpus_fingerprint=corpus_fingerprint,
             errors=(
                 KnowledgeRecallCaseError(
                     case_id=loaded_question_set.question_set_id,
@@ -480,6 +596,7 @@ async def run_knowledge_recall_eval(
             question_set=loaded_question_set,
             k_values=normalized_k,
             requested_search_limit=requested_search_limit,
+            corpus_fingerprint=corpus_fingerprint,
             errors=tuple(
                 KnowledgeRecallCaseError(case_id=case.case_id, cause=cause)
                 for case in loaded_question_set.cases
@@ -574,6 +691,7 @@ async def run_knowledge_recall_eval(
             question_set=loaded_question_set,
             k_values=normalized_k,
             requested_search_limit=requested_search_limit,
+            corpus_fingerprint=corpus_fingerprint,
             errors=tuple(case_errors),
         )
 
@@ -586,6 +704,7 @@ async def run_knowledge_recall_eval(
         k_values=normalized_k,
         requested_search_limit=requested_search_limit,
         effective_search_limit=observed_depths[0][1],
+        corpus_fingerprint=corpus_fingerprint,
         results=tuple(case_results),
     )
 
@@ -596,12 +715,14 @@ __all__ = [
     "EvidencePointer",
     "KnowledgeRecallCaseError",
     "KnowledgeRecallCaseResult",
+    "KnowledgeRecallCorpusFingerprint",
     "KnowledgeRecallEvaluationResult",
     "KnowledgeRecallInvalidResult",
     "KnowledgeRecallQuestion",
     "KnowledgeRecallQuestionSet",
     "KnowledgeRecallSuiteResult",
     "RankedKnowledgeResult",
+    "build_knowledge_recall_corpus_fingerprint",
     "load_knowledge_recall_question_set",
     "normalize_k_values",
     "run_knowledge_recall_eval",

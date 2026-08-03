@@ -1,12 +1,12 @@
-"""Evaluate or harvest knowledge-recall cases against the live database."""
+"""Evaluate, harvest, or compare knowledge-recall artifacts."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 from typing import Any, Sequence
 
 from brain.platform.db import SessionFactory
@@ -15,6 +15,13 @@ from brain.systems.knowledge.recall_eval import (
     DEFAULT_QUESTION_SET_PATH,
     load_knowledge_recall_question_set,
     run_knowledge_recall_eval,
+)
+from brain.systems.knowledge.recall_eval_comparison import (
+    compare_knowledge_recall_artifacts,
+)
+from brain.systems.knowledge.recall_eval_contract import (
+    KnowledgeRecallArtifact,
+    parse_knowledge_recall_artifact_json,
 )
 from brain.systems.knowledge.recall_eval_harvester import (
     harvest_knowledge_recall_candidates,
@@ -62,7 +69,7 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Evaluate or harvest Illo Knowledge recall cases.",
+        description="Evaluate, harvest, or compare Illo Knowledge recall artifacts.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -100,6 +107,29 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_common_arguments(harvest_parser)
     harvest_parser.add_argument("--limit-per-source", type=int, default=25)
+
+    compare_parser = commands.add_parser(
+        "compare",
+        help="Compare two serialized recall evaluation artifacts.",
+    )
+    compare_parser.add_argument(
+        "--baseline",
+        type=Path,
+        required=True,
+        help="Baseline evaluation artifact JSON.",
+    )
+    compare_parser.add_argument(
+        "--candidate",
+        type=Path,
+        required=True,
+        help="Candidate evaluation artifact JSON.",
+    )
+    compare_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Write JSON to this path instead of stdout.",
+    )
     return parser
 
 
@@ -135,10 +165,30 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         return candidates.to_dict()
 
 
+def _load_artifact(path: Path, *, label: str) -> KnowledgeRecallArtifact:
+    try:
+        return parse_knowledge_recall_artifact_json(
+            path.read_text(encoding="utf-8")
+        )
+    except ValueError as exc:
+        raise ValueError(f"Invalid {label} artifact at {path}: {exc}") from exc
+
+
+def _compare(args: argparse.Namespace) -> dict[str, Any]:
+    return compare_knowledge_recall_artifacts(
+        _load_artifact(args.baseline, label="baseline"),
+        _load_artifact(args.candidate, label="candidate"),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        payload = asyncio.run(_run(args))
+        payload = (
+            _compare(args)
+            if args.command == "compare"
+            else asyncio.run(_run(args))
+        )
         _emit(payload, args.output)
     except Exception as exc:
         print(
@@ -148,6 +198,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if args.command == "eval" and payload["result_type"] == "invalid":
         return 1
+    if args.command == "compare":
+        verdict = payload["comparability"]["verdict"]
+        if verdict != "ranking-attributable":
+            return 1
     return 0
 
 
