@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import hashlib
-import json
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.systems.knowledge.search import search_knowledge
+from brain.platform.db.models.knowledge import KnowledgeItem
+from brain.systems.knowledge.search import (
+    knowledge_item_filters,
+    search_knowledge,
+)
 from brain.systems.knowledge.search_contract import (
     KNOWLEDGE_SEARCH_MAX_RESULTS,
     KnowledgeSearchResponse,
@@ -26,6 +31,138 @@ DEFAULT_QUESTION_SET_PATH = (
 )
 
 KnowledgeSearch = Callable[..., Awaitable[Any]]
+
+
+def _iso_utc(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+@dataclass(frozen=True)
+class KnowledgeRecallCorpusFingerprint:
+    """Stable summary of the knowledge rows visible to one organization."""
+
+    total_item_count: int
+    source_counts: tuple[tuple[str, int], ...]
+    newest_source_updated_at: str | None
+    newest_ingested_at: str | None
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, Any],
+    ) -> KnowledgeRecallCorpusFingerprint:
+        """Load and verify the serialized form used by evaluation artifacts."""
+
+        raw_source_counts = value.get("source_counts")
+        if not isinstance(raw_source_counts, Mapping):
+            raise ValueError("corpus_fingerprint.source_counts must be an object")
+        try:
+            fingerprint = cls(
+                total_item_count=int(value["total_item_count"]),
+                source_counts=tuple(
+                    sorted(
+                        (str(source), int(count))
+                        for source, count in raw_source_counts.items()
+                    )
+                ),
+                newest_source_updated_at=value.get("newest_source_updated_at"),
+                newest_ingested_at=value.get("newest_ingested_at"),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid corpus fingerprint: {exc}") from exc
+        stored_digest = str(value.get("fingerprint") or "").strip()
+        if stored_digest != fingerprint.fingerprint:
+            raise ValueError("corpus fingerprint digest does not match its values")
+        return fingerprint
+
+    def _values_dict(self) -> dict[str, Any]:
+        return {
+            "total_item_count": self.total_item_count,
+            "source_counts": {
+                source: count for source, count in self.source_counts
+            },
+            "newest_source_updated_at": self.newest_source_updated_at,
+            "newest_ingested_at": self.newest_ingested_at,
+        }
+
+    @property
+    def fingerprint(self) -> str:
+        encoded = json.dumps(
+            self._values_dict(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:16]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self._values_dict(),
+            "fingerprint": self.fingerprint,
+        }
+
+    def changed_fields_from(
+        self,
+        baseline: KnowledgeRecallCorpusFingerprint,
+    ) -> dict[str, dict[str, Any]]:
+        """Return serialized field changes without duplicating the schema."""
+
+        baseline_values = baseline.to_dict()
+        candidate_values = self.to_dict()
+        return {
+            field_name: {
+                "baseline": baseline_value,
+                "candidate": candidate_values[field_name],
+            }
+            for field_name, baseline_value in baseline_values.items()
+            if baseline_value != candidate_values[field_name]
+        }
+
+
+async def build_knowledge_recall_corpus_fingerprint(
+    session: AsyncSession,
+    *,
+    org_id: str,
+) -> KnowledgeRecallCorpusFingerprint:
+    """Summarize the same organization-visible rows used by knowledge search."""
+
+    rows = (
+        await session.execute(
+            select(
+                KnowledgeItem.source,
+                func.count(KnowledgeItem.id),
+                func.max(KnowledgeItem.source_updated_at),
+                func.max(KnowledgeItem.ingested_at),
+            )
+            .where(
+                *knowledge_item_filters(
+                    org_id=org_id,
+                    sources=None,
+                    kinds=None,
+                )
+            )
+            .group_by(KnowledgeItem.source)
+        )
+    ).all()
+    sorted_rows = sorted(rows, key=lambda row: row[0])
+    source_updated_values = [row[2] for row in sorted_rows if row[2] is not None]
+    ingested_values = [row[3] for row in sorted_rows if row[3] is not None]
+    return KnowledgeRecallCorpusFingerprint(
+        total_item_count=sum(int(row[1]) for row in sorted_rows),
+        source_counts=tuple(
+            (str(row[0]), int(row[1])) for row in sorted_rows
+        ),
+        newest_source_updated_at=_iso_utc(
+            max(source_updated_values) if source_updated_values else None
+        ),
+        newest_ingested_at=_iso_utc(
+            max(ingested_values) if ingested_values else None
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -178,6 +315,7 @@ class KnowledgeRecallInvalidResult:
     question_set: KnowledgeRecallQuestionSet
     k_values: tuple[int, ...]
     requested_search_limit: int
+    corpus_fingerprint: KnowledgeRecallCorpusFingerprint
     errors: tuple[KnowledgeRecallCaseError, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -192,6 +330,7 @@ class KnowledgeRecallInvalidResult:
                 "k_values": list(self.k_values),
                 "requested_search_limit": self.requested_search_limit,
             },
+            "corpus_fingerprint": self.corpus_fingerprint.to_dict(),
             "errors": [error.to_dict() for error in self.errors],
         }
 
@@ -210,6 +349,7 @@ class KnowledgeRecallSuiteResult:
     k_values: tuple[int, ...]
     requested_search_limit: int
     effective_search_limit: int
+    corpus_fingerprint: KnowledgeRecallCorpusFingerprint
     results: tuple[KnowledgeRecallCaseResult, ...]
 
     @property
@@ -251,6 +391,7 @@ class KnowledgeRecallSuiteResult:
                 "requested_search_limit": self.requested_search_limit,
                 "effective_search_limit": self.effective_search_limit,
             },
+            "corpus_fingerprint": self.corpus_fingerprint.to_dict(),
             "semantic_available": self.semantic_available,
             "semantic_degraded_reason": " | ".join(reasons) if reasons else None,
             "summary": {
@@ -443,6 +584,10 @@ async def run_knowledge_recall_eval(
     normalized_k = normalize_k_values(k_values)
     requested_search_limit = int(search_limit)
     report_generated_at = generated_at or datetime.now(timezone.utc).isoformat()
+    corpus_fingerprint = await build_knowledge_recall_corpus_fingerprint(
+        session,
+        org_id=clean_org_id,
+    )
     if not loaded_question_set.cases:
         return KnowledgeRecallInvalidResult(
             suite="knowledge-recall",
@@ -452,6 +597,7 @@ async def run_knowledge_recall_eval(
             question_set=loaded_question_set,
             k_values=normalized_k,
             requested_search_limit=requested_search_limit,
+            corpus_fingerprint=corpus_fingerprint,
             errors=(
                 KnowledgeRecallCaseError(
                     case_id=loaded_question_set.question_set_id,
@@ -480,6 +626,7 @@ async def run_knowledge_recall_eval(
             question_set=loaded_question_set,
             k_values=normalized_k,
             requested_search_limit=requested_search_limit,
+            corpus_fingerprint=corpus_fingerprint,
             errors=tuple(
                 KnowledgeRecallCaseError(case_id=case.case_id, cause=cause)
                 for case in loaded_question_set.cases
@@ -574,6 +721,7 @@ async def run_knowledge_recall_eval(
             question_set=loaded_question_set,
             k_values=normalized_k,
             requested_search_limit=requested_search_limit,
+            corpus_fingerprint=corpus_fingerprint,
             errors=tuple(case_errors),
         )
 
@@ -586,6 +734,7 @@ async def run_knowledge_recall_eval(
         k_values=normalized_k,
         requested_search_limit=requested_search_limit,
         effective_search_limit=observed_depths[0][1],
+        corpus_fingerprint=corpus_fingerprint,
         results=tuple(case_results),
     )
 
@@ -596,12 +745,14 @@ __all__ = [
     "EvidencePointer",
     "KnowledgeRecallCaseError",
     "KnowledgeRecallCaseResult",
+    "KnowledgeRecallCorpusFingerprint",
     "KnowledgeRecallEvaluationResult",
     "KnowledgeRecallInvalidResult",
     "KnowledgeRecallQuestion",
     "KnowledgeRecallQuestionSet",
     "KnowledgeRecallSuiteResult",
     "RankedKnowledgeResult",
+    "build_knowledge_recall_corpus_fingerprint",
     "load_knowledge_recall_question_set",
     "normalize_k_values",
     "run_knowledge_recall_eval",
