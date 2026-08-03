@@ -22,6 +22,7 @@ RUN python3 -m pip install --upgrade pip setuptools wheel \
     && rm -rf /var/lib/apt/lists/*
 
 COPY meetbot ./meetbot
+COPY deploy/docker/meetbot-entrypoint.sh /usr/local/bin/meetbot-entrypoint.sh
 
 RUN useradd --create-home --uid 10001 illo \
     && mkdir -p /data/private/meetbot /app/brain/uploads \
@@ -31,5 +32,4 @@ USER illo
 
 EXPOSE 8010
 
-ENTRYPOINT ["xvfb-run", "-a", "--server-args=-screen 0 1280x720x24"]
-CMD ["uvicorn", "meetbot.app:app", "--host", "0.0.0.0", "--port", "8010"]
+ENTRYPOINT ["/usr/local/bin/meetbot-entrypoint.sh"]
