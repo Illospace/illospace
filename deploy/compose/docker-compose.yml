@@ -191,6 +191,35 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  meetbot:
+    image: ${ILLO_MEETBOT_IMAGE:-ghcr.io/illospace/meetbot:latest}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/meetbot.Dockerfile
+    profiles: ["meetbot"]
+    restart: unless-stopped
+    environment:
+      ILLO_MEETBOT_TOKEN: ${ILLO_MEETBOT_TOKEN:-}
+      ILLO_MEETBOT_BRIDGE_TOKEN: ${ILLO_MEETBOT_BRIDGE_TOKEN:-}
+      ILLO_MEETBOT_CALLBACK_URL: ${ILLO_MEETBOT_CALLBACK_URL:-http://api:8000}
+      ILLO_MEETBOT_DISPLAY_NAME: ${ILLO_MEETBOT_DISPLAY_NAME:-Illo (notetaker)}
+      ILLO_MEETBOT_MAX_SESSION_SECONDS: ${ILLO_MEETBOT_MAX_SESSION_SECONDS:-7200}
+      ILLO_MEETBOT_UI_LOCALE: ${ILLO_MEETBOT_UI_LOCALE:-en-US}
+      ILLO_MEETBOT_CAPTION_LANGUAGE: ${ILLO_MEETBOT_CAPTION_LANGUAGE:-fr-FR}
+      ILLO_MEETBOT_LOBBY_TIMEOUT_SECONDS: ${ILLO_MEETBOT_LOBBY_TIMEOUT_SECONDS:-600}
+    volumes:
+      - illo_uploads:/app/brain/uploads
+      - illo_private:/data/private
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
   updater:
     image: ${ILLO_UPDATER_IMAGE:-ghcr.io/illospace/updater:latest}
     build:

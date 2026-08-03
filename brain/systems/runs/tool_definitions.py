@@ -44,6 +44,7 @@ from brain.systems.runs.tool_catalog.definitions.domain_inbound import (
 from brain.systems.runs.tool_catalog.definitions.execution import EXEC_TOOLS
 from brain.systems.runs.tool_catalog.definitions.github import GITHUB_TOOLS
 from brain.systems.runs.tool_catalog.definitions.knowledge import KNOWLEDGE_TOOLS
+from brain.systems.runs.tool_catalog.definitions.meetings import MEETING_TOOLS
 from brain.systems.runs.tool_catalog.definitions.run_support import (
     CORTEX_REPLY_TOOL,
     CORTEX_VISUAL_REPLY_TOOL,
@@ -79,6 +80,7 @@ WORKER_TOOLS = (
     + WORKSPACE_APP_TOOLS
     + GITHUB_TOOLS
     + KNOWLEDGE_TOOLS
+    + MEETING_TOOLS
     + EXEC_TOOLS
     + SESSION_TOOLS
     + [
@@ -103,6 +105,7 @@ COORDINATOR_TOOLS = (
     + WORKSPACE_APP_TOOLS
     + GITHUB_TOOLS
     + KNOWLEDGE_TOOLS
+    + MEETING_TOOLS
     + EXEC_TOOLS
     + SESSION_TOOLS
     + LIFECYCLE_TOOLS

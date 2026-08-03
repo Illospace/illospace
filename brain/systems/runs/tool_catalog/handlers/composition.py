@@ -56,6 +56,12 @@ from brain.systems.runs.tool_catalog.handlers.github import (
     _handle_update_github_issue,
 )
 from brain.systems.runs.tool_catalog.handlers.knowledge import _handle_search_knowledge
+from brain.systems.runs.tool_catalog.handlers.meetings import (
+    _handle_join_meeting,
+    _handle_leave_meeting,
+    _handle_meeting_status,
+    _handle_send_meeting_chat,
+)
 from brain.systems.runs.tool_catalog.handlers.ideas import _handle_manage_idea
 from brain.systems.runs.tool_catalog.handlers.launch_handoffs import _handle_create_launch_handoff
 from brain.systems.runs.tool_catalog.handlers.projects import _handle_manage_project
@@ -374,6 +380,22 @@ def _get_tool_handlers(
         "list_github_sub_issues": _private_async_adapter(
             "_handle_list_github_sub_issues",
             _handle_list_github_sub_issues,
+        ),
+        "join_meeting": _private_async_adapter(
+            "_handle_join_meeting",
+            _handle_join_meeting,
+        ),
+        "meeting_status": _private_async_adapter(
+            "_handle_meeting_status",
+            _handle_meeting_status,
+        ),
+        "leave_meeting": _private_async_adapter(
+            "_handle_leave_meeting",
+            _handle_leave_meeting,
+        ),
+        "send_meeting_chat": _private_async_adapter(
+            "_handle_send_meeting_chat",
+            _handle_send_meeting_chat,
         ),
         "check_fix_deploy_state": _private_async_adapter(
             "_handle_check_fix_deploy_state",
