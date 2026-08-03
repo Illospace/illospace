@@ -2682,7 +2682,9 @@ case "${1:-}" in
     ;;
   test)
     [ -f "venv/bin/activate" ] && source venv/bin/activate
-    "$ROOT/venv/bin/python3" -m pytest tests/ -m "not requires_db" -q "${@:2}"
+    # No explicit path: pytest.ini's testpaths owns the selection, so this runs
+    # the same suite CI runs. An explicit path in "${@:2}" still overrides it.
+    "$ROOT/venv/bin/python3" -m pytest -m "not requires_db" -q "${@:2}"
     ;;
   help|-h|--help)
     usage

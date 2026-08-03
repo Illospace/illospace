@@ -43,6 +43,8 @@ jobs:
               # script-only change that breaks its own guard test would otherwise
               # skip the suite that guards it and only fail once it reaches main.
               - "brain/**"
+              # meetbot/** is backend surface covered by the fast fake-based suite.
+              - "meetbot/**"
               - "deploy/**"
               - "tests/**"
               - "scripts/**"
@@ -110,7 +112,7 @@ jobs:
 
       - name: Run backend fast suite
         run: >-
-          python3 -m pytest tests/
+          python3 -m pytest
           -m "not requires_db and not requires_browser and not live_provider"
           -q
 
