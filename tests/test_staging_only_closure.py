@@ -32,10 +32,12 @@ from brain.systems.deploy_tracker import (
     PRODUCTION_GATE_FIELD,
     PRODUCTION_GATE_PENDING,
 )
+from brain.systems.github_read_failures import (
+    GITHUB_READ_ACCESS_FORBIDDEN,
+    GITHUB_READ_AUTHENTICATION_REQUIRED,
+    GITHUB_READ_CONNECTOR_ERROR,
+)
 from brain.systems.production_gate_github import (
-    CLOSURE_READ_ACCESS_FORBIDDEN,
-    CLOSURE_READ_AUTHENTICATION_REQUIRED,
-    CLOSURE_READ_CONNECTOR_ERROR,
     ClosureReadFailure,
 )
 from brain.systems.staging_only_closure import (
@@ -258,7 +260,7 @@ class _AuthFailingGithub:
     async def get_issue_closure(self, *, repo: str, issue_number: int):
         self.reads.append((repo, issue_number))
         raise ClosureReadFailure(
-            reason_code=CLOSURE_READ_ACCESS_FORBIDDEN,
+            reason_code=GITHUB_READ_ACCESS_FORBIDDEN,
             status_code=403,
             message="API rate limit exceeded for 207.134.142.114.",
         )
@@ -350,7 +352,7 @@ async def test_mixed_success_and_auth_failure_does_not_report_all_reads_failed(
         {
             (REPO, 1281): None,
             (REPO, 1282): ClosureReadFailure(
-                reason_code=CLOSURE_READ_ACCESS_FORBIDDEN,
+                reason_code=GITHUB_READ_ACCESS_FORBIDDEN,
                 status_code=403,
                 message="Access forbidden",
             ),
@@ -380,12 +382,12 @@ async def test_different_auth_reasons_do_not_report_one_all_reads_failure(sessio
     github = _PerIssueGithub(
         {
             (REPO, 1281): ClosureReadFailure(
-                reason_code=CLOSURE_READ_AUTHENTICATION_REQUIRED,
+                reason_code=GITHUB_READ_AUTHENTICATION_REQUIRED,
                 status_code=401,
                 message="Authentication required",
             ),
             (REPO, 1282): ClosureReadFailure(
-                reason_code=CLOSURE_READ_ACCESS_FORBIDDEN,
+                reason_code=GITHUB_READ_ACCESS_FORBIDDEN,
                 status_code=403,
                 message="Access forbidden",
             ),
@@ -414,7 +416,7 @@ async def test_non_auth_closure_failure_does_not_report_authentication_error(ses
     github = _PerIssueGithub(
         {
             (REPO, 1281): ClosureReadFailure(
-                reason_code=CLOSURE_READ_CONNECTOR_ERROR,
+                reason_code=GITHUB_READ_CONNECTOR_ERROR,
                 status_code=503,
                 message="GitHub unavailable",
             )

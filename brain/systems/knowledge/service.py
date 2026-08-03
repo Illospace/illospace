@@ -22,6 +22,7 @@ from brain.platform.db.models.knowledge import (
 )
 from brain.systems.knowledge.connectors.base import (
     EnumerationFailure,
+    EnumerationFailureKind,
     KnowledgeConnector,
     KnowledgeDraft,
 )
@@ -203,14 +204,23 @@ def _manifest_enumeration_failures(value: Any) -> tuple[EnumerationFailure, ...]
         scope = str(item.get("scope") or "").strip()
         message = str(item.get("message") or "").strip()
         if scope and message:
+            try:
+                kind = EnumerationFailureKind(
+                    str(item.get("kind") or EnumerationFailureKind.TRANSIENT)
+                )
+            except ValueError:
+                kind = EnumerationFailureKind.TRANSIENT
             failures.append(
                 EnumerationFailure(
                     scope=scope,
                     message=message,
+                    kind=kind,
                     reason_code=(
                         str(item.get("reason_code") or "").strip() or None
                     ),
-                    configuration_fault=item.get("configuration_fault") is True,
+                    remediation=(
+                        str(item.get("remediation") or "").strip() or None
+                    ),
                 )
             )
     return tuple(failures)
@@ -220,11 +230,12 @@ def _enumeration_failure_payload(failure: EnumerationFailure) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "scope": failure.scope,
         "message": failure.message,
+        "kind": failure.kind.value,
     }
     if failure.reason_code:
         payload["reason_code"] = failure.reason_code
-    if failure.configuration_fault:
-        payload["configuration_fault"] = True
+    if failure.remediation:
+        payload["remediation"] = failure.remediation
     return payload
 
 
@@ -242,7 +253,9 @@ def _account_enumeration_failures(
     failures: tuple[EnumerationFailure, ...],
 ) -> tuple[EnumerationFailure, ...]:
     config_faults = tuple(
-        failure for failure in failures if failure.configuration_fault
+        failure
+        for failure in failures
+        if failure.kind is EnumerationFailureKind.CONFIGURATION
     )
     stats.config_faults += len(config_faults)
     stats.failed += len(failures) - len(config_faults)

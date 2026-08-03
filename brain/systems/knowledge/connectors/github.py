@@ -25,13 +25,15 @@ from brain.systems.cortex.project_context.github import (
     async_list_repo_issues,
     parse_github_repo_slug,
 )
-from brain.systems.production_gate_github import (
+from brain.systems.github_read_failures import (
     GITHUB_READ_ACCESS_FORBIDDEN,
+    GITHUB_READ_AUTHENTICATION_REQUIRED,
     GITHUB_READ_AUTH_FAILURE_REASONS,
     github_read_reason_code,
 )
 from brain.systems.knowledge.connectors.base import (
     EnumerationFailure,
+    EnumerationFailureKind,
     KnowledgeDraft,
     KnowledgeEnumeration,
 )
@@ -53,11 +55,47 @@ _CURSOR_VERSION = 2
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _GitHubAuthority:
-    token: str | None
-    org_id: str | None
-    actor_user_id: str | None
+    token: str
+    org_id: str
+
+
+@dataclass(slots=True)
+class _GitHubConfigurationError(Exception):
+    """A local knowledge-connector configuration failure."""
+
+    reason_code: str
+    message: str
+    remediation: str
+
+    def __post_init__(self) -> None:
+        Exception.__init__(self, self.message)
+
+
+def _configuration_remediation(repo: str, reason_code: str) -> str:
+    if reason_code == GITHUB_READ_ACCESS_FORBIDDEN:
+        return (
+            f"Grant the installed GitHub App access to {repo}, then reconnect or "
+            "update its active Vault project binding for this exact repository slug."
+        )
+    return (
+        f"Install or reconnect the GitHub App for {repo}, then create an active "
+        "VaultProjectBinding to a github_app secret for this exact repository slug."
+    )
+
+
+def _configuration_error(
+    repo: str,
+    *,
+    reason_code: str,
+    message: str,
+) -> _GitHubConfigurationError:
+    return _GitHubConfigurationError(
+        reason_code=reason_code,
+        message=message,
+        remediation=_configuration_remediation(repo, reason_code),
+    )
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -148,8 +186,9 @@ async def _github_authority(session: AsyncSession, repo: str) -> _GitHubAuthorit
         .limit(1)
     )
     if binding is None:
-        raise GitHubConnectorError(
-            status_code=401,
+        raise _configuration_error(
+            repo,
+            reason_code=GITHUB_READ_AUTHENTICATION_REQUIRED,
             message=(
                 "No active GitHub App Vault project binding exists for the "
                 "knowledge sync."
@@ -165,17 +204,25 @@ async def _github_authority(session: AsyncSession, repo: str) -> _GitHubAuthorit
             github_app_permissions=_READ_PERMISSIONS,
         )
     except GitHubConnectorError as exc:
-        if exc.status_code in {403, 404, 422}:
-            raise GitHubConnectorError(
-                status_code=403,
+        if exc.status_code == 401:
+            raise _configuration_error(
+                repo,
+                reason_code=GITHUB_READ_AUTHENTICATION_REQUIRED,
                 message=(
-                    f"The bound GitHub App could not mint a token for {repo}: {exc}"
+                    f"The bound GitHub App credential could not mint a token: {exc}"
                 ),
+            ) from exc
+        if exc.status_code in {403, 404, 422}:
+            raise _configuration_error(
+                repo,
+                reason_code=GITHUB_READ_ACCESS_FORBIDDEN,
+                message=f"The bound GitHub App could not mint a token for {repo}: {exc}",
             ) from exc
         raise
     except RuntimeSecretUnavailable as exc:
-        raise GitHubConnectorError(
-            status_code=401,
+        raise _configuration_error(
+            repo,
+            reason_code=GITHUB_READ_AUTHENTICATION_REQUIRED,
             message=f"The bound GitHub App credential could not mint a token: {exc}",
         ) from exc
     for key in ("GITHUB_TOKEN", "GH_TOKEN"):
@@ -184,42 +231,47 @@ async def _github_authority(session: AsyncSession, repo: str) -> _GitHubAuthorit
             return _GitHubAuthority(
                 token=token,
                 org_id=org_id,
-                actor_user_id=None,
             )
     token = next(
         (str(value).strip() for value in env.values() if str(value).strip()),
         None,
     )
     if not token:
-        raise GitHubConnectorError(
-            status_code=401,
+        raise _configuration_error(
+            repo,
+            reason_code=GITHUB_READ_AUTHENTICATION_REQUIRED,
             message="The active GitHub App Vault binding did not resolve a token.",
         )
-    return _GitHubAuthority(token=token, org_id=org_id, actor_user_id=None)
+    return _GitHubAuthority(token=token, org_id=org_id)
 
 
 def _configuration_failure(
+    repo: str,
+    exc: _GitHubConfigurationError,
+) -> EnumerationFailure:
+    return EnumerationFailure(
+        scope=repo,
+        message=exc.message,
+        kind=EnumerationFailureKind.CONFIGURATION,
+        reason_code=exc.reason_code,
+        remediation=exc.remediation,
+    )
+
+
+def _repository_visibility_failure(
     repo: str,
     exc: GitHubConnectorError,
 ) -> EnumerationFailure | None:
     reason_code = github_read_reason_code(exc)
     if reason_code not in GITHUB_READ_AUTH_FAILURE_REASONS:
         return None
-    if reason_code == GITHUB_READ_ACCESS_FORBIDDEN:
-        remediation = (
-            f"Grant the installed GitHub App access to {repo}, then reconnect or "
-            "update its active Vault project binding for this exact repository slug."
-        )
-    else:
-        remediation = (
-            f"Install or reconnect the GitHub App for {repo}, then create an active "
-            "VaultProjectBinding to a github_app secret for this exact repository slug."
-        )
-    return EnumerationFailure(
-        scope=repo,
-        reason_code=reason_code,
-        configuration_fault=True,
-        message=f"{exc.message.rstrip('.')}. Remediation: {remediation}",
+    return _configuration_failure(
+        repo,
+        _configuration_error(
+            repo,
+            reason_code=reason_code,
+            message=exc.message,
+        ),
     )
 
 
@@ -228,9 +280,7 @@ def _draft_for_issue(
     issue: Mapping[str, Any],
     *,
     closure: GithubIssueClosure | None = None,
-    closure_unavailable_reason: str | None = None,
     org_id: str | None = None,
-    actor_user_id: str | None = None,
 ) -> KnowledgeDraft:
     labels = [
         str(label.get("name") or "").strip()
@@ -290,11 +340,6 @@ def _draft_for_issue(
         if closure is not None
         else []
     )
-    if closure_unavailable_reason:
-        closure_extra["closure_enrichment"] = {
-            "status": "unavailable",
-            "reason": closure_unavailable_reason,
-        }
     return KnowledgeDraft(
         source="github",
         kind=kind,
@@ -319,7 +364,6 @@ def _draft_for_issue(
             "body_total_chars": int(issue.get("body_total_chars") or len(body)),
             **closure_extra,
             **({"org_id": org_id} if org_id else {}),
-            **({"actor_user_id": actor_user_id} if actor_user_id else {}),
         },
         source_created_at=_parse_timestamp(issue.get("created_at")),
         source_updated_at=_parse_timestamp(issue.get("updated_at")),
@@ -346,11 +390,6 @@ async def _enumerate_repository(
     )
     authority = await _github_authority(session, repo)
     token = authority.token
-    if not token:
-        raise GitHubConnectorError(
-            status_code=401,
-            message="The knowledge GitHub connector refused an anonymous request.",
-        )
     payload = await async_list_repo_issues(
         repo,
         token=token,
@@ -402,7 +441,6 @@ async def _enumerate_repository(
                 issue,
                 closure=closure,
                 org_id=authority.org_id,
-                actor_user_id=authority.actor_user_id,
             )
         )
 
@@ -492,10 +530,25 @@ class GitHubConnector:
                     state,
                     remaining=repository_limit,
                 )
-            except GitHubConnectorError as exc:
+            except _GitHubConfigurationError as exc:
                 failure = _configuration_failure(repo, exc)
+                logger.error(
+                    "GitHub knowledge configuration fault for repository %s "
+                    "(%s): %s",
+                    repo,
+                    failure.reason_code,
+                    failure.message,
+                )
+                failures.append(failure)
+                continue
+            except GitHubConnectorError as exc:
+                failure = _repository_visibility_failure(repo, exc)
                 if failure is None:
-                    failure = EnumerationFailure(scope=repo, message=exc.message)
+                    failure = EnumerationFailure(
+                        scope=repo,
+                        message=exc.message,
+                        reason_code=github_read_reason_code(exc),
+                    )
                     logger.exception(
                         "GitHub knowledge enumeration skipped repository %s: %s",
                         repo,

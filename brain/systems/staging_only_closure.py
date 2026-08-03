@@ -11,13 +11,13 @@ from typing import Any
 from brain.platform.db.models.domain import DomainRecord
 from brain.systems import deploy_tracker
 from brain.systems.deploy_state import DeployStateBatch
+from brain.systems.github_read_failures import GITHUB_READ_AUTH_FAILURE_REASONS
 from brain.systems.production_gate_evidence import (
     ProductionEvidenceReader,
     StoredAlertEvidenceReader,
 )
 from brain.systems.production_gate_github import (
     BackendClosureGithubClient,
-    CLOSURE_READ_AUTH_FAILURE_REASONS,
     ClosureReadFailure,
     ClosureGithubClient,
     FixingPullRequest,
@@ -238,7 +238,7 @@ async def _read_closed_issues(
         if (
             len(typed_failures) == len(failures)
             and len(reason_codes) == 1
-            and reason_codes <= CLOSURE_READ_AUTH_FAILURE_REASONS
+            and reason_codes <= GITHUB_READ_AUTH_FAILURE_REASONS
         ):
             failure = typed_failures[0]
             logger.error(
