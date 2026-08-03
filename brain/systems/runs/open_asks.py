@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -27,6 +29,10 @@ from brain.systems.runs.obligation_specs import (
 OPEN_ASK_STATUS = "open"
 ANSWERED_ASK_STATUS = "answered"
 OPEN_ASK_STRAGGLER_AFTER = timedelta(hours=1)
+SLACK_TIMESTAMP_MAX_LENGTH = 40
+_SLACK_TIMESTAMP = re.compile(r"^[0-9]+\.[0-9]+$")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +96,37 @@ def _slack_trigger_for_request(request: AgentRunRequest) -> dict[str, Any]:
     return {}
 
 
+def _normalize_open_ask_timestamp(value: Any, *, field: str) -> str | None:
+    timestamp = _clean(value)
+    if not timestamp:
+        return None
+    if (
+        len(timestamp) > SLACK_TIMESTAMP_MAX_LENGTH
+        or _SLACK_TIMESTAMP.fullmatch(timestamp) is None
+    ):
+        logger.warning(
+            "Ignoring invalid Slack %s for open-ask anchoring",
+            field,
+            extra={
+                "event": "invalid_open_ask_slack_timestamp",
+                "slack_timestamp_field": field,
+                "slack_timestamp_length": len(timestamp),
+            },
+        )
+        return None
+    return timestamp
+
+
+def _validated_open_ask_trigger(trigger: dict[str, Any]) -> dict[str, Any]:
+    validated = dict(trigger)
+    for field in ("thread_ts", "message_ts"):
+        validated[field] = _normalize_open_ask_timestamp(
+            trigger.get(field),
+            field=field,
+        )
+    return validated
+
+
 def slack_origin_ref(trigger: dict[str, Any]) -> str | None:
     team_id = _clean(trigger.get("team_id"))
     channel_id = _clean(trigger.get("channel_id"))
@@ -117,14 +154,17 @@ def slack_thread_permalink(trigger: dict[str, Any]) -> str | None:
 def open_ask_context_for_request(request: AgentRunRequest) -> dict[str, Any] | None:
     target_ref, metadata = _request_maps(request)
     trigger = _slack_trigger_for_request(request)
+    if not trigger or _clean(metadata.get("obligation")).lower() == "none":
+        return None
     obligation_spec = obligation_spec_from_metadata(
         metadata.get("obligation_spec")
     )
-    if not trigger or (
+    if (
         obligation_spec is None
         and (metadata.get("slack_monitor") or target_ref.get("headless"))
     ):
         return None
+    trigger = _validated_open_ask_trigger(trigger)
     channel_id = _clean(trigger.get("channel_id"))
     thread_ts = _clean(trigger.get("thread_ts") or trigger.get("message_ts"))
     requester = metadata.get("obligation_requester")

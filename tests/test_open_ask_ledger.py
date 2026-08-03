@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
 
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
@@ -292,6 +292,27 @@ async def test_admission_preserves_verbatim_ask_and_answer_requires_delivery_tim
         )
     assert ask.status == "open"
     assert ask.answered_at is None
+
+
+@pytest.mark.asyncio
+async def test_admission_rejects_fabricated_open_ask_timestamp(
+    session,
+    caplog,
+):
+    from brain.systems.runs.work_intake import admit_work
+
+    event = _slack_admission_event()
+    fabricated_ts = "meeting-1eebef49-253a-4c59-830a-0b18f33f417d"
+    event.payload["metadata"]["slack_trigger"]["message_ts"] = fabricated_ts
+    event.payload["metadata"]["slack_trigger"]["thread_ts"] = fabricated_ts
+
+    with caplog.at_level("WARNING", logger="brain.systems.runs.open_asks"):
+        result = await admit_work(session, event)
+
+    assert result.ok is True
+    assert await session.scalar(select(func.count()).select_from(OpenAsk)) == 0
+    assert "Ignoring invalid Slack thread_ts for open-ask anchoring" in caplog.text
+    assert "Ignoring invalid Slack message_ts for open-ask anchoring" in caplog.text
 
 
 @pytest.mark.asyncio
