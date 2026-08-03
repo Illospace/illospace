@@ -202,7 +202,11 @@ class PlaywrightMeetEngine:
             # contract, not a caption-language preference; spoken French stays separate.
             context_options: dict[str, object] = {
                 "viewport": {"width": 1280, "height": 720},
-                "permissions": ["microphone", "camera"],
+                # Deliberately NO microphone/camera permission grant: a page
+                # that never receives the permission structurally cannot send
+                # audio or video, which is the real silence guarantee. The
+                # mute-toggle pass below is best-effort cosmetics on top.
+                "permissions": [],
                 "locale": self._config.ui_locale,
                 "extra_http_headers": {
                     "Accept-Language": f"{self._config.ui_locale},en;q=0.9",
@@ -221,6 +225,7 @@ class PlaywrightMeetEngine:
             try:
                 await page.goto(meeting_url, wait_until="domcontentloaded", timeout=60_000)
                 await events.status("lobby")
+                await self._dismiss_media_prompt(page)
                 await self._mute_before_join(page)
                 if not using_storage_state:
                     await self._fill_guest_name(page, display_name)
@@ -270,6 +275,35 @@ class PlaywrightMeetEngine:
             raise RuntimeError("Google Meet chat input was not found.")
         await editor.fill(text)
         await editor.press("Enter")
+
+    async def _dismiss_media_prompt(self, page: Any) -> None:
+        """Accept Meet's no-devices prejoin dialog when it appears.
+
+        With no mic/cam permission granted, Meet often interposes a
+        "Do you want people to see and hear you?" dialog whose decline
+        path is the button we want.
+        """
+
+        for _ in range(10):
+            clicked = await _click_first_visible(
+                page,
+                (
+                    'button:has-text("Continue without microphone and camera")',
+                    'button:has-text("Continue without microphone")',
+                ),
+            )
+            if clicked:
+                return
+            if await _first_visible(
+                page,
+                (
+                    'input[aria-label*="Your name" i]',
+                    'button:has-text("Ask to join")',
+                    'button:has-text("Join now")',
+                ),
+            ) is not None:
+                return
+            await asyncio.sleep(0.5)
 
     async def _mute_before_join(self, page: Any) -> None:
         await _ensure_media_muted(
@@ -541,12 +575,21 @@ async def _ensure_media_muted(
     off_selectors: tuple[str, ...],
     on_selectors: tuple[str, ...],
 ) -> None:
+    """Best-effort toggle-off; never a join precondition.
+
+    The context grants no microphone/camera permission, so the page cannot
+    transmit either way. A bot with no device sees NO mute control at all —
+    absence is the normal permissionless state, not an error (first live
+    join failed here when this raised).
+    """
+
     if await _first_visible(page, on_selectors) is not None:
         return
     if not await _click_first_visible(page, off_selectors):
-        raise RuntimeError(f"Google Meet did not expose the {device} mute control.")
+        logger.info("Google Meet shows no %s control; nothing to mute.", device)
+        return
     if await _first_visible(page, on_selectors) is None:
-        raise RuntimeError(f"Google Meet did not confirm that the {device} is muted.")
+        logger.warning("Google Meet did not confirm the %s toggled off.", device)
 
 
 async def _is_in_call(page: Any) -> bool:

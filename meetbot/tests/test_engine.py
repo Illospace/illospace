@@ -109,3 +109,22 @@ async def test_caption_language_failure_emits_transcript_risk_warning(
         "Could not confirm the caption language is fr-FR; "
         "the transcript may be translated or empty."
     ]
+
+
+def test_missing_mute_controls_do_not_block_the_join() -> None:
+    """A bot with no mic/cam permission sees no mute controls at all.
+
+    The first live join failed because control absence raised; absence is
+    the normal permissionless state and must be tolerated silently.
+    """
+
+    from meetbot.engine import _ensure_media_muted
+
+    asyncio.run(
+        _ensure_media_muted(
+            _NeverAdmittedPage(),
+            device="microphone",
+            off_selectors=('button[aria-label*="Turn off microphone" i]',),
+            on_selectors=('button[aria-label*="Turn on microphone" i]',),
+        )
+    )
