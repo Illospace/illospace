@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy import select
@@ -72,6 +72,10 @@ def _due_job(job_key: str, *, priority: int) -> SchedulerJob:
     )
 
 
+def _frozen_clock() -> float:
+    return 0.0
+
+
 async def test_drain_budget_bounds_admission_not_in_flight_execution(session):
     blocker = _due_job("blocking_job", priority=200)
     blocker.timeout_seconds = 60
@@ -81,22 +85,19 @@ async def test_drain_budget_bounds_admission_not_in_flight_execution(session):
 
     runner_timeouts = []
 
-    async def runner(command, **_kwargs):
+    async def runner(_command, **_kwargs):
         runner_timeouts.append(_kwargs["timeout_seconds"])
-        if command == ["blocking_job"]:
-            await asyncio.sleep(0.3)
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     now = datetime(2026, 7, 28, 19, 30, tzinfo=timezone.utc)
-    first = await asyncio.wait_for(
-        async_drain_scheduler(
-            session,
-            max_runs=2,
-            runner=runner,
-            admission_budget_seconds=0.25,
-            now=now,
-        ),
-        timeout=1.5,
+    clock = Mock(side_effect=[0.0, 0.0, 1.0])
+    first = await async_drain_scheduler(
+        session,
+        max_runs=2,
+        runner=runner,
+        admission_budget_seconds=0.25,
+        clock=clock,
+        now=now,
     )
 
     assert first["executed"] == 1
@@ -123,6 +124,7 @@ async def test_drain_budget_bounds_admission_not_in_flight_execution(session):
         max_runs=2,
         runner=runner,
         admission_budget_seconds=1,
+        clock=_frozen_clock,
         now=now,
     )
 
@@ -147,6 +149,7 @@ async def test_healthy_drain_keeps_existing_result_shape(session):
         session,
         runner=runner,
         admission_budget_seconds=1,
+        clock=_frozen_clock,
         now=datetime(2026, 7, 28, 19, 30, tzinfo=timezone.utc),
     )
 
@@ -180,6 +183,7 @@ async def test_undeclared_command_output_cannot_activate_detached_lifecycle(sess
         session,
         runner=runner,
         admission_budget_seconds=1,
+        clock=_frozen_clock,
         now=datetime(2026, 7, 28, 19, 30, tzinfo=timezone.utc),
     )
 
@@ -221,6 +225,7 @@ async def test_declared_detached_command_rejects_malformed_handoff(session):
         session,
         runner=runner,
         admission_budget_seconds=1,
+        clock=_frozen_clock,
         now=now,
     )
 
@@ -322,6 +327,7 @@ async def test_later_drain_reconciles_detached_agent_run_and_step(
         job_key=job.job_key,
         runner=runner,
         admission_budget_seconds=1,
+        clock=_frozen_clock,
         now=now,
     )
     assert first_drain["executed"] == 1
