@@ -26,6 +26,8 @@ x-illo-env: &illo-env
   EMBEDDING_API_MODEL: ${EMBEDDING_API_MODEL:-gemini-embedding-2}
   EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
   WORKSPACE_ROOT: /workspaces
+  ILLO_MEETBOT_URL: ${ILLO_MEETBOT_URL:-}
+  ILLO_MEETBOT_TOKEN: ${ILLO_MEETBOT_TOKEN:-}
   ILLO_PRIVATE_HOME: /data/private
   JOURNAL_DIR: /data/private/journal
   AGENT_CONTEXT_DIR: /data/private/agent-context
