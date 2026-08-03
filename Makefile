@@ -28,8 +28,10 @@ start:
 	uvicorn brain.app.api.main:app --host 0.0.0.0 --port 8000
 
 ## Run fast tests only (no Docker, no DB)
+# No explicit path: pytest.ini's testpaths owns the selection, so this runs the
+# same suite CI runs. Naming tests/ here would silently drop meetbot/tests again.
 test:
-	python3 -m pytest tests/ -m "not requires_db" -q
+	python3 -m pytest -m "not requires_db" -q
 
 ## Run backend architecture boundary guardrails
 architecture-check:
