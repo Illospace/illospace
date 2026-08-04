@@ -9,10 +9,9 @@ index has an ACL-aware read path.  The mirror is derived and additive: it reads
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.config import KNOWLEDGE_CONNECTOR_BATCH_SIZE
@@ -21,29 +20,12 @@ from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, Memor
 from brain.systems.knowledge.connectors.base import (
     KnowledgeDraft,
     KnowledgeEnumeration,
+    KnowledgeScope,
+    UpdatedAtCursor,
 )
 
 _SHARED_VISIBILITIES = ("org", "team")
 _KNOWLEDGE_NODE_KINDS = ("content",)
-
-
-def _cursor_datetime(value: Any) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _utc_iso(value: datetime) -> str:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat()
-
 
 def _draft_for_memory(
     node: MemoryNode,
@@ -59,6 +41,7 @@ def _draft_for_memory(
         source="memory",
         kind="memory",
         source_ref=f"memory_node:{node.id}",
+        scope=KnowledgeScope.ORGANIZATION,
         title=str(node.canonical_label).strip(),
         summary=content,
         entities=list(dict.fromkeys((memory_kind, scope))),
@@ -92,6 +75,7 @@ def _withdrawn_draft(node: MemoryNode) -> KnowledgeDraft:
         source="memory",
         kind="memory",
         source_ref=f"memory_node:{node.id}",
+        scope=KnowledgeScope.ORGANIZATION,
         title="Memory no longer shared",
         summary="This memory is no longer shared with the workspace.",
         raw_text="",
@@ -122,24 +106,16 @@ class MemoryConnector:
         session: AsyncSession,
         cursor: dict[str, Any],
     ) -> KnowledgeEnumeration:
-        marker = _cursor_datetime(cursor.get("updated_at"))
-        marker_id = max(0, int(cursor.get("id") or 0))
+        watermark = UpdatedAtCursor.from_mapping(cursor)
         statement = (
             select(MemoryNode)
             .where(MemoryNode.node_kind.in_(_KNOWLEDGE_NODE_KINDS))
             .order_by(MemoryNode.updated_at.asc(), MemoryNode.id.asc())
             .limit(self.max_items)
         )
-        if marker is not None:
-            statement = statement.where(
-                or_(
-                    MemoryNode.updated_at > marker,
-                    and_(
-                        MemoryNode.updated_at == marker,
-                        MemoryNode.id > marker_id,
-                    ),
-                )
-            )
+        changed_after = watermark.changed_after(MemoryNode.updated_at, MemoryNode.id)
+        if changed_after is not None:
+            statement = statement.where(changed_after)
 
         rows = list((await session.scalars(statement)).all())
         if not rows:
@@ -183,10 +159,7 @@ class MemoryConnector:
         last = rows[-1]
         return KnowledgeEnumeration(
             drafts=drafts,
-            cursor={
-                "updated_at": _utc_iso(last.updated_at),
-                "id": last.id,
-            },
+            cursor=watermark.advanced_to(last.updated_at, last.id),
         )
 
 

@@ -23,6 +23,7 @@ from brain.platform.db.models.knowledge import (
 from brain.systems.knowledge.connectors.base import (
     EnumerationFailure,
     EnumerationFailureKind,
+    KNOWLEDGE_SCOPE_EXTRA_KEY,
     KnowledgeConnector,
     KnowledgeDraft,
 )
@@ -465,6 +466,7 @@ async def _upsert_item(
     if draft.source_ref.strip() == "":
         raise ValueError("Knowledge drafts require a stable source_ref")
     raw_text, extra, truncated = _bounded_raw_text(draft)
+    extra[KNOWLEDGE_SCOPE_EXTRA_KEY] = draft.scope.value
     digest = content_digest(draft, raw_text=raw_text, extra=extra)
     item = await session.scalar(
         select(KnowledgeItem).where(

@@ -16,10 +16,11 @@ from brain.platform.db.models.knowledge import (
     KnowledgeSyncState,
 )
 from brain.platform.db.models.skill import Skill
-from brain.systems.knowledge.connectors.skills import (
-    SkillsConnector,
-    _draft_for_skill,
+from brain.systems.knowledge.connectors.base import (
+    KNOWLEDGE_SCOPE_EXTRA_KEY,
+    KnowledgeScope,
 )
+from brain.systems.knowledge.connectors.skills import SkillsConnector
 from brain.systems.knowledge.search import search_knowledge
 from brain.systems.knowledge.service import sync_connector
 from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
@@ -114,36 +115,38 @@ def _skill(
     )
 
 
-def test_skill_draft_contains_subject_matter_and_skill_view_provenance():
+async def test_synced_skill_contains_subject_matter_and_skill_view_provenance(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
     updated_at = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
-    draft = _draft_for_skill(
+    session.add(
         _skill(
             54,
             updated_at,
             name="uwear-customer-generation-report-triage",
         )
     )
+    await session.flush()
+    await sync_connector(session, SkillsConnector(max_items=10))
+    item = await session.scalar(
+        select(KnowledgeItem).where(KnowledgeItem.source_ref == "skill:54")
+    )
 
-    assert draft.source == "skills"
-    assert draft.kind == "skill"
-    assert draft.source_ref == "skill:54"
-    assert draft.title == "uwear-customer-generation-report-triage"
-    assert "Inspect the generation report" in draft.raw_text
-    assert "generation report triage" in draft.raw_text
-    assert "Preserve the original report" in draft.raw_text
-    assert "Do not infer a policy failure" in draft.raw_text
-    assert draft.summary == draft.raw_text
-    assert draft.extra == {
-        "archived": False,
-        "maturity": "proficient",
-        "skill_type": "procedure",
-        "skill_view": {
-            "tool": "skill_view",
-            "arguments": {"name": "uwear-customer-generation-report-triage"},
-        },
-        "success_count": 10,
-        "use_count": 12,
-        "version": 3,
+    assert item is not None
+    assert item.source == "skills"
+    assert item.kind == "skill"
+    assert item.title == "uwear-customer-generation-report-triage"
+    assert "Inspect the generation report" in item.raw_text
+    assert "generation report triage" in item.raw_text
+    assert "Preserve the original report" in item.raw_text
+    assert "Do not infer a policy failure" in item.raw_text
+    assert "Inspect the generation report" in item.summary
+    assert item.extra[KNOWLEDGE_SCOPE_EXTRA_KEY] == KnowledgeScope.GLOBAL.value
+    assert item.extra["skill_view"] == {
+        "tool": "skill_view",
+        "arguments": {"name": "uwear-customer-generation-report-triage"},
     }
 
 
@@ -232,14 +235,24 @@ async def test_customer_generation_report_triage_skill_is_searchable(
     await session.flush()
     await sync_connector(session, SkillsConnector(max_items=10))
 
-    result = await search_knowledge(
+    first_org_result = await search_knowledge(
         session,
         "customer generation report triage",
         org_id=_ORG_ID,
     )
+    second_org_result = await search_knowledge(
+        session,
+        "customer generation report triage",
+        org_id="22222222-2222-4222-8222-222222222222",
+    )
 
-    assert [hit["source_ref"] for hit in result["results"]] == ["skill:54"]
-    assert result["results"][0]["extra"]["skill_view"] == {
+    assert [hit["source_ref"] for hit in first_org_result["results"]] == [
+        "skill:54"
+    ]
+    assert [hit["source_ref"] for hit in second_org_result["results"]] == [
+        "skill:54"
+    ]
+    assert first_org_result["results"][0]["extra"]["skill_view"] == {
         "tool": "skill_view",
         "arguments": {"name": "uwear-customer-generation-report-triage"},
     }

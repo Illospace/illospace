@@ -14,6 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.config import KNOWLEDGE_EMBEDDING_DIM
 from brain.platform.db.models.knowledge import KnowledgeItem, KnowledgeItemEmbedding
+from brain.systems.knowledge.scope import (
+    KNOWLEDGE_SCOPE_EXTRA_KEY,
+    KnowledgeScope,
+)
 from brain.systems.knowledge.search_contract import (
     KNOWLEDGE_SEARCH_DEFAULT_RESULTS,
     KnowledgeSearchResponse,
@@ -151,7 +155,8 @@ def knowledge_item_filters(
         KnowledgeItem.archived_at.is_(None),
         or_(
             KnowledgeItem.extra["org_id"].as_string() == clean_org_id,
-            KnowledgeItem.source == "skills",
+            KnowledgeItem.extra[KNOWLEDGE_SCOPE_EXTRA_KEY].as_string()
+            == KnowledgeScope.GLOBAL.value,
         ),
     ]
     clean_sources = [str(value).strip() for value in sources or [] if str(value).strip()]

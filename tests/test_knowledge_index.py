@@ -34,8 +34,10 @@ from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, Memor
 from brain.systems.knowledge.connectors.base import (
     EnumerationFailure,
     EnumerationFailureKind,
+    KNOWLEDGE_SCOPE_EXTRA_KEY,
     KnowledgeDraft,
     KnowledgeEnumeration,
+    KnowledgeScope,
 )
 from brain.systems.knowledge.connectors.domain_records import DomainRecordsConnector
 from brain.systems.knowledge.connectors.github import (
@@ -330,6 +332,7 @@ async def test_sync_connector_upsert_is_idempotent_by_digest(
         source="stub",
         kind="record",
         source_ref="stub:1",
+        scope=KnowledgeScope.ORGANIZATION,
         title="Stable knowledge",
         summary="The same source content should only be embedded once.",
         raw_text="stable source body",
@@ -503,6 +506,7 @@ async def test_memory_connector_mirrors_only_shared_source_backed_memories(
         "archived": False,
         "confidence": 0.92,
         "freshness_status": "fresh",
+        KNOWLEDGE_SCOPE_EXTRA_KEY: KnowledgeScope.ORGANIZATION.value,
         "memory_type": "decision",
         "node_kind": "content",
         "org_id": _ORG_ID,
@@ -703,6 +707,7 @@ async def test_memory_connector_scrubs_a_mirror_when_visibility_becomes_private(
     assert "launch detail" not in mirrored.search_text
     assert mirrored.extra == {
         "archived": True,
+        KNOWLEDGE_SCOPE_EXTRA_KEY: KnowledgeScope.ORGANIZATION.value,
         "mirror_status": "visibility_withdrawn",
         "node_kind": "content",
         "org_id": _ORG_ID,
@@ -754,6 +759,7 @@ async def test_embedding_failures_degrade_to_lexical_ingest_and_search(
                 source="degraded",
                 kind="record",
                 source_ref="degraded:1",
+                scope=KnowledgeScope.ORGANIZATION,
                 title="Lexical lighthouse",
                 summary="This row survives an embedding outage.",
                 raw_text="lexical lighthouse fallback",
@@ -939,6 +945,7 @@ async def test_sync_connector_accounts_for_truncated_raw_text(
                 source="truncation",
                 kind="record",
                 source_ref="truncation:1",
+                scope=KnowledgeScope.ORGANIZATION,
                 title="Oversized source",
                 summary="A source body larger than the storage bound.",
                 raw_text=raw_text,
@@ -962,6 +969,7 @@ async def test_sync_connector_accounts_for_truncated_raw_text(
     assert item is not None
     assert len(item.raw_text) == RAW_TEXT_MAX_CHARS
     assert item.extra == {
+        KNOWLEDGE_SCOPE_EXTRA_KEY: KnowledgeScope.ORGANIZATION.value,
         "origin": "test",
         "raw_text_truncated": True,
         "raw_text_total_chars": len(raw_text),
@@ -1004,6 +1012,7 @@ async def test_distillation_admission_is_restart_safe_and_holds_cursor_until_har
                 source="slack",
                 kind="slack_thread",
                 source_ref="slack:T1:C1:1700000000.000001",
+                scope=KnowledgeScope.ORGANIZATION,
                 title="Release thread",
                 summary="Structural fallback summary",
                 raw_text="Why did release 42 fail? It was fixed in deploy.py.",
@@ -1119,6 +1128,7 @@ async def test_distillation_exhaustion_lands_lexical_fallback_without_embedding(
                 source="github",
                 kind="issue",
                 source_ref="github:Illospace/illospace#577",
+                scope=KnowledgeScope.ORGANIZATION,
                 title="Distill this issue",
                 summary="Structural fallback survives poison output.",
                 raw_text="Original issue body remains lexically searchable.",
@@ -1194,6 +1204,7 @@ async def test_mixed_distillation_batch_persists_completed_rows_while_others_wai
                 source="slack",
                 kind="slack_thread",
                 source_ref=f"slack:T1:C1:{index}",
+                scope=KnowledgeScope.ORGANIZATION,
                 title=f"Thread {index}",
                 summary=f"Fallback {index}",
                 raw_text=f"Raw thread {index}",
@@ -1276,6 +1287,7 @@ async def test_knowledge_search_scopes_lexical_and_semantic_candidates_to_org(
                 source="scoped",
                 kind="record",
                 source_ref=f"scoped:{suffix}",
+                scope=KnowledgeScope.ORGANIZATION,
                 title="Shared deployment keyword",
                 summary=f"Secret for org {suffix}",
                 raw_text="shared deployment keyword",
@@ -1295,6 +1307,55 @@ async def test_knowledge_search_scopes_lexical_and_semantic_candidates_to_org(
     assert result["org_id"] == "org-a"
     assert result["semantic_available"] is True
     assert [item["source_ref"] for item in result["results"]] == ["scoped:a"]
+
+
+async def test_knowledge_search_treats_missing_scope_as_organization_scoped(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    connector = _StubConnector(
+        source_key="legacy-scoped",
+        drafts=[
+            KnowledgeDraft(
+                source="legacy-scoped",
+                kind="record",
+                source_ref="legacy-scoped:a",
+                scope=KnowledgeScope.ORGANIZATION,
+                title="Legacy narwhal deployment",
+                summary="Legacy organization-only deployment detail.",
+                raw_text="legacy narwhal deployment",
+                extra={"org_id": "org-a"},
+            )
+        ],
+    )
+    await sync_connector(session, connector)
+    item = await session.scalar(
+        select(KnowledgeItem).where(
+            KnowledgeItem.source_ref == "legacy-scoped:a"
+        )
+    )
+    assert item is not None
+    legacy_extra = dict(item.extra)
+    legacy_extra.pop(KNOWLEDGE_SCOPE_EXTRA_KEY)
+    item.extra = legacy_extra
+    await session.flush()
+
+    own_org = await search_knowledge(
+        session,
+        "legacy narwhal deployment",
+        org_id="org-a",
+    )
+    other_org = await search_knowledge(
+        session,
+        "legacy narwhal deployment",
+        org_id="org-b",
+    )
+
+    assert [row["source_ref"] for row in own_org["results"]] == [
+        "legacy-scoped:a"
+    ]
+    assert other_org["results"] == []
 
 
 async def test_distillation_preserves_verified_github_resolution_when_model_omits_it(
@@ -1321,6 +1382,7 @@ async def test_distillation_preserves_verified_github_resolution_when_model_omit
                 source="github",
                 kind="issue",
                 source_ref="github:Illospace/illospace#577",
+                scope=KnowledgeScope.ORGANIZATION,
                 title="Quasarlexeme closure title",
                 summary="Closed issue awaiting distillation.",
                 resolution=structural_resolution,
@@ -1886,6 +1948,7 @@ async def test_enumeration_error_survives_pending_distillation_as_degraded(
                 source="github",
                 kind="issue",
                 source_ref="github:acme/healthy#33",
+                scope=KnowledgeScope.ORGANIZATION,
                 title="Healthy issue",
                 summary="A healthy repository continued indexing.",
                 raw_text="Healthy repository body.",

@@ -18,6 +18,7 @@ from brain.platform.db.models.inbound import InboundEventRow
 from brain.systems.knowledge.connectors.base import (
     KnowledgeDraft,
     KnowledgeEnumeration,
+    KnowledgeScope,
 )
 from brain.systems.slack.client import SlackApiError
 from brain.systems.slack.monitored_intakes import visible_slack_content
@@ -502,6 +503,7 @@ class SlackKnowledgeConnector:
             source=self.source_key,
             kind="slack_thread",
             source_ref=f"slack:{team_id}:{channel.id}:{thread_ts}",
+            scope=KnowledgeScope.ORGANIZATION,
             title=f"Slack {channel_label}: {title_lede}",
             summary=summary,
             entities=[channel.id, *([channel.name] if channel.name else []), *participants],
@@ -539,6 +541,7 @@ class SlackKnowledgeConnector:
             source=self.source_key,
             kind="slack_thread",
             source_ref=f"slack:{team_id}:{channel.id}:{thread_ts}",
+            scope=KnowledgeScope.ORGANIZATION,
             title=f"Slack {channel_label}: deleted thread {thread_ts}",
             summary=(
                 f"Slack thread {thread_ts} in {channel_label} was deleted at "
