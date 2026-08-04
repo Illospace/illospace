@@ -920,14 +920,25 @@ def test_question_set_is_data_backed_versioned_and_supports_multiple_evidence():
     question_set = load_knowledge_recall_question_set()
 
     assert question_set.question_set_id == "illospace-knowledge-recall-seed"
-    assert question_set.version == "1"
-    assert len(question_set.cases) == 5
-    assert len(question_set.cases[1].acceptable_evidence) == 3
+    assert question_set.version.isdigit()
+    assert len(question_set.digest) == 64
+
+    # A floor, not an exact count. One case is worth 1/N of the score, so a small
+    # set moves in steps too coarse to attribute; growing the set must not have to
+    # edit this test. See Illospace/illospace#578 for why 5 was not enough.
+    assert len(question_set.cases) >= 25
+
+    case_ids = [case.case_id for case in question_set.cases]
+    assert len(case_ids) == len(set(case_ids))
+    assert all(case.acceptable_evidence for case in question_set.cases)
     assert all(
         case.origin["method"].startswith("hand_seeded")
         for case in question_set.cases
     )
-    assert len(question_set.digest) == 64
+    # Multiple acceptable evidence items per case stay supported.
+    assert any(
+        len(case.acceptable_evidence) > 1 for case in question_set.cases
+    )
 
 
 def test_question_set_rejects_a_case_without_known_best_evidence(tmp_path):

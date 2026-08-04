@@ -1,0 +1,651 @@
+{
+  "question_set_id": "illospace-knowledge-recall-seed",
+  "version": "3",
+  "description": "Hand-seeded questions from real closed Illospace incidents and their resolving GitHub PRs. These are not claimed to be verbatim query-log entries. PHRASING RULE: every question describes only the OBSERVED SYMPTOM, in the words someone would use before they knew the cause. Internal vocabulary -- symbol names, file paths, subsystem nouns, and the rare phrases the ticket itself uses -- is banned, because a question carrying the document's own rare terms retrieves on lexical match and inflates recall. Every question here was rewritten under this rule after an adversarial review on 2026-08-03 graded the first draft 0 honest / 27 leaky / 2 wrong-evidence. Acceptable-evidence pointers are the items that actually ANSWER the question; an issue merely closed by the same PR is not automatically evidence.",
+  "cases": [
+    {
+      "case_id": "memory-mirror-produced-node-kind",
+      "question": "Notes created by memory ingestion never appear in knowledge search, although sync succeeds. What is wrong?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#586"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#607"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#586",
+          "github:Illospace/illospace#607"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "agent-run-zero-capacity-detection",
+      "question": "A deploy finishes green, but queued work does not start. What should the checks report?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#549"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#579"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#608"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_prs",
+        "source_refs": [
+          "github:Illospace/illospace#549",
+          "github:Illospace/illospace#579",
+          "github:Illospace/illospace#608"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "tool-event-transaction-boundary",
+      "question": "A tool call returns, but the run never reaches its final state and another database writer waits. What was left open?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#606"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#606"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review",
+        "excluded_evidence": {
+          "github:Illospace/illospace#593": "Removed after the 2026-08-03 adversarial review. #593 is about duplicate event sequences and a poisoned session, not about a completed tool blocking settlement. Scoring it as a hit would count an unrelated retrieval as success."
+        }
+      }
+    },
+    {
+      "case_id": "agent-run-deadline-contract",
+      "question": "An agent keeps working long after its allowed time. How should it stop without losing its partial result?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#505"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#580"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#505",
+          "github:Illospace/illospace#580"
+        ],
+        "excluded_evidence": {
+          "github:Illospace/illospace#510": "Closed alongside #580 in the timeline, but #510 is an observability ticket (my_activity dead fields, worker self-monitoring, pushing token budget into context) and does not answer the deadline/close-out question. Listing it as acceptable evidence would score an unrelated hit as a success and inflate recall."
+        },
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "sibling-agent-run-deadlock",
+      "question": "Two child jobs started together fail with a database deadlock while updating their parent. Why?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#567"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#575"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#567",
+          "github:Illospace/illospace#575"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "scheduler-inline-job-starves-tick-loop",
+      "question": "One scheduled task starts, then every other task misses its slot until it ends. Why?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#566"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#570"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#566",
+          "github:Illospace/illospace#570"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "cold-start-gap-reconciliation",
+      "question": "The service restarts after a long outage, but messages and tracker changes from the outage are missing. How should startup handle them?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#516"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#569"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#516",
+          "github:Illospace/illospace#569"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "scheduler-single-command-program-registry",
+      "question": "Adding a small scheduled command requires matching edits in two code paths. How can those definitions stop drifting?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#501"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#540"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#501",
+          "github:Illospace/illospace#540"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "failure-guard-projection-query-cost",
+      "question": "The scheduler health page makes more database calls for every job and check that is added. Why?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#539"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#583"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#539",
+          "github:Illospace/illospace#583"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "deploy-signal-trap-must-terminate",
+      "question": "An operator interrupts a worker update, but the shell continues after cleanup. What should happen?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#552"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#564"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#552",
+          "github:Illospace/illospace#564"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "claiming-versus-drained-worker-signal",
+      "question": "A worker that has stopped accepting work still looks healthy outside its process. How can the host distinguish it from an active worker?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#548"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#558"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#548",
+          "github:Illospace/illospace#558"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "drain-wait-must-watch-real-cover",
+      "question": "During a long drain, the temporary worker exits and no process accepts work, but the deploy keeps waiting. What should end the wait?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#556"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#557"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#556",
+          "github:Illospace/illospace#557"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "worker-does-not-survive-host-reboot",
+      "question": "After a host restart, the web service is healthy, but queued work never starts until one service is started by hand. Why?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#527"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#529"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#527",
+          "github:Illospace/illospace#529"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "spawn-worker-fanout-failure-visibility",
+      "question": "A parent reports a complete search after most child readers fail. How should it report the missing results?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#547"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#561"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#547",
+          "github:Illospace/illospace#561"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "semantic-tool-loop-detection",
+      "question": "An agent repeats the same search intent with small wording changes for 40 minutes, but its guard does not stop it. Why?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#506"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#533"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#506",
+          "github:Illospace/illospace#533"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "agent-loop-failure-breaker-rolling-window",
+      "question": "A flaky tool fails many times, but occasional successes keep it enabled. How should the run respond?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#508"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#519"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#508",
+          "github:Illospace/illospace#519"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "deferral-promise-obligation-record",
+      "question": "The assistant says it will reply later, then stops and nobody follows up. What durable state is missing?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#514"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#523"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#514",
+          "github:Illospace/illospace#523"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "human-ask-survives-a-dead-run",
+      "question": "The first task for a person's request fails. A later task produces the requested artifact, but the original thread stays silent. How should the result be routed?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#436"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#450"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#436",
+          "github:Illospace/illospace#450"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "joined-select-locks-agent-runs-implicitly",
+      "question": "Replying to a message blocks an unrelated run update even though it only reads run metadata. What database behavior causes this?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#609"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#610"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#609",
+          "github:Illospace/illospace#610"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "cycle-failure-alert-path",
+      "question": "The system alerts on failed scheduled jobs, but repeated coordinator failures stay silent. Why?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#546"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#555"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#546",
+          "github:Illospace/illospace#555"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "context-floor-exceeds-token-ceiling",
+      "question": "A run fails before its first model response and keeps trying to reduce its prompt without success. What makes the configuration impossible?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#545"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#553"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#545",
+          "github:Illospace/illospace#553"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "canceled-run-settles-cyclerun-at-cancel-time",
+      "question": "After a user cancels a scheduled coordination run, it stays active for a while and later reports a cleanup error. Why?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#622"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#625"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#622",
+          "github:Illospace/illospace#625"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "forward-only-sweep-starves-other-repos",
+      "question": "While one source imports old history, current changes from other sources stop appearing even though sync reports success. Why?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#633"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#634"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#633",
+          "github:Illospace/illospace#634"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "stale-corpus-answers-without-warning",
+      "question": "A sync fails for days, yet search returns old results without saying current records are missing. What failure caused the data to stop advancing?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#627"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#629"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#627",
+          "github:Illospace/illospace#629"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "closure-sweep-unauthenticated-github-read",
+      "question": "A maintenance pass reads many public records, but every read hits an IP-level request limit and the pass reports no work. Why?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#637"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#638"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#637",
+          "github:Illospace/illospace#638"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "websocket-replays-event-history-on-restart",
+      "question": "After a service restart, current live updates are delayed behind a large amount of old history. Why?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#590"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#591"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#590",
+          "github:Illospace/illospace#591"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "openai-stream-server-error-retryable",
+      "question": "A temporary provider failure ends an interactive investigation even though a second attempt would work. Why is it not retried?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#585"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#587"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#585",
+          "github:Illospace/illospace#587"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "slack-identity-normalization-owner",
+      "question": "Two account metadata stores disagree, and a display name can be joined to the wrong user. Which layer should reconcile the records?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#612"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#617"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#612",
+          "github:Illospace/illospace#617"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    },
+    {
+      "case_id": "deploy-state-derived-from-git-ancestry",
+      "question": "A release reaches production, but tracker records remain in the earlier environment. Why does the status become stale?",
+      "acceptable_evidence": [
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#473"
+        },
+        {
+          "source": "github",
+          "source_ref": "github:Illospace/illospace#526"
+        }
+      ],
+      "origin": {
+        "method": "hand_seeded_from_closed_github_issue_and_resolving_pr",
+        "source_refs": [
+          "github:Illospace/illospace#473",
+          "github:Illospace/illospace#526"
+        ],
+        "phrasing": "symptom_only_rewritten_after_adversarial_review"
+      }
+    }
+  ]
+}
