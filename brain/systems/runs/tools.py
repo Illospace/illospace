@@ -27,6 +27,9 @@ from brain.systems.runs.actions import (
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType, EventVisibility
 from brain.systems.runs.events import activity_event, redact_tool_call_result, run_event
 from brain.systems.runs.execution_context import bind_agent_context, current_agent_context
+from brain.systems.runs.outbound_reply_admission import (
+    REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY,
+)
 from brain.systems.runs.secret_mounts import (
     handler_args_with_resolved_secret_env,
     resolve_secret_env_mounts,
@@ -219,6 +222,7 @@ class AsyncRunToolExecutor:
                     result = await invoke_maybe_async(handler, **handler_args)
             finally:
                 workspace_tool_runtime.cleanup()
+            await self._persist_reply_admission_block_count(run_id, result)
         except BlockingInvocationCancelled as exc:
             failure = str(exc.error) if exc.error else result_failure_summary(exc.result)
             if manifest_id:
@@ -417,6 +421,36 @@ class AsyncRunToolExecutor:
         await self._commit_event_boundary(run_id)
         return result
 
+    async def _persist_reply_admission_block_count(
+        self,
+        run_id: int,
+        result: Any,
+    ) -> None:
+        payload = result
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                return
+        if not isinstance(payload, dict):
+            return
+        if (
+            payload.get("blocked") is not True
+            or payload.get("error") != "outbound_reply_admission_blocked"
+        ):
+            return
+        try:
+            block_count = max(
+                0,
+                int(payload[REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return
+        await self.store.update_metadata(
+            int(run_id),
+            {REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY: block_count},
+        )
+
     async def _commit_event_boundary(self, run_id: int) -> None:
         commit_event_boundary = getattr(self.store, "commit_event_boundary", None)
         if callable(commit_event_boundary):
@@ -562,6 +596,9 @@ def _handler_context_from_action_context(action_context: dict[str, Any]) -> dict
         metadata.pop(key, None)
         metadata[key] = context.get(key)
     context["execution_metadata"] = metadata
+    run_state = getattr(current_agent_context(), "_run_state", None)
+    if run_state is not None:
+        context["_run_state"] = run_state
     return context
 
 

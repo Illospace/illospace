@@ -2416,6 +2416,177 @@ class TestFinalReplyReview:
         assert admissions[2].review["enforcement"] == "advisory"
         assert "already blocked two replies" in admissions[2].review["rationale"]
 
+    async def test_active_sibling_gate_keeps_block_budget_when_run_is_reexecuted(
+        self,
+        monkeypatch,
+    ):
+        from brain.platform.integrations.providers import (
+            LLMResponse,
+            ToolUseContentBlock,
+            Usage,
+        )
+        from brain.systems.runs.direct_agent import run_agent_async
+        from brain.systems.runs.execution_context import current_agent_context
+        from brain.systems.runs.outbound_reply_admission import admit_outbound_reply
+        from brain.systems.runs.tools import AsyncRunToolExecutor, wrap_tool_handlers
+
+        class _PersistedRunStore:
+            def __init__(self):
+                self.metadata = {
+                    "same_thread_run_context": {
+                        "thread_id": "slack:T:C:1785870481.000100",
+                        "lookup_status": "verified",
+                        "status_question": False,
+                        "live_sibling_runs": [
+                            {"run_id": 14644, "status": "running"},
+                        ],
+                    }
+                }
+                self.row = SimpleNamespace(
+                    id=671,
+                    org_id="org-1",
+                    user_id="user-1",
+                    thread_id="slack:T:C:1785870481.000100",
+                    recipe="fast",
+                    trace_id="trace-671",
+                    root_run_id=671,
+                    target_ref={},
+                    metadata_=self.metadata,
+                )
+                self.events = []
+                self.artifacts = []
+
+            async def require_run(self, run_id):
+                assert run_id == 671
+                return self.row
+
+            async def update_metadata(self, run_id, patch):
+                assert run_id == 671
+                self.metadata.update(dict(patch))
+                self.row.metadata_ = self.metadata
+                return dict(self.metadata)
+
+            async def append_event(self, event):
+                self.events.append(event)
+                return SimpleNamespace(
+                    id=len(self.events),
+                    root_run_id=671,
+                    sequence_no=len(self.events),
+                )
+
+            async def append_artifact(self, artifact):
+                self.artifacts.append(artifact)
+                return artifact
+
+            async def commit_event_boundary(self, run_id):
+                assert run_id == 671
+
+        store = _PersistedRunStore()
+        admissions = []
+
+        async def reply(content):
+            admission = admit_outbound_reply(
+                agent_context=current_agent_context(),
+                content=content,
+                coordination=None,
+                review_completion=False,
+            )
+            admissions.append(admission)
+            if not admission.admitted:
+                return json.dumps(admission.blocked_result)
+            return json.dumps(
+                {
+                    "ok": True,
+                    "posted": True,
+                    "checker_enforcement": admission.review["enforcement"],
+                }
+            )
+
+        handlers = wrap_tool_handlers(
+            {"reply": reply},
+            executor=AsyncRunToolExecutor(store),
+            run_id=671,
+            root_run_id=671,
+        )
+        tool = {
+            "name": "reply",
+            "description": "Reply to the user.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"content": {"type": "string"}},
+                "required": ["content"],
+            },
+        }
+        responses = iter(
+            [
+                LLMResponse(
+                    content=[
+                        ToolUseContentBlock(
+                            id=f"reply-{attempt}",
+                            name="reply",
+                            input={"content": "She doesn't specify the image model."},
+                        )
+                    ],
+                    stop_reason="tool_use",
+                    usage=Usage(input_tokens=3, output_tokens=2),
+                    model="gpt-5.5",
+                )
+                for attempt in range(1, 4)
+            ]
+        )
+
+        async def fake_api_call(*_args, **_kwargs):
+            return next(responses)
+
+        monkeypatch.setattr(
+            "brain.systems.runs.direct_agent.get_provider",
+            lambda *_args: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "brain.systems.runs.direct_agent._api_call_with_retry_async",
+            fake_api_call,
+        )
+        monkeypatch.setattr(
+            "brain.systems.runs.direct_agent._async_record_api_call",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "brain.systems.runs.direct_agent._runtime_async_apply_agent_session_side_effects",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "brain.systems.runs.direct_agent.load_budget_notices_sent",
+            AsyncMock(return_value={"soft", "ceiling"}),
+        )
+        llm = _mock_llm_client(MagicMock(), provider="openai")
+
+        async def execute_attempt(max_turns):
+            await run_agent_async(
+                "Which image model is she trying to use?",
+                model="openai/gpt-5.5",
+                tools=[tool],
+                tool_handlers=handlers,
+                max_turns=max_turns,
+                persist_session=False,
+                skip_harvest=True,
+                brain_context_preloaded=True,
+                resolved_llm=llm,
+                org_id="org-1",
+                user_id="user-1",
+                run_id=671,
+                metadata={"execution_provenance": dict(store.metadata)},
+            )
+
+        await execute_attempt(max_turns=2)
+        assert [item.admitted for item in admissions] == [False, False]
+        assert store.metadata["reply_admission_block_count"] == 2
+
+        await execute_attempt(max_turns=1)
+
+        assert [item.admitted for item in admissions] == [False, False, True]
+        assert admissions[2].review["enforcement"] == "advisory"
+        assert "already blocked two replies" in admissions[2].review["rationale"]
+
     def test_no_active_sibling_adds_no_deterministic_rejection(self):
         from brain.systems.runs.direct_agent import review_candidate_final_reply
         from brain.systems.runs.direct_loop.final_reply_evidence import FinalReplyEvidence

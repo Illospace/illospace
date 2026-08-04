@@ -22,6 +22,7 @@ from brain.systems.runs.failures import failure_category_for_error, public_run_f
 
 
 MAX_OUTBOUND_REPLY_BLOCKS = 2
+REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY = "reply_admission_block_count"
 
 
 @dataclass(frozen=True)
@@ -261,6 +262,10 @@ def _bounded_admission(
         blocked_attempts += 1
         state["blocked_attempts"] = blocked_attempts
         agent_context.reply_admission_block_count = blocked_attempts
+        execution_metadata = getattr(agent_context, "execution_metadata", None)
+        if isinstance(execution_metadata, dict):
+            execution_metadata[REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY] = blocked_attempts
+            agent_context.execution_metadata = execution_metadata
         return OutboundReplyAdmission(
             admitted=False,
             review=review,
@@ -331,6 +336,7 @@ def admit_outbound_reply(
 __all__ = [
     "MAX_OUTBOUND_REPLY_BLOCKS",
     "OutboundReplyAdmission",
+    "REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY",
     "admit_outbound_reply",
     "build_final_reply_check_context",
 ]

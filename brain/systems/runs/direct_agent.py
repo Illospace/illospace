@@ -108,6 +108,9 @@ from brain.systems.runs.execution_context import (
     bind_agent_context,
     current_agent_context,
 )
+from brain.systems.runs.outbound_reply_admission import (
+    REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY,
+)
 from brain.systems.runs.direct_loop.telemetry import (
     async_record_api_call as _async_record_api_call,
 )
@@ -1385,7 +1388,15 @@ async def run_agent_async(
         "loop_control": state.loop_control,
         "final_reply_review": None,
         "resolved_llm_context": None,
-        "reply_admission_block_count": 0,
+        "reply_admission_block_count": _metadata_int(
+            execution_provenance,
+            REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY,
+            _metadata_int(
+                metadata,
+                REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY,
+                0,
+            ),
+        ),
     }
     if workspace_root:
         context_attrs["workspace_root"] = workspace_root
