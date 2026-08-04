@@ -26,7 +26,10 @@ from brain.systems.cycles.common import (
     string_or_none,
     validate_nonempty_trimmed,
 )
-from brain.systems.cycles.contract_gate import MISSION_RESULT_CONTRACT_VERDICT_KEY
+from brain.systems.cycles.contract_gate import (
+    MISSION_RESULT_CONTRACT_VERDICT_KEY,
+    SELF_REVIEW_SUMMARY_VERDICT_KEY,
+)
 from brain.systems.cycles.contracts import (
     cycle_launch_receipt,
     cycle_result_contract,
@@ -462,10 +465,13 @@ async def record_cycle_run_evaluation(
         "observed_causes": observed_causes,
         "result_state": degradation_state,
     }
-    if usage is not None:
-        context_snapshot["usage"] = usage
+    stored_usage = usage or json_dict(context_snapshot.get("usage"))
+    context_snapshot["usage"] = {**stored_usage, "summary": summary}
     run.context_snapshot = jsonable(context_snapshot)
-    run.self_review_summary = summary
+    self_review_summary = verdict.get(SELF_REVIEW_SUMMARY_VERDICT_KEY)
+    run.self_review_summary = (
+        str(self_review_summary).strip() if self_review_summary else None
+    )
     session.add(
         CycleRunEvaluation(
             cycle_id=cycle.id,

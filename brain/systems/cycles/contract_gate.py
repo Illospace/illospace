@@ -16,11 +16,13 @@ from brain.platform.integrations.provider_error_sentinel import (
 )
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.cycle import Cycle, CycleRun
+from brain.systems.cycles.contracts import SELF_REVIEW_SUMMARY_MARKERS
 from brain.systems.personality import soul_prompt_section
 
 logger = logging.getLogger(__name__)
 
 MISSION_RESULT_CONTRACT_VERDICT_KEY = "mission_result_contract_verdict"
+SELF_REVIEW_SUMMARY_VERDICT_KEY = "self_review_summary"
 _CONTRACT_KIND = "autonomous_cycle_run_result"
 _FINAL_ANSWER_TYPE = "final_answer"
 _MANDATORY_DEGRADATION_ESCALATION_PREFIX = "mandatory_degradation_escalation:"
@@ -52,6 +54,13 @@ _EVIDENCE_HEALTH_REPORT_RE = re.compile(
     r"(?P<value>ok|healthy|degraded|partial|sparse|failed|unavailable|unknown)"
     r"(?P<detail>[^\n.]{0,240})",
     re.IGNORECASE,
+)
+_SELF_REVIEW_SUMMARY_RES = tuple(
+    re.compile(
+        rf"(?:\*\*)?{re.escape(marker)}(?:\*\*)?[ \t]*(?P<summary>[^\r\n]+)",
+        re.IGNORECASE,
+    )
+    for marker in SELF_REVIEW_SUMMARY_MARKERS
 )
 
 _NON_PRESERVABLE_OUTPUTS = frozenset(
@@ -120,11 +129,27 @@ def _reported_evidence_health(candidate_answer: str | None) -> dict[str, Any] | 
     return report
 
 
+def extract_self_review_summary(candidate_answer: str | None) -> str | None:
+    """Return the final agent-authored self-review recognized by the gate."""
+
+    answer = str(candidate_answer or "")
+    matches = [
+        match
+        for pattern in _SELF_REVIEW_SUMMARY_RES
+        for match in pattern.finditer(answer)
+    ]
+    if not matches:
+        return None
+    summary = max(matches, key=lambda match: match.start()).group("summary").strip()
+    return summary or None
+
+
 def _satisfies_required_output(
     requirement: str,
     *,
     normalized_candidate: str,
     result_contract: dict[str, Any],
+    self_review_summary: str | None,
 ) -> bool:
     if requirement.startswith(_MANDATORY_DEGRADATION_ESCALATION_PREFIX):
         required_key = requirement.removeprefix(
@@ -167,10 +192,7 @@ def _satisfies_required_output(
     if requirement == "record_next_action_or_blocker":
         return _contains_any(normalized_candidate, ("next action", "next step", "blocker"))
     if requirement == "short_self_review_summary":
-        return _contains_any(
-            normalized_candidate,
-            ("self-review", "self review", "review summary", "self review summary"),
-        )
+        return self_review_summary is not None
     if requirement in {"domain_tracking", "domain_tracking_summary"}:
         return _contains_any(
             normalized_candidate,
@@ -190,6 +212,7 @@ def evaluate_cycle_result_contract(
     """Validate a visible answer against only its advertised required outputs."""
 
     normalized_candidate = _normalize_text(candidate_answer)
+    self_review_summary = extract_self_review_summary(candidate_answer)
     detected_provider_error = provider_error_kind(
         candidate_answer,
         provider_exception=provider_exception,
@@ -212,6 +235,7 @@ def evaluate_cycle_result_contract(
             requirement_name,
             normalized_candidate=normalized_candidate,
             result_contract=result_contract,
+            self_review_summary=self_review_summary,
         ):
             missing.append(requirement_name)
 
@@ -227,6 +251,7 @@ def evaluate_cycle_result_contract(
         ),
         "provider_error": detected_provider_error,
         "reported_evidence_health": _reported_evidence_health(candidate_answer),
+        SELF_REVIEW_SUMMARY_VERDICT_KEY: self_review_summary,
     }
 
 
@@ -680,6 +705,9 @@ def _base_verdict(
         "domain_side_effects_succeeded": bool(evidence_packet.get("domain_side_effects_succeeded")),
         "provider_error": initial_review.get("provider_error"),
         "reported_evidence_health": initial_review.get("reported_evidence_health"),
+        SELF_REVIEW_SUMMARY_VERDICT_KEY: initial_review.get(
+            SELF_REVIEW_SUMMARY_VERDICT_KEY
+        ),
     }
 
 
@@ -826,6 +854,9 @@ async def async_prepare_cycle_run_visible_finalization(
                     "reported_evidence_health": repair_review.get(
                         "reported_evidence_health"
                     ),
+                    SELF_REVIEW_SUMMARY_VERDICT_KEY: repair_review.get(
+                        SELF_REVIEW_SUMMARY_VERDICT_KEY
+                    ),
                 }
             )
             _persist_cycle_contract_verdict(cycle_run, verdict)
@@ -835,6 +866,9 @@ async def async_prepare_cycle_run_visible_finalization(
         if not append_only and _candidate_can_be_preserved(combined_answer, repair_review):
             preserved_answer = combined_answer
             preserved_answer_source = "repair"
+            verdict[SELF_REVIEW_SUMMARY_VERDICT_KEY] = repair_review.get(
+                SELF_REVIEW_SUMMARY_VERDICT_KEY
+            )
 
     missing_outputs = list(verdict.get("final_missing_outputs") or verdict["missing_outputs"])
     degraded_answer = _degraded_visible_answer(
