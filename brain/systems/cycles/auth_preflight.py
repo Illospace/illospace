@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,10 +10,9 @@ from brain.platform.integrations.provider_auth_preflight import (
     ProviderAuthPreflightResult,
     async_probe_provider_auth,
 )
-from brain.platform.providers.model_policy import (
-    async_get_default_model,
-    infer_provider_from_model,
-)
+
+if TYPE_CHECKING:
+    from brain.systems.cycles.admission import CycleProviderRoute
 
 
 def _with_cycle_presentation(
@@ -46,28 +45,16 @@ def _with_cycle_presentation(
 async def async_preflight_cycle_external_auth(
     session: AsyncSession,
     *,
-    cycle: Any,
+    route: CycleProviderRoute,
 ) -> ProviderAuthPreflightResult:
     """Probe the Cycle's selected provider before admitting an agent run."""
 
-    user_id = str(getattr(cycle, "user_id", "") or "") or None
-    org_id = str(getattr(cycle, "org_id", "") or "") or None
-    model = str(getattr(cycle, "model_override", None) or "").strip()
-    if not model:
-        model = await async_get_default_model(
-            session,
-            include_provider_prefix=True,
-            user_id=user_id,
-            org_id=org_id,
-        )
-
-    provider = infer_provider_from_model(model)
     result = await async_probe_provider_auth(
         session,
-        user_id=user_id,
-        org_id=org_id,
-        provider=provider,
-        model=model,
+        user_id=route.user_id,
+        org_id=route.org_id,
+        provider=route.provider,
+        model=route.model,
     )
     return _with_cycle_presentation(result)
 

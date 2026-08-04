@@ -2193,6 +2193,7 @@ async def test_spawn_worker_auth_policy_probes_anthropic_and_owns_wording(
 
 async def test_cycle_auth_policy_blocks_anthropic_without_credentials(monkeypatch):
     from brain.systems.cycles import auth_preflight
+    from brain.systems.cycles.admission import CycleProviderRoute
     from brain.platform.integrations.provider_auth_preflight import (
         ProviderAuthPreflightResult,
     )
@@ -2217,10 +2218,12 @@ async def test_cycle_auth_policy_blocks_anthropic_without_credentials(monkeypatc
 
     result = await auth_preflight.async_preflight_cycle_external_auth(
         object(),
-        cycle=SimpleNamespace(
+        route=CycleProviderRoute(
             user_id="user-1",
             org_id="org-1",
-            model_override="anthropic/claude-sonnet-4-6",
+            model="anthropic/claude-sonnet-4-6",
+            provider="anthropic",
+            model_policy={"model": "anthropic/claude-sonnet-4-6"},
         ),
     )
 

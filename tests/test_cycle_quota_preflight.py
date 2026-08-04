@@ -6,7 +6,18 @@ from brain.platform.integrations.provider_quota_preflight import (
     ProviderQuotaPreflightResult,
     ProviderQuotaThresholds,
 )
+from brain.systems.cycles.admission import CycleProviderRoute
 from brain.systems.cycles import quota_preflight
+
+
+def _route(model: str = "openai/gpt-5.6-sol") -> CycleProviderRoute:
+    return CycleProviderRoute(
+        user_id="user-1",
+        org_id="org-1",
+        model=model,
+        provider="openai",
+        model_policy={"model": model},
+    )
 
 
 async def test_cycle_quota_marks_scheduled_origin_as_autonomous(monkeypatch):
@@ -27,11 +38,7 @@ async def test_cycle_quota_marks_scheduled_origin_as_autonomous(monkeypatch):
     monkeypatch.setattr(quota_preflight, "probe_provider_quota", probe)
     result = await quota_preflight.async_preflight_cycle_external_quota(
         object(),
-        cycle=SimpleNamespace(
-            user_id="user-1",
-            org_id="org-1",
-            model_override="openai/gpt-5.6-sol",
-        ),
+        route=_route(),
         run=SimpleNamespace(
             context_snapshot={"launch_context": {"origin": "scheduled_cycle"}}
         ),
@@ -62,11 +69,7 @@ async def test_cycle_quota_marks_manual_origin_as_explicit(monkeypatch):
     monkeypatch.setattr(quota_preflight, "probe_provider_quota", probe)
     result = await quota_preflight.async_preflight_cycle_external_quota(
         object(),
-        cycle=SimpleNamespace(
-            user_id="user-1",
-            org_id="org-1",
-            model_override="openai/gpt-5.6-sol",
-        ),
+        route=_route(),
         run=SimpleNamespace(
             context_snapshot={"launch_context": {"origin": "manual_cycle"}}
         ),
@@ -77,12 +80,8 @@ async def test_cycle_quota_marks_manual_origin_as_explicit(monkeypatch):
     assert result.visible_message is None
 
 
-async def test_cycle_quota_resolves_default_model(monkeypatch):
+async def test_cycle_quota_consumes_resolved_route(monkeypatch):
     captured = {}
-
-    async def default_model(_session, **kwargs):
-        captured["default"] = kwargs
-        return "openai/gpt-5.6-sol"
 
     def probe(**kwargs):
         captured["probe"] = kwargs
@@ -96,23 +95,13 @@ async def test_cycle_quota_resolves_default_model(monkeypatch):
             thresholds=ProviderQuotaThresholds(soft_percent=75, hard_percent=90),
         )
 
-    monkeypatch.setattr(quota_preflight, "async_get_default_model", default_model)
     monkeypatch.setattr(quota_preflight, "probe_provider_quota", probe)
     result = await quota_preflight.async_preflight_cycle_external_quota(
         object(),
-        cycle=SimpleNamespace(
-            user_id="user-1",
-            org_id="org-1",
-            model_override=None,
-        ),
+        route=_route(),
         run=SimpleNamespace(context_snapshot={}),
     )
 
-    assert captured["default"] == {
-        "include_provider_prefix": True,
-        "user_id": "user-1",
-        "org_id": "org-1",
-    }
     assert captured["probe"]["model"] == "openai/gpt-5.6-sol"
     assert result.status == "unknown"
     assert result.decision == "admitted"
