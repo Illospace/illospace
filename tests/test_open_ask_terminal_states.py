@@ -2,15 +2,21 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
+from brain.contracts.statuses import (
+    ACTIVE_OPEN_ASK_STATUS_VALUES,
+    OPEN_ASK_STATUS_VALUES,
+    TERMINAL_OPEN_ASK_STATUS_VALUES,
+    OpenAskStatus,
+)
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.open_ask import (
-    OPEN_ASK_STATUSES,
     ObligationKind,
     ObligationNotice,
     OpenAsk,
@@ -52,15 +58,18 @@ async def terminal_session(async_sqlite_session_factory):
     return session
 
 
-def test_open_ask_model_declares_only_supported_statuses():
-    assert OPEN_ASK_STATUSES == ("open", "answered", "routed", "expired")
+def test_open_ask_contract_and_model_declare_only_supported_statuses():
+    assert OPEN_ASK_STATUS_VALUES == ("open", "answered", "routed", "expired")
+    assert ACTIVE_OPEN_ASK_STATUS_VALUES == ("open", "routed")
+    assert TERMINAL_OPEN_ASK_STATUS_VALUES == ("answered", "expired")
+    assert OPEN_ASK_STATUS_VALUES == tuple(status.value for status in OpenAskStatus)
     constraint = next(
         item
         for item in OpenAsk.__table__.constraints
         if item.name == "ck_open_asks_status"
     )
     expression = str(constraint.sqltext)
-    for status in OPEN_ASK_STATUSES:
+    for status in OPEN_ASK_STATUS_VALUES:
         assert repr(status) in expression
     assert "unknown" not in expression
 
@@ -87,7 +96,7 @@ async def test_open_ask_database_constraint_accepts_supported_statuses_only(
         """
     )
     opened_at = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
-    for index, status in enumerate(OPEN_ASK_STATUSES):
+    for index, status in enumerate(OPEN_ASK_STATUS_VALUES):
         await db_session.execute(
             statement,
             {
@@ -208,9 +217,10 @@ async def test_contact_form_acknowledgement_routes_then_owner_reply_answers(
 
 
 @pytest.mark.asyncio
-async def test_periodic_straggler_collection_expires_only_old_terminal_deferrals(
+async def test_scheduled_straggler_collection_expires_only_old_terminal_deferrals(
     terminal_session,
 ):
+    from brain.systems.cycles.service import _async_attach_open_ask_stragglers
     from brain.systems.runs.open_asks import (
         RUN_DEFERRAL_EXPIRY_AFTER,
         list_open_ask_stragglers,
@@ -289,10 +299,35 @@ async def test_periodic_straggler_collection_expires_only_old_terminal_deferrals
     terminal_session.add_all([old, inside_bound, routed])
     await terminal_session.flush()
 
-    stragglers = await list_open_ask_stragglers(
+    unswept_stragglers = await list_open_ask_stragglers(
         terminal_session,
         org_id=ORG_ID,
         now=now,
+    )
+    assert old.status == "open"
+    assert [row["id"] for row in unswept_stragglers] == [
+        routed.id,
+        old.id,
+        inside_bound.id,
+    ]
+
+    cycle = SimpleNamespace(
+        org_id=ORG_ID,
+        name="Uwear Ticket Coordinator Check-ins",
+    )
+    cycle_run = SimpleNamespace(
+        scheduled_for=now,
+        context_snapshot={
+            "launch_context": {
+                "origin": "scheduled_cycle",
+                "run_kind": "scheduled_digest",
+            }
+        },
+    )
+    stragglers = await _async_attach_open_ask_stragglers(
+        terminal_session,
+        cycle,
+        cycle_run,
     )
 
     assert old.status == "expired"
@@ -303,6 +338,49 @@ async def test_periodic_straggler_collection_expires_only_old_terminal_deferrals
     assert [row["id"] for row in stragglers] == [routed.id, inside_bound.id]
     assert stragglers[0]["owner_label"] == "Reda"
     assert stragglers[0]["age"] == "2h"
+
+
+@pytest.mark.asyncio
+async def test_failed_scheduled_sweep_rolls_back_its_savepoint(
+    terminal_session,
+    monkeypatch,
+):
+    from brain.systems.cycles.service import _async_attach_open_ask_stragglers
+    from brain.systems.runs import open_asks
+
+    async def fail_during_sweep(session, **_kwargs):
+        session.add(Org(id=ORG_ID, name="Duplicate", slug="duplicate"))
+        await session.flush()
+
+    monkeypatch.setattr(
+        open_asks,
+        "expire_stale_run_deferrals",
+        fail_during_sweep,
+    )
+    cycle = SimpleNamespace(
+        org_id=ORG_ID,
+        name="Uwear Ticket Coordinator Check-ins",
+    )
+    cycle_run = SimpleNamespace(
+        scheduled_for=datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc),
+        context_snapshot={
+            "launch_context": {
+                "origin": "scheduled_cycle",
+                "run_kind": "scheduled_digest",
+            }
+        },
+    )
+
+    assert await _async_attach_open_ask_stragglers(
+        terminal_session,
+        cycle,
+        cycle_run,
+    ) == []
+    assert "open_ask_ledger_error" in cycle_run.context_snapshot
+    assert await terminal_session.scalar(select(func.count()).select_from(Org)) == 1
+    user = await terminal_session.get(User, USER_ID)
+    user.name = "Session survived"
+    await terminal_session.flush()
 
 
 def test_open_ask_instruction_splits_illo_and_human_ownership():

@@ -582,43 +582,17 @@ async def test_uncommitted_deferral_never_reaches_slack_when_outer_transaction_f
     assert slack_post.await_count == 0
 
 
-@pytest.mark.asyncio
-async def test_clarification_reply_does_not_close_run_deferral(session):
+def test_delivered_slack_transition_commands_have_disjoint_fields():
     from brain.systems.runs.open_asks import (
-        DeliveredSlackReply,
-        record_delivered_slack_answer,
-        record_run_deferral,
+        DeliveredSlackAnswer,
+        DeliveredSlackRoute,
     )
 
-    run = await _create_slack_run(session)
-    obligation, _notice, _created = await record_run_deferral(
-        session,
-        run=run,
-        channel_id="CALERTS",
-        thread_ts="1784741786.046759",
-        trigger=run.target_ref["slack_trigger"],
-        deferral_text="I will come back.",
-        notice_condition="interruption:requeued",
-        post_thread_ts="1784741786.046759",
-    )
-
-    counts = await record_delivered_slack_answer(
-        session,
-        DeliveredSlackReply(
-            org_id=ORG_ID,
-            channel_id="CALERTS",
-            thread_ts="1784741786.046759",
-            answering_run_id=run.id,
-            slack_message_ts="1784743141.000100",
-            answer_text="Which repository should own this?",
-            is_answer=False,
-        ),
-    )
-
-    assert counts.total == 0
-    assert counts.answered_open_asks == 0
-    assert obligation.status == "open"
-    assert obligation.answer_text is None
+    answer_fields = set(DeliveredSlackAnswer.__dataclass_fields__)
+    route_fields = set(DeliveredSlackRoute.__dataclass_fields__)
+    assert "is_answer" not in answer_fields | route_fields
+    assert {"routed_to_name", "routed_to_slack_id"}.isdisjoint(answer_fields)
+    assert {"answer_text", "artifact_kind", "artifact_ref"}.isdisjoint(route_fields)
 
 
 @pytest.mark.asyncio
@@ -691,7 +665,7 @@ async def test_stale_notice_claim_is_disambiguated_before_any_resend(session):
 @pytest.mark.asyncio
 async def test_answer_supersedes_a_stale_notice_proven_absent(session):
     from brain.systems.runs.open_asks import (
-        DeliveredSlackReply,
+        DeliveredSlackAnswer,
         record_delivered_slack_answer,
         record_run_deferral,
     )
@@ -717,14 +691,13 @@ async def test_answer_supersedes_a_stale_notice_proven_absent(session):
     notice.claimed_at = now - STALE_NOTICE_POSTING_GRACE - timedelta(minutes=1)
     await record_delivered_slack_answer(
         session,
-        DeliveredSlackReply(
+        DeliveredSlackAnswer(
             org_id=ORG_ID,
             channel_id="CALERTS",
             thread_ts="1784741786.046759",
             answering_run_id=run.id,
             slack_message_ts="1784743141.000100",
             answer_text="Done.",
-            is_answer=True,
         ),
     )
     await session.commit()
@@ -759,7 +732,7 @@ async def test_delivered_answer_returns_kind_counts_and_closes_all_matching_kind
 ):
     from brain.platform.db.models.open_ask import ObligationKind
     from brain.systems.runs.open_asks import (
-        DeliveredSlackReply,
+        DeliveredSlackAnswer,
         record_delivered_slack_answer,
         record_run_deferral,
     )
@@ -779,14 +752,13 @@ async def test_delivered_answer_returns_kind_counts_and_closes_all_matching_kind
 
     counts = await record_delivered_slack_answer(
         session,
-        DeliveredSlackReply(
+        DeliveredSlackAnswer(
             org_id=ORG_ID,
             channel_id="CALERTS",
             thread_ts="1784741786.046759",
             answering_run_id=run_id,
             slack_message_ts="1784743141.000100",
             answer_text="Issue #1221 is filed.",
-            is_answer=True,
         ),
     )
 

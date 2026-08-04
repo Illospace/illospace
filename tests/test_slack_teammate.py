@@ -762,7 +762,7 @@ async def test_post_slack_reply_tool_posts_to_triggering_thread(monkeypatch):
 async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkeypatch):
     from brain.platform.db.models.open_ask import ObligationKind
     from brain.systems.runs.execution_context import bind_agent_context
-    from brain.systems.runs.open_asks import DeliveredSlackReplyCounts
+    from brain.systems.runs.open_asks import DeliveredSlackAnswerCounts
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
 
     class _SlackClient:
@@ -778,15 +778,12 @@ async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkey
         AsyncMock(return_value=_SlackClient()),
     )
     recorder = AsyncMock(
-        side_effect=[
-            DeliveredSlackReplyCounts(
-                by_kind={
-                    ObligationKind.HUMAN_ASK: 1,
-                    ObligationKind.RUN_DEFERRAL: 1,
-                }
-            ),
-            DeliveredSlackReplyCounts.empty(),
-        ]
+        return_value=DeliveredSlackAnswerCounts(
+            by_kind={
+                ObligationKind.HUMAN_ASK: 1,
+                ObligationKind.RUN_DEFERRAL: 1,
+            }
+        )
     )
     monkeypatch.setattr(
         "brain.systems.runs.slack_delivery.persist_delivered_slack_answer",
@@ -823,7 +820,7 @@ async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkey
     delivered = recorder.await_args.args[0]
     assert delivered.answering_run_id == 9
     assert delivered.thread_ts == "1716900000.000100"
-    assert delivered.is_answer is True
+    assert delivered.answer_text == "Issue #1221 is filed."
 
     recorder.reset_mock()
     with bind_agent_context(context):
@@ -834,10 +831,7 @@ async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkey
             )
         )
     assert clarification["answered_open_asks"] == 0
-    recorder.assert_awaited_once()
-    clarification_delivery = recorder.await_args.args[0]
-    assert clarification_delivery.answer_text == "Which repository should own this?"
-    assert clarification_delivery.is_answer is False
+    recorder.assert_not_awaited()
 
 
 @pytest.mark.asyncio

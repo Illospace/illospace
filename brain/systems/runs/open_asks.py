@@ -12,8 +12,11 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from brain.contracts.statuses import (
+    ACTIVE_OPEN_ASK_STATUS_VALUES,
     AGENT_RUN_DB_STATUS_VALUES,
+    TERMINAL_OPEN_ASK_STATUS_VALUES,
     TERMINAL_RUN_STATUS_VALUES,
+    OpenAskStatus,
     project_run_status_value,
 )
 from brain.platform.db.models.agent_run import AgentRunRow
@@ -31,12 +34,6 @@ from brain.systems.runs.obligation_specs import (
 )
 
 
-OPEN_ASK_STATUS = "open"
-ANSWERED_ASK_STATUS = "answered"
-ROUTED_ASK_STATUS = "routed"
-EXPIRED_ASK_STATUS = "expired"
-ACTIVE_ASK_STATUSES = (OPEN_ASK_STATUS, ROUTED_ASK_STATUS)
-TERMINAL_ASK_STATUSES = (ANSWERED_ASK_STATUS, EXPIRED_ASK_STATUS)
 OPEN_ASK_STRAGGLER_AFTER = timedelta(hours=1)
 # Three days is well below the observed 146-176h failures while allowing recovery.
 RUN_DEFERRAL_EXPIRY_AFTER = timedelta(hours=72)
@@ -52,8 +49,8 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
-class DeliveredSlackReply:
-    """Confirmed Slack delivery facts used to settle matching obligations."""
+class DeliveredSlackAnswer:
+    """Confirmed Slack answer delivery used to settle matching obligations."""
 
     org_id: str
     channel_id: str
@@ -61,26 +58,32 @@ class DeliveredSlackReply:
     answering_run_id: int | None
     slack_message_ts: str
     answer_text: str
-    is_answer: bool
     artifact_kind: str | None = None
     artifact_ref: str | None = None
-    routed_to_name: str | None = None
-    routed_to_slack_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class DeliveredSlackReplyCounts:
-    """Answered counts by kind plus routed human-ask transitions."""
+class DeliveredSlackRoute:
+    """Confirmed Slack routing delivery for one originating human ask."""
+
+    org_id: str
+    channel_id: str
+    thread_ts: str
+    answering_run_id: int
+    slack_message_ts: str
+    routed_to_name: str
+    routed_to_slack_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveredSlackAnswerCounts:
+    """Answered obligation counts grouped by kind."""
 
     by_kind: dict[ObligationKind, int]
-    routed_open_asks: int = 0
 
     @classmethod
-    def empty(cls) -> DeliveredSlackReplyCounts:
-        return cls(
-            by_kind={kind: 0 for kind in ObligationKind},
-            routed_open_asks=0,
-        )
+    def empty(cls) -> DeliveredSlackAnswerCounts:
+        return cls(by_kind={kind: 0 for kind in ObligationKind})
 
     @property
     def answered_open_asks(self) -> int:
@@ -349,7 +352,7 @@ def _reopen_obligation(
     *,
     opened_at: datetime,
 ) -> OpenAsk:
-    row.status = OPEN_ASK_STATUS
+    row.status = OpenAskStatus.OPEN.value
     row.opened_at = opened_at
     row.answer_text = None
     row.answer_artifact_kind = None
@@ -412,7 +415,7 @@ async def record_open_ask(
             obligation_kind=ObligationKind.HUMAN_ASK,
             requester_name=requester_name,
             origin_run_id=int(run_id),
-            status=OPEN_ASK_STATUS,
+            status=OpenAskStatus.OPEN.value,
             opened_at=opened_at,
         )
         try:
@@ -469,7 +472,7 @@ async def open_asks_for_origin_ref(
         .where(
             OpenAsk.origin_ref == normalized,
             OpenAsk.obligation_kind == ObligationKind.HUMAN_ASK,
-            OpenAsk.status == OPEN_ASK_STATUS,
+            OpenAsk.status == OpenAskStatus.OPEN.value,
         )
         .order_by(OpenAsk.opened_at.asc(), OpenAsk.id.asc())
     )
@@ -489,7 +492,7 @@ async def open_asks_for_origin_run(
         .where(
             OpenAsk.origin_run_id == int(origin_run_id),
             OpenAsk.obligation_kind == ObligationKind.HUMAN_ASK,
-            OpenAsk.status == OPEN_ASK_STATUS,
+            OpenAsk.status == OpenAskStatus.OPEN.value,
         )
         .order_by(OpenAsk.id.asc())
     )
@@ -629,7 +632,7 @@ async def record_run_deferral(
                 thread_ts=normalized_thread,
             ),
             origin_run_id=run_id,
-            status=OPEN_ASK_STATUS,
+            status=OpenAskStatus.OPEN.value,
             opened_at=_aware_utc(now),
         )
         try:
@@ -649,7 +652,7 @@ async def record_run_deferral(
                 raise
     # Settled obligations are terminal. A later failure condition on the same
     # run cannot resurrect the promise or emit a contradictory new notice.
-    if row.status in TERMINAL_ASK_STATUSES:
+    if row.status in TERMINAL_OPEN_ASK_STATUS_VALUES:
         return row, None, False
 
     from brain.systems.runs.obligation_notices import record_obligation_notice
@@ -687,7 +690,7 @@ def mark_open_ask_answered(
     message_ts = delivered_message_ts(slack_response)
     if message_ts is None:
         raise ValueError("open ask answers require a confirmed Slack delivery timestamp")
-    row.status = ANSWERED_ASK_STATUS
+    row.status = OpenAskStatus.ANSWERED.value
     row.answer_text = str(answer_text)
     row.answer_artifact_kind = _clean(artifact_kind) or None
     row.answer_artifact_ref = _clean(artifact_ref) or None
@@ -716,7 +719,7 @@ def mark_open_ask_routed(
         raise ValueError("routed open asks require a named Slack answerer")
     if message_ts is None:
         raise ValueError("routed open asks require a confirmed Slack delivery timestamp")
-    row.status = ROUTED_ASK_STATUS
+    row.status = OpenAskStatus.ROUTED.value
     row.routed_to_name = owner_name
     row.routed_to_slack_id = owner_slack_id
     row.routed_at = _aware_utc(now)
@@ -752,77 +755,57 @@ async def _supersede_pending_notices(
         await session.flush()
 
 
-async def record_delivered_slack_answer(
+async def _delivered_slack_rows(
     session: Any,
-    delivered: DeliveredSlackReply,
     *,
-    now: datetime | None = None,
-) -> DeliveredSlackReplyCounts:
-    """Apply a structured answer or routing transition after Slack delivery."""
-
-    counts = DeliveredSlackReplyCounts.empty()
-    message_ts = _clean(delivered.slack_message_ts)
-    if not message_ts:
-        raise ValueError("delivered Slack answers require a confirmed message timestamp")
-    routed_to_name = _clean(delivered.routed_to_name)
-    routed_to_slack_id = _clean(delivered.routed_to_slack_id)
-    if bool(routed_to_name) != bool(routed_to_slack_id):
-        raise ValueError("delivered Slack routing requires a complete named answerer")
-    is_routing = bool(routed_to_name and routed_to_slack_id)
-    if not delivered.is_answer and not is_routing:
-        return counts
-    org_id = _clean(delivered.org_id)
-    channel_id = _clean(delivered.channel_id)
-    thread_ts = _clean(delivered.thread_ts)
-    if not all((org_id, channel_id, thread_ts)):
-        raise ValueError("delivered Slack answers require org, channel, and thread")
-
-    conditions = [
-        OpenAsk.org_id == org_id,
-        OpenAsk.channel_id == channel_id,
-        OpenAsk.thread_ts == thread_ts,
-    ]
-    if delivered.is_answer:
-        conditions.append(OpenAsk.status.in_(ACTIVE_ASK_STATUSES))
-    else:
-        if delivered.answering_run_id is None:
-            raise ValueError("delivered Slack routing requires its originating run")
-        conditions.extend(
-            [
-                OpenAsk.obligation_kind == ObligationKind.HUMAN_ASK,
-                OpenAsk.origin_run_id == int(delivered.answering_run_id),
-                OpenAsk.status == OPEN_ASK_STATUS,
-            ]
-        )
-
-    rows = list(
+    org_id: str,
+    channel_id: str,
+    thread_ts: str,
+    conditions: tuple[Any, ...],
+) -> list[OpenAsk]:
+    return list(
         (
             await session.scalars(
                 select(OpenAsk)
-                .where(*conditions)
+                .where(
+                    OpenAsk.org_id == org_id,
+                    OpenAsk.channel_id == channel_id,
+                    OpenAsk.thread_ts == thread_ts,
+                    *conditions,
+                )
                 .order_by(OpenAsk.id.asc())
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
         ).all()
     )
-    if is_routing and not delivered.is_answer:
-        for row in rows:
-            mark_open_ask_routed(
-                row,
-                routed_to_name=routed_to_name,
-                routed_to_slack_id=routed_to_slack_id,
-                slack_response={"ts": message_ts},
-                now=now,
-            )
-        if rows:
-            await session.flush()
-        return DeliveredSlackReplyCounts(
-            by_kind=dict(counts.by_kind),
-            routed_open_asks=len(rows),
-        )
 
-    by_kind = dict(counts.by_kind)
+
+async def record_delivered_slack_answer(
+    session: Any,
+    delivered: DeliveredSlackAnswer,
+    *,
+    now: datetime | None = None,
+) -> DeliveredSlackAnswerCounts:
+    """Settle matching obligations after a confirmed Slack answer delivery."""
+
+    message_ts = _clean(delivered.slack_message_ts)
+    if not message_ts:
+        raise ValueError("delivered Slack answers require a confirmed message timestamp")
+    org_id = _clean(delivered.org_id)
+    channel_id = _clean(delivered.channel_id)
+    thread_ts = _clean(delivered.thread_ts)
+    if not all((org_id, channel_id, thread_ts)):
+        raise ValueError("delivered Slack answers require org, channel, and thread")
+
+    rows = await _delivered_slack_rows(
+        session,
+        org_id=org_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        conditions=(OpenAsk.status.in_(ACTIVE_OPEN_ASK_STATUS_VALUES),),
+    )
+    by_kind = dict(DeliveredSlackAnswerCounts.empty().by_kind)
     for row in rows:
         mark_open_ask_answered(
             row,
@@ -842,7 +825,54 @@ async def record_delivered_slack_answer(
         session,
         [int(row.id) for row in rows],
     )
-    return DeliveredSlackReplyCounts(by_kind=by_kind)
+    return DeliveredSlackAnswerCounts(by_kind=by_kind)
+
+
+async def record_delivered_slack_route(
+    session: Any,
+    delivered: DeliveredSlackRoute,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Route one originating human ask after a confirmed Slack delivery."""
+
+    message_ts = _clean(delivered.slack_message_ts)
+    if not message_ts:
+        raise ValueError("delivered Slack routes require a confirmed message timestamp")
+    routed_to_name = _clean(delivered.routed_to_name)
+    routed_to_slack_id = _clean(delivered.routed_to_slack_id)
+    if not routed_to_name or not routed_to_slack_id:
+        raise ValueError("delivered Slack routing requires a complete named answerer")
+    org_id = _clean(delivered.org_id)
+    channel_id = _clean(delivered.channel_id)
+    thread_ts = _clean(delivered.thread_ts)
+    if not all((org_id, channel_id, thread_ts)):
+        raise ValueError("delivered Slack routing requires org, channel, and thread")
+    if delivered.answering_run_id is None:
+        raise ValueError("delivered Slack routing requires its originating run")
+
+    rows = await _delivered_slack_rows(
+        session,
+        org_id=org_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        conditions=(
+            OpenAsk.obligation_kind == ObligationKind.HUMAN_ASK,
+            OpenAsk.origin_run_id == int(delivered.answering_run_id),
+            OpenAsk.status == OpenAskStatus.OPEN.value,
+        ),
+    )
+    for row in rows:
+        mark_open_ask_routed(
+            row,
+            routed_to_name=routed_to_name,
+            routed_to_slack_id=routed_to_slack_id,
+            slack_response={"ts": message_ts},
+            now=now,
+        )
+    if rows:
+        await session.flush()
+    return len(rows)
 
 
 async def record_inbound_slack_obligation_answer(
@@ -887,7 +917,7 @@ async def record_inbound_slack_obligation_answer(
                     OpenAsk.org_id == normalized["org_id"],
                     OpenAsk.channel_id == normalized["channel_id"],
                     OpenAsk.thread_ts == normalized["thread_ts"],
-                    OpenAsk.status.in_(ACTIVE_ASK_STATUSES),
+                    OpenAsk.status.in_(ACTIVE_OPEN_ASK_STATUS_VALUES),
                 )
                 .order_by(OpenAsk.id.asc())
                 .with_for_update(of=[OpenAsk, ObligationNotice])
@@ -938,7 +968,7 @@ def _age_label(age: timedelta) -> str:
 
 
 def _open_ask_age_started_at(row: OpenAsk) -> datetime:
-    if row.status == ROUTED_ASK_STATUS and row.routed_at is not None:
+    if row.status == OpenAskStatus.ROUTED.value and row.routed_at is not None:
         return _aware_utc(row.routed_at)
     return _aware_utc(row.opened_at)
 
@@ -962,7 +992,7 @@ async def expire_stale_run_deferrals(
                 .where(
                     OpenAsk.org_id == str(org_id),
                     OpenAsk.obligation_kind == ObligationKind.RUN_DEFERRAL,
-                    OpenAsk.status == OPEN_ASK_STATUS,
+                    OpenAsk.status == OpenAskStatus.OPEN.value,
                     OpenAsk.opened_at < cutoff,
                     AgentRunRow.status.in_(_TERMINAL_ORIGIN_RUN_STATUS_VALUES),
                 )
@@ -973,7 +1003,7 @@ async def expire_stale_run_deferrals(
     )
     expiry_hours = int(expiry_after.total_seconds() // 3600)
     for row, run_status in results:
-        row.status = EXPIRED_ASK_STATUS
+        row.status = OpenAskStatus.EXPIRED.value
         row.expired_at = current
         row.status_reason = (
             f"Origin run {int(row.origin_run_id)} is terminal ({str(run_status)}); "
@@ -994,11 +1024,6 @@ async def list_open_ask_stragglers(
     older_than: timedelta = OPEN_ASK_STRAGGLER_AFTER,
 ) -> list[dict[str, Any]]:
     current = _aware_utc(now)
-    await expire_stale_run_deferrals(
-        session,
-        org_id=org_id,
-        now=current,
-    )
     cutoff = current - older_than
     rows = list(
         (
@@ -1006,14 +1031,14 @@ async def list_open_ask_stragglers(
                 select(OpenAsk)
                 .where(
                     OpenAsk.org_id == str(org_id),
-                    OpenAsk.status.in_(ACTIVE_ASK_STATUSES),
+                    OpenAsk.status.in_(ACTIVE_OPEN_ASK_STATUS_VALUES),
                     or_(
                         and_(
-                            OpenAsk.status == OPEN_ASK_STATUS,
+                            OpenAsk.status == OpenAskStatus.OPEN.value,
                             OpenAsk.opened_at < cutoff,
                         ),
                         and_(
-                            OpenAsk.status == ROUTED_ASK_STATUS,
+                            OpenAsk.status == OpenAskStatus.ROUTED.value,
                             func.coalesce(OpenAsk.routed_at, OpenAsk.opened_at)
                             < cutoff,
                         ),
@@ -1055,14 +1080,10 @@ async def list_open_ask_stragglers(
 
 
 __all__ = [
-    "ACTIVE_ASK_STATUSES",
-    "ANSWERED_ASK_STATUS",
-    "DeliveredSlackReply",
-    "DeliveredSlackReplyCounts",
-    "EXPIRED_ASK_STATUS",
-    "OPEN_ASK_STATUS",
+    "DeliveredSlackAnswer",
+    "DeliveredSlackAnswerCounts",
+    "DeliveredSlackRoute",
     "OPEN_ASK_STRAGGLER_AFTER",
-    "ROUTED_ASK_STATUS",
     "RUN_DEFERRAL_EXPIRY_AFTER",
     "annotate_request_with_open_ask",
     "delivered_message_ts",
@@ -1074,6 +1095,7 @@ __all__ = [
     "open_asks_for_origin_ref",
     "open_asks_for_origin_run",
     "record_delivered_slack_answer",
+    "record_delivered_slack_route",
     "record_inbound_slack_obligation_answer",
     "record_open_ask",
     "record_run_deferral",

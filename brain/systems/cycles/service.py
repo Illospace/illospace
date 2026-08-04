@@ -242,9 +242,18 @@ async def _async_attach_open_ask_stragglers(
         or launch_context.get("run_kind") != SCHEDULED_DIGEST_RUN_KIND
     ):
         return []
-    from brain.systems.runs.open_asks import list_open_ask_stragglers
+    from brain.systems.runs.open_asks import (
+        expire_stale_run_deferrals,
+        list_open_ask_stragglers,
+    )
 
     try:
+        async with session.begin_nested():
+            await expire_stale_run_deferrals(
+                session,
+                org_id=str(cycle.org_id),
+                now=run.scheduled_for,
+            )
         stragglers = await list_open_ask_stragglers(
             session,
             org_id=str(cycle.org_id),

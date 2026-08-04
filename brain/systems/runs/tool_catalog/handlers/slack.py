@@ -787,40 +787,44 @@ async def _handle_post_slack_reply(
         ).strip() or None
     if target_visibility == "public" and obligation_thread_ts and org_id:
         from brain.systems.runs.slack_delivery import (
-            DeliveredSlackReply,
+            DeliveredSlackAnswer,
+            DeliveredSlackRoute,
             delivered_message_ts,
             persist_delivered_slack_answer,
+            persist_delivered_slack_route,
         )
 
-        counts = await persist_delivered_slack_answer(
-            DeliveredSlackReply(
-                org_id=org_id,
-                channel_id=target_channel,
-                thread_ts=obligation_thread_ts,
-                answering_run_id=run_id,
-                slack_message_ts=delivered_message_ts(response) or "",
-                answer_text=text,
-                is_answer=answers_open_ask,
-                artifact_kind="slack_image" if image_upload is not None else None,
-                artifact_ref=(
-                    str(image_filename or image_title or "").strip() or None
-                    if image_upload is not None
-                    else None
-                ),
-                routed_to_name=(
-                    obligation_spec.answerer.name
-                    if routes_open_ask and obligation_spec is not None
-                    else None
-                ),
-                routed_to_slack_id=(
-                    obligation_spec.answerer.slack_user_id
-                    if routes_open_ask and obligation_spec is not None
-                    else None
-                ),
+        message_ts = delivered_message_ts(response) or ""
+        if routes_open_ask and obligation_spec is not None and run_id is not None:
+            routed_open_asks = await persist_delivered_slack_route(
+                DeliveredSlackRoute(
+                    org_id=org_id,
+                    channel_id=target_channel,
+                    thread_ts=obligation_thread_ts,
+                    answering_run_id=run_id,
+                    slack_message_ts=message_ts,
+                    routed_to_name=obligation_spec.answerer.name,
+                    routed_to_slack_id=obligation_spec.answerer.slack_user_id,
+                )
             )
-        )
-        answered_open_asks = counts.answered_open_asks
-        routed_open_asks = counts.routed_open_asks
+        elif answers_open_ask:
+            counts = await persist_delivered_slack_answer(
+                DeliveredSlackAnswer(
+                    org_id=org_id,
+                    channel_id=target_channel,
+                    thread_ts=obligation_thread_ts,
+                    answering_run_id=run_id,
+                    slack_message_ts=message_ts,
+                    answer_text=text,
+                    artifact_kind="slack_image" if image_upload is not None else None,
+                    artifact_ref=(
+                        str(image_filename or image_title or "").strip() or None
+                        if image_upload is not None
+                        else None
+                    ),
+                )
+            )
+            answered_open_asks = counts.answered_open_asks
     return json.dumps(
         {
             "ok": True,

@@ -114,7 +114,6 @@ async def test_contact_form_intake_run_cannot_settle_its_open_ask(
     monkeypatch,
 ):
     from brain.systems.runs.execution_context import bind_agent_context
-    from brain.systems.runs.open_asks import DeliveredSlackReplyCounts
     from brain.systems.runs.tool_catalog.handlers.slack import (
         _handle_post_slack_reply,
     )
@@ -131,10 +130,15 @@ async def test_contact_form_intake_run_cannot_settle_its_open_ask(
         "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
         AsyncMock(return_value=_SlackClient()),
     )
-    recorder = AsyncMock(return_value=DeliveredSlackReplyCounts.empty())
+    answer_recorder = AsyncMock()
+    route_recorder = AsyncMock(return_value=0)
     monkeypatch.setattr(
         "brain.systems.runs.slack_delivery.persist_delivered_slack_answer",
-        recorder,
+        answer_recorder,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.slack_delivery.persist_delivered_slack_route",
+        route_recorder,
     )
     context = {
         "run_id": 9,
@@ -176,9 +180,11 @@ async def test_contact_form_intake_run_cannot_settle_its_open_ask(
 
     assert result["answers_open_ask"] is False
     assert result["answered_open_asks"] == 0
-    recorder.assert_awaited_once()
-    delivered = recorder.await_args.args[0]
-    assert delivered.is_answer is False
+    answer_recorder.assert_not_awaited()
+    route_recorder.assert_awaited_once()
+    delivered = route_recorder.await_args.args[0]
+    assert delivered.routed_to_name == "Reda"
+    assert delivered.routed_to_slack_id == "UREDA"
 
 
 @pytest.mark.asyncio
@@ -186,7 +192,6 @@ async def test_answerer_slack_reply_policy_blocks_tool_settlement_for_other_inta
     monkeypatch,
 ):
     from brain.systems.runs.execution_context import bind_agent_context
-    from brain.systems.runs.open_asks import DeliveredSlackReplyCounts
     from brain.systems.runs.tool_catalog.handlers.slack import (
         _handle_post_slack_reply,
     )
@@ -203,10 +208,15 @@ async def test_answerer_slack_reply_policy_blocks_tool_settlement_for_other_inta
         "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
         AsyncMock(return_value=_SlackClient()),
     )
-    recorder = AsyncMock(return_value=DeliveredSlackReplyCounts.empty())
+    answer_recorder = AsyncMock()
+    route_recorder = AsyncMock(return_value=0)
     monkeypatch.setattr(
         "brain.systems.runs.slack_delivery.persist_delivered_slack_answer",
-        recorder,
+        answer_recorder,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.slack_delivery.persist_delivered_slack_route",
+        route_recorder,
     )
     context = {
         "run_id": 9,
@@ -248,9 +258,11 @@ async def test_answerer_slack_reply_policy_blocks_tool_settlement_for_other_inta
 
     assert result["answers_open_ask"] is False
     assert result["answered_open_asks"] == 0
-    recorder.assert_awaited_once()
-    delivered = recorder.await_args.args[0]
-    assert delivered.is_answer is False
+    answer_recorder.assert_not_awaited()
+    route_recorder.assert_awaited_once()
+    delivered = route_recorder.await_args.args[0]
+    assert delivered.routed_to_name == "Partner"
+    assert delivered.routed_to_slack_id == "UPARTNER"
 
 
 @pytest.mark.asyncio
