@@ -12,6 +12,8 @@ from brain.systems.knowledge.recall_eval_contract import (
     KnowledgeRecallInvalidArtifact,
     KnowledgeRecallLegacyInvalidArtifact,
     KnowledgeRecallLegacyValidArtifact,
+    KnowledgeRecallV1InvalidArtifact,
+    KnowledgeRecallV1ValidArtifact,
     KnowledgeRecallValidArtifact,
     KnowledgeRecallValidArtifactContract,
 )
@@ -134,9 +136,18 @@ def _metric_deltas(
 def _fingerprint(
     artifact: KnowledgeRecallValidArtifactContract,
 ) -> KnowledgeRecallCorpusFingerprint | None:
-    if isinstance(artifact, KnowledgeRecallValidArtifact):
+    if isinstance(
+        artifact,
+        (KnowledgeRecallValidArtifact, KnowledgeRecallV1ValidArtifact),
+    ):
         return artifact.corpus_fingerprint
     return None
+
+
+def _engine(artifact: KnowledgeRecallValidArtifactContract) -> str:
+    if isinstance(artifact, KnowledgeRecallValidArtifact):
+        return artifact.engine
+    return "knowledge"
 
 
 def _computed_comparison(
@@ -181,6 +192,7 @@ def compare_knowledge_recall_artifacts(
 
     invalid_types = (
         KnowledgeRecallInvalidArtifact,
+        KnowledgeRecallV1InvalidArtifact,
         KnowledgeRecallLegacyInvalidArtifact,
     )
     invalid_labels = [
@@ -204,10 +216,18 @@ def compare_knowledge_recall_artifacts(
 
     if not isinstance(
         baseline_artifact,
-        (KnowledgeRecallValidArtifact, KnowledgeRecallLegacyValidArtifact),
+        (
+            KnowledgeRecallValidArtifact,
+            KnowledgeRecallV1ValidArtifact,
+            KnowledgeRecallLegacyValidArtifact,
+        ),
     ) or not isinstance(
         candidate_artifact,
-        (KnowledgeRecallValidArtifact, KnowledgeRecallLegacyValidArtifact),
+        (
+            KnowledgeRecallValidArtifact,
+            KnowledgeRecallV1ValidArtifact,
+            KnowledgeRecallLegacyValidArtifact,
+        ),
     ):
         raise TypeError("comparison requires knowledge-recall artifacts")
     baseline = baseline_artifact
@@ -215,6 +235,10 @@ def compare_knowledge_recall_artifacts(
     baseline_corpus = _fingerprint(baseline)
     candidate_corpus = _fingerprint(candidate)
     checks = {
+        "engine": _check(
+            _engine(baseline),
+            _engine(candidate),
+        ),
         "question_set_digest": _check(
             baseline.question_set.digest,
             candidate.question_set.digest,
@@ -246,6 +270,7 @@ def compare_knowledge_recall_artifacts(
     blocking_differences = [
         name
         for name in (
+            "engine",
             "question_set_digest",
             "org_id",
             "k_values",

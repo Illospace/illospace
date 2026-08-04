@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
-from sqlalchemy import and_, exists, func, or_, select, true, update
+from sqlalchemy import and_, exists, false, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.reconstructive_memory import (
@@ -56,6 +56,42 @@ _QUERY_STOP_WORDS = {
     "with",
 }
 _MIN_SEMANTIC_CANDIDATE_SCORE = 0.35
+
+
+def memory_content_node_filters(
+    *,
+    org_id: str | None = None,
+    user_id: str | None = None,
+    allow_global: bool = False,
+) -> tuple[Any, ...]:
+    """Return the visibility and lifecycle filters used by memory recall."""
+
+    if allow_global:
+        visibility_predicate = true()
+    elif not user_id and not org_id:
+        return (false(),)
+    else:
+        visibility_predicate = or_(
+            and_(MemoryNode.visibility == "org", MemoryNode.org_id == org_id),
+            and_(MemoryNode.visibility == "team", MemoryNode.org_id == org_id),
+            and_(MemoryNode.visibility == "private", MemoryNode.user_id == user_id),
+        )
+
+    filters: list[Any] = [
+        MemoryNode.archived_at.is_(None),
+        MemoryNode.truth_status != "superseded",
+        ~exists(
+            select(MemoryEdgeNode.id).where(
+                MemoryEdgeNode.source_node_id == MemoryNode.id,
+                MemoryEdgeNode.edge_kind == "superseded_by",
+            )
+        ),
+        MemoryNode.node_kind.in_(_CONTENT_NODE_KINDS),
+        visibility_predicate,
+    ]
+    if org_id is not None:
+        filters.append(or_(MemoryNode.org_id == org_id, MemoryNode.org_id.is_(None)))
+    return tuple(filters)
 
 
 def stable_digest(value: str) -> str:
@@ -270,34 +306,16 @@ class MemoryNodeRepository(BaseRepository[MemoryNode]):
         query = query.strip()
         if not query:
             return []
-        if allow_global:
-            visibility_predicate = true()
-        elif not user_id and not org_id:
-            return []
-        else:
-            visibility_predicate = or_(
-                and_(MemoryNode.visibility == "org", MemoryNode.org_id == org_id),
-                and_(MemoryNode.visibility == "team", MemoryNode.org_id == org_id),
-                and_(MemoryNode.visibility == "private", MemoryNode.user_id == user_id),
-            )
-
         base_stmt = (
             select(MemoryNode)
-            .where(MemoryNode.archived_at.is_(None))
-            .where(MemoryNode.truth_status != "superseded")
             .where(
-                ~exists(
-                    select(MemoryEdgeNode.id).where(
-                        MemoryEdgeNode.source_node_id == MemoryNode.id,
-                        MemoryEdgeNode.edge_kind == "superseded_by",
-                    )
+                *memory_content_node_filters(
+                    org_id=org_id,
+                    user_id=user_id,
+                    allow_global=allow_global,
                 )
             )
-            .where(MemoryNode.node_kind.in_(_CONTENT_NODE_KINDS))
-            .where(visibility_predicate)
         )
-        if org_id is not None:
-            base_stmt = base_stmt.where(or_(MemoryNode.org_id == org_id, MemoryNode.org_id.is_(None)))
 
         query_vector = (
             np.asarray(query_embedding, dtype=np.float32).reshape(-1)
