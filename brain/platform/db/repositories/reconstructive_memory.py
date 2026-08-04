@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from sqlalchemy import and_, exists, false, func, or_, select, true, update
@@ -447,6 +447,39 @@ def _lexical_relevance(node: MemoryNode, *, query: str, terms: Sequence[str]) ->
     return max(1.0 if exact else 0.0, hits / len(terms))
 
 
+class MemoryBlendWeights(NamedTuple):
+    """The weights `_blended_relevance_score` applies, for one query's regime."""
+
+    semantic: float
+    lexical: float
+    storage_confidence: float
+
+
+# Similarity and query-term coverage own 97% of ranking. Storage confidence is
+# only a stable tie-break signal and cannot swamp relevance.
+MEMORY_BLEND_WEIGHTS = MemoryBlendWeights(
+    semantic=0.72,
+    lexical=0.25,
+    storage_confidence=0.03,
+)
+# Missing vectors remain fully retrievable by text while backfill runs.
+MEMORY_BLEND_WEIGHTS_WITHOUT_SEMANTIC = MemoryBlendWeights(
+    semantic=0.0,
+    lexical=0.95,
+    storage_confidence=0.05,
+)
+
+
+def memory_blend_weights(*, semantic_available: bool) -> MemoryBlendWeights:
+    """Expose the ranking weights so reporters cannot drift from the ranker."""
+
+    return (
+        MEMORY_BLEND_WEIGHTS
+        if semantic_available
+        else MEMORY_BLEND_WEIGHTS_WITHOUT_SEMANTIC
+    )
+
+
 def _blended_relevance_score(
     *,
     semantic_score: float | None,
@@ -455,13 +488,18 @@ def _blended_relevance_score(
 ) -> float:
     storage_confidence = min(1.0, max(0.0, storage_confidence))
     lexical_score = min(1.0, max(0.0, lexical_score))
+    weights = memory_blend_weights(semantic_available=semantic_score is not None)
     if semantic_score is None:
-        # Missing vectors remain fully retrievable by text while backfill runs.
-        return 0.95 * lexical_score + 0.05 * storage_confidence
+        return (
+            weights.lexical * lexical_score
+            + weights.storage_confidence * storage_confidence
+        )
     semantic_score = min(1.0, max(0.0, semantic_score))
-    # Similarity and query-term coverage own 97% of ranking. Storage confidence
-    # is only a stable tie-break signal and cannot swamp relevance.
-    return 0.72 * semantic_score + 0.25 * lexical_score + 0.03 * storage_confidence
+    return (
+        weights.semantic * semantic_score
+        + weights.lexical * lexical_score
+        + weights.storage_confidence * storage_confidence
+    )
 
 
 def _rank_memory_nodes(

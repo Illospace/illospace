@@ -18,6 +18,7 @@ from brain.platform.db.models.knowledge import KnowledgeItem
 from brain.platform.db.models.reconstructive_memory import MemoryNode
 from brain.platform.db.repositories.reconstructive_memory import (
     MemoryNodeRepository,
+    memory_blend_weights,
     memory_content_node_filters,
 )
 from brain.systems.knowledge.recall_eval_contract import (
@@ -652,9 +653,11 @@ async def search_memory_recall(
         ),
     )
     semantic_available = query_embedding is not None
-    lexical_weight = 0.25 if semantic_available else 0.95
-    semantic_weight = 0.72 if semantic_available else 0.0
-    storage_weight = 0.03 if semantic_available else 0.05
+    # The ranker owns these numbers; reporting them from anywhere else drifts.
+    weights = memory_blend_weights(semantic_available=semantic_available)
+    lexical_weight = weights.lexical
+    semantic_weight = weights.semantic
+    storage_weight = weights.storage_confidence
     hits: list[KnowledgeSearchHit] = []
     for rank, node in enumerate(nodes, start=1):
         lexical_score = float(getattr(node, "lexical_score", 0.0))
