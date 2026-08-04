@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
 import pytest
@@ -63,7 +64,7 @@ async def test_cycle_route_resolves_default_model_once(monkeypatch, raw_model):
     ]
     assert route.model == "openai/gpt-5.6-sol"
     assert route.provider == "openai"
-    assert route.model_policy == {"model": "openai/gpt-5.6-sol"}
+    assert route.work_intake_model_policy == {"model": "openai/gpt-5.6-sol"}
 
 
 @pytest.mark.asyncio
@@ -86,7 +87,7 @@ async def test_cycle_route_uses_bound_revision_instead_of_live_cycle():
 
     assert route.model == "openai/gpt-5.6-luna"
     assert route.provider == "openai"
-    assert route.model_policy == {
+    assert route.work_intake_model_policy == {
         "model": "openai/gpt-5.6-luna",
         "thinking": "xhigh",
     }
@@ -100,7 +101,7 @@ async def test_cycle_route_falls_back_to_live_cycle_without_snapshot():
         run=SimpleNamespace(context_snapshot=None),
     )
 
-    assert route.model_policy == {
+    assert route.work_intake_model_policy == {
         "model": "openai/gpt-5.6-luna",
         "thinking": "low",
     }
@@ -124,7 +125,7 @@ async def test_cycle_admission_derives_one_route_shared_by_both_preflights(monke
             model=route.model,
         )
 
-    async def quota_preflight(_session, *, route, run):
+    def quota_preflight(*, route, run):
         quota_routes.append((route, run))
         return ProviderQuotaPreflightResult(
             status="passed",
@@ -139,7 +140,7 @@ async def test_cycle_admission_derives_one_route_shared_by_both_preflights(monke
 
     monkeypatch.setattr(admission, "async_get_default_model", default_model)
     monkeypatch.setattr(admission, "async_preflight_cycle_external_auth", auth_preflight)
-    monkeypatch.setattr(admission, "async_preflight_cycle_external_quota", quota_preflight)
+    monkeypatch.setattr(admission, "preflight_cycle_external_quota", quota_preflight)
     run = SimpleNamespace(
         context_snapshot={
             "revision": {"model_override": None, "thinking_override": "low"},
@@ -153,13 +154,158 @@ async def test_cycle_admission_derives_one_route_shared_by_both_preflights(monke
         run=run,
     )
 
+    assert isinstance(outcome, admission.CycleAdmissionAdmitted)
     assert len(default_calls) == 1
     assert auth_routes == [outcome.route]
     assert quota_routes == [(outcome.route, run)]
     assert auth_routes[0] is quota_routes[0][0] is outcome.route
-    assert outcome.route.model_policy == {
+    assert outcome.route.work_intake_model_policy == {
         "model": "openai/gpt-5.6-sol",
         "thinking": "low",
     }
     assert run.context_snapshot["auth_preflight"]["status"] == "passed"
     assert run.context_snapshot["quota_preflight"]["decision"] == "admitted"
+
+
+def test_cycle_route_enforces_and_derives_its_invariants():
+    route = admission.CycleProviderRoute(
+        user_id="user-1",
+        org_id="org-1",
+        model="openai/gpt-5.6-sol",
+        thinking="high",
+    )
+
+    policy = route.work_intake_model_policy
+    policy["model"] = "anthropic/claude-opus-5"
+
+    assert route.provider == "openai"
+    assert route.work_intake_model_policy == {
+        "model": "openai/gpt-5.6-sol",
+        "thinking": "high",
+    }
+    assert not hasattr(route, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        route.model = "anthropic/claude-opus-5"
+
+
+@pytest.mark.parametrize(
+    ("model", "thinking"),
+    [
+        ("gpt-5.6-sol", None),
+        ("openai/gpt-5.6-sol", "ultra"),
+    ],
+)
+def test_cycle_route_rejects_noncanonical_construction(model, thinking):
+    with pytest.raises(ValueError):
+        admission.CycleProviderRoute(
+            user_id="user-1",
+            org_id="org-1",
+            model=model,
+            thinking=thinking,
+        )
+
+
+@pytest.mark.asyncio
+async def test_cycle_admission_returns_complete_auth_rejection(monkeypatch):
+    auth = ProviderAuthPreflightResult(
+        status="auth_blocked",
+        provider="openai",
+        model="openai/gpt-5.5",
+        visible_message="Reconnect OpenAI.",
+    )
+
+    async def auth_preflight(_session, *, route):
+        return auth
+
+    def unexpected_quota(**_kwargs):
+        raise AssertionError("quota must not run after an auth rejection")
+
+    monkeypatch.setattr(admission, "async_preflight_cycle_external_auth", auth_preflight)
+    monkeypatch.setattr(admission, "preflight_cycle_external_quota", unexpected_quota)
+    run = SimpleNamespace(context_snapshot={})
+
+    outcome = await admission.async_prepare_cycle_run_admission(
+        object(),
+        cycle=_cycle(),
+        run=run,
+    )
+
+    assert isinstance(outcome, admission.CycleAdmissionRejected)
+    assert outcome.status == "auth_blocked"
+    assert outcome.error == "Reconnect OpenAI."
+    assert outcome.skip_reason is None
+    assert outcome.notice_kind == "auth"
+    assert outcome.notice is auth
+    assert run.context_snapshot["auth_preflight"]["status"] == "auth_blocked"
+    assert "quota_preflight" not in run.context_snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "decision", "message", "expected_status", "expected_error", "skip_reason"),
+    [
+        (
+            "quota_blocked",
+            "blocked",
+            "Quota is blocked.",
+            "quota_blocked",
+            "Quota is blocked.",
+            None,
+        ),
+        (
+            "quota_deferred",
+            "deferred",
+            "Quota is deferred.",
+            "skipped",
+            None,
+            "quota_soft_limit",
+        ),
+    ],
+)
+async def test_cycle_admission_returns_complete_quota_rejection(
+    monkeypatch,
+    status,
+    decision,
+    message,
+    expected_status,
+    expected_error,
+    skip_reason,
+):
+    quota = ProviderQuotaPreflightResult(
+        status=status,
+        decision=decision,
+        provider="openai",
+        model="openai/gpt-5.5",
+        usage_status="ok",
+        used_percent=90.0,
+        thresholds=ProviderQuotaThresholds(soft_percent=75.0, hard_percent=90.0),
+        visible_message=message,
+    )
+
+    async def auth_preflight(_session, *, route):
+        return ProviderAuthPreflightResult(
+            status="passed",
+            provider=route.provider,
+            model=route.model,
+        )
+
+    def quota_preflight(*, route, run):
+        return quota
+
+    monkeypatch.setattr(admission, "async_preflight_cycle_external_auth", auth_preflight)
+    monkeypatch.setattr(admission, "preflight_cycle_external_quota", quota_preflight)
+    run = SimpleNamespace(context_snapshot={})
+
+    outcome = await admission.async_prepare_cycle_run_admission(
+        object(),
+        cycle=_cycle(),
+        run=run,
+    )
+
+    assert isinstance(outcome, admission.CycleAdmissionRejected)
+    assert outcome.status == expected_status
+    assert outcome.error == expected_error
+    assert outcome.skip_reason == skip_reason
+    assert outcome.notice_kind == "quota"
+    assert outcome.notice is quota
+    assert run.context_snapshot["quota_preflight"]["decision"] == decision

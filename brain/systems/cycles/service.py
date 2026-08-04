@@ -16,7 +16,10 @@ from brain.systems.cortex.events import publish
 from brain.systems.cortex.thought_lifecycle import ThreadMessageCommand, post_thread_message
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUSES, CYCLE_RUN_TERMINAL_STATUSES
 from brain.systems.cycles.admission import (
-    CycleAdmissionOutcome,
+    CycleAdmissionAdmitted,
+    CycleAdmissionNoticeKind,
+    CycleAdmissionRejected,
+    CycleProviderRoute,
     async_prepare_cycle_run_admission,
 )
 from brain.systems.cycles.quota_preflight import (
@@ -141,10 +144,9 @@ async def _async_admit_cycle_run(
     idea_id: str,
     message: str,
     priority: int,
-    user_id: str | None,
+    route: CycleProviderRoute,
     metadata: dict | None,
     cycle_run_id: int,
-    model_policy: dict | None = None,
     deadline_at: datetime | None = None,
 ) -> int | None:
     result = await admit_work(
@@ -153,12 +155,12 @@ async def _async_admit_cycle_run(
             source="cycle",
             event_type="cycle.due_run",
             org_id=str((metadata or {}).get("org_id") or ""),
-            actor={"id": user_id, "org_id": (metadata or {}).get("org_id")},
+            actor={"id": route.user_id, "org_id": (metadata or {}).get("org_id")},
             target={"kind": "cortex_idea", "idea_id": idea_id},
             payload={
                 "message": message,
                 "metadata": dict(metadata or {}),
-                "model_policy": dict(model_policy or {}),
+                "model_policy": route.work_intake_model_policy,
                 **({"deadline_at": deadline_at} if deadline_at is not None else {}),
             },
             policy={
@@ -299,6 +301,13 @@ async def _async_append_cycle_auth_blocked_thread_message(
         lifecycle_trigger="cycle_auth_preflight_blocked",
     )
     return result.message_payload, result.status_change
+
+
+def _cycle_admission_notice_appender(notice_kind: CycleAdmissionNoticeKind):
+    return {
+        "auth": _async_append_cycle_auth_blocked_thread_message,
+        "quota": async_append_cycle_quota_notice,
+    }[notice_kind]
 
 
 async def async_run_cycle_now(
@@ -798,48 +807,34 @@ async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
 async def _async_settle_rejected_cycle_run(
     session,
     *,
-    admission: CycleAdmissionOutcome,
+    admission: CycleAdmissionRejected,
     idea: Idea,
     cycle: Cycle,
     run: CycleRun,
 ) -> tuple[dict | None, dict | None, dict]:
-    rejection_status = admission.rejection_status
-    if rejection_status is None:
-        raise ValueError("Cannot settle an admitted Cycle run")
-
     await _finalize_cycle_run(
         run,
         cycle,
-        status=rejection_status,
+        status=admission.status,
         error=admission.error,
         skip_reason=admission.skip_reason,
         session=session,
     )
-    if admission.auth.blocked:
-        message_payload, status_payload = await _async_append_cycle_auth_blocked_thread_message(
-            session,
-            idea,
-            cycle,
-            run,
-            admission.auth,
-        )
-    else:
-        if admission.quota is None:
-            raise ValueError("Rejected Cycle quota admission requires a quota result")
-        message_payload, status_payload = await async_append_cycle_quota_notice(
-            session,
-            idea,
-            cycle,
-            run,
-            admission.quota,
-        )
+    append_notice = _cycle_admission_notice_appender(admission.notice_kind)
+    message_payload, status_payload = await append_notice(
+        session,
+        idea,
+        cycle,
+        run,
+        admission.notice,
+    )
     return message_payload, status_payload, serialize_execution_idea(idea)
 
 
 async def _async_start_admitted_cycle_run(
     session,
     *,
-    admission: CycleAdmissionOutcome,
+    admission: CycleAdmissionAdmitted,
     idea: Idea,
     cycle: Cycle,
     run: CycleRun,
@@ -853,10 +848,9 @@ async def _async_start_admitted_cycle_run(
         idea_id=idea.id,
         message=run_message,
         priority=1,
-        user_id=admission.route.user_id,
+        route=admission.route,
         metadata=run_metadata,
         cycle_run_id=run.id,
-        model_policy=admission.route.model_policy,
         deadline_at=_cycle_run_deadline_at(cycle),
     )
     if agent_run_id is None:
@@ -939,7 +933,7 @@ async def async_execute_cycle_run(run_id: int) -> None:
             cycle=cycle,
             run=run,
         )
-        if admission.rejected:
+        if isinstance(admission, CycleAdmissionRejected):
             message_payload, status_payload, idea_snapshot = (
                 await _async_settle_rejected_cycle_run(
                     uow.session,
@@ -961,12 +955,21 @@ async def async_execute_cycle_run(run_id: int) -> None:
             if started is None:
                 return
             agent_run_id, message_payload, status_payload, idea_snapshot = started
-    if should_publish_idea and idea_snapshot:
-        publish("idea_upserted", {"idea": idea_snapshot})
-    if message_payload:
-        publish("thread_message", {"idea_id": idea_id, "message": message_payload})
-    if status_payload:
-        publish("status_change", status_payload)
+    for should_publish, event, payload in (
+        (
+            should_publish_idea and idea_snapshot,
+            "idea_upserted",
+            {"idea": idea_snapshot},
+        ),
+        (
+            message_payload,
+            "thread_message",
+            {"idea_id": idea_id, "message": message_payload},
+        ),
+        (status_payload, "status_change", status_payload),
+    ):
+        if should_publish:
+            publish(event, payload)
     if agent_run_id is not None:
         logger.info(
             "Enqueued cycle run #%s for idea %s... (cycle=%s)",

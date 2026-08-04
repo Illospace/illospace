@@ -15,12 +15,10 @@ def _route(model: str = "openai/gpt-5.6-sol") -> CycleProviderRoute:
         user_id="user-1",
         org_id="org-1",
         model=model,
-        provider="openai",
-        model_policy={"model": model},
     )
 
 
-async def test_cycle_quota_marks_scheduled_origin_as_autonomous(monkeypatch):
+def test_cycle_quota_marks_scheduled_origin_as_autonomous(monkeypatch):
     captured = {}
 
     def probe(**kwargs):
@@ -36,8 +34,7 @@ async def test_cycle_quota_marks_scheduled_origin_as_autonomous(monkeypatch):
         )
 
     monkeypatch.setattr(quota_preflight, "probe_provider_quota", probe)
-    result = await quota_preflight.async_preflight_cycle_external_quota(
-        object(),
+    result = quota_preflight.preflight_cycle_external_quota(
         route=_route(),
         run=SimpleNamespace(
             context_snapshot={"launch_context": {"origin": "scheduled_cycle"}}
@@ -50,7 +47,7 @@ async def test_cycle_quota_marks_scheduled_origin_as_autonomous(monkeypatch):
     assert "75% soft limit" in result.visible_message
 
 
-async def test_cycle_quota_marks_manual_origin_as_explicit(monkeypatch):
+def test_cycle_quota_marks_manual_origin_as_explicit(monkeypatch):
     captured = {}
 
     def probe(**kwargs):
@@ -67,8 +64,7 @@ async def test_cycle_quota_marks_manual_origin_as_explicit(monkeypatch):
         )
 
     monkeypatch.setattr(quota_preflight, "probe_provider_quota", probe)
-    result = await quota_preflight.async_preflight_cycle_external_quota(
-        object(),
+    result = quota_preflight.preflight_cycle_external_quota(
         route=_route(),
         run=SimpleNamespace(
             context_snapshot={"launch_context": {"origin": "manual_cycle"}}
@@ -80,7 +76,7 @@ async def test_cycle_quota_marks_manual_origin_as_explicit(monkeypatch):
     assert result.visible_message is None
 
 
-async def test_cycle_quota_consumes_resolved_route(monkeypatch):
+def test_cycle_quota_consumes_resolved_route(monkeypatch):
     captured = {}
 
     def probe(**kwargs):
@@ -96,8 +92,7 @@ async def test_cycle_quota_consumes_resolved_route(monkeypatch):
         )
 
     monkeypatch.setattr(quota_preflight, "probe_provider_quota", probe)
-    result = await quota_preflight.async_preflight_cycle_external_quota(
-        object(),
+    result = quota_preflight.preflight_cycle_external_quota(
         route=_route(),
         run=SimpleNamespace(context_snapshot={}),
     )

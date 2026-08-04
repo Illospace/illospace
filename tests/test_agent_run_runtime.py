@@ -2222,8 +2222,6 @@ async def test_cycle_auth_policy_blocks_anthropic_without_credentials(monkeypatc
             user_id="user-1",
             org_id="org-1",
             model="anthropic/claude-sonnet-4-6",
-            provider="anthropic",
-            model_policy={"model": "anthropic/claude-sonnet-4-6"},
         ),
     )
 

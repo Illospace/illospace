@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, TypeAlias, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,58 +26,79 @@ from brain.systems.cycles.auth_preflight import (
 )
 from brain.systems.cycles.common import json_dict
 from brain.systems.cycles.quota_preflight import (
-    async_preflight_cycle_external_quota,
+    preflight_cycle_external_quota,
 )
 
 logger = logging.getLogger("cycles")
 
 
-@dataclass(frozen=True)
+CycleThinking: TypeAlias = Literal["none", "low", "medium", "high", "xhigh"]
+
+
+@dataclass(frozen=True, slots=True)
 class CycleProviderRoute:
     """The one provider route used by every Cycle admission check."""
 
     user_id: str | None
     org_id: str | None
     model: str
-    provider: str
-    model_policy: dict[str, str]
+    thinking: CycleThinking | None = None
+
+    def __post_init__(self) -> None:
+        canonical_model = normalize_model_name(self.model)
+        checks = (
+            (
+                bool(self.model) and canonical_model == self.model,
+                f"Cycle route model must be canonical: {canonical_model!r}",
+            ),
+            (
+                self.thinking is None or self.thinking in EFFORT_TIER_SET,
+                "Cycle route thinking must be a canonical effort tier",
+            ),
+        )
+        for valid, message in checks:
+            if not valid:
+                raise ValueError(message)
+
+    @property
+    def provider(self) -> str:
+        return infer_provider_from_model(self.model)
+
+    @property
+    def work_intake_model_policy(self) -> dict[str, str]:
+        policy = {"model": self.model}
+        if self.thinking is not None:
+            policy["thinking"] = self.thinking
+        return policy
 
 
-@dataclass(frozen=True)
-class CycleAdmissionOutcome:
-    """Ordered auth and quota decisions for a resolved provider route."""
+@dataclass(frozen=True, slots=True)
+class CycleAdmissionAdmitted:
+    """A complete decision to admit work through one resolved route."""
 
     route: CycleProviderRoute
-    auth: ProviderAuthPreflightResult
-    quota: ProviderQuotaPreflightResult | None = None
 
-    @property
-    def rejection_status(self) -> str | None:
-        if self.auth.blocked:
-            return "auth_blocked"
-        if self.quota is not None and self.quota.blocked:
-            return "quota_blocked"
-        if self.quota is not None and self.quota.deferred:
-            return "skipped"
-        return None
 
-    @property
-    def rejected(self) -> bool:
-        return self.rejection_status is not None
+CycleAdmissionStatus: TypeAlias = Literal["auth_blocked", "quota_blocked", "skipped"]
+CycleAdmissionNoticeKind: TypeAlias = Literal["auth", "quota"]
+CycleAdmissionSkipReason: TypeAlias = Literal["quota_soft_limit"]
+CycleAdmissionNotice: TypeAlias = (
+    ProviderAuthPreflightResult | ProviderQuotaPreflightResult
+)
 
-    @property
-    def error(self) -> str | None:
-        if self.auth.blocked:
-            return self.auth.visible_message
-        if self.quota is not None and self.quota.blocked:
-            return self.quota.visible_message
-        return None
 
-    @property
-    def skip_reason(self) -> str | None:
-        if self.quota is not None and self.quota.deferred:
-            return "quota_soft_limit"
-        return None
+@dataclass(frozen=True, slots=True)
+class CycleAdmissionRejected:
+    """A complete decision to settle a run without admitting work."""
+
+    status: CycleAdmissionStatus
+    error: str | None
+    skip_reason: CycleAdmissionSkipReason | None
+    notice_kind: CycleAdmissionNoticeKind
+    notice: CycleAdmissionNotice
+
+
+CycleAdmissionOutcome: TypeAlias = CycleAdmissionAdmitted | CycleAdmissionRejected
 
 
 def _cycle_run_overrides(cycle: Cycle, run: CycleRun) -> dict[str, Any]:
@@ -89,6 +110,16 @@ def _cycle_run_overrides(cycle: Cycle, run: CycleRun) -> dict[str, Any]:
         "model_override": getattr(cycle, "model_override", None),
         "thinking_override": getattr(cycle, "thinking_override", None),
     }
+
+
+def _cycle_thinking(overrides: dict[str, Any]) -> CycleThinking | None:
+    thinking = str(overrides.get("thinking_override") or "").strip().lower()
+    if thinking and thinking not in EFFORT_TIER_SET:
+        logger.warning(
+            "Ignoring invalid thinking_override in CycleRun revision snapshot",
+        )
+        return None
+    return cast(CycleThinking | None, thinking or None)
 
 
 async def async_resolve_cycle_provider_route(
@@ -105,7 +136,7 @@ async def async_resolve_cycle_provider_route(
 
     raw_model = str(overrides.get("model_override") or "").strip()
     if raw_model and raw_model.lower() != "default":
-        model = normalize_model_name(raw_model)
+        model = raw_model
     else:
         model = await async_get_default_model(
             session,
@@ -114,33 +145,22 @@ async def async_resolve_cycle_provider_route(
             org_id=org_id,
         )
 
-    model_policy = {"model": model}
-    thinking = str(overrides.get("thinking_override") or "").strip().lower()
-    if thinking in EFFORT_TIER_SET:
-        model_policy["thinking"] = thinking
-    elif thinking:
-        logger.warning(
-            "Ignoring invalid thinking_override in CycleRun revision snapshot",
-        )
-
     return CycleProviderRoute(
         user_id=user_id,
         org_id=org_id,
-        model=model,
-        provider=infer_provider_from_model(model),
-        model_policy=model_policy,
+        model=normalize_model_name(model),
+        thinking=_cycle_thinking(overrides),
     )
 
 
-def _record_admission_snapshot(
+def _record_preflight_snapshot(
     run: CycleRun,
-    outcome: CycleAdmissionOutcome,
+    *,
+    key: str,
+    preflight: ProviderAuthPreflightResult | ProviderQuotaPreflightResult,
 ) -> None:
     context_snapshot = dict(getattr(run, "context_snapshot", None) or {})
-    if outcome.auth.status != "skipped":
-        context_snapshot["auth_preflight"] = outcome.auth.to_dict()
-    if outcome.quota is not None:
-        context_snapshot["quota_preflight"] = outcome.quota.to_dict()
+    context_snapshot[key] = preflight.to_dict()
     run.context_snapshot = context_snapshot
 
 
@@ -158,23 +178,45 @@ async def async_prepare_cycle_run_admission(
         run=run,
     )
     auth = await async_preflight_cycle_external_auth(session, route=route)
+    if auth.status != "skipped":
+        _record_preflight_snapshot(run, key="auth_preflight", preflight=auth)
     if auth.blocked:
-        outcome = CycleAdmissionOutcome(route=route, auth=auth)
-        _record_admission_snapshot(run, outcome)
-        return outcome
+        return CycleAdmissionRejected(
+            status="auth_blocked",
+            error=auth.visible_message,
+            skip_reason=None,
+            notice_kind="auth",
+            notice=auth,
+        )
 
-    quota = await async_preflight_cycle_external_quota(
-        session,
+    quota = preflight_cycle_external_quota(
         route=route,
         run=run,
     )
-    outcome = CycleAdmissionOutcome(route=route, auth=auth, quota=quota)
-    _record_admission_snapshot(run, outcome)
-    return outcome
+    _record_preflight_snapshot(run, key="quota_preflight", preflight=quota)
+    if quota.decision == "admitted":
+        return CycleAdmissionAdmitted(route=route)
+    try:
+        status, error, skip_reason = {
+            "blocked": ("quota_blocked", quota.visible_message, None),
+            "deferred": ("skipped", None, "quota_soft_limit"),
+        }[quota.decision]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported Cycle quota decision: {quota.decision!r}") from exc
+    return CycleAdmissionRejected(
+        status=cast(CycleAdmissionStatus, status),
+        error=error,
+        skip_reason=cast(CycleAdmissionSkipReason | None, skip_reason),
+        notice_kind="quota",
+        notice=quota,
+    )
 
 
 __all__ = [
+    "CycleAdmissionAdmitted",
+    "CycleAdmissionNoticeKind",
     "CycleAdmissionOutcome",
+    "CycleAdmissionRejected",
     "CycleProviderRoute",
     "async_prepare_cycle_run_admission",
     "async_resolve_cycle_provider_route",

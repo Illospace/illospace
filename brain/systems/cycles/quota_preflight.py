@@ -47,15 +47,13 @@ def _with_cycle_presentation(
     return result
 
 
-async def async_preflight_cycle_external_quota(
-    session: AsyncSession,
+def preflight_cycle_external_quota(
     *,
     route: CycleProviderRoute,
     run: CycleRun,
 ) -> ProviderQuotaPreflightResult:
     """Probe subscription quota before admitting a Cycle agent run."""
 
-    del session
     origin = str(cycle_run_launch_context(run).get("origin") or "")
     result = probe_provider_quota(
         provider=route.provider,
@@ -137,5 +135,5 @@ async def async_append_cycle_quota_notice(
 
 __all__ = [
     "async_append_cycle_quota_notice",
-    "async_preflight_cycle_external_quota",
+    "preflight_cycle_external_quota",
 ]

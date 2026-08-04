@@ -79,7 +79,7 @@ async def _passed_cycle_auth(_session, *, route):
     )
 
 
-async def _passed_cycle_quota(_session, *, route, run):
+def _passed_cycle_quota(*, route, run):
     del run
     return ProviderQuotaPreflightResult(
         status="passed",
@@ -1771,6 +1771,7 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
     session = object()
 
     cycle = Cycle()
+    cycle.user_id = "user-1"
     cycle.model_override = "anthropic/claude-opus-5"
     cycle.thinking_override = "low"
     cycle_run = CycleRun()
@@ -1792,10 +1793,9 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
         idea_id="idea-1",
         message="cycle prompt",
         priority=1,
-        user_id="user-1",
+        route=route,
         metadata={"source": "cycle", "cycle_run_id": 12},
         cycle_run_id=12,
-        model_policy=route.model_policy,
         deadline_at=deadline_at,
     )
 
@@ -1821,10 +1821,9 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
         idea_id="idea-1",
         message="cycle prompt",
         priority=1,
-        user_id="user-1",
+        route=route,
         metadata={"source": "cycle", "cycle_run_id": 13},
         cycle_run_id=13,
-        model_policy=route.model_policy,
     )
 
     _, default_deadline_event = calls[1]
@@ -2177,7 +2176,7 @@ async def test_execute_cycle_run_valid_codex_preflight_proceeds_to_agent_admissi
     monkeypatch.setattr("brain.platform.integrations.llm._async_resolve_key_from_db", fake_resolve_key)
     monkeypatch.setattr("brain.platform.integrations.llm.refresh_codex_access_token", fail_refresh)
     monkeypatch.setattr("brain.platform.integrations.llm.OpenAICodexClient", fake_codex_client)
-    monkeypatch.setattr(cycle_admission, "async_preflight_cycle_external_quota", _passed_cycle_quota)
+    monkeypatch.setattr(cycle_admission, "preflight_cycle_external_quota", _passed_cycle_quota)
     monkeypatch.setattr(service, "_async_admit_cycle_run", fake_admit)
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
 
@@ -2191,7 +2190,9 @@ async def test_execute_cycle_run_valid_codex_preflight_proceeds_to_agent_admissi
     assert run.context_snapshot["auth_preflight"]["status"] == "passed"
     assert run.context_snapshot["quota_preflight"]["decision"] == "admitted"
     assert codex_client_calls[0][0][0] == "fresh-access"
-    assert admissions[0]["model_policy"] == {"model": "openai/gpt-5.6-sol"}
+    assert admissions[0]["route"].work_intake_model_policy == {
+        "model": "openai/gpt-5.6-sol"
+    }
     assert admissions[0]["metadata"]["launch_envelope"]["origin"] == "scheduled_cycle"
 
 
@@ -2206,7 +2207,7 @@ async def test_execute_cycle_run_resolves_one_route_shared_with_work_admission(m
     )
     default_model_calls = []
     preflight_routes = []
-    admitted_model_policies = []
+    admitted_routes = []
 
     async def default_model(_session, **kwargs):
         default_model_calls.append(kwargs)
@@ -2216,18 +2217,18 @@ async def test_execute_cycle_run_resolves_one_route_shared_with_work_admission(m
         preflight_routes.append(route)
         return await _passed_cycle_auth(_session, route=route)
 
-    async def quota_preflight(_session, *, route, run):
+    def quota_preflight(*, route, run):
         preflight_routes.append(route)
-        return await _passed_cycle_quota(_session, route=route, run=run)
+        return _passed_cycle_quota(route=route, run=run)
 
     async def admit(*_args, **kwargs):
-        admitted_model_policies.append(kwargs["model_policy"])
+        admitted_routes.append(kwargs["route"])
         return 77
 
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
     monkeypatch.setattr(cycle_admission, "async_get_default_model", default_model)
     monkeypatch.setattr(cycle_admission, "async_preflight_cycle_external_auth", auth_preflight)
-    monkeypatch.setattr(cycle_admission, "async_preflight_cycle_external_quota", quota_preflight)
+    monkeypatch.setattr(cycle_admission, "preflight_cycle_external_quota", quota_preflight)
     monkeypatch.setattr(service, "_async_admit_cycle_run", admit)
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
 
@@ -2236,8 +2237,8 @@ async def test_execute_cycle_run_resolves_one_route_shared_with_work_admission(m
     assert len(default_model_calls) == 1
     assert len(preflight_routes) == 2
     assert preflight_routes[0] is preflight_routes[1]
-    assert admitted_model_policies == [preflight_routes[0].model_policy]
-    assert admitted_model_policies[0] is preflight_routes[0].model_policy
+    assert admitted_routes == [preflight_routes[0]]
+    assert admitted_routes[0] is preflight_routes[0]
     assert run.status == "running"
 
 
@@ -2267,7 +2268,7 @@ async def test_execute_cycle_run_hard_quota_blocks_and_records_one_notice(monkey
         ),
     )
 
-    async def quota_preflight(*_args, **_kwargs):
+    def quota_preflight(*_args, **_kwargs):
         return quota
 
     async def fail_admit(*_args, **_kwargs):
@@ -2281,7 +2282,7 @@ async def test_execute_cycle_run_hard_quota_blocks_and_records_one_notice(monkey
 
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
     monkeypatch.setattr(cycle_admission, "async_preflight_cycle_external_auth", _passed_cycle_auth)
-    monkeypatch.setattr(cycle_admission, "async_preflight_cycle_external_quota", quota_preflight)
+    monkeypatch.setattr(cycle_admission, "preflight_cycle_external_quota", quota_preflight)
     monkeypatch.setattr(service, "async_append_cycle_quota_notice", append_quota_notice)
     monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
@@ -2433,7 +2434,7 @@ async def test_execute_scheduled_cycle_run_defers_at_soft_quota(monkeypatch):
         visible_message="Scheduled Cycle quota deferred.",
     )
 
-    async def quota_preflight(*_args, **_kwargs):
+    def quota_preflight(*_args, **_kwargs):
         return quota
 
     async def fail_admit(*_args, **_kwargs):
@@ -2441,7 +2442,7 @@ async def test_execute_scheduled_cycle_run_defers_at_soft_quota(monkeypatch):
 
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
     monkeypatch.setattr(cycle_admission, "async_preflight_cycle_external_auth", _passed_cycle_auth)
-    monkeypatch.setattr(cycle_admission, "async_preflight_cycle_external_quota", quota_preflight)
+    monkeypatch.setattr(cycle_admission, "preflight_cycle_external_quota", quota_preflight)
     monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
 
