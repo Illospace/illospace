@@ -759,6 +759,7 @@ async def test_read_cycles_pages_to_complete_history_and_watermark_is_one_bounde
     assert seen_ids == [5, 4, 3, 2, 1]
     assert pages[0]["truncated"] is True
     assert pages[0]["next_page"]
+    assert pages[0]["sources"]["cycle_runs"][0]["self_review_summary"] == "Healthy evidence"
     assert pages[-1]["truncated"] is False
     assert pages[-1]["evidence_health"] == {"status": "ok", "completeness": "complete"}
 

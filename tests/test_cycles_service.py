@@ -3250,6 +3250,44 @@ def test_coordinator_posted_digest_scores_one_without_repair_or_repost(monkeypat
     assert len(session._artifacts) == 1
 
 
+def test_cycle_finalization_persists_gate_extracted_self_review(monkeypatch):
+    from brain.systems.cycles import contract_gate
+
+    self_review = "I should verify the evidence gap earlier in the next run."
+    answer = (
+        "The workspace review completed its mission using the current Cycle records.\n"
+        "Evidence reviewed: the Cycle ledger and current workspace records.\n"
+        "Evidence health: ok; all required readers returned complete results.\n"
+        "Next action: inspect the next scheduled run.\n"
+        f"Self-review summary: {self_review}"
+    )
+    session, cycle_run, _, _ = _contract_finalization_scenario(
+        cycle_id=8,
+        mission="Review the workspace.",
+        answer=answer,
+    )
+
+    async def fail_if_repair_runs(**_kwargs):
+        raise AssertionError("valid final answer should not need repair")
+
+    monkeypatch.setattr(
+        contract_gate,
+        "_async_repair_cycle_contract_answer",
+        fail_if_repair_runs,
+    )
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+
+    service.finalize_cycle_run_from_run(44, status="completed")
+
+    verdict = cycle_run.context_snapshot["mission_result_contract_verdict"]
+    evaluation = next(
+        item for item in session.added if item.__class__.__name__ == "CycleRunEvaluation"
+    )
+    assert verdict["self_review_summary"] == self_review
+    assert cycle_run.self_review_summary == self_review
+    assert evaluation.summary == "Cycle run completed and was recorded in the Cycle ledger."
+
+
 @pytest.mark.parametrize(
     ("run_id", "answer"),
     [
@@ -3549,6 +3587,10 @@ async def test_cycle_contract_gate_repairs_bad_visible_answer_once(monkeypatch):
     assert verdict["settlement_status"] == "mission_success_after_repair"
     assert verdict["side_effects_succeeded"] is True
     assert verdict["domain_side_effects_succeeded"] is True
+    assert verdict["self_review_summary"] == (
+        "mission result contract satisfied after repair."
+    )
+    assert cycle_run.self_review_summary == verdict["self_review_summary"]
     latest_answer = session._artifacts[-1]
     assert latest_answer.artifact_type == "final_answer"
     assert latest_answer.text.startswith("24h readout")

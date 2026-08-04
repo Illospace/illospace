@@ -140,8 +140,15 @@ def extract_self_review_summary(candidate_answer: str | None) -> str | None:
     ]
     if not matches:
         return None
-    summary = max(matches, key=lambda match: match.start()).group("summary").strip()
-    return summary or None
+    return _normalize_self_review_summary(
+        max(matches, key=lambda match: match.start()).group("summary")
+    )
+
+
+def _normalize_self_review_summary(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
 
 
 def _satisfies_required_output(
@@ -320,10 +327,19 @@ def persisted_cycle_contract_verdict(cycle_run: CycleRun | None) -> dict[str, An
     return dict(verdict) if isinstance(verdict, dict) else None
 
 
-def _persist_cycle_contract_verdict(cycle_run: CycleRun, verdict: dict[str, Any]) -> None:
+def _persist_cycle_contract_verdict(
+    cycle_run: CycleRun,
+    verdict: dict[str, Any],
+    *,
+    self_review_summary: str | None,
+) -> None:
+    normalized_self_review_summary = _normalize_self_review_summary(self_review_summary)
+    stored_verdict = dict(verdict)
+    stored_verdict[SELF_REVIEW_SUMMARY_VERDICT_KEY] = normalized_self_review_summary
     context_snapshot = _json_dict(getattr(cycle_run, "context_snapshot", None))
-    context_snapshot[MISSION_RESULT_CONTRACT_VERDICT_KEY] = dict(verdict)
+    context_snapshot[MISSION_RESULT_CONTRACT_VERDICT_KEY] = stored_verdict
     cycle_run.context_snapshot = context_snapshot
+    cycle_run.self_review_summary = normalized_self_review_summary
 
 
 async def _latest_final_answer_artifact(
@@ -684,6 +700,7 @@ def _base_verdict(
     candidate_artifact_id: Any,
     initial_review: dict[str, Any],
     evidence_packet: dict[str, Any],
+    self_review_summary: str | None,
 ) -> dict[str, Any]:
     return {
         "kind": "cycle_result_contract_verdict",
@@ -705,9 +722,7 @@ def _base_verdict(
         "domain_side_effects_succeeded": bool(evidence_packet.get("domain_side_effects_succeeded")),
         "provider_error": initial_review.get("provider_error"),
         "reported_evidence_health": initial_review.get("reported_evidence_health"),
-        SELF_REVIEW_SUMMARY_VERDICT_KEY: initial_review.get(
-            SELF_REVIEW_SUMMARY_VERDICT_KEY
-        ),
+        SELF_REVIEW_SUMMARY_VERDICT_KEY: self_review_summary,
     }
 
 
@@ -782,15 +797,23 @@ async def async_prepare_cycle_run_visible_finalization(
         evidence_packet=evidence_packet,
         provider_exception=captured_provider_exception,
     )
+    self_review_summary = _normalize_self_review_summary(
+        initial_review.get(SELF_REVIEW_SUMMARY_VERDICT_KEY)
+    )
     verdict = _base_verdict(
         candidate_answer=candidate_answer,
         candidate_artifact_id=getattr(artifact, "id", None),
         initial_review=initial_review,
         evidence_packet=evidence_packet,
+        self_review_summary=self_review_summary,
     )
 
     if initial_review["approved"]:
-        _persist_cycle_contract_verdict(cycle_run, verdict)
+        _persist_cycle_contract_verdict(
+            cycle_run,
+            verdict,
+            self_review_summary=self_review_summary,
+        )
         return verdict
 
     append_only = _candidate_can_be_preserved(candidate_answer, initial_review)
@@ -823,6 +846,9 @@ async def async_prepare_cycle_run_visible_finalization(
             mission=mission,
             evidence_packet=evidence_packet,
         )
+        repaired_self_review_summary = _normalize_self_review_summary(
+            repair_review.get(SELF_REVIEW_SUMMARY_VERDICT_KEY)
+        )
         if repair_review.get("provider_error"):
             logger.error(
                 "cycle_contract_repair_provider_error run_id=%s raw_error=%s",
@@ -854,21 +880,22 @@ async def async_prepare_cycle_run_visible_finalization(
                     "reported_evidence_health": repair_review.get(
                         "reported_evidence_health"
                     ),
-                    SELF_REVIEW_SUMMARY_VERDICT_KEY: repair_review.get(
-                        SELF_REVIEW_SUMMARY_VERDICT_KEY
-                    ),
+                    SELF_REVIEW_SUMMARY_VERDICT_KEY: repaired_self_review_summary,
                 }
             )
-            _persist_cycle_contract_verdict(cycle_run, verdict)
+            _persist_cycle_contract_verdict(
+                cycle_run,
+                verdict,
+                self_review_summary=repaired_self_review_summary,
+            )
             return verdict
         verdict["repair_missing_outputs"] = list(repair_review["missing_outputs"])
         verdict["final_missing_outputs"] = list(repair_review["missing_outputs"])
         if not append_only and _candidate_can_be_preserved(combined_answer, repair_review):
             preserved_answer = combined_answer
             preserved_answer_source = "repair"
-            verdict[SELF_REVIEW_SUMMARY_VERDICT_KEY] = repair_review.get(
-                SELF_REVIEW_SUMMARY_VERDICT_KEY
-            )
+            self_review_summary = repaired_self_review_summary
+            verdict[SELF_REVIEW_SUMMARY_VERDICT_KEY] = self_review_summary
 
     missing_outputs = list(verdict.get("final_missing_outputs") or verdict["missing_outputs"])
     degraded_answer = _degraded_visible_answer(
@@ -910,7 +937,11 @@ async def async_prepare_cycle_run_visible_finalization(
             "final_missing_outputs": missing_outputs,
         }
     )
-    _persist_cycle_contract_verdict(cycle_run, verdict)
+    _persist_cycle_contract_verdict(
+        cycle_run,
+        verdict,
+        self_review_summary=self_review_summary,
+    )
     return verdict
 
 
