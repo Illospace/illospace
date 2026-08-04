@@ -15,6 +15,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.knowledge import KnowledgeItem
+from brain.platform.db.models.reconstructive_memory import MemoryNode
+from brain.platform.db.repositories.reconstructive_memory import (
+    MemoryNodeRepository,
+    memory_blend_weights,
+    memory_content_node_filters,
+)
 from brain.systems.knowledge.recall_eval_contract import (
     KNOWLEDGE_RECALL_ARTIFACT_SCHEMA_VERSION,
     KnowledgeRecallArtifactCaseError,
@@ -35,7 +41,11 @@ from brain.systems.knowledge.search import (
 )
 from brain.systems.knowledge.search_contract import (
     KNOWLEDGE_SEARCH_MAX_RESULTS,
+    KnowledgeSearchChannelScore,
+    KnowledgeSearchChannelWeights,
+    KnowledgeSearchHit,
     KnowledgeSearchResponse,
+    KnowledgeSearchScoreChannels,
     KnowledgeSearchScores,
     normalize_knowledge_search_limit,
 )
@@ -46,6 +56,7 @@ DEFAULT_QUESTION_SET_PATH = (
 )
 
 KnowledgeSearch = Callable[..., Awaitable[Any]]
+KnowledgeRecallEngine = Literal["knowledge", "memory"]
 
 
 def _iso_utc(value: datetime | None) -> str | None:
@@ -119,6 +130,104 @@ async def build_knowledge_recall_corpus_fingerprint(
         ),
         fingerprint=hashlib.sha256(encoded_rows).hexdigest(),
     )
+
+
+async def _visible_memory_content_nodes(
+    session: AsyncSession,
+    *,
+    org_id: str,
+) -> list[MemoryNode]:
+    return list(
+        (
+            await session.scalars(
+                select(MemoryNode)
+                .where(*memory_content_node_filters(org_id=org_id))
+                .order_by(MemoryNode.id.asc())
+            )
+        ).all()
+    )
+
+
+async def build_memory_recall_corpus_fingerprint(
+    session: AsyncSession,
+    *,
+    org_id: str,
+) -> KnowledgeRecallCorpusFingerprint:
+    """Summarize the visible content nodes used by reconstructive memory."""
+
+    rows = await _visible_memory_content_nodes(session, org_id=org_id)
+    canonical_rows = [
+        {
+            "id": int(row.id),
+            "node_kind": str(row.node_kind),
+            "content_kind": str(row.content_kind) if row.content_kind else None,
+            "canonical_label": str(row.canonical_label),
+            "text": str(row.text) if row.text is not None else None,
+            "normalized_key": str(row.normalized_key),
+            "scope_key": str(row.scope_key),
+            "confidence": float(row.confidence),
+            "truth_status": str(row.truth_status),
+            "freshness_status": str(row.freshness_status),
+            "created_at": _iso_utc(row.created_at),
+            "updated_at": _iso_utc(row.updated_at),
+        }
+        for row in rows
+    ]
+    encoded_rows = json.dumps(
+        canonical_rows,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    updated_values = [row.updated_at for row in rows if row.updated_at is not None]
+    created_values = [row.created_at for row in rows if row.created_at is not None]
+    return KnowledgeRecallCorpusFingerprint(
+        total_item_count=len(rows),
+        source_counts={"memory": len(rows)} if rows else {},
+        newest_source_updated_at=_iso_utc(
+            max(updated_values) if updated_values else None
+        ),
+        newest_ingested_at=_iso_utc(
+            max(created_values) if created_values else None
+        ),
+        fingerprint=hashlib.sha256(encoded_rows).hexdigest(),
+    )
+
+
+async def _recall_corpus(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    engine: KnowledgeRecallEngine,
+) -> tuple[KnowledgeRecallCorpusFingerprint, set[tuple[str, str]]]:
+    if engine == "knowledge":
+        fingerprint = await build_knowledge_recall_corpus_fingerprint(
+            session,
+            org_id=org_id,
+        )
+        pointers = set(
+            (
+                await session.execute(
+                    select(KnowledgeItem.source, KnowledgeItem.source_ref).where(
+                        *knowledge_item_filters(
+                            org_id=org_id,
+                            sources=None,
+                            kinds=None,
+                        )
+                    )
+                )
+            ).all()
+        )
+        return fingerprint, {
+            (str(source), str(source_ref)) for source, source_ref in pointers
+        }
+
+    rows = await _visible_memory_content_nodes(session, org_id=org_id)
+    fingerprint = await build_memory_recall_corpus_fingerprint(
+        session,
+        org_id=org_id,
+    )
+    return fingerprint, {("memory", f"memory_node:{row.id}") for row in rows}
 
 
 @dataclass(frozen=True)
@@ -273,6 +382,7 @@ class KnowledgeRecallInvalidResult:
     suite: str
     generated_at: str
     live_database: bool
+    engine: KnowledgeRecallEngine
     org_id: str
     question_set: KnowledgeRecallQuestionSet
     k_values: tuple[int, ...]
@@ -287,6 +397,7 @@ class KnowledgeRecallInvalidResult:
             suite=self.suite,
             generated_at=self.generated_at,
             live_database=self.live_database,
+            engine=self.engine,
             question_set=self.question_set.to_artifact(),
             configuration=KnowledgeRecallInvalidArtifactConfiguration(
                 org_id=self.org_id,
@@ -310,6 +421,7 @@ class KnowledgeRecallSuiteResult:
     suite: str
     generated_at: str
     live_database: bool
+    engine: KnowledgeRecallEngine
     org_id: str
     question_set: KnowledgeRecallQuestionSet
     k_values: tuple[int, ...]
@@ -351,6 +463,7 @@ class KnowledgeRecallSuiteResult:
             suite=self.suite,
             generated_at=self.generated_at,
             live_database=self.live_database,
+            engine=self.engine,
             question_set=self.question_set.to_artifact(),
             configuration=KnowledgeRecallArtifactConfiguration(
                 org_id=self.org_id,
@@ -504,6 +617,118 @@ def _metric(value: float) -> float:
     return round(float(value), 8)
 
 
+async def _embed_memory_recall_query(
+    session: AsyncSession,
+    query: str,
+) -> Any:
+    from brain.systems.reconstructive_memory.embeddings import embed_recall_query
+
+    return await embed_recall_query(session, query)
+
+
+async def search_memory_recall(
+    session: AsyncSession,
+    query: str,
+    *,
+    org_id: str,
+    limit: int,
+) -> KnowledgeSearchResponse:
+    """Adapt reconstructive memory's own ranker to the recall harness contract."""
+
+    requested_limit = int(limit)
+    effective_limit = normalize_knowledge_search_limit(
+        requested_limit,
+        default=KNOWLEDGE_SEARCH_MAX_RESULTS,
+    )
+    query_embedding = await _embed_memory_recall_query(session, query)
+    nodes = await MemoryNodeRepository(session).search_content_nodes(
+        query=query,
+        org_id=org_id,
+        limit=effective_limit,
+        query_embedding=(
+            query_embedding.vector if query_embedding is not None else None
+        ),
+        embedding_model=(
+            query_embedding.model if query_embedding is not None else None
+        ),
+    )
+    semantic_available = query_embedding is not None
+    # The ranker owns these numbers; reporting them from anywhere else drifts.
+    weights = memory_blend_weights(semantic_available=semantic_available)
+    lexical_weight = weights.lexical
+    semantic_weight = weights.semantic
+    storage_weight = weights.storage_confidence
+    hits: list[KnowledgeSearchHit] = []
+    for rank, node in enumerate(nodes, start=1):
+        lexical_score = float(getattr(node, "lexical_score", 0.0))
+        semantic_score = getattr(node, "semantic_score", None)
+        semantic_value = (
+            float(semantic_score) if semantic_score is not None else None
+        )
+        hits.append(
+            KnowledgeSearchHit(
+                id=int(node.id),
+                source="memory",
+                kind=str(node.content_kind or node.node_kind),
+                source_ref=f"memory_node:{node.id}",
+                title=str(node.canonical_label),
+                summary=str(node.text or node.canonical_label),
+                resolution=None,
+                entities=[],
+                extra={
+                    "confidence": float(node.confidence or 0.0),
+                    "freshness_status": str(node.freshness_status),
+                    "node_kind": str(node.node_kind),
+                    "scope": str(node.scope_key),
+                    "truth_status": str(node.truth_status),
+                    "visibility": str(node.visibility),
+                },
+                source_created_at=_iso_utc(node.created_at),
+                source_updated_at=_iso_utc(node.updated_at),
+                scores=KnowledgeSearchScores(
+                    rrf=float(getattr(node, "retrieval_score", 0.0)),
+                    channels=KnowledgeSearchScoreChannels(
+                        lexical=KnowledgeSearchChannelScore(
+                            rank=rank,
+                            score=lexical_score,
+                            weight=lexical_weight,
+                            contribution=lexical_weight * lexical_score,
+                        ),
+                        semantic=(
+                            KnowledgeSearchChannelScore(
+                                rank=rank,
+                                score=semantic_value,
+                                weight=semantic_weight,
+                                contribution=semantic_weight * semantic_value,
+                            )
+                            if semantic_value is not None
+                            else None
+                        ),
+                        recency=None,
+                    ),
+                ),
+            )
+        )
+    return KnowledgeSearchResponse(
+        query=query,
+        org_id=org_id,
+        sources=["memory"],
+        kinds=[],
+        semantic_available=semantic_available,
+        semantic_degraded_reason=(
+            None if semantic_available else "memory query embedding unavailable"
+        ),
+        weights=KnowledgeSearchChannelWeights(
+            lexical=lexical_weight,
+            semantic=semantic_weight,
+            recency=storage_weight,
+        ),
+        requested_limit=requested_limit,
+        effective_limit=effective_limit,
+        results=hits,
+    )
+
+
 def _ranked_results(
     response: KnowledgeSearchResponse,
     *,
@@ -538,7 +763,8 @@ async def run_knowledge_recall_eval(
     question_set: KnowledgeRecallQuestionSet | None = None,
     k_values: Sequence[int] = DEFAULT_K_VALUES,
     search_limit: int = KNOWLEDGE_SEARCH_MAX_RESULTS,
-    search: KnowledgeSearch = search_knowledge,
+    engine: KnowledgeRecallEngine = "knowledge",
+    search: KnowledgeSearch | None = None,
     generated_at: str | None = None,
     live_database: bool = False,
 ) -> KnowledgeRecallEvaluationResult:
@@ -550,19 +776,26 @@ async def run_knowledge_recall_eval(
     """
 
     clean_org_id = _required_text(org_id, field_name="org_id")
+    if engine not in ("knowledge", "memory"):
+        raise ValueError("engine must be 'knowledge' or 'memory'")
+    selected_search = search or (
+        search_knowledge if engine == "knowledge" else search_memory_recall
+    )
     loaded_question_set = question_set or load_knowledge_recall_question_set()
     normalized_k = normalize_k_values(k_values)
     requested_search_limit = int(search_limit)
     report_generated_at = generated_at or datetime.now(timezone.utc).isoformat()
-    corpus_fingerprint = await build_knowledge_recall_corpus_fingerprint(
+    corpus_fingerprint, reachable_pointers = await _recall_corpus(
         session,
         org_id=clean_org_id,
+        engine=engine,
     )
     if not loaded_question_set.cases:
         return KnowledgeRecallInvalidResult(
             suite="knowledge-recall",
             generated_at=report_generated_at,
             live_database=live_database,
+            engine=engine,
             org_id=clean_org_id,
             question_set=loaded_question_set,
             k_values=normalized_k,
@@ -592,6 +825,7 @@ async def run_knowledge_recall_eval(
             suite="knowledge-recall",
             generated_at=report_generated_at,
             live_database=live_database,
+            engine=engine,
             org_id=clean_org_id,
             question_set=loaded_question_set,
             k_values=normalized_k,
@@ -603,13 +837,52 @@ async def run_knowledge_recall_eval(
             ),
         )
 
+    evidence_pointers = [
+        pointer
+        for case in loaded_question_set.cases
+        for pointer in case.acceptable_evidence
+    ]
+    reachable_count = sum(
+        (pointer.source, pointer.source_ref) in reachable_pointers
+        for pointer in evidence_pointers
+    )
+    if evidence_pointers and reachable_count == 0:
+        evidence_source_counts = Counter(
+            pointer.source for pointer in evidence_pointers
+        )
+        source_breakdown = ", ".join(
+            f"{count}/{len(evidence_pointers)} `{source}`"
+            for source, count in sorted(evidence_source_counts.items())
+        )
+        return KnowledgeRecallInvalidResult(
+            suite="knowledge-recall",
+            generated_at=report_generated_at,
+            live_database=live_database,
+            engine=engine,
+            org_id=clean_org_id,
+            question_set=loaded_question_set,
+            k_values=normalized_k,
+            requested_search_limit=requested_search_limit,
+            corpus_fingerprint=corpus_fingerprint,
+            errors=(
+                KnowledgeRecallCaseError(
+                    case_id=loaded_question_set.question_set_id,
+                    cause=(
+                        f"0 of {len(evidence_pointers)} acceptable evidence refs "
+                        f"are reachable in the {engine} corpus; the question set "
+                        f"evidence is {source_breakdown}"
+                    ),
+                ),
+            ),
+        )
+
     case_results: list[KnowledgeRecallCaseResult] = []
     case_errors: list[KnowledgeRecallCaseError] = []
     observed_depths: list[tuple[str, int]] = []
 
     for case in loaded_question_set.cases:
         try:
-            raw_response = await search(
+            raw_response = await selected_search(
                 session,
                 case.question,
                 org_id=clean_org_id,
@@ -687,6 +960,7 @@ async def run_knowledge_recall_eval(
             suite="knowledge-recall",
             generated_at=report_generated_at,
             live_database=live_database,
+            engine=engine,
             org_id=clean_org_id,
             question_set=loaded_question_set,
             k_values=normalized_k,
@@ -699,6 +973,7 @@ async def run_knowledge_recall_eval(
         suite="knowledge-recall",
         generated_at=report_generated_at,
         live_database=live_database,
+        engine=engine,
         org_id=clean_org_id,
         question_set=loaded_question_set,
         k_values=normalized_k,
@@ -723,7 +998,9 @@ __all__ = [
     "KnowledgeRecallSuiteResult",
     "RankedKnowledgeResult",
     "build_knowledge_recall_corpus_fingerprint",
+    "build_memory_recall_corpus_fingerprint",
     "load_knowledge_recall_question_set",
     "normalize_k_values",
     "run_knowledge_recall_eval",
+    "search_memory_recall",
 ]

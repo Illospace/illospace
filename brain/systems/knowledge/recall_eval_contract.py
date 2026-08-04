@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from brain.systems.knowledge.search_contract import KnowledgeSearchScores
 
-KNOWLEDGE_RECALL_ARTIFACT_SCHEMA_VERSION = 1
+KNOWLEDGE_RECALL_ARTIFACT_SCHEMA_VERSION = 2
 
 
 class _StrictKnowledgeRecallArtifactModel(BaseModel):
@@ -125,11 +125,18 @@ class KnowledgeRecallLegacyValidArtifact(_KnowledgeRecallLegacyArtifact):
     results: tuple[KnowledgeRecallArtifactCaseResult, ...]
 
 
-class KnowledgeRecallValidArtifact(KnowledgeRecallLegacyValidArtifact):
+class KnowledgeRecallV1ValidArtifact(KnowledgeRecallLegacyValidArtifact):
+    """Valid artifact emitted before recall engines were recorded."""
+
+    schema_version: Literal[1]
+    corpus_fingerprint: KnowledgeRecallCorpusFingerprint
+
+
+class KnowledgeRecallValidArtifact(KnowledgeRecallV1ValidArtifact):
     """Current valid evaluation artifact."""
 
     schema_version: Literal[KNOWLEDGE_RECALL_ARTIFACT_SCHEMA_VERSION]
-    corpus_fingerprint: KnowledgeRecallCorpusFingerprint
+    engine: Literal["knowledge", "memory"]
 
 
 class KnowledgeRecallLegacyInvalidArtifact(_KnowledgeRecallLegacyArtifact):
@@ -140,21 +147,31 @@ class KnowledgeRecallLegacyInvalidArtifact(_KnowledgeRecallLegacyArtifact):
     errors: tuple[KnowledgeRecallArtifactCaseError, ...]
 
 
-class KnowledgeRecallInvalidArtifact(KnowledgeRecallLegacyInvalidArtifact):
+class KnowledgeRecallV1InvalidArtifact(KnowledgeRecallLegacyInvalidArtifact):
+    """Invalid artifact emitted before recall engines were recorded."""
+
+    schema_version: Literal[1]
+    corpus_fingerprint: KnowledgeRecallCorpusFingerprint
+
+
+class KnowledgeRecallInvalidArtifact(KnowledgeRecallV1InvalidArtifact):
     """Current invalid evaluation artifact."""
 
     schema_version: Literal[KNOWLEDGE_RECALL_ARTIFACT_SCHEMA_VERSION]
-    corpus_fingerprint: KnowledgeRecallCorpusFingerprint
+    engine: Literal["knowledge", "memory"]
 
 
 KnowledgeRecallValidArtifactContract = Union[
     KnowledgeRecallValidArtifact,
+    KnowledgeRecallV1ValidArtifact,
     KnowledgeRecallLegacyValidArtifact,
 ]
 KnowledgeRecallArtifact = Union[
     KnowledgeRecallValidArtifact,
+    KnowledgeRecallV1ValidArtifact,
     KnowledgeRecallLegacyValidArtifact,
     KnowledgeRecallInvalidArtifact,
+    KnowledgeRecallV1InvalidArtifact,
     KnowledgeRecallLegacyInvalidArtifact,
 ]
 
@@ -182,6 +199,8 @@ __all__ = [
     "KnowledgeRecallInvalidArtifactConfiguration",
     "KnowledgeRecallLegacyInvalidArtifact",
     "KnowledgeRecallLegacyValidArtifact",
+    "KnowledgeRecallV1InvalidArtifact",
+    "KnowledgeRecallV1ValidArtifact",
     "KnowledgeRecallValidArtifact",
     "KnowledgeRecallValidArtifactContract",
     "parse_knowledge_recall_artifact_json",

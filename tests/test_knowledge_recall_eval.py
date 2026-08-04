@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler
@@ -9,6 +10,7 @@ from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler
 from brain.app.cli import knowledge_recall as knowledge_recall_cli
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.knowledge import KnowledgeItem
+from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
 from brain.systems.knowledge.recall_eval import (
     EvidencePointer,
     KnowledgeRecallCaseError,
@@ -21,6 +23,7 @@ from brain.systems.knowledge.recall_eval import (
     build_knowledge_recall_corpus_fingerprint,
     load_knowledge_recall_question_set,
     run_knowledge_recall_eval,
+    search_memory_recall,
 )
 from brain.systems.knowledge.recall_eval_contract import (
     KnowledgeRecallArtifact,
@@ -180,9 +183,27 @@ def _question_set() -> KnowledgeRecallQuestionSet:
     )
 
 
+async def _seed_question_set_evidence(
+    session,
+    question_set: KnowledgeRecallQuestionSet,
+) -> None:
+    pointers = {
+        (pointer.source, pointer.source_ref)
+        for case in question_set.cases
+        for pointer in case.acceptable_evidence
+    }
+    for item_id, (source, source_ref) in enumerate(sorted(pointers), start=1000):
+        item = _item(item_id, source_ref, f"Reachable evidence {item_id}")
+        item.source = source
+        session.add(item)
+    await session.flush()
+
+
 async def test_known_rankings_compute_recall_at_k_and_mrr_with_misses_in_denominator(
     knowledge_session,
 ):
+    question_set = _question_set()
+    await _seed_question_set_evidence(knowledge_session, question_set)
     distractors = [
         _item(index + 10, f"github:Illospace/illospace#{index + 10}", f"Noise {index}")
         for index in range(5)
@@ -204,7 +225,7 @@ async def test_known_rankings_compute_recall_at_k_and_mrr_with_misses_in_denomin
     report = await run_knowledge_recall_eval(
         knowledge_session,
         org_id=_ORG_ID,
-        question_set=_question_set(),
+        question_set=question_set,
         k_values=(1, 5),
         search_limit=5,
         search=stub_search,
@@ -214,12 +235,13 @@ async def test_known_rankings_compute_recall_at_k_and_mrr_with_misses_in_denomin
     payload = report.to_dict()
 
     assert payload["result_type"] == "valid"
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
+    assert payload["engine"] == "knowledge"
     assert payload["corpus_fingerprint"] == _corpus_fingerprint(
         fingerprint=payload["corpus_fingerprint"]["fingerprint"],
-        total_item_count=0,
-        newest_source_updated_at=None,
-        newest_ingested_at=None,
+        total_item_count=4,
+        newest_source_updated_at="2026-07-30T00:00:00+00:00",
+        newest_ingested_at="2026-07-30T00:00:00+00:00",
     ).model_dump(mode="json")
     assert len(payload["corpus_fingerprint"]["fingerprint"]) == 64
     assert payload["summary"] == {
@@ -262,6 +284,7 @@ async def test_report_preserves_channel_attribution_and_marks_semantic_degradati
         description="Semantic degradation fixture.",
         cases=(_question_set().cases[0],),
     )
+    await _seed_question_set_evidence(knowledge_session, single_case)
     payload = (
         await run_knowledge_recall_eval(
             knowledge_session,
@@ -310,6 +333,7 @@ async def test_malformed_search_hit_is_an_evaluation_error_not_a_miss(
         description="Producer drift fixture.",
         cases=(_question_set().cases[0],),
     )
+    await _seed_question_set_evidence(knowledge_session, single_case)
     report = await run_knowledge_recall_eval(
         knowledge_session,
         org_id=_ORG_ID,
@@ -325,9 +349,9 @@ async def test_malformed_search_hit_is_an_evaluation_error_not_a_miss(
     assert payload["result_type"] == "invalid"
     assert payload["corpus_fingerprint"] == _corpus_fingerprint(
         fingerprint=payload["corpus_fingerprint"]["fingerprint"],
-        total_item_count=0,
-        newest_source_updated_at=None,
-        newest_ingested_at=None,
+        total_item_count=1,
+        newest_source_updated_at="2026-07-30T00:00:00+00:00",
+        newest_ingested_at="2026-07-30T00:00:00+00:00",
     ).model_dump(mode="json")
     assert "summary" not in payload
     assert "results" not in payload
@@ -339,6 +363,8 @@ async def test_malformed_search_hit_is_an_evaluation_error_not_a_miss(
 async def test_one_search_failure_invalidates_the_whole_question_set(
     knowledge_session,
 ):
+    question_set = _question_set()
+    await _seed_question_set_evidence(knowledge_session, question_set)
     evidence = _item(1, "github:Illospace/illospace#1", "Alpha evidence")
 
     async def partly_failing_search(_session, query, *, org_id, limit):
@@ -350,7 +376,7 @@ async def test_one_search_failure_invalidates_the_whole_question_set(
     report = await run_knowledge_recall_eval(
         knowledge_session,
         org_id=_ORG_ID,
-        question_set=_question_set(),
+        question_set=question_set,
         k_values=(1,),
         search_limit=1,
         search=partly_failing_search,
@@ -389,6 +415,7 @@ async def test_eval_rejects_effective_depth_that_cannot_support_requested_k(
         description="Retrieval-depth fixture.",
         cases=(_question_set().cases[0],),
     )
+    await _seed_question_set_evidence(knowledge_session, single_case)
     report = await run_knowledge_recall_eval(
         knowledge_session,
         org_id=_ORG_ID,
@@ -416,6 +443,13 @@ async def test_inconsistent_effective_depths_return_one_invalid_result(
 ):
     evidence = _item(1, "github:Illospace/illospace#1", "Alpha evidence")
     cases = _question_set().cases[:2]
+    question_set = KnowledgeRecallQuestionSet(
+        question_set_id="inconsistent-depth",
+        version="1",
+        description="Inconsistent retrieval-depth fixture.",
+        cases=cases,
+    )
+    await _seed_question_set_evidence(knowledge_session, question_set)
 
     async def inconsistent_search(_session, query, *, org_id, limit):
         assert org_id == _ORG_ID
@@ -430,12 +464,7 @@ async def test_inconsistent_effective_depths_return_one_invalid_result(
     report = await run_knowledge_recall_eval(
         knowledge_session,
         org_id=_ORG_ID,
-        question_set=KnowledgeRecallQuestionSet(
-            question_set_id="inconsistent-depth",
-            version="1",
-            description="Inconsistent retrieval-depth fixture.",
-            cases=cases,
-        ),
+        question_set=question_set,
         k_values=(3,),
         search_limit=5,
         search=inconsistent_search,
@@ -473,6 +502,7 @@ async def test_mrr_cutoff_uses_effective_retrieval_depth(knowledge_session):
         description="Actual MRR cutoff fixture.",
         cases=(_question_set().cases[0],),
     )
+    await _seed_question_set_evidence(knowledge_session, single_case)
     payload = (
         await run_knowledge_recall_eval(
             knowledge_session,
@@ -490,6 +520,206 @@ async def test_mrr_cutoff_uses_effective_retrieval_depth(knowledge_session):
     assert payload["summary"]["mean_reciprocal_rank_cutoff"] == 4
 
 
+async def test_memory_adapter_maps_memory_retrieval_scores(monkeypatch):
+    node = SimpleNamespace(
+        id=41,
+        node_kind="content",
+        content_kind="decision",
+        canonical_label="Use the memory recall arm",
+        text="The harness should use memory's own blended ranker.",
+        confidence=0.8,
+        freshness_status="fresh",
+        scope_key="default",
+        truth_status="active",
+        visibility="org",
+        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 2, tzinfo=timezone.utc),
+        retrieval_score=0.734,
+        semantic_score=0.81,
+        lexical_score=0.55,
+    )
+
+    async def fake_embed(_session, query):
+        assert query == "How does memory recall rank?"
+        return SimpleNamespace(vector=[0.1, 0.2], model="test:model")
+
+    async def fake_search(
+        _repository,
+        *,
+        query,
+        org_id,
+        limit,
+        query_embedding,
+        embedding_model,
+    ):
+        assert query == "How does memory recall rank?"
+        assert org_id == _ORG_ID
+        assert limit == 10
+        assert query_embedding == [0.1, 0.2]
+        assert embedding_model == "test:model"
+        return [node]
+
+    monkeypatch.setattr(
+        "brain.systems.knowledge.recall_eval._embed_memory_recall_query",
+        fake_embed,
+    )
+    monkeypatch.setattr(
+        "brain.systems.knowledge.recall_eval.MemoryNodeRepository.search_content_nodes",
+        fake_search,
+    )
+
+    response = await search_memory_recall(
+        SimpleNamespace(),
+        "How does memory recall rank?",
+        org_id=_ORG_ID,
+        limit=10,
+    )
+
+    hit = response.results[0]
+    assert hit.source == "memory"
+    assert hit.source_ref == "memory_node:41"
+    assert hit.scores.rrf == 0.734
+    assert hit.scores.channels.semantic.score == 0.81
+    assert hit.scores.channels.lexical.score == 0.55
+
+
+async def test_memory_guard_rejects_github_only_evidence_with_counts(
+    knowledge_session,
+):
+    question_set = load_knowledge_recall_question_set()
+    evidence_count = sum(
+        len(case.acceptable_evidence) for case in question_set.cases
+    )
+    assert evidence_count == 58
+    assert {
+        pointer.source
+        for case in question_set.cases
+        for pointer in case.acceptable_evidence
+    } == {"github"}
+
+    async def search_must_not_run(*_args, **_kwargs):
+        raise AssertionError("search ran before the corpus guard")
+
+    report = await run_knowledge_recall_eval(
+        knowledge_session,
+        org_id=_ORG_ID,
+        question_set=question_set,
+        k_values=(1,),
+        search_limit=1,
+        engine="memory",
+        search=search_must_not_run,
+        generated_at=_FIXED_TIME,
+    )
+
+    assert isinstance(report, KnowledgeRecallInvalidResult)
+    payload = report.to_dict()
+    assert payload["engine"] == "memory"
+    assert payload["errors"] == [
+        {
+            "case_id": question_set.question_set_id,
+            "cause": (
+                "0 of 58 acceptable evidence refs are reachable in the memory "
+                "corpus; the question set evidence is 58/58 `github`"
+            ),
+        }
+    ]
+    assert "summary" not in payload
+
+
+async def test_knowledge_guard_accepts_reachable_github_evidence(
+    knowledge_session,
+):
+    case = _question_set().cases[0]
+    question_set = KnowledgeRecallQuestionSet(
+        question_set_id="reachable-github",
+        version="1",
+        description="Knowledge reachability fixture.",
+        cases=(case,),
+    )
+    await _seed_question_set_evidence(knowledge_session, question_set)
+    evidence = _item(1, case.acceptable_evidence[0].source_ref, "Alpha evidence")
+
+    async def stub_search(_session, query, *, org_id, limit):
+        return _search_response(query, [evidence], requested_limit=limit)
+
+    report = await run_knowledge_recall_eval(
+        knowledge_session,
+        org_id=_ORG_ID,
+        question_set=question_set,
+        k_values=(1,),
+        search_limit=1,
+        engine="knowledge",
+        search=stub_search,
+        generated_at=_FIXED_TIME,
+    )
+
+    assert isinstance(report, KnowledgeRecallSuiteResult)
+    assert report.to_dict()["summary"]["recall_at_k"] == {"1": 1.0}
+
+
+async def test_memory_arm_scores_memory_reachable_evidence(
+    knowledge_session,
+    monkeypatch,
+):
+    node = MemoryNode(
+        id=77,
+        node_kind="content",
+        content_kind="decision",
+        canonical_label="Memory corpus comparison guard",
+        text="The memory corpus comparison guard prevents a fake recall win.",
+        normalized_key="memory corpus comparison guard",
+        scope_key="default",
+        org_id=_ORG_ID,
+        visibility="org",
+        confidence=0.9,
+        truth_status="active",
+        freshness_status="fresh",
+    )
+    knowledge_session.add(node)
+    await knowledge_session.flush()
+
+    async def no_query_embedding(_session, _query):
+        return None
+
+    monkeypatch.setattr(
+        "brain.systems.knowledge.recall_eval._embed_memory_recall_query",
+        no_query_embedding,
+    )
+    question_set = KnowledgeRecallQuestionSet(
+        question_set_id="reachable-memory",
+        version="1",
+        description="Memory reachability fixture.",
+        cases=(
+            KnowledgeRecallQuestion(
+                case_id="memory-hit",
+                question="What prevents a fake recall win?",
+                acceptable_evidence=(
+                    EvidencePointer("memory", "memory_node:77"),
+                ),
+            ),
+        ),
+    )
+
+    report = await run_knowledge_recall_eval(
+        knowledge_session,
+        org_id=_ORG_ID,
+        question_set=question_set,
+        k_values=(1,),
+        search_limit=1,
+        engine="memory",
+        generated_at=_FIXED_TIME,
+    )
+
+    assert isinstance(report, KnowledgeRecallSuiteResult)
+    payload = report.to_dict()
+    assert payload["engine"] == "memory"
+    assert payload["summary"]["recall_at_k"] == {"1": 1.0}
+    scores = payload["results"][0]["ranked_results"][0]["scores"]
+    assert scores["rrf"] == 0.995
+    assert scores["channels"]["lexical"]["score"] == 1.0
+    assert scores["channels"]["semantic"] is None
+
+
 def test_cli_emits_invalid_result_and_returns_nonzero(monkeypatch, capsys):
     invalid_payload = {
         "result_type": "invalid",
@@ -502,7 +732,8 @@ def test_cli_emits_invalid_result_and_returns_nonzero(monkeypatch, capsys):
         ],
     }
 
-    async def fake_run(_args):
+    async def fake_run(args):
+        assert args.engine == "knowledge"
         return invalid_payload
 
     monkeypatch.setattr(knowledge_recall_cli, "_run", fake_run)
@@ -511,6 +742,21 @@ def test_cli_emits_invalid_result_and_returns_nonzero(monkeypatch, capsys):
 
     assert exit_code == 1
     assert json.loads(capsys.readouterr().out) == invalid_payload
+
+
+def test_cli_accepts_memory_engine(monkeypatch, capsys):
+    async def fake_run(args):
+        assert args.engine == "memory"
+        return {"result_type": "invalid", "engine": args.engine, "errors": []}
+
+    monkeypatch.setattr(knowledge_recall_cli, "_run", fake_run)
+
+    exit_code = knowledge_recall_cli.main(
+        ["eval", "--org-id", _ORG_ID, "--engine", "memory"]
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out)["engine"] == "memory"
 
 
 def _comparison_report(
@@ -522,6 +768,7 @@ def _comparison_report(
     requested_search_limit: int = 50,
     effective_search_limit: int = 50,
     ranks: tuple[int | None, ...] = (1, 4),
+    engine: str = "knowledge",
 ) -> KnowledgeRecallSuiteResult:
     questions = tuple(
         KnowledgeRecallQuestion(
@@ -554,6 +801,7 @@ def _comparison_report(
         suite="knowledge-recall",
         generated_at=_FIXED_TIME,
         live_database=True,
+        engine=engine,
         org_id=org_id,
         question_set=KnowledgeRecallQuestionSet(
             question_set_id="comparison-fixture",
@@ -573,6 +821,14 @@ def _legacy_artifact(report: KnowledgeRecallSuiteResult) -> KnowledgeRecallArtif
     payload = report.to_dict()
     payload.pop("schema_version")
     payload.pop("corpus_fingerprint")
+    payload.pop("engine")
+    return parse_knowledge_recall_artifact_json(json.dumps(payload))
+
+
+def _v1_artifact(report: KnowledgeRecallSuiteResult) -> KnowledgeRecallArtifact:
+    payload = report.to_dict()
+    payload["schema_version"] = 1
+    payload.pop("engine")
     return parse_knowledge_recall_artifact_json(json.dumps(payload))
 
 
@@ -619,6 +875,73 @@ def test_compare_labels_same_corpus_metric_change_as_ranking_attributable(
         "change": "rank-changed",
     }
     assert payload["metric_deltas"]["mean_reciprocal_rank"]["delta"] == -0.25
+
+
+def test_compare_refuses_cross_engine_artifacts(tmp_path, capsys):
+    corpus = _corpus_fingerprint()
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    _write_artifact(
+        baseline_path,
+        _comparison_report(corpus_fingerprint=corpus, engine="knowledge"),
+    )
+    _write_artifact(
+        candidate_path,
+        _comparison_report(corpus_fingerprint=corpus, engine="memory"),
+    )
+
+    exit_code = knowledge_recall_cli.main(
+        [
+            "compare",
+            "--baseline",
+            str(baseline_path),
+            "--candidate",
+            str(candidate_path),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert payload["comparability"]["verdict"] == "not-comparable"
+    assert payload["comparability"]["differences"] == ["engine"]
+    assert payload["comparability"]["checks"]["engine"] == {
+        "baseline": "knowledge",
+        "candidate": "memory",
+        "state": "different",
+    }
+    assert "metric_deltas" not in payload
+
+
+def test_compare_loads_version_one_artifacts_as_knowledge_engine(tmp_path, capsys):
+    corpus = _corpus_fingerprint()
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    _write_artifact(
+        baseline_path,
+        _v1_artifact(_comparison_report(corpus_fingerprint=corpus)),
+    )
+    _write_artifact(
+        candidate_path,
+        _v1_artifact(_comparison_report(corpus_fingerprint=corpus)),
+    )
+
+    exit_code = knowledge_recall_cli.main(
+        [
+            "compare",
+            "--baseline",
+            str(baseline_path),
+            "--candidate",
+            str(candidate_path),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["comparability"]["checks"]["engine"] == {
+        "baseline": "knowledge",
+        "candidate": "knowledge",
+        "state": "match",
+    }
 
 
 def test_compare_reports_changed_corpus_without_claiming_causation(tmp_path, capsys):
@@ -883,6 +1206,7 @@ def test_compare_refuses_invalid_artifact(tmp_path, capsys):
         suite="knowledge-recall",
         generated_at=_FIXED_TIME,
         live_database=True,
+        engine="knowledge",
         org_id=_ORG_ID,
         question_set=question_set,
         k_values=(3, 10),
@@ -972,6 +1296,8 @@ async def knowledge_session(async_sqlite_session_factory, sqlite_postgres_ddl_pa
         [
             AgentRunRow.__table__,
             KnowledgeItem.__table__,
+            MemoryNode.__table__,
+            MemoryEdgeNode.__table__,
         ]
     )
 

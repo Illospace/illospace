@@ -85,6 +85,12 @@ def _parser() -> argparse.ArgumentParser:
         help=f"Versioned question-set JSON (default: {DEFAULT_QUESTION_SET_PATH}).",
     )
     eval_parser.add_argument(
+        "--engine",
+        choices=("knowledge", "memory"),
+        default="knowledge",
+        help="Recall engine to evaluate (default: knowledge).",
+    )
+    eval_parser.add_argument(
         "--k",
         action="append",
         dest="k_values",
@@ -152,6 +158,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 question_set=question_set,
                 k_values=args.k_values or DEFAULT_K_VALUES,
                 search_limit=args.search_limit,
+                engine=args.engine,
                 generated_at=args.generated_at,
                 live_database=True,
             )
