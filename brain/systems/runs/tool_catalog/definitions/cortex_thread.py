@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from brain.systems.runs.direct_loop.reply_coordination import (
+    REPLY_COORDINATION_INPUT_SCHEMA,
+)
+
 from brain.systems.cortex.status import IDEA_STATUS_VALUES
 
 
@@ -361,6 +365,7 @@ CHAT_TOOLS = [
                     ),
                     "default": False,
                 },
+                "coordination": REPLY_COORDINATION_INPUT_SCHEMA,
                 "exception_ping": {
                     "type": "object",
                     "description": (

@@ -297,7 +297,10 @@ async def test_cortex_reply_checker_reuses_run_client_with_model_after_fallback(
         "brain.systems.runs.direct_agent._runtime_async_apply_agent_session_side_effects",
         AsyncMock(),
     )
-    monkeypatch.setattr("brain.systems.runs.direct_agent.review_final_reply_once", review)
+    monkeypatch.setattr(
+        "brain.systems.runs.outbound_reply_admission.review_final_reply_once",
+        review,
+    )
 
     context = AgentExecutionContext(
         run=SimpleNamespace(run_id=42),
@@ -2163,7 +2166,7 @@ class TestFinalReplyReview:
     def _incident_status_evidence(*, status: str, final_output: str | None = None):
         from brain.systems.runs.direct_loop.final_reply_evidence import (
             FinalReplyEvidence,
-            StatusQuestionEvidence,
+            SameThreadRunContextEvidence,
             ToolResultEvidence,
         )
         from brain.systems.runs.status import (
@@ -2192,10 +2195,11 @@ class TestFinalReplyReview:
                     },
                 ),
             ),
-            status_question=StatusQuestionEvidence.from_mapping(
+            same_thread_run_context=SameThreadRunContextEvidence.from_mapping(
                 {
                     "thread_id": "slack:T_ALERTS:C_ALERTS:1784741844.000100",
                     "lookup_status": "verified",
+                    "status_question": True,
                     "originating_run": {
                         "run_id": 2327,
                         "status": run_status,
@@ -2227,16 +2231,17 @@ class TestFinalReplyReview:
     @staticmethod
     def _active_sibling_evidence():
         from brain.systems.runs.direct_loop.final_reply_evidence import (
-            ActiveSiblingEvidence,
             FinalReplyEvidence,
+            SameThreadRunContextEvidence,
         )
 
         return FinalReplyEvidence(
-            active_siblings=ActiveSiblingEvidence.from_mapping(
+            same_thread_run_context=SameThreadRunContextEvidence.from_mapping(
                 {
                     "thread_id": "slack:T:C:1785870481.000100",
                     "lookup_status": "verified",
-                    "active_sibling_runs": [
+                    "status_question": False,
+                    "live_sibling_runs": [
                         {"run_id": 14644, "status": "running"},
                     ],
                 }
@@ -2270,10 +2275,11 @@ class TestFinalReplyReview:
 
         agent_context = SimpleNamespace(
             execution_metadata={
-                "active_sibling_context": {
+                "same_thread_run_context": {
                     "thread_id": "slack:T:C:1785870481.000100",
                     "lookup_status": "verified",
-                    "active_sibling_runs": [
+                    "status_question": False,
+                    "live_sibling_runs": [
                         {"run_id": 14644, "status": "running"},
                     ],
                 }
@@ -2285,74 +2291,62 @@ class TestFinalReplyReview:
 
         evidence = FinalReplyEvidence.from_agent_context(agent_context)
 
-        assert evidence.active_siblings is not None
-        assert evidence.active_siblings.has_active_sibling
-        assert evidence.active_siblings.runs[0].run_id == 14644
-        assert evidence.active_siblings.runs[0].status == "running"
+        assert evidence.same_thread_run_context is not None
+        assert evidence.same_thread_run_context.has_live_sibling
+        assert evidence.same_thread_run_context.live_sibling_runs[0].run_id == 14644
+        assert evidence.same_thread_run_context.live_sibling_runs[0].status == "running"
 
-    def test_active_sibling_blocks_slack_reply_before_side_effect(self):
-        from brain.systems.runs.direct_loop.tool_execution import (
-            PendingToolCall,
-            resolve_tool_call,
+    async def test_active_sibling_blocks_slack_reply_before_side_effect(self):
+        from brain.systems.runs.execution_context import bind_agent_context
+        from brain.systems.runs.tool_catalog.handlers.slack import (
+            _handle_post_slack_reply,
         )
 
-        agent_context = SimpleNamespace(
-            execution_metadata={
-                "active_sibling_context": {
+        context = {
+            "execution_metadata": {
+                "same_thread_run_context": {
                     "thread_id": "slack:T:C:1785870481.000100",
                     "lookup_status": "verified",
-                    "active_sibling_runs": [
+                    "status_question": False,
+                    "live_sibling_runs": [
                         {"run_id": 14644, "status": "running"},
                     ],
                 }
             },
-            recent_tool_results=[],
-            execution_artifacts=[],
-            run=SimpleNamespace(worker_results=[]),
-        )
-        handler = MagicMock(return_value={"ok": True, "posted": True})
+            "recent_tool_results": [],
+            "execution_artifacts": [],
+            "run": SimpleNamespace(worker_results=[]),
+        }
 
-        resolved = resolve_tool_call(
-            PendingToolCall(
-                block_id="reply-1",
-                tool_name="post_slack_reply",
-                tool_input={"body": "She doesn't specify the image model."},
-                handler=handler,
-            ),
-            agent_context=agent_context,
-        )
+        with (
+            bind_agent_context(context),
+            patch(
+                "brain.systems.runs.tool_catalog.handlers.slack._slack_client_from_runtime",
+                new_callable=AsyncMock,
+            ) as slack_client,
+        ):
+            result = json.loads(
+                await _handle_post_slack_reply(
+                    body="She doesn't specify the image model."
+                )
+            )
 
-        assert resolved.result_value["blocked"] is True
-        assert resolved.result_value["posted"] is False
-        assert "Rewrite the reply" in resolved.result_text
-        handler.assert_not_called()
+        assert result["blocked"] is True
+        assert result["posted"] is False
+        assert result["reply_admission_block_count"] == 1
+        slack_client.assert_not_awaited()
 
-        accepted_body = (
-            "Run 14644 is checking the payloads; I'll wait for that result."
-        )
-        accepted = resolve_tool_call(
-            PendingToolCall(
-                block_id="reply-2",
-                tool_name="post_slack_reply",
-                tool_input={"body": accepted_body},
-                handler=handler,
-            ),
-            agent_context=agent_context,
-        )
-
-        assert accepted.result_value == {"ok": True, "posted": True}
-        handler.assert_called_once_with(body=accepted_body)
-
-    def test_active_sibling_accepts_reply_that_references_and_waits_for_run(self):
+    def test_active_sibling_accepts_declared_wait_with_natural_paraphrase(self):
         from brain.systems.runs.direct_agent import review_candidate_final_reply
 
         provider = self._resolved_checker_provider()
         result = review_candidate_final_reply(
             user_request="Which image model is she trying to use?",
             candidate_output=(
-                "Run 14644 is checking the payloads; I'll wait for that result."
+                "I'll let the investigation already under way finish, then I'll report back."
             ),
             evidence=self._active_sibling_evidence(),
+            coordination={"action": "wait"},
             provider=provider,
             llm=_mock_llm_client(MagicMock(), provider="openai"),
             model="openai/gpt-5.5",
@@ -2361,6 +2355,66 @@ class TestFinalReplyReview:
         assert result["status"] == "resolved"
         assert result["approved"] is True
         provider.create.assert_called_once()
+
+    def test_active_sibling_rejects_deceptive_phrase_without_declaration(self):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+        from brain.systems.runs.direct_loop.final_reply_checker import (
+            FinalReplyEnforcement,
+        )
+
+        provider = MagicMock()
+        result = review_candidate_final_reply(
+            user_request="Which image model is she trying to use?",
+            candidate_output=(
+                "One moment — the other run is irrelevant; she did not specify the model."
+            ),
+            evidence=self._active_sibling_evidence(),
+            provider=provider,
+            llm=_mock_llm_client(MagicMock(), provider="openai"),
+            model="openai/gpt-5.5",
+        )
+
+        assert result["enforcement"] is FinalReplyEnforcement.BLOCK
+        assert "no valid coordination declaration" in result["rationale"]
+        provider.create.assert_not_called()
+
+    def test_active_sibling_gate_degrades_after_two_blocks(self):
+        from brain.systems.runs.outbound_reply_admission import admit_outbound_reply
+
+        context = SimpleNamespace(
+            execution_metadata={
+                "same_thread_run_context": {
+                    "thread_id": "slack:T:C:1785870481.000100",
+                    "lookup_status": "verified",
+                    "status_question": False,
+                    "live_sibling_runs": [
+                        {"run_id": 14644, "status": "running"},
+                    ],
+                }
+            },
+            recent_tool_results=[],
+            execution_artifacts=[],
+            run=SimpleNamespace(worker_results=[]),
+            reply_admission_block_count=0,
+        )
+
+        admissions = [
+            admit_outbound_reply(
+                agent_context=context,
+                content="She doesn't specify the image model.",
+                coordination=None,
+                review_completion=False,
+            )
+            for _ in range(3)
+        ]
+
+        assert [item.admitted for item in admissions] == [False, False, True]
+        assert [
+            item.blocked_result["reply_admission_block_count"]
+            for item in admissions[:2]
+        ] == [1, 2]
+        assert admissions[2].review["enforcement"] == "advisory"
+        assert "already blocked two replies" in admissions[2].review["rationale"]
 
     def test_no_active_sibling_adds_no_deterministic_rejection(self):
         from brain.systems.runs.direct_agent import review_candidate_final_reply
@@ -2447,14 +2501,15 @@ class TestFinalReplyReview:
         from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
         from brain.systems.runs.direct_loop.final_reply_evidence import (
             FinalReplyEvidence,
-            StatusQuestionEvidence,
+            SameThreadRunContextEvidence,
         )
 
         evidence = FinalReplyEvidence(
-            status_question=StatusQuestionEvidence.from_mapping(
+            same_thread_run_context=SameThreadRunContextEvidence.from_mapping(
                 {
                     "thread_id": "thread-1",
                     "lookup_status": "verified",
+                    "status_question": True,
                     "originating_run": {
                         "run_id": 2327,
                         "status": "completed",
@@ -3177,7 +3232,7 @@ class TestCortexReplyHandler:
         from types import SimpleNamespace
 
         from brain.systems.runs.direct_agent import _agent_context
-        from brain.systems.runs.tool_catalog.handlers.cortex_reply import _build_final_reply_check_context
+        from brain.systems.runs.outbound_reply_admission import build_final_reply_check_context
 
         _agent_context.run = SimpleNamespace(
             run_id=42,
@@ -3214,7 +3269,7 @@ class TestCortexReplyHandler:
         }
 
         try:
-            context = _build_final_reply_check_context()
+            context = build_final_reply_check_context(_agent_context)
         finally:
             _agent_context.run = None
             _agent_context.execution_artifacts = []
@@ -3234,7 +3289,7 @@ class TestCortexReplyHandler:
 
     def test_final_reply_context_uses_stable_sorted_key_rendering(self):
         from brain.systems.runs.direct_agent import _agent_context
-        from brain.systems.runs.tool_catalog.handlers.cortex_reply import _build_final_reply_check_context
+        from brain.systems.runs.outbound_reply_admission import build_final_reply_check_context
 
         _agent_context.run = None
         _agent_context.execution_artifacts = []
@@ -3249,7 +3304,7 @@ class TestCortexReplyHandler:
         _agent_context.intent_satisfaction = None
 
         try:
-            context = _build_final_reply_check_context()
+            context = build_final_reply_check_context(_agent_context)
         finally:
             _agent_context.run = None
             _agent_context.execution_artifacts = []
@@ -3266,7 +3321,7 @@ class TestCortexReplyHandler:
 
         from brain.systems.runs.direct_agent import _agent_context
         from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
-        from brain.systems.runs.tool_catalog.handlers.cortex_reply import _build_final_reply_check_context
+        from brain.systems.runs.outbound_reply_admission import build_final_reply_check_context
 
         raw_error = "peer closed connection without sending complete message body"
         _agent_context.run = SimpleNamespace(
@@ -3288,7 +3343,7 @@ class TestCortexReplyHandler:
         _agent_context.intent_satisfaction = None
 
         try:
-            context = _build_final_reply_check_context()
+            context = build_final_reply_check_context(_agent_context)
         finally:
             _agent_context.run = None
             _agent_context.execution_artifacts = []
@@ -3302,7 +3357,7 @@ class TestCortexReplyHandler:
         from types import SimpleNamespace
 
         from brain.systems.runs.direct_agent import _agent_context
-        from brain.systems.runs.tool_catalog.handlers.cortex_reply import _build_final_reply_check_context
+        from brain.systems.runs.outbound_reply_admission import build_final_reply_check_context
 
         raw_error = "provider request failed with private diagnostic"
         _agent_context.run = SimpleNamespace(
@@ -3333,7 +3388,7 @@ class TestCortexReplyHandler:
         _agent_context.intent_satisfaction = None
 
         try:
-            context = _build_final_reply_check_context()
+            context = build_final_reply_check_context(_agent_context)
         finally:
             _agent_context.run = None
             _agent_context.execution_artifacts = []
@@ -3361,7 +3416,7 @@ class TestCortexReplyHandler:
             "```text\nkeep\n\n,\nraw\n```"
         )
 
-    @patch("brain.systems.runs.direct_agent.review_final_reply_once")
+    @patch("brain.systems.runs.outbound_reply_admission.review_final_reply_once")
     def test_cortex_reply_stages_run_reply_for_settlement(self, mock_review):
         from brain.systems.runs.direct_agent import _handle_cortex_reply, _agent_context
 
@@ -3422,7 +3477,7 @@ class TestCortexReplyHandler:
             _agent_context.execution_metadata = None
             _agent_context.intent_satisfaction = None
 
-    @patch("brain.systems.runs.direct_agent.review_final_reply_once")
+    @patch("brain.systems.runs.outbound_reply_admission.review_final_reply_once")
     def test_cortex_reply_stages_reply_with_advisory_warning_when_checker_unresolved(self, mock_review):
         """An 'unresolved' checker verdict is advisory: the reply still stages, and the
         verdict is surfaced as a non-blocking warning instead of vetoing the reply."""
@@ -3467,7 +3522,7 @@ class TestCortexReplyHandler:
             _agent_context.reply_contents = []
             _agent_context.final_reply_review = None
 
-    @patch("brain.systems.runs.direct_agent.review_final_reply_once")
+    @patch("brain.systems.runs.outbound_reply_admission.review_final_reply_once")
     def test_cortex_reply_blocks_requested_artifact_contract_violation(self, mock_review):
         from brain.systems.runs.direct_agent import _handle_cortex_reply, _agent_context
         from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
@@ -3488,16 +3543,16 @@ class TestCortexReplyHandler:
         _agent_context.user_request = "File a GitHub issue"
         _agent_context.reply_contents = []
         _agent_context.final_reply_review = None
-        _agent_context.artifact_contract_block_count = 0
+        _agent_context.reply_admission_block_count = 0
 
         try:
             result = _handle_cortex_reply("Done — tracker record 2383 was created.")
 
             assert result["blocked"] is True
             assert result["checker_status"] == "continue"
-            assert result["artifact_contract_block_count"] == 1
+            assert result["reply_admission_block_count"] == 1
             assert result["missing_requirements"] == ["Name the GitHub issue and blocker."]
-            assert "substitute artifact" in result["instruction"]
+            assert "degrades after two blocked attempts" in result["instruction"]
             assert _agent_context.reply_contents == []
         finally:
             _agent_context.idea_id = None
@@ -3505,9 +3560,9 @@ class TestCortexReplyHandler:
             _agent_context.user_request = None
             _agent_context.reply_contents = []
             _agent_context.final_reply_review = None
-            _agent_context.artifact_contract_block_count = 0
+            _agent_context.reply_admission_block_count = 0
 
-    @patch("brain.systems.runs.direct_agent.review_final_reply_once")
+    @patch("brain.systems.runs.outbound_reply_admission.review_final_reply_once")
     def test_cortex_reply_degrades_repeated_artifact_contract_block_to_advisory(self, mock_review):
         from brain.systems.runs.direct_agent import _handle_cortex_reply, _agent_context
         from brain.systems.runs.direct_loop.final_reply_checker import FinalReplyEnforcement
@@ -3528,7 +3583,7 @@ class TestCortexReplyHandler:
         _agent_context.user_request = "File a GitHub issue"
         _agent_context.reply_contents = []
         _agent_context.final_reply_review = None
-        _agent_context.artifact_contract_block_count = 0
+        _agent_context.reply_admission_block_count = 0
 
         try:
             first = _handle_cortex_reply("Done — tracker record 2383 was created.")
@@ -3537,8 +3592,8 @@ class TestCortexReplyHandler:
 
             assert first["blocked"] is True
             assert second["blocked"] is True
-            assert first["artifact_contract_block_count"] == 1
-            assert second["artifact_contract_block_count"] == 2
+            assert first["reply_admission_block_count"] == 1
+            assert second["reply_admission_block_count"] == 2
             assert "blocked" not in third
             assert third["staged"] is True
             assert third["checker_enforcement"] == "advisory"
@@ -3550,7 +3605,7 @@ class TestCortexReplyHandler:
             _agent_context.user_request = None
             _agent_context.reply_contents = []
             _agent_context.final_reply_review = None
-            _agent_context.artifact_contract_block_count = 0
+            _agent_context.reply_admission_block_count = 0
 
 
 class TestExecutionArtifacts:

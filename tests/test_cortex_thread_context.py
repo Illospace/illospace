@@ -273,7 +273,7 @@ async def test_slack_work_intake_attaches_same_thread_status_context(session):
         ),
     )
 
-    status_context = request.metadata["status_question_context"]
+    status_context = request.metadata["same_thread_run_context"]
     assert request.thread_id == slack_thread_id
     assert status_context["originating_run"]["run_id"] == 2328
     assert status_context["originating_run"]["status"] == "running"
@@ -294,6 +294,7 @@ async def test_slack_work_intake_attaches_active_sibling_to_non_status_question(
             org_id=ORG_ID,
             user_id=USER_ID,
             thread_id=slack_thread_id,
+            root_run_id=14644,
             profile="fast",
             recipe="fast",
             status="running",
@@ -314,6 +315,7 @@ async def test_slack_work_intake_attaches_active_sibling_to_non_status_question(
             thread_id=slack_thread_id,
             parent_run_id=14644,
             root_run_id=14644,
+            parent_step_key_hash="payload-batch-step",
             profile="fast",
             recipe="fast",
             status="running",
@@ -354,10 +356,13 @@ async def test_slack_work_intake_attaches_active_sibling_to_non_status_question(
     )
 
     assert request.thread_id == slack_thread_id
-    assert "status_question_context" not in request.metadata
-    assert request.metadata["active_sibling_context"]["active_sibling_runs"] == [
+    assert request.metadata["same_thread_run_context"]["live_sibling_runs"] == [
         {"run_id": 14644, "status": "running"}
     ]
+    assert all(
+        item["run_id"] != 14646
+        for item in request.metadata["same_thread_run_context"]["live_sibling_runs"]
+    )
 
     context = RunContextLoader().load(
         thread_id=request.thread_id,
@@ -368,6 +373,7 @@ async def test_slack_work_intake_attaches_active_sibling_to_non_status_question(
     assert "Authoritative active-sibling evidence" in context
     assert "Sibling run 14644 status: running" in context
     assert "wait for the active work" in context
+    assert "coordination field" in context
 
 
 async def test_slack_work_intake_without_active_sibling_has_no_deferral_context(session):
@@ -400,8 +406,26 @@ async def test_slack_work_intake_without_active_sibling_has_no_deferral_context(
         ),
     )
 
-    assert "active_sibling_context" not in request.metadata
-    assert "status_question_context" not in request.metadata
+    assert "same_thread_run_context" not in request.metadata
+
+
+def test_interactive_slack_classifier_uses_surface_policy_for_monitors():
+    from brain.systems.runs.interactive_reply import is_interactive_slack_reply_context
+
+    assert not is_interactive_slack_reply_context(
+        {
+            "origin": "slack_channel_monitor",
+            "headless": True,
+            "final_answer_target_surface": "headless",
+        }
+    )
+    assert is_interactive_slack_reply_context(
+        {
+            "origin": "slack_channel_monitor",
+            "headless": False,
+            "final_answer_target_surface": "slack",
+        }
+    )
 
 
 def test_run_context_prompt_includes_thread_context():
@@ -429,9 +453,10 @@ def test_run_context_prompt_marks_live_status_work_as_in_progress():
         thread_id="idea-1",
         message="was it done?",
         metadata={
-            "status_question_context": {
+            "same_thread_run_context": {
                 "thread_id": "idea-1",
                 "lookup_status": "verified",
+                "status_question": True,
                 "originating_run": {
                     "run_id": 2327,
                     "status": "running",

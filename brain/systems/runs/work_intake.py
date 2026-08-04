@@ -27,9 +27,9 @@ from brain.systems.runs.direct_targets import (
     resolve_direct_target,
 )
 from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
+from brain.systems.runs.interactive_reply import is_interactive_slack_reply_context
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
 from brain.systems.runs.status_questions import (
-    active_sibling_context,
     build_same_thread_run_context,
     is_status_question,
 )
@@ -726,20 +726,18 @@ async def build_agent_run_request(
         org_id=request.org_id,
         include_status_details=status_question,
     )
-    context_metadata: dict[str, Any] = {}
-    if status_question:
-        context_metadata["status_question_context"] = same_thread_context
-    elif interactive_slack_thread:
-        sibling_context = active_sibling_context(same_thread_context)
-        if sibling_context is not None:
-            context_metadata["active_sibling_context"] = sibling_context
-    if not context_metadata:
+    live_siblings = (
+        list(same_thread_context.get("live_sibling_runs") or [])
+        if isinstance(same_thread_context, dict)
+        else []
+    )
+    if not status_question and not live_siblings:
         return request
     return replace(
         request,
         metadata={
             **request.metadata,
-            **context_metadata,
+            "same_thread_run_context": same_thread_context,
         },
     )
 
@@ -750,9 +748,7 @@ def _is_interactive_slack_thread(request: AgentRunRequest) -> bool:
     return bool(
         str(request.thread_id or "").startswith("slack:")
         and target.get("kind") == "slack_message"
-        and not metadata.get("headless")
-        and not metadata.get("slack_monitor")
-        and metadata.get("final_answer_target_surface") == "slack"
+        and is_interactive_slack_reply_context(metadata, target)
     )
 
 

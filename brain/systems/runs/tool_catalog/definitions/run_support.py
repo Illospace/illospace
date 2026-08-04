@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from brain.systems.runs.direct_loop.reply_coordination import (
+    REPLY_COORDINATION_INPUT_SCHEMA,
+)
+
 
 # ── Soul Tools ────────────────────────────────────────────────
 # Controlled access to private operator/personality context.
@@ -61,6 +65,7 @@ CORTEX_REPLY_TOOL = {
                     "no raw evidence dumps, no one-metric-per-line formatting, and no punctuation on its own line."
                 ),
             },
+            "coordination": REPLY_COORDINATION_INPUT_SCHEMA,
         },
         "required": ["content"],
     },
