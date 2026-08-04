@@ -32,7 +32,8 @@ from brain.platform.db.models.cycle import (
 )
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
 from brain.platform.db.models.run import AgentRun
-from brain.platform.db.models.idea import Idea
+from brain.platform.db.models.idea import Idea, IdeaThread
+from brain.platform.db.models.org import Org, User
 from brain.platform.integrations.provider_auth_preflight import ProviderAuthPreflightResult
 from brain.platform.integrations.provider_quota_preflight import (
     ProviderQuotaPreflightResult,
@@ -2271,17 +2272,21 @@ async def test_execute_cycle_run_hard_quota_blocks_and_records_one_notice(monkey
         raise AssertionError("hard-limit run must not be admitted")
 
     original_scalar = session.scalar
+    admission_since_notice = False
 
     async def scalar(statement):
+        nonlocal admission_since_notice
         if "FROM idea_threads" in str(statement):
             return next(
                 (
-                    item.id
+                    item.metadata_
                     for item in session.added
                     if item.__class__.__name__ == "IdeaThread"
                 ),
                 None,
             )
+        if "FROM cycle_runs" in str(statement):
+            return 99 if admission_since_notice else None
         return await original_scalar(statement)
 
     session.scalar = scalar
@@ -2318,6 +2323,125 @@ async def test_execute_cycle_run_hard_quota_blocks_and_records_one_notice(monkey
     assert len(
         [item for item in session.added if item.__class__.__name__ == "IdeaThread"]
     ) == 1
+
+    admission_since_notice = True
+    later_run = CycleRun()
+    later_run.id = run.id + 1
+    await service._async_append_cycle_quota_notice(
+        session,
+        idea,
+        cycle,
+        later_run,
+        quota,
+    )
+    assert len(
+        [item for item in session.added if item.__class__.__name__ == "IdeaThread"]
+    ) == 2
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_cycle_quota_notice_deduplicates_per_episode_in_postgres(db_session):
+    unique = uuid4().hex
+    org_id = str(uuid4())
+    user_id = str(uuid4())
+    idea_id = str(uuid4())
+    db_session.add(Org(id=org_id, name="Quota Episode Org", slug=f"quota-{unique}"))
+    db_session.add(
+        User(
+            id=user_id,
+            org_id=org_id,
+            name="Quota Episode Owner",
+            email=f"quota-{unique}@example.com",
+        )
+    )
+    cycle = Cycle(
+        user_id=user_id,
+        org_id=org_id,
+        name="Quota episode Cycle",
+        prompt="Run a scheduled coding-agent check",
+        schedule_expr="20 16 * * *",
+        timezone="America/Toronto",
+        target_idea_id=idea_id,
+    )
+    idea = Idea(
+        id=idea_id,
+        title="Quota episode thread",
+        description="Verify quota notice episode semantics",
+        status="needs_input",
+        origin="cycle",
+        user_id=user_id,
+        org_id=org_id,
+    )
+    db_session.add_all([cycle, idea])
+    await db_session.flush()
+
+    quota_snapshots = [
+        {"status": "quota_blocked", "decision": "blocked"},
+        {"status": "quota_deferred", "decision": "deferred"},
+        {"status": "unknown", "decision": "admitted"},
+        {"status": "quota_blocked", "decision": "blocked"},
+    ]
+    runs = []
+    scheduled_for = datetime(2026, 8, 4, 13, 0, tzinfo=timezone.utc)
+    for offset, quota_snapshot in enumerate(quota_snapshots):
+        decision = quota_snapshot["decision"]
+        run = CycleRun(
+            cycle_id=cycle.id,
+            scheduled_for=scheduled_for + timedelta(minutes=offset),
+            status=(
+                "quota_blocked"
+                if decision == "blocked"
+                else "skipped" if decision == "deferred" else "running"
+            ),
+            skip_reason="quota_soft_limit" if decision == "deferred" else None,
+            idea_id=idea_id,
+            prompt_snapshot=cycle.prompt,
+            context_snapshot={"quota_preflight": quota_snapshot},
+        )
+        db_session.add(run)
+        runs.append(run)
+    await db_session.flush()
+
+    quota = ProviderQuotaPreflightResult(
+        status="quota_blocked",
+        decision="blocked",
+        provider="openai",
+        model="openai/gpt-5.6-sol",
+        usage_status="ok",
+        used_percent=92.0,
+        thresholds=ProviderQuotaThresholds(soft_percent=75.0, hard_percent=90.0),
+        visible_message="Scheduled Cycle quota blocked.",
+    )
+
+    first, _ = await service._async_append_cycle_quota_notice(
+        db_session, idea, cycle, runs[0], quota
+    )
+    suppressed, _ = await service._async_append_cycle_quota_notice(
+        db_session, idea, cycle, runs[1], quota
+    )
+    repeated, _ = await service._async_append_cycle_quota_notice(
+        db_session, idea, cycle, runs[3], quota
+    )
+
+    notices = (
+        await db_session.scalars(
+            select(IdeaThread)
+            .where(
+                IdeaThread.idea_id == idea_id,
+                IdeaThread.metadata_.contains({"quota_notice": True}),
+            )
+            .order_by(IdeaThread.id)
+        )
+    ).all()
+
+    assert first is not None
+    assert suppressed is None
+    assert repeated is not None
+    assert [notice.metadata_["cycle_run_id"] for notice in notices] == [
+        runs[0].id,
+        runs[3].id,
+    ]
 
 
 @pytest.mark.asyncio

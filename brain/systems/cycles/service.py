@@ -338,20 +338,41 @@ async def _async_append_cycle_quota_notice(
     preflight: ProviderQuotaPreflightResult,
 ) -> tuple[dict | None, dict | None]:
     # Serialize the check and insert on the reusable thread. The quota gate can
-    # settle many scheduled runs, but the user should see one durable notice.
+    # settle many scheduled runs, but the user should see one durable notice
+    # for each contiguous quota-restricted episode.
     await session.scalar(
         select(Idea.id).where(Idea.id == idea.id).with_for_update()
     )
-    existing_notice = await session.scalar(
-        select(IdeaThread.id)
+    latest_notice_metadata = await session.scalar(
+        select(IdeaThread.metadata_)
         .where(
             IdeaThread.idea_id == idea.id,
             IdeaThread.metadata_.contains({"quota_notice": True}),
         )
+        .order_by(IdeaThread.id.desc())
         .limit(1)
     )
-    if existing_notice:
-        return None, None
+    if isinstance(latest_notice_metadata, dict):
+        try:
+            notice_cycle_run_id = int(latest_notice_metadata["cycle_run_id"])
+        except (KeyError, TypeError, ValueError):
+            notice_cycle_run_id = None
+
+        if notice_cycle_run_id is not None:
+            admitted_since_notice = await session.scalar(
+                select(CycleRun.id)
+                .where(
+                    CycleRun.idea_id == idea.id,
+                    CycleRun.id > notice_cycle_run_id,
+                    CycleRun.id < cycle_run.id,
+                    CycleRun.context_snapshot.contains(
+                        {"quota_preflight": {"decision": "admitted"}}
+                    ),
+                )
+                .limit(1)
+            )
+            if admitted_since_notice is None:
+                return None, None
 
     metadata = {
         "source": "cycle",
