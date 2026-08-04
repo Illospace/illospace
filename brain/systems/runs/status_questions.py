@@ -62,18 +62,16 @@ def enumerate_status_deliverables(request: str | None) -> list[dict[str, str]]:
     return deliverables
 
 
-async def build_status_question_context(
+async def build_same_thread_run_context(
     session: Any,
     *,
     thread_id: str,
-    message: str,
     org_id: str | None = None,
     limit: int = 32,
+    include_status_details: bool = False,
 ) -> dict[str, Any] | None:
-    """Snapshot the prior same-thread run that a status question refers to."""
+    """Snapshot prior top-level runs on a thread for admission-time policies."""
 
-    if not is_status_question(message):
-        return None
     clean_thread_id = str(thread_id or "").strip()
     if not clean_thread_id:
         return {
@@ -95,19 +93,20 @@ async def build_status_question_context(
         }
 
     try:
-        statement = select(AgentRunRow).where(AgentRunRow.thread_id == clean_thread_id)
+        statement = select(AgentRunRow).where(
+            AgentRunRow.thread_id == clean_thread_id,
+            AgentRunRow.parent_run_id.is_(None),
+        )
         clean_org_id = str(org_id or "").strip()
         if clean_org_id:
             statement = statement.where(AgentRunRow.org_id == clean_org_id)
         result = await session.scalars(
-            statement
-            .order_by(AgentRunRow.created_at.desc(), AgentRunRow.id.desc())
-            .limit(max(1, int(limit)))
+            statement.order_by(AgentRunRow.created_at.desc(), AgentRunRow.id.desc())
         )
         rows = list(result.all())
     except Exception as exc:
         logger.warning(
-            "status_question_run_lookup_failed thread_id=%s error=%s",
+            "same_thread_run_lookup_failed thread_id=%s error=%s",
             clean_thread_id,
             exc,
         )
@@ -141,13 +140,13 @@ async def build_status_question_context(
     origin_with_status = next(
         (
             (row, status)
-            for row, status in rows_with_status
+            for row, status in rows_with_status[:max(1, int(limit))]
             if not is_status_question(getattr(row, "input_message", None))
         ),
         None,
     )
     origin_payload: dict[str, Any] | None = None
-    if origin_with_status is not None:
+    if include_status_details and origin_with_status is not None:
         origin, origin_status = origin_with_status
         final_output = await _latest_final_output(session, int(origin.id))
         origin_payload = {
@@ -162,9 +161,55 @@ async def build_status_question_context(
         "lookup_status": "verified",
         "originating_run": origin_payload,
         "live_sibling_runs": live_runs,
-        "deliverables": enumerate_status_deliverables(
-            origin_payload.get("request") if origin_payload else None
+        "deliverables": (
+            enumerate_status_deliverables(
+                origin_payload.get("request") if origin_payload else None
+            )
+            if include_status_details
+            else []
         ),
+    }
+
+
+async def build_status_question_context(
+    session: Any,
+    *,
+    thread_id: str,
+    message: str,
+    org_id: str | None = None,
+    limit: int = 32,
+) -> dict[str, Any] | None:
+    """Snapshot the prior same-thread run that a status question refers to."""
+
+    if not is_status_question(message):
+        return None
+    return await build_same_thread_run_context(
+        session,
+        thread_id=thread_id,
+        org_id=org_id,
+        limit=limit,
+        include_status_details=True,
+    )
+
+
+def active_sibling_context(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Project a shared same-thread snapshot into active-sibling evidence."""
+
+    if not isinstance(value, Mapping) or value.get("lookup_status") != "verified":
+        return None
+    active_runs = [
+        dict(item)
+        for item in list(value.get("live_sibling_runs") or [])
+        if isinstance(item, Mapping)
+    ]
+    if not active_runs:
+        return None
+    return {
+        "thread_id": str(value.get("thread_id") or "").strip(),
+        "lookup_status": "verified",
+        "active_sibling_runs": active_runs,
     }
 
 
@@ -253,9 +298,43 @@ def format_status_question_context(value: Mapping[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+def format_active_sibling_context(value: Mapping[str, Any] | None) -> str:
+    """Render active siblings as authoritative admission-time context."""
+
+    if not isinstance(value, Mapping) or not value:
+        return ""
+    active_runs = [
+        item
+        for item in list(value.get("active_sibling_runs") or [])
+        if isinstance(item, Mapping)
+    ]
+    if not active_runs:
+        return ""
+
+    lines = ["Authoritative active-sibling evidence captured at admission:"]
+    for run in active_runs:
+        lines.append(
+            f"Sibling run {run.get('run_id')} status: "
+            f"{run.get('status') or 'unknown'}."
+        )
+    lines.append(
+        "Do not answer as if this is the only active work on the Slack thread. "
+        "Your final reply must wait for the active work, reference an active sibling "
+        "run, or explicitly hand the question off."
+    )
+    lines.append(
+        "This admission snapshot is authoritative even if the sibling work seems "
+        "unrelated or may have finished since admission."
+    )
+    return "\n".join(lines)
+
+
 __all__ = [
+    "active_sibling_context",
+    "build_same_thread_run_context",
     "build_status_question_context",
     "enumerate_status_deliverables",
+    "format_active_sibling_context",
     "format_status_question_context",
     "is_status_question",
 ]

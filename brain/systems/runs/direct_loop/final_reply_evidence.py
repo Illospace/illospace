@@ -184,6 +184,59 @@ class ToolFailureStateEvidence:
 
 
 @dataclass(frozen=True)
+class ActiveSiblingRunEvidence:
+    """One run that was active on the Slack thread at admission."""
+
+    run_id: int | None = None
+    status: RunStatus = RunStatus.FAILED
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ActiveSiblingRunEvidence":
+        return cls(
+            run_id=_coerce_optional_int(value.get("run_id")),
+            status=coerce_run_status(
+                value.get("status"),
+                default=RunStatus.FAILED,
+            ),
+        )
+
+    def cache_payload(self) -> dict[str, Any]:
+        return {"run_id": self.run_id, "status": self.status}
+
+
+@dataclass(frozen=True)
+class ActiveSiblingEvidence:
+    """Typed admission snapshot of active same-thread Slack runs."""
+
+    thread_id: str = ""
+    lookup_status: str = ""
+    runs: tuple[ActiveSiblingRunEvidence, ...] = ()
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ActiveSiblingEvidence":
+        return cls(
+            thread_id=str(value.get("thread_id") or "").strip(),
+            lookup_status=str(value.get("lookup_status") or "").strip().lower(),
+            runs=tuple(
+                ActiveSiblingRunEvidence.from_mapping(item)
+                for item in list(value.get("active_sibling_runs") or [])
+                if isinstance(item, Mapping)
+            ),
+        )
+
+    @property
+    def has_active_sibling(self) -> bool:
+        return self.lookup_status == "verified" and bool(self.runs)
+
+    def cache_payload(self) -> dict[str, Any]:
+        return {
+            "thread_id": self.thread_id,
+            "lookup_status": self.lookup_status,
+            "active_sibling_runs": [item.cache_payload() for item in self.runs],
+        }
+
+
+@dataclass(frozen=True)
 class StatusRunEvidence:
     """One prior same-thread run relevant to a status question."""
 
@@ -310,6 +363,7 @@ class FinalReplyEvidence:
     tool_results: tuple[ToolResultEvidence, ...] = ()
     execution_artifacts: tuple[Mapping[str, Any], ...] = ()
     worker_results: tuple[Mapping[str, Any], ...] = ()
+    active_siblings: ActiveSiblingEvidence | None = None
     status_question: StatusQuestionEvidence | None = None
     tool_failure_state: ToolFailureStateEvidence | None = None
 
@@ -338,12 +392,14 @@ class FinalReplyEvidence:
                     "evidence": getattr(item, "evidence", None),
                 }
             )
+        active_siblings = _active_sibling_evidence_from_context(agent_context)
         status_question = _status_question_evidence_from_context(agent_context)
         failure_state = _tool_failure_state_from_context(agent_context, tool_results)
         return cls(
             tool_results=tuple(tool_results),
             execution_artifacts=artifacts,
             worker_results=tuple(workers),
+            active_siblings=active_siblings,
             status_question=status_question,
             tool_failure_state=failure_state,
         )
@@ -417,6 +473,11 @@ class FinalReplyEvidence:
             "tool_results": [item.cache_payload() for item in self.tool_results],
             "execution_artifacts": self.execution_artifacts,
             "worker_results": self.worker_results,
+            "active_siblings": (
+                self.active_siblings.cache_payload()
+                if self.active_siblings is not None
+                else None
+            ),
             "status_question": (
                 self.status_question.cache_payload()
                 if self.status_question is not None
@@ -474,25 +535,50 @@ def _coerce_tool_names(value: Any) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _find_status_question_mapping(value: Any, *, depth: int = 0) -> Mapping[str, Any] | None:
+def _find_context_mapping(
+    value: Any,
+    context_key: str,
+    *,
+    depth: int = 0,
+) -> Mapping[str, Any] | None:
     if not isinstance(value, Mapping) or depth > 3:
         return None
-    direct = value.get("status_question_context")
+    direct = value.get(context_key)
     if isinstance(direct, Mapping):
         return direct
     for key in ("execution_provenance", "metadata", "request_metadata"):
         nested = value.get(key)
-        found = _find_status_question_mapping(nested, depth=depth + 1)
+        found = _find_context_mapping(
+            nested,
+            context_key,
+            depth=depth + 1,
+        )
         if found is not None:
             return found
     return None
 
 
+def _active_sibling_evidence_from_context(
+    agent_context: Any,
+) -> ActiveSiblingEvidence | None:
+    execution_metadata = getattr(agent_context, "execution_metadata", None)
+    mapping = _find_context_mapping(execution_metadata, "active_sibling_context")
+    if mapping is None:
+        mapping = _find_context_mapping(
+            getattr(agent_context, "metadata", None),
+            "active_sibling_context",
+        )
+    return ActiveSiblingEvidence.from_mapping(mapping) if mapping is not None else None
+
+
 def _status_question_evidence_from_context(agent_context: Any) -> StatusQuestionEvidence | None:
     execution_metadata = getattr(agent_context, "execution_metadata", None)
-    mapping = _find_status_question_mapping(execution_metadata)
+    mapping = _find_context_mapping(execution_metadata, "status_question_context")
     if mapping is None:
-        mapping = _find_status_question_mapping(getattr(agent_context, "metadata", None))
+        mapping = _find_context_mapping(
+            getattr(agent_context, "metadata", None),
+            "status_question_context",
+        )
     return StatusQuestionEvidence.from_mapping(mapping) if mapping is not None else None
 
 
@@ -532,6 +618,8 @@ def _tool_failure_state_from_context(
 
 
 __all__ = [
+    "ActiveSiblingEvidence",
+    "ActiveSiblingRunEvidence",
     "DEFAULT_TOOL_FAILURE_THRESHOLD",
     "FinalReplyEvidence",
     "StatusDeliverableEvidence",

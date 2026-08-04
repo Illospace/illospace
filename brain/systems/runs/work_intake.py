@@ -28,7 +28,11 @@ from brain.systems.runs.direct_targets import (
 )
 from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
-from brain.systems.runs.status_questions import build_status_question_context
+from brain.systems.runs.status_questions import (
+    active_sibling_context,
+    build_same_thread_run_context,
+    is_status_question,
+)
 from brain.systems.runs.store import AsyncAgentRunStore
 
 _VALID_MODEL_PROVIDERS = {"anthropic", "openai"}
@@ -711,20 +715,44 @@ async def build_agent_run_request(
             model_policy["model"] = target_model
             model_policy.pop("model_override", None)
             request = replace(request, model_policy=model_policy)
-    status_context = await build_status_question_context(
+    status_question = is_status_question(request.message)
+    interactive_slack_thread = _is_interactive_slack_thread(request)
+    if not status_question and not interactive_slack_thread:
+        return request
+
+    same_thread_context = await build_same_thread_run_context(
         session,
         thread_id=request.thread_id,
         org_id=request.org_id,
-        message=request.message,
+        include_status_details=status_question,
     )
-    if status_context is None:
+    context_metadata: dict[str, Any] = {}
+    if status_question:
+        context_metadata["status_question_context"] = same_thread_context
+    elif interactive_slack_thread:
+        sibling_context = active_sibling_context(same_thread_context)
+        if sibling_context is not None:
+            context_metadata["active_sibling_context"] = sibling_context
+    if not context_metadata:
         return request
     return replace(
         request,
         metadata={
             **request.metadata,
-            "status_question_context": status_context,
+            **context_metadata,
         },
+    )
+
+
+def _is_interactive_slack_thread(request: AgentRunRequest) -> bool:
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    target = request.target_ref if isinstance(request.target_ref, dict) else {}
+    return bool(
+        str(request.thread_id or "").startswith("slack:")
+        and target.get("kind") == "slack_message"
+        and not metadata.get("headless")
+        and not metadata.get("slack_monitor")
+        and metadata.get("final_answer_target_surface") == "slack"
     )
 
 

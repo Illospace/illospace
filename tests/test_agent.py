@@ -2224,6 +2224,185 @@ class TestFinalReplyReview:
             ),
         )
 
+    @staticmethod
+    def _active_sibling_evidence():
+        from brain.systems.runs.direct_loop.final_reply_evidence import (
+            ActiveSiblingEvidence,
+            FinalReplyEvidence,
+        )
+
+        return FinalReplyEvidence(
+            active_siblings=ActiveSiblingEvidence.from_mapping(
+                {
+                    "thread_id": "slack:T:C:1785870481.000100",
+                    "lookup_status": "verified",
+                    "active_sibling_runs": [
+                        {"run_id": 14644, "status": "running"},
+                    ],
+                }
+            )
+        )
+
+    def test_active_sibling_blocks_reply_that_ignores_known_work(self):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+        from brain.systems.runs.direct_loop.final_reply_checker import (
+            FinalReplyEnforcement,
+        )
+
+        provider = MagicMock()
+        result = review_candidate_final_reply(
+            user_request="Which image model is she trying to use?",
+            candidate_output="She doesn't specify the image model.",
+            evidence=self._active_sibling_evidence(),
+            provider=provider,
+            llm=_mock_llm_client(MagicMock(), provider="openai"),
+            model="openai/gpt-5.5",
+        )
+
+        assert result["status"] == "continue"
+        assert result["enforcement"] is FinalReplyEnforcement.BLOCK
+        assert "14644 (running)" in result["rationale"]
+        assert "wait" in " ".join(result["missing_requirements"]).lower()
+        provider.create.assert_not_called()
+
+    def test_active_sibling_evidence_is_loaded_from_admission_metadata(self):
+        from brain.systems.runs.direct_loop.final_reply_evidence import FinalReplyEvidence
+
+        agent_context = SimpleNamespace(
+            execution_metadata={
+                "active_sibling_context": {
+                    "thread_id": "slack:T:C:1785870481.000100",
+                    "lookup_status": "verified",
+                    "active_sibling_runs": [
+                        {"run_id": 14644, "status": "running"},
+                    ],
+                }
+            },
+            recent_tool_results=[],
+            execution_artifacts=[],
+            run=SimpleNamespace(worker_results=[]),
+        )
+
+        evidence = FinalReplyEvidence.from_agent_context(agent_context)
+
+        assert evidence.active_siblings is not None
+        assert evidence.active_siblings.has_active_sibling
+        assert evidence.active_siblings.runs[0].run_id == 14644
+        assert evidence.active_siblings.runs[0].status == "running"
+
+    def test_active_sibling_blocks_slack_reply_before_side_effect(self):
+        from brain.systems.runs.direct_loop.tool_execution import (
+            PendingToolCall,
+            resolve_tool_call,
+        )
+
+        agent_context = SimpleNamespace(
+            execution_metadata={
+                "active_sibling_context": {
+                    "thread_id": "slack:T:C:1785870481.000100",
+                    "lookup_status": "verified",
+                    "active_sibling_runs": [
+                        {"run_id": 14644, "status": "running"},
+                    ],
+                }
+            },
+            recent_tool_results=[],
+            execution_artifacts=[],
+            run=SimpleNamespace(worker_results=[]),
+        )
+        handler = MagicMock(return_value={"ok": True, "posted": True})
+
+        resolved = resolve_tool_call(
+            PendingToolCall(
+                block_id="reply-1",
+                tool_name="post_slack_reply",
+                tool_input={"body": "She doesn't specify the image model."},
+                handler=handler,
+            ),
+            agent_context=agent_context,
+        )
+
+        assert resolved.result_value["blocked"] is True
+        assert resolved.result_value["posted"] is False
+        assert "Rewrite the reply" in resolved.result_text
+        handler.assert_not_called()
+
+        accepted_body = (
+            "Run 14644 is checking the payloads; I'll wait for that result."
+        )
+        accepted = resolve_tool_call(
+            PendingToolCall(
+                block_id="reply-2",
+                tool_name="post_slack_reply",
+                tool_input={"body": accepted_body},
+                handler=handler,
+            ),
+            agent_context=agent_context,
+        )
+
+        assert accepted.result_value == {"ok": True, "posted": True}
+        handler.assert_called_once_with(body=accepted_body)
+
+    def test_active_sibling_accepts_reply_that_references_and_waits_for_run(self):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+
+        provider = self._resolved_checker_provider()
+        result = review_candidate_final_reply(
+            user_request="Which image model is she trying to use?",
+            candidate_output=(
+                "Run 14644 is checking the payloads; I'll wait for that result."
+            ),
+            evidence=self._active_sibling_evidence(),
+            provider=provider,
+            llm=_mock_llm_client(MagicMock(), provider="openai"),
+            model="openai/gpt-5.5",
+        )
+
+        assert result["status"] == "resolved"
+        assert result["approved"] is True
+        provider.create.assert_called_once()
+
+    def test_no_active_sibling_adds_no_deterministic_rejection(self):
+        from brain.systems.runs.direct_agent import review_candidate_final_reply
+        from brain.systems.runs.direct_loop.final_reply_evidence import FinalReplyEvidence
+        from brain.systems.runs.direct_loop.tool_execution import (
+            PendingToolCall,
+            resolve_tool_call,
+        )
+
+        provider = self._resolved_checker_provider()
+        result = review_candidate_final_reply(
+            user_request="Which image model is she trying to use?",
+            candidate_output="She doesn't specify the image model.",
+            evidence=FinalReplyEvidence(),
+            provider=provider,
+            llm=_mock_llm_client(MagicMock(), provider="openai"),
+            model="openai/gpt-5.5",
+        )
+
+        assert result["status"] == "resolved"
+        assert result["approved"] is True
+        provider.create.assert_called_once()
+
+        handler = MagicMock(return_value={"ok": True, "posted": True})
+        posted = resolve_tool_call(
+            PendingToolCall(
+                block_id="reply-no-sibling",
+                tool_name="post_slack_reply",
+                tool_input={"body": "She doesn't specify the image model."},
+                handler=handler,
+            ),
+            agent_context=SimpleNamespace(
+                execution_metadata={},
+                recent_tool_results=[],
+                execution_artifacts=[],
+                run=SimpleNamespace(worker_results=[]),
+            ),
+        )
+
+        assert posted.result_value == {"ok": True, "posted": True}
+        handler.assert_called_once()
+
     @pytest.mark.parametrize(
         "status",
         ["queued", "starting", "running", "paused", "verifying"],

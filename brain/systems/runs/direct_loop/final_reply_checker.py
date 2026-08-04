@@ -118,6 +118,27 @@ _STATUS_IN_PROGRESS_RE = re.compile(
     r"not (?:done|complete|completed|finished)|not done yet)\b",
     re.IGNORECASE,
 )
+_ACTIVE_SIBLING_REFERENCE_RE = re.compile(
+    r"\b(?:active|another|other|sibling|earlier|existing|prior)\s+"
+    r"(?:agent\s+)?run\b|\b(?:the|that)\s+(?:active\s+)?run\b",
+    re.IGNORECASE,
+)
+_ACTIVE_SIBLING_WAIT_RE = re.compile(
+    r"(?:\b(?:i|we)(?:['’]ll|\s+will|\s+should|\s+can)?\s+"
+    r"(?:wait|hold)(?:\s+off)?\b|"
+    r"\b(?:wait|waiting|holding)\s+(?:for|on|until)\b|"
+    r"\blet(?:['’]s|\s+us)\s+wait\b|"
+    r"\b(?:one|a)\s+(?:sec(?:ond)?|moment)\b)",
+    re.IGNORECASE,
+)
+_ACTIVE_SIBLING_HANDOFF_RE = re.compile(
+    r"\b(?:hand(?:ing)?|pass(?:ing)?)\s+(?:this|it|the\s+"
+    r"(?:question|request|answer))\s+(?:off|over)\b|"
+    r"\bdefer(?:ring)?\s+(?:this|it|the\s+(?:question|request|answer))\s+to\b|"
+    r"\bleav(?:e|ing)\s+(?:this|it|the\s+(?:question|request|answer))\s+"
+    r"(?:to|with)\b",
+    re.IGNORECASE,
+)
 _UNRESOLVED_RE = re.compile(
     r"\b(?:unresolved|outstanding|pending|missing|not (?:created|opened|filed|done)|"
     r"has not been (?:created|opened|filed|done)|hasn't been (?:created|opened|filed|done)|"
@@ -553,6 +574,51 @@ def _successful_assignees(evidence: FinalReplyEvidence) -> tuple[str, ...]:
     return tuple(found)
 
 
+def _coordinates_with_active_sibling(
+    candidate_output: str,
+    evidence: FinalReplyEvidence,
+) -> bool:
+    active = evidence.active_siblings
+    if active is None or not active.has_active_sibling:
+        return True
+    candidate = str(candidate_output or "")
+    if _ACTIVE_SIBLING_WAIT_RE.search(candidate):
+        return True
+    if _ACTIVE_SIBLING_HANDOFF_RE.search(candidate):
+        return True
+    if _ACTIVE_SIBLING_REFERENCE_RE.search(candidate):
+        return True
+    return any(
+        run.run_id is not None
+        and re.search(
+            rf"\brun\s*#?\s*{re.escape(str(run.run_id))}\b",
+            candidate,
+            re.IGNORECASE,
+        )
+        for run in active.runs
+    )
+
+
+def active_sibling_contract_issue(
+    candidate_output: str,
+    evidence: FinalReplyEvidence,
+) -> str | None:
+    active = evidence.active_siblings
+    if active is None or not active.has_active_sibling:
+        return None
+    if _coordinates_with_active_sibling(candidate_output, evidence):
+        return None
+    runs = ", ".join(
+        f"{run.run_id} ({run.status})"
+        for run in active.runs
+    )
+    return (
+        f"Admission evidence names active sibling run(s) {runs}, but the candidate "
+        "ignores that work. The reply must wait, reference a sibling run, or "
+        "explicitly hand the question off."
+    )
+
+
 def _status_question_contract_issue(
     candidate_output: str,
     evidence: FinalReplyEvidence,
@@ -848,6 +914,23 @@ def review_candidate_final_reply(
                 "tool-dependent work before ending the run.",
             ),
             raw_output="deterministic_tool_failure_honesty_contract",
+            enforcement=FinalReplyEnforcement.BLOCK,
+        ).to_dict()
+
+    active_sibling_issue = active_sibling_contract_issue(
+        candidate_output,
+        structured_evidence,
+    )
+    if active_sibling_issue:
+        return FinalReplyReview(
+            status="continue",
+            approved=False,
+            rationale=active_sibling_issue,
+            missing_requirements=(
+                "Wait for the active sibling, reference an active sibling run, or "
+                "explicitly hand the question off.",
+            ),
+            raw_output="deterministic_active_sibling_contract",
             enforcement=FinalReplyEnforcement.BLOCK,
         ).to_dict()
 

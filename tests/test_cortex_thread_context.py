@@ -282,6 +282,128 @@ async def test_slack_work_intake_attaches_same_thread_status_context(session):
     ]
 
 
+async def test_slack_work_intake_attaches_active_sibling_to_non_status_question(session):
+    from brain.systems.runs.context import RunContextLoader
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    thread_ts = "1785870481.000100"
+    slack_thread_id = f"slack:T:C:{thread_ts}"
+    session.add(
+        AgentRunRow(
+            id=14644,
+            org_id=ORG_ID,
+            user_id=USER_ID,
+            thread_id=slack_thread_id,
+            profile="fast",
+            recipe="fast",
+            status="running",
+            input_message="Investigate the customer's generation payloads.",
+            target_ref={},
+            workspace_ref={},
+            model_policy={},
+            metadata_={},
+            created_at=datetime(2026, 8, 4, 18, 51, 53, tzinfo=timezone.utc),
+        )
+    )
+    await session.flush()
+    session.add(
+        AgentRunRow(
+            id=14646,
+            org_id=ORG_ID,
+            user_id=USER_ID,
+            thread_id=slack_thread_id,
+            parent_run_id=14644,
+            root_run_id=14644,
+            profile="fast",
+            recipe="fast",
+            status="running",
+            input_message="Inspect one payload batch.",
+            target_ref={},
+            workspace_ref={},
+            model_policy={},
+            metadata_={},
+            created_at=datetime(2026, 8, 4, 18, 52, 10, tzinfo=timezone.utc),
+        )
+    )
+    await session.flush()
+
+    request = await build_agent_run_request(
+        session,
+        WorkIntakeEvent(
+            source="slack",
+            event_type="slack.message",
+            org_id=ORG_ID,
+            actor={"id": USER_ID, "org_id": ORG_ID, "internal": False},
+            target={
+                "kind": "slack_message",
+                "team_id": "T",
+                "channel_id": "C",
+                "thread_ts": thread_ts,
+            },
+            payload={
+                "message": "Which image model is she trying to use?",
+                "metadata": {
+                    "slack_trigger": {
+                        "team_id": "T",
+                        "channel_id": "C",
+                        "thread_ts": thread_ts,
+                    }
+                },
+            },
+        ),
+    )
+
+    assert request.thread_id == slack_thread_id
+    assert "status_question_context" not in request.metadata
+    assert request.metadata["active_sibling_context"]["active_sibling_runs"] == [
+        {"run_id": 14644, "status": "running"}
+    ]
+
+    context = RunContextLoader().load(
+        thread_id=request.thread_id,
+        message=request.message,
+        target_ref=request.target_ref,
+        metadata=request.metadata,
+    ).prompt_context()
+    assert "Authoritative active-sibling evidence" in context
+    assert "Sibling run 14644 status: running" in context
+    assert "wait for the active work" in context
+
+
+async def test_slack_work_intake_without_active_sibling_has_no_deferral_context(session):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    thread_ts = "1785870481.000200"
+    request = await build_agent_run_request(
+        session,
+        WorkIntakeEvent(
+            source="slack",
+            event_type="slack.message",
+            org_id=ORG_ID,
+            actor={"id": USER_ID, "org_id": ORG_ID, "internal": False},
+            target={
+                "kind": "slack_message",
+                "team_id": "T",
+                "channel_id": "C",
+                "thread_ts": thread_ts,
+            },
+            payload={
+                "message": "Which image model is she trying to use?",
+                "metadata": {
+                    "slack_trigger": {
+                        "team_id": "T",
+                        "channel_id": "C",
+                        "thread_ts": thread_ts,
+                    }
+                },
+            },
+        ),
+    )
+
+    assert "active_sibling_context" not in request.metadata
+    assert "status_question_context" not in request.metadata
+
+
 def test_run_context_prompt_includes_thread_context():
     from brain.systems.runs.context import RunContextLoader
 

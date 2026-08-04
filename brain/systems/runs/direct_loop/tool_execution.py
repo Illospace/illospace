@@ -23,7 +23,10 @@ from brain.systems.runs.direct_loop.loop_control import (
 )
 from brain.systems.runs.direct_loop.tool_failure_policy import ToolDisablement
 from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
-from brain.systems.runs.direct_loop.final_reply_evidence import ToolResultEvidence
+from brain.systems.runs.direct_loop.final_reply_evidence import (
+    FinalReplyEvidence,
+    ToolResultEvidence,
+)
 from brain.systems.runs.tool_catalog.metadata import is_write_side_effect_class
 from brain.systems.runs.tool_catalog.registry import (
     action_policy_for_tool,
@@ -231,8 +234,10 @@ def _resolved_tool_result(request: PendingToolCall, result: Any) -> ResolvedTool
             "\n\n[System: brain_encode failed. Do not retry brain_encode in this run. "
             "Move on and end your turn unless another required tool remains.]"
         )
-    elif request.tool_name == "cortex_reply" and isinstance(result, dict) and (
-        result.get("blocked") or result.get("error")
+    elif (
+        request.tool_name in {"cortex_reply", "post_slack_reply"}
+        and isinstance(result, dict)
+        and (result.get("blocked") or result.get("error"))
     ):
         if result.get("instruction"):
             result_text += f"\n\n[System: {result['instruction']}]"
@@ -247,6 +252,44 @@ def _resolved_tool_result(request: PendingToolCall, result: Any) -> ResolvedTool
         outcome=outcome,
         result_content=model_content,
         result_value=result,
+    )
+
+
+def _blocked_active_sibling_reply(
+    request: PendingToolCall,
+    agent_context: Any,
+) -> ResolvedToolCall | None:
+    if request.tool_name != "post_slack_reply" or agent_context is None:
+        return None
+    evidence = FinalReplyEvidence.from_agent_context(agent_context)
+    if (
+        evidence.active_siblings is None
+        or not evidence.active_siblings.has_active_sibling
+    ):
+        return None
+    from brain.systems.runs.direct_loop.final_reply_checker import (
+        active_sibling_contract_issue,
+    )
+
+    issue = active_sibling_contract_issue(
+        str(request.tool_input.get("body") or ""),
+        evidence,
+    )
+    if issue is None:
+        return None
+    return _resolved_tool_result(
+        request,
+        {
+            "ok": False,
+            "posted": False,
+            "blocked": True,
+            "error": "active_sibling_reply_requires_coordination",
+            "detail": issue,
+            "instruction": (
+                "Rewrite the reply to wait for the active sibling, reference an active "
+                "sibling run, or explicitly hand the question off."
+            ),
+        },
     )
 
 
@@ -371,6 +414,9 @@ async def _async_resolve_tool_call_once(
 ) -> ResolvedToolCall:
     """Execute one tool request and normalize success/error handling."""
     try:
+        policy_block = _blocked_active_sibling_reply(request, agent_context)
+        if policy_block is not None:
+            return policy_block
         if not getattr(request.handler, "_illo_marks_side_effect_start", False):
             mark_side_effect_started()
         result = await async_invoke_tool_handler(
@@ -475,6 +521,9 @@ def _resolve_tool_call_sync(
 ) -> ResolvedToolCall:
     """Execute one tool request and normalize success/error handling."""
     try:
+        policy_block = _blocked_active_sibling_reply(request, agent_context)
+        if policy_block is not None:
+            return policy_block
         result = invoke_tool_handler(
             request.handler,
             request.tool_input,
