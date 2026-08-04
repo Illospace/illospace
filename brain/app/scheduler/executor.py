@@ -1242,6 +1242,7 @@ async def async_drain_scheduler(
     now: datetime | None = None,
     allowed_owner_modes: tuple[str, ...] | None = None,
     admission_budget_seconds: float | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> dict[str, Any]:
     """Start due runs within one bounded scheduler-tick admission budget."""
     now = _utcnow(now)
@@ -1253,8 +1254,8 @@ async def async_drain_scheduler(
     )
     if budget_seconds <= 0:
         raise ValueError("admission_budget_seconds must be greater than zero")
-    loop = asyncio.get_running_loop()
-    admission_deadline = loop.time() + budget_seconds
+    clock = asyncio.get_running_loop().time if clock is None else clock
+    admission_deadline = clock() + budget_seconds
 
     await async_reconcile_detached_runs(
         session,
@@ -1274,7 +1275,7 @@ async def async_drain_scheduler(
     executed = 0
     budget_exhausted = False
     while executed < max_runs:
-        if loop.time() >= admission_deadline:
+        if clock() >= admission_deadline:
             budget_exhausted = True
             break
         candidate = await async_claim_next_due_run(
