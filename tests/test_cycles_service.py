@@ -32,8 +32,13 @@ from brain.platform.db.models.cycle import (
 )
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
 from brain.platform.db.models.run import AgentRun
-from brain.platform.db.models.idea import Idea
+from brain.platform.db.models.idea import Idea, IdeaThread
+from brain.platform.db.models.org import Org, User
 from brain.platform.integrations.provider_auth_preflight import ProviderAuthPreflightResult
+from brain.platform.integrations.provider_quota_preflight import (
+    ProviderQuotaPreflightResult,
+    ProviderQuotaThresholds,
+)
 from brain.platform.providers.model_policy import infer_provider_from_model
 
 
@@ -71,6 +76,20 @@ async def _passed_cycle_auth(_session, *, cycle):
         status="passed",
         provider=infer_provider_from_model(model),
         model=model,
+    )
+
+
+async def _passed_cycle_quota(_session, *, cycle, run):
+    model = str(cycle.model_override or "openai/gpt-5.6-sol")
+    return ProviderQuotaPreflightResult(
+        status="passed",
+        decision="admitted",
+        provider=infer_provider_from_model(model),
+        model=model,
+        usage_status="ok",
+        used_percent=10.0,
+        thresholds=ProviderQuotaThresholds(soft_percent=75.0, hard_percent=90.0),
+        explicit_request=False,
     )
 
 
@@ -2203,6 +2222,7 @@ async def test_execute_cycle_run_valid_codex_preflight_proceeds_to_agent_admissi
     monkeypatch.setattr("brain.platform.integrations.llm._async_resolve_key_from_db", fake_resolve_key)
     monkeypatch.setattr("brain.platform.integrations.llm.refresh_codex_access_token", fail_refresh)
     monkeypatch.setattr("brain.platform.integrations.llm.OpenAICodexClient", fake_codex_client)
+    monkeypatch.setattr(service, "async_preflight_cycle_external_quota", _passed_cycle_quota)
     monkeypatch.setattr(service, "_async_admit_cycle_run", fake_admit)
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
 
@@ -2214,8 +2234,268 @@ async def test_execute_cycle_run_valid_codex_preflight_proceeds_to_agent_admissi
     assert run.started_at is not None
     assert cycle.last_status == "running"
     assert run.context_snapshot["auth_preflight"]["status"] == "passed"
+    assert run.context_snapshot["quota_preflight"]["decision"] == "admitted"
     assert codex_client_calls[0][0][0] == "fresh-access"
     assert admissions[0]["metadata"]["launch_envelope"]["origin"] == "scheduled_cycle"
+
+
+@pytest.mark.asyncio
+async def test_execute_cycle_run_hard_quota_blocks_and_records_one_notice(monkeypatch):
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
+    session = _AsyncExecuteCycleSession(
+        run=run,
+        cycle=cycle,
+        idea=idea,
+        expected_run_id=run.id,
+    )
+    quota = ProviderQuotaPreflightResult(
+        status="quota_blocked",
+        decision="blocked",
+        provider="openai",
+        model="openai/gpt-5.6-sol",
+        usage_status="ok",
+        used_percent=92.0,
+        observed_at="2026-08-04T13:24:45Z",
+        source_path="/tmp/codex/session.jsonl",
+        limit_id="codex",
+        plan_type="pro",
+        thresholds=ProviderQuotaThresholds(soft_percent=75.0, hard_percent=90.0),
+        visible_message=(
+            "Cycle quota blocked: Codex usage is 92%, at or above the 90% hard limit."
+        ),
+    )
+
+    async def quota_preflight(*_args, **_kwargs):
+        return quota
+
+    async def fail_admit(*_args, **_kwargs):
+        raise AssertionError("hard-limit run must not be admitted")
+
+    original_scalar = session.scalar
+    admission_since_notice = False
+
+    async def scalar(statement):
+        nonlocal admission_since_notice
+        if "FROM idea_threads" in str(statement):
+            return next(
+                (
+                    item.metadata_
+                    for item in session.added
+                    if item.__class__.__name__ == "IdeaThread"
+                ),
+                None,
+            )
+        if "FROM cycle_runs" in str(statement):
+            return 99 if admission_since_notice else None
+        return await original_scalar(statement)
+
+    session.scalar = scalar
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr(service, "async_preflight_cycle_external_auth", _passed_cycle_auth)
+    monkeypatch.setattr(service, "async_preflight_cycle_external_quota", quota_preflight)
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
+    monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
+
+    await service.async_execute_cycle_run(run.id)
+
+    assert run.status == "quota_blocked"
+    assert run.run_id is None
+    assert run.started_at is None
+    assert run.context_snapshot["quota_preflight"]["decision"] == "blocked"
+    assert run.context_snapshot["quota_preflight"]["used_percent"] == 92.0
+    assert run.context_snapshot["quota_preflight"]["thresholds"] == {
+        "soft_percent": 75.0,
+        "hard_percent": 90.0,
+    }
+    notices = [
+        item for item in session.added if item.__class__.__name__ == "IdeaThread"
+    ]
+    assert len(notices) == 1
+    assert notices[0].metadata_["quota_notice"] is True
+
+    await service._async_append_cycle_quota_notice(
+        session,
+        idea,
+        cycle,
+        run,
+        quota,
+    )
+    assert len(
+        [item for item in session.added if item.__class__.__name__ == "IdeaThread"]
+    ) == 1
+
+    admission_since_notice = True
+    later_run = CycleRun()
+    later_run.id = run.id + 1
+    await service._async_append_cycle_quota_notice(
+        session,
+        idea,
+        cycle,
+        later_run,
+        quota,
+    )
+    assert len(
+        [item for item in session.added if item.__class__.__name__ == "IdeaThread"]
+    ) == 2
+
+
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+async def test_cycle_quota_notice_deduplicates_per_episode_in_postgres(db_session):
+    unique = uuid4().hex
+    org_id = str(uuid4())
+    user_id = str(uuid4())
+    idea_id = str(uuid4())
+    db_session.add(Org(id=org_id, name="Quota Episode Org", slug=f"quota-{unique}"))
+    await db_session.flush()
+
+    db_session.add(
+        User(
+            id=user_id,
+            org_id=org_id,
+            name="Quota Episode Owner",
+            email=f"quota-{unique}@example.com",
+        )
+    )
+    await db_session.flush()
+
+    idea = Idea(
+        id=idea_id,
+        title="Quota episode thread",
+        description="Verify quota notice episode semantics",
+        status="needs_input",
+        origin="cycle",
+        user_id=user_id,
+        org_id=org_id,
+    )
+    db_session.add(idea)
+    await db_session.flush()
+
+    cycle = Cycle(
+        user_id=user_id,
+        org_id=org_id,
+        name="Quota episode Cycle",
+        prompt="Run a scheduled coding-agent check",
+        schedule_expr="20 16 * * *",
+        timezone="America/Toronto",
+        target_idea_id=idea_id,
+    )
+    db_session.add(cycle)
+    await db_session.flush()
+
+    quota_snapshots = [
+        {"status": "quota_blocked", "decision": "blocked"},
+        {"status": "quota_blocked", "decision": "blocked"},
+        {"status": "unknown", "decision": "admitted"},
+        {"status": "quota_blocked", "decision": "blocked"},
+    ]
+    runs = []
+    scheduled_for = datetime(2026, 8, 4, 13, 0, tzinfo=timezone.utc)
+    for offset, quota_snapshot in enumerate(quota_snapshots):
+        decision = quota_snapshot["decision"]
+        run = CycleRun(
+            cycle_id=cycle.id,
+            scheduled_for=scheduled_for + timedelta(minutes=offset),
+            status=(
+                "quota_blocked"
+                if decision == "blocked"
+                else "skipped" if decision == "deferred" else "running"
+            ),
+            skip_reason="quota_soft_limit" if decision == "deferred" else None,
+            idea_id=idea_id,
+            prompt_snapshot=cycle.prompt,
+            context_snapshot={"quota_preflight": quota_snapshot},
+        )
+        db_session.add(run)
+        runs.append(run)
+    await db_session.flush()
+
+    quota = ProviderQuotaPreflightResult(
+        status="quota_blocked",
+        decision="blocked",
+        provider="openai",
+        model="openai/gpt-5.6-sol",
+        usage_status="ok",
+        used_percent=92.0,
+        thresholds=ProviderQuotaThresholds(soft_percent=75.0, hard_percent=90.0),
+        visible_message="Scheduled Cycle quota blocked.",
+    )
+
+    first, _ = await service._async_append_cycle_quota_notice(
+        db_session, idea, cycle, runs[0], quota
+    )
+    suppressed, _ = await service._async_append_cycle_quota_notice(
+        db_session, idea, cycle, runs[1], quota
+    )
+    after_admission, _ = await service._async_append_cycle_quota_notice(
+        db_session, idea, cycle, runs[3], quota
+    )
+
+    notices = (
+        await db_session.scalars(
+            select(IdeaThread)
+            .where(
+                IdeaThread.idea_id == idea_id,
+                IdeaThread.metadata_.contains({"quota_notice": True}),
+            )
+            .order_by(IdeaThread.id)
+        )
+    ).all()
+
+    assert first is not None
+    assert suppressed is None
+    assert runs[2].context_snapshot["quota_preflight"]["decision"] == "admitted"
+    assert after_admission is not None
+    assert [notice.metadata_["cycle_run_id"] for notice in notices] == [
+        runs[0].id,
+        runs[3].id,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_scheduled_cycle_run_defers_at_soft_quota(monkeypatch):
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
+    session = _AsyncExecuteCycleSession(
+        run=run,
+        cycle=cycle,
+        idea=idea,
+        expected_run_id=run.id,
+    )
+    quota = ProviderQuotaPreflightResult(
+        status="quota_deferred",
+        decision="deferred",
+        provider="openai",
+        model="openai/gpt-5.6-sol",
+        usage_status="ok",
+        used_percent=80.0,
+        thresholds=ProviderQuotaThresholds(soft_percent=75.0, hard_percent=90.0),
+        visible_message="Scheduled Cycle quota deferred.",
+    )
+
+    async def quota_preflight(*_args, **_kwargs):
+        return quota
+
+    async def fail_admit(*_args, **_kwargs):
+        raise AssertionError("soft-limit scheduled run must not be admitted")
+
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr(service, "async_preflight_cycle_external_auth", _passed_cycle_auth)
+    monkeypatch.setattr(service, "async_preflight_cycle_external_quota", quota_preflight)
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
+    monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
+
+    await service.async_execute_cycle_run(run.id)
+
+    assert run.status == "skipped"
+    assert run.skip_reason == "quota_soft_limit"
+    assert run.context_snapshot["quota_preflight"]["decision"] == "deferred"
+    evaluation = next(
+        item
+        for item in session.added
+        if item.__class__.__name__ == "CycleRunEvaluation"
+    )
+    assert evaluation.details["status"] == "skipped"
+    assert evaluation.details["skip_reason"] == "quota_soft_limit"
 
 
 @pytest.mark.asyncio

@@ -91,6 +91,7 @@ def test_cycle_terminal_policy_is_total_for_canonical_terminal_statuses():
         "skipped": cycle_failure_guard.CycleTerminalAction.IGNORE,
         "degraded": cycle_failure_guard.CycleTerminalAction.RECORD_FAILURE,
         "auth_blocked": cycle_failure_guard.CycleTerminalAction.RECORD_FAILURE,
+        "quota_blocked": cycle_failure_guard.CycleTerminalAction.IGNORE,
     }
 
 

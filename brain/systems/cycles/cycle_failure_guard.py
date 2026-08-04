@@ -223,6 +223,9 @@ CYCLE_TERMINAL_POLICIES: Mapping[str, CycleTerminalPolicy] = MappingProxyType(
             alert_class=CYCLE_AUTH_BLOCKED_ALERT_CLASS,
             operator_action="reconnect OpenAI in Settings > Access",
         ),
+        # Quota admission owns its visible, deduplicated notice. It is not a
+        # repeated Cycle execution failure and must not trigger Slack alerts.
+        "quota_blocked": IgnoreCycleTerminalPolicy(),
     }
 )
 
