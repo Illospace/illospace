@@ -2347,6 +2347,8 @@ async def test_cycle_quota_notice_deduplicates_per_episode_in_postgres(db_sessio
     user_id = str(uuid4())
     idea_id = str(uuid4())
     db_session.add(Org(id=org_id, name="Quota Episode Org", slug=f"quota-{unique}"))
+    await db_session.flush()
+
     db_session.add(
         User(
             id=user_id,
@@ -2355,15 +2357,8 @@ async def test_cycle_quota_notice_deduplicates_per_episode_in_postgres(db_sessio
             email=f"quota-{unique}@example.com",
         )
     )
-    cycle = Cycle(
-        user_id=user_id,
-        org_id=org_id,
-        name="Quota episode Cycle",
-        prompt="Run a scheduled coding-agent check",
-        schedule_expr="20 16 * * *",
-        timezone="America/Toronto",
-        target_idea_id=idea_id,
-    )
+    await db_session.flush()
+
     idea = Idea(
         id=idea_id,
         title="Quota episode thread",
@@ -2373,12 +2368,24 @@ async def test_cycle_quota_notice_deduplicates_per_episode_in_postgres(db_sessio
         user_id=user_id,
         org_id=org_id,
     )
-    db_session.add_all([cycle, idea])
+    db_session.add(idea)
+    await db_session.flush()
+
+    cycle = Cycle(
+        user_id=user_id,
+        org_id=org_id,
+        name="Quota episode Cycle",
+        prompt="Run a scheduled coding-agent check",
+        schedule_expr="20 16 * * *",
+        timezone="America/Toronto",
+        target_idea_id=idea_id,
+    )
+    db_session.add(cycle)
     await db_session.flush()
 
     quota_snapshots = [
         {"status": "quota_blocked", "decision": "blocked"},
-        {"status": "quota_deferred", "decision": "deferred"},
+        {"status": "quota_blocked", "decision": "blocked"},
         {"status": "unknown", "decision": "admitted"},
         {"status": "quota_blocked", "decision": "blocked"},
     ]
@@ -2420,7 +2427,7 @@ async def test_cycle_quota_notice_deduplicates_per_episode_in_postgres(db_sessio
     suppressed, _ = await service._async_append_cycle_quota_notice(
         db_session, idea, cycle, runs[1], quota
     )
-    repeated, _ = await service._async_append_cycle_quota_notice(
+    after_admission, _ = await service._async_append_cycle_quota_notice(
         db_session, idea, cycle, runs[3], quota
     )
 
@@ -2437,7 +2444,8 @@ async def test_cycle_quota_notice_deduplicates_per_episode_in_postgres(db_sessio
 
     assert first is not None
     assert suppressed is None
-    assert repeated is not None
+    assert runs[2].context_snapshot["quota_preflight"]["decision"] == "admitted"
+    assert after_admission is not None
     assert [notice.metadata_["cycle_run_id"] for notice in notices] == [
         runs[0].id,
         runs[3].id,
