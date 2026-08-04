@@ -227,7 +227,7 @@ async def post_slack_run_message(
                 "channel_id": channel_id,
                 "thread_ts": target["thread_ts"],
                 "suppressed": True,
-                "reason": "answered_run_deferral",
+                "reason": f"{_obligation.status}_run_deferral",
                 "condition": deferral_condition,
             }
         schedule_post_commit_notice_delivery(

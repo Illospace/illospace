@@ -23,7 +23,7 @@ from brain.platform.db.base import Base, TimestampMixin
 from brain.platform.db.constraints import check_in_constraint
 
 
-OPEN_ASK_STATUSES = ("open", "answered")
+OPEN_ASK_STATUSES = ("open", "answered", "routed", "expired")
 OBLIGATION_NOTICE_STATES = ("pending", "posting", "delivered", "superseded")
 UUIDString = UUID(as_uuid=False).with_variant(String, "sqlite")
 
@@ -145,11 +145,20 @@ class OpenAsk(Base, TimestampMixin):
     )
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivered_message_ts: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    routed_to_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    routed_to_slack_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    routed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     @property
     def owner_label(self) -> str:
         """Display ownership without pretending every obligation has a requester."""
 
+        if self.status == "routed" and self.routed_to_name:
+            return str(self.routed_to_name)
+        if self.status == "routed" and self.routed_to_slack_id:
+            return f"<@{self.routed_to_slack_id}>"
         if self.obligation_kind == ObligationKind.HUMAN_ASK:
             if self.requester_name:
                 return str(self.requester_name)
