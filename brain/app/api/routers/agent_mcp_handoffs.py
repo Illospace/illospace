@@ -102,13 +102,9 @@ async def read_packet_outcomes(
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     """Slice 07: the outcomes reporter over the caller's org, JSON-safe."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
 
-    from brain.systems.briefing.outcomes import (
-        format_outcomes_line,
-        load_packet_handoffs,
-        packet_outcomes,
-    )
+    from brain.systems.briefing.outcomes import load_packet_outcome_report
 
     raw_since = arguments.get("since_hours")
     try:
@@ -117,14 +113,22 @@ async def read_packet_outcomes(
         since_hours = 168.0
     since_hours = max(1.0, min(since_hours, 24 * 90))
     now = datetime.now(timezone.utc)
-    rows = await load_packet_handoffs(
-        db, org_id=principal.org_id, since=now - timedelta(hours=since_hours)
+    report = await load_packet_outcome_report(
+        db,
+        org_id=principal.org_id,
+        now=now,
+        since_hours=since_hours,
     )
-    summary = packet_outcomes(rows, now=now)
     return {
-        "since_hours": since_hours,
-        "outcomes": summary.to_dict(),
-        "digest_line": format_outcomes_line(summary),
+        "since_hours": report.since_hours,
+        "outcomes": report.summary.to_dict(),
+        "digest_line": report.digest_line,
+        "last_launched_at": (
+            report.last_launched_at.isoformat()
+            if report.last_launched_at is not None
+            else None
+        ),
+        "days_since_last_launch": report.days_since_last_launch,
     }
 
 

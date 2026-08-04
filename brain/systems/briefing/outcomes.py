@@ -30,6 +30,8 @@ from statistics import median
 from typing import Any
 
 IGNORED_AFTER_HOURS = 48
+DEFAULT_OUTCOME_WINDOW_HOURS = 168.0
+PACKET_FLATLINE_MIN_MINTS = 10
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,35 @@ class OutcomeSummary:
             "median_minutes_to_launch": self.median_minutes_to_launch,
             "per_member": dict(self.per_member),
         }
+
+
+@dataclass(frozen=True)
+class PacketOutcomeReport:
+    """One time-anchored outcomes read shared by MCP, digests, and alerts."""
+
+    since_hours: float
+    now: datetime
+    summary: OutcomeSummary
+    last_launched_at: datetime | None
+
+    @property
+    def digest_line(self) -> str | None:
+        return format_outcomes_line(self.summary)
+
+    @property
+    def days_since_last_launch(self) -> int | None:
+        launched_at = _ts(self.last_launched_at)
+        if launched_at is None:
+            return None
+        elapsed = max(0.0, (self.now - launched_at).total_seconds())
+        return int(elapsed // timedelta(days=1).total_seconds())
+
+    @property
+    def launch_flatline(self) -> bool:
+        return (
+            self.summary.minted >= PACKET_FLATLINE_MIN_MINTS
+            and self.summary.launched == 0
+        )
 
 
 def _meta(row: Any) -> dict[str, Any]:
@@ -173,4 +204,40 @@ async def load_packet_handoffs(session: Any, *, org_id: str, since: datetime) ->
         )
         .scalars()
         .all()
+    )
+
+
+async def load_packet_outcome_report(
+    session: Any,
+    *,
+    org_id: str,
+    now: datetime,
+    since_hours: float = DEFAULT_OUTCOME_WINDOW_HOURS,
+) -> PacketOutcomeReport:
+    """Load one shared, time-anchored packet outcome report for an org."""
+    from sqlalchemy import func, select
+
+    from brain.platform.db.models.launch_handoff import LaunchHandoff
+
+    anchored_now = _ts(now)
+    if anchored_now is None:
+        raise ValueError("packet outcome report requires a datetime anchor")
+    window_hours = max(1.0, min(float(since_hours), 24.0 * 90.0))
+    rows = await load_packet_handoffs(
+        session,
+        org_id=org_id,
+        since=anchored_now - timedelta(hours=window_hours),
+    )
+    last_launched_at = await session.scalar(
+        select(func.max(LaunchHandoff.last_launched_at)).where(
+            LaunchHandoff.org_id == str(org_id),
+            LaunchHandoff.source_surface == "inbound_triage",
+            LaunchHandoff.launch_count > 0,
+        )
+    )
+    return PacketOutcomeReport(
+        since_hours=window_hours,
+        now=anchored_now,
+        summary=packet_outcomes(rows, now=anchored_now),
+        last_launched_at=_ts(last_launched_at),
     )

@@ -21,6 +21,10 @@ from brain.platform.db.models.cycle import (
     CycleFailureGuardObservation,
     CycleFailureGuardTriggerState,
 )
+from brain.systems.briefing.outcomes import (
+    format_outcomes_line,
+    load_packet_outcome_report,
+)
 from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.failure_guard.core import (
     FailureRecord,
@@ -53,6 +57,8 @@ CYCLE_FAILURE_ALERT_THRESHOLD_DEFAULT = 3
 CYCLE_REPEATED_FAILURE_ALERT_CLASS = "repeated_failure"
 CYCLE_AUTH_BLOCKED_ALERT_CLASS = "auth_blocked"
 CYCLE_CONSECUTIVE_TRIGGER_KIND = FailureGuardTriggerKind("consecutive")
+PACKET_FLATLINE_TRIGGER_KIND = FailureGuardTriggerKind("packet_launch_flatline")
+_UWEAR_COORDINATOR_CYCLE_NAME = "Uwear Ticket Coordinator Check-ins"
 
 logger = logging.getLogger(__name__)
 
@@ -423,6 +429,103 @@ def _cycle_failure_guard_state_store(
     )
 
 
+async def async_apply_packet_launch_flatline_guard(
+    session: AsyncSession,
+    cycle: Cycle,
+    *,
+    cycle_run_id: int,
+    now: datetime,
+) -> FailureGuardEvaluation | None:
+    """Alert once when a coordinator window mints packets but launches none."""
+    if cycle.name != _UWEAR_COORDINATOR_CYCLE_NAME or not cycle.org_id:
+        return None
+
+    report = await load_packet_outcome_report(
+        session,
+        org_id=str(cycle.org_id),
+        now=now,
+    )
+    days = report.days_since_last_launch
+    days_line = str(days) if days is not None else "no recorded launch"
+    digest_line = format_outcomes_line(report.summary) or "Packets: 0 minted · 0 launched"
+    result = FailureGuardTriggerResult(
+        kind=PACKET_FLATLINE_TRIGGER_KIND,
+        active=report.launch_flatline,
+        public_details={
+            "minted": report.summary.minted,
+            "launched": report.summary.launched,
+            "since_hours": report.since_hours,
+            "days_since_last_launch": days,
+        },
+        alert_title="Packet launch flatline",
+        alert_summary=(
+            f"{digest_line}\n"
+            f"Days since last launch: {days_line}"
+        ),
+    )
+    store = CycleFailureGuardStore(session=session, cycle_id=cycle.id)
+    latches = dict(await store.load_latches())
+    if not result.active and PACKET_FLATLINE_TRIGGER_KIND in latches:
+        await store.delete_latch(PACKET_FLATLINE_TRIGGER_KIND)
+        await session.flush()
+
+    evaluation = await async_evaluate_failure_edges(
+        results=(result,),
+        failure_signature=None,
+        last_error="No packet minted in the rolling window was launched",
+        now=now,
+        store=store,
+        latch_new_edges=True,
+    )
+    await session.flush()
+    if not evaluation.crossed_edges:
+        return evaluation
+
+    logger.error(
+        "Packet launch flatline alert: cycle_id=%s cycle_run_id=%s minted=%s "
+        "days_since_last_launch=%s",
+        cycle.id,
+        cycle_run_id,
+        report.summary.minted,
+        days_line,
+    )
+    try:
+        await async_deliver_failure_alert(
+            policy=SlackFailureAlertPolicy(
+                provide_client=slack_web_client_from_runtime,
+                requested_by="cycle_failure_alert",
+                reason="Deliver a packet launch flatline alert to the team.",
+                channel=(
+                    os.getenv("ILLO_CYCLE_FAILURE_ALERT_CHANNEL", "").strip()
+                    or "#alerts"
+                ),
+                unknown_error_text="Packet launch flatline",
+            ),
+            subject=FailureAlertSubject(
+                identity_label="Cycle",
+                identity=f"{cycle.name} (#{cycle.id})",
+                url_label="Cycle",
+                url=(
+                    f"{public_app_base_url()}/cycles"
+                    f"?cycle_id={cycle.id}&run_id={cycle_run_id}"
+                ),
+                link_label="open cycle state",
+            ),
+            presentation=FailureAlertPresentation(
+                title=result.alert_title,
+                summary=result.alert_summary,
+            ),
+            error_text="No packet minted in the rolling window was launched",
+        )
+    except Exception:
+        logger.exception(
+            "Packet flatline Slack delivery failed: cycle_id=%s cycle_run_id=%s",
+            cycle.id,
+            cycle_run_id,
+        )
+    return evaluation
+
+
 async def async_apply_cycle_terminal_failure_guard(
     session: AsyncSession,
     cycle: Cycle,
@@ -449,6 +552,20 @@ async def async_apply_cycle_terminal_failure_guard(
     )
     if locked_cycle is None:
         raise ValueError(f"Cycle {cycle.id} not found")
+
+    try:
+        await async_apply_packet_launch_flatline_guard(
+            session,
+            locked_cycle,
+            cycle_run_id=cycle_run_id,
+            now=now,
+        )
+    except Exception:
+        logger.exception(
+            "Packet flatline evaluation failed safely: cycle_id=%s cycle_run_id=%s",
+            locked_cycle.id,
+            cycle_run_id,
+        )
 
     registry = cycle_failure_guard_registry()
     state_store = _cycle_failure_guard_state_store(session, locked_cycle.id)
