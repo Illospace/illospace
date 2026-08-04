@@ -430,7 +430,13 @@ async def record_cycle_run_evaluation(
         skip_reason=skip_reason,
         usage=usage,
     )
-    score = 1 if status == "completed" else 0 if status in {"failed", "degraded", "auth_blocked"} else None
+    score = (
+        1
+        if status == "completed"
+        else 0
+        if status in {"failed", "degraded", "auth_blocked", "quota_blocked"}
+        else None
+    )
     context_snapshot = json_dict(getattr(run, "context_snapshot", None))
     launch_tracking = json_dict(context_snapshot.get("degradation_tracking"))
     verdict = json_dict(context_snapshot.get(MISSION_RESULT_CONTRACT_VERDICT_KEY))
@@ -560,6 +566,9 @@ def cycle_run_evaluation_summary(
     if status == "auth_blocked":
         detail = error or "external auth preflight blocked the run"
         return f"Cycle run was auth-blocked and recorded in the Cycle ledger: {detail}" + burn
+    if status == "quota_blocked":
+        detail = error or "subscription quota preflight blocked the run"
+        return f"Cycle run was quota-blocked and recorded in the Cycle ledger: {detail}" + burn
     if status == "skipped":
         detail = skip_reason or "unknown skip reason"
         return f"Cycle run was skipped and recorded in the Cycle ledger: {detail}" + burn
