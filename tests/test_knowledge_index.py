@@ -207,6 +207,7 @@ def test_default_knowledge_sync_includes_the_memory_mirror():
         "github",
         "slack",
         "memory",
+        "skills",
     ]
 
 
