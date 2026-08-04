@@ -205,6 +205,86 @@ def test_cycle_route_rejects_noncanonical_construction(model, thinking):
         )
 
 
+def test_cycle_rejection_union_rejects_contradictory_construction():
+    auth = ProviderAuthPreflightResult(
+        status="auth_blocked",
+        provider="openai",
+        model="openai/gpt-5.5",
+        visible_message="Reconnect OpenAI.",
+    )
+
+    with pytest.raises(TypeError):
+        admission.CycleAdmissionRejected(
+            status="auth_blocked",
+            error="Reconnect OpenAI.",
+            skip_reason="quota_soft_limit",
+            notice_kind="quota",
+            notice=auth,
+        )
+
+
+@pytest.mark.parametrize(
+    "rejection_type",
+    [
+        admission.CycleAdmissionAuthBlocked,
+        admission.CycleAdmissionQuotaBlocked,
+        admission.CycleAdmissionQuotaDeferred,
+    ],
+)
+def test_cycle_rejection_variants_reject_independent_settlement_fields(rejection_type):
+    with pytest.raises(TypeError):
+        rejection_type(notice=object(), status="auth_blocked")
+
+
+@pytest.mark.parametrize(
+    ("rejection_type", "notice"),
+    [
+        (
+            admission.CycleAdmissionAuthBlocked,
+            ProviderAuthPreflightResult(
+                status="passed",
+                provider="openai",
+                model="openai/gpt-5.5",
+            ),
+        ),
+        (
+            admission.CycleAdmissionQuotaBlocked,
+            ProviderQuotaPreflightResult(
+                status="quota_deferred",
+                decision="deferred",
+                provider="openai",
+                model="openai/gpt-5.5",
+                usage_status="ok",
+                thresholds=ProviderQuotaThresholds(
+                    soft_percent=75.0,
+                    hard_percent=90.0,
+                ),
+            ),
+        ),
+        (
+            admission.CycleAdmissionQuotaDeferred,
+            ProviderQuotaPreflightResult(
+                status="quota_blocked",
+                decision="blocked",
+                provider="openai",
+                model="openai/gpt-5.5",
+                usage_status="ok",
+                thresholds=ProviderQuotaThresholds(
+                    soft_percent=75.0,
+                    hard_percent=90.0,
+                ),
+            ),
+        ),
+    ],
+)
+def test_cycle_rejection_variants_reject_mismatched_notices(
+    rejection_type,
+    notice,
+):
+    with pytest.raises(ValueError):
+        rejection_type(notice=notice)
+
+
 @pytest.mark.asyncio
 async def test_cycle_admission_returns_complete_auth_rejection(monkeypatch):
     auth = ProviderAuthPreflightResult(
@@ -230,11 +310,7 @@ async def test_cycle_admission_returns_complete_auth_rejection(monkeypatch):
         run=run,
     )
 
-    assert isinstance(outcome, admission.CycleAdmissionRejected)
-    assert outcome.status == "auth_blocked"
-    assert outcome.error == "Reconnect OpenAI."
-    assert outcome.skip_reason is None
-    assert outcome.notice_kind == "auth"
+    assert isinstance(outcome, admission.CycleAdmissionAuthBlocked)
     assert outcome.notice is auth
     assert run.context_snapshot["auth_preflight"]["status"] == "auth_blocked"
     assert "quota_preflight" not in run.context_snapshot
@@ -242,23 +318,19 @@ async def test_cycle_admission_returns_complete_auth_rejection(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status", "decision", "message", "expected_status", "expected_error", "skip_reason"),
+    ("status", "decision", "message", "expected_type"),
     [
         (
             "quota_blocked",
             "blocked",
             "Quota is blocked.",
-            "quota_blocked",
-            "Quota is blocked.",
-            None,
+            admission.CycleAdmissionQuotaBlocked,
         ),
         (
             "quota_deferred",
             "deferred",
             "Quota is deferred.",
-            "skipped",
-            None,
-            "quota_soft_limit",
+            admission.CycleAdmissionQuotaDeferred,
         ),
     ],
 )
@@ -267,9 +339,7 @@ async def test_cycle_admission_returns_complete_quota_rejection(
     status,
     decision,
     message,
-    expected_status,
-    expected_error,
-    skip_reason,
+    expected_type,
 ):
     quota = ProviderQuotaPreflightResult(
         status=status,
@@ -302,10 +372,6 @@ async def test_cycle_admission_returns_complete_quota_rejection(
         run=run,
     )
 
-    assert isinstance(outcome, admission.CycleAdmissionRejected)
-    assert outcome.status == expected_status
-    assert outcome.error == expected_error
-    assert outcome.skip_reason == skip_reason
-    assert outcome.notice_kind == "quota"
+    assert isinstance(outcome, expected_type)
     assert outcome.notice is quota
     assert run.context_snapshot["quota_preflight"]["decision"] == decision

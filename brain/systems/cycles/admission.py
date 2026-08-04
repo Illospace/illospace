@@ -79,25 +79,63 @@ class CycleAdmissionAdmitted:
     route: CycleProviderRoute
 
 
-CycleAdmissionStatus: TypeAlias = Literal["auth_blocked", "quota_blocked", "skipped"]
-CycleAdmissionNoticeKind: TypeAlias = Literal["auth", "quota"]
-CycleAdmissionSkipReason: TypeAlias = Literal["quota_soft_limit"]
-CycleAdmissionNotice: TypeAlias = (
-    ProviderAuthPreflightResult | ProviderQuotaPreflightResult
-)
+def _require_rejection_notice_case(
+    *,
+    actual: str,
+    expected: str,
+    rejection: str,
+) -> None:
+    if actual != expected:
+        raise ValueError(f"{rejection} requires preflight case {expected!r}")
 
 
 @dataclass(frozen=True, slots=True)
-class CycleAdmissionRejected:
-    """A complete decision to settle a run without admitting work."""
+class CycleAdmissionAuthBlocked:
+    """An auth rejection with its matching provider notice."""
 
-    status: CycleAdmissionStatus
-    error: str | None
-    skip_reason: CycleAdmissionSkipReason | None
-    notice_kind: CycleAdmissionNoticeKind
-    notice: CycleAdmissionNotice
+    notice: ProviderAuthPreflightResult
+
+    def __post_init__(self) -> None:
+        _require_rejection_notice_case(
+            actual=self.notice.status,
+            expected="auth_blocked",
+            rejection=type(self).__name__,
+        )
 
 
+@dataclass(frozen=True, slots=True)
+class CycleAdmissionQuotaBlocked:
+    """A hard-quota rejection with its matching provider notice."""
+
+    notice: ProviderQuotaPreflightResult
+
+    def __post_init__(self) -> None:
+        _require_rejection_notice_case(
+            actual=self.notice.decision,
+            expected="blocked",
+            rejection=type(self).__name__,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CycleAdmissionQuotaDeferred:
+    """A soft-quota deferral with its matching provider notice."""
+
+    notice: ProviderQuotaPreflightResult
+
+    def __post_init__(self) -> None:
+        _require_rejection_notice_case(
+            actual=self.notice.decision,
+            expected="deferred",
+            rejection=type(self).__name__,
+        )
+
+
+CycleAdmissionRejected: TypeAlias = (
+    CycleAdmissionAuthBlocked
+    | CycleAdmissionQuotaBlocked
+    | CycleAdmissionQuotaDeferred
+)
 CycleAdmissionOutcome: TypeAlias = CycleAdmissionAdmitted | CycleAdmissionRejected
 
 
@@ -181,41 +219,30 @@ async def async_prepare_cycle_run_admission(
     if auth.status != "skipped":
         _record_preflight_snapshot(run, key="auth_preflight", preflight=auth)
     if auth.blocked:
-        return CycleAdmissionRejected(
-            status="auth_blocked",
-            error=auth.visible_message,
-            skip_reason=None,
-            notice_kind="auth",
-            notice=auth,
-        )
+        return CycleAdmissionAuthBlocked(notice=auth)
 
     quota = preflight_cycle_external_quota(
         route=route,
         run=run,
     )
     _record_preflight_snapshot(run, key="quota_preflight", preflight=quota)
-    if quota.decision == "admitted":
-        return CycleAdmissionAdmitted(route=route)
     try:
-        status, error, skip_reason = {
-            "blocked": ("quota_blocked", quota.visible_message, None),
-            "deferred": ("skipped", None, "quota_soft_limit"),
+        outcome_type, outcome_value = {
+            "admitted": (CycleAdmissionAdmitted, route),
+            "blocked": (CycleAdmissionQuotaBlocked, quota),
+            "deferred": (CycleAdmissionQuotaDeferred, quota),
         }[quota.decision]
     except KeyError as exc:
         raise ValueError(f"Unsupported Cycle quota decision: {quota.decision!r}") from exc
-    return CycleAdmissionRejected(
-        status=cast(CycleAdmissionStatus, status),
-        error=error,
-        skip_reason=cast(CycleAdmissionSkipReason | None, skip_reason),
-        notice_kind="quota",
-        notice=quota,
-    )
+    return outcome_type(outcome_value)
 
 
 __all__ = [
     "CycleAdmissionAdmitted",
-    "CycleAdmissionNoticeKind",
+    "CycleAdmissionAuthBlocked",
     "CycleAdmissionOutcome",
+    "CycleAdmissionQuotaBlocked",
+    "CycleAdmissionQuotaDeferred",
     "CycleAdmissionRejected",
     "CycleProviderRoute",
     "async_prepare_cycle_run_admission",

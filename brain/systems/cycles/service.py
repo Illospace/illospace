@@ -17,7 +17,9 @@ from brain.systems.cortex.thought_lifecycle import ThreadMessageCommand, post_th
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUSES, CYCLE_RUN_TERMINAL_STATUSES
 from brain.systems.cycles.admission import (
     CycleAdmissionAdmitted,
-    CycleAdmissionNoticeKind,
+    CycleAdmissionAuthBlocked,
+    CycleAdmissionQuotaBlocked,
+    CycleAdmissionQuotaDeferred,
     CycleAdmissionRejected,
     CycleProviderRoute,
     async_prepare_cycle_run_admission,
@@ -303,11 +305,41 @@ async def _async_append_cycle_auth_blocked_thread_message(
     return result.message_payload, result.status_change
 
 
-def _cycle_admission_notice_appender(notice_kind: CycleAdmissionNoticeKind):
+def _cycle_admission_notice_error(notice):
+    return notice.visible_message
+
+
+def _cycle_admission_without_error(_notice):
+    return None
+
+
+def _cycle_admission_notice_appender(notice_kind):
     return {
         "auth": _async_append_cycle_auth_blocked_thread_message,
         "quota": async_append_cycle_quota_notice,
     }[notice_kind]
+
+
+_CYCLE_ADMISSION_REJECTION_SETTLEMENTS = {
+    CycleAdmissionAuthBlocked: (
+        "auth_blocked",
+        None,
+        _cycle_admission_notice_error,
+        "auth",
+    ),
+    CycleAdmissionQuotaBlocked: (
+        "quota_blocked",
+        None,
+        _cycle_admission_notice_error,
+        "quota",
+    ),
+    CycleAdmissionQuotaDeferred: (
+        "skipped",
+        "quota_soft_limit",
+        _cycle_admission_without_error,
+        "quota",
+    ),
+}
 
 
 async def async_run_cycle_now(
@@ -812,15 +844,18 @@ async def _async_settle_rejected_cycle_run(
     cycle: Cycle,
     run: CycleRun,
 ) -> tuple[dict | None, dict | None, dict]:
+    status, skip_reason, notice_error, notice_kind = (
+        _CYCLE_ADMISSION_REJECTION_SETTLEMENTS[type(admission)]
+    )
     await _finalize_cycle_run(
         run,
         cycle,
-        status=admission.status,
-        error=admission.error,
-        skip_reason=admission.skip_reason,
+        status=status,
+        error=notice_error(admission.notice),
+        skip_reason=skip_reason,
         session=session,
     )
-    append_notice = _cycle_admission_notice_appender(admission.notice_kind)
+    append_notice = _cycle_admission_notice_appender(notice_kind)
     message_payload, status_payload = await append_notice(
         session,
         idea,
