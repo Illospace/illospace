@@ -11,9 +11,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from brain.app.api.routers.agent_mcp_handoffs import read_packet_outcomes
+from brain.systems.briefing import outcomes as packet_outcomes_module
 from brain.systems.briefing.outcomes import (
+    DEFAULT_OUTCOME_WINDOW_HOURS,
+    MAX_OUTCOME_WINDOW_HOURS,
+    MIN_OUTCOME_WINDOW_HOURS,
     OutcomeSummary,
     format_outcomes_line,
+    load_packet_outcome_report,
+    normalize_outcome_window_hours,
     packet_outcomes,
 )
 
@@ -121,3 +128,92 @@ def test_empty_summary_is_json_safe():
         median_minutes_to_launch=None, per_member={},
     )
     assert summary.to_dict()["per_member"] == {}
+
+
+def test_outcome_window_normalization_owns_defaults_and_bounds():
+    assert normalize_outcome_window_hours(None) == DEFAULT_OUTCOME_WINDOW_HOURS
+    assert normalize_outcome_window_hours("invalid") == DEFAULT_OUTCOME_WINDOW_HOURS
+    assert normalize_outcome_window_hours(float("nan")) == DEFAULT_OUTCOME_WINDOW_HOURS
+    assert normalize_outcome_window_hours(0) == MIN_OUTCOME_WINDOW_HOURS
+    assert normalize_outcome_window_hours(24 * 365) == MAX_OUTCOME_WINDOW_HOURS
+
+
+async def test_report_loader_formats_the_canonical_window_line_without_history_query(
+    monkeypatch,
+):
+    rows = [
+        _row("ignored", created_hours_ago=72),
+        _row(
+            "launched",
+            created_hours_ago=4,
+            launch_count=1,
+            launched_minutes_after=60,
+        ),
+    ]
+
+    async def fake_load_packet_handoffs(session, *, org_id, since):
+        assert isinstance(session, NoHistoryQuerySession)
+        assert org_id == "org-1"
+        assert since == _NOW - timedelta(hours=DEFAULT_OUTCOME_WINDOW_HOURS)
+        return rows
+
+    class NoHistoryQuerySession:
+        async def scalar(self, _statement):
+            raise AssertionError("window reports must not query launch history")
+
+    monkeypatch.setattr(
+        packet_outcomes_module,
+        "load_packet_handoffs",
+        fake_load_packet_handoffs,
+    )
+
+    report = await load_packet_outcome_report(
+        NoHistoryQuerySession(),
+        org_id="org-1",
+        now=_NOW,
+    )
+
+    assert report.digest_line == (
+        "Packets: 2 minted · 1 launched · 1 ignored >48h · median 60m to launch"
+    )
+
+
+async def test_mcp_packet_outcomes_returns_only_the_window_report():
+    class EmptyScalarResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class WindowReadSession:
+        def __init__(self):
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return EmptyScalarResult()
+
+        async def scalar(self, _statement):
+            raise AssertionError("MCP packet reads must not query launch history")
+
+    session = WindowReadSession()
+    result = await read_packet_outcomes(
+        session,
+        SimpleNamespace(org_id="org-1"),
+        {"since_hours": "invalid"},
+    )
+
+    assert result == {
+        "since_hours": DEFAULT_OUTCOME_WINDOW_HOURS,
+        "outcomes": {
+            "minted": 0,
+            "launched": 0,
+            "ignored": 0,
+            "pending": 0,
+            "median_minutes_to_launch": None,
+            "per_member": {},
+        },
+        "digest_line": None,
+    }
+    assert len(session.statements) == 1

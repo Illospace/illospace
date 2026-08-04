@@ -7,6 +7,11 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.systems import launch_handoffs
+from brain.systems.briefing.outcomes import (
+    DEFAULT_OUTCOME_WINDOW_HOURS,
+    load_packet_outcome_report,
+    normalize_outcome_window_hours,
+)
 from brain.systems.external_agents import service as external_agents
 
 
@@ -20,7 +25,11 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
             "Handoff-packet outcome summary (minted / launched / ignored, median time to "
             "launch, per-member split) — the digest's packets footer reads this."
         ),
-        "arguments": {"since_hours": "number (default 168)"},
+        "arguments": {
+            "since_hours": (
+                f"number (default {DEFAULT_OUTCOME_WINDOW_HOURS:g})"
+            )
+        },
     },
 }
 
@@ -104,14 +113,7 @@ async def read_packet_outcomes(
     """Slice 07: the outcomes reporter over the caller's org, JSON-safe."""
     from datetime import datetime, timezone
 
-    from brain.systems.briefing.outcomes import load_packet_outcome_report
-
-    raw_since = arguments.get("since_hours")
-    try:
-        since_hours = float(raw_since) if raw_since is not None else 168.0
-    except (TypeError, ValueError):
-        since_hours = 168.0
-    since_hours = max(1.0, min(since_hours, 24 * 90))
+    since_hours = normalize_outcome_window_hours(arguments.get("since_hours"))
     now = datetime.now(timezone.utc)
     report = await load_packet_outcome_report(
         db,
@@ -123,12 +125,6 @@ async def read_packet_outcomes(
         "since_hours": report.since_hours,
         "outcomes": report.summary.to_dict(),
         "digest_line": report.digest_line,
-        "last_launched_at": (
-            report.last_launched_at.isoformat()
-            if report.last_launched_at is not None
-            else None
-        ),
-        "days_since_last_launch": report.days_since_last_launch,
     }
 
 

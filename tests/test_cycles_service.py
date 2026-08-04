@@ -1615,6 +1615,36 @@ def test_coordinator_launch_prompt_maps_declared_contract_to_visible_sections():
     assert "Example required footer:" in output_section
 
 
+def test_coordinator_launch_prompt_includes_packet_outcomes_instruction():
+    cycle = Cycle()
+    cycle.id = 2
+    cycle.name = "Uwear Ticket Coordinator Check-ins"
+    cycle.prompt = "Publish the chantier-primary coordinator digest."
+    cycle.timezone = "America/Toronto"
+    cycle.model_override = None
+    cycle.thinking_override = None
+
+    run = CycleRun()
+    run.id = 1364
+    run.cycle_id = cycle.id
+    run.scheduled_for = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+    run.guidance_snapshot = []
+    run.output_targets_snapshot = []
+    run.context_snapshot = {
+        "result_contract": cycle_result_contract(run_kind="scheduled_digest")
+    }
+
+    idea = Idea()
+    idea.id = "coordinator-digest"
+    idea.title = "Uwear Ticket Coordinator Runs"
+
+    message = cycle_prompts.cycle_run_message(idea, cycle, run)
+
+    assert "`packets.outcomes` with `since_hours: 168`" in message
+    assert "append that value verbatim" in message
+    assert "Do not recalculate or paraphrase its packet counts" in message
+
+
 @pytest.mark.parametrize(
     ("run_kind", "expected_outputs"),
     [

@@ -341,6 +341,8 @@ def _json_block(value: dict) -> str:
 
 def _packet_outcomes_instruction(cycle: Cycle, result_contract: dict) -> str:
     """Require the coordinator digest to consume the canonical packet read."""
+    from brain.systems.briefing.outcomes import DEFAULT_OUTCOME_WINDOW_HOURS
+
     if (
         cycle.name != _UWEAR_COORDINATOR_CYCLE_NAME
         or result_contract.get("run_kind") != SCHEDULED_DIGEST_RUN_KIND
@@ -348,7 +350,8 @@ def _packet_outcomes_instruction(cycle: Cycle, result_contract: dict) -> str:
         return ""
     return (
         "- MANDATORY PACKET OUTCOMES FOOTER: call the MCP read capability "
-        "`packets.outcomes` with `since_hours: 168` during the same evidence sweep as "
+        f"`packets.outcomes` with `since_hours: {DEFAULT_OUTCOME_WINDOW_HOURS:g}` "
+        "during the same evidence sweep as "
         "this digest. If its `digest_line` is non-null, append that value verbatim as "
         "one footer line next to the per-person recap. Do not recalculate or paraphrase "
         "its packet counts.\n"
