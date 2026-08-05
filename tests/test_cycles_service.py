@@ -36,7 +36,7 @@ from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEven
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea, IdeaThread
 from brain.platform.db.models.org import Org, User
-from brain.platform.integrations.codex_usage import CodexKnownUsageReading
+from brain.platform.integrations.codex_usage import CodexKnownUsage
 from brain.platform.integrations.provider_auth_preflight import (
     ProviderAuthPassedPreflightResult,
 )
@@ -84,7 +84,7 @@ async def _passed_cycle_auth(_session, *, route):
 
 
 def _quota_usage(used_percent, *, source_path="/tmp/codex/session.jsonl"):
-    return CodexKnownUsageReading(
+    return CodexKnownUsage(
         used_percent=used_percent,
         observed_at="2026-08-04T13:24:45Z",
         source_path=source_path,

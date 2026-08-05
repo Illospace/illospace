@@ -32,7 +32,7 @@ def _with_cycle_presentation(
         return result.with_presentation(
             visible_message=(
                 "Cycle quota blocked: Codex usage is "
-                f"{result.used_percent:g}%, at or above the "
+                f"{result.usage.used_percent:g}%, at or above the "
                 f"{result.thresholds.hard_percent:g}% hard limit. "
                 "Illo will admit new runs automatically after usage falls below the limit."
             )
@@ -41,7 +41,7 @@ def _with_cycle_presentation(
         return result.with_presentation(
             visible_message=(
                 "Scheduled Cycle quota deferred: Codex usage is "
-                f"{result.used_percent:g}%, at or above the "
+                f"{result.usage.used_percent:g}%, at or above the "
                 f"{result.thresholds.soft_percent:g}% soft limit. "
                 "Illo will try again on a later scheduled run."
             )

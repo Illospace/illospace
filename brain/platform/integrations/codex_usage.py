@@ -12,12 +12,6 @@ from pathlib import Path
 from typing import Any, Mapping, TypeAlias
 
 
-class CodexUsageStatus(StrEnum):
-    OK = "ok"
-    UNKNOWN = "unknown"
-    EXHAUSTED = "exhausted"
-
-
 class CodexUsageUnknownReason(StrEnum):
     AUTH_ERROR = "auth_error"
     MALFORMED_LINE = "malformed_line"
@@ -34,7 +28,7 @@ class CodexUsageUnknownReason(StrEnum):
     USED_PERCENT_MISSING = "used_percent_missing"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class CodexKnownUsage:
     used_percent: float
     observed_at: str
@@ -43,48 +37,7 @@ class CodexKnownUsage:
     plan_type: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "used_percent": self.used_percent,
-            "observed_at": self.observed_at,
-            "source_path": self.source_path,
-            "limit_id": self.limit_id,
-            "plan_type": self.plan_type,
-        }
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CodexKnownUsageReading:
-    used_percent: float
-    observed_at: str
-    source_path: str
-    limit_id: str = "codex"
-    plan_type: str | None = None
-
-    @property
-    def status(self) -> CodexUsageStatus:
-        if self.used_percent >= 100:
-            return CodexUsageStatus.EXHAUSTED
-        return CodexUsageStatus.OK
-
-    @property
-    def reason(self) -> None:
-        return None
-
-    @property
-    def last_known_good(self) -> None:
-        return None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "status": self.status,
-            "used_percent": self.used_percent,
-            "reason": None,
-            "observed_at": self.observed_at,
-            "source_path": self.source_path,
-            "limit_id": self.limit_id,
-            "plan_type": self.plan_type,
-            "last_known_good": None,
-        }
+        return _codex_usage_to_dict(self)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -100,30 +53,47 @@ class CodexUnknownUsageReading:
         if not isinstance(self.reason, CodexUsageUnknownReason):
             raise TypeError("reason must be a CodexUsageUnknownReason")
 
-    @property
-    def status(self) -> CodexUsageStatus:
-        return CodexUsageStatus.UNKNOWN
-
-    @property
-    def used_percent(self) -> None:
-        return None
-
     def to_dict(self) -> dict[str, Any]:
+        return _codex_usage_to_dict(self)
+
+
+CodexUsageReading: TypeAlias = CodexKnownUsage | CodexUnknownUsageReading
+
+
+def _codex_usage_to_dict(reading: CodexUsageReading) -> dict[str, Any]:
+    """Serialize the legacy flat reading shape at its persistence boundary."""
+
+    if isinstance(reading, CodexKnownUsage):
         return {
-            "status": self.status,
-            "used_percent": None,
-            "reason": self.reason,
-            "observed_at": self.observed_at,
-            "source_path": self.source_path,
-            "limit_id": self.limit_id,
-            "plan_type": self.plan_type,
-            "last_known_good": (
-                self.last_known_good.to_dict() if self.last_known_good else None
-            ),
+            "status": "exhausted" if reading.used_percent >= 100 else "ok",
+            "used_percent": reading.used_percent,
+            "reason": None,
+            "observed_at": reading.observed_at,
+            "source_path": reading.source_path,
+            "limit_id": reading.limit_id,
+            "plan_type": reading.plan_type,
+            "last_known_good": None,
         }
-
-
-CodexUsageReading: TypeAlias = CodexKnownUsageReading | CodexUnknownUsageReading
+    return {
+        "status": "unknown",
+        "used_percent": None,
+        "reason": reading.reason,
+        "observed_at": reading.observed_at,
+        "source_path": reading.source_path,
+        "limit_id": reading.limit_id,
+        "plan_type": reading.plan_type,
+        "last_known_good": (
+            {
+                "used_percent": reading.last_known_good.used_percent,
+                "observed_at": reading.last_known_good.observed_at,
+                "source_path": reading.last_known_good.source_path,
+                "limit_id": reading.last_known_good.limit_id,
+                "plan_type": reading.last_known_good.plan_type,
+            }
+            if reading.last_known_good is not None
+            else None
+        ),
+    }
 
 
 def codex_home_path(path: str | Path | None = None) -> Path:
@@ -279,7 +249,7 @@ def _reading_from_event(
             limit_id=limit_id,
             plan_type=plan_type,
         )
-    return CodexKnownUsageReading(
+    return CodexKnownUsage(
         used_percent=normalized_percent,
         observed_at=observed_at,
         source_path=str(source_path),
@@ -347,14 +317,9 @@ def _find_last_known(files: list[Path]) -> CodexKnownUsage | None:
             if not isinstance(data, Mapping):
                 continue
             reading = _reading_from_event(data, source_path=source_path)
-            if not isinstance(reading, CodexKnownUsageReading):
+            if not isinstance(reading, CodexKnownUsage):
                 continue
-            return CodexKnownUsage(
-                used_percent=reading.used_percent,
-                observed_at=reading.observed_at,
-                source_path=str(source_path),
-                plan_type=reading.plan_type,
-            )
+            return reading
     return None
 
 
@@ -401,7 +366,7 @@ def read_codex_usage(path: str | Path | None = None) -> CodexUsageReading:
                 source_path=newest,
             )
 
-    if isinstance(verdict, CodexKnownUsageReading):
+    if isinstance(verdict, CodexKnownUsage):
         return verdict
     return CodexUnknownUsageReading(
         reason=verdict.reason,
@@ -415,9 +380,7 @@ def read_codex_usage(path: str | Path | None = None) -> CodexUsageReading:
 
 __all__ = [
     "CodexKnownUsage",
-    "CodexKnownUsageReading",
     "CodexUsageReading",
-    "CodexUsageStatus",
     "CodexUsageUnknownReason",
     "CodexUnknownUsageReading",
     "codex_home_path",

@@ -4,17 +4,13 @@ from __future__ import annotations
 
 import math
 import os
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
-from enum import StrEnum
-from typing import Any, Self, TypeVar
+from typing import Any, Self, TypeAlias
 
 from brain.platform.integrations.codex_usage import (
     CodexKnownUsage,
-    CodexKnownUsageReading,
     CodexUnknownUsageReading,
     CodexUsageReading,
-    CodexUsageUnknownReason,
     read_codex_usage,
 )
 from brain.platform.providers.model_policy import required_openai_auth_mode
@@ -22,20 +18,6 @@ from brain.platform.providers.model_policy import required_openai_auth_mode
 
 DEFAULT_CODEX_QUOTA_SOFT_PERCENT = 75.0
 DEFAULT_CODEX_QUOTA_HARD_PERCENT = 90.0
-
-
-class ProviderQuotaPreflightStatus(StrEnum):
-    PASSED = "passed"
-    QUOTA_BLOCKED = "quota_blocked"
-    QUOTA_DEFERRED = "quota_deferred"
-    SKIPPED = "skipped"
-    UNKNOWN = "unknown"
-
-
-class ProviderQuotaDecision(StrEnum):
-    ADMITTED = "admitted"
-    BLOCKED = "blocked"
-    DEFERRED = "deferred"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,45 +33,29 @@ class ProviderQuotaThresholds:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ProviderQuotaPreflightResult(ABC):
+class _ProviderQuotaPreflightResult:
     provider: str
     model: str
     thresholds: ProviderQuotaThresholds
     explicit_request: bool = False
     visible_message: str | None = None
 
-    @property
-    @abstractmethod
-    def status(self) -> ProviderQuotaPreflightStatus:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def decision(self) -> ProviderQuotaDecision:
-        raise NotImplementedError
-
-    @property
-    def blocked(self) -> bool:
-        return self.decision is ProviderQuotaDecision.BLOCKED
-
-    @property
-    def deferred(self) -> bool:
-        return self.decision is ProviderQuotaDecision.DEFERRED
-
     def with_presentation(self, *, visible_message: str) -> Self:
         return replace(self, visible_message=visible_message)
 
-    @abstractmethod
-    def _usage_dict(self) -> dict[str, Any]:
-        raise NotImplementedError
-
-    def to_dict(self) -> dict[str, Any]:
+    def _to_dict(
+        self,
+        *,
+        status: str,
+        decision: str,
+        usage_fields: dict[str, Any],
+    ) -> dict[str, Any]:
         return {
-            "status": self.status,
-            "decision": self.decision,
+            "status": status,
+            "decision": decision,
             "provider": self.provider,
             "model": self.model,
-            **self._usage_dict(),
+            **usage_fields,
             "explicit_request": self.explicit_request,
             "thresholds": self.thresholds.to_dict(),
             "visible_message": self.visible_message,
@@ -97,126 +63,92 @@ class ProviderQuotaPreflightResult(ABC):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ProviderQuotaSkippedPreflightResult(ProviderQuotaPreflightResult):
-    @property
-    def status(self) -> ProviderQuotaPreflightStatus:
-        return ProviderQuotaPreflightStatus.SKIPPED
-
-    @property
-    def decision(self) -> ProviderQuotaDecision:
-        return ProviderQuotaDecision.ADMITTED
-
-    def _usage_dict(self) -> dict[str, Any]:
-        return {
-            "usage_status": None,
-            "used_percent": None,
-            "unknown_reason": None,
-            "observed_at": None,
-            "source_path": None,
-            "limit_id": None,
-            "plan_type": None,
-            "last_known_good": None,
-        }
+class ProviderQuotaSkippedPreflightResult(_ProviderQuotaPreflightResult):
+    def to_dict(self) -> dict[str, Any]:
+        return self._to_dict(
+            status="skipped",
+            decision="admitted",
+            usage_fields={
+                "usage_status": None,
+                "used_percent": None,
+                "unknown_reason": None,
+                "observed_at": None,
+                "source_path": None,
+                "limit_id": None,
+                "plan_type": None,
+                "last_known_good": None,
+            },
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class _ProviderQuotaKnownPreflightResult(ProviderQuotaPreflightResult):
-    usage: CodexKnownUsageReading
+class _ProviderQuotaKnownPreflightResult(_ProviderQuotaPreflightResult):
+    usage: CodexKnownUsage
 
-    @property
-    def used_percent(self) -> float:
-        return self.usage.used_percent
-
-    def _usage_dict(self) -> dict[str, Any]:
-        return {
-            "usage_status": self.usage.status,
-            "used_percent": self.usage.used_percent,
-            "unknown_reason": None,
-            "observed_at": self.usage.observed_at,
-            "source_path": self.usage.source_path,
-            "limit_id": self.usage.limit_id,
-            "plan_type": self.usage.plan_type,
-            "last_known_good": None,
-        }
+    def _known_to_dict(self, *, status: str, decision: str) -> dict[str, Any]:
+        return self._to_dict(
+            status=status,
+            decision=decision,
+            usage_fields=_provider_quota_usage_fields(self.usage),
+        )
 
 
 class ProviderQuotaPassedPreflightResult(_ProviderQuotaKnownPreflightResult):
     __slots__ = ()
 
-    @property
-    def status(self) -> ProviderQuotaPreflightStatus:
-        return ProviderQuotaPreflightStatus.PASSED
-
-    @property
-    def decision(self) -> ProviderQuotaDecision:
-        return ProviderQuotaDecision.ADMITTED
+    def to_dict(self) -> dict[str, Any]:
+        return self._known_to_dict(status="passed", decision="admitted")
 
 
 class ProviderQuotaBlockedPreflightResult(_ProviderQuotaKnownPreflightResult):
     __slots__ = ()
 
-    @property
-    def status(self) -> ProviderQuotaPreflightStatus:
-        return ProviderQuotaPreflightStatus.QUOTA_BLOCKED
-
-    @property
-    def decision(self) -> ProviderQuotaDecision:
-        return ProviderQuotaDecision.BLOCKED
+    def to_dict(self) -> dict[str, Any]:
+        return self._known_to_dict(status="quota_blocked", decision="blocked")
 
 
 class ProviderQuotaDeferredPreflightResult(_ProviderQuotaKnownPreflightResult):
     __slots__ = ()
 
-    @property
-    def status(self) -> ProviderQuotaPreflightStatus:
-        return ProviderQuotaPreflightStatus.QUOTA_DEFERRED
-
-    @property
-    def decision(self) -> ProviderQuotaDecision:
-        return ProviderQuotaDecision.DEFERRED
+    def to_dict(self) -> dict[str, Any]:
+        return self._known_to_dict(status="quota_deferred", decision="deferred")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ProviderQuotaUnknownPreflightResult(ProviderQuotaPreflightResult):
+class ProviderQuotaUnknownPreflightResult(_ProviderQuotaPreflightResult):
     usage: CodexUnknownUsageReading
 
-    @property
-    def status(self) -> ProviderQuotaPreflightStatus:
-        return ProviderQuotaPreflightStatus.UNKNOWN
-
-    @property
-    def decision(self) -> ProviderQuotaDecision:
-        return ProviderQuotaDecision.ADMITTED
-
-    @property
-    def unknown_reason(self) -> CodexUsageUnknownReason:
-        return self.usage.reason
-
-    @property
-    def last_known_good(self) -> CodexKnownUsage | None:
-        return self.usage.last_known_good
-
-    def _usage_dict(self) -> dict[str, Any]:
-        return {
-            "usage_status": self.usage.status,
-            "used_percent": None,
-            "unknown_reason": self.usage.reason,
-            "observed_at": self.usage.observed_at,
-            "source_path": self.usage.source_path,
-            "limit_id": self.usage.limit_id,
-            "plan_type": self.usage.plan_type,
-            "last_known_good": (
-                self.usage.last_known_good.to_dict()
-                if self.usage.last_known_good
-                else None
-            ),
-        }
+    def to_dict(self) -> dict[str, Any]:
+        return self._to_dict(
+            status="unknown",
+            decision="admitted",
+            usage_fields=_provider_quota_usage_fields(self.usage),
+        )
 
 
-KnownQuotaResultT = TypeVar(
-    "KnownQuotaResultT",
-    bound=_ProviderQuotaKnownPreflightResult,
+ProviderQuotaPreflightResult: TypeAlias = (
+    ProviderQuotaSkippedPreflightResult
+    | ProviderQuotaPassedPreflightResult
+    | ProviderQuotaBlockedPreflightResult
+    | ProviderQuotaDeferredPreflightResult
+    | ProviderQuotaUnknownPreflightResult
 )
+
+
+def _provider_quota_usage_fields(
+    usage: CodexUsageReading,
+) -> dict[str, Any]:
+    reading = usage.to_dict()
+    return {
+        "usage_status": reading["status"],
+        "used_percent": reading["used_percent"],
+        "unknown_reason": reading["reason"],
+        "observed_at": reading["observed_at"],
+        "source_path": reading["source_path"],
+        "limit_id": reading["limit_id"],
+        "plan_type": reading["plan_type"],
+        "last_known_good": reading["last_known_good"],
+    }
 
 
 def _percent_setting(name: str, default: float) -> float:
@@ -259,24 +191,6 @@ def skipped_provider_quota_preflight(
     )
 
 
-def _known_result(
-    result_type: type[KnownQuotaResultT],
-    usage: CodexKnownUsageReading,
-    *,
-    provider: str,
-    model: str,
-    explicit_request: bool,
-    thresholds: ProviderQuotaThresholds,
-) -> KnownQuotaResultT:
-    return result_type(
-        provider=provider,
-        model=model,
-        thresholds=thresholds,
-        usage=usage,
-        explicit_request=explicit_request,
-    )
-
-
 def probe_provider_quota(
     *,
     provider: str,
@@ -305,30 +219,27 @@ def probe_provider_quota(
         )
 
     if usage.used_percent >= thresholds.hard_percent:
-        return _known_result(
-            ProviderQuotaBlockedPreflightResult,
-            usage,
+        return ProviderQuotaBlockedPreflightResult(
             provider=provider,
             model=model,
             explicit_request=explicit_request,
             thresholds=thresholds,
+            usage=usage,
         )
     if usage.used_percent >= thresholds.soft_percent and not explicit_request:
-        return _known_result(
-            ProviderQuotaDeferredPreflightResult,
-            usage,
+        return ProviderQuotaDeferredPreflightResult(
             provider=provider,
             model=model,
             explicit_request=explicit_request,
             thresholds=thresholds,
+            usage=usage,
         )
-    return _known_result(
-        ProviderQuotaPassedPreflightResult,
-        usage,
+    return ProviderQuotaPassedPreflightResult(
         provider=provider,
         model=model,
         explicit_request=explicit_request,
         thresholds=thresholds,
+        usage=usage,
     )
 
 
@@ -336,11 +247,9 @@ __all__ = [
     "DEFAULT_CODEX_QUOTA_HARD_PERCENT",
     "DEFAULT_CODEX_QUOTA_SOFT_PERCENT",
     "ProviderQuotaBlockedPreflightResult",
-    "ProviderQuotaDecision",
     "ProviderQuotaDeferredPreflightResult",
     "ProviderQuotaPassedPreflightResult",
     "ProviderQuotaPreflightResult",
-    "ProviderQuotaPreflightStatus",
     "ProviderQuotaSkippedPreflightResult",
     "ProviderQuotaThresholds",
     "ProviderQuotaUnknownPreflightResult",

@@ -12,6 +12,7 @@ from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.integrations.provider_auth_preflight import (
     ProviderAuthBlockedPreflightResult,
     ProviderAuthPreflightResult,
+    ProviderAuthSkippedPreflightResult,
 )
 from brain.platform.integrations.provider_quota_preflight import (
     ProviderQuotaBlockedPreflightResult,
@@ -82,28 +83,11 @@ class CycleAdmissionAdmitted:
     route: CycleProviderRoute
 
 
-def _require_rejection_notice_case(
-    *,
-    actual: str,
-    expected: str,
-    rejection: str,
-) -> None:
-    if actual != expected:
-        raise ValueError(f"{rejection} requires preflight case {expected!r}")
-
-
 @dataclass(frozen=True, slots=True)
 class CycleAdmissionAuthBlocked:
     """An auth rejection with its matching provider notice."""
 
     notice: ProviderAuthBlockedPreflightResult
-
-    def __post_init__(self) -> None:
-        _require_rejection_notice_case(
-            actual=self.notice.status,
-            expected="auth_blocked",
-            rejection=type(self).__name__,
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,26 +96,12 @@ class CycleAdmissionQuotaBlocked:
 
     notice: ProviderQuotaBlockedPreflightResult
 
-    def __post_init__(self) -> None:
-        _require_rejection_notice_case(
-            actual=self.notice.decision,
-            expected="blocked",
-            rejection=type(self).__name__,
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class CycleAdmissionQuotaDeferred:
     """A soft-quota deferral with its matching provider notice."""
 
     notice: ProviderQuotaDeferredPreflightResult
-
-    def __post_init__(self) -> None:
-        _require_rejection_notice_case(
-            actual=self.notice.decision,
-            expected="deferred",
-            rejection=type(self).__name__,
-        )
 
 
 CycleAdmissionRejected: TypeAlias = (
@@ -219,7 +189,7 @@ async def async_prepare_cycle_run_admission(
         run=run,
     )
     auth = await async_preflight_cycle_external_auth(session, route=route)
-    if auth.status != "skipped":
+    if not isinstance(auth, ProviderAuthSkippedPreflightResult):
         _record_preflight_snapshot(run, key="auth_preflight", preflight=auth)
     if isinstance(auth, ProviderAuthBlockedPreflightResult):
         return CycleAdmissionAuthBlocked(notice=auth)
@@ -229,15 +199,11 @@ async def async_prepare_cycle_run_admission(
         run=run,
     )
     _record_preflight_snapshot(run, key="quota_preflight", preflight=quota)
-    try:
-        outcome_type, outcome_value = {
-            "admitted": (CycleAdmissionAdmitted, route),
-            "blocked": (CycleAdmissionQuotaBlocked, quota),
-            "deferred": (CycleAdmissionQuotaDeferred, quota),
-        }[quota.decision]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported Cycle quota decision: {quota.decision!r}") from exc
-    return outcome_type(outcome_value)
+    if isinstance(quota, ProviderQuotaBlockedPreflightResult):
+        return CycleAdmissionQuotaBlocked(notice=quota)
+    if isinstance(quota, ProviderQuotaDeferredPreflightResult):
+        return CycleAdmissionQuotaDeferred(notice=quota)
+    return CycleAdmissionAdmitted(route=route)
 
 
 __all__ = [

@@ -6,7 +6,7 @@ import os
 import pytest
 
 from brain.platform.integrations.codex_usage import (
-    CodexKnownUsageReading,
+    CodexKnownUsage,
     CodexUnknownUsageReading,
     CodexUsageUnknownReason,
     read_codex_usage,
@@ -57,10 +57,9 @@ def test_reads_newest_real_codex_usage(tmp_path):
 
     reading = read_codex_usage(tmp_path)
 
-    assert isinstance(reading, CodexKnownUsageReading)
-    assert reading.status == "ok"
+    assert isinstance(reading, CodexKnownUsage)
+    assert reading.to_dict()["status"] == "ok"
     assert reading.used_percent == 31.0
-    assert reading.reason is None
     assert reading.observed_at == "2026-08-04T13:24:46Z"
     assert reading.limit_id == "codex"
     assert reading.plan_type == "pro"
@@ -72,10 +71,9 @@ def test_real_codex_usage_at_one_hundred_is_exhausted(tmp_path):
 
     reading = read_codex_usage(tmp_path)
 
-    assert isinstance(reading, CodexKnownUsageReading)
-    assert reading.status == "exhausted"
+    assert isinstance(reading, CodexKnownUsage)
+    assert reading.to_dict()["status"] == "exhausted"
     assert reading.used_percent == 100.0
-    assert reading.reason is None
 
 
 def test_degenerate_premium_payload_is_unknown_with_last_known_good(tmp_path):
@@ -95,9 +93,7 @@ def test_degenerate_premium_payload_is_unknown_with_last_known_good(tmp_path):
     reading = read_codex_usage(tmp_path)
 
     assert isinstance(reading, CodexUnknownUsageReading)
-    assert reading.status == "unknown"
     assert reading.reason == "unexpected_limit_id"
-    assert reading.used_percent is None
     assert reading.limit_id == "premium"
     assert reading.last_known_good is not None
     assert reading.last_known_good.used_percent == 31.0
@@ -111,9 +107,7 @@ def test_null_primary_on_codex_limit_is_unknown_not_zero_or_exhausted(tmp_path):
     reading = read_codex_usage(tmp_path)
 
     assert isinstance(reading, CodexUnknownUsageReading)
-    assert reading.status == "unknown"
     assert reading.reason == "primary_missing"
-    assert reading.used_percent is None
     assert reading.last_known_good is None
 
 
@@ -126,9 +120,7 @@ def test_malformed_newest_line_is_unknown_with_older_known_reading(tmp_path):
     reading = read_codex_usage(tmp_path)
 
     assert isinstance(reading, CodexUnknownUsageReading)
-    assert reading.status == "unknown"
     assert reading.reason == "malformed_line"
-    assert reading.used_percent is None
     assert reading.last_known_good is not None
     assert reading.last_known_good.used_percent == 42.0
 
@@ -151,9 +143,7 @@ def test_newer_auth_error_is_unknown_with_older_known_reading(tmp_path):
     reading = read_codex_usage(tmp_path)
 
     assert isinstance(reading, CodexUnknownUsageReading)
-    assert reading.status == "unknown"
     assert reading.reason == "auth_error"
-    assert reading.used_percent is None
     assert reading.last_known_good is not None
     assert reading.last_known_good.used_percent == 52.0
 
@@ -162,9 +152,7 @@ def test_missing_sessions_directory_is_unknown(tmp_path):
     reading = read_codex_usage(tmp_path)
 
     assert isinstance(reading, CodexUnknownUsageReading)
-    assert reading.status == "unknown"
     assert reading.reason == "sessions_dir_missing"
-    assert reading.used_percent is None
 
 
 def test_only_newest_session_file_controls_current_verdict(tmp_path):
@@ -178,7 +166,6 @@ def test_only_newest_session_file_controls_current_verdict(tmp_path):
     reading = read_codex_usage(tmp_path)
 
     assert isinstance(reading, CodexUnknownUsageReading)
-    assert reading.status == "unknown"
     assert reading.reason == "token_count_missing"
     assert reading.last_known_good is not None
     assert reading.last_known_good.used_percent == 12.0
@@ -190,12 +177,12 @@ def test_codex_home_environment_selects_usage_root(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
 
     reading = read_codex_usage()
-    assert isinstance(reading, CodexKnownUsageReading)
+    assert isinstance(reading, CodexKnownUsage)
     assert reading.used_percent == 17.0
 
 
 def test_usage_reading_serialization_is_byte_compatible():
-    known = CodexKnownUsageReading(
+    known = CodexKnownUsage(
         used_percent=31.0,
         observed_at="2026-08-04T13:24:45Z",
         source_path="/tmp/codex/sessions/rollout.jsonl",

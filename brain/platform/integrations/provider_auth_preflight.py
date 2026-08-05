@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
-from enum import StrEnum
-from typing import Any, Self
+from typing import Any, Self, TypeAlias
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,76 +11,51 @@ from brain.platform.integrations.llm import async_resolve_llm_client
 from brain.platform.providers.model_policy import required_openai_auth_mode
 
 
-class ProviderAuthPreflightStatus(StrEnum):
-    AUTH_BLOCKED = "auth_blocked"
-    PASSED = "passed"
-    SKIPPED = "skipped"
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ProviderAuthPreflightResult(ABC):
+class _ProviderAuthPreflightResult:
     provider: str
     model: str
 
-    @property
-    @abstractmethod
-    def status(self) -> ProviderAuthPreflightStatus:
-        raise NotImplementedError
-
-    @property
-    def blocked(self) -> bool:
-        return self.status is ProviderAuthPreflightStatus.AUTH_BLOCKED
-
-    @abstractmethod
-    def _details_dict(self) -> dict[str, str | None]:
-        raise NotImplementedError
-
-    def to_dict(self) -> dict[str, Any]:
+    def _to_dict(
+        self,
+        *,
+        status: str,
+        credential: str | None = None,
+        error_code: str | None = None,
+        repair_action: str | None = None,
+        visible_message: str | None = None,
+    ) -> dict[str, Any]:
         return {
-            "status": self.status,
+            "status": status,
             "provider": self.provider,
             "model": self.model,
-            **self._details_dict(),
+            "credential": credential,
+            "error_code": error_code,
+            "repair_action": repair_action,
+            "visible_message": visible_message,
         }
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _ProviderAuthAvailablePreflightResult(ProviderAuthPreflightResult):
-    def _details_dict(self) -> dict[str, str | None]:
-        return {
-            "credential": None,
-            "error_code": None,
-            "repair_action": None,
-            "visible_message": None,
-        }
-
-
-class ProviderAuthPassedPreflightResult(_ProviderAuthAvailablePreflightResult):
+class ProviderAuthPassedPreflightResult(_ProviderAuthPreflightResult):
     __slots__ = ()
 
-    @property
-    def status(self) -> ProviderAuthPreflightStatus:
-        return ProviderAuthPreflightStatus.PASSED
+    def to_dict(self) -> dict[str, Any]:
+        return self._to_dict(status="passed")
 
 
-class ProviderAuthSkippedPreflightResult(_ProviderAuthAvailablePreflightResult):
+class ProviderAuthSkippedPreflightResult(_ProviderAuthPreflightResult):
     __slots__ = ()
 
-    @property
-    def status(self) -> ProviderAuthPreflightStatus:
-        return ProviderAuthPreflightStatus.SKIPPED
+    def to_dict(self) -> dict[str, Any]:
+        return self._to_dict(status="skipped")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ProviderAuthBlockedPreflightResult(ProviderAuthPreflightResult):
+class ProviderAuthBlockedPreflightResult(_ProviderAuthPreflightResult):
     credential: str
     error_code: str
     repair_action: str | None = None
     visible_message: str | None = None
-
-    @property
-    def status(self) -> ProviderAuthPreflightStatus:
-        return ProviderAuthPreflightStatus.AUTH_BLOCKED
 
     def with_presentation(
         self,
@@ -96,13 +69,21 @@ class ProviderAuthBlockedPreflightResult(ProviderAuthPreflightResult):
             visible_message=visible_message,
         )
 
-    def _details_dict(self) -> dict[str, str | None]:
-        return {
-            "credential": self.credential,
-            "error_code": self.error_code,
-            "repair_action": self.repair_action,
-            "visible_message": self.visible_message,
-        }
+    def to_dict(self) -> dict[str, Any]:
+        return self._to_dict(
+            status="auth_blocked",
+            credential=self.credential,
+            error_code=self.error_code,
+            repair_action=self.repair_action,
+            visible_message=self.visible_message,
+        )
+
+
+ProviderAuthPreflightResult: TypeAlias = (
+    ProviderAuthPassedPreflightResult
+    | ProviderAuthSkippedPreflightResult
+    | ProviderAuthBlockedPreflightResult
+)
 
 
 def skipped_provider_auth_preflight(
@@ -189,7 +170,6 @@ __all__ = [
     "ProviderAuthBlockedPreflightResult",
     "ProviderAuthPassedPreflightResult",
     "ProviderAuthPreflightResult",
-    "ProviderAuthPreflightStatus",
     "ProviderAuthSkippedPreflightResult",
     "async_probe_provider_auth",
     "skipped_provider_auth_preflight",

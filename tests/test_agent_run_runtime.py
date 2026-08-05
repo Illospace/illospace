@@ -2132,7 +2132,7 @@ async def test_neutral_auth_probe_names_missing_anthropic_configuration(
         model="anthropic/claude-sonnet-4-6",
     )
 
-    assert result.status == "auth_blocked"
+    assert result.to_dict()["status"] == "auth_blocked"
     assert result.error_code == "provider_credential_unavailable"
     assert result.credential == "Anthropic API key"
     assert result.visible_message is None
@@ -2177,7 +2177,7 @@ async def test_spawn_worker_auth_policy_probes_anthropic_and_owns_wording(
         "provider": "anthropic",
         "model": "anthropic/claude-sonnet-4-6",
     }
-    assert result.blocked is True
+    assert isinstance(result, ProviderAuthBlockedPreflightResult)
     assert result.repair_action == (
         "Add an Anthropic API key in Settings > Access, then retry the run."
     )
@@ -2219,7 +2219,7 @@ async def test_cycle_auth_policy_blocks_anthropic_without_credentials(monkeypatc
         ),
     )
 
-    assert result.status == "auth_blocked"
+    assert isinstance(result, ProviderAuthBlockedPreflightResult)
     assert result.provider == "anthropic"
     assert probes[0]["provider"] == "anthropic"
     assert "Add an Anthropic API key" in result.visible_message

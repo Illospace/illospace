@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from brain.platform.integrations.codex_usage import (
-    CodexKnownUsageReading,
+    CodexKnownUsage,
     CodexUnknownUsageReading,
     CodexUsageUnknownReason,
 )
@@ -25,8 +25,8 @@ def _route(model: str = "openai/gpt-5.6-sol") -> CycleProviderRoute:
     )
 
 
-def _usage(used_percent: float) -> CodexKnownUsageReading:
-    return CodexKnownUsageReading(
+def _usage(used_percent: float) -> CodexKnownUsage:
+    return CodexKnownUsage(
         used_percent=used_percent,
         observed_at="2026-08-04T13:24:45Z",
         source_path="/tmp/codex/sessions/rollout.jsonl",
@@ -54,7 +54,7 @@ def test_cycle_quota_marks_scheduled_origin_as_autonomous(monkeypatch):
     )
 
     assert captured["explicit_request"] is False
-    assert result.deferred is True
+    assert isinstance(result, ProviderQuotaDeferredPreflightResult)
     assert "80%" in result.visible_message
     assert "75% soft limit" in result.visible_message
 
@@ -81,7 +81,7 @@ def test_cycle_quota_marks_manual_origin_as_explicit(monkeypatch):
     )
 
     assert captured["explicit_request"] is True
-    assert result.decision == "admitted"
+    assert isinstance(result, ProviderQuotaPassedPreflightResult)
     assert result.visible_message is None
 
 
@@ -106,5 +106,4 @@ def test_cycle_quota_consumes_resolved_route(monkeypatch):
     )
 
     assert captured["probe"]["model"] == "openai/gpt-5.6-sol"
-    assert result.status == "unknown"
-    assert result.decision == "admitted"
+    assert isinstance(result, ProviderQuotaUnknownPreflightResult)

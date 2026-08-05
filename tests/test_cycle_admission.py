@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brain.platform.integrations.codex_usage import CodexKnownUsageReading
+from brain.platform.integrations.codex_usage import CodexKnownUsage
 from brain.platform.integrations.provider_auth_preflight import (
     ProviderAuthBlockedPreflightResult,
     ProviderAuthPassedPreflightResult,
@@ -30,8 +30,8 @@ def _cycle(**overrides):
     return SimpleNamespace(**values)
 
 
-def _usage(used_percent: float) -> CodexKnownUsageReading:
-    return CodexKnownUsageReading(
+def _usage(used_percent: float) -> CodexKnownUsage:
+    return CodexKnownUsage(
         used_percent=used_percent,
         observed_at="2026-08-04T13:24:45Z",
         source_path="/tmp/codex/sessions/rollout.jsonl",
@@ -243,50 +243,6 @@ def test_cycle_rejection_union_rejects_contradictory_construction():
 def test_cycle_rejection_variants_reject_independent_settlement_fields(rejection_type):
     with pytest.raises(TypeError):
         rejection_type(notice=object(), status="auth_blocked")
-
-
-@pytest.mark.parametrize(
-    ("rejection_type", "notice"),
-    [
-        (
-            admission.CycleAdmissionAuthBlocked,
-            ProviderAuthPassedPreflightResult(
-                provider="openai",
-                model="openai/gpt-5.5",
-            ),
-        ),
-        (
-            admission.CycleAdmissionQuotaBlocked,
-            ProviderQuotaDeferredPreflightResult(
-                provider="openai",
-                model="openai/gpt-5.5",
-                usage=_usage(80.0),
-                thresholds=ProviderQuotaThresholds(
-                    soft_percent=75.0,
-                    hard_percent=90.0,
-                ),
-            ),
-        ),
-        (
-            admission.CycleAdmissionQuotaDeferred,
-            ProviderQuotaBlockedPreflightResult(
-                provider="openai",
-                model="openai/gpt-5.5",
-                usage=_usage(90.0),
-                thresholds=ProviderQuotaThresholds(
-                    soft_percent=75.0,
-                    hard_percent=90.0,
-                ),
-            ),
-        ),
-    ],
-)
-def test_cycle_rejection_variants_reject_mismatched_notices(
-    rejection_type,
-    notice,
-):
-    with pytest.raises(ValueError):
-        rejection_type(notice=notice)
 
 
 @pytest.mark.asyncio

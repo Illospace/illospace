@@ -6,7 +6,6 @@ import pytest
 
 from brain.platform.integrations.codex_usage import (
     CodexKnownUsage,
-    CodexKnownUsageReading,
     CodexUnknownUsageReading,
     CodexUsageUnknownReason,
 )
@@ -20,8 +19,8 @@ from brain.platform.integrations.provider_quota_preflight import (
 )
 
 
-def _usage(used_percent: float) -> CodexKnownUsageReading:
-    return CodexKnownUsageReading(
+def _usage(used_percent: float) -> CodexKnownUsage:
+    return CodexKnownUsage(
         used_percent=used_percent,
         observed_at="2026-08-04T13:24:45Z",
         source_path="/tmp/codex/sessions/2026/08/04/rollout.jsonl",
@@ -44,9 +43,9 @@ def test_below_soft_limit_is_admitted(monkeypatch):
     result = _probe()
 
     assert isinstance(result, ProviderQuotaPassedPreflightResult)
-    assert result.status == "passed"
-    assert result.decision == "admitted"
-    assert result.used_percent == 74.9
+    assert result.to_dict()["status"] == "passed"
+    assert result.to_dict()["decision"] == "admitted"
+    assert result.usage.used_percent == 74.9
     assert result.thresholds.to_dict() == {
         "soft_percent": 75.0,
         "hard_percent": 90.0,
@@ -61,11 +60,10 @@ def test_soft_limit_defers_scheduled_run_but_admits_explicit_run(monkeypatch):
 
     assert isinstance(scheduled, ProviderQuotaDeferredPreflightResult)
     assert isinstance(explicit, ProviderQuotaPassedPreflightResult)
-    assert scheduled.status == "quota_deferred"
-    assert scheduled.decision == "deferred"
-    assert scheduled.deferred is True
-    assert explicit.status == "passed"
-    assert explicit.decision == "admitted"
+    assert scheduled.to_dict()["status"] == "quota_deferred"
+    assert scheduled.to_dict()["decision"] == "deferred"
+    assert explicit.to_dict()["status"] == "passed"
+    assert explicit.to_dict()["decision"] == "admitted"
 
 
 def test_hard_limit_blocks_even_explicit_run(monkeypatch):
@@ -74,10 +72,9 @@ def test_hard_limit_blocks_even_explicit_run(monkeypatch):
     result = _probe(explicit_request=True)
 
     assert isinstance(result, ProviderQuotaBlockedPreflightResult)
-    assert result.status == "quota_blocked"
-    assert result.decision == "blocked"
-    assert result.blocked is True
-    assert result.used_percent == 90.0
+    assert result.to_dict()["status"] == "quota_blocked"
+    assert result.to_dict()["decision"] == "blocked"
+    assert result.usage.used_percent == 90.0
 
 
 def test_real_exhausted_reading_blocks(monkeypatch):
@@ -86,9 +83,9 @@ def test_real_exhausted_reading_blocks(monkeypatch):
     result = _probe()
 
     assert isinstance(result, ProviderQuotaBlockedPreflightResult)
-    assert result.usage.status == "exhausted"
-    assert result.decision == "blocked"
-    assert result.used_percent == 100.0
+    assert result.usage.to_dict()["status"] == "exhausted"
+    assert result.to_dict()["decision"] == "blocked"
+    assert result.usage.used_percent == 100.0
 
 
 def test_unknown_reading_fails_open_and_preserves_last_known_good(monkeypatch):
@@ -109,10 +106,10 @@ def test_unknown_reading_fails_open_and_preserves_last_known_good(monkeypatch):
     result = _probe()
 
     assert isinstance(result, ProviderQuotaUnknownPreflightResult)
-    assert result.status == "unknown"
-    assert result.decision == "admitted"
-    assert result.unknown_reason == "primary_missing"
-    assert result.last_known_good is reading.last_known_good
+    assert result.to_dict()["status"] == "unknown"
+    assert result.to_dict()["decision"] == "admitted"
+    assert result.usage.reason == "primary_missing"
+    assert result.usage.last_known_good is reading.last_known_good
     assert result.to_dict()["last_known_good"] == {
         "used_percent": 31,
         "observed_at": "2026-08-04T13:24:45Z",
@@ -129,7 +126,7 @@ def test_thresholds_are_configurable(monkeypatch):
 
     result = _probe()
 
-    assert result.decision == "deferred"
+    assert result.to_dict()["decision"] == "deferred"
     assert result.thresholds.to_dict() == {
         "soft_percent": 60.0,
         "hard_percent": 70.0,
@@ -169,9 +166,9 @@ def test_live_reader_recovers_automatically_after_window_reset(tmp_path, monkeyp
 
     assert isinstance(blocked, ProviderQuotaBlockedPreflightResult)
     assert isinstance(recovered, ProviderQuotaPassedPreflightResult)
-    assert blocked.decision == "blocked"
-    assert recovered.decision == "admitted"
-    assert recovered.used_percent == 3.0
+    assert blocked.to_dict()["decision"] == "blocked"
+    assert recovered.to_dict()["decision"] == "admitted"
+    assert recovered.usage.used_percent == 3.0
 
 
 def test_non_subscription_route_skips_codex_quota_reader(monkeypatch):
@@ -188,8 +185,8 @@ def test_non_subscription_route_skips_codex_quota_reader(monkeypatch):
     )
 
     assert isinstance(result, ProviderQuotaSkippedPreflightResult)
-    assert result.status == "skipped"
-    assert result.decision == "admitted"
+    assert result.to_dict()["status"] == "skipped"
+    assert result.to_dict()["decision"] == "admitted"
     assert result.to_dict()["usage_status"] is None
 
 
