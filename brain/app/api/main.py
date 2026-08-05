@@ -14,9 +14,7 @@ from starlette.responses import JSONResponse
 
 from brain.app.api.config import CORS_ORIGINS, SECRET_KEY, validate_auth_config
 from brain.app.api.deps import get_db
-from brain.app.scheduler.overdue_monitor import (
-    async_scheduler_overdue_monitor_loop,
-)
+from brain.app.scheduler.overdue_monitor import SchedulerOverdueMonitor
 
 validate_auth_config()
 
@@ -202,11 +200,16 @@ async def lifespan(app):
 
     from brain.systems.cortex.events import set_publisher
     set_publisher(_schedule_product_event_publish)
+    scheduler_overdue_monitor = SchedulerOverdueMonitor()
     _scheduler_overdue_monitor_task = _main_loop.create_task(
-        async_scheduler_overdue_monitor_loop(),
-        name="scheduler-overdue-monitor",
+        scheduler_overdue_monitor.run(),
+        name=scheduler_overdue_monitor.name,
     )
-    logger.info("scheduler_overdue_monitor_started", host="api")
+    logger.info(
+        "scheduler_overdue_monitor_started",
+        host="api",
+        monitor=scheduler_overdue_monitor.name,
+    )
     await _ensure_starting_skill_bundle()
     if _should_start_run_event_consumer():
         _run_event_consumer_task = _main_loop.create_task(_run_event_consumer_loop())

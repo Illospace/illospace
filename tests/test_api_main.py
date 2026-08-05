@@ -190,6 +190,10 @@ async def test_lifespan_hosts_scheduler_overdue_monitor_outside_daemon():
         monitor_started.set()
         await asyncio.Future()
 
+    monitor = MagicMock()
+    monitor.name = "scheduler_overdue_monitor"
+    monitor.run = monitor_loop
+
     with patch("brain.app.api.main._should_start_inline_runner", return_value=False):
         with patch("brain.app.api.main._should_start_run_event_consumer", return_value=False):
             with patch("brain.systems.cortex.events.set_publisher"):
@@ -198,13 +202,18 @@ async def test_lifespan_hosts_scheduler_overdue_monitor_outside_daemon():
                     new=AsyncMock(),
                 ):
                     with patch(
-                        "brain.app.api.main.async_scheduler_overdue_monitor_loop",
-                        new=monitor_loop,
-                    ):
+                        "brain.app.api.main.SchedulerOverdueMonitor",
+                        return_value=monitor,
+                    ) as monitor_type:
                         async with api_main.lifespan(app):
                             await asyncio.wait_for(monitor_started.wait(), timeout=1)
                             assert api_main._scheduler_overdue_monitor_task is not None
+                            assert (
+                                api_main._scheduler_overdue_monitor_task.get_name()
+                                == "scheduler_overdue_monitor"
+                            )
 
+    monitor_type.assert_called_once_with()
     assert api_main._scheduler_overdue_monitor_task is None
 
 

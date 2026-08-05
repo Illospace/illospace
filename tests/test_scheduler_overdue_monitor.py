@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 
 from brain.app.scheduler.daemon import async_scheduler_health_snapshot
-from brain.app.scheduler.overdue_monitor import (
-    OVERDUE_FREEZE_TRIGGER_KIND,
-    SCHEDULER_OVERDUE_CHECK_INTERVAL_SECONDS,
-    async_check_scheduler_overdue_jobs,
+from brain.app.scheduler.overdue_monitor import SchedulerOverdueMonitor
+from brain.app.scheduler.read_models import (
+    SchedulerOverdueCandidate,
+    async_scheduler_overdue_candidates,
 )
 from brain.platform.db.models.scheduler import SchedulerLease, SchedulerRun
 from tests.scheduler_test_support import (
@@ -25,52 +26,28 @@ async def scheduler_session(async_sqlite_session_factory):
     return await make_scheduler_test_session(async_sqlite_session_factory)
 
 
-class MemoryTriggerStateStore:
-    def __init__(self) -> None:
-        self.states = {}
-
-    async def load_trigger_states(self):
-        return dict(self.states)
-
-    async def save_trigger_state(self, trigger_kind, state):
-        self.states[trigger_kind] = dict(state)
-
-    async def delete_trigger_state(self, trigger_kind):
-        self.states.pop(trigger_kind, None)
+def _candidate(
+    *,
+    now: datetime,
+    lag_seconds: int,
+    job_key: str = "uwear_aws_health_scan",
+) -> SchedulerOverdueCandidate:
+    return SchedulerOverdueCandidate(
+        job_key=job_key,
+        next_run_at=now - timedelta(seconds=lag_seconds),
+    )
 
 
 def test_overdue_monitor_checks_well_inside_twenty_minute_window():
-    assert SCHEDULER_OVERDUE_CHECK_INTERVAL_SECONDS <= 5 * 60
-
-
-def _snapshot(*, lag_seconds: int) -> dict:
-    due_at = NOW - timedelta(seconds=lag_seconds)
-    return {
-        "daemon": {"owner_mode": "scheduler", "service_ready": True},
-        "lag": {
-            "lag_seconds": lag_seconds,
-            "oldest_due_at": due_at.isoformat(),
-            "lagging_jobs": [
-                {
-                    "job_key": "uwear_aws_health_scan",
-                    "family": "uwear_aws_health_scan",
-                    "next_run_at": due_at.isoformat(),
-                    "lag_seconds": lag_seconds,
-                    "pause_reason": None,
-                }
-            ],
-        },
-        "jobs": [{"id": 7, "job_key": "uwear_aws_health_scan"}],
-    }
+    assert SchedulerOverdueMonitor.check_interval_seconds <= 5 * 60
 
 
 async def test_job_overdue_by_more_than_fifteen_minutes_alerts_with_tick_time():
-    state_store = MemoryTriggerStateStore()
     deliveries = []
     last_tick_at = NOW - timedelta(minutes=16)
 
-    async def health_snapshot(_session, *, now):
-        return _snapshot(lag_seconds=16 * 60)
+    async def candidates(_session, *, now):
+        return (_candidate(now=now, lag_seconds=16 * 60),)
 
     async def liveness_checkpoint(_session):
         return last_tick_at
@@ -78,31 +55,29 @@ async def test_job_overdue_by_more_than_fifteen_minutes_alerts_with_tick_time():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    result = await async_check_scheduler_overdue_jobs(
-        object(),
-        now=NOW,
-        health_snapshot=health_snapshot,
+    monitor = SchedulerOverdueMonitor(
+        candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
-        state_store=state_store,
         deliver_alert=deliver_alert,
     )
+    result = await monitor._check(object(), now=NOW)
 
+    assert monitor.name == "scheduler_overdue_monitor"
     assert result.alert_sent is True
     assert result.overdue_job_keys == ("uwear_aws_health_scan",)
     assert len(deliveries) == 1
     alert = deliveries[0]
+    assert alert["policy"].requested_by == "scheduler_overdue_monitor"
     assert alert["subject"].identity == "uwear_aws_health_scan"
     assert "16m overdue" in alert["presentation"].summary
     assert last_tick_at.isoformat() in alert["presentation"].summary
-    assert OVERDUE_FREEZE_TRIGGER_KIND in state_store.states
 
 
 async def test_all_jobs_on_schedule_for_twenty_four_hours_produces_no_alert():
-    state_store = MemoryTriggerStateStore()
     deliveries = []
 
-    async def health_snapshot(_session, *, now):
-        return _snapshot(lag_seconds=0)
+    async def candidates(_session, *, now):
+        return (_candidate(now=now, lag_seconds=0),)
 
     async def liveness_checkpoint(_session):
         return NOW
@@ -110,27 +85,24 @@ async def test_all_jobs_on_schedule_for_twenty_four_hours_produces_no_alert():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
+    monitor = SchedulerOverdueMonitor(
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        deliver_alert=deliver_alert,
+    )
     for hour in range(25):
-        result = await async_check_scheduler_overdue_jobs(
-            object(),
-            now=NOW + timedelta(hours=hour),
-            health_snapshot=health_snapshot,
-            liveness_checkpoint=liveness_checkpoint,
-            state_store=state_store,
-            deliver_alert=deliver_alert,
-        )
+        result = await monitor._check(object(), now=NOW + timedelta(hours=hour))
         assert result.alert_sent is False
         assert result.overdue_job_keys == ()
     assert deliveries == []
 
 
 async def test_alert_fires_once_per_freeze_and_rearms_after_recovery():
-    state_store = MemoryTriggerStateStore()
     deliveries = []
     lag_seconds = 60 * 60
 
-    async def health_snapshot(_session, *, now):
-        return _snapshot(lag_seconds=lag_seconds)
+    async def candidates(_session, *, now):
+        return (_candidate(now=now, lag_seconds=lag_seconds),)
 
     async def liveness_checkpoint(_session):
         return NOW
@@ -138,22 +110,17 @@ async def test_alert_fires_once_per_freeze_and_rearms_after_recovery():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    async def check(at: datetime):
-        return await async_check_scheduler_overdue_jobs(
-            object(),
-            now=at,
-            health_snapshot=health_snapshot,
-            liveness_checkpoint=liveness_checkpoint,
-            state_store=state_store,
-            deliver_alert=deliver_alert,
-        )
-
-    first = await check(NOW)
-    repeated = await check(NOW + timedelta(minutes=1))
+    monitor = SchedulerOverdueMonitor(
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        deliver_alert=deliver_alert,
+    )
+    first = await monitor._check(object(), now=NOW)
+    repeated = await monitor._check(object(), now=NOW + timedelta(minutes=1))
     lag_seconds = 0
-    recovered = await check(NOW + timedelta(minutes=2))
+    recovered = await monitor._check(object(), now=NOW + timedelta(minutes=2))
     lag_seconds = 60 * 60
-    later_freeze = await check(NOW + timedelta(hours=2))
+    later_freeze = await monitor._check(object(), now=NOW + timedelta(hours=2))
 
     assert first.alert_sent is True
     assert repeated.alert_sent is False
@@ -163,21 +130,17 @@ async def test_alert_fires_once_per_freeze_and_rearms_after_recovery():
 
 
 async def test_multiple_overdue_jobs_produce_one_freeze_alert():
-    state_store = MemoryTriggerStateStore()
     deliveries = []
 
-    async def health_snapshot(_session, *, now):
-        snapshot = _snapshot(lag_seconds=60 * 60)
-        snapshot["lag"]["lagging_jobs"].append(
-            {
-                "job_key": "knowledge_index_sync",
-                "family": "knowledge_index_sync",
-                "next_run_at": (NOW - timedelta(minutes=45)).isoformat(),
-                "lag_seconds": 45 * 60,
-                "pause_reason": None,
-            }
+    async def candidates(_session, *, now):
+        return (
+            _candidate(now=now, lag_seconds=60 * 60),
+            _candidate(
+                now=now,
+                lag_seconds=45 * 60,
+                job_key="knowledge_index_sync",
+            ),
         )
-        return snapshot
 
     async def liveness_checkpoint(_session):
         return NOW - timedelta(hours=1)
@@ -185,14 +148,12 @@ async def test_multiple_overdue_jobs_produce_one_freeze_alert():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    result = await async_check_scheduler_overdue_jobs(
-        object(),
-        now=NOW,
-        health_snapshot=health_snapshot,
+    monitor = SchedulerOverdueMonitor(
+        candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
-        state_store=state_store,
         deliver_alert=deliver_alert,
     )
+    result = await monitor._check(object(), now=NOW)
 
     assert result.overdue_job_keys == (
         "uwear_aws_health_scan",
@@ -204,16 +165,10 @@ async def test_multiple_overdue_jobs_produce_one_freeze_alert():
 
 
 async def test_fresh_daemon_heartbeat_does_not_hide_stale_next_run_at():
-    state_store = MemoryTriggerStateStore()
     deliveries = []
 
-    async def health_snapshot(_session, *, now):
-        snapshot = _snapshot(lag_seconds=60 * 60)
-        snapshot["daemon"].update(
-            process_alive=True,
-            heartbeat_at=NOW.isoformat(),
-        )
-        return snapshot
+    async def candidates(_session, *, now):
+        return (_candidate(now=now, lag_seconds=60 * 60),)
 
     async def liveness_checkpoint(_session):
         return NOW
@@ -221,21 +176,111 @@ async def test_fresh_daemon_heartbeat_does_not_hide_stale_next_run_at():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    result = await async_check_scheduler_overdue_jobs(
-        object(),
-        now=NOW,
-        health_snapshot=health_snapshot,
+    monitor = SchedulerOverdueMonitor(
+        candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
-        state_store=state_store,
         deliver_alert=deliver_alert,
     )
+    result = await monitor._check(object(), now=NOW)
 
     assert result.alert_sent is True
     assert result.last_tick_at == NOW
     assert len(deliveries) == 1
 
 
-async def test_scheduler_snapshot_skips_job_with_active_run(scheduler_session):
+async def test_slack_delivery_starts_after_read_transaction_closes():
+    transaction_open = False
+
+    class FakeUnitOfWork:
+        session = object()
+
+        async def __aenter__(self):
+            nonlocal transaction_open
+            transaction_open = True
+            return self
+
+        async def __aexit__(self, *_exc):
+            nonlocal transaction_open
+            transaction_open = False
+
+    async def candidates(_session, *, now):
+        assert transaction_open is True
+        return (_candidate(now=now, lag_seconds=60 * 60),)
+
+    async def liveness_checkpoint(_session):
+        assert transaction_open is True
+        return NOW
+
+    async def deliver_alert(**_kwargs):
+        assert transaction_open is False
+
+    monitor = SchedulerOverdueMonitor(
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        deliver_alert=deliver_alert,
+    )
+    with patch(
+        "brain.platform.db.repositories.unit_of_work.UnitOfWork",
+        FakeUnitOfWork,
+    ):
+        result = await monitor._run_once(now=NOW)
+
+    assert result.alert_sent is True
+
+
+async def test_monitor_projection_selects_only_eligible_scheduler_jobs(
+    scheduler_session,
+):
+    scheduler_session.add_all(
+        [
+            make_scheduler_job(
+                job_key="eligible",
+                family="eligible",
+                program_key="eligible",
+                next_run_at=NOW - timedelta(hours=1),
+            ),
+            make_scheduler_job(
+                job_key="disabled",
+                family="disabled",
+                program_key="disabled",
+                enabled=False,
+                next_run_at=NOW - timedelta(hours=1),
+            ),
+            make_scheduler_job(
+                job_key="paused",
+                family="paused",
+                program_key="paused",
+                pause_reason="operator pause",
+                next_run_at=NOW - timedelta(hours=1),
+            ),
+            make_scheduler_job(
+                job_key="future",
+                family="future",
+                program_key="future",
+                next_run_at=NOW + timedelta(minutes=1),
+            ),
+            make_scheduler_job(
+                job_key="cron_owned",
+                family="cron_owned",
+                program_key="cron_owned",
+                owner_mode="cron",
+                next_run_at=NOW - timedelta(hours=1),
+            ),
+        ]
+    )
+    await scheduler_session.flush()
+
+    candidates = await async_scheduler_overdue_candidates(
+        scheduler_session,
+        now=NOW,
+    )
+
+    assert tuple(candidate.job_key for candidate in candidates) == ("eligible",)
+
+
+async def test_monitor_skips_active_job_while_health_reports_canonical_lag(
+    scheduler_session,
+):
     job = make_scheduler_job(
         job_key="long_running_job",
         family="long_running_job",
@@ -270,12 +315,30 @@ async def test_scheduler_snapshot_skips_job_with_active_run(scheduler_session):
     await scheduler_session.flush()
 
     snapshot = await async_scheduler_health_snapshot(scheduler_session, now=NOW)
+    deliveries = []
 
-    assert snapshot["lag"]["lagging_jobs"] == []
-    assert snapshot["health"]["status"] == "healthy"
+    async def liveness_checkpoint(_session):
+        return NOW
+
+    async def deliver_alert(**kwargs):
+        deliveries.append(kwargs)
+
+    monitor = SchedulerOverdueMonitor(
+        liveness_checkpoint=liveness_checkpoint,
+        deliver_alert=deliver_alert,
+    )
+    result = await monitor._check(scheduler_session, now=NOW)
+
+    assert [item["job_key"] for item in snapshot["lag"]["lagging_jobs"]] == [
+        "long_running_job"
+    ]
+    assert snapshot["health"]["status"] == "degraded"
+    assert result.alert_sent is False
+    assert result.overdue_job_keys == ()
+    assert deliveries == []
 
 
-async def test_database_trigger_state_deduplicates_and_rearms(scheduler_session):
+async def test_in_memory_latch_is_independent_of_job_identity(scheduler_session):
     job = make_scheduler_job(
         job_key="stalled_job",
         family="stalled_job",
@@ -286,22 +349,39 @@ async def test_database_trigger_state_deduplicates_and_rearms(scheduler_session)
     await scheduler_session.flush()
     deliveries = []
 
+    async def liveness_checkpoint(_session):
+        return NOW
+
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    async def check(at: datetime):
-        return await async_check_scheduler_overdue_jobs(
-            scheduler_session,
-            now=at,
-            deliver_alert=deliver_alert,
-        )
+    monitor = SchedulerOverdueMonitor(
+        liveness_checkpoint=liveness_checkpoint,
+        deliver_alert=deliver_alert,
+    )
+    assert (await monitor._check(scheduler_session, now=NOW)).alert_sent is True
 
-    assert (await check(NOW)).alert_sent is True
-    assert (await check(NOW + timedelta(minutes=1))).alert_sent is False
-    job.next_run_at = NOW + timedelta(minutes=5)
+    await scheduler_session.delete(job)
+    replacement = make_scheduler_job(
+        job_key="replacement_stalled_job",
+        family="replacement_stalled_job",
+        program_key="replacement_stalled_job",
+        next_run_at=NOW - timedelta(hours=1),
+    )
+    scheduler_session.add(replacement)
     await scheduler_session.flush()
-    assert (await check(NOW + timedelta(minutes=2))).alert_sent is False
-    job.next_run_at = NOW - timedelta(hours=1)
+    assert (
+        await monitor._check(scheduler_session, now=NOW + timedelta(minutes=1))
+    ).alert_sent is False
+
+    replacement.next_run_at = NOW + timedelta(minutes=5)
     await scheduler_session.flush()
-    assert (await check(NOW + timedelta(hours=2))).alert_sent is True
+    assert (
+        await monitor._check(scheduler_session, now=NOW + timedelta(minutes=2))
+    ).alert_sent is False
+    replacement.next_run_at = NOW - timedelta(hours=1)
+    await scheduler_session.flush()
+    assert (
+        await monitor._check(scheduler_session, now=NOW + timedelta(hours=2))
+    ).alert_sent is True
     assert len(deliveries) == 2

@@ -26,9 +26,6 @@ from brain.app.scheduler.catalog import (
 from brain.app.scheduler.executor import async_drain_scheduler
 from brain.app.scheduler.cold_start import record_scheduler_liveness_checkpoint
 from brain.app.scheduler.runtime import (
-    RUN_STATUS_CLAIMED,
-    RUN_STATUS_EXECUTING,
-    RUN_STATUS_RUNNING,
     RUN_STATUS_SHELVED,
     async_reclaim_expired_leases,
     normalize_run_status,
@@ -139,28 +136,6 @@ async def _async_count_leases(
     return int(active), int(expired)
 
 
-async def _async_active_job_ids(
-    session: AsyncSession,
-    owner_mode: str,
-    now: datetime,
-) -> set[int]:
-    result = await session.scalars(
-        select(SchedulerRun.job_id)
-        .join(SchedulerLease, SchedulerRun.lease_id == SchedulerLease.id)
-        .join(SchedulerJob, SchedulerRun.job_id == SchedulerJob.id)
-        .where(
-            SchedulerJob.owner_mode == owner_mode,
-            SchedulerRun.status.in_(
-                (RUN_STATUS_CLAIMED, RUN_STATUS_RUNNING, RUN_STATUS_EXECUTING)
-            ),
-            SchedulerLease.released_at.is_(None),
-            SchedulerLease.expires_at > now,
-        )
-        .distinct()
-    )
-    return {int(job_id) for job_id in result.all()}
-
-
 def _scheduler_health_payload(
     *,
     owner_mode: str,
@@ -170,9 +145,7 @@ def _scheduler_health_payload(
     run_statuses: dict[str, int],
     active_leases: int,
     expired_leases: int,
-    active_job_ids: set[int] | None = None,
 ) -> dict[str, Any]:
-    active_job_ids = active_job_ids or set()
     scoped_jobs = _job_scope(jobs, owner_mode)
     alerts = []
     for job in scoped_jobs:
@@ -207,13 +180,7 @@ def _scheduler_health_payload(
     due_times: list[datetime] = []
     for job in scoped_jobs:
         next_run_at = _as_utc(job["next_run_at"])
-        if (
-            not job["enabled"]
-            or job["pause_reason"]
-            or next_run_at is None
-            or next_run_at > now
-            or job["id"] in active_job_ids
-        ):
+        if not job["enabled"] or job["pause_reason"] or next_run_at is None or next_run_at > now:
             continue
         due_times.append(next_run_at)
         lagging_jobs.append(
@@ -325,7 +292,6 @@ async def async_scheduler_health_snapshot(
     runs = await async_list_scheduler_runs(session, limit=recent_run_limit)
     run_statuses = await _async_count_run_statuses(session, owner_mode)
     active_leases, expired_leases = await _async_count_leases(session, owner_mode, now)
-    active_job_ids = await _async_active_job_ids(session, owner_mode, now)
     return _scheduler_health_payload(
         owner_mode=owner_mode,
         now=now,
@@ -334,7 +300,6 @@ async def async_scheduler_health_snapshot(
         run_statuses=run_statuses,
         active_leases=active_leases,
         expired_leases=expired_leases,
-        active_job_ids=active_job_ids,
     )
 
 
