@@ -4,8 +4,10 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # No base-branch filter — see the note in brain-ci.yml and #682. PR builds never
+  # publish (`push:` is false for pull_request below), so this only widens what is
+  # built, never what is pushed to the registry.
   pull_request:
-    branches: [main]
     paths:
       - ".dockerignore"
       - "frontend/package.json"
