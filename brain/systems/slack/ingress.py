@@ -6,11 +6,12 @@ import logging
 from typing import Any, Mapping
 
 from brain.systems.slack.monitored_intakes import (
+    ImmediateReplyPolicy,
     MonitoredIntakeMatch,
+    configurable_monitored_intake_origins,
     enrich_monitored_intake_payload,
     recognize_monitored_intake,
     slack_response_thread_ts,
-    typed_monitored_intake_origins,
     visible_slack_content,
 )
 
@@ -95,7 +96,7 @@ def _event_origin(
         and (
             monitored_intake is None
             or subtype
-            not in monitored_intake.policy.allowed_ignored_subtypes
+            not in monitored_intake.policy.recognition.allowed_ignored_subtypes
         )
     ):
         return None
@@ -103,9 +104,9 @@ def _event_origin(
         return None
     if (
         monitored_intake is not None
-        and monitored_intake.policy.interrupt is not None
+        and isinstance(monitored_intake.policy, ImmediateReplyPolicy)
     ):
-        return monitored_intake.policy.origin
+        return monitored_intake.policy.recognition.origin
     is_bot = bool(event.get("bot_id"))
     # Direct human invitations to participate: explicit mentions and DMs.
     if not is_bot:
@@ -126,7 +127,7 @@ def _event_origin(
     ):
         if monitored_intake is None:
             return None
-        return monitored_intake.policy.origin
+        return monitored_intake.policy.recognition.origin
     return None
 
 
@@ -138,9 +139,9 @@ def _event_kind(
         return "direct_message"
     if (
         monitored_intake is not None
-        and origin == monitored_intake.policy.origin
+        and origin == monitored_intake.policy.recognition.origin
     ):
-        return monitored_intake.policy.event_kind
+        return monitored_intake.policy.recognition.event_kind
     return "mention"
 
 
@@ -198,8 +199,8 @@ def normalize_slack_socket_event(
     # explicit mentions and DMs resolve their own origin above and stay
     # actionable even when their text happens to decode as a typed intake.
     if (
-        origin == monitored_intake.policy.origin
-        and origin in typed_monitored_intake_origins()
+        origin == monitored_intake.policy.recognition.origin
+        and origin in configurable_monitored_intake_origins()
         and origin in disabled
     ):
         logger.info(
@@ -211,7 +212,7 @@ def normalize_slack_socket_event(
         return None
     message_text = (
         monitored_intake.text
-        if origin == monitored_intake.policy.origin
+        if origin == monitored_intake.policy.recognition.origin
         else visible_content.message_text
     )
 
@@ -238,7 +239,7 @@ def normalize_slack_socket_event(
             channel_type,
             thread_ts,
             message_ts,
-            is_monitored=origin == monitored_intake.policy.origin,
+            is_monitored=origin == monitored_intake.policy.recognition.origin,
         ),
         "visibility": "public",
     }
@@ -263,7 +264,7 @@ def normalize_slack_socket_event(
         "surface": surface,
         "response_target": response_target,
     }
-    if origin == monitored_intake.policy.origin:
+    if origin == monitored_intake.policy.recognition.origin:
         enrich_monitored_intake_payload(
             normalized_payload,
             monitored_intake,

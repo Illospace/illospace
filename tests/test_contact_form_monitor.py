@@ -30,16 +30,28 @@ def _contact_form_text(*, include_phone: bool = True) -> str:
 
 def test_typed_intakes_and_alert_fallback_share_one_registry():
     from brain.systems.slack.monitored_intakes import (
+        ImmediateReplyPolicy,
         MONITORED_INTAKE_POLICIES,
+        RunIntakePolicy,
+        configurable_monitored_intake_origins,
     )
 
-    assert [policy.origin for policy in MONITORED_INTAKE_POLICIES] == [
+    assert [policy.recognition.origin for policy in MONITORED_INTAKE_POLICIES] == [
         "slack.direct_liveness_probe",
         "contact_form_lead",
         "slack.channel_message",
     ]
-    for policy in MONITORED_INTAKE_POLICIES:
-        assert callable(policy.recognize)
+    assert isinstance(MONITORED_INTAKE_POLICIES[0], ImmediateReplyPolicy)
+    assert not hasattr(MONITORED_INTAKE_POLICIES[0], "enrich")
+    assert all(
+        isinstance(policy, RunIntakePolicy)
+        for policy in MONITORED_INTAKE_POLICIES[1:]
+    )
+    assert configurable_monitored_intake_origins() == frozenset(
+        {"contact_form_lead"}
+    )
+    for policy in MONITORED_INTAKE_POLICIES[1:]:
+        assert callable(policy.recognition.recognize)
         assert callable(policy.enrich)
         assert callable(policy.render)
         assert callable(policy.routing)

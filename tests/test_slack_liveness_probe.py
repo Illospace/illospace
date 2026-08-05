@@ -7,9 +7,28 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from brain.systems.liveness_state import LivenessSnapshot
+from brain.systems.slack.interrupt_delivery import (
+    SlackAcknowledgementMode,
+    SlackInterruptDeliveryDirective,
+    SlackInterruptReply,
+)
 from tests.slack_monitor_fixtures import (
     FakeSlackConnection,
     socket_mode_channel_message,
+)
+
+
+LIVENESS_SNAPSHOT = LivenessSnapshot(
+    ts="2026-08-05T18:00:00Z",
+    last_run_id=512,
+    last_surface="slack",
+)
+LIVENESS_REPLY = (
+    "Yes — the Illo API process handled this message. "
+    "Liveness snapshot: timestamp `2026-08-05T18:00:00Z`, last run ID `512`, "
+    "coarse last surface `slack`. "
+    "This confirms API message handling; it does not confirm that the scheduler is ticking."
 )
 
 
@@ -17,10 +36,11 @@ from tests.slack_monitor_fixtures import (
 async def test_monitored_direct_liveness_probe_replies_on_interrupt_path(
     monkeypatch,
 ):
-    from brain.systems.slack import connector
+    from brain.systems.slack import connector, interrupt_delivery
 
     submitted = []
     posts = []
+    reactions = []
 
     class FakeSlackClient:
         def __init__(self, _token):
@@ -29,6 +49,10 @@ async def test_monitored_direct_liveness_probe_replies_on_interrupt_path(
         async def post_message(self, **kwargs):
             posts.append(kwargs)
             return {"ok": True, "channel": kwargs["channel"], "ts": "1716900001.000300"}
+
+        async def add_reaction(self, **kwargs):
+            reactions.append(kwargs)
+            return {"ok": True}
 
     async def submit_inbound_envelope(
         _session,
@@ -41,10 +65,24 @@ async def test_monitored_direct_liveness_probe_replies_on_interrupt_path(
         return {
             "status": "processed",
             "idempotent_replay": False,
-            "ilo_outcome": {"operation": "slack_liveness_probe_interrupt"},
+            "ilo_outcome": {
+                "operation": "slack_liveness_probe_interrupt",
+                "delivery_directive": SlackInterruptDeliveryDirective(
+                    acknowledgement=SlackAcknowledgementMode.SUPPRESS,
+                    reply=SlackInterruptReply(
+                        channel_id="C_ALERTS",
+                        thread_ts="1716900000.000200",
+                        text=LIVENESS_REPLY,
+                        idempotency_key=(
+                            "slack:T789:C_ALERTS:1716900000.000200"
+                        ),
+                    ),
+                ).to_payload(),
+            },
         }
 
     monkeypatch.setattr(connector, "SlackWebClient", FakeSlackClient)
+    monkeypatch.setattr(interrupt_delivery, "SlackWebClient", FakeSlackClient)
     monkeypatch.setattr(
         connector,
         "submit_inbound_envelope",
@@ -71,10 +109,11 @@ async def test_monitored_direct_liveness_probe_replies_on_interrupt_path(
     assert result["ignored"] is False
     assert submitted[0]["origin"] == "slack.direct_liveness_probe"
     assert submitted[0]["payload"]["event_kind"] == "direct_liveness_probe"
+    assert reactions == []
     assert posts == [
         {
             "channel": "C_ALERTS",
-            "text": "Yes — Illo is alive and received this probe.",
+            "text": LIVENESS_REPLY,
             "thread_ts": "1716900000.000200",
             "client_msg_id": str(
                 uuid.uuid5(
@@ -111,7 +150,9 @@ async def test_liveness_probe_inbound_completes_without_admitting_agent_run(
         return {"status": value.status, "ilo_outcome": dict(value.action_result)}
 
     admit = AsyncMock()
+    snapshot = AsyncMock(return_value=LIVENESS_SNAPSHOT)
     monkeypatch.setattr(inbound, "admit_surface_envelope", admit)
+    monkeypatch.setattr(inbound, "latest_liveness_snapshot", snapshot)
 
     result = await inbound.process_slack_message_envelope(
         object(),
@@ -136,6 +177,12 @@ async def test_liveness_probe_inbound_completes_without_admitting_agent_run(
         "type": "post_slack_reply",
         "status": "interrupt",
     }
+    directive = result["ilo_outcome"]["delivery_directive"]
+    assert directive["acknowledgement"] == "suppress"
+    assert directive["reply"]["text"] == LIVENESS_REPLY
+    assert directive["reply"]["channel_id"] == "C_ALERTS"
+    assert directive["reply"]["thread_ts"] == "1716900000.000200"
+    snapshot.assert_awaited_once()
     admit.assert_not_awaited()
 
 
@@ -161,12 +208,15 @@ async def test_liveness_probe_inbound_completes_without_admitting_agent_run(
         ),
     ],
 )
-def test_direct_liveness_probe_uses_interrupt_policy_on_dm_and_ordinary_channel(
+@pytest.mark.asyncio
+async def test_direct_liveness_probe_replies_without_agent_run_on_dm_and_ordinary_channel(
+    monkeypatch,
     event_overrides,
     expected_thread_ts,
 ):
+    from brain.systems.inbound.handlers import InboundHandlerContext
+    from brain.systems.slack import inbound
     from brain.systems.slack.ingress import normalize_slack_socket_event
-    from brain.systems.slack.monitored_intakes import monitored_intake_policy
 
     envelope = normalize_slack_socket_event(
         socket_mode_channel_message(**event_overrides),
@@ -176,8 +226,39 @@ def test_direct_liveness_probe_uses_interrupt_policy_on_dm_and_ordinary_channel(
 
     assert envelope is not None
     assert envelope["origin"] == "slack.direct_liveness_probe"
-    assert monitored_intake_policy(envelope).interrupt is not None
     assert envelope["payload"]["response_target"]["thread_ts"] == expected_thread_ts
+
+    async def complete(value):
+        return {"status": value.status, "ilo_outcome": dict(value.action_result)}
+
+    admit = AsyncMock()
+    monkeypatch.setattr(inbound, "admit_surface_envelope", admit)
+    monkeypatch.setattr(
+        inbound,
+        "latest_liveness_snapshot",
+        AsyncMock(return_value=LIVENESS_SNAPSHOT),
+    )
+
+    result = await inbound.process_slack_message_envelope(
+        object(),
+        context=InboundHandlerContext(
+            connection_id="conn-1",
+            org_id="org-1",
+            owner_user_id="user-1",
+            token_id=None,
+            scopes=None,
+            display_name="Slack",
+            source_kind="slack",
+        ),
+        event=type("InboundEvent", (), {"id": "event-1"})(),
+        normalized=envelope,
+        complete=complete,
+    )
+
+    reply = result["ilo_outcome"]["delivery_directive"]["reply"]
+    assert reply["text"] == LIVENESS_REPLY
+    assert reply["thread_ts"] == expected_thread_ts
+    admit.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -196,6 +277,34 @@ def test_direct_liveness_probe_uses_interrupt_policy_on_dm_and_ordinary_channel(
                 "text": "<@BOTHER> are you alive?",
             },
             "slack.channel_message",
+        ),
+        (
+            {
+                "type": "app_mention",
+                "text": "<@BILLO> are you up for pairing?",
+            },
+            "slack.app_mention",
+        ),
+        (
+            {
+                "type": "app_mention",
+                "text": "<@BILLO> are you there to review this?",
+            },
+            "slack.app_mention",
+        ),
+        (
+            {
+                "type": "app_mention",
+                "text": "<@BILLO> are you dead set on this approach?",
+            },
+            "slack.app_mention",
+        ),
+        (
+            {
+                "type": "app_mention",
+                "text": "<@BILLO> are you alive? Please review the failed deploy.",
+            },
+            "slack.app_mention",
         ),
     ],
 )

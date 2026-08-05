@@ -10,7 +10,6 @@ import json
 import logging
 import os
 from typing import Any, Mapping
-import uuid
 
 from sqlalchemy import select
 
@@ -28,10 +27,14 @@ from brain.systems.slack.client import (
     slack_bot_token_from_env,
 )
 from brain.systems.slack.ingress import normalize_slack_socket_event
+from brain.systems.slack.interrupt_delivery import (
+    interrupt_delivery_from_inbound,
+    post_interrupt_reply,
+    should_add_reflex_ack,
+)
 from brain.systems.slack.monitored_intakes import (
     enrich_monitored_intake,
     is_monitored_intake,
-    monitored_intake_policy,
 )
 from brain.systems.slack.monitors import (
     disabled_intake_origins,
@@ -362,9 +365,7 @@ async def process_normalized_slack_envelope(
 ) -> dict[str, Any]:
     """Run every Slack ingress adapter through one normalized-envelope owner."""
 
-    policy = monitored_intake_policy(envelope)
     monitored_intake = is_monitored_intake(envelope)
-    interrupt = policy.interrupt if policy is not None else None
     existing_run_for_message = await _has_slack_run_for_envelope(session, connection, envelope)
     existing_inbound = await _has_inbound_event_for_envelope(
         session,
@@ -376,16 +377,6 @@ async def process_normalized_slack_envelope(
         connection=connection,
         envelope=envelope,
     )
-    acknowledged = False
-    if (monitored_intake and interrupt is None) or acknowledge_all:
-        # Reflex acknowledgement: leave a 👀 on every observed message so the
-        # channel knows Illo has seen it, independent of whether the ensuing
-        # triage run decides to reply.
-        acknowledged = await _acknowledge_monitored_message(
-            config,
-            envelope,
-            client=acknowledgement_client,
-        )
     if monitored_intake and existing_inbound is None:
         await enrich_monitored_intake(
             envelope,
@@ -398,12 +389,25 @@ async def process_normalized_slack_envelope(
         envelope=envelope,
         ingress_context=dict(ingress_context),
     )
-    interrupt_reply = None
-    if interrupt is not None and not inbound.get("idempotent_replay"):
-        interrupt_reply = await _post_interrupt_reply(
+    delivery_directive = interrupt_delivery_from_inbound(inbound)
+    acknowledged = False
+    if should_add_reflex_ack(
+        delivery_directive,
+        default=monitored_intake or acknowledge_all,
+    ):
+        # Reflex acknowledgement: leave a 👀 on every observed message so the
+        # channel knows Illo has seen it, independent of whether the ensuing
+        # triage run decides to reply.
+        acknowledged = await _acknowledge_monitored_message(
             config,
             envelope,
-            text=interrupt.reply(dict(envelope.get("payload") or {})),
+            client=acknowledgement_client,
+        )
+    interrupt_reply = None
+    if delivery_directive is not None and not inbound.get("idempotent_replay"):
+        interrupt_reply = await post_interrupt_reply(
+            config.bot_token,
+            delivery_directive,
             client=acknowledgement_client,
         )
     if (
@@ -736,35 +740,6 @@ def _admitted_slack_run(inbound: Mapping[str, Any]) -> bool:
     outcome = inbound.get("ilo_outcome")
     outcome = outcome if isinstance(outcome, Mapping) else {}
     return outcome.get("operation") == "slack_run_admitted" and outcome.get("run_id") is not None
-
-
-async def _post_interrupt_reply(
-    config: SlackConnectorConfig,
-    envelope: Mapping[str, Any],
-    *,
-    text: str,
-    client: Any | None = None,
-) -> Mapping[str, Any]:
-    payload = dict(envelope.get("payload") or {})
-    response_target = dict(payload.get("response_target") or {})
-    channel_id = str(response_target.get("channel_id") or payload.get("channel_id") or "").strip()
-    thread_ts = str(response_target.get("thread_ts") or "").strip() or None
-    if not channel_id:
-        raise ValueError("Slack interrupt reply requires a channel id")
-    idempotency_key = str(envelope.get("idempotency_key") or "").strip()
-    client_msg_id = str(
-        uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            f"illospace:slack-interrupt:{idempotency_key}",
-        )
-    )
-    active_client = client or SlackWebClient(config.bot_token)
-    return await active_client.post_message(
-        channel=channel_id,
-        text=text,
-        thread_ts=thread_ts,
-        client_msg_id=client_msg_id,
-    )
 
 
 async def _set_processing_status(config: SlackConnectorConfig, envelope: Mapping[str, Any]) -> None:
