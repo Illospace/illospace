@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.systems.cycles.execution_effects import CycleExecutionEffect
@@ -16,7 +15,17 @@ from brain.systems.cycles.promotion_readiness import (
 
 logger = logging.getLogger(__name__)
 
-CycleExecutionGate = Callable[..., Awaitable[CycleExecutionEffect | None]]
+
+class CycleExecutionGate(Protocol):
+    """One execution-policy gate with the dispatcher call contract."""
+
+    async def __call__(
+        self,
+        session: Any,
+        *,
+        cycle: Cycle,
+        run: CycleRun,
+    ) -> CycleExecutionEffect | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,44 +36,37 @@ class CycleExecutionPolicyRegistration:
     gate: CycleExecutionGate
 
 
+@dataclass(frozen=True, slots=True)
 class CycleExecutionPolicyRegistry:
     """Resolve one durable policy key to exactly one execution gate."""
 
-    def __init__(self) -> None:
-        self._registrations: list[CycleExecutionPolicyRegistration] = []
+    registrations: tuple[CycleExecutionPolicyRegistration, ...]
 
-    def register(
-        self,
-        key: str,
-        gate: CycleExecutionGate,
-    ) -> CycleExecutionPolicyRegistration:
-        normalized_key = _normalized_policy_key(key)
-        if normalized_key is None:
+    def __post_init__(self) -> None:
+        keys = [
+            _normalized_policy_key(registration.key)
+            for registration in self.registrations
+        ]
+        if any(key is None for key in keys):
             raise ValueError("Cycle execution policy registration requires a key")
-        registration = CycleExecutionPolicyRegistration(normalized_key, gate)
-        self._registrations.append(registration)
-        return registration
-
-    def unregister(self, registration: CycleExecutionPolicyRegistration) -> None:
-        self._registrations.remove(registration)
+        seen: set[str] = set()
+        for key in keys:
+            assert key is not None
+            if key in seen:
+                raise ValueError(
+                    "Ambiguous Cycle execution policy key: "
+                    f"{key!r} resolves to {keys.count(key)} gates"
+                )
+            seen.add(key)
 
     def resolve(self, key: str) -> CycleExecutionGate:
         normalized_key = _normalized_policy_key(key)
-        matches = [
-            registration.gate
-            for registration in self._registrations
-            if registration.key == normalized_key
-        ]
-        if not matches:
-            raise ValueError(
-                f"Unknown Cycle execution policy key: {normalized_key!r}"
-            )
-        if len(matches) > 1:
-            raise ValueError(
-                "Ambiguous Cycle execution policy key: "
-                f"{normalized_key!r} resolves to {len(matches)} gates"
-            )
-        return matches[0]
+        for registration in self.registrations:
+            if _normalized_policy_key(registration.key) == normalized_key:
+                return registration.gate
+        raise ValueError(
+            f"Unknown Cycle execution policy key: {normalized_key!r}"
+        )
 
 
 def _normalized_policy_key(value: str | None) -> str | None:
@@ -72,15 +74,23 @@ def _normalized_policy_key(value: str | None) -> str | None:
     return normalized or None
 
 
-cycle_execution_policy_registry = CycleExecutionPolicyRegistry()
-cycle_execution_policy_registry.register(
-    PROMOTION_READINESS_POLICY.execution_policy_key,
-    async_apply_promotion_readiness_gate,
+_DEFAULT_CYCLE_EXECUTION_POLICY_REGISTRY = CycleExecutionPolicyRegistry(
+    registrations=(
+        CycleExecutionPolicyRegistration(
+            PROMOTION_READINESS_POLICY.execution_policy_key,
+            async_apply_promotion_readiness_gate,
+        ),
+    )
 )
 
 
+def cycle_execution_policy_registry() -> CycleExecutionPolicyRegistry:
+    """Return every registered Cycle execution-policy gate."""
+    return _DEFAULT_CYCLE_EXECUTION_POLICY_REGISTRY
+
+
 def validate_cycle_execution_policy_key(value: str | None) -> str | None:
-    """Return a canonical configured key, rejecting unknown or ambiguous keys."""
+    """Return a canonical configured key, rejecting unknown keys."""
 
     if value is None:
         return None
@@ -89,7 +99,7 @@ def validate_cycle_execution_policy_key(value: str | None) -> str | None:
         raise ValueError(
             "Cycle execution policy key must be null or a registered non-empty key"
         )
-    cycle_execution_policy_registry.resolve(normalized_key)
+    cycle_execution_policy_registry().resolve(normalized_key)
     return normalized_key
 
 
@@ -110,7 +120,7 @@ async def async_apply_cycle_execution_policy(
             raise ValueError(
                 "Cycle execution policy key must be null or a registered non-empty key"
             )
-        gate = cycle_execution_policy_registry.resolve(key)
+        gate = cycle_execution_policy_registry().resolve(key)
     except ValueError as exc:
         error = str(exc)
         key = str(configured_key).strip()

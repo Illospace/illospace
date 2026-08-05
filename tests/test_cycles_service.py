@@ -14,12 +14,14 @@ from brain.app.api.schemas.cycles import CycleCreate, CycleRead, CycleRunRead
 from brain.contracts.statuses import TERMINAL_RUN_STATUS_VALUES
 from brain.systems.cycles import access as cycle_access
 from brain.systems.cycles import execution as cycle_execution
+from brain.systems.cycles import execution_policy_registry as policy_registry_module
 from brain.systems.cycles import prompts as cycle_prompts
 from brain.systems.cycles import service
 from brain.systems.cycles.common import AGENT_TRIGGERED_CYCLE_ORIGIN, MANUAL_CYCLE_ORIGIN
 from brain.systems.cycles.execution_effects import CycleExecutionEffect
 from brain.systems.cycles.execution_policy_registry import (
-    cycle_execution_policy_registry,
+    CycleExecutionPolicyRegistration,
+    CycleExecutionPolicyRegistry,
 )
 from brain.systems.cycles.contracts import (
     CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND,
@@ -2351,18 +2353,24 @@ async def test_execute_cycle_run_applies_a_second_registered_policy_without_exec
     async def fail_admit(*_args, **_kwargs):
         raise AssertionError("dummy policy did not finalize before admission")
 
-    registration = cycle_execution_policy_registry.register(
-        cycle.execution_policy_key,
-        dummy_gate,
+    isolated_registry = CycleExecutionPolicyRegistry(
+        registrations=(
+            CycleExecutionPolicyRegistration(
+                cycle.execution_policy_key,
+                dummy_gate,
+            ),
+        )
     )
-    try:
-        monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
-        monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
-        monkeypatch.setattr(service, "publish", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        policy_registry_module,
+        "cycle_execution_policy_registry",
+        lambda: isolated_registry,
+    )
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
+    monkeypatch.setattr(service, "publish", lambda *_args, **_kwargs: None)
 
-        await service.async_execute_cycle_run(run.id)
-    finally:
-        cycle_execution_policy_registry.unregister(registration)
+    await service.async_execute_cycle_run(run.id)
 
     assert applied == [(session, cycle.id, run.id)]
     assert run.status == "skipped"
