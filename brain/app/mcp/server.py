@@ -1134,6 +1134,28 @@ async def async_tool_brain_encode(
     return result
 
 
+async def _index_committed_memory_node(node_id: int) -> None:
+    """Best-effort mirror write after the memory transaction is durable."""
+
+    from brain.systems.knowledge.service import index_memory_node
+
+    try:
+        async with UnitOfWork() as uow:
+            stats = await index_memory_node(uow.session, node_id=node_id)
+            if stats.failed:
+                logger.warning(
+                    "Immediate knowledge indexing degraded for committed memory node %s",
+                    node_id,
+                )
+    except Exception:
+        # Knowledge is a disposable mirror. A failed index write must never
+        # change the successful outcome of the committed memory ingest.
+        logger.exception(
+            "Immediate knowledge indexing failed for committed memory node %s",
+            node_id,
+        )
+
+
 async def async_tool_memory_ingest_source(
     content: str,
     content_kind: str = "episode",
@@ -1175,6 +1197,10 @@ async def async_tool_memory_ingest_source(
             evidence=evidence or {},
             authority_principal=user_id,
         )
+    # This call is deliberately after UnitOfWork.__aexit__ commits the outer
+    # transaction. SQLAlchemy after_commit events also run for savepoint
+    # releases, so they cannot prove that the memory row is globally visible.
+    await _index_committed_memory_node(result.content_node_id)
     payload = result.to_dict()
     payload["content_kind"] = content_kind
     payload["source_kind"] = source_kind

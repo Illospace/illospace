@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler
 
 from brain.app.api.auth import get_current_user
@@ -30,7 +30,13 @@ from brain.platform.db.models.knowledge import (
     KnowledgeSyncState,
 )
 from brain.platform.db.models.org import Org, User
-from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
+from brain.platform.db.models.reconstructive_memory import (
+    MemoryAssertionNode,
+    MemoryEdgeNode,
+    MemoryNode,
+    MemorySource,
+    MemorySpan,
+)
 from brain.systems.knowledge.connectors.base import (
     EnumerationFailure,
     EnumerationFailureKind,
@@ -49,7 +55,11 @@ from brain.systems.knowledge.connectors.github import (
 )
 from brain.systems.knowledge.connectors.memory import MemoryConnector
 from brain.systems.knowledge.search import reciprocal_rank_fusion, search_knowledge
-from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS, sync_connector
+from brain.systems.knowledge.service import (
+    RAW_TEXT_MAX_CHARS,
+    index_memory_node,
+    sync_connector,
+)
 from brain.systems.external_agents import service as external_agents
 from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
 from brain.systems.cortex.project_context.github import (
@@ -317,7 +327,10 @@ async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
             KnowledgeItem.__table__,
             KnowledgeItemEmbedding.__table__,
             KnowledgeSyncState.__table__,
+            MemorySource.__table__,
+            MemorySpan.__table__,
             MemoryNode.__table__,
+            MemoryAssertionNode.__table__,
             MemoryEdgeNode.__table__,
         ]
     )
@@ -579,6 +592,211 @@ async def test_memory_connector_skips_orgless_nodes_and_keeps_organization_scope
     )
     assert items[0].extra["org_id"] == _ORG_ID
     assert "skipped node 14: org_id is missing" in caplog.text
+
+
+def _committing_unit_of_work(session):
+    class _CommittingUnitOfWork:
+        async def __aenter__(self):
+            self.session = session
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            del exc, traceback
+            if exc_type is None:
+                await session.commit()
+            else:
+                await session.rollback()
+            return False
+
+    return _CommittingUnitOfWork
+
+
+async def _ingest_shared_memory_through_mcp(
+    session,
+    monkeypatch,
+    *,
+    content: str,
+    source_ref: str,
+):
+    from brain.app.mcp import server as mcp_server
+    from brain.systems.reconstructive_memory import embeddings as memory_embeddings
+
+    monkeypatch.setattr(
+        mcp_server,
+        "UnitOfWork",
+        _committing_unit_of_work(session),
+    )
+    monkeypatch.setattr(memory_embeddings, "embed_node_texts", AsyncMock())
+    return await mcp_server.async_tool_memory_ingest_source(
+        content=content,
+        content_kind="decision",
+        source_kind="contract_test",
+        source_ref=source_ref,
+        org_id=_ORG_ID,
+        user_id="22222222-2222-4222-8222-222222222222",
+        visibility="team",
+        confidence=0.9,
+    )
+
+
+async def test_memory_ingest_indexes_committed_node_for_immediate_search(
+    session,
+    embedding_runtime,
+    monkeypatch,
+):
+    del embedding_runtime
+    distinctive = "Zephyr quokka release ownership stays with the active worker."
+
+    payload = await _ingest_shared_memory_through_mcp(
+        session,
+        monkeypatch,
+        content=distinctive,
+        source_ref="immediate-knowledge-search",
+    )
+
+    source_ref = f"memory_node:{payload['content_node_id']}"
+    item = await session.scalar(
+        select(KnowledgeItem).where(
+            KnowledgeItem.source == "memory",
+            KnowledgeItem.source_ref == source_ref,
+        )
+    )
+    search = await search_knowledge(session, "zephyr quokka", org_id=_ORG_ID)
+
+    assert item is not None
+    assert item.summary == distinctive
+    assert [result["source_ref"] for result in search["results"]] == [source_ref]
+
+
+@pytest.mark.parametrize(
+    ("node_id", "node_kind", "org_id", "visibility"),
+    [
+        (16, "content", None, "org"),
+        (17, "content", _ORG_ID, "private"),
+        (18, "summary", _ORG_ID, "org"),
+    ],
+)
+async def test_immediate_memory_index_reuses_connector_eligibility(
+    session,
+    embedding_runtime,
+    node_id,
+    node_kind,
+    org_id,
+    visibility,
+):
+    del embedding_runtime
+    session.add(
+        _memory_node(
+            node_id,
+            datetime(2026, 8, 5, 14, node_id, tzinfo=timezone.utc),
+            node_kind=node_kind,
+            org_id=org_id,
+            visibility=visibility,
+        )
+    )
+    await session.commit()
+
+    stats = await index_memory_node(session, node_id=node_id)
+    await session.commit()
+
+    item = await session.scalar(
+        select(KnowledgeItem).where(
+            KnowledgeItem.source == "memory",
+            KnowledgeItem.source_ref == f"memory_node:{node_id}",
+        )
+    )
+    assert stats.ingested == 0
+    assert item is None
+
+
+async def test_memory_sweep_and_cursor_rewalk_are_idempotent_after_immediate_ingest(
+    session,
+    embedding_runtime,
+    monkeypatch,
+):
+    del embedding_runtime
+    payload = await _ingest_shared_memory_through_mcp(
+        session,
+        monkeypatch,
+        content="Cobalt narwhal decisions remain searchable after every reconciler pass.",
+        source_ref="immediate-then-sweep",
+    )
+    source_ref = f"memory_node:{payload['content_node_id']}"
+    before = await session.scalar(
+        select(KnowledgeItem).where(KnowledgeItem.source_ref == source_ref)
+    )
+    assert before is not None
+    item_id = before.id
+    digest = before.content_digest
+
+    first_sweep = await sync_connector(session, MemoryConnector(max_items=20))
+    await session.execute(
+        delete(KnowledgeSyncState).where(KnowledgeSyncState.source == "memory")
+    )
+    await session.flush()
+    rewalk = await sync_connector(session, MemoryConnector(max_items=20))
+
+    items = list(
+        (
+            await session.scalars(
+                select(KnowledgeItem).where(KnowledgeItem.source_ref == source_ref)
+            )
+        ).all()
+    )
+    embeddings = list(
+        (
+            await session.scalars(
+                select(KnowledgeItemEmbedding).where(
+                    KnowledgeItemEmbedding.item_id == item_id
+                )
+            )
+        ).all()
+    )
+    assert first_sweep.stats["ingested"] == 0
+    assert first_sweep.stats["skipped"] == 1
+    assert rewalk.stats["ingested"] == 0
+    assert rewalk.stats["skipped"] == 1
+    assert len(items) == 1
+    assert items[0].id == item_id
+    assert items[0].content_digest == digest
+    assert len(embeddings) == 1
+
+
+async def test_memory_index_failure_does_not_fail_committed_ingest(
+    session,
+    monkeypatch,
+    caplog,
+):
+    from brain.app.mcp import server as mcp_server
+    from brain.systems.knowledge import service as knowledge_service
+    from brain.systems.reconstructive_memory import embeddings as memory_embeddings
+
+    monkeypatch.setattr(
+        mcp_server,
+        "UnitOfWork",
+        _committing_unit_of_work(session),
+    )
+    monkeypatch.setattr(memory_embeddings, "embed_node_texts", AsyncMock())
+    monkeypatch.setattr(
+        knowledge_service,
+        "index_memory_node",
+        AsyncMock(side_effect=RuntimeError("knowledge mirror unavailable")),
+    )
+
+    with caplog.at_level("ERROR", logger="mcp_brain"):
+        payload = await mcp_server.async_tool_memory_ingest_source(
+            content="Amber kestrel preservation remains durable during an index outage.",
+            source_kind="contract_test",
+            source_ref="failed-immediate-index",
+            org_id=_ORG_ID,
+            user_id="22222222-2222-4222-8222-222222222222",
+            visibility="org",
+        )
+
+    node = await session.get(MemoryNode, payload["content_node_id"])
+    assert node is not None
+    assert node.text == "Amber kestrel preservation remains durable during an index outage."
+    assert "Immediate knowledge indexing failed for committed memory node" in caplog.text
 
 
 async def test_memory_connector_resumes_a_bounded_same_timestamp_backfill(
