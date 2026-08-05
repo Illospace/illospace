@@ -1,8 +1,9 @@
 name: Deployment Smoke
 
 on:
+  # No base-branch filter — see the note in brain-ci.yml and #682. The paths
+  # filter below still decides whether this workflow has anything to do.
   pull_request:
-    branches: [main]
     paths:
       - "deploy/**"
       - "requirements.txt"
