@@ -26,6 +26,7 @@ class CycleCreate(BaseModel):
     )
     model_override: str | None = None
     thinking_override: str | None = None
+    execution_policy_key: str | None = Field(default=None, max_length=100)
     target_idea_id: str | None = None
     guidance: str | None = Field(default=None, max_length=20000)
     rationale: str | None = Field(default=None, max_length=5000)
@@ -47,6 +48,7 @@ class CycleUpdate(BaseModel):
     )
     model_override: str | None = None
     thinking_override: str | None = None
+    execution_policy_key: str | None = Field(default=None, max_length=100)
     target_idea_id: str | None = None
     guidance: str | None = Field(default=None, max_length=20000)
     rationale: str | None = Field(default=None, max_length=5000)
@@ -71,6 +73,7 @@ class CycleRead(BaseModel):
     timeout_seconds: int | None = None
     model_override: str | None = None
     thinking_override: str | None = None
+    execution_policy_key: str | None = None
     execution_mode: str
     target_idea_id: str | None = None
     reopen_archived: bool

@@ -25,9 +25,8 @@ from brain.systems.cycles.auth_preflight import (
 from brain.systems.cycles.quota_preflight import (
     async_preflight_cycle_external_quota,
 )
-from brain.systems.cycles.promotion_readiness import (
-    async_apply_promotion_readiness_gate,
-    async_validate_promotion_readiness_policy_configuration,
+from brain.systems.cycles.execution_policy_registry import (
+    async_apply_cycle_execution_policy,
 )
 from brain.systems.cycles.execution_effects import CycleExecutionDisposition
 from brain.systems.cycles.common import (
@@ -675,9 +674,6 @@ async def _async_materialize_due_cycle_runs_once(
 ) -> list[int]:
     executable_run_ids: list[int] = []
     async with UnitOfWork() as uow:
-        await async_validate_promotion_readiness_policy_configuration(
-            uow.session
-        )
         stmt = (
             select(Cycle)
             .where(
@@ -951,7 +947,7 @@ async def async_execute_cycle_run(run_id: int) -> None:
         run.idea_id = idea.id
         await _async_prepare_cycle_run_memory_snapshot(uow.session, cycle, run)
         await _async_attach_open_ask_stragglers(uow.session, cycle, run)
-        execution_effect = await async_apply_promotion_readiness_gate(
+        execution_effect = await async_apply_cycle_execution_policy(
             uow.session,
             cycle=cycle,
             run=run,

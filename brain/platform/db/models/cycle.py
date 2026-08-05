@@ -61,6 +61,7 @@ class Cycle(Base, TimestampMixin):
     )
     model_override: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     thinking_override: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    execution_policy_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     execution_mode: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
@@ -154,6 +155,7 @@ class CycleRevision(Base, CreatedAtMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     model_override: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     thinking_override: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    execution_policy_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     target_idea_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), nullable=True)
     context_policy: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict

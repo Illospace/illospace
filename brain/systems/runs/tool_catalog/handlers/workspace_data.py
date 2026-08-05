@@ -1309,6 +1309,7 @@ async def _query_cycles(
             "schedule_expr": cycle.schedule_expr,
             "timezone": cycle.timezone,
             "enabled": bool(cycle.enabled),
+            "execution_policy_key": cycle.execution_policy_key,
             "target_idea_id": str(cycle.target_idea_id) if cycle.target_idea_id else None,
             "idea_id": str(cycle.target_idea_id) if cycle.target_idea_id else None,
             **_thread_link_fields(idea, cycle.target_idea_id),
