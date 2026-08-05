@@ -30,6 +30,12 @@ _KNOWLEDGE_NODE_KINDS = ("content",)
 logger = logging.getLogger(__name__)
 
 
+def _candidate_node_query():
+    return select(MemoryNode).where(
+        MemoryNode.node_kind.in_(_KNOWLEDGE_NODE_KINDS)
+    )
+
+
 def _required_org_id(node: MemoryNode) -> str:
     if node.org_id is None:
         raise ValueError(f"Memory node {node.id} has no organization")
@@ -119,10 +125,7 @@ class MemoryConnector:
         """Build one immediate-index draft with the sweep's eligibility rules."""
 
         node = await session.scalar(
-            select(MemoryNode).where(
-                MemoryNode.id == node_id,
-                MemoryNode.node_kind.in_(_KNOWLEDGE_NODE_KINDS),
-            )
+            _candidate_node_query().where(MemoryNode.id == node_id)
         )
         if node is None:
             return None
@@ -202,8 +205,7 @@ class MemoryConnector:
     ) -> KnowledgeEnumeration:
         watermark = UpdatedAtCursor.from_mapping(cursor)
         statement = (
-            select(MemoryNode)
-            .where(MemoryNode.node_kind.in_(_KNOWLEDGE_NODE_KINDS))
+            _candidate_node_query()
             .order_by(MemoryNode.updated_at.asc(), MemoryNode.id.asc())
             .limit(self.max_items)
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
@@ -57,7 +58,6 @@ from brain.systems.knowledge.connectors.memory import MemoryConnector
 from brain.systems.knowledge.search import reciprocal_rank_fusion, search_knowledge
 from brain.systems.knowledge.service import (
     RAW_TEXT_MAX_CHARS,
-    index_memory_node,
     sync_connector,
 )
 from brain.systems.external_agents import service as external_agents
@@ -611,23 +611,30 @@ def _committing_unit_of_work(session):
     return _CommittingUnitOfWork
 
 
-async def _ingest_shared_memory_through_mcp(
+async def _wait_for_memory_knowledge_index(memory_ingestion):
+    await asyncio.sleep(0)
+    if memory_ingestion._POST_COMMIT_TASKS:
+        await asyncio.gather(*list(memory_ingestion._POST_COMMIT_TASKS))
+
+
+async def _ingest_shared_memory_at_canonical_boundary(
     session,
     monkeypatch,
     *,
     content: str,
     source_ref: str,
 ):
-    from brain.app.mcp import server as mcp_server
     from brain.systems.reconstructive_memory import embeddings as memory_embeddings
+    from brain.systems.reconstructive_memory import ingestion as memory_ingestion
 
     monkeypatch.setattr(
-        mcp_server,
+        memory_ingestion,
         "UnitOfWork",
         _committing_unit_of_work(session),
     )
     monkeypatch.setattr(memory_embeddings, "embed_node_texts", AsyncMock())
-    return await mcp_server.async_tool_memory_ingest_source(
+    result = await memory_ingestion.ingest_memory_source(
+        session,
         content=content,
         content_kind="decision",
         source_kind="contract_test",
@@ -637,6 +644,9 @@ async def _ingest_shared_memory_through_mcp(
         visibility="team",
         confidence=0.9,
     )
+    await session.commit()
+    await _wait_for_memory_knowledge_index(memory_ingestion)
+    return result.to_dict()
 
 
 async def test_memory_ingest_indexes_committed_node_for_immediate_search(
@@ -647,7 +657,7 @@ async def test_memory_ingest_indexes_committed_node_for_immediate_search(
     del embedding_runtime
     distinctive = "Zephyr quokka release ownership stays with the active worker."
 
-    payload = await _ingest_shared_memory_through_mcp(
+    payload = await _ingest_shared_memory_at_canonical_boundary(
         session,
         monkeypatch,
         content=distinctive,
@@ -668,45 +678,120 @@ async def test_memory_ingest_indexes_committed_node_for_immediate_search(
     assert [result["source_ref"] for result in search["results"]] == [source_ref]
 
 
-@pytest.mark.parametrize(
-    ("node_id", "node_kind", "org_id", "visibility"),
-    [
-        (16, "content", None, "org"),
-        (17, "content", _ORG_ID, "private"),
-        (18, "summary", _ORG_ID, "org"),
-    ],
-)
-async def test_immediate_memory_index_reuses_connector_eligibility(
+async def test_memory_connector_immediate_and_sweep_eligibility_are_identical(
     session,
-    embedding_runtime,
-    node_id,
-    node_kind,
-    org_id,
-    visibility,
 ):
-    del embedding_runtime
+    updated_at = datetime(2026, 8, 5, 14, 0, tzinfo=timezone.utc)
+    superseded = _memory_node(22, updated_at, visibility="team")
+    superseded.truth_status = "superseded"
+    rows = [
+        _memory_node(16, updated_at, visibility="org"),
+        _memory_node(17, updated_at, visibility="team"),
+        _memory_node(18, updated_at, node_kind="summary", visibility="org"),
+        _memory_node(19, updated_at, org_id=None, visibility="org"),
+        _memory_node(20, updated_at, visibility="private"),
+        _memory_node(21, updated_at, visibility="private"),
+        superseded,
+    ]
+    session.add_all(rows)
     session.add(
-        _memory_node(
-            node_id,
-            datetime(2026, 8, 5, 14, node_id, tzinfo=timezone.utc),
-            node_kind=node_kind,
-            org_id=org_id,
-            visibility=visibility,
+        KnowledgeItem(
+            source="memory",
+            kind="memory",
+            source_ref="memory_node:21",
+            title="Formerly shared memory",
+            summary="Formerly shared memory",
+            raw_text="Formerly shared memory",
+            search_text="Formerly shared memory",
+            extra={"org_id": _ORG_ID},
+            content_digest="former-shared-memory",
         )
     )
-    await session.commit()
+    await session.flush()
 
-    stats = await index_memory_node(session, node_id=node_id)
-    await session.commit()
+    connector = MemoryConnector(max_items=20)
+    immediate_drafts = {}
+    for row in rows:
+        draft = await connector.draft_for_node(session, node_id=row.id)
+        if draft is not None:
+            immediate_drafts[draft.source_ref] = draft
+    enumeration = await connector.enumerate_changed(session, {})
+    sweep_drafts = {draft.source_ref: draft for draft in enumeration.drafts}
 
-    item = await session.scalar(
-        select(KnowledgeItem).where(
-            KnowledgeItem.source == "memory",
-            KnowledgeItem.source_ref == f"memory_node:{node_id}",
-        )
+    assert immediate_drafts == sweep_drafts
+    assert set(immediate_drafts) == {
+        "memory_node:16",
+        "memory_node:17",
+        "memory_node:21",
+        "memory_node:22",
+    }
+    assert immediate_drafts["memory_node:21"].extra["mirror_status"] == (
+        "visibility_withdrawn"
     )
-    assert stats.ingested == 0
-    assert item is None
+    assert immediate_drafts["memory_node:22"].archived_at == updated_at
+
+
+async def test_memory_index_waits_for_outer_commit_after_savepoint_release(
+    session,
+    monkeypatch,
+):
+    from brain.systems.reconstructive_memory import embeddings as memory_embeddings
+    from brain.systems.reconstructive_memory import ingestion as memory_ingestion
+
+    spawn_index = MagicMock()
+    monkeypatch.setattr(memory_embeddings, "embed_node_texts", AsyncMock())
+    monkeypatch.setattr(
+        memory_ingestion,
+        "_spawn_knowledge_index_task",
+        spawn_index,
+    )
+
+    async with session.begin_nested():
+        ingested = await memory_ingestion.ingest_memory_source(
+            session,
+            content="Savepoint release must not publish a memory projection early.",
+            content_kind="decision",
+            source_kind="contract_test",
+            org_id=_ORG_ID,
+            visibility="team",
+        )
+
+    await asyncio.sleep(0)
+    spawn_index.assert_not_called()
+
+    await session.commit()
+    await asyncio.sleep(0)
+    spawn_index.assert_called_once_with([ingested.content_node_id])
+
+
+async def test_memory_index_queue_is_cleared_on_outer_rollback(
+    session,
+    monkeypatch,
+):
+    from brain.systems.reconstructive_memory import embeddings as memory_embeddings
+    from brain.systems.reconstructive_memory import ingestion as memory_ingestion
+
+    spawn_index = MagicMock()
+    monkeypatch.setattr(memory_embeddings, "embed_node_texts", AsyncMock())
+    monkeypatch.setattr(
+        memory_ingestion,
+        "_spawn_knowledge_index_task",
+        spawn_index,
+    )
+
+    await memory_ingestion.ingest_memory_source(
+        session,
+        content="Rolled-back memory must never publish a knowledge projection.",
+        content_kind="decision",
+        source_kind="contract_test",
+        org_id=_ORG_ID,
+        visibility="team",
+    )
+    await session.rollback()
+    await asyncio.sleep(0)
+
+    spawn_index.assert_not_called()
+    assert session.sync_session.info[memory_ingestion._INFO_QUEUE_KEY] == []
 
 
 async def test_memory_sweep_and_cursor_rewalk_are_idempotent_after_immediate_ingest(
@@ -715,7 +800,7 @@ async def test_memory_sweep_and_cursor_rewalk_are_idempotent_after_immediate_ing
     monkeypatch,
 ):
     del embedding_runtime
-    payload = await _ingest_shared_memory_through_mcp(
+    payload = await _ingest_shared_memory_at_canonical_boundary(
         session,
         monkeypatch,
         content="Cobalt narwhal decisions remain searchable after every reconciler pass.",
@@ -767,12 +852,12 @@ async def test_memory_index_failure_does_not_fail_committed_ingest(
     monkeypatch,
     caplog,
 ):
-    from brain.app.mcp import server as mcp_server
     from brain.systems.knowledge import service as knowledge_service
     from brain.systems.reconstructive_memory import embeddings as memory_embeddings
+    from brain.systems.reconstructive_memory import ingestion as memory_ingestion
 
     monkeypatch.setattr(
-        mcp_server,
+        memory_ingestion,
         "UnitOfWork",
         _committing_unit_of_work(session),
     )
@@ -783,17 +868,21 @@ async def test_memory_index_failure_does_not_fail_committed_ingest(
         AsyncMock(side_effect=RuntimeError("knowledge mirror unavailable")),
     )
 
-    with caplog.at_level("ERROR", logger="mcp_brain"):
-        payload = await mcp_server.async_tool_memory_ingest_source(
+    with caplog.at_level("ERROR", logger=memory_ingestion.__name__):
+        result = await memory_ingestion.ingest_memory_source(
+            session,
             content="Amber kestrel preservation remains durable during an index outage.",
+            content_kind="episode",
             source_kind="contract_test",
             source_ref="failed-immediate-index",
             org_id=_ORG_ID,
             user_id="22222222-2222-4222-8222-222222222222",
             visibility="org",
         )
+        await session.commit()
+        await _wait_for_memory_knowledge_index(memory_ingestion)
 
-    node = await session.get(MemoryNode, payload["content_node_id"])
+    node = await session.get(MemoryNode, result.content_node_id)
     assert node is not None
     assert node.text == "Amber kestrel preservation remains durable during an index outage."
     assert "Immediate knowledge indexing failed for committed memory node" in caplog.text
