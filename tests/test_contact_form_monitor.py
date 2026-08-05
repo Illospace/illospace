@@ -817,7 +817,7 @@ async def test_disabled_contact_form_creates_no_run_or_ack(monkeypatch):
 async def test_connector_dispatches_thread_reply_to_generic_obligation_matcher(
     monkeypatch,
 ):
-    from brain.systems.runs import open_asks
+    from brain.systems.runs import open_ask_settlement
 
     connector_module, _reactions, _submitted = patch_slack_connector(
         monkeypatch
@@ -828,7 +828,7 @@ async def test_connector_dispatches_thread_reply_to_generic_obligation_matcher(
     session = FakeSlackSession(connection)
     record_answer = AsyncMock(return_value=1)
     monkeypatch.setattr(
-        open_asks,
+        open_ask_settlement,
         "record_inbound_slack_obligation_answer",
         record_answer,
     )

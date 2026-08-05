@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import logging
 from typing import TYPE_CHECKING, Any
 
-from brain.systems.runs.open_asks import (
+from brain.systems.runs.open_ask_settlement import (
     DeliveredSlackAnswer,
     DeliveredSlackAnswerCounts,
     DeliveredSlackRoute,
@@ -381,7 +381,7 @@ async def post_open_ask_artifact_reply(
 ) -> dict[str, Any]:
     """Reply to every matching open ask and close only confirmed deliveries."""
 
-    from brain.systems.runs.open_asks import open_asks_for_origin_ref
+    from brain.systems.runs.open_ask_settlement import open_asks_for_origin_ref
 
     rows = await open_asks_for_origin_ref(
         session,

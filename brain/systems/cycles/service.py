@@ -242,7 +242,7 @@ async def _async_attach_open_ask_stragglers(
         or launch_context.get("run_kind") != SCHEDULED_DIGEST_RUN_KIND
     ):
         return []
-    from brain.systems.runs.open_asks import (
+    from brain.systems.runs.open_ask_digest import (
         expire_stale_run_deferrals,
         list_open_ask_stragglers,
     )

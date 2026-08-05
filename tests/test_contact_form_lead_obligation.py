@@ -351,7 +351,7 @@ async def test_owner_reply_answers_contact_lead_and_suppresses_24h_resurface(
     from brain.systems.runs.obligation_notices import (
         deliver_pending_obligation_notices,
     )
-    from brain.systems.runs.open_asks import (
+    from brain.systems.runs.open_ask_settlement import (
         record_inbound_slack_obligation_answer,
     )
     from brain.systems.runs.work_intake import admit_work
