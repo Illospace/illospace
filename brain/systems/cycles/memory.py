@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import func, select
 
 from brain.kernel.common.serialization import jsonable
+from brain.kernel.common.time import assume_utc
 from brain.platform.db.models.cycle import (
     Cycle,
     CycleGuidance,
@@ -377,8 +378,12 @@ async def finalize_stale_cycle_run(
         skip_reason=skip_reason,
         evaluator_type="recovery",
     )
-    cycle_last_run_at = _aware_utc(cycle.last_run_at)
-    scheduled_for = _aware_utc(run.scheduled_for)
+    cycle_last_run_at = cycle.last_run_at
+    if cycle_last_run_at is not None and cycle_last_run_at.tzinfo is None:
+        cycle_last_run_at = assume_utc(cycle_last_run_at)
+    scheduled_for = run.scheduled_for
+    if scheduled_for is not None and scheduled_for.tzinfo is None:
+        scheduled_for = assume_utc(scheduled_for)
     if cycle_last_run_at is None or (
         scheduled_for is not None and scheduled_for >= cycle_last_run_at
     ):
@@ -573,11 +578,3 @@ def cycle_run_evaluation_summary(
         detail = skip_reason or "unknown skip reason"
         return f"Cycle run was skipped and recorded in the Cycle ledger: {detail}" + burn
     return f"Cycle run reached status {status} and was recorded in the Cycle ledger." + burn
-
-
-def _aware_utc(value):
-    from datetime import timezone
-
-    if value is not None and value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value

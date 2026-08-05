@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 
 from brain.contracts.statuses import TERMINAL_RUN_STATUS_VALUES
+from brain.kernel.common.time import assume_utc
 from brain.platform.integrations.provider_auth_preflight import (
     ProviderAuthPreflightResult,
 )
@@ -444,12 +445,6 @@ async def async_run_cycle_now(
     return serialize_cycle_run(run)
 
 
-def _aware_utc(value: datetime | None) -> datetime | None:
-    if value is not None and value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value
-
-
 def _agent_run_terminal_cycle_status(agent_run: AgentRun | None) -> str | None:
     if agent_run is None:
         return None
@@ -601,7 +596,9 @@ async def async_recover_stale_cycle_runs_once(
         for run in active_runs:
             cycle = await uow.session.get(Cycle, run.cycle_id)
             if run.status == "queued":
-                scheduled_for = _aware_utc(run.scheduled_for)
+                scheduled_for = run.scheduled_for
+                if scheduled_for is not None and scheduled_for.tzinfo is None:
+                    scheduled_for = assume_utc(scheduled_for)
                 if scheduled_for is not None and scheduled_for < catchup_cutoff:
                     await _finalize_stale_cycle_run(
                         run,
@@ -650,16 +647,18 @@ def _advance_cycle_schedule(
 ) -> datetime | None:
     """Move one Cycle onto its next schedule slot."""
 
-    scheduled_for = _aware_utc(from_dt)
+    scheduled_for = from_dt
+    if scheduled_for is not None and scheduled_for.tzinfo is None:
+        scheduled_for = assume_utc(scheduled_for)
     if scheduled_for is None:
         raise ValueError("from_dt is required")
-    next_run_at = _aware_utc(
-        compute_next_run_at(
-            cycle.schedule_expr,
-            cycle.timezone,
-            from_dt=scheduled_for,
-        )
+    next_run_at = compute_next_run_at(
+        cycle.schedule_expr,
+        cycle.timezone,
+        from_dt=scheduled_for,
     )
+    if next_run_at is not None and next_run_at.tzinfo is None:
+        next_run_at = assume_utc(next_run_at)
     if next_run_at is not None and next_run_at <= scheduled_for:
         raise RuntimeError("schedule did not advance")
     cycle.next_run_at = next_run_at
@@ -750,8 +749,10 @@ async def async_advance_cycle_schedule_past_gap(
     advances ``next_run_at`` beyond the gap without creating ``CycleRun`` rows.
     """
 
-    gap_start = _aware_utc(gap_start)
-    now = _aware_utc(now)
+    if gap_start is not None and gap_start.tzinfo is None:
+        gap_start = assume_utc(gap_start)
+    if now is not None and now.tzinfo is None:
+        now = assume_utc(now)
     if gap_start is None or now is None:
         raise ValueError("gap_start and now are required")
     if gap_start > now:
@@ -779,7 +780,9 @@ async def async_advance_cycle_schedule_past_gap(
     limit = max(1, int(max_slots_per_cycle))
 
     for cycle in cycles:
-        scheduled_for = _aware_utc(cycle.next_run_at)
+        scheduled_for = cycle.next_run_at
+        if scheduled_for is not None and scheduled_for.tzinfo is None:
+            scheduled_for = assume_utc(scheduled_for)
         original_next_run_at = cycle.next_run_at
         original_enabled = cycle.enabled
         seen = 0
@@ -877,7 +880,9 @@ async def async_wake_cycle_now(*, name: str, org_id: str | None = None) -> str:
         # competing wake must judge the slot as of when it holds the row, or it
         # re-stamps a slot that is already due.
         now = datetime.now(timezone.utc)
-        pending_at = _aware_utc(cycle.next_run_at)
+        pending_at = cycle.next_run_at
+        if pending_at is not None and pending_at.tzinfo is None:
+            pending_at = assume_utc(pending_at)
         if pending_at is not None and pending_at <= now:
             return "already_pending"
         active_run_count = await _async_active_cycle_run_count(uow.session, cycle.id)

@@ -823,7 +823,7 @@ async def test_due_cycle_with_long_running_previous_run_records_skip_in_ledger(
     assert len(ledger) == 2
     assert ledger[0] is active_run
     assert ledger[0].status == "running"
-    assert service._aware_utc(ledger[1].scheduled_for) == scheduled_for
+    assert _aware_utc_for_test(ledger[1].scheduled_for) == scheduled_for
     assert ledger[1].status == "skipped"
     assert ledger[1].skip_reason == "previous_run_active"
     assert ledger[1].context_snapshot["disposition"] == {
@@ -4188,7 +4188,7 @@ async def test_wake_cycle_now_skips_when_run_in_flight(
     assert disposition == "run_in_flight"
     # The wake re-reads the locked row, and SQLite has no timestamptz, so the
     # refreshed attribute comes back naive. Same instant, unmoved.
-    assert service._aware_utc(cycle.next_run_at) == future
+    assert _aware_utc_for_test(cycle.next_run_at) == future
 
 
 @pytest.mark.asyncio
@@ -4228,7 +4228,7 @@ async def test_wake_cycle_now_reports_already_pending_and_missing(
     )
 
     assert await service.async_wake_cycle_now(name="Pending Cycle") == "already_pending"
-    assert service._aware_utc(pending.next_run_at) == now - timedelta(minutes=5)
+    assert _aware_utc_for_test(pending.next_run_at) == now - timedelta(minutes=5)
     assert await service.async_wake_cycle_now(name="Disabled Cycle") == "not_found"
     assert await service.async_wake_cycle_now(name="No Such Cycle") == "not_found"
 
