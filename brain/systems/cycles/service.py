@@ -27,7 +27,9 @@ from brain.systems.cycles.quota_preflight import (
 )
 from brain.systems.cycles.promotion_readiness import (
     async_apply_promotion_readiness_gate,
+    async_validate_promotion_readiness_policy_configuration,
 )
+from brain.systems.cycles.execution_effects import CycleExecutionDisposition
 from brain.systems.cycles.common import (
     MANUAL_CYCLE_ORIGIN,
     MAX_CYCLE_TIMEOUT_SECONDS,
@@ -47,6 +49,8 @@ from brain.systems.cycles.contracts import normalize_cycle_run_kind
 from brain.systems.cycles.contract_gate import (
     async_prepare_cycle_run_visible_finalization,
     cycle_finalization_status_from_verdict,
+)
+from brain.systems.cycles.cycle_verdict_ledger import (
     persisted_cycle_contract_verdict,
 )
 from brain.systems.cycles.memory import (
@@ -671,6 +675,9 @@ async def _async_materialize_due_cycle_runs_once(
 ) -> list[int]:
     executable_run_ids: list[int] = []
     async with UnitOfWork() as uow:
+        await async_validate_promotion_readiness_policy_configuration(
+            uow.session
+        )
         stmt = (
             select(Cycle)
             .where(
@@ -944,17 +951,24 @@ async def async_execute_cycle_run(run_id: int) -> None:
         run.idea_id = idea.id
         await _async_prepare_cycle_run_memory_snapshot(uow.session, cycle, run)
         await _async_attach_open_ask_stragglers(uow.session, cycle, run)
-        promotion_gate = await async_apply_promotion_readiness_gate(
+        execution_effect = await async_apply_promotion_readiness_gate(
             uow.session,
             cycle=cycle,
             run=run,
         )
-        if promotion_gate is not None and promotion_gate.skip_agent:
+        if (
+            execution_effect is not None
+            and execution_effect.disposition
+            is CycleExecutionDisposition.FINALIZE
+        ):
+            if execution_effect.final_status is None:
+                raise RuntimeError("finalize execution effect omitted final_status")
             await _finalize_cycle_run(
                 run,
                 cycle,
-                status="skipped",
-                skip_reason=promotion_gate.skip_reason,
+                status=execution_effect.final_status,
+                error=execution_effect.final_error,
+                skip_reason=execution_effect.final_skip_reason,
                 session=uow.session,
             )
             return
@@ -1027,14 +1041,10 @@ async def async_execute_cycle_run(run_id: int) -> None:
             else:
                 run.started_at = datetime.now(timezone.utc)
                 run_metadata = _cycle_run_metadata(cycle, run)
-                if (
-                    promotion_gate is not None
-                    and promotion_gate.outcome == "unchanged"
-                ):
-                    run_metadata["tool_policy"] = {
-                        "disabled_tools": ["read_github_source"],
-                        "reason": "promotion_readiness_unchanged",
-                    }
+                if execution_effect is not None:
+                    run_metadata.update(
+                        execution_effect.admission_metadata_patch
+                    )
                 run_message = _cycle_run_message(idea, cycle, run)
                 agent_run_id = await _async_admit_cycle_run(
                     uow.session,

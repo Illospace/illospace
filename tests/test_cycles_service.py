@@ -21,6 +21,7 @@ from brain.systems.cycles.contracts import (
     CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND,
     cycle_result_contract,
 )
+from brain.systems.cycles.promotion_readiness import PROMOTION_READINESS_POLICY
 from brain.app.api.routers import cycles as cycles_router
 from brain.platform.db.models.cycle import (
     Cycle,
@@ -2093,14 +2094,13 @@ async def test_execute_promotion_run_unchanged_skips_review_and_reaches_posting_
 ):
     from unittest.mock import AsyncMock
 
-    from brain.systems.cycles.contracts import PROMOTION_READINESS_CYCLE_NAME
     from brain.systems.cycles.promotion_readiness import (
         async_apply_promotion_readiness_gate,
     )
 
     run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
     cycle.id = 9
-    cycle.name = PROMOTION_READINESS_CYCLE_NAME
+    cycle.name = PROMOTION_READINESS_POLICY.expected_cycle_name
     run.cycle_id = cycle.id
     session = _AsyncExecuteCycleSession(
         run=run,
@@ -2125,6 +2125,7 @@ async def test_execute_promotion_run_unchanged_skips_review_and_reaches_posting_
             branch_comparison_reader=AsyncMock(
                 return_value={"status": "ahead", "ahead_by": 47}
             ),
+            configured_cycle_ids_reader=AsyncMock(return_value=(9,)),
         )
 
     admissions = []
@@ -2147,8 +2148,7 @@ async def test_execute_promotion_run_unchanged_skips_review_and_reaches_posting_
     assert len(admissions) == 1
     gate = run.context_snapshot["promotion_readiness_gate"]
     assert gate["outcome"] == "unchanged"
-    assert gate["requires_per_pr_review"] is False
-    assert gate["reaches_posting_path"] is True
+    assert set(gate) == {"outcome", "evidence"}
     assert admissions[0]["metadata"]["tool_policy"] == {
         "disabled_tools": ["read_github_source"],
         "reason": "promotion_readiness_unchanged",
@@ -2163,14 +2163,13 @@ async def test_execute_promotion_run_unchanged_skips_review_and_reaches_posting_
 async def test_execute_promotion_run_idle_finishes_before_agent_admission(monkeypatch):
     from unittest.mock import AsyncMock
 
-    from brain.systems.cycles.contracts import PROMOTION_READINESS_CYCLE_NAME
     from brain.systems.cycles.promotion_readiness import (
         async_apply_promotion_readiness_gate,
     )
 
     run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
     cycle.id = 9
-    cycle.name = PROMOTION_READINESS_CYCLE_NAME
+    cycle.name = PROMOTION_READINESS_POLICY.expected_cycle_name
     run.cycle_id = cycle.id
     session = _AsyncExecuteCycleSession(
         run=run,
@@ -2194,6 +2193,7 @@ async def test_execute_promotion_run_idle_finishes_before_agent_admission(monkey
             branch_comparison_reader=AsyncMock(
                 return_value={"status": "identical", "ahead_by": 0}
             ),
+            configured_cycle_ids_reader=AsyncMock(return_value=(9,)),
         )
 
     async def fail_admit(*_args, **_kwargs):
@@ -2219,14 +2219,13 @@ async def test_execute_promotion_run_with_staging_ahead_reaches_agent_posting_pa
 ):
     from unittest.mock import AsyncMock
 
-    from brain.systems.cycles.contracts import PROMOTION_READINESS_CYCLE_NAME
     from brain.systems.cycles.promotion_readiness import (
         async_apply_promotion_readiness_gate,
     )
 
     run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
     cycle.id = 9
-    cycle.name = PROMOTION_READINESS_CYCLE_NAME
+    cycle.name = PROMOTION_READINESS_POLICY.expected_cycle_name
     run.cycle_id = cycle.id
     session = _AsyncExecuteCycleSession(
         run=run,
@@ -2250,6 +2249,7 @@ async def test_execute_promotion_run_with_staging_ahead_reaches_agent_posting_pa
             branch_comparison_reader=AsyncMock(
                 return_value={"status": "ahead", "ahead_by": 47}
             ),
+            configured_cycle_ids_reader=AsyncMock(return_value=(9,)),
         )
 
     admissions = []
@@ -3497,7 +3497,7 @@ def test_promotion_low_silent_run_persists_its_deliberate_posting_verdict(
     )
     contract = cycle_result_contract(
         run_kind="scheduled_digest",
-        require_closing_block_verdict=True,
+        extension=PROMOTION_READINESS_POLICY.contract_extension,
     )
     session, cycle_run, _, _ = _contract_finalization_scenario(
         cycle_id=9,
@@ -3547,7 +3547,7 @@ def test_promotion_unchanged_run_persists_skip_and_posting_verdict(monkeypatch):
     )
     contract = cycle_result_contract(
         run_kind="scheduled_digest",
-        require_closing_block_verdict=True,
+        extension=PROMOTION_READINESS_POLICY.contract_extension,
     )
     slack_post = AgentRunEventRow(
         id=1,

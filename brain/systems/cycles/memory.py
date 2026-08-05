@@ -26,12 +26,11 @@ from brain.systems.cycles.common import (
     string_or_none,
     validate_nonempty_trimmed,
 )
-from brain.systems.cycles.contract_gate import (
+from brain.systems.cycles.cycle_verdict_ledger import (
     MISSION_RESULT_CONTRACT_VERDICT_KEY,
     ensure_cycle_run_closing_verdict,
 )
 from brain.systems.cycles.contracts import (
-    cycle_requires_closing_block_verdict,
     cycle_launch_receipt,
     cycle_result_contract,
     cycle_scheduled_review_window,
@@ -225,9 +224,6 @@ def _build_cycle_run_memory_snapshot(
         run_kind=str(
             launch_context.get("run_kind") or SCHEDULED_DIGEST_RUN_KIND
         ),
-        require_closing_block_verdict=cycle_requires_closing_block_verdict(
-            cycle.name
-        ),
     )
 
     return {
@@ -417,7 +413,6 @@ async def record_cycle_run_evaluation(
         raise ValueError("CycleRun must be flushed before recording an evaluation")
     ensure_cycle_run_closing_verdict(
         run,
-        cycle_name=cycle.name,
         status=status,
         error=error,
         skip_reason=skip_reason,

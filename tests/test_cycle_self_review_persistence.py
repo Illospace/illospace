@@ -6,11 +6,10 @@ import pytest
 
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.systems.cycles import memory as cycle_memory
-from brain.systems.cycles.contract_gate import (
-    CLOSING_BLOCK_VERDICT_KEY,
-    extract_self_review_summary,
-)
-from brain.systems.cycles.contracts import PROMOTION_READINESS_CYCLE_NAME
+from brain.systems.cycles.contract_gate import extract_self_review_summary
+from brain.systems.cycles.contracts import cycle_result_contract
+from brain.systems.cycles.cycle_verdict_ledger import CLOSING_BLOCK_VERDICT_KEY
+from brain.systems.cycles.promotion_readiness import PROMOTION_READINESS_POLICY
 
 
 SELF_REVIEW = "I should verify the evidence gap earlier in the next run."
@@ -114,8 +113,14 @@ async def test_cycle_evaluation_omits_usage_when_no_usage_was_recorded(monkeypat
 async def test_failed_promotion_run_records_that_the_closing_gate_was_not_reached():
     session = _CaptureSession()
     cycle, run = _cycle_and_run()
-    cycle.name = PROMOTION_READINESS_CYCLE_NAME
+    cycle.name = PROMOTION_READINESS_POLICY.expected_cycle_name
     run.run_id = None
+    run.context_snapshot = {
+        "result_contract": cycle_result_contract(
+            run_kind="scheduled_digest",
+            extension=PROMOTION_READINESS_POLICY.contract_extension,
+        )
+    }
 
     await cycle_memory.record_cycle_run_evaluation(
         session,
