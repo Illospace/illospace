@@ -10,9 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.integrations.provider_auth_preflight import (
+    ProviderAuthBlockedPreflightResult,
     ProviderAuthPreflightResult,
 )
 from brain.platform.integrations.provider_quota_preflight import (
+    ProviderQuotaBlockedPreflightResult,
+    ProviderQuotaDeferredPreflightResult,
     ProviderQuotaPreflightResult,
 )
 from brain.platform.providers.model_policy import (
@@ -93,7 +96,7 @@ def _require_rejection_notice_case(
 class CycleAdmissionAuthBlocked:
     """An auth rejection with its matching provider notice."""
 
-    notice: ProviderAuthPreflightResult
+    notice: ProviderAuthBlockedPreflightResult
 
     def __post_init__(self) -> None:
         _require_rejection_notice_case(
@@ -107,7 +110,7 @@ class CycleAdmissionAuthBlocked:
 class CycleAdmissionQuotaBlocked:
     """A hard-quota rejection with its matching provider notice."""
 
-    notice: ProviderQuotaPreflightResult
+    notice: ProviderQuotaBlockedPreflightResult
 
     def __post_init__(self) -> None:
         _require_rejection_notice_case(
@@ -121,7 +124,7 @@ class CycleAdmissionQuotaBlocked:
 class CycleAdmissionQuotaDeferred:
     """A soft-quota deferral with its matching provider notice."""
 
-    notice: ProviderQuotaPreflightResult
+    notice: ProviderQuotaDeferredPreflightResult
 
     def __post_init__(self) -> None:
         _require_rejection_notice_case(
@@ -218,7 +221,7 @@ async def async_prepare_cycle_run_admission(
     auth = await async_preflight_cycle_external_auth(session, route=route)
     if auth.status != "skipped":
         _record_preflight_snapshot(run, key="auth_preflight", preflight=auth)
-    if auth.blocked:
+    if isinstance(auth, ProviderAuthBlockedPreflightResult):
         return CycleAdmissionAuthBlocked(notice=auth)
 
     quota = preflight_cycle_external_quota(

@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 import os
 
-from brain.platform.integrations.codex_usage import read_codex_usage
+import pytest
+
+from brain.platform.integrations.codex_usage import (
+    CodexKnownUsageReading,
+    CodexUnknownUsageReading,
+    CodexUsageUnknownReason,
+    read_codex_usage,
+)
 
 
 def _event(
@@ -50,6 +57,7 @@ def test_reads_newest_real_codex_usage(tmp_path):
 
     reading = read_codex_usage(tmp_path)
 
+    assert isinstance(reading, CodexKnownUsageReading)
     assert reading.status == "ok"
     assert reading.used_percent == 31.0
     assert reading.reason is None
@@ -64,6 +72,7 @@ def test_real_codex_usage_at_one_hundred_is_exhausted(tmp_path):
 
     reading = read_codex_usage(tmp_path)
 
+    assert isinstance(reading, CodexKnownUsageReading)
     assert reading.status == "exhausted"
     assert reading.used_percent == 100.0
     assert reading.reason is None
@@ -85,6 +94,7 @@ def test_degenerate_premium_payload_is_unknown_with_last_known_good(tmp_path):
 
     reading = read_codex_usage(tmp_path)
 
+    assert isinstance(reading, CodexUnknownUsageReading)
     assert reading.status == "unknown"
     assert reading.reason == "unexpected_limit_id"
     assert reading.used_percent is None
@@ -100,6 +110,7 @@ def test_null_primary_on_codex_limit_is_unknown_not_zero_or_exhausted(tmp_path):
 
     reading = read_codex_usage(tmp_path)
 
+    assert isinstance(reading, CodexUnknownUsageReading)
     assert reading.status == "unknown"
     assert reading.reason == "primary_missing"
     assert reading.used_percent is None
@@ -114,6 +125,7 @@ def test_malformed_newest_line_is_unknown_with_older_known_reading(tmp_path):
 
     reading = read_codex_usage(tmp_path)
 
+    assert isinstance(reading, CodexUnknownUsageReading)
     assert reading.status == "unknown"
     assert reading.reason == "malformed_line"
     assert reading.used_percent is None
@@ -138,6 +150,7 @@ def test_newer_auth_error_is_unknown_with_older_known_reading(tmp_path):
 
     reading = read_codex_usage(tmp_path)
 
+    assert isinstance(reading, CodexUnknownUsageReading)
     assert reading.status == "unknown"
     assert reading.reason == "auth_error"
     assert reading.used_percent is None
@@ -148,6 +161,7 @@ def test_newer_auth_error_is_unknown_with_older_known_reading(tmp_path):
 def test_missing_sessions_directory_is_unknown(tmp_path):
     reading = read_codex_usage(tmp_path)
 
+    assert isinstance(reading, CodexUnknownUsageReading)
     assert reading.status == "unknown"
     assert reading.reason == "sessions_dir_missing"
     assert reading.used_percent is None
@@ -163,6 +177,7 @@ def test_only_newest_session_file_controls_current_verdict(tmp_path):
 
     reading = read_codex_usage(tmp_path)
 
+    assert isinstance(reading, CodexUnknownUsageReading)
     assert reading.status == "unknown"
     assert reading.reason == "token_count_missing"
     assert reading.last_known_good is not None
@@ -174,4 +189,54 @@ def test_codex_home_environment_selects_usage_root(tmp_path, monkeypatch):
     _write_events(path, _event(17))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
 
-    assert read_codex_usage().used_percent == 17.0
+    reading = read_codex_usage()
+    assert isinstance(reading, CodexKnownUsageReading)
+    assert reading.used_percent == 17.0
+
+
+def test_usage_reading_serialization_is_byte_compatible():
+    known = CodexKnownUsageReading(
+        used_percent=31.0,
+        observed_at="2026-08-04T13:24:45Z",
+        source_path="/tmp/codex/sessions/rollout.jsonl",
+        plan_type="pro",
+    )
+    unknown = CodexUnknownUsageReading(
+        reason=CodexUsageUnknownReason.PRIMARY_MISSING,
+        observed_at="2026-08-04T13:28:13Z",
+        source_path="/tmp/codex/sessions/rollout.jsonl",
+        limit_id="codex",
+    )
+
+    assert json.dumps(known.to_dict(), separators=(",", ":")).encode() == (
+        b'{"status":"ok","used_percent":31.0,"reason":null,'
+        b'"observed_at":"2026-08-04T13:24:45Z",'
+        b'"source_path":"/tmp/codex/sessions/rollout.jsonl",'
+        b'"limit_id":"codex","plan_type":"pro","last_known_good":null}'
+    )
+    assert json.dumps(unknown.to_dict(), separators=(",", ":")).encode() == (
+        b'{"status":"unknown","used_percent":null,"reason":"primary_missing",'
+        b'"observed_at":"2026-08-04T13:28:13Z",'
+        b'"source_path":"/tmp/codex/sessions/rollout.jsonl",'
+        b'"limit_id":"codex","plan_type":null,"last_known_good":null}'
+    )
+
+
+def test_unknown_reasons_are_enumerable_and_reject_free_form_strings():
+    assert {reason.value for reason in CodexUsageUnknownReason} == {
+        "auth_error",
+        "malformed_line",
+        "primary_missing",
+        "rate_limits_missing",
+        "sessions_dir_empty",
+        "sessions_dir_missing",
+        "sessions_dir_unreadable",
+        "session_file_empty",
+        "session_file_unreadable",
+        "token_count_missing",
+        "unexpected_limit_id",
+        "used_percent_invalid",
+        "used_percent_missing",
+    }
+    with pytest.raises(TypeError):
+        CodexUnknownUsageReading(reason="new_reason")

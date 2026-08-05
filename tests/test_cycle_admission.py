@@ -5,11 +5,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from brain.platform.integrations.codex_usage import CodexKnownUsageReading
 from brain.platform.integrations.provider_auth_preflight import (
-    ProviderAuthPreflightResult,
+    ProviderAuthBlockedPreflightResult,
+    ProviderAuthPassedPreflightResult,
 )
 from brain.platform.integrations.provider_quota_preflight import (
-    ProviderQuotaPreflightResult,
+    ProviderQuotaBlockedPreflightResult,
+    ProviderQuotaDeferredPreflightResult,
+    ProviderQuotaPassedPreflightResult,
     ProviderQuotaThresholds,
 )
 from brain.systems.cycles import admission
@@ -24,6 +28,14 @@ def _cycle(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _usage(used_percent: float) -> CodexKnownUsageReading:
+    return CodexKnownUsageReading(
+        used_percent=used_percent,
+        observed_at="2026-08-04T13:24:45Z",
+        source_path="/tmp/codex/sessions/rollout.jsonl",
+    )
 
 
 @pytest.mark.asyncio
@@ -119,21 +131,17 @@ async def test_cycle_admission_derives_one_route_shared_by_both_preflights(monke
 
     async def auth_preflight(_session, *, route):
         auth_routes.append(route)
-        return ProviderAuthPreflightResult(
-            status="passed",
+        return ProviderAuthPassedPreflightResult(
             provider=route.provider,
             model=route.model,
         )
 
     def quota_preflight(*, route, run):
         quota_routes.append((route, run))
-        return ProviderQuotaPreflightResult(
-            status="passed",
-            decision="admitted",
+        return ProviderQuotaPassedPreflightResult(
             provider=route.provider,
             model=route.model,
-            usage_status="ok",
-            used_percent=10.0,
+            usage=_usage(10.0),
             thresholds=ProviderQuotaThresholds(soft_percent=75.0, hard_percent=90.0),
             explicit_request=False,
         )
@@ -206,10 +214,11 @@ def test_cycle_route_rejects_noncanonical_construction(model, thinking):
 
 
 def test_cycle_rejection_union_rejects_contradictory_construction():
-    auth = ProviderAuthPreflightResult(
-        status="auth_blocked",
+    auth = ProviderAuthBlockedPreflightResult(
         provider="openai",
         model="openai/gpt-5.5",
+        credential="OpenAI Codex / ChatGPT",
+        error_code="provider_credential_unavailable",
         visible_message="Reconnect OpenAI.",
     )
 
@@ -241,20 +250,17 @@ def test_cycle_rejection_variants_reject_independent_settlement_fields(rejection
     [
         (
             admission.CycleAdmissionAuthBlocked,
-            ProviderAuthPreflightResult(
-                status="passed",
+            ProviderAuthPassedPreflightResult(
                 provider="openai",
                 model="openai/gpt-5.5",
             ),
         ),
         (
             admission.CycleAdmissionQuotaBlocked,
-            ProviderQuotaPreflightResult(
-                status="quota_deferred",
-                decision="deferred",
+            ProviderQuotaDeferredPreflightResult(
                 provider="openai",
                 model="openai/gpt-5.5",
-                usage_status="ok",
+                usage=_usage(80.0),
                 thresholds=ProviderQuotaThresholds(
                     soft_percent=75.0,
                     hard_percent=90.0,
@@ -263,12 +269,10 @@ def test_cycle_rejection_variants_reject_independent_settlement_fields(rejection
         ),
         (
             admission.CycleAdmissionQuotaDeferred,
-            ProviderQuotaPreflightResult(
-                status="quota_blocked",
-                decision="blocked",
+            ProviderQuotaBlockedPreflightResult(
                 provider="openai",
                 model="openai/gpt-5.5",
-                usage_status="ok",
+                usage=_usage(90.0),
                 thresholds=ProviderQuotaThresholds(
                     soft_percent=75.0,
                     hard_percent=90.0,
@@ -287,10 +291,11 @@ def test_cycle_rejection_variants_reject_mismatched_notices(
 
 @pytest.mark.asyncio
 async def test_cycle_admission_returns_complete_auth_rejection(monkeypatch):
-    auth = ProviderAuthPreflightResult(
-        status="auth_blocked",
+    auth = ProviderAuthBlockedPreflightResult(
         provider="openai",
         model="openai/gpt-5.5",
+        credential="OpenAI Codex / ChatGPT",
+        error_code="provider_credential_unavailable",
         visible_message="Reconnect OpenAI.",
     )
 
@@ -318,16 +323,16 @@ async def test_cycle_admission_returns_complete_auth_rejection(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status", "decision", "message", "expected_type"),
+    ("quota_type", "decision", "message", "expected_type"),
     [
         (
-            "quota_blocked",
+            ProviderQuotaBlockedPreflightResult,
             "blocked",
             "Quota is blocked.",
             admission.CycleAdmissionQuotaBlocked,
         ),
         (
-            "quota_deferred",
+            ProviderQuotaDeferredPreflightResult,
             "deferred",
             "Quota is deferred.",
             admission.CycleAdmissionQuotaDeferred,
@@ -336,25 +341,21 @@ async def test_cycle_admission_returns_complete_auth_rejection(monkeypatch):
 )
 async def test_cycle_admission_returns_complete_quota_rejection(
     monkeypatch,
-    status,
+    quota_type,
     decision,
     message,
     expected_type,
 ):
-    quota = ProviderQuotaPreflightResult(
-        status=status,
-        decision=decision,
+    quota = quota_type(
         provider="openai",
         model="openai/gpt-5.5",
-        usage_status="ok",
-        used_percent=90.0,
+        usage=_usage(90.0),
         thresholds=ProviderQuotaThresholds(soft_percent=75.0, hard_percent=90.0),
         visible_message=message,
     )
 
     async def auth_preflight(_session, *, route):
-        return ProviderAuthPreflightResult(
-            status="passed",
+        return ProviderAuthPassedPreflightResult(
             provider=route.provider,
             model=route.model,
         )

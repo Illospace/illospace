@@ -7,11 +7,31 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Mapping, TypeAlias
 
 
-CodexUsageStatus = Literal["ok", "unknown", "exhausted"]
+class CodexUsageStatus(StrEnum):
+    OK = "ok"
+    UNKNOWN = "unknown"
+    EXHAUSTED = "exhausted"
+
+
+class CodexUsageUnknownReason(StrEnum):
+    AUTH_ERROR = "auth_error"
+    MALFORMED_LINE = "malformed_line"
+    PRIMARY_MISSING = "primary_missing"
+    RATE_LIMITS_MISSING = "rate_limits_missing"
+    SESSIONS_DIR_EMPTY = "sessions_dir_empty"
+    SESSIONS_DIR_MISSING = "sessions_dir_missing"
+    SESSIONS_DIR_UNREADABLE = "sessions_dir_unreadable"
+    SESSION_FILE_EMPTY = "session_file_empty"
+    SESSION_FILE_UNREADABLE = "session_file_unreadable"
+    TOKEN_COUNT_MISSING = "token_count_missing"
+    UNEXPECTED_LIMIT_ID = "unexpected_limit_id"
+    USED_PERCENT_INVALID = "used_percent_invalid"
+    USED_PERCENT_MISSING = "used_percent_missing"
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,21 +52,66 @@ class CodexKnownUsage:
         }
 
 
-@dataclass(frozen=True, slots=True)
-class CodexUsageReading:
-    status: CodexUsageStatus
-    used_percent: float | None = None
-    reason: str | None = None
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CodexKnownUsageReading:
+    used_percent: float
+    observed_at: str
+    source_path: str
+    limit_id: str = "codex"
+    plan_type: str | None = None
+
+    @property
+    def status(self) -> CodexUsageStatus:
+        if self.used_percent >= 100:
+            return CodexUsageStatus.EXHAUSTED
+        return CodexUsageStatus.OK
+
+    @property
+    def reason(self) -> None:
+        return None
+
+    @property
+    def last_known_good(self) -> None:
+        return None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "used_percent": self.used_percent,
+            "reason": None,
+            "observed_at": self.observed_at,
+            "source_path": self.source_path,
+            "limit_id": self.limit_id,
+            "plan_type": self.plan_type,
+            "last_known_good": None,
+        }
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CodexUnknownUsageReading:
+    reason: CodexUsageUnknownReason
     observed_at: str | None = None
     source_path: str | None = None
     limit_id: str | None = None
     plan_type: str | None = None
     last_known_good: CodexKnownUsage | None = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.reason, CodexUsageUnknownReason):
+            raise TypeError("reason must be a CodexUsageUnknownReason")
+
+    @property
+    def status(self) -> CodexUsageStatus:
+        return CodexUsageStatus.UNKNOWN
+
+    @property
+    def used_percent(self) -> None:
+        return None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status,
-            "used_percent": self.used_percent,
+            "used_percent": None,
             "reason": self.reason,
             "observed_at": self.observed_at,
             "source_path": self.source_path,
@@ -56,6 +121,9 @@ class CodexUsageReading:
                 self.last_known_good.to_dict() if self.last_known_good else None
             ),
         }
+
+
+CodexUsageReading: TypeAlias = CodexKnownUsageReading | CodexUnknownUsageReading
 
 
 def codex_home_path(path: str | Path | None = None) -> Path:
@@ -68,15 +136,14 @@ def codex_home_path(path: str | Path | None = None) -> Path:
 
 
 def _unknown(
-    reason: str,
+    reason: CodexUsageUnknownReason,
     *,
     observed_at: str | None = None,
     source_path: Path | None = None,
     limit_id: str | None = None,
     plan_type: str | None = None,
 ) -> CodexUsageReading:
-    return CodexUsageReading(
-        status="unknown",
+    return CodexUnknownUsageReading(
         reason=reason,
         observed_at=observed_at,
         source_path=str(source_path) if source_path else None,
@@ -141,7 +208,7 @@ def _reading_from_event(
 ) -> CodexUsageReading | None:
     if _is_auth_error(data):
         return _unknown(
-            "auth_error",
+            CodexUsageUnknownReason.AUTH_ERROR,
             observed_at=_event_timestamp(data, source_path),
             source_path=source_path,
         )
@@ -153,20 +220,20 @@ def _reading_from_event(
     observed_at = _event_timestamp(data, source_path)
     if token_payload.get("error"):
         return _unknown(
-            "auth_error",
+            CodexUsageUnknownReason.AUTH_ERROR,
             observed_at=observed_at,
             source_path=source_path,
         )
     rate_limits = _rate_limits(data, token_payload)
     if not rate_limits:
         return _unknown(
-            "rate_limits_missing",
+            CodexUsageUnknownReason.RATE_LIMITS_MISSING,
             observed_at=observed_at,
             source_path=source_path,
         )
     if rate_limits.get("error"):
         return _unknown(
-            "auth_error",
+            CodexUsageUnknownReason.AUTH_ERROR,
             observed_at=observed_at,
             source_path=source_path,
         )
@@ -177,7 +244,7 @@ def _reading_from_event(
     plan_type = str(plan_value).strip() if plan_value is not None else None
     if limit_id != "codex":
         return _unknown(
-            "unexpected_limit_id",
+            CodexUsageUnknownReason.UNEXPECTED_LIMIT_ID,
             observed_at=observed_at,
             source_path=source_path,
             limit_id=limit_id,
@@ -187,7 +254,7 @@ def _reading_from_event(
     primary = rate_limits.get("primary")
     if not isinstance(primary, Mapping):
         return _unknown(
-            "primary_missing",
+            CodexUsageUnknownReason.PRIMARY_MISSING,
             observed_at=observed_at,
             source_path=source_path,
             limit_id=limit_id,
@@ -197,7 +264,7 @@ def _reading_from_event(
     used_percent = primary.get("used_percent")
     if isinstance(used_percent, bool) or not isinstance(used_percent, (int, float)):
         return _unknown(
-            "used_percent_missing",
+            CodexUsageUnknownReason.USED_PERCENT_MISSING,
             observed_at=observed_at,
             source_path=source_path,
             limit_id=limit_id,
@@ -206,14 +273,13 @@ def _reading_from_event(
     normalized_percent = float(used_percent)
     if not math.isfinite(normalized_percent) or normalized_percent < 0:
         return _unknown(
-            "used_percent_invalid",
+            CodexUsageUnknownReason.USED_PERCENT_INVALID,
             observed_at=observed_at,
             source_path=source_path,
             limit_id=limit_id,
             plan_type=plan_type,
         )
-    return CodexUsageReading(
-        status="exhausted" if normalized_percent >= 100 else "ok",
+    return CodexKnownUsageReading(
         used_percent=normalized_percent,
         observed_at=observed_at,
         source_path=str(source_path),
@@ -249,11 +315,17 @@ def _scan_lines(
             data = json.loads(raw_line)
         except (json.JSONDecodeError, UnicodeDecodeError):
             if malformed_is_verdict:
-                return _unknown("malformed_line", source_path=source_path)
+                return _unknown(
+                    CodexUsageUnknownReason.MALFORMED_LINE,
+                    source_path=source_path,
+                )
             continue
         if not isinstance(data, Mapping):
             if malformed_is_verdict:
-                return _unknown("malformed_line", source_path=source_path)
+                return _unknown(
+                    CodexUsageUnknownReason.MALFORMED_LINE,
+                    source_path=source_path,
+                )
             continue
         reading = _reading_from_event(data, source_path=source_path)
         if reading is not None:
@@ -275,11 +347,11 @@ def _find_last_known(files: list[Path]) -> CodexKnownUsage | None:
             if not isinstance(data, Mapping):
                 continue
             reading = _reading_from_event(data, source_path=source_path)
-            if reading is None or reading.status == "unknown":
+            if not isinstance(reading, CodexKnownUsageReading):
                 continue
             return CodexKnownUsage(
-                used_percent=float(reading.used_percent),
-                observed_at=str(reading.observed_at),
+                used_percent=reading.used_percent,
+                observed_at=reading.observed_at,
                 source_path=str(source_path),
                 plan_type=reading.plan_type,
             )
@@ -296,34 +368,42 @@ def read_codex_usage(path: str | Path | None = None) -> CodexUsageReading:
     sessions_path = codex_home_path(path) / "sessions"
     try:
         if not sessions_path.exists():
-            return _unknown("sessions_dir_missing")
+            return _unknown(CodexUsageUnknownReason.SESSIONS_DIR_MISSING)
         if not sessions_path.is_dir():
-            return _unknown("sessions_dir_unreadable")
+            return _unknown(CodexUsageUnknownReason.SESSIONS_DIR_UNREADABLE)
         files = _session_files(sessions_path)
     except OSError:
-        return _unknown("sessions_dir_unreadable")
+        return _unknown(CodexUsageUnknownReason.SESSIONS_DIR_UNREADABLE)
     if not files:
-        return _unknown("sessions_dir_empty")
+        return _unknown(CodexUsageUnknownReason.SESSIONS_DIR_EMPTY)
 
     newest = files[0]
     try:
         newest_lines = _read_lines(newest)
     except (OSError, UnicodeError):
-        verdict = _unknown("session_file_unreadable", source_path=newest)
+        verdict = _unknown(
+            CodexUsageUnknownReason.SESSION_FILE_UNREADABLE,
+            source_path=newest,
+        )
     else:
         if not any(line.strip() for line in newest_lines):
-            verdict = _unknown("session_file_empty", source_path=newest)
+            verdict = _unknown(
+                CodexUsageUnknownReason.SESSION_FILE_EMPTY,
+                source_path=newest,
+            )
         else:
             verdict = _scan_lines(
                 newest_lines,
                 source_path=newest,
                 malformed_is_verdict=True,
-            ) or _unknown("token_count_missing", source_path=newest)
+            ) or _unknown(
+                CodexUsageUnknownReason.TOKEN_COUNT_MISSING,
+                source_path=newest,
+            )
 
-    if verdict.status != "unknown":
+    if isinstance(verdict, CodexKnownUsageReading):
         return verdict
-    return CodexUsageReading(
-        status=verdict.status,
+    return CodexUnknownUsageReading(
         reason=verdict.reason,
         observed_at=verdict.observed_at,
         source_path=verdict.source_path,
@@ -335,8 +415,11 @@ def read_codex_usage(path: str | Path | None = None) -> CodexUsageReading:
 
 __all__ = [
     "CodexKnownUsage",
+    "CodexKnownUsageReading",
     "CodexUsageReading",
     "CodexUsageStatus",
+    "CodexUsageUnknownReason",
+    "CodexUnknownUsageReading",
     "codex_home_path",
     "read_codex_usage",
 ]

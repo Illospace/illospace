@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from brain.platform.integrations.codex_usage import (
+    CodexKnownUsageReading,
+    CodexUnknownUsageReading,
+    CodexUsageUnknownReason,
+)
 from brain.platform.integrations.provider_quota_preflight import (
-    ProviderQuotaPreflightResult,
+    ProviderQuotaDeferredPreflightResult,
+    ProviderQuotaPassedPreflightResult,
     ProviderQuotaThresholds,
+    ProviderQuotaUnknownPreflightResult,
 )
 from brain.systems.cycles.admission import CycleProviderRoute
 from brain.systems.cycles import quota_preflight
@@ -18,18 +25,23 @@ def _route(model: str = "openai/gpt-5.6-sol") -> CycleProviderRoute:
     )
 
 
+def _usage(used_percent: float) -> CodexKnownUsageReading:
+    return CodexKnownUsageReading(
+        used_percent=used_percent,
+        observed_at="2026-08-04T13:24:45Z",
+        source_path="/tmp/codex/sessions/rollout.jsonl",
+    )
+
+
 def test_cycle_quota_marks_scheduled_origin_as_autonomous(monkeypatch):
     captured = {}
 
     def probe(**kwargs):
         captured.update(kwargs)
-        return ProviderQuotaPreflightResult(
-            status="quota_deferred",
-            decision="deferred",
+        return ProviderQuotaDeferredPreflightResult(
             provider=kwargs["provider"],
             model=kwargs["model"],
-            usage_status="ok",
-            used_percent=80,
+            usage=_usage(80),
             thresholds=ProviderQuotaThresholds(soft_percent=75, hard_percent=90),
         )
 
@@ -52,13 +64,10 @@ def test_cycle_quota_marks_manual_origin_as_explicit(monkeypatch):
 
     def probe(**kwargs):
         captured.update(kwargs)
-        return ProviderQuotaPreflightResult(
-            status="passed",
-            decision="admitted",
+        return ProviderQuotaPassedPreflightResult(
             provider=kwargs["provider"],
             model=kwargs["model"],
-            usage_status="ok",
-            used_percent=80,
+            usage=_usage(80),
             thresholds=ProviderQuotaThresholds(soft_percent=75, hard_percent=90),
             explicit_request=kwargs["explicit_request"],
         )
@@ -81,13 +90,12 @@ def test_cycle_quota_consumes_resolved_route(monkeypatch):
 
     def probe(**kwargs):
         captured["probe"] = kwargs
-        return ProviderQuotaPreflightResult(
-            status="unknown",
-            decision="admitted",
+        return ProviderQuotaUnknownPreflightResult(
             provider=kwargs["provider"],
             model=kwargs["model"],
-            usage_status="unknown",
-            unknown_reason="sessions_dir_missing",
+            usage=CodexUnknownUsageReading(
+                reason=CodexUsageUnknownReason.SESSIONS_DIR_MISSING,
+            ),
             thresholds=ProviderQuotaThresholds(soft_percent=75, hard_percent=90),
         )
 

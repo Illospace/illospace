@@ -36,9 +36,14 @@ from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEven
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea, IdeaThread
 from brain.platform.db.models.org import Org, User
-from brain.platform.integrations.provider_auth_preflight import ProviderAuthPreflightResult
+from brain.platform.integrations.codex_usage import CodexKnownUsageReading
+from brain.platform.integrations.provider_auth_preflight import (
+    ProviderAuthPassedPreflightResult,
+)
 from brain.platform.integrations.provider_quota_preflight import (
-    ProviderQuotaPreflightResult,
+    ProviderQuotaBlockedPreflightResult,
+    ProviderQuotaDeferredPreflightResult,
+    ProviderQuotaPassedPreflightResult,
     ProviderQuotaThresholds,
 )
 
@@ -72,22 +77,27 @@ REFLEX_ANSWER = (
 
 
 async def _passed_cycle_auth(_session, *, route):
-    return ProviderAuthPreflightResult(
-        status="passed",
+    return ProviderAuthPassedPreflightResult(
         provider=route.provider,
         model=route.model,
     )
 
 
+def _quota_usage(used_percent, *, source_path="/tmp/codex/session.jsonl"):
+    return CodexKnownUsageReading(
+        used_percent=used_percent,
+        observed_at="2026-08-04T13:24:45Z",
+        source_path=source_path,
+        plan_type="pro",
+    )
+
+
 def _passed_cycle_quota(*, route, run):
     del run
-    return ProviderQuotaPreflightResult(
-        status="passed",
-        decision="admitted",
+    return ProviderQuotaPassedPreflightResult(
         provider=route.provider,
         model=route.model,
-        usage_status="ok",
-        used_percent=10.0,
+        usage=_quota_usage(10.0),
         thresholds=ProviderQuotaThresholds(soft_percent=75.0, hard_percent=90.0),
         explicit_request=False,
     )
@@ -2251,17 +2261,10 @@ async def test_execute_cycle_run_hard_quota_blocks_and_records_one_notice(monkey
         idea=idea,
         expected_run_id=run.id,
     )
-    quota = ProviderQuotaPreflightResult(
-        status="quota_blocked",
-        decision="blocked",
+    quota = ProviderQuotaBlockedPreflightResult(
         provider="openai",
         model="openai/gpt-5.6-sol",
-        usage_status="ok",
-        used_percent=92.0,
-        observed_at="2026-08-04T13:24:45Z",
-        source_path="/tmp/codex/session.jsonl",
-        limit_id="codex",
-        plan_type="pro",
+        usage=_quota_usage(92.0),
         thresholds=ProviderQuotaThresholds(soft_percent=75.0, hard_percent=90.0),
         visible_message=(
             "Cycle quota blocked: Codex usage is 92%, at or above the 90% hard limit."
@@ -2372,13 +2375,10 @@ async def test_cycle_quota_notice_deduplicates_per_episode_in_postgres(db_sessio
         runs.append(run)
     await db_session.flush()
 
-    quota = ProviderQuotaPreflightResult(
-        status="quota_blocked",
-        decision="blocked",
+    quota = ProviderQuotaBlockedPreflightResult(
         provider="openai",
         model="openai/gpt-5.6-sol",
-        usage_status="ok",
-        used_percent=92.0,
+        usage=_quota_usage(92.0),
         thresholds=ProviderQuotaThresholds(soft_percent=75.0, hard_percent=90.0),
         visible_message="Scheduled Cycle quota blocked.",
     )
@@ -2423,13 +2423,10 @@ async def test_execute_scheduled_cycle_run_defers_at_soft_quota(monkeypatch):
         idea=idea,
         expected_run_id=run.id,
     )
-    quota = ProviderQuotaPreflightResult(
-        status="quota_deferred",
-        decision="deferred",
+    quota = ProviderQuotaDeferredPreflightResult(
         provider="openai",
         model="openai/gpt-5.6-sol",
-        usage_status="ok",
-        used_percent=80.0,
+        usage=_quota_usage(80.0),
         thresholds=ProviderQuotaThresholds(soft_percent=75.0, hard_percent=90.0),
         visible_message="Scheduled Cycle quota deferred.",
     )

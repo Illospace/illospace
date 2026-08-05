@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import Idea, IdeaThread
 from brain.platform.integrations.provider_quota_preflight import (
+    ProviderQuotaBlockedPreflightResult,
+    ProviderQuotaDeferredPreflightResult,
     ProviderQuotaPreflightResult,
     probe_provider_quota,
 )
@@ -26,7 +28,7 @@ if TYPE_CHECKING:
 def _with_cycle_presentation(
     result: ProviderQuotaPreflightResult,
 ) -> ProviderQuotaPreflightResult:
-    if result.blocked:
+    if isinstance(result, ProviderQuotaBlockedPreflightResult):
         return result.with_presentation(
             visible_message=(
                 "Cycle quota blocked: Codex usage is "
@@ -35,7 +37,7 @@ def _with_cycle_presentation(
                 "Illo will admit new runs automatically after usage falls below the limit."
             )
         )
-    if result.deferred:
+    if isinstance(result, ProviderQuotaDeferredPreflightResult):
         return result.with_presentation(
             visible_message=(
                 "Scheduled Cycle quota deferred: Codex usage is "
