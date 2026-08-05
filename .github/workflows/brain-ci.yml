@@ -3,8 +3,10 @@ name: Brain CI
 on:
   push:
     branches: [main]
+  # No base-branch filter. A stacked PR is based on another feature branch, and a
+  # `branches: [main]` filter gives it zero checks — silently, since an empty
+  # checks list reads as "none configured" rather than "never tested" (#682).
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
