@@ -2088,6 +2088,196 @@ async def test_async_execute_cycle_run_uses_native_uow_without_sync_bridges(monk
 
 
 @pytest.mark.asyncio
+async def test_execute_promotion_run_unchanged_skips_review_and_reaches_posting_agent(
+    monkeypatch,
+):
+    from unittest.mock import AsyncMock
+
+    from brain.systems.cycles.contracts import PROMOTION_READINESS_CYCLE_NAME
+    from brain.systems.cycles.promotion_readiness import (
+        async_apply_promotion_readiness_gate,
+    )
+
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
+    cycle.id = 9
+    cycle.name = PROMOTION_READINESS_CYCLE_NAME
+    run.cycle_id = cycle.id
+    session = _AsyncExecuteCycleSession(
+        run=run,
+        cycle=cycle,
+        idea=idea,
+        expected_run_id=run.id,
+    )
+    controlled_now = datetime(2026, 8, 5, 15, 0, tzinfo=timezone.utc)
+
+    async def read_head(_repo, branch, *, token):
+        return {"staging": "staging-same", "main": "main-same"}[branch]
+
+    async def apply_gate(db, *, cycle, run):
+        return await async_apply_promotion_readiness_gate(
+            db,
+            cycle=cycle,
+            run=run,
+            now=controlled_now,
+            baseline_reader=AsyncMock(return_value=("staging-same", "main-same")),
+            token_resolver=AsyncMock(return_value="app-token"),
+            branch_head_reader=read_head,
+            branch_comparison_reader=AsyncMock(
+                return_value={"status": "ahead", "ahead_by": 47}
+            ),
+        )
+
+    admissions = []
+
+    async def admit(*_args, **kwargs):
+        admissions.append(kwargs)
+        return 77
+
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr(service, "async_apply_promotion_readiness_gate", apply_gate)
+    monkeypatch.setattr(service, "async_preflight_cycle_external_auth", _passed_cycle_auth)
+    monkeypatch.setattr(service, "async_preflight_cycle_external_quota", _passed_cycle_quota)
+    monkeypatch.setattr(service, "_async_admit_cycle_run", admit)
+    monkeypatch.setattr(service, "publish", lambda *_args, **_kwargs: None)
+
+    await service.async_execute_cycle_run(run.id)
+
+    assert run.status == "running"
+    assert run.run_id == 77
+    assert len(admissions) == 1
+    gate = run.context_snapshot["promotion_readiness_gate"]
+    assert gate["outcome"] == "unchanged"
+    assert gate["requires_per_pr_review"] is False
+    assert gate["reaches_posting_path"] is True
+    assert admissions[0]["metadata"]["tool_policy"] == {
+        "disabled_tools": ["read_github_source"],
+        "reason": "promotion_readiness_unchanged",
+    }
+    assert "Do not perform per-PR review" in admissions[0]["message"]
+    assert "Continue directly to the scheduled posting decision" in admissions[0][
+        "message"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_promotion_run_idle_finishes_before_agent_admission(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from brain.systems.cycles.contracts import PROMOTION_READINESS_CYCLE_NAME
+    from brain.systems.cycles.promotion_readiness import (
+        async_apply_promotion_readiness_gate,
+    )
+
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
+    cycle.id = 9
+    cycle.name = PROMOTION_READINESS_CYCLE_NAME
+    run.cycle_id = cycle.id
+    session = _AsyncExecuteCycleSession(
+        run=run,
+        cycle=cycle,
+        idea=idea,
+        expected_run_id=run.id,
+    )
+
+    async def read_head(_repo, branch, *, token):
+        return {"staging": "same-head", "main": "same-head"}[branch]
+
+    async def apply_gate(db, *, cycle, run):
+        return await async_apply_promotion_readiness_gate(
+            db,
+            cycle=cycle,
+            run=run,
+            now=datetime(2026, 8, 5, 15, 0, tzinfo=timezone.utc),
+            baseline_reader=AsyncMock(return_value=("staging-old", "main-old")),
+            token_resolver=AsyncMock(return_value="app-token"),
+            branch_head_reader=read_head,
+            branch_comparison_reader=AsyncMock(
+                return_value={"status": "identical", "ahead_by": 0}
+            ),
+        )
+
+    async def fail_admit(*_args, **_kwargs):
+        raise AssertionError("idle run admitted an agent")
+
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr(service, "async_apply_promotion_readiness_gate", apply_gate)
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
+    monkeypatch.setattr(service, "publish", lambda *_args, **_kwargs: None)
+
+    await service.async_execute_cycle_run(run.id)
+
+    assert run.status == "skipped"
+    assert run.skip_reason == "promotion_readiness_idle"
+    assert run.run_id is None
+    assert "Risk: IDLE" in run.self_review_summary
+    assert "per-PR sweep was skipped" in run.self_review_summary
+
+
+@pytest.mark.asyncio
+async def test_execute_promotion_run_with_staging_ahead_reaches_agent_posting_path(
+    monkeypatch,
+):
+    from unittest.mock import AsyncMock
+
+    from brain.systems.cycles.contracts import PROMOTION_READINESS_CYCLE_NAME
+    from brain.systems.cycles.promotion_readiness import (
+        async_apply_promotion_readiness_gate,
+    )
+
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
+    cycle.id = 9
+    cycle.name = PROMOTION_READINESS_CYCLE_NAME
+    run.cycle_id = cycle.id
+    session = _AsyncExecuteCycleSession(
+        run=run,
+        cycle=cycle,
+        idea=idea,
+        expected_run_id=run.id,
+    )
+
+    async def read_head(_repo, branch, *, token):
+        return {"staging": "staging-new", "main": "main-new"}[branch]
+
+    async def apply_gate(db, *, cycle, run):
+        return await async_apply_promotion_readiness_gate(
+            db,
+            cycle=cycle,
+            run=run,
+            now=datetime(2026, 8, 5, 15, 0, tzinfo=timezone.utc),
+            baseline_reader=AsyncMock(return_value=("staging-old", "main-old")),
+            token_resolver=AsyncMock(return_value="app-token"),
+            branch_head_reader=read_head,
+            branch_comparison_reader=AsyncMock(
+                return_value={"status": "ahead", "ahead_by": 47}
+            ),
+        )
+
+    admissions = []
+
+    async def admit(*_args, **kwargs):
+        admissions.append(kwargs)
+        return 77
+
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr(service, "async_apply_promotion_readiness_gate", apply_gate)
+    monkeypatch.setattr(service, "async_preflight_cycle_external_auth", _passed_cycle_auth)
+    monkeypatch.setattr(service, "async_preflight_cycle_external_quota", _passed_cycle_quota)
+    monkeypatch.setattr(service, "_async_admit_cycle_run", admit)
+    monkeypatch.setattr(service, "publish", lambda *_args, **_kwargs: None)
+
+    await service.async_execute_cycle_run(run.id)
+
+    assert run.status == "running"
+    assert run.run_id == 77
+    assert len(admissions) == 1
+    assert run.context_snapshot["promotion_readiness_gate"]["outcome"] == "evaluate"
+    assert (
+        "`closing_block_verdict`"
+        in admissions[0]["message"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_execute_cycle_run_auth_blocks_expired_codex_before_agent_admission(monkeypatch):
     from brain.platform.integrations.openai_codex_auth import (
         OpenAICodexCredential,
@@ -3286,6 +3476,117 @@ def test_cycle_finalization_persists_gate_extracted_self_review(monkeypatch):
     assert verdict["self_review_summary"] == self_review
     assert cycle_run.self_review_summary == self_review
     assert evaluation.summary == "Cycle run completed and was recorded in the Cycle ledger."
+
+
+def test_promotion_low_silent_run_persists_its_deliberate_posting_verdict(
+    monkeypatch,
+):
+    from brain.systems.cycles import contract_gate
+
+    self_review = "The SHA gate completed before the bounded risk review."
+    answer = (
+        "Promotion readiness was evaluated from the current staging comparison and "
+        "the bounded release evidence.\n"
+        "Evidence reviewed: branch heads, promotion diff, and required checks.\n"
+        "Evidence health: ok; all required readers completed.\n"
+        "Next action: check the next changed SHA pair.\n"
+        f"Self-review summary: {self_review}\n"
+        "Risk: LOW — no blocking promotion risk found\n"
+        "Evaluated: last_staging_sha=staging-new; last_main_sha=main-new\n"
+        "Posted: No — LOW risk is deliberately silent"
+    )
+    contract = cycle_result_contract(
+        run_kind="scheduled_digest",
+        require_closing_block_verdict=True,
+    )
+    session, cycle_run, _, _ = _contract_finalization_scenario(
+        cycle_id=9,
+        mission="Evaluate promotion readiness and persist the closing verdict.",
+        answer=answer,
+        launch_contract=contract,
+    )
+
+    async def fail_if_repair_runs(**_kwargs):
+        raise AssertionError("complete closing verdict should not need repair")
+
+    monkeypatch.setattr(
+        contract_gate,
+        "_async_repair_cycle_contract_answer",
+        fail_if_repair_runs,
+    )
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+
+    service.finalize_cycle_run_from_run(44, status="completed")
+
+    closing = cycle_run.context_snapshot["mission_result_contract_verdict"][
+        contract_gate.CLOSING_BLOCK_VERDICT_KEY
+    ]
+    assert cycle_run.status == "completed"
+    assert closing["outcome"] == "evaluated_low_silent"
+    assert cycle_run.self_review_summary == (
+        f"{self_review}\n"
+        "Risk: LOW — no blocking promotion risk found\n"
+        "Evaluated: last_staging_sha=staging-new; last_main_sha=main-new\n"
+        "Posted: No — LOW risk is deliberately silent"
+    )
+
+
+def test_promotion_unchanged_run_persists_skip_and_posting_verdict(monkeypatch):
+    from brain.systems.cycles import contract_gate
+
+    answer = (
+        "Promotion readiness reused the prior bounded review because the branch heads "
+        "did not move.\n"
+        "Evidence reviewed: the deterministic SHA gate and prior completed verdict.\n"
+        "Evidence health: ok; the cheap readers completed.\n"
+        "Next action: check the next scheduled SHA gate.\n"
+        "Self-review summary: unchanged gate bypassed the per-PR sweep.\n"
+        "Risk: UNCHANGED — prior evaluated risk remains current\n"
+        "Evaluated: last_staging_sha=staging-same; last_main_sha=main-same\n"
+        "Posted: Yes — staging remains ahead on this scheduled weekday run"
+    )
+    contract = cycle_result_contract(
+        run_kind="scheduled_digest",
+        require_closing_block_verdict=True,
+    )
+    slack_post = AgentRunEventRow(
+        id=1,
+        run_id=44,
+        root_run_id=44,
+        sequence_no=1,
+        event_type="run.tool_completed",
+        payload={
+            "tool_name": "post_slack_reply",
+            "result": {"status": "ok", "channel": "4_software"},
+        },
+    )
+    session, cycle_run, _, _ = _contract_finalization_scenario(
+        cycle_id=9,
+        mission="Use the SHA gate, post when staging is ahead, and persist the verdict.",
+        answer=answer,
+        events=[slack_post],
+        launch_contract=contract,
+    )
+
+    async def fail_if_repair_runs(**_kwargs):
+        raise AssertionError("complete closing verdict should not need repair")
+
+    monkeypatch.setattr(
+        contract_gate,
+        "_async_repair_cycle_contract_answer",
+        fail_if_repair_runs,
+    )
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+
+    service.finalize_cycle_run_from_run(44, status="completed")
+
+    closing = cycle_run.context_snapshot["mission_result_contract_verdict"][
+        contract_gate.CLOSING_BLOCK_VERDICT_KEY
+    ]
+    assert closing["outcome"] == "skipped_unchanged"
+    assert closing["posted"].startswith("Yes — staging remains ahead")
+    assert "Risk: UNCHANGED" in cycle_run.self_review_summary
+    assert "Posted: Yes — staging remains ahead" in cycle_run.self_review_summary
 
 
 @pytest.mark.parametrize(

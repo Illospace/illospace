@@ -7,8 +7,10 @@ import pytest
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.systems.cycles import memory as cycle_memory
 from brain.systems.cycles.contract_gate import (
+    CLOSING_BLOCK_VERDICT_KEY,
     extract_self_review_summary,
 )
+from brain.systems.cycles.contracts import PROMOTION_READINESS_CYCLE_NAME
 
 
 SELF_REVIEW = "I should verify the evidence gap earlier in the next run."
@@ -106,3 +108,39 @@ async def test_cycle_evaluation_omits_usage_when_no_usage_was_recorded(monkeypat
     assert run.self_review_summary is None
     assert "usage" not in run.context_snapshot
     assert session.added[-1].details["usage"] is None
+
+
+@pytest.mark.asyncio
+async def test_failed_promotion_run_records_that_the_closing_gate_was_not_reached():
+    session = _CaptureSession()
+    cycle, run = _cycle_and_run()
+    cycle.name = PROMOTION_READINESS_CYCLE_NAME
+    run.run_id = None
+
+    await cycle_memory.record_cycle_run_evaluation(
+        session,
+        run,
+        cycle,
+        status="failed",
+        error="agent budget exhausted",
+    )
+
+    closing = run.context_snapshot["mission_result_contract_verdict"][
+        CLOSING_BLOCK_VERDICT_KEY
+    ]
+    assert closing == {
+        "risk": "UNKNOWN",
+        "evaluated": "No — closing gate was not reached before failed",
+        "posted": (
+            "Unknown — no posting verdict was recorded (agent budget exhausted)"
+        ),
+        "outcome": "gate_not_reached",
+    }
+    assert run.self_review_summary == (
+        "Risk: UNKNOWN\n"
+        "Evaluated: No — closing gate was not reached before failed\n"
+        "Posted: Unknown — no posting verdict was recorded (agent budget exhausted)"
+    )
+    assert session.added[-1].details["mission_result_contract_verdict"][
+        CLOSING_BLOCK_VERDICT_KEY
+    ]["outcome"] == "gate_not_reached"

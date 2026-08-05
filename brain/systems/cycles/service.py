@@ -25,6 +25,9 @@ from brain.systems.cycles.auth_preflight import (
 from brain.systems.cycles.quota_preflight import (
     async_preflight_cycle_external_quota,
 )
+from brain.systems.cycles.promotion_readiness import (
+    async_apply_promotion_readiness_gate,
+)
 from brain.systems.cycles.common import (
     MANUAL_CYCLE_ORIGIN,
     MAX_CYCLE_TIMEOUT_SECONDS,
@@ -941,6 +944,20 @@ async def async_execute_cycle_run(run_id: int) -> None:
         run.idea_id = idea.id
         await _async_prepare_cycle_run_memory_snapshot(uow.session, cycle, run)
         await _async_attach_open_ask_stragglers(uow.session, cycle, run)
+        promotion_gate = await async_apply_promotion_readiness_gate(
+            uow.session,
+            cycle=cycle,
+            run=run,
+        )
+        if promotion_gate is not None and promotion_gate.skip_agent:
+            await _finalize_cycle_run(
+                run,
+                cycle,
+                status="skipped",
+                skip_reason=promotion_gate.skip_reason,
+                session=uow.session,
+            )
+            return
         append_cycle_run_output_target_snapshot(
             run,
             target_type=THREAD_OUTPUT_TARGET_TYPE,
@@ -1010,6 +1027,14 @@ async def async_execute_cycle_run(run_id: int) -> None:
             else:
                 run.started_at = datetime.now(timezone.utc)
                 run_metadata = _cycle_run_metadata(cycle, run)
+                if (
+                    promotion_gate is not None
+                    and promotion_gate.outcome == "unchanged"
+                ):
+                    run_metadata["tool_policy"] = {
+                        "disabled_tools": ["read_github_source"],
+                        "reason": "promotion_readiness_unchanged",
+                    }
                 run_message = _cycle_run_message(idea, cycle, run)
                 agent_run_id = await _async_admit_cycle_run(
                     uow.session,

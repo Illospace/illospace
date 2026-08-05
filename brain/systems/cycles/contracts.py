@@ -16,6 +16,11 @@ from brain.systems.cycles.common import (
 from brain.systems.cycles.degradation import mandatory_escalations
 
 SCHEDULED_REVIEW_WINDOW_HOURS = 24
+PROMOTION_READINESS_CYCLE_NAME = "Uwear Backend Promotion Readiness"
+PROMOTION_READINESS_REPO = "uwear-ai/uwear-backend"
+PROMOTION_READINESS_STATUS_DOMAIN_SLUG = "promotion-readiness"
+PROMOTION_READINESS_STATUS_OBJECT_KEY = "status"
+CLOSING_BLOCK_VERDICT_REQUIRED_OUTPUT = "closing_block_verdict"
 SELF_REVIEW_SUMMARY_MARKER = "Self-review summary:"
 SELF_REVIEW_SUMMARY_MARKERS = (
     SELF_REVIEW_SUMMARY_MARKER,
@@ -31,6 +36,10 @@ RESULT_CONTRACT_OUTPUT_SECTIONS = {
     "report_evidence_health": "`Evidence health:`",
     "record_next_action_or_blocker": "`Next action:` or `Blocker:`",
     "short_self_review_summary": f"`{SELF_REVIEW_SUMMARY_MARKER}`",
+    CLOSING_BLOCK_VERDICT_REQUIRED_OUTPUT: (
+        "a final `Risk:` / `Evaluated:` / `Posted:` block that states why a post "
+        "was sent or withheld"
+    ),
 }
 
 # Keep each coordinator run kind's complete contract visible here. Do not derive
@@ -93,12 +102,15 @@ def cycle_result_contract(
     degradation_tracking: dict[str, Any] | None = None,
     *,
     run_kind: str,
+    require_closing_block_verdict: bool = False,
 ) -> dict[str, Any]:
     """The minimum output contract for autonomous cycle runs."""
     clean_run_kind = normalize_cycle_run_kind(run_kind)
     required_outputs = list(
         CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND[clean_run_kind]
     )
+    if require_closing_block_verdict:
+        required_outputs.append(CLOSING_BLOCK_VERDICT_REQUIRED_OUTPUT)
     contract = {
         "kind": "autonomous_cycle_run_result",
         "run_kind": clean_run_kind,
@@ -113,6 +125,30 @@ def cycle_result_contract(
             "follow_next_page_to_completion_and_report_ok_when_no_reader_warnings_or_failures_remain"
         ),
     }
+    if require_closing_block_verdict:
+        contract["execution_gate"] = {
+            "name": "promotion_readiness_sha_pair",
+            "decision_source": "cycle_memory.context.promotion_readiness_gate",
+            "must_run_before": "per_pr_review",
+            "outcomes": {
+                "idle": (
+                    "Stop without per-PR review or posting; emit the required closing "
+                    "verdict."
+                ),
+                "unchanged": (
+                    "Do not perform per-PR review. Continue directly to the scheduled "
+                    "posting decision, then emit the required closing verdict."
+                ),
+                "evaluate": (
+                    "Run the bounded per-PR review, then continue to the posting decision "
+                    "and required closing verdict."
+                ),
+                "unavailable": (
+                    "The cheap gate could not decide. Run the mission and report the "
+                    "evidence gap in the required closing verdict."
+                ),
+            },
+        }
     escalations = mandatory_escalations(degradation_tracking)
     if escalations:
         contract["required_outputs"].extend(
@@ -127,6 +163,12 @@ def cycle_result_contract(
             "off-cadence silence is not allowed to consume the escalation."
         )
     return contract
+
+
+def cycle_requires_closing_block_verdict(cycle_name: str | None) -> bool:
+    """Return whether this Cycle has the promotion-readiness ledger contract."""
+
+    return str(cycle_name or "").strip() == PROMOTION_READINESS_CYCLE_NAME
 
 
 def pending_evidence_health_receipt(scheduled_for: datetime | None) -> dict[str, Any]:

@@ -16,13 +16,18 @@ from brain.platform.integrations.provider_error_sentinel import (
 )
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.cycle import Cycle, CycleRun
-from brain.systems.cycles.contracts import SELF_REVIEW_SUMMARY_MARKERS
+from brain.systems.cycles.contracts import (
+    CLOSING_BLOCK_VERDICT_REQUIRED_OUTPUT,
+    SELF_REVIEW_SUMMARY_MARKERS,
+    cycle_requires_closing_block_verdict,
+)
 from brain.systems.personality import soul_prompt_section
 
 logger = logging.getLogger(__name__)
 
 MISSION_RESULT_CONTRACT_VERDICT_KEY = "mission_result_contract_verdict"
 SELF_REVIEW_SUMMARY_VERDICT_KEY = "self_review_summary"
+CLOSING_BLOCK_VERDICT_KEY = "closing_block_verdict"
 _CONTRACT_KIND = "autonomous_cycle_run_result"
 _FINAL_ANSWER_TYPE = "final_answer"
 _MANDATORY_DEGRADATION_ESCALATION_PREFIX = "mandatory_degradation_escalation:"
@@ -62,6 +67,13 @@ _SELF_REVIEW_SUMMARY_RES = tuple(
     )
     for marker in SELF_REVIEW_SUMMARY_MARKERS
 )
+_CLOSING_BLOCK_FIELD_RES = {
+    field.lower(): re.compile(
+        rf"^[ \t]*(?:[-*][ \t]+)?(?:\*\*)?{field}(?:\*\*)?[ \t]*:[ \t]*(?:\*\*)?(?P<value>[^\r\n]+)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for field in ("Risk", "Evaluated", "Posted")
+}
 
 _NON_PRESERVABLE_OUTPUTS = frozenset(
     {
@@ -151,12 +163,75 @@ def _normalize_self_review_summary(value: Any) -> str | None:
     return value.strip() or None
 
 
+def extract_closing_block_verdict(candidate_answer: str | None) -> dict[str, str] | None:
+    """Return the final complete Risk/Evaluated/Posted closing block."""
+
+    answer = str(candidate_answer or "")
+    values: dict[str, str] = {}
+    positions: list[int] = []
+    for field, pattern in _CLOSING_BLOCK_FIELD_RES.items():
+        matches = list(pattern.finditer(answer))
+        if not matches:
+            return None
+        match = matches[-1]
+        value = str(match.group("value") or "").strip()
+        if not value:
+            return None
+        values[field] = value
+        positions.append(match.start())
+    if positions != sorted(positions):
+        return None
+    return {
+        **values,
+        "outcome": _closing_block_outcome(values),
+    }
+
+
+def _closing_block_outcome(verdict: dict[str, str]) -> str:
+    risk = _normalize_text(verdict.get("risk"))
+    evaluated = _normalize_text(verdict.get("evaluated"))
+    posted = _normalize_text(verdict.get("posted"))
+    if "unchanged" in risk:
+        return "skipped_unchanged"
+    if "idle" in risk:
+        return "skipped_idle"
+    if risk in {"unknown", "not reached"} or evaluated.startswith(
+        ("no ", "not reached", "unknown")
+    ):
+        return "gate_not_reached"
+    if posted.startswith(("yes", "posted", "sent")):
+        return "posted"
+    if risk.startswith("low") and posted.startswith(("no", "not posted", "withheld")):
+        return "evaluated_low_silent"
+    return "evaluated_silent"
+
+
+def format_closing_block_verdict(verdict: dict[str, Any]) -> str:
+    """Render the stable three-line Cycle ledger verdict."""
+
+    return "\n".join(
+        f"{label}: {str(verdict.get(label.lower()) or '').strip()}"
+        for label in ("Risk", "Evaluated", "Posted")
+    )
+
+
+def _ledger_self_review_summary(
+    self_review_summary: str | None,
+    closing_block_verdict: dict[str, Any] | None,
+) -> str | None:
+    parts = [value for value in (_normalize_self_review_summary(self_review_summary),) if value]
+    if closing_block_verdict:
+        parts.append(format_closing_block_verdict(closing_block_verdict))
+    return "\n".join(parts) or None
+
+
 def _satisfies_required_output(
     requirement: str,
     *,
     normalized_candidate: str,
     result_contract: dict[str, Any],
     self_review_summary: str | None,
+    closing_block_verdict: dict[str, str] | None,
 ) -> bool:
     if requirement.startswith(_MANDATORY_DEGRADATION_ESCALATION_PREFIX):
         required_key = requirement.removeprefix(
@@ -200,6 +275,8 @@ def _satisfies_required_output(
         return _contains_any(normalized_candidate, ("next action", "next step", "blocker"))
     if requirement == "short_self_review_summary":
         return self_review_summary is not None
+    if requirement == CLOSING_BLOCK_VERDICT_REQUIRED_OUTPUT:
+        return closing_block_verdict is not None
     if requirement in {"domain_tracking", "domain_tracking_summary"}:
         return _contains_any(
             normalized_candidate,
@@ -220,6 +297,7 @@ def evaluate_cycle_result_contract(
 
     normalized_candidate = _normalize_text(candidate_answer)
     self_review_summary = extract_self_review_summary(candidate_answer)
+    closing_block_verdict = extract_closing_block_verdict(candidate_answer)
     detected_provider_error = provider_error_kind(
         candidate_answer,
         provider_exception=provider_exception,
@@ -243,6 +321,7 @@ def evaluate_cycle_result_contract(
             normalized_candidate=normalized_candidate,
             result_contract=result_contract,
             self_review_summary=self_review_summary,
+            closing_block_verdict=closing_block_verdict,
         ):
             missing.append(requirement_name)
 
@@ -259,6 +338,7 @@ def evaluate_cycle_result_contract(
         "provider_error": detected_provider_error,
         "reported_evidence_health": _reported_evidence_health(candidate_answer),
         SELF_REVIEW_SUMMARY_VERDICT_KEY: self_review_summary,
+        CLOSING_BLOCK_VERDICT_KEY: closing_block_verdict,
     }
 
 
@@ -336,10 +416,93 @@ def _persist_cycle_contract_verdict(
     normalized_self_review_summary = _normalize_self_review_summary(self_review_summary)
     stored_verdict = dict(verdict)
     stored_verdict[SELF_REVIEW_SUMMARY_VERDICT_KEY] = normalized_self_review_summary
+    closing_block_verdict = _json_dict(stored_verdict.get(CLOSING_BLOCK_VERDICT_KEY))
     context_snapshot = _json_dict(getattr(cycle_run, "context_snapshot", None))
     context_snapshot[MISSION_RESULT_CONTRACT_VERDICT_KEY] = stored_verdict
     cycle_run.context_snapshot = context_snapshot
-    cycle_run.self_review_summary = normalized_self_review_summary
+    cycle_run.self_review_summary = _ledger_self_review_summary(
+        normalized_self_review_summary,
+        closing_block_verdict,
+    )
+
+
+def persist_cycle_run_short_circuit_verdict(
+    cycle_run: CycleRun,
+    closing_block_verdict: dict[str, str],
+) -> None:
+    """Persist a deterministic pre-agent verdict on the #668 ledger surface."""
+
+    verdict = {
+        "kind": "cycle_result_contract_verdict",
+        "schema_version": 1,
+        "approved": True,
+        "missing_outputs": [],
+        "final_missing_outputs": [],
+        "repair_attempted": False,
+        "repair_succeeded": False,
+        "settlement_status": "mission_short_circuited",
+        "visible_answer_source": None,
+        SELF_REVIEW_SUMMARY_VERDICT_KEY: None,
+        CLOSING_BLOCK_VERDICT_KEY: dict(closing_block_verdict),
+    }
+    _persist_cycle_contract_verdict(
+        cycle_run,
+        verdict,
+        self_review_summary=None,
+    )
+
+
+def ensure_cycle_run_closing_verdict(
+    cycle_run: CycleRun,
+    *,
+    cycle_name: str | None,
+    status: str,
+    error: str | None = None,
+    skip_reason: str | None = None,
+) -> dict[str, str] | None:
+    """Persist an explicit gate-not-reached verdict for terminal Cycle 9 runs."""
+
+    context_snapshot = _json_dict(getattr(cycle_run, "context_snapshot", None))
+    result_contract = _json_dict(context_snapshot.get("result_contract"))
+    required_outputs = _json_list(result_contract.get("required_outputs"))
+    if (
+        CLOSING_BLOCK_VERDICT_REQUIRED_OUTPUT not in required_outputs
+        and not cycle_requires_closing_block_verdict(cycle_name)
+    ):
+        return None
+
+    stored_verdict = _json_dict(context_snapshot.get(MISSION_RESULT_CONTRACT_VERDICT_KEY))
+    existing = _json_dict(stored_verdict.get(CLOSING_BLOCK_VERDICT_KEY))
+    if all(str(existing.get(field) or "").strip() for field in ("risk", "evaluated", "posted")):
+        cycle_run.self_review_summary = _ledger_self_review_summary(
+            stored_verdict.get(SELF_REVIEW_SUMMARY_VERDICT_KEY),
+            existing,
+        )
+        return existing
+
+    detail = str(error or skip_reason or status or "terminal state").strip()
+    fallback = {
+        "risk": "UNKNOWN",
+        "evaluated": f"No — closing gate was not reached before {status}",
+        "posted": f"Unknown — no posting verdict was recorded ({detail})",
+        "outcome": "gate_not_reached",
+    }
+    stored_verdict.update(
+        {
+            "kind": stored_verdict.get("kind") or "cycle_result_contract_verdict",
+            "schema_version": stored_verdict.get("schema_version") or 1,
+            "settlement_status": stored_verdict.get("settlement_status") or "gate_not_reached",
+            CLOSING_BLOCK_VERDICT_KEY: fallback,
+        }
+    )
+    _persist_cycle_contract_verdict(
+        cycle_run,
+        stored_verdict,
+        self_review_summary=_normalize_self_review_summary(
+            stored_verdict.get(SELF_REVIEW_SUMMARY_VERDICT_KEY)
+        ),
+    )
+    return fallback
 
 
 async def _latest_final_answer_artifact(
@@ -723,6 +886,7 @@ def _base_verdict(
         "provider_error": initial_review.get("provider_error"),
         "reported_evidence_health": initial_review.get("reported_evidence_health"),
         SELF_REVIEW_SUMMARY_VERDICT_KEY: self_review_summary,
+        CLOSING_BLOCK_VERDICT_KEY: initial_review.get(CLOSING_BLOCK_VERDICT_KEY),
     }
 
 
@@ -881,6 +1045,9 @@ async def async_prepare_cycle_run_visible_finalization(
                         "reported_evidence_health"
                     ),
                     SELF_REVIEW_SUMMARY_VERDICT_KEY: repaired_self_review_summary,
+                    CLOSING_BLOCK_VERDICT_KEY: repair_review.get(
+                        CLOSING_BLOCK_VERDICT_KEY
+                    ),
                 }
             )
             _persist_cycle_contract_verdict(
@@ -891,6 +1058,10 @@ async def async_prepare_cycle_run_visible_finalization(
             return verdict
         verdict["repair_missing_outputs"] = list(repair_review["missing_outputs"])
         verdict["final_missing_outputs"] = list(repair_review["missing_outputs"])
+        if repair_review.get(CLOSING_BLOCK_VERDICT_KEY):
+            verdict[CLOSING_BLOCK_VERDICT_KEY] = repair_review[
+                CLOSING_BLOCK_VERDICT_KEY
+            ]
         if not append_only and _candidate_can_be_preserved(combined_answer, repair_review):
             preserved_answer = combined_answer
             preserved_answer_source = "repair"
