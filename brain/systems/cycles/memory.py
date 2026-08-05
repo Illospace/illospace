@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import func, select
 
 from brain.kernel.common.serialization import jsonable
-from brain.kernel.common.time import assume_utc
+from brain.kernel.common.time import assume_utc_optional
 from brain.platform.db.models.cycle import (
     Cycle,
     CycleGuidance,
@@ -378,12 +378,8 @@ async def finalize_stale_cycle_run(
         skip_reason=skip_reason,
         evaluator_type="recovery",
     )
-    cycle_last_run_at = cycle.last_run_at
-    if cycle_last_run_at is not None and cycle_last_run_at.tzinfo is None:
-        cycle_last_run_at = assume_utc(cycle_last_run_at)
-    scheduled_for = run.scheduled_for
-    if scheduled_for is not None and scheduled_for.tzinfo is None:
-        scheduled_for = assume_utc(scheduled_for)
+    cycle_last_run_at = assume_utc_optional(cycle.last_run_at)
+    scheduled_for = assume_utc_optional(run.scheduled_for)
     if cycle_last_run_at is None or (
         scheduled_for is not None and scheduled_for >= cycle_last_run_at
     ):

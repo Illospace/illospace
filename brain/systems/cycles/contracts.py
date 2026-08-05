@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from brain.kernel.common.time import assume_utc
+from brain.kernel.common.time import assume_utc_optional
 from brain.systems.cycles.common import (
     OFF_SLOT_MATERIAL_ALERT_RUN_KIND,
     SCHEDULED_CYCLE_ORIGIN,
@@ -53,7 +53,7 @@ def _iso(value: datetime | None) -> str | None:
 
 def cycle_scheduled_review_window(scheduled_for: datetime | None) -> dict[str, Any]:
     """Return the stable evidence window a scheduled cycle should inspect."""
-    end = assume_utc(scheduled_for) if scheduled_for is not None else None
+    end = assume_utc_optional(scheduled_for)
     start = end - timedelta(hours=SCHEDULED_REVIEW_WINDOW_HOURS) if end else None
     return {
         "anchor": "cycle_run.scheduled_for",
@@ -158,8 +158,9 @@ def cycle_launch_receipt(
     except (TypeError, ValueError, ZoneInfoNotFoundError):
         timezone_name = "UTC"
         local_timezone = ZoneInfo("UTC")
-    if scheduled_for is not None:
-        local_scheduled_for = assume_utc(scheduled_for).astimezone(
+    aware_scheduled_for = assume_utc_optional(scheduled_for)
+    if aware_scheduled_for is not None:
+        local_scheduled_for = aware_scheduled_for.astimezone(
             local_timezone
         ).isoformat()
     return {
@@ -168,9 +169,7 @@ def cycle_launch_receipt(
         "cycle_run_id": cycle_run_id,
         "origin": origin,
         "launch_context": launch,
-        "scheduled_for": _iso(
-            assume_utc(scheduled_for) if scheduled_for is not None else None
-        ),
+        "scheduled_for": _iso(aware_scheduled_for),
         "timezone": timezone_name,
         "local_scheduled_for": local_scheduled_for,
         "scheduled_review_window": cycle_scheduled_review_window(scheduled_for),

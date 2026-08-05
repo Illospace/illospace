@@ -8,7 +8,7 @@ import re
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
-from brain.kernel.common.time import assume_utc
+from brain.kernel.common.time import assume_utc_optional
 
 
 DEGRADATION_ESCALATION_THRESHOLD = 3
@@ -18,7 +18,7 @@ REQUIRED_DIGEST_TIMEZONE = "America/Toronto"
 
 
 def _iso(value: datetime | None) -> str | None:
-    aware = assume_utc(value) if value is not None else None
+    aware = assume_utc_optional(value)
     return aware.isoformat() if aware is not None else None
 
 
@@ -106,7 +106,7 @@ def degradation_causes(
 def next_required_digest_at(scheduled_for: datetime) -> datetime:
     """Return the first required 08:00/13:00/18:00 ET digest after a run."""
 
-    scheduled_utc = assume_utc(scheduled_for) if scheduled_for is not None else None
+    scheduled_utc = assume_utc_optional(scheduled_for)
     if scheduled_utc is None:
         raise ValueError("scheduled_for is required")
     zone = ZoneInfo(REQUIRED_DIGEST_TIMEZONE)
@@ -158,7 +158,7 @@ def degradation_tracking_for_run(
     """Snapshot durable degradation state and mark escalations due in this run."""
 
     snapshot = _persistent_state(state)
-    scheduled_utc = assume_utc(scheduled_for) if scheduled_for is not None else None
+    scheduled_utc = assume_utc_optional(scheduled_for)
     mandatory: list[dict[str, Any]] = []
     for escalation in snapshot["pending_escalations"]:
         target_text = _text(escalation.get("next_required_digest_at"))
@@ -166,10 +166,11 @@ def degradation_tracking_for_run(
             target = datetime.fromisoformat(target_text) if target_text else None
         except ValueError:
             target = None
+        target_utc = assume_utc_optional(target)
         if (
             scheduled_utc is not None
-            and target is not None
-            and scheduled_utc >= assume_utc(target)
+            and target_utc is not None
+            and scheduled_utc >= target_utc
         ):
             mandatory.append(dict(escalation))
     snapshot["mandatory_in_current_digest"] = bool(mandatory)

@@ -31,3 +31,14 @@ def assume_utc(value: datetime | None = None) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def assume_utc_optional(value: datetime | None) -> datetime | None:
+    """Normalize an optional timestamp to UTC while preserving ``None``.
+
+    Unlike :func:`assume_utc`, which replaces ``None`` with the current time,
+    this helper returns ``None`` unchanged. Unlike :func:`ensure_utc`, it
+    accepts naive timestamps and assumes that they already represent UTC.
+    """
+
+    return None if value is None else assume_utc(value)

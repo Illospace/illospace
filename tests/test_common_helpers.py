@@ -18,7 +18,7 @@ from brain.kernel.common.coercion import (
 )
 from brain.kernel.common.env import env_flag, env_float, env_int
 from brain.kernel.common.serialization import json_safe, jsonable, stable_digest
-from brain.kernel.common.time import assume_utc, ensure_utc, utcnow
+from brain.kernel.common.time import assume_utc, assume_utc_optional, ensure_utc, utcnow
 
 
 def test_coercion_helpers_preserve_legacy_defaults() -> None:
@@ -78,6 +78,17 @@ def test_datetime_and_time_helpers_are_timezone_aware() -> None:
         2,
         tzinfo=timezone.utc,
     )
+    # The three helpers differ only on the inputs nobody remembers to check.
+    # Pin them side by side so the next reader does not have to diff them.
+    assert assume_utc_optional(datetime(2026, 1, 2)) == datetime(
+        2026,
+        1,
+        2,
+        tzinfo=timezone.utc,
+    )
+    assert assume_utc_optional(None) is None
+    # assume_utc replaces None with *now*; assume_utc_optional preserves it.
+    assert assume_utc(None) is not None
 
 
 def test_env_helpers_support_strict_and_permissive_boolean_semantics() -> None:
