@@ -538,6 +538,56 @@ async def test_memory_connector_reports_an_empty_searchable_corpus(session):
     assert state.last_stats == result.stats
 
 
+async def test_memory_connector_skips_orgless_nodes_and_keeps_organization_scope(
+    session,
+    embedding_runtime,
+    caplog,
+):
+    del embedding_runtime
+    updated_at = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            _memory_node(
+                14,
+                updated_at,
+                title="Unreachable org-less memory",
+                org_id=None,
+                visibility="org",
+            ),
+            _memory_node(
+                15,
+                updated_at,
+                title="Reachable organization memory",
+                org_id=_ORG_ID,
+                visibility="org",
+            ),
+        ]
+    )
+    await session.flush()
+
+    with caplog.at_level(
+        "WARNING",
+        logger="brain.systems.knowledge.connectors.memory",
+    ):
+        result = await sync_connector(session, MemoryConnector(max_items=10))
+
+    items = list((await session.scalars(select(KnowledgeItem))).all())
+    embeddings = list((await session.scalars(select(KnowledgeItemEmbedding))).all())
+
+    assert result.stats == {
+        "ingested": 1,
+        "skipped": 1,
+        "failed": 0,
+        "truncated": 0,
+    }
+    assert [item.source_ref for item in items] == ["memory_node:15"]
+    assert [embedding.item_id for embedding in embeddings] == [items[0].id]
+    assert items[0].extra[KNOWLEDGE_SCOPE_EXTRA_KEY] == (
+        KnowledgeScope.ORGANIZATION.value
+    )
+    assert "skipped node 14: org_id is missing" in caplog.text
+
+
 async def test_memory_connector_resumes_a_bounded_same_timestamp_backfill(
     session,
     embedding_runtime,

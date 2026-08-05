@@ -782,6 +782,7 @@ async def sync_connector(
         drafts = enumeration.drafts
         new_cursor = enumeration.cursor
         enumeration_failures = enumeration.failures
+        stats.skipped += enumeration.skipped
     except Exception as exc:
         stats.failed = 1
         logger.exception("Knowledge connector %s enumeration failed", source)

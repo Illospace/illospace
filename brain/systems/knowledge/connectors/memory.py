@@ -9,6 +9,7 @@ index has an ACL-aware read path.  The mirror is derived and additive: it reads
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import select
@@ -26,6 +27,14 @@ from brain.systems.knowledge.connectors.base import (
 
 _SHARED_VISIBILITIES = ("org", "team")
 _KNOWLEDGE_NODE_KINDS = ("content",)
+logger = logging.getLogger(__name__)
+
+
+def _required_org_id(node: MemoryNode) -> str:
+    if node.org_id is None:
+        raise ValueError(f"Memory node {node.id} has no organization")
+    return str(node.org_id)
+
 
 def _draft_for_memory(
     node: MemoryNode,
@@ -52,7 +61,7 @@ def _draft_for_memory(
             "freshness_status": node.freshness_status,
             "memory_type": memory_kind,
             "node_kind": node.node_kind,
-            "org_id": str(node.org_id) if node.org_id is not None else None,
+            "org_id": _required_org_id(node),
             "scope": scope,
             "sensitivity": node.sensitivity,
             "source_backed": True,
@@ -83,7 +92,7 @@ def _withdrawn_draft(node: MemoryNode) -> KnowledgeDraft:
             "archived": True,
             "mirror_status": "visibility_withdrawn",
             "node_kind": node.node_kind,
-            "org_id": str(node.org_id) if node.org_id is not None else None,
+            "org_id": _required_org_id(node),
             "truth_status": node.truth_status,
             "visibility": node.visibility,
         },
@@ -131,6 +140,21 @@ class MemoryConnector:
                 )
             ).all()
         )
+        candidate_rows = [
+            node
+            for node in rows
+            if node.visibility in _SHARED_VISIBILITIES
+            or f"memory_node:{node.id}" in existing_refs
+        ]
+        mirrorable_rows: list[MemoryNode] = []
+        for node in candidate_rows:
+            if node.org_id is None:
+                logger.warning(
+                    "Memory knowledge enumeration skipped node %s: org_id is missing",
+                    node.id,
+                )
+                continue
+            mirrorable_rows.append(node)
         supersession_rows = (
             await session.execute(
                 select(
@@ -138,7 +162,9 @@ class MemoryConnector:
                     MemoryEdgeNode.target_node_id,
                 )
                 .where(
-                    MemoryEdgeNode.source_node_id.in_([node.id for node in rows])
+                    MemoryEdgeNode.source_node_id.in_(
+                        [node.id for node in mirrorable_rows]
+                    )
                 )
                 .where(MemoryEdgeNode.edge_kind == "superseded_by")
                 .order_by(MemoryEdgeNode.id.asc())
@@ -152,14 +178,13 @@ class MemoryConnector:
             _draft_for_memory(node, superseded_by=superseded_by.get(node.id))
             if node.visibility in _SHARED_VISIBILITIES
             else _withdrawn_draft(node)
-            for node in rows
-            if node.visibility in _SHARED_VISIBILITIES
-            or f"memory_node:{node.id}" in existing_refs
+            for node in mirrorable_rows
         ]
         last = rows[-1]
         return KnowledgeEnumeration(
             drafts=drafts,
             cursor=watermark.advanced_to(last.updated_at, last.id),
+            skipped=len(candidate_rows) - len(mirrorable_rows),
         )
 
 
