@@ -77,7 +77,7 @@ def _draft_for_memory(
     )
 
 
-def _withdrawn_draft(node: MemoryNode) -> KnowledgeDraft:
+def _withdrawn_draft(node: MemoryNode, *, org_id: str) -> KnowledgeDraft:
     """Scrub a formerly shared mirror after its source becomes private."""
 
     return KnowledgeDraft(
@@ -92,7 +92,7 @@ def _withdrawn_draft(node: MemoryNode) -> KnowledgeDraft:
             "archived": True,
             "mirror_status": "visibility_withdrawn",
             "node_kind": node.node_kind,
-            "org_id": _required_org_id(node),
+            "org_id": org_id,
             "truth_status": node.truth_status,
             "visibility": node.visibility,
         },
@@ -130,31 +130,35 @@ class MemoryConnector:
         if not rows:
             return KnowledgeEnumeration(drafts=[], cursor=dict(cursor))
         source_refs = [f"memory_node:{node.id}" for node in rows]
-        existing_refs = set(
-            (
-                await session.scalars(
-                    select(KnowledgeItem.source_ref).where(
+        existing_org_ids = {
+            source_ref: extra["org_id"]
+            for source_ref, extra in (
+                await session.execute(
+                    select(KnowledgeItem.source_ref, KnowledgeItem.extra).where(
                         KnowledgeItem.source == self.source_key,
                         KnowledgeItem.source_ref.in_(source_refs),
                     )
                 )
             ).all()
-        )
+        }
         candidate_rows = [
             node
             for node in rows
             if node.visibility in _SHARED_VISIBILITIES
-            or f"memory_node:{node.id}" in existing_refs
+            or f"memory_node:{node.id}" in existing_org_ids
         ]
-        mirrorable_rows: list[MemoryNode] = []
+        draft_rows: list[MemoryNode] = []
+        active_rows: list[MemoryNode] = []
         for node in candidate_rows:
-            if node.org_id is None:
-                logger.warning(
-                    "Memory knowledge enumeration skipped node %s: org_id is missing",
-                    node.id,
-                )
-                continue
-            mirrorable_rows.append(node)
+            if node.visibility in _SHARED_VISIBILITIES:
+                if node.org_id is None:
+                    logger.warning(
+                        "Memory knowledge enumeration skipped node %s: org_id is missing",
+                        node.id,
+                    )
+                    continue
+                active_rows.append(node)
+            draft_rows.append(node)
         supersession_rows = (
             await session.execute(
                 select(
@@ -163,7 +167,7 @@ class MemoryConnector:
                 )
                 .where(
                     MemoryEdgeNode.source_node_id.in_(
-                        [node.id for node in mirrorable_rows]
+                        [node.id for node in active_rows]
                     )
                 )
                 .where(MemoryEdgeNode.edge_kind == "superseded_by")
@@ -177,14 +181,16 @@ class MemoryConnector:
         drafts = [
             _draft_for_memory(node, superseded_by=superseded_by.get(node.id))
             if node.visibility in _SHARED_VISIBILITIES
-            else _withdrawn_draft(node)
-            for node in mirrorable_rows
+            else _withdrawn_draft(
+                node,
+                org_id=existing_org_ids[f"memory_node:{node.id}"],
+            )
+            for node in draft_rows
         ]
         last = rows[-1]
         return KnowledgeEnumeration(
             drafts=drafts,
             cursor=watermark.advanced_to(last.updated_at, last.id),
-            skipped=len(candidate_rows) - len(mirrorable_rows),
         )
 
 

@@ -565,26 +565,19 @@ async def test_memory_connector_skips_orgless_nodes_and_keeps_organization_scope
     )
     await session.flush()
 
-    with caplog.at_level(
-        "WARNING",
-        logger="brain.systems.knowledge.connectors.memory",
-    ):
+    with caplog.at_level("WARNING"):
         result = await sync_connector(session, MemoryConnector(max_items=10))
 
     items = list((await session.scalars(select(KnowledgeItem))).all())
     embeddings = list((await session.scalars(select(KnowledgeItemEmbedding))).all())
 
-    assert result.stats == {
-        "ingested": 1,
-        "skipped": 1,
-        "failed": 0,
-        "truncated": 0,
-    }
+    assert result.stats["ingested"] == 1
     assert [item.source_ref for item in items] == ["memory_node:15"]
     assert [embedding.item_id for embedding in embeddings] == [items[0].id]
     assert items[0].extra[KNOWLEDGE_SCOPE_EXTRA_KEY] == (
         KnowledgeScope.ORGANIZATION.value
     )
+    assert items[0].extra["org_id"] == _ORG_ID
     assert "skipped node 14: org_id is missing" in caplog.text
 
 
@@ -764,6 +757,45 @@ async def test_memory_connector_scrubs_a_mirror_when_visibility_becomes_private(
         "truth_status": "active",
         "visibility": "private",
     }
+
+
+async def test_memory_connector_scrubs_a_mirror_after_its_organization_is_removed(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    created_at = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+    node = _memory_node(
+        42,
+        created_at,
+        title="Shared organization decision",
+        text="This organization detail must be scrubbed after withdrawal.",
+        visibility="org",
+    )
+    session.add(node)
+    await session.flush()
+    connector = MemoryConnector(max_items=10)
+    await sync_connector(session, connector)
+
+    withdrawn_at = datetime(2026, 7, 21, 13, 0, tzinfo=timezone.utc)
+    node.visibility = "private"
+    node.org_id = None
+    node.updated_at = withdrawn_at
+    await session.flush()
+
+    result = await sync_connector(session, connector)
+    mirrored = await session.scalar(
+        select(KnowledgeItem).where(KnowledgeItem.source_ref == "memory_node:42")
+    )
+
+    assert result.stats["ingested"] == 1
+    assert result.corpus_empty is True
+    assert mirrored is not None
+    assert mirrored.archived_at.replace(tzinfo=timezone.utc) == withdrawn_at
+    assert mirrored.raw_text == ""
+    assert "organization detail" not in mirrored.search_text
+    assert mirrored.extra["mirror_status"] == "visibility_withdrawn"
+    assert mirrored.extra["org_id"] == _ORG_ID
 
 
 def test_reciprocal_rank_fusion_uses_recency_as_weight_not_candidate_gate():

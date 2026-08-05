@@ -115,7 +115,6 @@ class KnowledgeEnumeration:
     drafts: list[KnowledgeDraft]
     cursor: dict[str, Any]
     failures: tuple[EnumerationFailure, ...] = ()
-    skipped: int = 0
 
 
 class KnowledgeConnector(Protocol):
