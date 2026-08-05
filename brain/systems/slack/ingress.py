@@ -101,6 +101,11 @@ def _event_origin(
         return None
     if _is_own_slack_message(event, bot_user_id=bot_user_id, api_app_id=api_app_id):
         return None
+    if (
+        monitored_intake is not None
+        and monitored_intake.policy.interrupt is not None
+    ):
+        return monitored_intake.policy.origin
     is_bot = bool(event.get("bot_id"))
     # Direct human invitations to participate: explicit mentions and DMs.
     if not is_bot:
@@ -164,14 +169,18 @@ def normalize_slack_socket_event(
 
     payload = _socket_payload(socket_payload)
     event = _slack_event(socket_payload)
+    resolved_bot_user_id = _bot_user_id(socket_payload, bot_user_id)
     visible_content = visible_slack_content(event)
-    monitored_intake = recognize_monitored_intake(event, visible_content)
+    monitored_intake = recognize_monitored_intake(
+        event,
+        visible_content,
+        bot_user_id=resolved_bot_user_id,
+    )
     disabled = frozenset(
         str(intake).strip()
         for intake in (disabled_intakes or ())
         if str(intake).strip()
     )
-    resolved_bot_user_id = _bot_user_id(socket_payload, bot_user_id)
     api_app_id = str(payload.get("api_app_id") or "").strip() or None
     monitored = frozenset(
         str(channel).strip() for channel in (monitored_channels or ()) if str(channel).strip()

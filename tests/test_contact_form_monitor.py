@@ -28,12 +28,13 @@ def _contact_form_text(*, include_phone: bool = True) -> str:
     return "\n".join(fields)
 
 
-def test_alert_and_contact_form_are_peer_policies_in_one_registry():
+def test_typed_intakes_and_alert_fallback_share_one_registry():
     from brain.systems.slack.monitored_intakes import (
         MONITORED_INTAKE_POLICIES,
     )
 
     assert [policy.origin for policy in MONITORED_INTAKE_POLICIES] == [
+        "slack.direct_liveness_probe",
         "contact_form_lead",
         "slack.channel_message",
     ]

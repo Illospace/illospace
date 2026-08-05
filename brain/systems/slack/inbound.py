@@ -11,9 +11,11 @@ from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.inbound import InboundEventRow
 from brain.platform.db.models.org import User
 from brain.systems.inbound.handlers import (
+    InboundCompletion,
     InboundEventCompleter,
     InboundHandlerContext,
 )
+from brain.systems.inbound.status import STATUS_PROCESSED
 from brain.systems.inbound.surface_admission import (
     SurfaceAdmissionSpec,
     SurfaceIdentity,
@@ -31,8 +33,10 @@ from brain.systems.slack.identity import (
     SlackIdentitySource,
     normalize_slack_identities,
 )
+from brain.systems.slack.monitored_intakes import monitored_intake_policy
 from brain.systems.slack.triggers import (
     SLACK_MESSAGE_ENVELOPE_KIND,
+    SLACK_REPLY_TOOL,
     build_slack_work_intake_payload,
 )
 from brain.systems.user_domains.service import DomainError, DomainNotFound
@@ -49,6 +53,38 @@ async def process_slack_message_envelope(
     complete: InboundEventCompleter,
 ) -> dict[str, Any]:
     """Admit an Illo run for a normalized Slack mention or DM."""
+
+    policy = monitored_intake_policy(normalized)
+    if policy is not None and policy.interrupt is not None:
+        payload = dict(normalized.get("payload") or {})
+        response_target = dict(payload.get("response_target") or {})
+        return await complete(
+            InboundCompletion(
+                status=STATUS_PROCESSED,
+                action_type=policy.interrupt.action_type,
+                action_result={
+                    "operation": policy.interrupt.operation,
+                    "event_id": str(event.id),
+                    "origin": normalized.get("origin"),
+                },
+                confidence=1.0,
+                target={
+                    "kind": SLACK_MESSAGE_ENVELOPE_KIND,
+                    "channel_id": response_target.get("channel_id"),
+                    "thread_ts": response_target.get("thread_ts"),
+                },
+                tool_use={"type": SLACK_REPLY_TOOL, "status": "interrupt"},
+                reasoning_summary=(
+                    "A typed Slack intake policy routed this direct liveness "
+                    "probe to a deterministic process-local reply."
+                ),
+                reusable_pattern_candidate={
+                    "kind": SLACK_MESSAGE_ENVELOPE_KIND,
+                    "origin": normalized.get("origin"),
+                    "source_kind": context.source_kind,
+                },
+            )
+        )
 
     return await admit_surface_envelope(
         session,
