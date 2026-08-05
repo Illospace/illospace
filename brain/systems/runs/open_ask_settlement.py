@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -12,11 +12,15 @@ from brain.contracts.statuses import (
     ACTIVE_OPEN_ASK_STATUS_VALUES,
     OpenAskStatus,
 )
+from brain.kernel.common.time import assume_utc
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.open_ask import (
     ObligationKind,
     ObligationNotice,
     OpenAsk,
+)
+from brain.systems.runs.obligation_notices import (
+    supersede_pending_obligation_notices,
 )
 from brain.systems.runs.obligation_specs import (
     InboundSlackReply,
@@ -72,30 +76,6 @@ class DeliveredSlackAnswerCounts:
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()
-
-
-def _aware_utc(value: datetime | None) -> datetime:
-    if value is None:
-        return datetime.now(timezone.utc)
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
-def _clear_open_ask_resolution(row: OpenAsk) -> None:
-    """Clear terminal transition fields before creation reopens an obligation."""
-
-    row.answer_text = None
-    row.answer_artifact_kind = None
-    row.answer_artifact_ref = None
-    row.answered_by_run_id = None
-    row.answered_at = None
-    row.delivered_message_ts = None
-    row.routed_to_name = None
-    row.routed_to_slack_id = None
-    row.routed_at = None
-    row.expired_at = None
-    row.status_reason = None
 
 
 async def open_asks_for_origin_ref(
@@ -169,7 +149,7 @@ def mark_open_ask_answered(
     row.answer_artifact_kind = _clean(artifact_kind) or None
     row.answer_artifact_ref = _clean(artifact_ref) or None
     row.answered_by_run_id = int(answered_by_run_id) if answered_by_run_id else None
-    row.answered_at = _aware_utc(now)
+    row.answered_at = assume_utc(now)
     row.delivered_message_ts = message_ts
     row.expired_at = None
     row.status_reason = None
@@ -196,37 +176,11 @@ def mark_open_ask_routed(
     row.status = OpenAskStatus.ROUTED.value
     row.routed_to_name = owner_name
     row.routed_to_slack_id = owner_slack_id
-    row.routed_at = _aware_utc(now)
+    row.routed_at = assume_utc(now)
     row.delivered_message_ts = message_ts
     row.expired_at = None
     row.status_reason = None
     return row
-
-
-async def _supersede_pending_notices(
-    session: Any,
-    obligation_ids: list[int],
-) -> None:
-    if not obligation_ids:
-        return
-    pending_notices = list(
-        (
-            await session.scalars(
-                select(ObligationNotice)
-                .where(
-                    ObligationNotice.obligation_id.in_(obligation_ids),
-                    ObligationNotice.state == "pending",
-                )
-                .with_for_update()
-            )
-        ).all()
-    )
-    for notice in pending_notices:
-        notice.state = "superseded"
-        notice.claimed_at = None
-        notice.last_error = None
-    if pending_notices:
-        await session.flush()
 
 
 async def _delivered_slack_rows(
@@ -295,7 +249,7 @@ async def record_delivered_slack_answer(
         except ValueError:
             continue
         by_kind[kind] = int(by_kind.get(kind, 0)) + 1
-    await _supersede_pending_notices(
+    await supersede_pending_obligation_notices(
         session,
         [int(row.id) for row in rows],
     )
@@ -424,7 +378,7 @@ async def record_inbound_slack_obligation_answer(
             slack_response={"ts": normalized["message_ts"]},
             now=now,
         )
-    await _supersede_pending_notices(
+    await supersede_pending_obligation_notices(
         session,
         list(rows_by_id),
     )

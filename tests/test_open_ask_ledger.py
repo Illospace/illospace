@@ -597,11 +597,11 @@ def test_delivered_slack_transition_commands_have_disjoint_fields():
 
 @pytest.mark.asyncio
 async def test_stale_notice_claim_is_disambiguated_before_any_resend(session):
-    from brain.systems.runs.open_asks import record_run_deferral
     from brain.systems.runs.obligation_notices import (
         STALE_NOTICE_POSTING_GRACE,
         deliver_pending_obligation_notices,
     )
+    from brain.systems.runs.run_deferrals import record_run_deferral
 
     run = await _create_slack_run(session)
     _obligation, notice, _created = await record_run_deferral(
@@ -668,11 +668,11 @@ async def test_answer_supersedes_a_stale_notice_proven_absent(session):
         DeliveredSlackAnswer,
         record_delivered_slack_answer,
     )
-    from brain.systems.runs.open_asks import record_run_deferral
     from brain.systems.runs.obligation_notices import (
         STALE_NOTICE_POSTING_GRACE,
         deliver_pending_obligation_notices,
     )
+    from brain.systems.runs.run_deferrals import record_run_deferral
 
     run = await _create_slack_run(session)
     _obligation, notice, _created = await record_run_deferral(
@@ -735,7 +735,7 @@ async def test_delivered_answer_returns_kind_counts_and_closes_all_matching_kind
         DeliveredSlackAnswer,
         record_delivered_slack_answer,
     )
-    from brain.systems.runs.open_asks import record_run_deferral
+    from brain.systems.runs.run_deferrals import record_run_deferral
 
     run_id, human_ask = await _admit_originating_ask(session)
     run = await session.get(AgentRunRow, run_id)

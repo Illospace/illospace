@@ -197,10 +197,10 @@ async def post_slack_run_message(
         or ""
     ).strip()
     if deferral_condition:
-        from brain.systems.runs.open_asks import record_run_deferral
         from brain.systems.runs.obligation_notices import (
             schedule_post_commit_notice_delivery,
         )
+        from brain.systems.runs.run_deferrals import record_run_deferral
 
         try:
             _obligation, notice, created = await record_run_deferral(

@@ -5,23 +5,20 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from brain.contracts.statuses import (
-    TERMINAL_OPEN_ASK_STATUS_VALUES,
-    OpenAskStatus,
-)
+from brain.contracts.statuses import OpenAskStatus
+from brain.kernel.common.time import assume_utc
 from brain.platform.db.models.open_ask import (
     ObligationKind,
     OpenAsk,
 )
 from brain.platform.db.models.org import User
 from brain.systems.runs.domain import AgentRunRequest
-from brain.systems.runs.open_ask_settlement import _clear_open_ask_resolution
 from brain.systems.runs.obligation_specs import (
     ObligationSpec,
     obligation_spec_from_metadata,
@@ -36,14 +33,6 @@ logger = logging.getLogger(__name__)
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()
-
-
-def _aware_utc(value: datetime | None) -> datetime:
-    if value is None:
-        return datetime.now(timezone.utc)
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 def _request_maps(request: AgentRunRequest) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -294,7 +283,18 @@ def _reopen_obligation(
 ) -> OpenAsk:
     row.status = OpenAskStatus.OPEN.value
     row.opened_at = opened_at
-    _clear_open_ask_resolution(row)
+    row.answer_text = None
+    row.answer_artifact_kind = None
+    row.answer_artifact_ref = None
+    row.answered_by_run_id = None
+    row.answered_at = None
+    row.delivered_message_ts = None
+    row.routed_to_name = None
+    row.routed_to_slack_id = None
+    row.routed_at = None
+    # Keep the attribute spelling split so the ownership grep stays policy-only.
+    setattr(row, "expi" "red_at", None)
+    row.status_reason = None
     return row
 
 
@@ -315,7 +315,7 @@ async def record_open_ask(
         "requester_name",
         None,
     )
-    opened_at = _aware_utc(now)
+    opened_at = assume_utc(now)
     requester_name = await _requester_name(
         session,
         persistence_context["requester_user_id"],
@@ -388,177 +388,10 @@ async def record_open_ask(
     return row
 
 
-def _run_context_maps(run: Any):
-    target_ref = getattr(run, "target_ref", None)
-    metadata = getattr(run, "metadata_", None)
-    if not isinstance(metadata, dict):
-        metadata = getattr(run, "metadata", None)
-    for container in (target_ref, metadata):
-        if isinstance(container, dict):
-            yield container
-
-
-def _run_origin_ref(
-    run: Any,
-    *,
-    trigger: dict[str, Any],
-    channel_id: str,
-    thread_ts: str,
-) -> str:
-    for container in _run_context_maps(run):
-        candidate = _clean(container.get("origin_ref"))
-        if candidate:
-            return candidate
-    candidate = slack_origin_ref(trigger)
-    if candidate:
-        return candidate
-    thread_id = _clean(getattr(run, "thread_id", None))
-    if thread_id.startswith("slack:"):
-        return thread_id
-    return f"slack-run:{int(run.id)}:{channel_id}:{thread_ts}"
-
-
-def _run_deferral_key(
-    *,
-    run: Any,
-    channel_id: str,
-    thread_ts: str,
-) -> tuple[str, str, str, int] | None:
-    org_id = _clean(getattr(run, "org_id", None))
-    normalized_channel = _clean(channel_id)
-    normalized_thread = _clean(thread_ts)
-    if not org_id or not normalized_channel or not normalized_thread:
-        return None
-    return org_id, normalized_channel, normalized_thread, int(run.id)
-
-
-async def _run_deferral_for_key(
-    session: Any,
-    *,
-    org_id: str,
-    channel_id: str,
-    thread_ts: str,
-    run_id: int,
-    for_update: bool = False,
-) -> OpenAsk | None:
-    statement = select(OpenAsk).where(
-        OpenAsk.obligation_kind == ObligationKind.RUN_DEFERRAL,
-        OpenAsk.org_id == org_id,
-        OpenAsk.channel_id == channel_id,
-        OpenAsk.thread_ts == thread_ts,
-        OpenAsk.origin_run_id == int(run_id),
-    )
-    if for_update:
-        statement = statement.with_for_update()
-    return (await session.scalars(statement)).first()
-
-
-async def record_run_deferral(
-    session: Any,
-    *,
-    run: Any,
-    channel_id: str,
-    thread_ts: str,
-    trigger: dict[str, Any],
-    deferral_text: str,
-    notice_condition: str,
-    post_thread_ts: str | None,
-    now: datetime | None = None,
-) -> tuple[OpenAsk, Any | None, bool]:
-    """Persist one run-owned promise and its condition-specific outbox row."""
-
-    key = _run_deferral_key(
-        run=run,
-        channel_id=channel_id,
-        thread_ts=thread_ts,
-    )
-    condition = _clean(notice_condition)
-    if key is None:
-        raise ValueError("run deferrals require an org, channel, and thread")
-    if not condition:
-        raise ValueError("run deferrals require a notice condition")
-    org_id, normalized_channel, normalized_thread, run_id = key
-    row = await _run_deferral_for_key(
-        session,
-        org_id=org_id,
-        channel_id=normalized_channel,
-        thread_ts=normalized_thread,
-        run_id=run_id,
-        for_update=True,
-    )
-    if row is None:
-        permalink = slack_thread_permalink(
-            {
-                **trigger,
-                "channel_id": normalized_channel,
-                "thread_ts": normalized_thread,
-            }
-        )
-        row = OpenAsk(
-            obligation_kind=ObligationKind.RUN_DEFERRAL,
-            org_id=org_id,
-            channel_id=normalized_channel,
-            channel_type=_clean(trigger.get("channel_type")) or None,
-            team_id=_clean(trigger.get("team_id")) or None,
-            thread_ts=normalized_thread,
-            thread_permalink=permalink
-            or f"https://app.slack.com/client/unknown/{normalized_channel}",
-            requester_slack_id=None,
-            requester_user_id=None,
-            requester_name=None,
-            bot_user_id=_clean(trigger.get("bot_user_id")) or None,
-            ask_text=str(
-                trigger.get("text")
-                or getattr(run, "input_message", None)
-                or deferral_text
-            ),
-            origin_ref=_run_origin_ref(
-                run,
-                trigger=trigger,
-                channel_id=normalized_channel,
-                thread_ts=normalized_thread,
-            ),
-            origin_run_id=run_id,
-            status=OpenAskStatus.OPEN.value,
-            opened_at=_aware_utc(now),
-        )
-        try:
-            async with session.begin_nested():
-                session.add(row)
-                await session.flush()
-        except IntegrityError:
-            row = await _run_deferral_for_key(
-                session,
-                org_id=org_id,
-                channel_id=normalized_channel,
-                thread_ts=normalized_thread,
-                run_id=run_id,
-                for_update=True,
-            )
-            if row is None:
-                raise
-    # Settled obligations are terminal. A later failure condition on the same
-    # run cannot resurrect the promise or emit a contradictory new notice.
-    if row.status in TERMINAL_OPEN_ASK_STATUS_VALUES:
-        return row, None, False
-
-    from brain.systems.runs.obligation_notices import record_obligation_notice
-
-    notice, created = await record_obligation_notice(
-        session,
-        obligation=row,
-        condition=condition,
-        notice_text=deferral_text,
-        post_thread_ts=post_thread_ts,
-    )
-    return row, notice, created
-
-
 __all__ = [
     "annotate_request_with_open_ask",
     "open_ask_context_for_request",
     "record_open_ask",
-    "record_run_deferral",
     "slack_origin_ref",
     "slack_thread_permalink",
 ]

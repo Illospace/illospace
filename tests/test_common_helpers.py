@@ -18,7 +18,7 @@ from brain.kernel.common.coercion import (
 )
 from brain.kernel.common.env import env_flag, env_float, env_int
 from brain.kernel.common.serialization import json_safe, jsonable, stable_digest
-from brain.kernel.common.time import ensure_utc, utcnow
+from brain.kernel.common.time import assume_utc, ensure_utc, utcnow
 
 
 def test_coercion_helpers_preserve_legacy_defaults() -> None:
@@ -72,6 +72,12 @@ def test_datetime_and_time_helpers_are_timezone_aware() -> None:
     )
     with pytest.raises(ValueError):
         ensure_utc(datetime(2026, 1, 2))
+    assert assume_utc(datetime(2026, 1, 2)) == datetime(
+        2026,
+        1,
+        2,
+        tzinfo=timezone.utc,
+    )
 
 
 def test_env_helpers_support_strict_and_permissive_boolean_semantics() -> None:

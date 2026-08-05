@@ -138,6 +138,34 @@ async def record_obligation_notice(
     return row, True
 
 
+async def supersede_pending_obligation_notices(
+    session: Any,
+    obligation_ids: list[int],
+) -> None:
+    """Supersede pending notices for obligations that have become terminal."""
+
+    if not obligation_ids:
+        return
+    pending_notices = list(
+        (
+            await session.scalars(
+                select(ObligationNotice)
+                .where(
+                    ObligationNotice.obligation_id.in_(obligation_ids),
+                    ObligationNotice.state == "pending",
+                )
+                .with_for_update()
+            )
+        ).all()
+    )
+    for notice in pending_notices:
+        notice.state = "superseded"
+        notice.claimed_at = None
+        notice.last_error = None
+    if pending_notices:
+        await session.flush()
+
+
 def _default_session_factory() -> Callable[[], Any] | None:
     try:
         from brain.platform.db import SessionFactory
@@ -767,4 +795,5 @@ __all__ = [
     "notice_idempotency_key",
     "record_obligation_notice",
     "schedule_post_commit_notice_delivery",
+    "supersede_pending_obligation_notices",
 ]

@@ -223,10 +223,8 @@ async def test_scheduled_straggler_collection_expires_only_old_terminal_deferral
     terminal_session,
 ):
     from brain.systems.cycles.service import _async_attach_open_ask_stragglers
-    from brain.systems.runs.open_ask_digest import (
-        RUN_DEFERRAL_EXPIRY_AFTER,
-        list_open_ask_stragglers,
-    )
+    from brain.systems.runs.open_ask_digest import list_open_ask_stragglers
+    from brain.systems.runs.run_deferrals import RUN_DEFERRAL_EXPIRY_AFTER
 
     now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
     runs = []
@@ -348,14 +346,14 @@ async def test_failed_scheduled_sweep_rolls_back_its_savepoint(
     monkeypatch,
 ):
     from brain.systems.cycles.service import _async_attach_open_ask_stragglers
-    from brain.systems.runs import open_ask_digest
+    from brain.systems.runs import run_deferrals
 
     async def fail_during_sweep(session, **_kwargs):
         session.add(Org(id=ORG_ID, name="Duplicate", slug="duplicate"))
         await session.flush()
 
     monkeypatch.setattr(
-        open_ask_digest,
+        run_deferrals,
         "expire_stale_run_deferrals",
         fail_during_sweep,
     )
