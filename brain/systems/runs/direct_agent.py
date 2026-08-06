@@ -108,6 +108,9 @@ from brain.systems.runs.execution_context import (
     bind_agent_context,
     current_agent_context,
 )
+from brain.systems.runs.outbound_reply_admission import (
+    REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY,
+)
 from brain.systems.runs.direct_loop.telemetry import (
     async_record_api_call as _async_record_api_call,
 )
@@ -155,7 +158,6 @@ from brain.systems.runs.tool_definitions import (  # noqa: F401
 )
 
 from brain.systems.runs.tool_handlers import (  # noqa: F401
-    _build_final_reply_check_context,
     _get_tool_handlers,
     get_tools_with_extended,
     WORKSPACE_ROOT,
@@ -349,6 +351,7 @@ def review_candidate_final_reply(
     candidate_output: str,
     execution_context: str | None = None,
     evidence: FinalReplyEvidence | None = None,
+    coordination: Any = None,
     intent_profile: dict | None = None,
     user_id: str | None = None,
     provider=None,
@@ -362,6 +365,7 @@ def review_candidate_final_reply(
         candidate_output=candidate_output,
         execution_context=execution_context,
         evidence=evidence,
+        coordination=coordination,
         intent_profile=intent_profile,
         user_id=user_id,
         provider=provider,
@@ -381,6 +385,7 @@ def review_final_reply_once(
     candidate_output: str,
     execution_context: str | None = None,
     evidence: FinalReplyEvidence | None = None,
+    coordination: Any = None,
     intent_profile: dict | None = None,
     user_id: str | None = None,
     provider=None,
@@ -394,6 +399,7 @@ def review_final_reply_once(
         candidate_output=candidate_output,
         execution_context=execution_context,
         evidence=evidence,
+        coordination=coordination,
         intent_profile=intent_profile,
         user_id=user_id,
         provider=provider,
@@ -1382,7 +1388,15 @@ async def run_agent_async(
         "loop_control": state.loop_control,
         "final_reply_review": None,
         "resolved_llm_context": None,
-        "artifact_contract_block_count": 0,
+        "reply_admission_block_count": _metadata_int(
+            execution_provenance,
+            REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY,
+            _metadata_int(
+                metadata,
+                REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY,
+                0,
+            ),
+        ),
     }
     if workspace_root:
         context_attrs["workspace_root"] = workspace_root

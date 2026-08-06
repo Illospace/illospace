@@ -578,9 +578,10 @@ def test_final_reply_evidence_reads_status_and_tool_failure_state_from_agent_con
         loop_control=loop_control,
         execution_metadata={
             "execution_provenance": {
-                "status_question_context": {
+                "same_thread_run_context": {
                     "thread_id": "thread-1",
                     "lookup_status": "verified",
+                    "status_question": True,
                     "originating_run": {
                         "run_id": 2327,
                         "status": "running",
@@ -598,13 +599,13 @@ def test_final_reply_evidence_reads_status_and_tool_failure_state_from_agent_con
 
     evidence = FinalReplyEvidence.from_agent_context(context)
 
-    assert evidence.status_question is not None
-    assert evidence.status_question.originating_run is not None
-    assert evidence.status_question.originating_run.run_id == 2327
-    assert evidence.status_question.originating_run.status is RunStatus.RUNNING
-    assert evidence.status_question.has_live_sibling is True
+    assert evidence.same_thread_run_context is not None
+    assert evidence.same_thread_run_context.originating_run is not None
+    assert evidence.same_thread_run_context.originating_run.run_id == 2327
+    assert evidence.same_thread_run_context.originating_run.status is RunStatus.RUNNING
+    assert evidence.same_thread_run_context.has_live_sibling is True
     assert (
-        evidence.status_question.live_sibling_runs[0].status
+        evidence.same_thread_run_context.live_sibling_runs[0].status
         is RunStatus.RUNNING
     )
     assert evidence.tool_failure_state is not None

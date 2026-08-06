@@ -23,6 +23,7 @@ from brain.systems.runs.obligation_specs import (
     ObligationSettlementPolicy,
     obligation_spec_from_metadata,
 )
+from brain.systems.runs.outbound_reply_admission import admit_outbound_reply
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _current_runtime_secret_context
 from brain.systems.slack.client import SlackApiError, SlackDeliveryError
 from brain.systems.slack.exception_ping_posting import post_exception_ping
@@ -446,6 +447,7 @@ async def _handle_post_slack_reply(
     image_alt: str | None = None,
     answers_open_ask: bool = False,
     exception_ping: dict[str, Any] | None = None,
+    coordination: dict[str, Any] | None = None,
 ) -> str:
     """Post an Illo-authored reply to the originating Slack surface."""
 
@@ -473,6 +475,15 @@ async def _handle_post_slack_reply(
         return json.dumps({"error": str(exc)})
     if not text.strip() and image_upload is None:
         return json.dumps({"error": "post_slack_reply requires body or image_data"})
+
+    admission = admit_outbound_reply(
+        agent_context=_agent_context,
+        content=text,
+        coordination=coordination,
+        review_completion=False,
+    )
+    if not admission.admitted:
+        return json.dumps(admission.blocked_result, default=str)
 
     if _makes_persistence_claim(text):
         try:

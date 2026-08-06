@@ -15,10 +15,13 @@ INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE = (
 
 
 def is_interactive_slack_reply_context(*contexts: Mapping | None) -> bool:
-    """Recognize the two conversational Slack origins through nested provenance."""
+    """Recognize a Slack reply surface through nested provenance and surface policy."""
 
     pending = [context for context in contexts if isinstance(context, Mapping)]
     seen: set[int] = set()
+    has_interactive_origin = False
+    targets_slack = False
+    is_headless = False
     while pending:
         context = pending.pop()
         identity = id(context)
@@ -26,12 +29,20 @@ def is_interactive_slack_reply_context(*contexts: Mapping | None) -> bool:
             continue
         seen.add(identity)
         if str(context.get("origin") or "").strip().lower() in INTERACTIVE_SLACK_ORIGINS:
-            return True
+            has_interactive_origin = True
+        if str(context.get("final_answer_target_surface") or "").strip().lower() == "slack":
+            targets_slack = True
+        if (
+            bool(context.get("headless"))
+            or str(context.get("final_answer_target_surface") or "").strip().lower()
+            == "headless"
+        ):
+            is_headless = True
         for key in ("execution_provenance", "target_ref"):
             nested = context.get(key)
             if isinstance(nested, Mapping):
                 pending.append(nested)
-    return False
+    return not is_headless and (has_interactive_origin or targets_slack)
 
 
 def interactive_transport_fallback(
