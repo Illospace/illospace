@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 
 from brain.contracts.statuses import TERMINAL_RUN_STATUS_VALUES
+from brain.kernel.common.time import assume_utc_optional
 from brain.platform.integrations.provider_auth_preflight import (
     ProviderAuthBlockedPreflightResult,
 )
@@ -217,9 +218,16 @@ async def _async_attach_open_ask_stragglers(
         or launch_context.get("run_kind") != SCHEDULED_DIGEST_RUN_KIND
     ):
         return []
-    from brain.systems.runs.open_asks import list_open_ask_stragglers
+    from brain.systems.runs.open_ask_digest import list_open_ask_stragglers
+    from brain.systems.runs.run_deferrals import expire_stale_run_deferrals
 
     try:
+        async with session.begin_nested():
+            await expire_stale_run_deferrals(
+                session,
+                org_id=str(cycle.org_id),
+                now=run.scheduled_for,
+            )
         stragglers = await list_open_ask_stragglers(
             session,
             org_id=str(cycle.org_id),
@@ -378,12 +386,6 @@ async def async_run_cycle_now(
     return serialize_cycle_run(run)
 
 
-def _aware_utc(value: datetime | None) -> datetime | None:
-    if value is not None and value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value
-
-
 def _agent_run_terminal_cycle_status(agent_run: AgentRun | None) -> str | None:
     if agent_run is None:
         return None
@@ -535,7 +537,7 @@ async def async_recover_stale_cycle_runs_once(
         for run in active_runs:
             cycle = await uow.session.get(Cycle, run.cycle_id)
             if run.status == "queued":
-                scheduled_for = _aware_utc(run.scheduled_for)
+                scheduled_for = assume_utc_optional(run.scheduled_for)
                 if scheduled_for is not None and scheduled_for < catchup_cutoff:
                     await _finalize_stale_cycle_run(
                         run,
@@ -584,10 +586,10 @@ def _advance_cycle_schedule(
 ) -> datetime | None:
     """Move one Cycle onto its next schedule slot."""
 
-    scheduled_for = _aware_utc(from_dt)
+    scheduled_for = assume_utc_optional(from_dt)
     if scheduled_for is None:
         raise ValueError("from_dt is required")
-    next_run_at = _aware_utc(
+    next_run_at = assume_utc_optional(
         compute_next_run_at(
             cycle.schedule_expr,
             cycle.timezone,
@@ -684,8 +686,8 @@ async def async_advance_cycle_schedule_past_gap(
     advances ``next_run_at`` beyond the gap without creating ``CycleRun`` rows.
     """
 
-    gap_start = _aware_utc(gap_start)
-    now = _aware_utc(now)
+    gap_start = assume_utc_optional(gap_start)
+    now = assume_utc_optional(now)
     if gap_start is None or now is None:
         raise ValueError("gap_start and now are required")
     if gap_start > now:
@@ -713,7 +715,7 @@ async def async_advance_cycle_schedule_past_gap(
     limit = max(1, int(max_slots_per_cycle))
 
     for cycle in cycles:
-        scheduled_for = _aware_utc(cycle.next_run_at)
+        scheduled_for = assume_utc_optional(cycle.next_run_at)
         original_next_run_at = cycle.next_run_at
         original_enabled = cycle.enabled
         seen = 0
@@ -811,7 +813,7 @@ async def async_wake_cycle_now(*, name: str, org_id: str | None = None) -> str:
         # competing wake must judge the slot as of when it holds the row, or it
         # re-stamps a slot that is already due.
         now = datetime.now(timezone.utc)
-        pending_at = _aware_utc(cycle.next_run_at)
+        pending_at = assume_utc_optional(cycle.next_run_at)
         if pending_at is not None and pending_at <= now:
             return "already_pending"
         active_run_count = await _async_active_cycle_run_count(uow.session, cycle.id)

@@ -4796,7 +4796,7 @@ async def test_runner_reports_interruption_run_id_and_requeue_status_to_slack(mo
         )
     )
     monkeypatch.setattr(
-        "brain.systems.runs.open_asks.record_run_deferral",
+        "brain.systems.runs.run_deferrals.record_run_deferral",
         deferral_recorder,
     )
     monkeypatch.setattr(
@@ -5124,7 +5124,7 @@ async def test_runner_replaces_failed_run_artifact_with_typed_safe_message(monke
         )
     )
     monkeypatch.setattr(
-        "brain.systems.runs.open_asks.record_run_deferral",
+        "brain.systems.runs.run_deferrals.record_run_deferral",
         deferral_recorder,
     )
     monkeypatch.setattr(
@@ -5252,7 +5252,7 @@ async def test_runner_posts_typed_failure_for_headless_slack_monitor(monkeypatch
         )
     )
     monkeypatch.setattr(
-        "brain.systems.runs.open_asks.record_run_deferral",
+        "brain.systems.runs.run_deferrals.record_run_deferral",
         deferral_recorder,
     )
     monkeypatch.setattr(

@@ -23,7 +23,9 @@ from brain.systems.runs.direct_loop.loop_control import (
 )
 from brain.systems.runs.direct_loop.tool_failure_policy import ToolDisablement
 from brain.systems.runs.execution_context import bind_agent_context, clone_agent_context_mapping
-from brain.systems.runs.direct_loop.final_reply_evidence import ToolResultEvidence
+from brain.systems.runs.direct_loop.final_reply_evidence import (
+    ToolResultEvidence,
+)
 from brain.systems.runs.tool_catalog.metadata import is_write_side_effect_class
 from brain.systems.runs.tool_catalog.registry import (
     action_policy_for_tool,
@@ -231,9 +233,7 @@ def _resolved_tool_result(request: PendingToolCall, result: Any) -> ResolvedTool
             "\n\n[System: brain_encode failed. Do not retry brain_encode in this run. "
             "Move on and end your turn unless another required tool remains.]"
         )
-    elif request.tool_name == "cortex_reply" and isinstance(result, dict) and (
-        result.get("blocked") or result.get("error")
-    ):
+    elif isinstance(result, dict) and (result.get("blocked") or result.get("error")):
         if result.get("instruction"):
             result_text += f"\n\n[System: {result['instruction']}]"
     elif request.result_nudge:

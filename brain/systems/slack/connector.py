@@ -658,7 +658,7 @@ async def _record_inbound_obligation_reply(
     if not org_id or not channel_id:
         return
     try:
-        from brain.systems.runs.open_asks import (
+        from brain.systems.runs.open_ask_settlement import (
             record_inbound_slack_obligation_answer,
         )
 

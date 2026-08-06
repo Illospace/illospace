@@ -115,7 +115,7 @@ class AgentExecutionContext:
     resolved_llm_context: ResolvedLLMContext | None = None
     intent_satisfaction: dict | None = None
     final_reply_review: dict | None = None
-    artifact_contract_block_count: int = 0
+    reply_admission_block_count: int = 0
     resource_summary: dict | None = None
     slash_skill_refs: list[str] = field(default_factory=list)
 

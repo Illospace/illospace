@@ -30,6 +30,10 @@ from brain.systems.runs.direct_loop.final_reply_evidence import (
     FinalReplyEvidence,
     ToolResultEvidence,
 )
+from brain.systems.runs.direct_loop.reply_coordination import (
+    ReplyCoordination,
+    ReplyCoordinationAction,
+)
 from brain.systems.runs.direct_loop.request import build_api_request, strip_provider_prefix
 from brain.systems.runs.status import RunStatus
 from brain.systems.sessions import _content_to_dicts
@@ -265,12 +269,14 @@ def _review_scope(
     execution_context: str | None,
     evidence: FinalReplyEvidence | None,
     intent_profile: dict | None,
+    coordination: ReplyCoordination | None,
 ) -> dict[str, Any]:
     return {
         "user_request": " ".join((user_request or "").split())[:1200],
         "execution_context": " ".join((execution_context or "").split())[:2500],
         "evidence": evidence.cache_fingerprint() if evidence is not None else "",
         "intent_profile": intent_profile or {},
+        "coordination": coordination.cache_payload() if coordination is not None else None,
     }
 
 
@@ -553,12 +559,50 @@ def _successful_assignees(evidence: FinalReplyEvidence) -> tuple[str, ...]:
     return tuple(found)
 
 
+def active_sibling_contract_issue(
+    coordination: ReplyCoordination | dict[str, Any] | None,
+    evidence: FinalReplyEvidence,
+) -> str | None:
+    same_thread = evidence.same_thread_run_context
+    if (
+        same_thread is None
+        or same_thread.status_question
+        or same_thread.lookup_status != "verified"
+        or not same_thread.live_sibling_runs
+    ):
+        return None
+    declaration = ReplyCoordination.from_value(coordination)
+    runs = ", ".join(
+        f"{run.run_id} ({run.status})"
+        for run in same_thread.live_sibling_runs
+    )
+    if declaration is None:
+        return (
+            f"Admission evidence names active sibling run(s) {runs}, but the reply "
+            "has no valid coordination declaration."
+        )
+    if declaration.action in {
+        ReplyCoordinationAction.WAIT,
+        ReplyCoordinationAction.HANDOFF,
+    }:
+        return None
+    active_run_ids = {
+        run.run_id for run in same_thread.live_sibling_runs if run.run_id is not None
+    }
+    if declaration.run_id in active_run_ids:
+        return None
+    return (
+        f"Admission evidence names active sibling run(s) {runs}, but the reply "
+        f"references run {declaration.run_id}, which is not in that snapshot."
+    )
+
+
 def _status_question_contract_issue(
     candidate_output: str,
     evidence: FinalReplyEvidence,
 ) -> str | None:
-    status = evidence.status_question
-    if status is None:
+    status = evidence.same_thread_run_context
+    if status is None or not status.status_question:
         return None
     candidate = str(candidate_output or "")
     claims_complete = _claims_request_complete(candidate)
@@ -819,6 +863,7 @@ def review_candidate_final_reply(
     candidate_output: str,
     execution_context: str | None = None,
     evidence: FinalReplyEvidence | None = None,
+    coordination: ReplyCoordination | dict[str, Any] | None = None,
     intent_profile: dict | None = None,
     user_id: str | None = None,
     provider=None,
@@ -834,6 +879,7 @@ def review_candidate_final_reply(
     """Run the final-reply checker and return a dict-compatible review payload."""
 
     structured_evidence = evidence or FinalReplyEvidence()
+    declared_coordination = ReplyCoordination.from_value(coordination)
     tool_failure_issue = _tool_failure_success_issue(
         candidate_output,
         structured_evidence,
@@ -848,6 +894,23 @@ def review_candidate_final_reply(
                 "tool-dependent work before ending the run.",
             ),
             raw_output="deterministic_tool_failure_honesty_contract",
+            enforcement=FinalReplyEnforcement.BLOCK,
+        ).to_dict()
+
+    active_sibling_issue = active_sibling_contract_issue(
+        declared_coordination,
+        structured_evidence,
+    )
+    if active_sibling_issue:
+        return FinalReplyReview(
+            status="continue",
+            approved=False,
+            rationale=active_sibling_issue,
+            missing_requirements=(
+                "Wait for the active sibling, reference an active sibling run, or "
+                "explicitly hand the question off.",
+            ),
+            raw_output="deterministic_active_sibling_contract",
             enforcement=FinalReplyEnforcement.BLOCK,
         ).to_dict()
 
@@ -1012,6 +1075,7 @@ def review_final_reply_once(
     candidate_output: str,
     execution_context: str | None = None,
     evidence: FinalReplyEvidence | None = None,
+    coordination: ReplyCoordination | dict[str, Any] | None = None,
     intent_profile: dict | None = None,
     user_id: str | None = None,
     provider=None,
@@ -1023,11 +1087,13 @@ def review_final_reply_once(
 ) -> dict:
     """Review a candidate final reply once per unique candidate text."""
 
+    declared_coordination = ReplyCoordination.from_value(coordination)
     scope = _review_scope(
         user_request=user_request,
         execution_context=execution_context,
         evidence=evidence,
         intent_profile=intent_profile,
+        coordination=declared_coordination,
     )
     if agent_context is not None:
         cached = cached_final_reply_review(agent_context, candidate_output, scope)
@@ -1040,6 +1106,7 @@ def review_final_reply_once(
         candidate_output=candidate_output,
         execution_context=execution_context,
         evidence=evidence,
+        coordination=declared_coordination,
         intent_profile=intent_profile,
         user_id=user_id,
         provider=provider,
