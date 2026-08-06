@@ -19,7 +19,7 @@ def test_cycle_execution_policy_key_migration_backfills_safely(
         "brain.platform.db.alembic.versions.0053_cycle_execution_policy_key"
     )
     assert migration.revision == "0053_cycle_execution_policy_key"
-    assert migration.down_revision == "0051_open_ask_terminal_states"
+    assert migration.down_revision == "0052_drop_packet_brief_deliveries"
     engine = sa.create_engine("sqlite://")
 
     with engine.begin() as connection:
