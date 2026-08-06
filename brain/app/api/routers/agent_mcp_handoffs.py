@@ -7,11 +7,6 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.systems import launch_handoffs
-from brain.systems.briefing.outcomes import (
-    DEFAULT_OUTCOME_WINDOW_HOURS,
-    load_packet_outcome_report,
-    normalize_outcome_window_hours,
-)
 from brain.systems.external_agents import service as external_agents
 
 
@@ -19,17 +14,6 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
     "handoff.get": {
         "description": "Read a launch handoff prepared by Illo for Codex or another local agent.",
         "arguments": {"handoff_id": "string", "url": "string"},
-    },
-    "packets.outcomes": {
-        "description": (
-            "Handoff-packet outcome summary (minted / launched / ignored, median time to "
-            "launch, per-member split) — the digest's packets footer reads this."
-        ),
-        "arguments": {
-            "since_hours": (
-                f"number (default {DEFAULT_OUTCOME_WINDOW_HOURS:g})"
-            )
-        },
     },
 }
 
@@ -105,29 +89,6 @@ async def read_handoff(
     return {"handoff": launch_handoffs.serialize_launch_handoff(row)}
 
 
-async def read_packet_outcomes(
-    db: AsyncSession,
-    principal: external_agents.AgentBridgePrincipal,
-    arguments: dict[str, Any],
-) -> dict[str, Any]:
-    """Slice 07: the outcomes reporter over the caller's org, JSON-safe."""
-    from datetime import datetime, timezone
-
-    since_hours = normalize_outcome_window_hours(arguments.get("since_hours"))
-    now = datetime.now(timezone.utc)
-    report = await load_packet_outcome_report(
-        db,
-        org_id=principal.org_id,
-        now=now,
-        since_hours=since_hours,
-    )
-    return {
-        "since_hours": report.since_hours,
-        "outcomes": report.summary.to_dict(),
-        "digest_line": report.digest_line,
-    }
-
-
 async def create_handoff(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
@@ -166,5 +127,4 @@ __all__ = [
     "create_handoff",
     "handoff_argument_id",
     "read_handoff",
-    "read_packet_outcomes",
 ]

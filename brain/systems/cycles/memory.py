@@ -16,9 +16,6 @@ from brain.platform.db.models.cycle import (
     CycleRun,
     CycleRunEvaluation,
 )
-from brain.systems.briefing.packet_outcome_monitor import (
-    async_monitor_packet_outcomes,
-)
 from brain.systems.cycles.common import (
     CYCLE_LEDGER_OUTPUT_TARGET_TYPE,
     SCHEDULED_DIGEST_RUN_KIND,
@@ -305,25 +302,6 @@ async def _apply_cycle_terminal_guards(
     now,
 ) -> None:
     latch_store = CycleAlertLatchStore(session=session, cycle_id=cycle.id)
-    run_kind = str(
-        cycle_run_launch_context(run).get("run_kind")
-        or SCHEDULED_DIGEST_RUN_KIND
-    )
-    if run_kind == SCHEDULED_DIGEST_RUN_KIND:
-        try:
-            await async_monitor_packet_outcomes(
-                session,
-                cycle,
-                cycle_run_id=run.id,
-                now=now,
-                latch_store=latch_store,
-            )
-        except Exception:
-            logger.exception(
-                "Packet outcome monitor failed safely: cycle_id=%s cycle_run_id=%s",
-                cycle.id,
-                run.id,
-            )
     evaluation = await async_apply_cycle_terminal_failure_guard(
         session,
         cycle,

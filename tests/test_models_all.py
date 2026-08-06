@@ -53,7 +53,6 @@ EXPECTED_TABLES = {
     "inbound_events",
     "inbound_source_policies",
     "launch_handoffs",
-    "packet_brief_deliveries",
     "idea_connections",
     "idea_project_attachments",
     "idea_state_log",

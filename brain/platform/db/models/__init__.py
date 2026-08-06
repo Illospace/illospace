@@ -31,7 +31,6 @@ from brain.platform.db.models.workspace_app import *  # noqa
 from brain.platform.db.models.workspace_pin import *  # noqa
 from brain.platform.db.models.object_reference import *  # noqa
 from brain.platform.db.models.launch_handoff import *  # noqa
-from brain.platform.db.models.packet_delivery import *  # noqa
 from brain.platform.db.models.workspace_tool import *  # noqa
 from brain.platform.db.models.provider_alert import *  # noqa
 from brain.platform.db.models.open_ask import *  # noqa

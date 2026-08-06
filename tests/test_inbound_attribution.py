@@ -1,9 +1,9 @@
-"""Attribution: durable-ref extraction + the packet-mint work predicate.
+"""Attribution: durable-ref extraction and durable-work classification.
 
 The gap under test (2026-07-16 fix): a run whose entire outcome is a filed
 GitHub issue reported NO mutated refs — the connector payload carries
 ``{"repo", "issue": {"number"}}``, not ``*_id`` keys — which left the
-packet-mint predicate blind to the most common actionable outcome.
+durable-work classification blind to the most common actionable outcome.
 """
 
 from __future__ import annotations
@@ -150,7 +150,7 @@ async def test_truncated_result_preview_recovers_refs_from_result_refs(session):
     refs from the FULL result into payload.result_refs first. A truncated
     (unparseable) preview must not blind attribution to what the tool
     created (live illo-dev finding, 2026-07-16: tracker record invisible
-    to the packet-mint predicate)."""
+    to durable-work classification)."""
     run_id = await _seed_run(session)
     big_result = json.dumps({"record": {"id": 1823, "domain_id": 30, "pad": "x" * 5000}})
     session.add(AgentRunEventRow(

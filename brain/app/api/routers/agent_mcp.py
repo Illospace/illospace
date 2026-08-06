@@ -962,8 +962,6 @@ async def _tool_read(
         return await _read_cycles_inspect(db, principal, capability_arguments)
     if capability == "handoff.get":
         return await agent_mcp_handoffs.read_handoff(db, principal, capability_arguments)
-    if capability == "packets.outcomes":
-        return await agent_mcp_handoffs.read_packet_outcomes(db, principal, capability_arguments)
     if capability == "team.members.list":
         return await external_agents.get_team_members(db, principal)
     if capability == "identity.resolve":

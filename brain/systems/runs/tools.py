@@ -729,9 +729,8 @@ def _event_payload(
     if result is not None:
         # The stored result is a bounded PREVIEW; entity refs are extracted
         # from the FULL result first, or a big JSON result truncates into an
-        # unparseable string and downstream attribution (inbound packet
-        # minting, preservation evidence) goes blind to what the tool
-        # actually created (illo-dev E2E finding, 2026-07-16).
+        # unparseable string and downstream attribution and preservation
+        # evidence go blind to what the tool actually created.
         payload["result"] = result[:1000]
         try:
             from brain.systems.inbound.attribution import collect_result_refs
