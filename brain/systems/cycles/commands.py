@@ -18,6 +18,9 @@ from brain.systems.cycles.memory import (
     async_record_cycle_revision,
     async_remove_cycle_output_target,
 )
+from brain.systems.cycles.execution_policy_registry import (
+    validate_cycle_execution_policy_key,
+)
 from brain.systems.cycles.output_targets import default_output_target_specs
 from brain.systems.cycles.schedules import (
     build_one_time_schedule_expr,
@@ -54,10 +57,14 @@ async def async_create_cycle(
     timeout_seconds: int | None = None,
     model_override: str | None = None,
     thinking_override: str | None = None,
+    execution_policy_key: str | None = None,
     target_idea_id: str | None = None,
     guidance: str | None = None,
     rationale: str | None = None,
 ) -> Cycle:
+    validated_execution_policy_key = validate_cycle_execution_policy_key(
+        execution_policy_key
+    )
     tz_name = validate_timezone_name(timezone_name)
     expr = _schedule_expr(schedule_expr=schedule_expr, run_at=run_at, timezone_name=tz_name)
     cycle = Cycle(
@@ -76,6 +83,7 @@ async def async_create_cycle(
         timeout_seconds=validate_cycle_timeout_seconds(timeout_seconds),
         model_override=validate_model_override(model_override),
         thinking_override=validate_thinking_override(thinking_override),
+        execution_policy_key=validated_execution_policy_key,
         execution_mode=canonical_execution_mode(),
         target_idea_id=target_idea_id,
         reopen_archived=True,
@@ -124,10 +132,20 @@ async def async_update_cycle(
     timeout_seconds=UNSET_CYCLE_FIELD,
     model_override=UNSET_CYCLE_FIELD,
     thinking_override=UNSET_CYCLE_FIELD,
+    execution_policy_key=UNSET_CYCLE_FIELD,
     target_idea_id=UNSET_CYCLE_FIELD,
     guidance: str | None = None,
     rationale: str | None = None,
 ) -> Cycle:
+    if _is_patch_field_set(execution_policy_key):
+        next_execution_policy_key = validate_cycle_execution_policy_key(
+            execution_policy_key
+        )
+    else:
+        validate_cycle_execution_policy_key(
+            getattr(cycle, "execution_policy_key", None)
+        )
+        next_execution_policy_key = UNSET_CYCLE_FIELD
     next_timezone = validate_timezone_name(timezone_name) if _has_patch_value(timezone_name) else cycle.timezone
     next_schedule_expr = cycle.schedule_expr
     next_model_override = (
@@ -166,6 +184,8 @@ async def async_update_cycle(
         cycle.model_override = next_model_override
     if _is_patch_field_set(next_thinking_override):
         cycle.thinking_override = next_thinking_override
+    if _is_patch_field_set(next_execution_policy_key):
+        cycle.execution_policy_key = next_execution_policy_key
     if _is_patch_field_set(target_idea_id):
         cycle.target_idea_id = target_idea_id
 

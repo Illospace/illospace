@@ -941,6 +941,13 @@ BRAIN_TOOLS = [
                     "enum": ["none", "low", "medium", "high", "xhigh"],
                     "description": "Optional thinking level override",
                 },
+                "execution_policy_key": {
+                    "oneOf": [{"type": "string"}, {"type": "null"}],
+                    "description": (
+                        "Optional durable execution-policy key. Null means no "
+                        "execution policy."
+                    ),
+                },
                 "target_idea_id": {
                     "type": "string",
                     "description": "Optional thought id to reuse; the first run creates one if omitted",

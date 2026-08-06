@@ -349,7 +349,7 @@ async def create_launch_handoff_with_status(
     get strict reuse only when they supply an idempotency key.
 
     The boolean is the caller's noise gate: a REUSED row (``False``) means
-    the packet already went out — mint must post nothing to Slack.
+    this content already went out, so the caller owes no new announcement.
     """
     clean_org_id = _required_string(handoff_input.org_id, "org_id")
     clean_title = _required_string(handoff_input.title, "title")

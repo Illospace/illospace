@@ -101,8 +101,7 @@ _GITHUB_ARTIFACT_KINDS = {
 
 # Ref kinds that represent routed/created WORK (something a teammate or
 # their agent picks up), as opposed to conversation, memory, or plumbing
-# state. This is the packet-mint predicate's vocabulary (mirrors how
-# preservation.py filters mutated refs by kind).
+# state. This mirrors how preservation.py filters mutated refs by kind.
 WORK_ITEM_REF_KINDS = frozenset(
     {
         "github_issue",
@@ -292,8 +291,8 @@ def collect_result_refs(result: Any, *, source: str) -> list[dict[str, str]]:
     Run events persist only a 1000-char result preview; a bigger mutating
     result truncates into invalid JSON and the ref walk goes blind (found
     live on illo-dev, 2026-07-16: a created tracker record was invisible to
-    the packet-mint predicate). The tool executor calls this on the full
-    text and stores the refs beside the preview as ``result_refs``.
+    downstream attribution). The tool executor calls this on the full text
+    and stores the refs beside the preview as ``result_refs``.
     """
     refs: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -463,10 +462,9 @@ async def summarize_inbound_run_attribution(
 def durable_work_refs(attribution: Mapping[str, Any] | None) -> list[dict[str, str]]:
     """Mutated refs proving the run created or routed durable WORK.
 
-    The packet-mint predicate for actionable-run lanes: only refs of
-    work-item kinds count, and refs produced by conversational tools
-    (``side_effect_class == "chat_message"``) never do — a Slack reply is
-    an answer, not routed work, and must not mint a packet.
+    Only refs of work-item kinds count, and refs produced by conversational
+    tools (``side_effect_class == "chat_message"``) never do. A Slack reply
+    is an answer, not routed work.
     """
     out: list[dict[str, str]] = []
     for ref in (attribution or {}).get("mutated_target_refs") or []:

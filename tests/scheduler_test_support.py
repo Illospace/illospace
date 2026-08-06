@@ -13,6 +13,7 @@ from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompile
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.scheduler import (
+    SchedulerAlertLatch,
     SchedulerColdStartReconciliation,
     SchedulerFailureGuardLatch,
     SchedulerFailureGuardTriggerState,
@@ -67,6 +68,7 @@ async def make_scheduler_test_session(async_sqlite_session_factory):
             AgentRunRow.__table__,
             Cycle.__table__,
             CycleRun.__table__,
+            SchedulerAlertLatch.__table__,
             SchedulerColdStartReconciliation.__table__,
             SchedulerLivenessCheckpoint.__table__,
             SchedulerJob.__table__,

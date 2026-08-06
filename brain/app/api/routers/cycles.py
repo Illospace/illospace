@@ -103,6 +103,7 @@ async def create_cycle(
             timeout_seconds=body.timeout_seconds,
             model_override=body.model_override,
             thinking_override=body.thinking_override,
+            execution_policy_key=body.execution_policy_key,
             target_idea_id=body.target_idea_id,
             guidance=body.guidance,
             rationale=body.rationale,
@@ -156,6 +157,9 @@ async def update_cycle(
             timeout_seconds=updates.get("timeout_seconds", UNSET_CYCLE_FIELD),
             model_override=updates.get("model_override", UNSET_CYCLE_FIELD),
             thinking_override=updates.get("thinking_override", UNSET_CYCLE_FIELD),
+            execution_policy_key=updates.get(
+                "execution_policy_key", UNSET_CYCLE_FIELD
+            ),
             target_idea_id=updates.get("target_idea_id", UNSET_CYCLE_FIELD),
             guidance=updates.get("guidance"),
             rationale=updates.get("rationale"),

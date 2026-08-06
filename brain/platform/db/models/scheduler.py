@@ -29,6 +29,7 @@ __all__ = [
     "OWNER_MODE_CRON",
     "OWNER_MODE_MIRROR",
     "OWNER_MODE_SCHEDULER",
+    "SchedulerAlertLatch",
     "SchedulerColdStartReconciliation",
     "SchedulerLivenessCheckpoint",
     "SchedulerFailureGuardLatch",
@@ -38,6 +39,18 @@ __all__ = [
     "SchedulerLease",
     "SchedulerRunStep",
 ]
+
+
+class SchedulerAlertLatch(Base):
+    """One durable scheduler-global alert latch."""
+
+    __tablename__ = "scheduler_alert_latches"
+
+    alert_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    alerted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
 
 
 class SchedulerColdStartReconciliation(Base, CreatedAtMixin):

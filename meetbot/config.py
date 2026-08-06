@@ -23,6 +23,8 @@ class MeetbotConfig:
     private_root: Path = Path("/data/private/meetbot")
     storage_state_path: Path = Path("/data/private/meetbot/google-storage-state.json")
     caption_warning_seconds: int = 90
+    health_interval_seconds: int = 60
+    stale_session_seconds: int = 180
 
     @property
     def debug_dir(self) -> Path:
@@ -50,6 +52,18 @@ class MeetbotConfig:
             lobby_timeout_seconds=_positive_int_env(
                 "ILLO_MEETBOT_LOBBY_TIMEOUT_SECONDS",
                 600,
+            ),
+            caption_warning_seconds=_positive_int_env(
+                "ILLO_MEETBOT_CAPTION_WARNING_SECONDS",
+                90,
+            ),
+            health_interval_seconds=_positive_int_env(
+                "ILLO_MEETBOT_HEALTH_INTERVAL_SECONDS",
+                60,
+            ),
+            stale_session_seconds=_positive_int_env(
+                "ILLO_MEETBOT_STALE_SESSION_SECONDS",
+                180,
             ),
         )
 

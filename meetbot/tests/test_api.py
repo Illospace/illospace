@@ -11,7 +11,12 @@ from fastapi.testclient import TestClient
 
 from meetbot.app import create_app
 from meetbot.config import MeetbotConfig
-from meetbot.models import EngineResult, SessionEvents, SessionRecord
+from meetbot.models import (
+    EngineResult,
+    SessionEvents,
+    SessionHealthSnapshot,
+    SessionRecord,
+)
 
 
 class FakeEngine:
@@ -62,14 +67,23 @@ class FakeEngine:
         self.chat_messages.append(text)
 
 
-class FakeCompletionSender:
+class FakeMeetingWebhookSender:
     def __init__(self) -> None:
         self.payloads: list[dict[str, object]] = []
         self.sent = threading.Event()
 
-    async def send(self, record: SessionRecord) -> None:
+    async def send_transcript(self, record: SessionRecord) -> None:
         self.payloads.append(record.completion_payload())
         self.sent.set()
+
+    async def send_health(
+        self,
+        snapshot: SessionHealthSnapshot,
+        *,
+        sequence: int,
+        warning: str | None = None,
+    ) -> None:
+        return None
 
 
 def _config(tmp_path: Path, *, token: str | None = "meetbot-secret", warning: int = 90) -> MeetbotConfig:
@@ -118,7 +132,7 @@ def test_health_is_public_but_session_routes_require_token(tmp_path: Path) -> No
     app = create_app(
         config=_config(tmp_path),
         engine=FakeEngine(),
-        completion_sender=FakeCompletionSender(),
+        webhook_sender=FakeMeetingWebhookSender(),
     )
     with TestClient(app) as client:
         assert client.get("/healthz").json() == {"status": "ok"}
@@ -135,7 +149,7 @@ def test_unset_token_skips_auth_and_logs_warning(
     app = create_app(
         config=_config(tmp_path, token=None),
         engine=engine,
-        completion_sender=FakeCompletionSender(),
+        webhook_sender=FakeMeetingWebhookSender(),
     )
     with TestClient(app) as client:
         response = _join(client, token=False)
@@ -148,7 +162,7 @@ def test_join_validates_url_and_rejects_second_active_session(tmp_path: Path) ->
     app = create_app(
         config=_config(tmp_path),
         engine=engine,
-        completion_sender=FakeCompletionSender(),
+        webhook_sender=FakeMeetingWebhookSender(),
     )
     with TestClient(app) as client:
         invalid = _join(client, url="https://example.com/abc-defg-hij")
@@ -170,7 +184,7 @@ def test_join_accepts_empty_origin_for_non_slack_runs(tmp_path: Path) -> None:
     app = create_app(
         config=_config(tmp_path),
         engine=engine,
-        completion_sender=FakeCompletionSender(),
+        webhook_sender=FakeMeetingWebhookSender(),
     )
     with TestClient(app) as client:
         response = client.post(
@@ -189,11 +203,11 @@ def test_caption_mutation_is_required_for_captions_flowing_and_transcript(
     tmp_path: Path,
 ) -> None:
     engine = FakeEngine(admit=True, captions=True)
-    callback = FakeCompletionSender()
+    sender = FakeMeetingWebhookSender()
     app = create_app(
         config=_config(tmp_path),
         engine=engine,
-        completion_sender=callback,
+        webhook_sender=sender,
     )
     with TestClient(app) as client:
         joined = _join(client)
@@ -221,9 +235,9 @@ def test_caption_mutation_is_required_for_captions_flowing_and_transcript(
         assert leave.status_code == 202
         ended = _wait_for_status(client, session_id, "ended")
         assert ended["caption_lines"] == 2
-        assert callback.sent.wait(1.0)
-        assert callback.payloads[0]["status"] == "ended"
-        assert callback.payloads[0]["caption_lines"] == 2
+        assert sender.sent.wait(1.0)
+        assert sender.payloads[0]["status"] == "ended"
+        assert sender.payloads[0]["caption_lines"] == 2
 
         session_dir = tmp_path / "uploads" / "meetings" / session_id
         assert (session_dir / "transcript.jsonl").is_file()
@@ -236,7 +250,7 @@ def test_admitted_without_caption_reports_warning_without_fake_success(tmp_path:
     app = create_app(
         config=_config(tmp_path, warning=0),
         engine=engine,
-        completion_sender=FakeCompletionSender(),
+        webhook_sender=FakeMeetingWebhookSender(),
     )
     with TestClient(app) as client:
         joined = _join(client)
@@ -253,17 +267,17 @@ def test_admitted_without_caption_reports_warning_without_fake_success(tmp_path:
         assert "No caption mutations" in str(response["warning"])
 
 
-def test_multiple_warnings_reach_the_completion_callback(tmp_path: Path) -> None:
+def test_multiple_warnings_reach_the_meeting_webhook(tmp_path: Path) -> None:
     language_warning = (
         "Could not confirm the caption language is fr-FR; "
         "the transcript may be translated or empty."
     )
     engine = FakeEngine(admit=True, warnings=(language_warning,))
-    callback = FakeCompletionSender()
+    sender = FakeMeetingWebhookSender()
     app = create_app(
         config=_config(tmp_path, warning=0),
         engine=engine,
-        completion_sender=callback,
+        webhook_sender=sender,
     )
     with TestClient(app) as client:
         joined = _join(client)
@@ -289,10 +303,10 @@ def test_multiple_warnings_reach_the_completion_callback(tmp_path: Path) -> None
             headers={"X-Meetbot-Token": "meetbot-secret"},
         )
         _wait_for_status(client, session_id, "ended")
-        assert callback.sent.wait(1.0)
-        callback_warning = str(callback.payloads[0]["warning"])
-        assert language_warning in callback_warning
-        assert "No caption mutations" in callback_warning
+        assert sender.sent.wait(1.0)
+        webhook_warning = str(sender.payloads[0]["warning"])
+        assert language_warning in webhook_warning
+        assert "No caption mutations" in webhook_warning
 
 
 def test_lobby_timeout_fails_with_distinct_reason_and_actionable_error(
@@ -309,11 +323,11 @@ def test_lobby_timeout_fails_with_distinct_reason_and_actionable_error(
             error=message,
         )
     )
-    callback = FakeCompletionSender()
+    sender = FakeMeetingWebhookSender()
     app = create_app(
         config=_config(tmp_path),
         engine=engine,
-        completion_sender=callback,
+        webhook_sender=sender,
     )
     with TestClient(app) as client:
         joined = _join(client)
@@ -324,10 +338,10 @@ def test_lobby_timeout_fails_with_distinct_reason_and_actionable_error(
         assert response["end_reason"] == "not_admitted"
         record = app.state.session_manager.get(session_id)
         assert record.end_reason == "not_admitted"
-        assert callback.sent.wait(1.0)
-        assert callback.payloads[0]["status"] == "failed"
-        assert callback.payloads[0]["end_reason"] == "not_admitted"
-        assert callback.payloads[0]["error"] == message
+        assert sender.sent.wait(1.0)
+        assert sender.payloads[0]["status"] == "failed"
+        assert sender.payloads[0]["end_reason"] == "not_admitted"
+        assert sender.payloads[0]["error"] == message
 
 
 def test_unknown_session_and_chat_before_admission_are_honest(tmp_path: Path) -> None:
@@ -335,7 +349,7 @@ def test_unknown_session_and_chat_before_admission_are_honest(tmp_path: Path) ->
     app = create_app(
         config=_config(tmp_path),
         engine=engine,
-        completion_sender=FakeCompletionSender(),
+        webhook_sender=FakeMeetingWebhookSender(),
     )
     headers = {"X-Meetbot-Token": "meetbot-secret"}
     with TestClient(app) as client:

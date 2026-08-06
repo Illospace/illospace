@@ -80,6 +80,12 @@ Start the optional Compose service with the meetbot profile:
 docker compose --profile meetbot up -d
 ```
 
+While a session is active, meetbot sends health observations through the same
+webhook ingress as its terminal transcript. The ingress keeps every observation
+for later diagnosis. A stale session creates a warning run on the same Slack
+route as the final report. The environment example owns the timing controls;
+shorten them only when the extra warning traffic is acceptable.
+
 ## Live verification
 
 1. Create a short Google Meet and invite `illo@uwear.ai`.

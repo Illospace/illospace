@@ -115,6 +115,10 @@ register_inbound_envelope_handler(
     "meeting_transcript",
     "brain.systems.meetings.inbound:process_meeting_transcript_envelope",
 )
+register_inbound_envelope_handler(
+    "meeting_session_health",
+    "brain.systems.meetings.inbound:process_meeting_session_health_envelope",
+)
 
 
 __all__ = [

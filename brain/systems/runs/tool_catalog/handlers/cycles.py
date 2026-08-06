@@ -60,6 +60,7 @@ class ManageCycleArgs:
     timeout_seconds: Any = UNSET_CYCLE_FIELD
     model_override: str | None = None
     thinking_override: str | None = None
+    execution_policy_key: Any = UNSET_CYCLE_FIELD
     target_idea_id: str | None = None
     guidance: str | None = None
     rationale: str | None = None
@@ -94,6 +95,7 @@ async def _handle_manage_cycle(
     timeout_seconds=UNSET_CYCLE_FIELD,
     model_override: str | None = None,
     thinking_override: str | None = None,
+    execution_policy_key=UNSET_CYCLE_FIELD,
     target_idea_id: str | None = None,
     guidance: str | None = None,
     rationale: str | None = None,
@@ -118,6 +120,7 @@ async def _handle_manage_cycle(
         timeout_seconds=timeout_seconds,
         model_override=model_override,
         thinking_override=thinking_override,
+        execution_policy_key=execution_policy_key,
         target_idea_id=target_idea_id,
         guidance=guidance,
         rationale=rationale,
@@ -144,6 +147,7 @@ async def _handle_manage_cycle_async(
     timeout_seconds=UNSET_CYCLE_FIELD,
     model_override: str | None = None,
     thinking_override: str | None = None,
+    execution_policy_key=UNSET_CYCLE_FIELD,
     target_idea_id: str | None = None,
     guidance: str | None = None,
     rationale: str | None = None,
@@ -179,6 +183,7 @@ async def _handle_manage_cycle_async(
         timeout_seconds=timeout_seconds,
         model_override=model_override,
         thinking_override=thinking_override,
+        execution_policy_key=execution_policy_key,
         target_idea_id=target_idea_id,
         guidance=guidance,
         rationale=rationale,
@@ -308,6 +313,11 @@ async def _action_create(ctx: ManageCycleContext) -> dict[str, Any]:
             timeout_seconds=timeout_seconds,
             model_override=args.model_override,
             thinking_override=args.thinking_override,
+            execution_policy_key=(
+                None
+                if args.execution_policy_key is UNSET_CYCLE_FIELD
+                else _optional_text(args.execution_policy_key)
+            ),
             target_idea_id=_optional_text(args.target_idea_id),
             guidance=_optional_text(args.guidance),
             rationale=_optional_text(args.rationale),
@@ -340,6 +350,7 @@ async def _action_update(ctx: ManageCycleContext) -> dict[str, Any]:
             timeout_seconds=timeout_seconds,
             model_override=_patch_value(args.model_override),
             thinking_override=_patch_text(args.thinking_override),
+            execution_policy_key=args.execution_policy_key,
             target_idea_id=_patch_text(args.target_idea_id),
             guidance=_optional_text(args.guidance),
             rationale=_optional_text(args.rationale),

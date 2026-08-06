@@ -98,6 +98,10 @@ LEGACY_SYNC_TEST_HARNESSES = {
         "sqlalchemy_create_engine",
         "sync_session_method_call",
     },
+    "tests/test_cycle_execution_policy_migration.py": {
+        "sqlalchemy_create_engine",
+        "sync_session_method_call",
+    },
     "tests/test_cold_start_reconciliation.py": {
         "sqlalchemy_create_engine",
     },
@@ -112,6 +116,9 @@ LEGACY_SYNC_TEST_HARNESSES = {
     "tests/test_scheduler.py": {
         "sqlalchemy_create_engine",
         "sqlalchemy_sync_session",
+    },
+    "tests/test_scheduler_alert_latch_migration.py": {
+        "sqlalchemy_create_engine",
     },
     "tests/test_scheduler_failure_guard_migration.py": {
         "sqlalchemy_create_engine",

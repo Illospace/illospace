@@ -124,90 +124,6 @@ async def _count_unclaimed(session, org_id) -> int:
     return int((await session.execute(stmt)).scalar() or 0)
 
 
-# At most this many packet refreshes per tick — each one re-gathers (live
-# Slack/GitHub reads), and a gathering storm inside the notify tick is worse
-# than a slightly stale packet. Deferrals are logged, never silent.
-_MAX_PACKET_REFRESHES_PER_TICK = 5
-
-
-async def _attach_and_refresh_packets(session, org_id, events) -> None:
-    """Slice 06 (illo-handoff-packets): give digest/nudge lines their launch
-    links, refreshing stale packets first (capped). Fully contained — any
-    failure degrades to lines without links, never a dead tick."""
-    import logging
-
-    if session is None:
-        return
-    log = logging.getLogger("illo.notify")
-    try:
-        from brain.systems.briefing.mint import (
-            find_packet_handoffs_for_jobs,
-            refresh_packet_for_job,
-        )
-        from brain.systems.launch_handoffs import launch_handoff_url_for_id
-
-        job_refs = []
-        seen: set[str] = set()
-        for event in events:
-            record_id = event.get("record_id")
-            if record_id:
-                job_ref = f"domain_record:{record_id}"
-                if job_ref not in seen:
-                    seen.add(job_ref)
-                    job_refs.append(job_ref)
-        packet_rows = await find_packet_handoffs_for_jobs(session, org_id=org_id, job_refs=job_refs)
-
-        # Refresh at most N unique jobs per tick — each refresh re-gathers
-        # (live Slack/GitHub reads). A slot is consumed only by a refresh
-        # that actually ran (ok) — permanently unrefreshable rows fail fast
-        # and must not starve the healthy ones.
-        refreshes_left = _MAX_PACKET_REFRESHES_PER_TICK
-        deferred = 0
-        for job_ref in job_refs:
-            row = packet_rows.get(job_ref)
-            if row is None:
-                continue
-            if refreshes_left > 0:
-                result = await refresh_packet_for_job(session, org_id=org_id, handoff_row=row)
-                if result.ok:
-                    refreshes_left -= 1
-                    if result.created:
-                        packet_rows[job_ref] = result.handoff  # superseded → new link
-            else:
-                deferred += 1
-
-        for event in events:
-            record_id = event.get("record_id")
-            row = packet_rows.get(f"domain_record:{record_id}") if record_id else None
-            if row is None:
-                continue
-            event["launch_url"] = launch_handoff_url_for_id(row.id, target_tool=row.target_tool)
-            event["packet_revision"] = (dict(row.metadata_ or {})).get("revision")
-        if deferred:
-            # No silent caps (spec invariant): say what was skipped.
-            log.warning("notify tick deferred %s packet refreshes to the next tick", deferred)
-    except Exception:  # noqa: BLE001
-        log.exception("packet link attachment failed safely; lines go out without links")
-
-
-async def _deliver_pending_briefs_safely(org_id) -> dict | None:
-    """Post-slice-05 hardening: the sweep half of the packet-brief outbox.
-    The mint records deliveries inside its transaction and an after-commit
-    fast path usually posts them within a second; this sweep is the
-    guaranteed retry for anything a crash or Slack outage left behind
-    (pending or stale-posting rows). Own sessions, fully contained — a
-    delivery failure degrades to a log line, never a dead tick."""
-    import logging
-
-    try:
-        from brain.systems.briefing.deliver import deliver_pending_briefs
-
-        return await deliver_pending_briefs(org_id=org_id)
-    except Exception:  # noqa: BLE001
-        logging.getLogger("illo.notify").exception("packet brief delivery sweep failed safely")
-        return None
-
-
 async def _deliver_pending_obligation_notices_safely(org_id) -> dict | None:
     """Guaranteed sweep for committed run-deferral notice outbox rows."""
 
@@ -270,37 +186,23 @@ async def run_notify_cycle(
     since=None,
     urgent_terms=DEFAULT_URGENT_TERMS,
     post=None,
-    deliver_briefs=None,
 ) -> dict:
     """One notify-cycle tick. Returns a small summary of what was sent."""
     resolution_harvest = await _maybe_run_alert_resolution_harvest(session, org_id)
     events = await _load_change_events(session, org_id, since)
     await _fill_owner_labels(session, events)
-    await _attach_and_refresh_packets(session, org_id, events)
-    # After the refresh: a supersede may have just moved a pending brief to
-    # its new revision, and this sweep should send THAT one.
-    deliveries = None
     notice_deliveries = None
     if session is not None:
         try:
-            deliveries = await (deliver_briefs or _deliver_pending_briefs_safely)(org_id)
-        except Exception:  # noqa: BLE001 — a delivery failure never kills the tick
+            notice_deliveries = await _deliver_pending_obligation_notices_safely(
+                org_id
+            )
+        except Exception:  # noqa: BLE001
             import logging
 
-            logging.getLogger("illo.notify").exception("brief delivery sweep failed safely")
-        # Test and specialist callers may inject only the packet sweep. The
-        # production path owns both transactional outboxes.
-        if deliver_briefs is None:
-            try:
-                notice_deliveries = await _deliver_pending_obligation_notices_safely(
-                    org_id
-                )
-            except Exception:  # noqa: BLE001
-                import logging
-
-                logging.getLogger("illo.notify").exception(
-                    "obligation notice delivery sweep failed safely"
-                )
+            logging.getLogger("illo.notify").exception(
+                "obligation notice delivery sweep failed safely"
+            )
     unclaimed = await _count_unclaimed(session, org_id)
     outbound = render_outbound(events, unclaimed_count=unclaimed, urgent_terms=urgent_terms)
 
@@ -338,8 +240,6 @@ async def run_notify_cycle(
         summary["post_failures"] = post_failures
     if resolution_harvest is not None:
         summary["resolution_harvest"] = resolution_harvest
-    if deliveries and deliveries.get("selected"):
-        summary["brief_deliveries"] = deliveries
     if notice_deliveries and notice_deliveries.get("selected"):
         summary["obligation_notice_deliveries"] = notice_deliveries
     return summary

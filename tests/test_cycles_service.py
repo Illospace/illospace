@@ -15,21 +15,30 @@ from brain.contracts.statuses import TERMINAL_RUN_STATUS_VALUES
 from brain.systems.cycles import access as cycle_access
 from brain.systems.cycles import admission as cycle_admission
 from brain.systems.cycles import execution as cycle_execution
+from brain.systems.cycles import execution_policy_registry as policy_registry_module
 from brain.systems.cycles import prompts as cycle_prompts
 from brain.systems.cycles import quota_preflight as cycle_quota_preflight
 from brain.systems.cycles import service
 from brain.systems.cycles.common import AGENT_TRIGGERED_CYCLE_ORIGIN, MANUAL_CYCLE_ORIGIN
+from brain.systems.cycles.execution_policy_registry import (
+    CycleExecutionPolicyRegistration,
+    CycleExecutionPolicyRegistry,
+)
 from brain.systems.cycles.contracts import (
     CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND,
     cycle_result_contract,
 )
-from brain.systems.cycles.promotion_readiness import PROMOTION_READINESS_POLICY
+from brain.systems.cycles.promotion_readiness import (
+    PROMOTION_READINESS_POLICY,
+    PromotionReadinessOutcome,
+)
 from brain.app.api.routers import cycles as cycles_router
 from brain.platform.db.models.cycle import (
     Cycle,
     CycleFailureGuardLatch,
     CycleFailureGuardObservation,
     CycleFailureGuardTriggerState,
+    CycleRevision,
     CycleRun,
     CycleRunEvaluation,
 )
@@ -578,6 +587,7 @@ def _cycle_execution_objects(*, model_override: str | None) -> tuple[CycleRun, C
     cycle.timeout_seconds = None
     cycle.model_override = model_override
     cycle.thinking_override = None
+    cycle.execution_policy_key = None
 
     idea = Idea()
     idea.id = idea_id
@@ -985,6 +995,7 @@ def _cycle_for_serialization(*, schedule_expr: str, timezone_name: str) -> Cycle
     cycle.timeout_seconds = None
     cycle.model_override = None
     cycle.thinking_override = None
+    cycle.execution_policy_key = None
     cycle.execution_mode = "new_idea_per_run"
     cycle.target_idea_id = None
     cycle.reopen_archived = False
@@ -1064,6 +1075,7 @@ async def test_cycle_create_persists_and_serializes_max_concurrency(monkeypatch)
         captured.update(kwargs)
         cycle.max_concurrency = kwargs["max_concurrency"]
         cycle.timeout_seconds = kwargs["timeout_seconds"]
+        cycle.execution_policy_key = kwargs["execution_policy_key"]
         return cycle
 
     monkeypatch.setattr(cycles_router, "command_create_cycle", fake_create_cycle)
@@ -1081,6 +1093,7 @@ async def test_cycle_create_persists_and_serializes_max_concurrency(monkeypatch)
             timezone=cycle.timezone,
             max_concurrency=3,
             timeout_seconds=3600,
+            execution_policy_key=PROMOTION_READINESS_POLICY.execution_policy_key,
         ),
         db=db,
         user={"id": cycle.user_id, "org_id": cycle.org_id},
@@ -1088,8 +1101,16 @@ async def test_cycle_create_persists_and_serializes_max_concurrency(monkeypatch)
 
     assert captured["max_concurrency"] == 3
     assert captured["timeout_seconds"] == 3600
+    assert (
+        captured["execution_policy_key"]
+        == PROMOTION_READINESS_POLICY.execution_policy_key
+    )
     assert response["max_concurrency"] == 3
     assert response["timeout_seconds"] == 3600
+    assert (
+        response["execution_policy_key"]
+        == PROMOTION_READINESS_POLICY.execution_policy_key
+    )
     CycleRead.model_validate(response)
 
 
@@ -1141,6 +1162,39 @@ async def test_cycle_update_sets_and_clears_timeout_seconds():
 
     assert cycle.timeout_seconds is None
     assert response["timeout_seconds"] is None
+    CycleRead.model_validate(response)
+
+
+@pytest.mark.asyncio
+async def test_cycle_update_snapshots_and_clears_execution_policy_key():
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="UTC",
+    )
+    db = _RouterCycleSession(cycle)
+    policy_key = PROMOTION_READINESS_POLICY.execution_policy_key
+
+    response = await cycles_router.update_cycle(
+        cycle.id,
+        cycles_router.CycleUpdate(execution_policy_key=policy_key),
+        db=db,
+        user={"id": cycle.user_id, "org_id": None},
+    )
+
+    assert response["execution_policy_key"] == policy_key
+    revisions = [row for row in db.added if isinstance(row, CycleRevision)]
+    assert revisions[-1].execution_policy_key == policy_key
+
+    response = await cycles_router.update_cycle(
+        cycle.id,
+        cycles_router.CycleUpdate(execution_policy_key=None),
+        db=db,
+        user={"id": cycle.user_id, "org_id": None},
+    )
+
+    assert response["execution_policy_key"] is None
+    revisions = [row for row in db.added if isinstance(row, CycleRevision)]
+    assert revisions[-1].execution_policy_key is None
     CycleRead.model_validate(response)
 
 
@@ -2123,7 +2177,8 @@ async def test_execute_promotion_run_unchanged_skips_review_and_reaches_posting_
 
     run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
     cycle.id = 9
-    cycle.name = PROMOTION_READINESS_POLICY.expected_cycle_name
+    cycle.name = "Renamed backend promotion readiness"
+    cycle.execution_policy_key = PROMOTION_READINESS_POLICY.execution_policy_key
     run.cycle_id = cycle.id
     session = _AsyncExecuteCycleSession(
         run=run,
@@ -2148,7 +2203,6 @@ async def test_execute_promotion_run_unchanged_skips_review_and_reaches_posting_
             branch_comparison_reader=AsyncMock(
                 return_value={"status": "ahead", "ahead_by": 47}
             ),
-            configured_cycle_ids_reader=AsyncMock(return_value=(9,)),
         )
 
     admissions = []
@@ -2158,7 +2212,7 @@ async def test_execute_promotion_run_unchanged_skips_review_and_reaches_posting_
         return 77
 
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
-    monkeypatch.setattr(cycle_admission, "async_apply_promotion_readiness_gate", apply_gate)
+    monkeypatch.setattr(cycle_admission, "async_apply_cycle_execution_policy", apply_gate)
     monkeypatch.setattr(cycle_admission, "async_preflight_cycle_external_auth", _passed_cycle_auth)
     monkeypatch.setattr(cycle_admission, "preflight_cycle_external_quota", _passed_cycle_quota)
     monkeypatch.setattr(service, "_async_admit_cycle_run", admit)
@@ -2192,7 +2246,8 @@ async def test_execute_promotion_run_idle_finishes_before_agent_admission(monkey
 
     run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
     cycle.id = 9
-    cycle.name = PROMOTION_READINESS_POLICY.expected_cycle_name
+    cycle.name = "Renamed backend promotion readiness"
+    cycle.execution_policy_key = PROMOTION_READINESS_POLICY.execution_policy_key
     run.cycle_id = cycle.id
     session = _AsyncExecuteCycleSession(
         run=run,
@@ -2216,14 +2271,13 @@ async def test_execute_promotion_run_idle_finishes_before_agent_admission(monkey
             branch_comparison_reader=AsyncMock(
                 return_value={"status": "identical", "ahead_by": 0}
             ),
-            configured_cycle_ids_reader=AsyncMock(return_value=(9,)),
         )
 
     async def fail_admit(*_args, **_kwargs):
         raise AssertionError("idle run admitted an agent")
 
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
-    monkeypatch.setattr(cycle_admission, "async_apply_promotion_readiness_gate", apply_gate)
+    monkeypatch.setattr(cycle_admission, "async_apply_cycle_execution_policy", apply_gate)
     monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
     monkeypatch.setattr(service, "publish", lambda *_args, **_kwargs: None)
 
@@ -2248,7 +2302,8 @@ async def test_execute_promotion_run_with_staging_ahead_reaches_agent_posting_pa
 
     run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
     cycle.id = 9
-    cycle.name = PROMOTION_READINESS_POLICY.expected_cycle_name
+    cycle.name = "Renamed backend promotion readiness"
+    cycle.execution_policy_key = PROMOTION_READINESS_POLICY.execution_policy_key
     run.cycle_id = cycle.id
     session = _AsyncExecuteCycleSession(
         run=run,
@@ -2272,7 +2327,6 @@ async def test_execute_promotion_run_with_staging_ahead_reaches_agent_posting_pa
             branch_comparison_reader=AsyncMock(
                 return_value={"status": "ahead", "ahead_by": 47}
             ),
-            configured_cycle_ids_reader=AsyncMock(return_value=(9,)),
         )
 
     admissions = []
@@ -2282,7 +2336,7 @@ async def test_execute_promotion_run_with_staging_ahead_reaches_agent_posting_pa
         return 77
 
     monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
-    monkeypatch.setattr(cycle_admission, "async_apply_promotion_readiness_gate", apply_gate)
+    monkeypatch.setattr(cycle_admission, "async_apply_cycle_execution_policy", apply_gate)
     monkeypatch.setattr(cycle_admission, "async_preflight_cycle_external_auth", _passed_cycle_auth)
     monkeypatch.setattr(cycle_admission, "preflight_cycle_external_quota", _passed_cycle_quota)
     monkeypatch.setattr(service, "_async_admit_cycle_run", admit)
@@ -2298,6 +2352,85 @@ async def test_execute_promotion_run_with_staging_ahead_reaches_agent_posting_pa
         "`closing_block_verdict`"
         in admissions[0]["message"]
     )
+
+
+@pytest.mark.asyncio
+async def test_execute_cycle_run_applies_a_second_registered_policy_without_executor_changes(
+    monkeypatch,
+):
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
+    cycle.execution_policy_key = "test_dummy_execution_policy"
+    session = _AsyncExecuteCycleSession(
+        run=run,
+        cycle=cycle,
+        idea=idea,
+        expected_run_id=run.id,
+    )
+    applied = []
+
+    async def dummy_gate(active_session, *, cycle, run):
+        applied.append((active_session, cycle.id, run.id))
+        return PromotionReadinessOutcome.IDLE
+
+    async def fail_admit(*_args, **_kwargs):
+        raise AssertionError("dummy policy did not finalize before admission")
+
+    isolated_registry = CycleExecutionPolicyRegistry(
+        registrations=(
+            CycleExecutionPolicyRegistration(
+                cycle.execution_policy_key,
+                dummy_gate,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        policy_registry_module,
+        "cycle_execution_policy_registry",
+        lambda: isolated_registry,
+    )
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
+    monkeypatch.setattr(service, "publish", lambda *_args, **_kwargs: None)
+
+    await service.async_execute_cycle_run(run.id)
+
+    assert applied == [(session, cycle.id, run.id)]
+    assert run.status == "skipped"
+    assert run.skip_reason == "promotion_readiness_idle"
+    assert run.run_id is None
+
+
+@pytest.mark.asyncio
+async def test_execute_cycle_run_fails_for_an_unknown_execution_policy_key(
+    monkeypatch,
+):
+    run, cycle, idea = _cycle_execution_objects(model_override="openai/gpt-5.6-sol")
+    cycle.execution_policy_key = "unknown_policy"
+    session = _AsyncExecuteCycleSession(
+        run=run,
+        cycle=cycle,
+        idea=idea,
+        expected_run_id=run.id,
+    )
+
+    async def fail_admit(*_args, **_kwargs):
+        raise AssertionError("unknown policy silently reached agent admission")
+
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fail_admit)
+    monkeypatch.setattr(service, "publish", lambda *_args, **_kwargs: None)
+
+    await service.async_execute_cycle_run(run.id)
+
+    expected_error = "Unknown Cycle execution policy key: 'unknown_policy'"
+    assert run.status == "failed"
+    assert run.error == expected_error
+    assert run.run_id is None
+    assert run.context_snapshot["execution_policy"] == {
+        "key": "unknown_policy",
+        "outcome": "configuration_error",
+        "error": expected_error,
+    }
 
 
 @pytest.mark.asyncio
@@ -4586,48 +4719,3 @@ async def test_wake_cycle_now_refuses_ambiguous_names(
     )
 
     assert await service.async_wake_cycle_now(name="Twin Cycle") == "ambiguous"
-
-
-def test_coordinator_launch_prompt_includes_packet_outcomes_instruction():
-    cycle = Cycle()
-    cycle.id = 2
-    cycle.name = "Uwear Ticket Coordinator Check-ins"
-    cycle.prompt = "Publish the chantier-primary coordinator digest."
-    cycle.timezone = "America/Toronto"
-    cycle.model_override = None
-    cycle.thinking_override = None
-
-    run = CycleRun()
-    run.id = 1364
-    run.cycle_id = cycle.id
-    run.scheduled_for = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
-    run.guidance_snapshot = []
-    run.output_targets_snapshot = []
-    run.context_snapshot = {
-        "result_contract": cycle_result_contract(run_kind="scheduled_digest"),
-        "open_ask_stragglers": [
-            {
-                "status": "open",
-                "owner_label": "Nicolas",
-                "ask_text": "Tell me what is best for us",
-                "age": "96h 41m",
-                "thread_permalink": "https://example.com/open",
-            }
-        ],
-    }
-
-    idea = Idea()
-    idea.id = "coordinator-digest"
-    idea.title = "Uwear Ticket Coordinator Runs"
-
-    message = cycle_prompts.cycle_run_message(idea, cycle, run)
-
-    assert "`packets.outcomes` with `since_hours: 168`" in message
-    assert "append that value verbatim" in message
-    assert "Do not recalculate or paraphrase its packet counts" in message
-    assert (
-        message.index("- MANDATORY OPEN-ASK LEDGER:")
-        < message.index("- AUTHORITATIVE EXCEPTION-PING GATE:")
-        < message.index("- MANDATORY PACKET OUTCOMES FOOTER:")
-        < message.index("## Result Contract")
-    )

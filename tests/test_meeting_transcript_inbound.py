@@ -98,6 +98,28 @@ def _ended_payload(upload_root: Path, *, session_id: str = "session-ended") -> d
     }
 
 
+def _health_payload(
+    *,
+    session_id: str = "session-active",
+    warning: str | None = None,
+) -> dict:
+    payload = {
+        "session_id": session_id,
+        "meeting_url": "https://meet.google.com/abc-defg-hij",
+        "status": "lobby",
+        "started_at": "2026-08-05T13:52:49Z",
+        "joined_at": None,
+        "observed_at": "2026-08-05T13:55:49Z",
+        "caption_lines": 0,
+        "participant_count": 0,
+        "origin": {"channel": "C-meetings", "thread_ts": "1722700000.001"},
+        "requested_by": "U-reda",
+    }
+    if warning:
+        payload["warning"] = warning
+    return payload
+
+
 @pytest.mark.asyncio
 async def test_meeting_transcript_admits_same_thread_run_and_is_idempotent(
     session,
@@ -222,6 +244,191 @@ async def test_failed_meeting_admits_short_failure_report_run(session):
     assert "Post a short failure report" in run.input_message
     assert "Required sequence" not in run.input_message
     assert "create_github_issue" not in run.input_message
+
+
+@pytest.mark.asyncio
+async def test_zero_caption_terminal_reports_degraded_capture(session, tmp_path, monkeypatch):
+    from brain.systems.inbound.service import submit_inbound_envelope
+    from brain.systems.meetings import inbound as meeting_inbound
+
+    meetbot = await _seed(session)
+    upload_root = tmp_path / "meetings"
+    monkeypatch.setattr(meeting_inbound, "MEETING_UPLOAD_ROOT", upload_root)
+    payload = _ended_payload(upload_root, session_id="session-empty")
+    payload["caption_lines"] = 0
+    payload["participants"] = []
+    Path(payload["transcript_path"]).write_text("", encoding="utf-8")
+    Path(payload["transcript_md_path"]).write_text("", encoding="utf-8")
+
+    result = await submit_inbound_envelope(
+        session,
+        connection=meetbot,
+        envelope={
+            "kind": "meeting_transcript",
+            "origin": "meetbot.session_complete",
+            "payload": payload,
+            "idempotency_key": "meeting-session-empty",
+        },
+    )
+
+    run = (await session.scalars(select(AgentRunRow))).one()
+    assert result["ilo_outcome"]["meeting_status"] == "degraded"
+    assert run.metadata_["evidence_health"]["status"] == "degraded"
+    assert run.metadata_["meeting_capture"]["status"] == "degraded"
+    assert "capture is degraded" in run.input_message
+    assert "Post a capture-failure report" in run.input_message
+    assert "Ask clarifying questions" not in run.input_message
+
+
+@pytest.mark.asyncio
+async def test_healthy_session_health_is_persisted_without_admitting_a_run(session):
+    from brain.systems.inbound.service import submit_inbound_envelope
+
+    meetbot = await _seed(session)
+    result = await submit_inbound_envelope(
+        session,
+        connection=meetbot,
+        envelope={
+            "kind": "meeting_session_health",
+            "origin": "meetbot",
+            "payload": _health_payload(),
+            "idempotency_key": "meeting-health-session-active-1",
+        },
+    )
+
+    event = (await session.scalars(select(InboundEventRow))).one()
+    receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
+    assert result["status"] == "processed"
+    assert result["ilo_outcome"]["operation"] == "meeting_health_observed"
+    assert "run_id" not in result["ilo_outcome"]
+    assert event.kind == "meeting_session_health"
+    assert event.raw_payload["participant_count"] == 0
+    assert receipt.tool_use["type"] == "meeting_session_health_intake"
+    assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 0
+
+
+@pytest.mark.asyncio
+async def test_session_health_rejects_invalid_payload_with_meeting_discipline(session):
+    from brain.systems.inbound.service import submit_inbound_envelope
+
+    meetbot = await _seed(session)
+    payload = _health_payload()
+    payload.pop("observed_at")
+
+    result = await submit_inbound_envelope(
+        session,
+        connection=meetbot,
+        envelope={
+            "kind": "meeting_session_health",
+            "origin": "meetbot",
+            "payload": payload,
+            "idempotency_key": "meeting-health-invalid",
+        },
+    )
+
+    assert result["status"] == "failed"
+    assert result["ilo_outcome"] == {
+        "operation": "meeting_health_payload_rejected",
+        "reason": "invalid_meeting_session_health_payload",
+        "event_id": result["event_id"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_stale_health_warning_admits_run_to_inviting_slack_thread(session):
+    from brain.systems.inbound.service import submit_inbound_envelope
+
+    meetbot = await _seed(session)
+    warning = (
+        "Session stale: wrong meeting, bot was never admitted, or captions off."
+    )
+    result = await submit_inbound_envelope(
+        session,
+        connection=meetbot,
+        envelope={
+            "kind": "meeting_session_health",
+            "origin": "meetbot",
+            "payload": _health_payload(warning=warning),
+            "idempotency_key": "meeting-health-session-active-3",
+        },
+    )
+
+    run = (await session.scalars(select(AgentRunRow))).one()
+    assert result["ilo_outcome"]["routing"] == "slack_origin"
+    assert run.thread_id == "slack:T-team:C-meetings:1722700000.001"
+    assert run.target_ref["slack_trigger"]["response_target"] == {
+        "channel_id": "C-meetings",
+        "thread_ts": "1722700000.001",
+        "visibility": "public",
+    }
+    assert "https://meet.google.com/abc-defg-hij" in run.input_message
+    assert "Participants observed: 0" in run.input_message
+    assert "Caption lines: 0" in run.input_message
+    assert "wrong meeting" in run.input_message
+    assert "never admitted" in run.input_message
+    assert "captions are off" in run.input_message
+
+
+@pytest.mark.asyncio
+async def test_replay_shape_persists_health_rows_between_join_and_terminal(
+    session,
+    tmp_path,
+    monkeypatch,
+):
+    from brain.systems.inbound.service import submit_inbound_envelope
+    from brain.systems.meetings import inbound as meeting_inbound
+
+    meetbot = await _seed(session)
+    for sequence, observed_at in enumerate(
+        ("2026-08-05T13:53:49Z", "2026-08-05T13:54:49Z"),
+        start=1,
+    ):
+        payload = _health_payload()
+        payload["observed_at"] = observed_at
+        await submit_inbound_envelope(
+            session,
+            connection=meetbot,
+            envelope={
+                "kind": "meeting_session_health",
+                "origin": "meetbot",
+                "payload": payload,
+                "idempotency_key": f"meeting-health-session-active-{sequence}",
+            },
+        )
+
+    upload_root = tmp_path / "meetings"
+    monkeypatch.setattr(meeting_inbound, "MEETING_UPLOAD_ROOT", upload_root)
+    terminal = _ended_payload(upload_root, session_id="session-active")
+    terminal.update(
+        {
+            "started_at": "2026-08-05T13:52:49Z",
+            "ended_at": "2026-08-05T15:53:25Z",
+            "caption_lines": 0,
+            "participants": [],
+        }
+    )
+    Path(terminal["transcript_path"]).write_text("", encoding="utf-8")
+    Path(terminal["transcript_md_path"]).write_text("", encoding="utf-8")
+    await submit_inbound_envelope(
+        session,
+        connection=meetbot,
+        envelope={
+            "kind": "meeting_transcript",
+            "origin": "meetbot.session_complete",
+            "payload": terminal,
+            "idempotency_key": "meeting-session-active",
+        },
+    )
+
+    rows = list((await session.scalars(select(InboundEventRow))).all())
+    health_rows = [row for row in rows if row.kind == "meeting_session_health"]
+    terminal_rows = [row for row in rows if row.kind == "meeting_transcript"]
+    assert sorted(row.raw_payload["observed_at"] for row in health_rows) == [
+        "2026-08-05T13:53:49Z",
+        "2026-08-05T13:54:49Z",
+    ]
+    assert len(terminal_rows) == 1
+    assert terminal_rows[0].raw_payload["ended_at"] == "2026-08-05T15:53:25Z"
 
 
 @pytest.mark.asyncio

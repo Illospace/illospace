@@ -1551,9 +1551,8 @@ async def github_read_ref_for_backend(
     genuine 404 on both the PR and exact-issue endpoints. Auth/permission
     errors fall through to the next candidate; other errors propagate.
 
-    NOTE: candidate resolution may write vault access-audit rows — the one
-    sanctioned write beneath the gather path's read-only stance (it belongs
-    to the auth owner, not to gather; see the handoff-packets spec).
+    NOTE: candidate resolution may write vault access-audit rows. That write
+    belongs to the auth owner, not to this backend read path.
     """
     from brain.systems.cortex.project_context.github import (
         async_get_issue,

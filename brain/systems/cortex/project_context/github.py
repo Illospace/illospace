@@ -1407,8 +1407,7 @@ async def async_get_pull_request(
         "checks": ci["checks"],
         "combined_status": ci["combined_status"],
         # True normalized body length BEFORE _compact_body's 1000-char cap, so
-        # downstream honesty accounting (handoff packets) can report what
-        # compaction removed.
+        # downstream consumers can report what compaction removed.
         "body_total_chars": len(" ".join(str((pr or {}).get("body") or "").split()))
         if isinstance(pr, dict)
         else 0,

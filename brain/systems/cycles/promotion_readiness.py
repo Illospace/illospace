@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,17 +21,13 @@ from brain.systems.cycles.contracts import (
 )
 from brain.systems.cycles.cycle_verdict_ledger import (
     ClosingBlockVerdict,
-    ensure_cycle_run_closing_verdict,
     persist_cycle_run_short_circuit_verdict,
 )
-
-logger = logging.getLogger(__name__)
 
 BaselineReader = Callable[[Any, str], Awaitable[tuple[str | None, str | None]]]
 TokenResolver = Callable[[Cycle], Awaitable[str]]
 BranchHeadReader = Callable[..., Awaitable[str]]
 BranchComparisonReader = Callable[..., Awaitable[dict[str, Any]]]
-ConfiguredCycleIdsReader = Callable[[Any], Awaitable[tuple[int, ...]]]
 
 
 class PromotionReadinessOutcome(StrEnum):
@@ -47,9 +42,9 @@ class PromotionReadinessOutcome(StrEnum):
 
 @dataclass(frozen=True)
 class PromotionReadinessPolicy:
-    """The single configuration point for the migration-free policy binding."""
+    """The single configuration point for the promotion-readiness policy."""
 
-    expected_cycle_name: str
+    execution_policy_key: str
     repository: str
     status_domain_slug: str
     status_object_key: str
@@ -95,7 +90,7 @@ class PromotionReadinessPolicy:
 
 
 PROMOTION_READINESS_POLICY = PromotionReadinessPolicy(
-    expected_cycle_name="Uwear Backend Promotion Readiness",
+    execution_policy_key="uwear_backend_promotion_readiness",
     repository="uwear-ai/uwear-backend",
     status_domain_slug="promotion-readiness",
     status_object_key="status",
@@ -157,52 +152,6 @@ async def _async_cycle_repo_token(cycle: Cycle) -> str:
     return token
 
 
-async def _async_configured_cycle_ids(session: Any) -> tuple[int, ...]:
-    result = await session.scalars(
-        select(Cycle.id).where(
-            Cycle.name == PROMOTION_READINESS_POLICY.expected_cycle_name,
-            Cycle.deleted_at.is_(None),
-        )
-    )
-    return tuple(int(cycle_id) for cycle_id in result.all())
-
-
-async def async_validate_promotion_readiness_policy_configuration(
-    session: Any,
-    *,
-    configured_cycle_ids_reader: ConfiguredCycleIdsReader | None = None,
-) -> str:
-    """Alert when the configured display-name binding is missing or ambiguous."""
-
-    reader = configured_cycle_ids_reader or _async_configured_cycle_ids
-    try:
-        cycle_ids = await reader(session)
-    except Exception:  # noqa: BLE001 - configuration checks must be loud
-        logger.exception(
-            "cycle_execution_policy_configuration_check_failed",
-            extra={
-                "policy": PROMOTION_READINESS_POLICY.gate_name,
-                "expected_cycle_name": (
-                    PROMOTION_READINESS_POLICY.expected_cycle_name
-                ),
-            },
-        )
-        return "unavailable"
-    if len(cycle_ids) == 1:
-        return "resolved"
-    status = "missing_or_renamed" if not cycle_ids else "ambiguous"
-    logger.error(
-        "cycle_execution_policy_configuration_error",
-        extra={
-            "policy": PROMOTION_READINESS_POLICY.gate_name,
-            "expected_cycle_name": PROMOTION_READINESS_POLICY.expected_cycle_name,
-            "status": status,
-            "matching_cycle_ids": list(cycle_ids),
-        },
-    )
-    return status
-
-
 def _apply_contract_extension(run: CycleRun) -> None:
     context_snapshot = dict(run.context_snapshot or {})
     result_contract = context_snapshot.get("result_contract")
@@ -253,17 +202,11 @@ async def async_apply_promotion_readiness_gate(
     token_resolver: TokenResolver | None = None,
     branch_head_reader: BranchHeadReader | None = None,
     branch_comparison_reader: BranchComparisonReader | None = None,
-    configured_cycle_ids_reader: ConfiguredCycleIdsReader | None = None,
 ) -> PromotionReadinessOutcome | None:
     """Record and return the policy outcome for the configured scheduled Cycle."""
 
     launch_context = cycle_run_launch_context(run)
     if launch_context.get("run_kind") != SCHEDULED_DIGEST_RUN_KIND:
-        return None
-    if (
-        str(getattr(cycle, "name", None) or "").strip()
-        != PROMOTION_READINESS_POLICY.expected_cycle_name
-    ):
         return None
 
     _apply_contract_extension(run)
@@ -272,42 +215,6 @@ async def async_apply_promotion_readiness_gate(
         "evaluated_at": evaluated_at.isoformat(),
         "repository": PROMOTION_READINESS_POLICY.repository,
     }
-    identity_reader = configured_cycle_ids_reader or _async_configured_cycle_ids
-    try:
-        configured_cycle_ids = await identity_reader(session)
-    except Exception as exc:  # noqa: BLE001 - policy identity must fail closed
-        configured_cycle_ids = ()
-        evidence["error"] = f"{type(exc).__name__}: {str(exc)[:240]}"
-    if configured_cycle_ids != (int(cycle.id),):
-        evidence.setdefault(
-            "error",
-            (
-                "configured cycle name is missing or renamed"
-                if not configured_cycle_ids
-                else "configured cycle name is ambiguous"
-            ),
-        )
-        evidence["matching_cycle_ids"] = list(configured_cycle_ids)
-        outcome = PromotionReadinessOutcome.CONFIGURATION_ERROR
-        _record_outcome(run, outcome, evidence)
-        ensure_cycle_run_closing_verdict(
-            run,
-            status="failed",
-            error=str(evidence["error"]),
-        )
-        logger.error(
-            "cycle_execution_policy_configuration_error",
-            extra={
-                "policy": PROMOTION_READINESS_POLICY.gate_name,
-                "expected_cycle_name": (
-                    PROMOTION_READINESS_POLICY.expected_cycle_name
-                ),
-                "matching_cycle_ids": list(configured_cycle_ids),
-                "executing_cycle_id": cycle.id,
-            },
-        )
-        return outcome
-
     baseline_reader = baseline_reader or _async_last_evaluated_pair
     token_resolver = token_resolver or _async_cycle_repo_token
     if branch_head_reader is None or branch_comparison_reader is None:
@@ -400,5 +307,4 @@ __all__ = [
     "PROMOTION_READINESS_POLICY",
     "PromotionReadinessOutcome",
     "async_apply_promotion_readiness_gate",
-    "async_validate_promotion_readiness_policy_configuration",
 ]

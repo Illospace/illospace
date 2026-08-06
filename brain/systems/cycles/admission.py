@@ -29,12 +29,14 @@ from brain.systems.cycles.auth_preflight import (
     async_preflight_cycle_external_auth,
 )
 from brain.systems.cycles.common import json_dict
+from brain.systems.cycles.execution_policy_registry import (
+    async_apply_cycle_execution_policy,
+)
 from brain.systems.cycles.quota_preflight import (
     preflight_cycle_external_quota,
 )
 from brain.systems.cycles.promotion_readiness import (
     PromotionReadinessOutcome,
-    async_apply_promotion_readiness_gate,
 )
 
 logger = logging.getLogger("cycles")
@@ -203,7 +205,7 @@ async def async_prepare_cycle_run_admission(
 ) -> CycleAdmissionOutcome:
     """Run policy gates, then resolve one route and complete admission checks."""
 
-    promotion_outcome = await async_apply_promotion_readiness_gate(
+    promotion_outcome = await async_apply_cycle_execution_policy(
         session,
         cycle=cycle,
         run=run,

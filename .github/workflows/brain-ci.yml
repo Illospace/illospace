@@ -211,17 +211,10 @@ jobs:
     if: always()
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Check selected CI jobs
-        run: |
-          for result in \
-            "${{ needs.changes.result }}" \
-            "${{ needs.backend-fast.result }}" \
-            "${{ needs.frontend.result }}" \
-            "${{ needs.db-contract.result }}"
-          do
-            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
-              echo "A selected CI job failed or was cancelled."
-              exit 1
-            fi
-          done
-          echo "Selected CI jobs passed."
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: bash scripts/ci_result_gate.sh

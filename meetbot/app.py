@@ -12,7 +12,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from meetbot.callback import CompletionCallback, CompletionSender
+from meetbot.callback import MeetingWebhookCallback, MeetingWebhookSender
 from meetbot.config import MeetbotConfig
 from meetbot.engine import PlaywrightMeetEngine
 from meetbot.models import MeetEngine, Origin, SessionStatus
@@ -103,13 +103,13 @@ def create_app(
     *,
     config: MeetbotConfig | None = None,
     engine: MeetEngine | None = None,
-    completion_sender: CompletionSender | None = None,
+    webhook_sender: MeetingWebhookSender | None = None,
 ) -> FastAPI:
-    """Create an app with injectable browser and callback boundaries."""
+    """Create an app with injectable browser and webhook boundaries."""
 
     resolved_config = config or MeetbotConfig.from_env()
     resolved_engine = engine or PlaywrightMeetEngine(resolved_config)
-    resolved_sender = completion_sender or CompletionCallback(resolved_config)
+    resolved_sender = webhook_sender or MeetingWebhookCallback(resolved_config)
     manager = SessionManager(resolved_config, resolved_engine, resolved_sender)
 
     if not resolved_config.api_token:
