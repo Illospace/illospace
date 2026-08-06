@@ -318,6 +318,34 @@ def test_build_payload_for_channel_message_is_headless_and_not_forced_reply():
     assert "alternative_response_tools" not in metadata
 
 
+def test_channel_monitor_prompt_requires_customer_support_recall_before_action():
+    from brain.systems.slack.channel_monitor_rendering import (
+        SUPPORT_INTAKE_RECALL_MANDATE,
+    )
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
+    monitored = _channel_monitor_payload()
+    monitored["channel_id"] = "C082SUKQKJL"
+    monitored["channel_name"] = "support-intake"
+    monitored["response_target"]["channel_id"] = "C082SUKQKJL"
+    payload = build_slack_work_intake_payload(
+        org_id="org1",
+        authority_user_id="user1",
+        payload=monitored,
+    )
+
+    run_message = payload["payload"]["run_message"]
+    assert "monitoring Slack #support-intake" in run_message
+    assert SUPPORT_INTAKE_RECALL_MANDATE in run_message
+    assert run_message.index(SUPPORT_INTAKE_RECALL_MANDATE) < run_message.index(
+        "Classify this message and act accordingly:"
+    )
+    assert "requester email, company id, and error signature" in run_message
+    assert "Silence is not allowed for a customer support intake." in run_message
+    assert "`uwear-customer-generation-report-triage`" in run_message
+    assert "appropriate read-only payload reader and `search_knowledge`" in run_message
+
+
 def test_channel_monitor_framing_routes_feature_requests_to_tickets():
     # Regression: a Retool-relayed customer feature request ("*New:* Idea") was
     # classified "low-signal" and dropped because the framing only made
