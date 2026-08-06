@@ -54,7 +54,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.11.0"
+    assert bundle.manifest.version == "1.12.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -271,6 +271,59 @@ def test_uwear_customer_bug_filing_has_one_declared_destination_and_complete_evi
         "resulting artifact references",
     ):
         assert expected in support_flat
+
+
+def test_uwear_customer_support_backend_generation_uses_shared_owner_gate():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    procedure = " ".join(bundle.skill_markdown.split())
+    filing = " ".join(
+        _uwear_triage_asset(bundle, "references/creating-work-items.md").split()
+    )
+    support = " ".join(
+        _uwear_triage_asset(bundle, "references/customer-support.md").split()
+    )
+
+    assert "Builder first" in procedure
+    assert "Axel = agent/LLM/MCP and AI-backend behavior" in procedure
+    assert "For generation/API behavior, use `uwear-ai/uwear-backend`" in support
+    assert "Pre-create ownership and readiness gate" in support
+    assert "Pass the resolved GitHub login in `assignees`" in filing
+    assert "Apply `ready-for-agent` in `labels`" in filing
+
+
+def test_uwear_customer_support_app_ui_uses_shared_owner_gate():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    procedure = " ".join(bundle.skill_markdown.split())
+    filing = " ".join(
+        _uwear_triage_asset(bundle, "references/creating-work-items.md").split()
+    )
+
+    assert "Reda = app/Studio UI, UX, visual, customer-facing app flows" in procedure
+    assert "apply the core operating doc's **Ownership** section" in filing
+    assert "the single canonical resolver" in filing
+
+
+def test_uwear_customer_support_ambiguous_owner_is_explained_in_issue_body():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    filing = " ".join(
+        _uwear_triage_asset(bundle, "references/creating-work-items.md").split()
+    )
+    support = " ".join(
+        _uwear_triage_asset(bundle, "references/customer-support.md").split()
+    )
+
+    assert "omit `assignees`" in filing
+    assert "Ownership: Unassigned — <specific ambiguity or missing evidence>." in filing
+    assert "required ambiguity statement in the issue body" in support
 
 
 def test_uwear_customer_bug_filing_policy_is_not_repeated_by_consumers():

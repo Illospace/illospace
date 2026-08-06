@@ -364,6 +364,21 @@ def test_channel_monitor_framing_routes_feature_requests_to_tickets():
     assert "email/profile id" in run_message
 
 
+def test_channel_monitor_filing_keeps_shared_triage_ownership_contract():
+    from brain.systems.slack.triggers import build_slack_work_intake_payload
+
+    payload = build_slack_work_intake_payload(
+        org_id="org1",
+        authority_user_id="user1",
+        payload=_channel_monitor_payload(),
+    )
+
+    run_message = payload["payload"]["run_message"]
+    assert "Load the 'uwear-engineering-triage' skill" in run_message
+    assert "first for routing/ownership rules" in run_message
+    assert "creating work items" in run_message
+
+
 def test_channel_monitor_framing_preserves_alert_thread_provenance_on_tracker_records():
     from brain.systems.slack.triggers import build_slack_work_intake_payload
 
