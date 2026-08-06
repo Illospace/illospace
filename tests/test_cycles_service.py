@@ -1631,7 +1631,16 @@ def test_coordinator_launch_prompt_includes_packet_outcomes_instruction():
     run.guidance_snapshot = []
     run.output_targets_snapshot = []
     run.context_snapshot = {
-        "result_contract": cycle_result_contract(run_kind="scheduled_digest")
+        "result_contract": cycle_result_contract(run_kind="scheduled_digest"),
+        "open_ask_stragglers": [
+            {
+                "status": "open",
+                "owner_label": "Nicolas",
+                "ask_text": "Tell me what is best for us",
+                "age": "96h 41m",
+                "thread_permalink": "https://example.com/open",
+            }
+        ],
     }
 
     idea = Idea()
@@ -1643,6 +1652,12 @@ def test_coordinator_launch_prompt_includes_packet_outcomes_instruction():
     assert "`packets.outcomes` with `since_hours: 168`" in message
     assert "append that value verbatim" in message
     assert "Do not recalculate or paraphrase its packet counts" in message
+    assert (
+        message.index("- MANDATORY OPEN-ASK LEDGER:")
+        < message.index("- AUTHORITATIVE EXCEPTION-PING GATE:")
+        < message.index("- MANDATORY PACKET OUTCOMES FOOTER:")
+        < message.index("## Result Contract")
+    )
 
 
 @pytest.mark.parametrize(
