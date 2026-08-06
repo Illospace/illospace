@@ -53,6 +53,20 @@ def slack_channel_monitor_message(
         SUPPORT_INTAKE_RECALL_MANDATE,
         "",
         "Classify this message and act accordingly:",
+        "- Filing is the floor for every ticket-worthy customer-support report. After the "
+        "required investigation and duplicate check, choose the best-supported repo from the "
+        "available evidence and create the GitHub issue before ownership resolution or any "
+        "routing question. An unknown owner is not a blocker: file unassigned, include the "
+        "required ownership-ambiguity statement in the issue body, and enrich ownership on the "
+        "filed issue in the same run.",
+        "- If you ask a routing question for a customer-support issue, the issue must already "
+        "exist. Register the question as an open ask with a named human owner and an explicit "
+        "expiry so terminal-state tracking applies, @-mention that human in Slack, and cite the "
+        "filed issue. Do not let a newly opened routing question carry answers_open_ask=false "
+        "unless its open_asks row was registered separately.",
+        "- A customer-support intake without a created or updated durable work item is DEGRADED, "
+        "not a healthy completion. Name the missing artifact and the exact write blocker in the "
+        "run self-review.",
         "- A human explicitly stating a durable presentation/behaviour preference requires a "
         "visible reply. Follow the durable-preference contract above before the general triage "
         "branches below.",
@@ -72,15 +86,18 @@ def slack_channel_monitor_message(
         "'repo and incident clear': file the issue in that repo in the same run. Include the "
         "investigation findings in the issue body — not just a link to Slack — so the analysis is "
         "captured in the work item instead of being left only in Slack.",
-        "- A human request/report or apparent request for work that is actionable but "
+        "- A non-customer human request or apparent request for work that is actionable but "
         "underspecified because the target repo or incident is unclear: do NOT stay silent and do "
         "NOT return 'No visible action taken.' Ask exactly ONE focused clarifying question "
-        "in-thread with post_slack_reply, then act on the answer. Proximity to an existing alert "
-        "alone does not turn an apparent human request into alert commentary. This branch does "
-        "not apply to casual chatter or genuine commentary that does not ask for work.",
+        "in-thread with post_slack_reply and register it as a tracked open ask. A ticket-worthy "
+        "customer-support report never enters this wait-for-clarification branch; follow the "
+        "filing-floor rule above. Proximity to an existing alert alone does not turn an apparent "
+        "human request into alert commentary. This branch does not apply to casual chatter or "
+        "genuine commentary that does not ask for work.",
         "- A message that @-mentions Illo must NEVER end in silence or 'No visible action taken.' "
-        "Either file the issue or post a visible reply; if the details are insufficient to file, "
-        "ask exactly ONE focused clarifying question in-thread.",
+        "Either file the issue or post a visible reply; if the details are insufficient for a "
+        "non-customer request, ask exactly ONE focused clarifying question in-thread. A customer "
+        "support intake still follows the filing-floor rule above.",
         "- A user-submitted feature request or product idea (feedback relayed by a bot such as "
         "Retool — e.g. '*New:* Idea' or '*New:* Feedback' with a user email and profile id — is "
         "a real customer ask, NOT chatter and NOT low-signal): if the ask is concrete and "

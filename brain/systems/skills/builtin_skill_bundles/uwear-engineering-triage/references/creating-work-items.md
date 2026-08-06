@@ -17,28 +17,48 @@ Two different places can hold work, and they are NOT the same thing:
 
 Decide as follows.
 
-### Pre-create ownership and readiness gate
+### Filing floor — create the issue first
 
-Immediately before every `create_github_issue` call, including calls for
-customer-support reports, apply the core operating doc's **Ownership** section
-to the evidence collected for the issue. That section is the single canonical
-resolver: do not copy its people or work-class rules into this playbook.
+For every ticket-worthy customer-support report, **filing is unconditional**.
+After the required investigation and duplicate check, choose the best-supported
+repo from the available evidence and call `create_github_issue` immediately.
+Create the issue before ownership resolution and before any routing question.
+Uncertainty about the owner or exact route does not delay filing: state the
+uncertainty in the issue body and keep the work visible.
+
+Create the customer-support issue without `assignees`. Ownership and readiness
+are post-create enrichment on an issue that already exists. Preserve any explicit
+assignee request in the evidence so the post-create step can honor it.
+
+### Post-create ownership and readiness enrichment
+
+Immediately after `create_github_issue` returns the issue number and URL, apply
+the core operating doc's **Ownership** section to the evidence collected for the
+filed issue. That section is the single canonical resolver: do not copy its
+people or work-class rules into this playbook.
 
 - An explicit human assignment wins. Otherwise, resolve builder-first and use
-  the core specialization and load-balancing tie-breakers. Pass the resolved
-  GitHub login in `assignees` on the same `create_github_issue` call; do not
-  create the issue first and plan to assign it later.
-- For a customer-generation report, the investigation hypothesis must exist
-  before this gate runs. "No owner up front" is an investigation rule, not an
-  instruction to file the resulting issue unassigned.
-- Apply `ready-for-agent` in `labels` when the issue meets the definition in
-  the core **States** section: it is scoped enough for an autonomous agent to
-  implement and open a PR without human judgment, credentials, external
-  testing, or a manual design/release decision.
-- If the ownership evidence remains genuinely ambiguous, omit `assignees` and
-  add `Ownership: Unassigned — <specific ambiguity or missing evidence>.` to
-  the issue body. An empty assignee list without that explanation is not a
-  completed ownership decision.
+  the core specialization and load-balancing tie-breakers. When ownership
+  resolves, call `update_github_issue` with the resolved GitHub login in
+  `assignees_add` during the same run.
+- For a customer-generation report, use the investigation hypothesis as
+  ownership evidence. "No owner up front" remains an investigation rule; it
+  does not remove the mandatory post-create ownership attempt.
+- Apply `ready-for-agent` with `update_github_issue` when the filed issue meets
+  the definition in the core **States** section: it is scoped enough for an
+  autonomous agent to implement and open a PR without human judgment,
+  credentials, external testing, or a manual design/release decision.
+- **Mandatory branch — I don't know the owner.** This branch requires no owner
+  to be known and never blocks filing; the issue already exists. Keep it
+  unassigned, add `Ownership: Unassigned — <specific ambiguity or missing
+  evidence>.` to the issue body with `update_github_issue`, and state exactly
+  what ownership or routing fact remains unresolved.
+- A routing question is never a substitute for filing. Ask it only after the
+  issue exists. Register it as an open ask with a named human owner and an
+  explicit expiry so the terminal-state machinery tracks it, then @-mention
+  that human in Slack and cite the filed issue. Do not let a newly opened
+  routing question carry `answers_open_ask: false` unless its `open_asks` row
+  was registered separately.
 
 ### Customer-bug filing policy
 
@@ -47,11 +67,11 @@ resolver: do not copy its people or work-class rules into this playbook.
   mirror, never a substitute. Create the GitHub issue first, then mirror it with
   the returned issue number/URL and stable external id. The issue body must carry
   the customer's own words, the concrete impact (including credit loss), and the
-  Slack `origin_ref`; run the pre-create ownership and readiness gate above,
+  Slack `origin_ref`; follow the filing floor and post-create enrichment above,
   including honoring an explicit assignee request using the verified GitHub
-  identity. If no more-specific tracker exists, use Domain `1` as the existing
-  default. Never create a Domain during filing: propose the schema change for
-  later review and complete the immediate mirror in Domain `1`.
+  identity after the issue exists. If no more-specific tracker exists, use Domain
+  `1` as the existing default. Never create a Domain during filing: propose the
+  schema change for later review and complete the immediate mirror in Domain `1`.
 - **One problem = one issue — check before filing.** Before calling
   `create_github_issue`, search open AND closed GitHub issues and Domain 1
   tracker records for the same tracked error signature, Rollbar id (prefer
@@ -74,8 +94,11 @@ resolver: do not copy its people or work-class rules into this playbook.
   403/404): do NOT claim an issue was filed. A retention tracker record + handoff
   may keep the work from being lost, but the reply must say **the requested GitHub
   issue was not created** and name the exact blocker.
-- **Repo or incident unclear:** ask first; capture an internal record only if the
-  signal must not be lost.
+- **Repo or incident remains uncertain after investigation:** for a ticket-worthy
+  customer-support report, choose the best-supported repo, file there, and state
+  the unresolved routing fact in the issue body. Ask a routing question only
+  after filing and follow the tracked open-ask requirements above. For other
+  intake, capture an internal record if the signal must not be lost.
 
 Never describe an internal tracker record as a GitHub issue. Only say a GitHub
 issue was opened when `create_github_issue` succeeded and you can cite its number

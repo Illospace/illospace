@@ -54,7 +54,7 @@ def test_uwear_engineering_triage_includes_dependency_monitor():
 
     bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
 
-    assert bundle.manifest.version == "1.12.0"
+    assert bundle.manifest.version == "1.13.0"
     procedure = bundle.skill_markdown
     for expected in (
         "## Dependency Monitor",
@@ -267,13 +267,13 @@ def test_uwear_customer_bug_filing_has_one_declared_destination_and_complete_evi
         "[customer-bug filing policy](creating-work-items.md#customer-bug-filing-policy)",
         "`uwear-ai/uwear-backend`",
         "payload evidence + hypothesis",
-        "after the hypothesis is formed",
+        "After the hypothesis is formed",
         "resulting artifact references",
     ):
         assert expected in support_flat
 
 
-def test_uwear_customer_support_backend_generation_uses_shared_owner_gate():
+def test_uwear_customer_support_files_before_resolving_owner():
     from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
     from brain.systems.skills.bundles import load_skill_bundle
 
@@ -286,15 +286,50 @@ def test_uwear_customer_support_backend_generation_uses_shared_owner_gate():
         _uwear_triage_asset(bundle, "references/customer-support.md").split()
     )
 
+    support_filing = "**File first, unconditionally.**"
+    support_ownership = "**Resolve ownership on the filed issue.**"
+    filing_floor = "### Filing floor — create the issue first"
+    ownership_enrichment = "### Post-create ownership and readiness enrichment"
+
+    assert support.index(support_filing) < support.index(support_ownership)
+    assert filing.index(filing_floor) < filing.index(ownership_enrichment)
     assert "Builder first" in procedure
     assert "Axel = agent/LLM/MCP and AI-backend behavior" in procedure
     assert "For generation/API behavior, use `uwear-ai/uwear-backend`" in support
-    assert "Pre-create ownership and readiness gate" in support
-    assert "Pass the resolved GitHub login in `assignees`" in filing
-    assert "Apply `ready-for-agent` in `labels`" in filing
+    assert "call `create_github_issue` before resolving ownership" in support
+    assert "resolve builder-first" in filing
+    assert "mandatory post-create ownership attempt" in filing
+    assert "`update_github_issue`" in filing
+    assert "`assignees_add`" in filing
+    assert "Apply `ready-for-agent` with `update_github_issue`" in filing
 
 
-def test_uwear_customer_support_app_ui_uses_shared_owner_gate():
+def test_uwear_customer_support_never_conditions_filing_on_owner_resolution():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    filing = " ".join(
+        _uwear_triage_asset(bundle, "references/creating-work-items.md").split()
+    )
+    support = " ".join(
+        _uwear_triage_asset(bundle, "references/customer-support.md").split()
+    )
+    combined = f"{filing} {support}"
+
+    for forbidden in (
+        "Pre-create ownership and readiness gate",
+        "Immediately before every `create_github_issue`",
+        "resolved before filing",
+        "before `create_github_issue`",
+        "Once the hypothesis exists",
+        "once confirmed",
+        "ask first; capture an internal record",
+    ):
+        assert forbidden not in combined
+
+
+def test_uwear_customer_support_app_ui_uses_shared_post_create_owner_rules():
     from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
     from brain.systems.skills.bundles import load_skill_bundle
 
@@ -321,9 +356,14 @@ def test_uwear_customer_support_ambiguous_owner_is_explained_in_issue_body():
         _uwear_triage_asset(bundle, "references/customer-support.md").split()
     )
 
-    assert "omit `assignees`" in filing
+    assert "**Mandatory branch — I don't know the owner.**" in filing
+    assert "This branch requires no owner to be known and never blocks filing" in filing
+    assert "Keep it unassigned" in filing
     assert "Ownership: Unassigned — <specific ambiguity or missing evidence>." in filing
-    assert "required ambiguity statement in the issue body" in support
+    assert "**Mandatory branch — I don't know the owner.**" in support
+    assert "No owner needs to be known to reach this branch" in support
+    assert "state exactly what ownership or routing fact is unresolved" in support
+    assert "The question never replaces or delays the issue" in support
 
 
 def test_uwear_customer_bug_filing_policy_is_not_repeated_by_consumers():
