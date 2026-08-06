@@ -364,7 +364,7 @@ def test_channel_monitor_framing_routes_feature_requests_to_tickets():
     assert "email/profile id" in run_message
 
 
-def test_channel_monitor_filing_keeps_shared_triage_ownership_contract():
+def test_channel_monitor_customer_support_files_before_any_routing_question():
     from brain.systems.slack.triggers import build_slack_work_intake_payload
 
     payload = build_slack_work_intake_payload(
@@ -374,6 +374,19 @@ def test_channel_monitor_filing_keeps_shared_triage_ownership_contract():
     )
 
     run_message = payload["payload"]["run_message"]
+    filing_floor = "Filing is the floor for every ticket-worthy customer-support report."
+    routing_question = "If you ask a routing question for a customer-support issue"
+
+    assert run_message.index(filing_floor) < run_message.index(routing_question)
+    assert "create the GitHub issue before ownership resolution" in run_message
+    assert "An unknown owner is not a blocker" in run_message
+    assert "file unassigned" in run_message
+    assert "the issue must already exist" in run_message
+    assert "Register the question as an open ask" in run_message
+    assert "named human owner and an explicit expiry" in run_message
+    assert "@-mention that human" in run_message
+    assert "answers_open_ask=false" in run_message
+    assert "without a created or updated durable work item is DEGRADED" in run_message
     assert "Load the 'uwear-engineering-triage' skill" in run_message
     assert "first for routing/ownership rules" in run_message
     assert "creating work items" in run_message

@@ -28,19 +28,30 @@ Do the mechanical investigation yourself, read-only, then act:
    (e.g. the try-on prompt/settings never specified the missing detail; the
    reference image lacked it; the model dropped it; a QA/status signal explains
    it).
-3. **Open the durable work item.** Follow the canonical
+3. **File first, unconditionally.** Follow the canonical
    [customer-bug filing policy](creating-work-items.md#customer-bug-filing-policy).
    For generation/API behavior, use `uwear-ai/uwear-backend`; add the payload
    evidence + hypothesis and point the owner at the payload to confirm or deny.
-   Run that playbook's **Pre-create ownership and readiness gate** after the
-   hypothesis is formed and before `create_github_issue`. Apply its result in
-   the create call, including an explicitly requested assignee when present.
-4. **Reply in-thread** on the alert with the resulting artifact references and a
+   After the hypothesis is formed, call `create_github_issue` before resolving
+   ownership or asking a routing question. Filing does not wait for an owner or
+   a human confirmation.
+4. **Resolve ownership on the filed issue.** After `create_github_issue` returns
+   the issue number and URL, run that playbook's **Post-create ownership and
+   readiness enrichment**. Attempt ownership with the unchanged builder-first,
+   specialization, and load-balancing rules, then update the filed issue.
+5. **Reply in-thread** on the alert with the resulting artifact references and a
    one-line hypothesis.
 
-**Owner: none during investigation; resolved before filing.** Illo runs the
-first-pass investigation. Once the hypothesis exists, the shared pre-create gate
-selects the human owner and readiness label from the core rules. Do not
-auto-assign a customer-generation issue to Axel merely because the output came
-from an AI model. If the shared gate cannot resolve ownership, file it
-unassigned with the required ambiguity statement in the issue body.
+**Owner: none during investigation and at initial filing; resolution follows
+filing.** Illo runs the first-pass investigation. The issue exists before the
+shared ownership step selects a human owner and readiness label from the core
+rules. Do not auto-assign a customer-generation issue to Axel merely because the
+output came from an AI model.
+
+**Mandatory branch — I don't know the owner.** No owner needs to be known to
+reach this branch. Keep the filed issue unassigned, include the required
+`Ownership: Unassigned — <specific ambiguity or missing evidence>.` statement in
+the issue body, and state exactly what ownership or routing fact is unresolved.
+If a routing question is useful, file the issue first, register the question as
+an open ask with a named human owner and an explicit expiry, and @-mention that
+human in Slack. The question never replaces or delays the issue.
