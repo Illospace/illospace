@@ -2,13 +2,25 @@ from __future__ import annotations
 
 import json
 
-from brain.platform.integrations.codex_usage import CodexKnownUsage, CodexUsageReading
+import pytest
+
+from brain.platform.integrations.codex_usage import (
+    CodexKnownUsage,
+    CodexUnknownUsageReading,
+    CodexUsageUnknownReason,
+)
 from brain.platform.integrations import provider_quota_preflight
+from brain.platform.integrations.provider_quota_preflight import (
+    ProviderQuotaBlockedPreflightResult,
+    ProviderQuotaDeferredPreflightResult,
+    ProviderQuotaPassedPreflightResult,
+    ProviderQuotaSkippedPreflightResult,
+    ProviderQuotaUnknownPreflightResult,
+)
 
 
-def _usage(used_percent: float) -> CodexUsageReading:
-    return CodexUsageReading(
-        status="exhausted" if used_percent >= 100 else "ok",
+def _usage(used_percent: float) -> CodexKnownUsage:
+    return CodexKnownUsage(
         used_percent=used_percent,
         observed_at="2026-08-04T13:24:45Z",
         source_path="/tmp/codex/sessions/2026/08/04/rollout.jsonl",
@@ -30,9 +42,10 @@ def test_below_soft_limit_is_admitted(monkeypatch):
 
     result = _probe()
 
-    assert result.status == "passed"
-    assert result.decision == "admitted"
-    assert result.used_percent == 74.9
+    assert isinstance(result, ProviderQuotaPassedPreflightResult)
+    assert result.to_dict()["status"] == "passed"
+    assert result.to_dict()["decision"] == "admitted"
+    assert result.usage.used_percent == 74.9
     assert result.thresholds.to_dict() == {
         "soft_percent": 75.0,
         "hard_percent": 90.0,
@@ -45,11 +58,12 @@ def test_soft_limit_defers_scheduled_run_but_admits_explicit_run(monkeypatch):
     scheduled = _probe(explicit_request=False)
     explicit = _probe(explicit_request=True)
 
-    assert scheduled.status == "quota_deferred"
-    assert scheduled.decision == "deferred"
-    assert scheduled.deferred is True
-    assert explicit.status == "passed"
-    assert explicit.decision == "admitted"
+    assert isinstance(scheduled, ProviderQuotaDeferredPreflightResult)
+    assert isinstance(explicit, ProviderQuotaPassedPreflightResult)
+    assert scheduled.to_dict()["status"] == "quota_deferred"
+    assert scheduled.to_dict()["decision"] == "deferred"
+    assert explicit.to_dict()["status"] == "passed"
+    assert explicit.to_dict()["decision"] == "admitted"
 
 
 def test_hard_limit_blocks_even_explicit_run(monkeypatch):
@@ -57,10 +71,10 @@ def test_hard_limit_blocks_even_explicit_run(monkeypatch):
 
     result = _probe(explicit_request=True)
 
-    assert result.status == "quota_blocked"
-    assert result.decision == "blocked"
-    assert result.blocked is True
-    assert result.used_percent == 90.0
+    assert isinstance(result, ProviderQuotaBlockedPreflightResult)
+    assert result.to_dict()["status"] == "quota_blocked"
+    assert result.to_dict()["decision"] == "blocked"
+    assert result.usage.used_percent == 90.0
 
 
 def test_real_exhausted_reading_blocks(monkeypatch):
@@ -68,15 +82,15 @@ def test_real_exhausted_reading_blocks(monkeypatch):
 
     result = _probe()
 
-    assert result.usage_status == "exhausted"
-    assert result.decision == "blocked"
-    assert result.used_percent == 100.0
+    assert isinstance(result, ProviderQuotaBlockedPreflightResult)
+    assert result.usage.to_dict()["status"] == "exhausted"
+    assert result.to_dict()["decision"] == "blocked"
+    assert result.usage.used_percent == 100.0
 
 
 def test_unknown_reading_fails_open_and_preserves_last_known_good(monkeypatch):
-    reading = CodexUsageReading(
-        status="unknown",
-        reason="primary_missing",
+    reading = CodexUnknownUsageReading(
+        reason=CodexUsageUnknownReason.PRIMARY_MISSING,
         observed_at="2026-08-04T13:28:13Z",
         source_path="/tmp/codex/sessions/2026/08/04/rollout.jsonl",
         limit_id="codex",
@@ -91,11 +105,12 @@ def test_unknown_reading_fails_open_and_preserves_last_known_good(monkeypatch):
 
     result = _probe()
 
-    assert result.status == "unknown"
-    assert result.decision == "admitted"
-    assert result.used_percent is None
-    assert result.unknown_reason == "primary_missing"
-    assert result.last_known_good == {
+    assert isinstance(result, ProviderQuotaUnknownPreflightResult)
+    assert result.to_dict()["status"] == "unknown"
+    assert result.to_dict()["decision"] == "admitted"
+    assert result.usage.reason == "primary_missing"
+    assert result.usage.last_known_good is reading.last_known_good
+    assert result.to_dict()["last_known_good"] == {
         "used_percent": 31,
         "observed_at": "2026-08-04T13:24:45Z",
         "source_path": "/tmp/codex/sessions/2026/08/04/rollout.jsonl",
@@ -111,7 +126,7 @@ def test_thresholds_are_configurable(monkeypatch):
 
     result = _probe()
 
-    assert result.decision == "deferred"
+    assert result.to_dict()["decision"] == "deferred"
     assert result.thresholds.to_dict() == {
         "soft_percent": 60.0,
         "hard_percent": 70.0,
@@ -149,9 +164,11 @@ def test_live_reader_recovers_automatically_after_window_reset(tmp_path, monkeyp
     write_usage(3)
     recovered = _probe()
 
-    assert blocked.decision == "blocked"
-    assert recovered.decision == "admitted"
-    assert recovered.used_percent == 3.0
+    assert isinstance(blocked, ProviderQuotaBlockedPreflightResult)
+    assert isinstance(recovered, ProviderQuotaPassedPreflightResult)
+    assert blocked.to_dict()["decision"] == "blocked"
+    assert recovered.to_dict()["decision"] == "admitted"
+    assert recovered.usage.used_percent == 3.0
 
 
 def test_non_subscription_route_skips_codex_quota_reader(monkeypatch):
@@ -167,6 +184,19 @@ def test_non_subscription_route_skips_codex_quota_reader(monkeypatch):
         explicit_request=False,
     )
 
-    assert result.status == "skipped"
-    assert result.decision == "admitted"
-    assert result.usage_status is None
+    assert isinstance(result, ProviderQuotaSkippedPreflightResult)
+    assert result.to_dict()["status"] == "skipped"
+    assert result.to_dict()["decision"] == "admitted"
+    assert result.to_dict()["usage_status"] is None
+
+
+def test_quota_variants_do_not_accept_independent_status_or_decision_fields():
+    with pytest.raises(TypeError):
+        ProviderQuotaPassedPreflightResult(
+            status="quota_blocked",
+            decision="blocked",
+            provider="openai",
+            model="openai/gpt-5.6-sol",
+            thresholds=provider_quota_preflight.ProviderQuotaThresholds(75, 90),
+            usage=_usage(10),
+        )

@@ -12,7 +12,10 @@ from typing import Any
 from sqlalchemy import text
 
 from brain.platform.db.models.idea import Idea
-from brain.platform.integrations.provider_auth_preflight import async_probe_provider_auth
+from brain.platform.integrations.provider_auth_preflight import (
+    ProviderAuthBlockedPreflightResult,
+    async_probe_provider_auth,
+)
 from brain.platform.providers.model_policy import (
     EFFORT_TIER_SET,
     async_get_default_model,
@@ -1141,7 +1144,7 @@ async def admit_work(
                 provider=provider,
                 model=model,
             )
-            if auth_preflight.blocked:
+            if isinstance(auth_preflight, ProviderAuthBlockedPreflightResult):
                 reason = (
                     f"{auth_preflight.error_code}: provider={provider} model={model} "
                     f"credential={auth_preflight.credential or 'unavailable'}"
