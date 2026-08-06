@@ -8,7 +8,6 @@ import pytest
 from brain.app.scheduler.daemon import async_scheduler_health_snapshot
 from brain.app.scheduler.overdue_monitor import SchedulerOverdueMonitor
 from brain.app.scheduler.read_models import (
-    async_scheduler_failure_candidates,
     SchedulerOverdueCandidate,
     async_scheduler_overdue_candidates,
 )
@@ -39,40 +38,6 @@ def _candidate(
     )
 
 
-async def _no_failure_candidates(_session, *, failure_streak_threshold):
-    assert failure_streak_threshold > 0
-    return ()
-
-
-def _monitor_without_failures(**kwargs) -> SchedulerOverdueMonitor:
-    return SchedulerOverdueMonitor(
-        failure_candidate_provider=_no_failure_candidates,
-        **kwargs,
-    )
-
-
-async def _add_terminal_runs(
-    session,
-    job,
-    statuses: tuple[str, ...],
-) -> None:
-    for index, status in enumerate(statuses, start=1):
-        finished_at = NOW - timedelta(days=len(statuses) - index + 1)
-        session.add(
-            SchedulerRun(
-                job_id=job.id,
-                scheduled_for=finished_at,
-                window_start=finished_at,
-                window_end=finished_at,
-                status=status,
-                idempotency_key=f"failure-axis:{job.id}:{index}",
-                started_at=finished_at,
-                finished_at=finished_at,
-            )
-        )
-    await session.flush()
-
-
 def test_overdue_monitor_checks_well_inside_twenty_minute_window():
     assert SchedulerOverdueMonitor.check_interval_seconds <= 5 * 60
 
@@ -90,7 +55,7 @@ async def test_job_overdue_by_more_than_fifteen_minutes_alerts_with_tick_time():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    monitor = _monitor_without_failures(
+    monitor = SchedulerOverdueMonitor(
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
@@ -120,7 +85,7 @@ async def test_all_jobs_on_schedule_for_twenty_four_hours_produces_no_alert():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    monitor = _monitor_without_failures(
+    monitor = SchedulerOverdueMonitor(
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
@@ -145,7 +110,7 @@ async def test_alert_fires_once_per_freeze_and_rearms_after_recovery():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    monitor = _monitor_without_failures(
+    monitor = SchedulerOverdueMonitor(
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
@@ -183,7 +148,7 @@ async def test_multiple_overdue_jobs_produce_one_freeze_alert():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    monitor = _monitor_without_failures(
+    monitor = SchedulerOverdueMonitor(
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
@@ -211,7 +176,7 @@ async def test_fresh_daemon_heartbeat_does_not_hide_stale_next_run_at():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    monitor = _monitor_without_failures(
+    monitor = SchedulerOverdueMonitor(
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
@@ -249,7 +214,7 @@ async def test_slack_delivery_starts_after_read_transaction_closes():
     async def deliver_alert(**_kwargs):
         assert transaction_open is False
 
-    monitor = _monitor_without_failures(
+    monitor = SchedulerOverdueMonitor(
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
@@ -311,195 +276,6 @@ async def test_monitor_projection_selects_only_eligible_scheduler_jobs(
     )
 
     assert tuple(candidate.job_key for candidate in candidates) == ("eligible",)
-
-
-async def test_all_failure_since_inception_is_a_failure_candidate(
-    scheduler_session,
-):
-    job = make_scheduler_job(
-        next_run_at=NOW + timedelta(hours=12),
-        failure_signature="739ac435",
-        last_failure_error="PermissionError: permission denied",
-    )
-    scheduler_session.add(job)
-    await scheduler_session.flush()
-    await _add_terminal_runs(
-        scheduler_session,
-        job,
-        ("settled_failure",) * 18,
-    )
-
-    candidates = await async_scheduler_failure_candidates(
-        scheduler_session,
-        failure_streak_threshold=3,
-    )
-
-    assert len(candidates) == 1
-    assert candidates[0].job_key == "nightly_sleep"
-    assert candidates[0].failure_count == 18
-    assert candidates[0].lifetime_success_count == 0
-    assert candidates[0].next_run_at == NOW + timedelta(hours=12)
-
-
-async def test_job_with_latest_success_is_not_a_failure_candidate(
-    scheduler_session,
-):
-    job = make_scheduler_job(next_run_at=NOW + timedelta(hours=12))
-    scheduler_session.add(job)
-    await scheduler_session.flush()
-    await _add_terminal_runs(
-        scheduler_session,
-        job,
-        ("settled_failure",) * 18 + ("settled_success",),
-    )
-
-    candidates = await async_scheduler_failure_candidates(
-        scheduler_session,
-        failure_streak_threshold=3,
-    )
-
-    assert candidates == ()
-
-
-async def test_sustained_failure_streak_after_success_is_a_candidate(
-    scheduler_session,
-):
-    job = make_scheduler_job(next_run_at=NOW + timedelta(hours=12))
-    scheduler_session.add(job)
-    await scheduler_session.flush()
-    await _add_terminal_runs(
-        scheduler_session,
-        job,
-        ("settled_success",) + ("settled_failure",) * 3,
-    )
-
-    candidates = await async_scheduler_failure_candidates(
-        scheduler_session,
-        failure_streak_threshold=3,
-    )
-
-    assert len(candidates) == 1
-    assert candidates[0].failure_count == 3
-    assert candidates[0].lifetime_success_count == 1
-
-
-async def test_failing_job_alerts_while_next_run_is_not_overdue(
-    scheduler_session,
-):
-    job = make_scheduler_job(
-        next_run_at=NOW + timedelta(hours=12),
-        failure_signature="739ac435",
-        last_failure_error="PermissionError: permission denied",
-    )
-    scheduler_session.add(job)
-    await scheduler_session.flush()
-    await _add_terminal_runs(
-        scheduler_session,
-        job,
-        ("settled_failure",) * 18,
-    )
-    deliveries = []
-
-    async def liveness_checkpoint(_session):
-        return NOW
-
-    async def deliver_alert(**kwargs):
-        deliveries.append(kwargs)
-
-    monitor = SchedulerOverdueMonitor(
-        liveness_checkpoint=liveness_checkpoint,
-        deliver_alert=deliver_alert,
-    )
-    result = await monitor._check(scheduler_session, now=NOW)
-
-    assert result.alert_sent is True
-    assert result.overdue_job_keys == ()
-    assert result.failure_job_keys == ("nightly_sleep",)
-    assert len(deliveries) == 1
-    assert deliveries[0]["presentation"].title == "Scheduler jobs failing"
-    assert "zero lifetime successes" in deliveries[0]["presentation"].summary
-    assert "739ac435" in deliveries[0]["presentation"].summary
-
-
-async def test_failure_alert_does_not_repeat_on_each_tick(
-    scheduler_session,
-):
-    job = make_scheduler_job(
-        next_run_at=NOW + timedelta(hours=12),
-        failure_signature="739ac435",
-        last_failure_error="PermissionError: permission denied",
-    )
-    scheduler_session.add(job)
-    await scheduler_session.flush()
-    await _add_terminal_runs(
-        scheduler_session,
-        job,
-        ("settled_failure",) * 18,
-    )
-    deliveries = []
-
-    async def liveness_checkpoint(_session):
-        return NOW
-
-    async def deliver_alert(**kwargs):
-        deliveries.append(kwargs)
-
-    monitor = SchedulerOverdueMonitor(
-        liveness_checkpoint=liveness_checkpoint,
-        deliver_alert=deliver_alert,
-    )
-    first = await monitor._check(scheduler_session, now=NOW)
-    repeated = await monitor._check(
-        scheduler_session,
-        now=NOW + timedelta(minutes=1),
-    )
-
-    assert first.alert_sent is True
-    assert repeated.alert_sent is False
-    assert repeated.failure_job_keys == ("nightly_sleep",)
-    assert len(deliveries) == 1
-
-
-async def test_failed_delivery_is_retried_on_the_next_tick(
-    scheduler_session,
-):
-    job = make_scheduler_job(
-        next_run_at=NOW + timedelta(hours=12),
-        failure_signature="739ac435",
-        last_failure_error="PermissionError: permission denied",
-    )
-    scheduler_session.add(job)
-    await scheduler_session.flush()
-    await _add_terminal_runs(
-        scheduler_session,
-        job,
-        ("settled_failure",) * 18,
-    )
-    attempts = 0
-
-    async def liveness_checkpoint(_session):
-        return NOW
-
-    async def deliver_alert(**_kwargs):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise RuntimeError("Slack unavailable")
-
-    monitor = SchedulerOverdueMonitor(
-        liveness_checkpoint=liveness_checkpoint,
-        deliver_alert=deliver_alert,
-    )
-
-    with pytest.raises(RuntimeError, match="Slack unavailable"):
-        await monitor._check(scheduler_session, now=NOW)
-    recovered = await monitor._check(
-        scheduler_session,
-        now=NOW + timedelta(minutes=1),
-    )
-
-    assert recovered.alert_sent is True
-    assert attempts == 2
 
 
 async def test_monitor_skips_active_job_while_health_reports_canonical_lag(

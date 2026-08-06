@@ -35,6 +35,7 @@ from brain.systems.failure_guard.core import (
     FailureGuardTriggerState,
     async_evaluate_failure_guard_triggers,
     async_evaluate_failure_edges,
+    async_latch_failure_edges,
     async_transition_failure_guard_trigger_states,
     failure_signature as scheduler_failure_signature,
     normalize_failure_identity as normalize_scheduler_failure_identity,
@@ -51,6 +52,7 @@ SCHEDULER_FAILURE_RATE_WINDOW_HOURS_DEFAULT = 24
 SchedulerFailureGuardResetEvent = Literal["signature_change", "success"]
 CONSECUTIVE_TRIGGER_KIND = FailureGuardTriggerKind("consecutive")
 ROLLING_WINDOW_TRIGGER_KIND = FailureGuardTriggerKind("rolling_window")
+STANDING_FAILURE_TRIGGER_KIND = FailureGuardTriggerKind("standing_failure")
 
 
 @dataclass(frozen=True)
@@ -137,6 +139,67 @@ class ConsecutiveFailuresTrigger:
     ) -> bool:
         del context, event
         return True
+
+
+@dataclass(frozen=True)
+class StandingFailuresTrigger:
+    """Alert after failures continue without a successful run."""
+
+    threshold: int
+    kind: FailureGuardTriggerKind = field(
+        default=STANDING_FAILURE_TRIGGER_KIND,
+        init=False,
+    )
+
+    @classmethod
+    def from_settings(cls) -> StandingFailuresTrigger:
+        return cls(
+            threshold=_positive_int_setting(
+                "SCHEDULER_STANDING_FAILURE_ALERT_THRESHOLD",
+                SCHEDULER_FAILURE_ALERT_THRESHOLD_DEFAULT,
+            ),
+        )
+
+    async def evaluate_with_state(
+        self,
+        context: SchedulerFailureGuardLifecycleContext,
+        *,
+        state: FailureGuardTriggerState,
+    ) -> FailureGuardTriggerResult:
+        del context
+        count = int(state.get("count", 0))
+        return FailureGuardTriggerResult(
+            kind=self.kind,
+            active=count >= self.threshold,
+            public_details={
+                "count": count,
+                "threshold": self.threshold,
+                "window_hours": None,
+            },
+            alert_title="Scheduler job standing failure",
+            alert_summary=f"Failures without a successful run: {count}",
+        )
+
+    async def transition_state(
+        self,
+        context: SchedulerFailureGuardLifecycleContext,
+        state: FailureGuardTriggerState,
+        *,
+        event: FailureGuardLifecycleEvent,
+    ) -> FailureGuardTriggerState | None:
+        del context
+        if event == "success":
+            return None
+        return {"count": int(state.get("count", 0)) + 1}
+
+    async def should_reset(
+        self,
+        context: SchedulerFailureGuardLifecycleContext,
+        *,
+        event: SchedulerFailureGuardResetEvent,
+    ) -> bool:
+        del context
+        return event == "success"
 
 
 @dataclass(frozen=True)
@@ -296,6 +359,7 @@ _FAILURE_GUARD_TRIGGER_PROVIDERS: tuple[
     ...,
 ] = (
     ConsecutiveFailuresTrigger.from_settings,
+    StandingFailuresTrigger.from_settings,
     RollingWindowFailuresTrigger.from_settings,
 )
 
@@ -529,7 +593,7 @@ async def async_read_scheduler_failure_guards(
             last_error=job.last_failure_error,
             now=now,
             store=latch_stores[job.id],
-            latch_new_edges=False,
+            new_edge_mode="ignore",
         )
     return evaluations
 
@@ -625,10 +689,27 @@ async def async_record_scheduler_job_failure(
         last_error=locked_job.last_failure_error,
         now=now,
         store=latch_store,
-        latch_new_edges=True,
+        new_edge_mode="detect",
     )
     await session.flush()
     return evaluation
+
+
+async def async_latch_scheduler_failure_alerts(
+    session: AsyncSession,
+    job: SchedulerJob,
+    evaluation: FailureGuardEvaluation,
+    *,
+    now: datetime | None = None,
+) -> FailureGuardEvaluation:
+    """Latch detected alert edges after their delivery succeeds."""
+    latched = await async_latch_failure_edges(
+        evaluation,
+        alerted_at=ensure_utc(now),
+        store=SchedulerFailureGuardStore(session=session, job_id=job.id),
+    )
+    await session.flush()
+    return latched
 
 
 async def async_reset_scheduler_job_failure_guard(

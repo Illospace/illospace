@@ -1,7 +1,7 @@
 """Neutral failure identity and latch/edge evaluation primitives."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
 import re
@@ -24,6 +24,7 @@ FailureGuardLifecycleEvent = Literal[
     "repeated_failure",
     "success",
 ]
+FailureGuardNewEdgeMode = Literal["ignore", "detect", "latch"]
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 FailureGuardTriggerState: TypeAlias = Mapping[str, JsonValue]
@@ -293,9 +294,9 @@ async def async_evaluate_failure_edges(
     last_error: str | None,
     now: datetime,
     store: FailureGuardStore,
-    latch_new_edges: bool,
+    new_edge_mode: FailureGuardNewEdgeMode,
 ) -> FailureGuardEvaluation:
-    """Apply durable latches to caller-evaluated trigger results."""
+    """Detect new edges and optionally persist their durable latches."""
     kinds = [str(result.kind) for result in results]
     if len(kinds) != len(set(kinds)):
         raise ValueError("Failure-guard trigger kinds must be unique")
@@ -304,8 +305,10 @@ async def async_evaluate_failure_edges(
     edges: list[FailureGuardEdge] = []
     for result in results:
         latch = latches.get(result.kind)
-        crossed = latch_new_edges and result.active and latch is None
-        if crossed:
+        crossed = (
+            new_edge_mode != "ignore" and result.active and latch is None
+        )
+        if crossed and new_edge_mode == "latch":
             latch = await store.create_latch(result.kind, now)
             latches[result.kind] = latch
         edges.append(
@@ -323,3 +326,20 @@ async def async_evaluate_failure_edges(
         last_error=last_error,
         edges=tuple(edges),
     )
+
+
+async def async_latch_failure_edges(
+    evaluation: FailureGuardEvaluation,
+    *,
+    alerted_at: datetime,
+    store: FailureGuardStore,
+) -> FailureGuardEvaluation:
+    """Persist previously detected edges after alert delivery succeeds."""
+    edges: list[FailureGuardEdge] = []
+    for edge in evaluation.edges:
+        if not edge.crossed or edge.alerted_at is not None:
+            edges.append(edge)
+            continue
+        latch = await store.create_latch(edge.kind, alerted_at)
+        edges.append(replace(edge, alerted_at=latch.alerted_at))
+    return replace(evaluation, edges=tuple(edges))

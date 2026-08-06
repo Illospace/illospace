@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable, Sequence
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from brain.kernel.common.time import ensure_utc
@@ -35,6 +36,8 @@ from brain.platform.db.models.scheduler import (
     SchedulerRun,
     SchedulerRunStep,
 )
+from brain.systems.cortex.thread_links import public_app_base_url
+from brain.systems.slack.client import slack_web_client_from_runtime
 from brain.app.scheduler.catalog import normalize_owner_mode
 from brain.app.scheduler.contracts import validate_scheduler_run_contract
 from brain.app.scheduler.detached_agent_runs import (
@@ -42,11 +45,19 @@ from brain.app.scheduler.detached_agent_runs import (
     async_reconcile_detached_runs,
 )
 from brain.app.scheduler.scheduler_failure_guard import (
+    async_latch_scheduler_failure_alerts,
     async_record_scheduler_job_failure,
     async_reset_scheduler_job_failure_guard,
 )
 from brain.systems.failure_guard.core import (
+    FailureGuardEvaluation,
     serialize_failure_guard,
+)
+from brain.systems.failure_guard.slack_delivery import (
+    FailureAlertPresentation,
+    FailureAlertSubject,
+    SlackFailureAlertPolicy,
+    async_deliver_failure_alert,
 )
 from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.programs import (
@@ -486,6 +497,64 @@ def _retryable_failure_summary(
     return RUN_STATUS_SETTLED_FAILURE, retry_summary
 
 
+async def async_deliver_scheduler_failure_alert(
+    *,
+    job_key: str,
+    run_id: int,
+    evaluation: FailureGuardEvaluation,
+    error_text: str,
+) -> None:
+    """Preserve the scheduler card contract through the shared delivery path."""
+    crossed_edges = evaluation.crossed_edges
+    if not crossed_edges:
+        raise ValueError(
+            "scheduler failure alert requires at least one crossed edge"
+        )
+    if len(crossed_edges) == 1:
+        presentation = FailureAlertPresentation(
+            title=crossed_edges[0].alert_title,
+            summary=crossed_edges[0].alert_summary,
+        )
+    else:
+        presentation = FailureAlertPresentation(
+            title="Scheduler job failure guard alert",
+            summary="\n".join(
+                (
+                    "Triggers crossed:",
+                    *(
+                        f"- {edge.kind}: {edge.alert_summary}"
+                        for edge in crossed_edges
+                    ),
+                )
+            ),
+        )
+
+    await async_deliver_failure_alert(
+        policy=SlackFailureAlertPolicy(
+            provide_client=slack_web_client_from_runtime,
+            requested_by="scheduler_failure_alert",
+            reason="Deliver a repeated scheduler job failure alert to the team.",
+            channel=(
+                os.getenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "").strip()
+                or "#alerts"
+            ),
+            unknown_error_text="Unknown scheduler failure",
+        ),
+        subject=FailureAlertSubject(
+            identity_label="Job key",
+            identity=job_key,
+            url_label="Job",
+            url=(
+                f"{public_app_base_url()}/api/system/scheduler"
+                f"?job_key={quote(job_key, safe='')}&run_id={run_id}"
+            ),
+            link_label="open scheduler state",
+        ),
+        presentation=presentation,
+        error_text=error_text,
+    )
+
+
 async def _async_apply_failure_guard(
     session: AsyncSession,
     job: SchedulerJob,
@@ -502,21 +571,48 @@ async def _async_apply_failure_guard(
         error_text=error_text,
         now=now,
     )
+    crossed_edges = guard.crossed_edges
+    if crossed_edges:
+        alert_title = (
+            crossed_edges[0].alert_title
+            if len(crossed_edges) == 1
+            else "Scheduler job combined failure guard"
+        )
+        logger.error(
+            "%s alert: job_key=%s run_id=%s crossed_triggers=%s "
+            "failure_signature=%s error=%s",
+            alert_title,
+            job.job_key,
+            run.id,
+            ",".join(str(edge.kind) for edge in crossed_edges),
+            guard.failure_signature,
+            error_text,
+        )
+        try:
+            await async_deliver_scheduler_failure_alert(
+                job_key=job.job_key,
+                run_id=run.id,
+                evaluation=guard,
+                error_text=error_text,
+            )
+        except Exception:
+            logger.exception(
+                "Scheduler job failure-guard Slack delivery failed: "
+                "job_key=%s run_id=%s",
+                job.job_key,
+                run.id,
+            )
+        else:
+            guard = await async_latch_scheduler_failure_alerts(
+                session,
+                job,
+                guard,
+                now=now,
+            )
     run.result_summary = {
         **(run.result_summary or {}),
         "failure_guard": serialize_failure_guard(guard),
     }
-    if guard.crossed_edges:
-        logger.error(
-            "Scheduler failure threshold crossed: "
-            "job_key=%s run_id=%s crossed_triggers=%s "
-            "failure_signature=%s error=%s",
-            job.job_key,
-            run.id,
-            ",".join(str(edge.kind) for edge in guard.crossed_edges),
-            guard.failure_signature,
-            error_text,
-        )
     await session.flush()
 
 

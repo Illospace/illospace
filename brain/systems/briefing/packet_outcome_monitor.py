@@ -148,7 +148,7 @@ async def async_monitor_packet_outcomes(
         last_error="No packet minted in the rolling window was launched",
         now=now,
         store=latch_store,
-        latch_new_edges=True,
+        new_edge_mode="latch",
     )
     await session.flush()
     if not evaluation.crossed_edges:
