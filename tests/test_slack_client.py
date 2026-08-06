@@ -215,7 +215,7 @@ async def test_runtime_client_prefers_env_token(monkeypatch):
 
 async def test_runtime_client_falls_back_to_runtime_secret(monkeypatch):
     """Deployments keep SLACK_BOT_TOKEN in DB-backed runtime secrets, not in
-    every service env (illo-dev packet-mint E2E finding, 2026-07-16)."""
+    every service env."""
     import brain.systems.slack.client as slack_client
     import brain.systems.slack.connector as connector
     import brain.systems.vault.runtime_secrets as runtime_secrets

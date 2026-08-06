@@ -669,8 +669,7 @@ async def slack_web_client_from_runtime(
     Deployments store SLACK_BOT_TOKEN in DB-backed runtime secrets, not in
     every service's env (the compose anchor passes it to the connector
     only), so env-only resolution silently strands backend posting/reading
-    in the worker and API — the packet-mint E2E on illo-dev caught exactly
-    that (2026-07-16). Resolution order mirrors the connector's
+    in the worker and API. Resolution order mirrors the connector's
     ``SlackConnectorConfig.from_runtime``: env when set, else the runtime
     secret under the connector authority. One owner for the secret.
     Durable connection consumers should pass that row's org/user authority so
