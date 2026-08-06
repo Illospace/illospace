@@ -127,6 +127,26 @@ class SessionRecord:
             payload["end_reason"] = self.end_reason
         return payload
 
+    def health_payload(self, *, warning: str | None = None) -> dict[str, object]:
+        """Return one non-terminal meeting_session_health webhook payload."""
+
+        payload: dict[str, object] = {
+            "session_id": self.session_id,
+            "meeting_url": self.meeting_url,
+            "status": self.status,
+            "started_at": self.started_at,
+            "joined_at": self.joined_at,
+            "observed_at": isoformat_utc(),
+            "caption_lines": self.caption_lines,
+            "participant_count": len(self.participants),
+            "origin": self.origin.as_dict(),
+            "requested_by": self.requested_by,
+        }
+        normalized_warning = " ".join(str(warning or "").split())
+        if normalized_warning:
+            payload["warning"] = normalized_warning
+        return payload
+
     def add_warning(self, message: str) -> bool:
         """Append one unique warning without hiding an earlier session risk."""
 

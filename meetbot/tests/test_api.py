@@ -71,6 +71,15 @@ class FakeCompletionSender:
         self.payloads.append(record.completion_payload())
         self.sent.set()
 
+    async def send_health(
+        self,
+        record: SessionRecord,
+        *,
+        sequence: int,
+        warning: str | None = None,
+    ) -> None:
+        return None
+
 
 def _config(tmp_path: Path, *, token: str | None = "meetbot-secret", warning: int = 90) -> MeetbotConfig:
     return MeetbotConfig(

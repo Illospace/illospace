@@ -55,6 +55,10 @@ AckBuilder = Callable[
     [str, Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]],
     Mapping[str, Any],
 ]
+AdmissionPredicate = Callable[
+    [Mapping[str, Any], Mapping[str, Any]],
+    bool,
+]
 
 
 @dataclass(frozen=True)
@@ -83,6 +87,7 @@ class SurfaceAdmissionSpec:
     missing_authority_failure_operation: str | None = None
     include_origin_in_outcome: bool = True
     action_result_target_fields: tuple[str, ...] = ()
+    admit_when: AdmissionPredicate | None = None
 
 
 async def admit_surface_envelope(
@@ -131,33 +136,42 @@ async def admit_surface_envelope(
 
     surface_target = spec.build_target(trigger_payload, normalized)
     target = dict(surface_target.value)
-    admission = await admit_work(
-        session,
-        WorkIntakeEvent.from_trigger_payload(trigger_payload),
+    should_admit = spec.admit_when is None or spec.admit_when(
+        trigger_payload,
+        normalized,
     )
-    if not admission.ok:
-        reason = admission.skipped_reason or "run_admission_failed"
-        return await _complete_failure(
-            complete,
-            spec=spec,
-            event=event,
-            reason=reason,
-            error=reason,
-            target=target,
-            reasoning_summary=admission.skipped_reason or spec.admission_failure_reasoning,
-            origin=(
-                normalized.get("origin")
-                if spec.include_origin_in_outcome
-                else None
-            ),
-            include_target_copy=True,
+    run_id = None
+    if should_admit:
+        admission = await admit_work(
+            session,
+            WorkIntakeEvent.from_trigger_payload(trigger_payload),
         )
+        if not admission.ok:
+            reason = admission.skipped_reason or "run_admission_failed"
+            return await _complete_failure(
+                complete,
+                spec=spec,
+                event=event,
+                reason=reason,
+                error=reason,
+                target=target,
+                reasoning_summary=(
+                    admission.skipped_reason or spec.admission_failure_reasoning
+                ),
+                origin=(
+                    normalized.get("origin")
+                    if spec.include_origin_in_outcome
+                    else None
+                ),
+                include_target_copy=True,
+            )
+        run_id = admission.run_id
 
-    if admission.run_id is not None:
-        target["run_id"] = admission.run_id
+    if run_id is not None:
+        target["run_id"] = run_id
     action_result: dict[str, Any] = {
         "operation": spec.success_operation,
-        "run_id": admission.run_id,
+        "run_id": run_id,
         "event_id": str(event.id),
     }
     if spec.include_origin_in_outcome:
@@ -184,7 +198,7 @@ async def admit_surface_envelope(
             if spec.success_tool_status is not None
             else {}
         ),
-        "run_id": admission.run_id,
+        "run_id": run_id,
         **dict(surface_target.tool_context),
     }
     return await complete(

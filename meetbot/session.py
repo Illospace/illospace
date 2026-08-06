@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 import logging
+import time
+from typing import Awaitable, Callable
 from uuid import uuid4
 
 from meetbot.callback import CompletionSender
@@ -63,6 +65,12 @@ class _ManagedSession:
     lines: list[CaptionLine] = field(default_factory=list)
     task: asyncio.Task[None] | None = None
     caption_warning_task: asyncio.Task[None] | None = None
+    started_at_monotonic: float = 0.0
+    admitted_at_monotonic: float | None = None
+    health_sequence: int = 0
+    caption_warning_sent: bool = False
+    stale_warning_checked: bool = False
+    health_wakeup: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class SessionManager:
@@ -73,10 +81,15 @@ class SessionManager:
         config: MeetbotConfig,
         engine: MeetEngine,
         completion_sender: CompletionSender,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._config = config
         self._engine = engine
         self._completion_sender = completion_sender
+        self._sleep = sleep
+        self._monotonic = monotonic
         self._managed_sessions: dict[str, _ManagedSession] = {}
         self._active_session_id: str | None = None
         self._lock = asyncio.Lock()
@@ -117,12 +130,17 @@ class SessionManager:
                 record=record,
                 writer=writer,
                 buffer=RollingCaptionBuffer(),
+                started_at_monotonic=self._monotonic(),
             )
             self._managed_sessions[session_id] = managed
             self._active_session_id = session_id
             managed.task = asyncio.create_task(
                 self._run_session(record),
                 name=f"meetbot-session-{session_id}",
+            )
+            managed.caption_warning_task = asyncio.create_task(
+                self._warn_if_no_captions(record.session_id),
+                name=f"meetbot-session-health-{record.session_id}",
             )
             return record
 
@@ -219,6 +237,7 @@ class SessionManager:
             return
         managed = self._active_managed_session(record.session_id)
         await self._transition(record, status)
+        await self._wait_for_health_monitor(record.session_id)
         final_lines = managed.buffer.flush()
         self._commit_lines(record, final_lines)
         record.caption_lines = len(managed.lines)
@@ -239,13 +258,11 @@ class SessionManager:
         if status == "admitted" and not record.joined_at:
             record.joined_at = timestamp
             managed = self._active_managed_session(record.session_id)
-            managed.caption_warning_task = asyncio.create_task(
-                self._warn_if_no_captions(record.session_id),
-                name=f"meetbot-caption-warning-{record.session_id}",
-            )
+            managed.admitted_at_monotonic = self._monotonic()
+            managed.health_wakeup.set()
         if status in TERMINAL_STATUSES:
             record.ended_at = timestamp
-            self._cancel_caption_warning(record.session_id)
+            self._wake_health_monitor(record.session_id)
         self._active_managed_session(record.session_id).writer.write_session(record)
 
     async def _on_status(self, session_id: str, status: SessionStatus) -> None:
@@ -266,9 +283,10 @@ class SessionManager:
             await self._transition(record, "captions_flowing")
         if record.status != "captions_flowing":
             return
-        self._cancel_caption_warning(session_id)
-        self._add_participants(record, [speaker])
         managed = self._active_managed_session(session_id)
+        managed.caption_warning_sent = True
+        managed.health_wakeup.set()
+        self._add_participants(record, [speaker])
         committed = managed.buffer.observe(speaker, text, line_id=line_id)
         self._commit_lines(record, committed)
         managed.writer.write_session(record)
@@ -282,6 +300,7 @@ class SessionManager:
         record = self.get(session_id)
         if record.add_warning(message):
             self._active_managed_session(session_id).writer.write_session(record)
+            await self._emit_health(session_id, warning=message)
 
     def _commit_lines(self, record: SessionRecord, lines: list[CaptionLine]) -> None:
         managed = self._active_managed_session(record.session_id)
@@ -304,24 +323,128 @@ class SessionManager:
         return changed
 
     async def _warn_if_no_captions(self, session_id: str) -> None:
+        """Extend the existing caption warning task into the session health loop."""
+
+        managed = self._managed_sessions.get(session_id)
+        if managed is None:
+            return
+        heartbeat_due = (
+            managed.started_at_monotonic + float(self._config.health_interval_seconds)
+        )
+        stale_due = (
+            managed.started_at_monotonic + float(self._config.stale_session_seconds)
+        )
         try:
-            await asyncio.sleep(float(self._config.caption_warning_seconds))
+            while managed.record.status in ACTIVE_STATUSES:
+                caption_due = None
+                if (
+                    managed.admitted_at_monotonic is not None
+                    and not managed.caption_warning_sent
+                    and managed.record.status == "admitted"
+                ):
+                    caption_due = managed.admitted_at_monotonic + float(
+                        self._config.caption_warning_seconds
+                    )
+                deadlines = [heartbeat_due]
+                if not managed.stale_warning_checked:
+                    deadlines.append(stale_due)
+                if caption_due is not None:
+                    deadlines.append(caption_due)
+                delay = max(0.0, min(deadlines) - self._monotonic())
+                await self._wait_for_health_deadline(managed, delay)
+                if managed.record.status in TERMINAL_STATUSES:
+                    return
+
+                now = self._monotonic()
+                warning_emitted = False
+                if caption_due is not None and now >= caption_due:
+                    managed.caption_warning_sent = True
+                    await self._on_warning(
+                        session_id,
+                        _no_captions_warning(self._config.caption_warning_seconds),
+                    )
+                    warning_emitted = True
+
+                if not managed.stale_warning_checked and now >= stale_due:
+                    managed.stale_warning_checked = True
+                    zero_participants = not managed.record.participants
+                    zero_captions = not _has_observed_captions(managed.record)
+                    if zero_participants or zero_captions:
+                        if zero_captions:
+                            managed.caption_warning_sent = True
+                        await self._on_warning(
+                            session_id,
+                            _stale_session_warning(
+                                managed.record,
+                                seconds=self._config.stale_session_seconds,
+                            ),
+                        )
+                        warning_emitted = True
+
+                if now >= heartbeat_due:
+                    while heartbeat_due <= now:
+                        heartbeat_due += float(self._config.health_interval_seconds)
+                    if not warning_emitted:
+                        await self._emit_health(session_id)
         except asyncio.CancelledError:
             return
-        managed = self._managed_sessions.get(session_id)
-        if managed and managed.record.status == "admitted":
-            if managed.record.add_warning(NO_CAPTIONS_WARNING):
-                self._active_managed_session(session_id).writer.write_session(
-                    managed.record
-                )
+        finally:
+            if managed.caption_warning_task is asyncio.current_task():
+                managed.caption_warning_task = None
 
-    def _cancel_caption_warning(self, session_id: str) -> None:
+    async def _wait_for_health_deadline(
+        self,
+        managed: _ManagedSession,
+        delay: float,
+    ) -> None:
+        sleep_task = asyncio.create_task(self._sleep(delay))
+        wake_task = asyncio.create_task(managed.health_wakeup.wait())
+        _, pending = await asyncio.wait(
+            {sleep_task, wake_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        managed.health_wakeup.clear()
+
+    async def _emit_health(
+        self,
+        session_id: str,
+        *,
+        warning: str | None = None,
+    ) -> None:
+        managed = self._managed_sessions.get(session_id)
+        if managed is None or managed.record.status in TERMINAL_STATUSES:
+            return
+        if managed.buffer is None:
+            return
+        managed.record.caption_lines = len(managed.lines) + managed.buffer.pending_count
+        managed.health_sequence += 1
+        try:
+            await self._completion_sender.send_health(
+                managed.record,
+                sequence=managed.health_sequence,
+                warning=warning,
+            )
+        except Exception:
+            logger.exception(
+                "Meetbot could not deliver or dead-letter health for session %s",
+                session_id,
+            )
+
+    def _wake_health_monitor(self, session_id: str) -> None:
+        managed = self._managed_sessions.get(session_id)
+        if managed is not None:
+            managed.health_wakeup.set()
+
+    async def _wait_for_health_monitor(self, session_id: str) -> None:
         managed = self._managed_sessions.get(session_id)
         task = managed.caption_warning_task if managed is not None else None
-        if managed is not None:
-            managed.caption_warning_task = None
-        if task and task is not asyncio.current_task() and not task.done():
-            task.cancel()
+        if task is None or task is asyncio.current_task():
+            return
+        await asyncio.gather(task, return_exceptions=True)
 
     def _active_managed_session(self, session_id: str) -> _ManagedSession:
         managed = self._managed_sessions.get(session_id)
@@ -332,6 +455,29 @@ class SessionManager:
                 f"Meetbot session {session_id} no longer has active runtime state."
             )
         return managed
+
+
+def _no_captions_warning(seconds: int) -> str:
+    if int(seconds) == 90:
+        return NO_CAPTIONS_WARNING
+    return (
+        f"No caption mutations were observed within {int(seconds)} seconds "
+        "after admission."
+    )
+
+
+def _has_observed_captions(record: SessionRecord) -> bool:
+    return record.status == "captions_flowing" or record.caption_lines > 0
+
+
+def _stale_session_warning(record: SessionRecord, *, seconds: int) -> str:
+    minutes = max(1, int(seconds) // 60)
+    return (
+        f"Meetbot session health is stale after {minutes} minute(s) for "
+        f"{record.meeting_url}: observed {len(record.participants)} participants and "
+        f"{record.caption_lines} caption lines. Likely causes are the wrong meeting, "
+        "the bot was never admitted, or captions off."
+    )
 
 
 class _ManagerSessionEvents:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from brain.systems.meetings.message import (
+    compose_degraded_meeting_run_message,
     compose_failed_meeting_run_message,
+    compose_meeting_health_warning_message,
     compose_post_meeting_run_message,
 )
 
@@ -75,3 +77,37 @@ def test_failed_meeting_message_skips_ticket_pipeline():
     assert "Post a short failure report" in message
     assert "Required sequence" not in message
     assert "create_github_issue" not in message
+
+
+def test_zero_caption_meeting_message_reports_degraded_capture_without_questions():
+    message = compose_degraded_meeting_run_message(
+        _payload(caption_lines=0, participants=[]),
+    )
+
+    assert "capture is degraded" in message
+    assert "Caption lines: 0" in message
+    assert "wrong meeting" in message
+    assert "never admitted" in message
+    assert "captions were off" in message
+    assert "Post a capture-failure report" in message
+    assert "Ask clarifying questions" not in message
+    assert "create_github_issue" not in message
+
+
+def test_health_warning_names_url_counts_and_likely_causes():
+    message = compose_meeting_health_warning_message(
+        {
+            "meeting_url": "https://meet.google.com/abc-defg-hij",
+            "status": "lobby",
+            "participant_count": 0,
+            "caption_lines": 0,
+            "warning": "The session is stale.",
+        }
+    )
+
+    assert "https://meet.google.com/abc-defg-hij" in message
+    assert "Participants observed: 0" in message
+    assert "Caption lines: 0" in message
+    assert "wrong meeting" in message
+    assert "never admitted" in message
+    assert "captions are off" in message

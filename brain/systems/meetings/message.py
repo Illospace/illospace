@@ -81,6 +81,60 @@ def compose_failed_meeting_run_message(payload: Mapping[str, Any]) -> str:
     )
 
 
+def compose_degraded_meeting_run_message(payload: Mapping[str, Any]) -> str:
+    """Compose a visible capture-failure task for an empty terminal transcript."""
+
+    return "\n".join(
+        [
+            "A meeting ended, but transcript capture is degraded.",
+            "",
+            *_meeting_header(payload),
+            "",
+            "No caption lines were captured, so no summary, decisions, or action items can be recovered.",
+            (
+                "Likely causes: the wrong meeting, the bot was never admitted, or captions were off."
+            ),
+            "",
+            (
+                "Post a capture-failure report in the originating Slack thread. Name the meeting "
+                "URL, participant count, caption-line count, and likely causes. Do not ask "
+                "clarifying questions or run the transcript-to-ticket pipeline."
+            ),
+        ]
+    )
+
+
+def compose_meeting_health_warning_message(payload: Mapping[str, Any]) -> str:
+    """Compose the immediate Slack task for one stale active session."""
+
+    try:
+        participant_count = max(0, int(payload.get("participant_count") or 0))
+    except (TypeError, ValueError):
+        participant_count = 0
+    try:
+        caption_lines = max(0, int(payload.get("caption_lines") or 0))
+    except (TypeError, ValueError):
+        caption_lines = 0
+    return "\n".join(
+        [
+            "An active meetbot session needs operator attention.",
+            "",
+            "## Meeting session health",
+            f"URL: {str(payload.get('meeting_url') or '').strip()}",
+            f"Session status: {str(payload.get('status') or '').strip()}",
+            f"Participants observed: {participant_count}",
+            f"Caption lines: {caption_lines}",
+            f"Health warning: {str(payload.get('warning') or '').strip()}",
+            "Likely causes: the wrong meeting, the bot was never admitted, or captions are off.",
+            "",
+            (
+                "Post a concise warning in the originating Slack thread now. Include the meeting "
+                "URL, both observed counts, and the likely causes. Do not wait for the meeting to end."
+            ),
+        ]
+    )
+
+
 def _meeting_header(payload: Mapping[str, Any]) -> list[str]:
     participants = [
         str(item).strip()
@@ -130,6 +184,8 @@ def _bounded_inline(
 
 __all__ = [
     "MAX_TRANSCRIPT_INLINE_CHARS",
+    "compose_degraded_meeting_run_message",
     "compose_failed_meeting_run_message",
+    "compose_meeting_health_warning_message",
     "compose_post_meeting_run_message",
 ]

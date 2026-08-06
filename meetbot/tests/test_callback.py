@@ -90,6 +90,57 @@ async def test_completion_callback_uses_webhook_envelope_and_headers(
 
 
 @pytest.mark.asyncio
+async def test_health_callback_uses_non_terminal_envelope_and_unique_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client()
+    monkeypatch.setattr("meetbot.callback.httpx.AsyncClient", lambda **_: client)
+    sender = CompletionCallback(
+        MeetbotConfig(
+            bridge_token="bridge-secret",
+            callback_url="http://api:8000",
+            private_root=tmp_path,
+        )
+    )
+    record = _terminal_record()
+    record.status = "admitted"
+    record.ended_at = None
+
+    await sender.send_health(
+        record,
+        sequence=3,
+        warning="No participants were observed.",
+    )
+
+    assert len(client.posts) == 1
+    url, body, headers = client.posts[0]
+    assert url == "http://api:8000/webhooks"
+    assert body == {
+        "origin": "meetbot",
+        "kind": "meeting_session_health",
+        "payload": {
+            "session_id": "session-1",
+            "meeting_url": "https://meet.google.com/abc-defg-hij",
+            "status": "admitted",
+            "started_at": "2026-08-03T14:00:00Z",
+            "joined_at": None,
+            "observed_at": body["payload"]["observed_at"],
+            "caption_lines": 4,
+            "participant_count": 2,
+            "origin": {"channel": "C123", "thread_ts": "1234.500"},
+            "requested_by": "U123",
+            "warning": "No participants were observed.",
+        },
+        "idempotency_key": "meeting-health-session-1-3",
+    }
+    assert headers == {
+        "Authorization": "Bearer bridge-secret",
+        "X-Illo-Idempotency-Key": "meeting-health-session-1-3",
+    }
+
+
+@pytest.mark.asyncio
 async def test_completion_callback_retries_three_times_then_dead_letters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -112,3 +163,32 @@ async def test_completion_callback_retries_three_times_then_dead_letters(
     assert content["attempts"] == 3
     assert content["envelope"]["kind"] == "meeting_transcript"
     assert content["envelope"]["payload"]["session_id"] == "failed-callback"
+
+
+@pytest.mark.asyncio
+async def test_health_callback_reuses_retries_and_durable_dead_letters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client(fail=True)
+    monkeypatch.setattr("meetbot.callback.httpx.AsyncClient", lambda **_: client)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    sender = CompletionCallback(
+        MeetbotConfig(private_root=tmp_path),
+        sleep=no_sleep,
+    )
+    record = _terminal_record("health-failed")
+    record.status = "lobby"
+    record.ended_at = None
+
+    await sender.send_health(record, sequence=7)
+
+    assert len(client.posts) == 3
+    dead_letter = tmp_path / "dead-letter-meeting-health-health-failed-7.json"
+    content = json.loads(dead_letter.read_text(encoding="utf-8"))
+    assert content["attempts"] == 3
+    assert content["envelope"]["kind"] == "meeting_session_health"
+    assert content["envelope"]["payload"]["session_id"] == "health-failed"
