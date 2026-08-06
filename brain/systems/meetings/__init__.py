@@ -7,7 +7,9 @@ from brain.systems.meetings.client import (
 )
 from brain.systems.meetings.message import (
     MAX_TRANSCRIPT_INLINE_CHARS,
+    compose_degraded_meeting_run_message,
     compose_failed_meeting_run_message,
+    compose_meeting_health_warning_message,
     compose_post_meeting_run_message,
 )
 
@@ -16,6 +18,8 @@ __all__ = [
     "MeetbotClient",
     "MeetbotConfigurationError",
     "MeetbotServiceError",
+    "compose_degraded_meeting_run_message",
     "compose_failed_meeting_run_message",
+    "compose_meeting_health_warning_message",
     "compose_post_meeting_run_message",
 ]

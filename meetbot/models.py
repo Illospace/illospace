@@ -141,6 +141,64 @@ class SessionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionHealthSnapshot:
+    """Immutable active-session state captured for one health observation."""
+
+    session_id: str
+    meeting_url: str
+    status: SessionStatus
+    started_at: str
+    joined_at: str | None
+    observed_at: str
+    observed_caption_count: int
+    participant_count: int
+    origin: Origin
+    requested_by: str | None
+
+    @classmethod
+    def capture(
+        cls,
+        record: SessionRecord,
+        *,
+        observed_caption_count: int,
+    ) -> SessionHealthSnapshot:
+        """Copy the health fields without changing the durable session record."""
+
+        return cls(
+            session_id=record.session_id,
+            meeting_url=record.meeting_url,
+            status=record.status,
+            started_at=record.started_at,
+            joined_at=record.joined_at,
+            observed_at=isoformat_utc(),
+            observed_caption_count=observed_caption_count,
+            participant_count=len(record.participants),
+            origin=record.origin,
+            requested_by=record.requested_by,
+        )
+
+    def webhook_payload(self, *, warning: str | None = None) -> dict[str, object]:
+        """Return one non-terminal meeting_session_health webhook payload."""
+
+        payload: dict[str, object] = {
+            "session_id": self.session_id,
+            "meeting_url": self.meeting_url,
+            "status": self.status,
+            "started_at": self.started_at,
+            "joined_at": self.joined_at,
+            "observed_at": self.observed_at,
+            "caption_lines": self.observed_caption_count,
+            "participant_count": self.participant_count,
+            "origin": self.origin.as_dict(),
+            "requested_by": self.requested_by,
+        }
+        normalized_warning = " ".join(str(warning or "").split())
+        if normalized_warning:
+            payload["warning"] = normalized_warning
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
 class EngineResult:
     """Expected terminal result returned by a Meet browser engine."""
 

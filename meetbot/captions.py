@@ -105,6 +105,12 @@ class RollingCaptionBuffer:
                 self._closed_line_ids.add((item.line.speaker, item.line_id))
         return [item.line for item in pending]
 
+    @property
+    def pending_count(self) -> int:
+        """Return the number of observed lines that are still being rewritten."""
+
+        return len(self._pending)
+
     def _new_pending(
         self,
         speaker: str,

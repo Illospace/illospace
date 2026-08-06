@@ -1,4 +1,4 @@
-"""Completion webhook delivery with retry and durable dead letters."""
+"""Meeting webhook delivery with retry and durable dead letters."""
 
 from __future__ import annotations
 
@@ -11,19 +11,27 @@ from typing import Awaitable, Callable, Protocol
 import httpx
 
 from meetbot.config import MeetbotConfig
-from meetbot.models import SessionRecord
+from meetbot.models import SessionHealthSnapshot, SessionRecord
 
 logger = logging.getLogger(__name__)
 
 
-class CompletionSender(Protocol):
-    """Delivery interface used by the session manager."""
+class MeetingWebhookSender(Protocol):
+    """Meeting webhook delivery interface used by the session manager."""
 
-    async def send(self, record: SessionRecord) -> None: ...
+    async def send_transcript(self, record: SessionRecord) -> None: ...
+
+    async def send_health(
+        self,
+        snapshot: SessionHealthSnapshot,
+        *,
+        sequence: int,
+        warning: str | None = None,
+    ) -> None: ...
 
 
-class CompletionCallback:
-    """POST terminal meeting records to Illospace's webhook ingress."""
+class MeetingWebhookCallback:
+    """POST terminal transcripts and live health to Illospace webhook ingress."""
 
     def __init__(
         self,
@@ -36,7 +44,7 @@ class CompletionCallback:
         self._private_root = config.private_root
         self._sleep = sleep
 
-    async def send(self, record: SessionRecord) -> None:
+    async def send_transcript(self, record: SessionRecord) -> None:
         """Try three deliveries, then save the envelope for manual replay."""
 
         key = f"meeting-{record.session_id}"
@@ -46,11 +54,61 @@ class CompletionCallback:
             "payload": record.completion_payload(),
             "idempotency_key": key,
         }
+        await self._deliver(
+            session_id=record.session_id,
+            key=key,
+            envelope=envelope,
+            dead_letter_name=f"dead-letter-meeting-{record.session_id}.json",
+            failure_log=(
+                "Meetbot transcript webhook attempt %d/3 failed for session %s: %s"
+            ),
+            dead_letter_log="Meetbot transcript webhook saved to dead letter %s",
+        )
+
+    async def send_health(
+        self,
+        snapshot: SessionHealthSnapshot,
+        *,
+        sequence: int,
+        warning: str | None = None,
+    ) -> None:
+        """Deliver one active-session observation with the shared retry policy."""
+
+        key = f"meeting-health-{snapshot.session_id}-{sequence}"
+        envelope = {
+            "origin": "meetbot",
+            "kind": "meeting_session_health",
+            "payload": snapshot.webhook_payload(warning=warning),
+            "idempotency_key": key,
+        }
+        await self._deliver(
+            session_id=snapshot.session_id,
+            key=key,
+            envelope=envelope,
+            dead_letter_name=(
+                f"dead-letter-meeting-health-{snapshot.session_id}-{sequence}.json"
+            ),
+            failure_log=(
+                "Meetbot health webhook attempt %d/3 failed for session %s: %s"
+            ),
+            dead_letter_log="Meetbot health webhook saved to dead letter %s",
+        )
+
+    async def _deliver(
+        self,
+        *,
+        session_id: str,
+        key: str,
+        envelope: dict[str, object],
+        dead_letter_name: str,
+        failure_log: str,
+        dead_letter_log: str,
+    ) -> None:
         headers = {
             "Authorization": f"Bearer {self._bridge_token}",
             "X-Illo-Idempotency-Key": key,
         }
-        last_error = "unknown callback failure"
+        last_error = "unknown webhook failure"
         async with httpx.AsyncClient(timeout=15.0) as client:
             for attempt in range(1, 4):
                 try:
@@ -59,25 +117,27 @@ class CompletionCallback:
                     return
                 except (httpx.HTTPError, OSError) as exc:
                     last_error = str(exc)
-                    logger.warning(
-                        "Meetbot completion callback attempt %d/3 failed for session %s: %s",
-                        attempt,
-                        record.session_id,
-                        exc,
-                    )
+                    logger.warning(failure_log, attempt, session_id, exc)
                     if attempt < 3:
                         await self._sleep(float(2 ** (attempt - 1)))
 
-        self._write_dead_letter(record.session_id, envelope, last_error)
+        self._write_dead_letter(
+            envelope,
+            last_error,
+            name=dead_letter_name,
+            log_message=dead_letter_log,
+        )
 
     def _write_dead_letter(
         self,
-        session_id: str,
         envelope: dict[str, object],
         error: str,
+        *,
+        name: str,
+        log_message: str,
     ) -> None:
         self._private_root.mkdir(parents=True, exist_ok=True)
-        path = self._private_root / f"dead-letter-meeting-{session_id}.json"
+        path = self._private_root / name
         temporary = path.with_name(f".{path.name}.tmp")
         content = {
             "callback_url": self._url,
@@ -87,4 +147,4 @@ class CompletionCallback:
         }
         temporary.write_text(json.dumps(content, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(temporary, path)
-        logger.error("Meetbot completion callback saved to dead letter %s", path)
+        logger.error(log_message, path)
