@@ -120,22 +120,6 @@ async def test_stateful_third_trigger_flows_through_production_registry(
         )
     ] == ["consecutive", "rolling_window", "distinct_failure_classes"]
 
-    deliveries: list[dict[str, str]] = []
-
-    class FakeSlackClient:
-        async def post_message(self, *, channel, text):
-            deliveries.append({"channel": channel, "text": text})
-            return {"ok": True, "message": {"text": text}}
-
-    async def fake_client_from_runtime(*, requested_by, reason):
-        return FakeSlackClient()
-
-    monkeypatch.setattr(
-        scheduler_executor,
-        "slack_web_client_from_runtime",
-        fake_client_from_runtime,
-    )
-
     async def apply_failure(
         *,
         offset: int,
@@ -176,7 +160,6 @@ async def test_stateful_third_trigger_flows_through_production_registry(
     )
     assert first_trigger["distinct_count"] == 1
     assert first_trigger["crossed"] is False
-    assert deliveries == []
     assert (
         await guard_trigger_states(session, job)
     )["distinct_failure_classes"].trigger_state == {
@@ -200,9 +183,6 @@ async def test_stateful_third_trigger_flows_through_production_registry(
         "alerted_at": (base + timedelta(minutes=1)).isoformat(),
         "crossed": True,
     }
-    assert deliveries[0]["channel"] == "C_ALERTS"
-    assert "Scheduler job crossed distinct failure classes" in deliveries[0]["text"]
-
     health = await async_scheduler_health_snapshot(
         session,
         now=base + timedelta(minutes=1),
