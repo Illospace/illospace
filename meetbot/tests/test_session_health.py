@@ -6,8 +6,15 @@ from pathlib import Path
 import pytest
 
 from meetbot.config import MeetbotConfig
-from meetbot.models import EngineResult, Origin, SessionEvents, SessionRecord
+from meetbot.models import (
+    EngineResult,
+    Origin,
+    SessionEvents,
+    SessionHealthSnapshot,
+    SessionRecord,
+)
 from meetbot.session import SessionManager
+from meetbot.session_health import SessionHealthMonitor
 
 
 class _ManualClock:
@@ -35,8 +42,9 @@ class _ManualClock:
 
 
 class _HoldingEngine:
-    def __init__(self, *, admitted: bool) -> None:
+    def __init__(self, *, admitted: bool, caption: bool = False) -> None:
         self.admitted = admitted
+        self.caption = caption
         self.started = asyncio.Event()
         self.finish = asyncio.Event()
 
@@ -51,6 +59,8 @@ class _HoldingEngine:
         await events.status("lobby")
         if self.admitted:
             await events.status("admitted")
+        if self.caption:
+            await events.caption("Alice", "A pending caption", "line-1")
         self.started.set()
         await self.finish.wait()
         return EngineResult(reason="call_ended")
@@ -67,19 +77,19 @@ class _RecordingSender:
         self.health: list[dict[str, object]] = []
         self.terminal: list[dict[str, object]] = []
 
-    async def send(self, record: SessionRecord) -> None:
+    async def send_transcript(self, record: SessionRecord) -> None:
         self.terminal.append(record.completion_payload())
 
     async def send_health(
         self,
-        record: SessionRecord,
+        snapshot: SessionHealthSnapshot,
         *,
         sequence: int,
         warning: str | None = None,
     ) -> None:
         self.health.append(
             {
-                **record.health_payload(warning=warning),
+                **snapshot.webhook_payload(warning=warning),
                 "sequence": sequence,
             }
         )
@@ -108,10 +118,11 @@ async def _join(
     admitted: bool,
     clock: _ManualClock,
     sender: _RecordingSender,
+    caption: bool = False,
     caption_warning_seconds: int = 90,
     stale_session_seconds: int = 180,
 ) -> tuple[SessionManager, _HoldingEngine, SessionRecord]:
-    engine = _HoldingEngine(admitted=admitted)
+    engine = _HoldingEngine(admitted=admitted, caption=caption)
     manager = SessionManager(
         _config(
             tmp_path,
@@ -132,6 +143,57 @@ async def _join(
     await asyncio.wait_for(engine.started.wait(), timeout=1)
     await clock.advance(0)
     return manager, engine, record
+
+
+def test_deadline_seam_catches_heartbeat_up_without_duplicate_events(
+    tmp_path: Path,
+) -> None:
+    clock = _ManualClock()
+    record = SessionRecord(
+        session_id="deadline-seam",
+        meeting_url="https://meet.google.com/abc-defg-hij",
+        display_name="Illo",
+        origin=Origin(channel="C-meetings", thread_ts="1722700000.001"),
+        requested_by="U-reda",
+        transcript_path="brain/uploads/meetings/deadline-seam/transcript.jsonl",
+        transcript_md_path="brain/uploads/meetings/deadline-seam/transcript.md",
+        status="lobby",
+    )
+    monitor = SessionHealthMonitor(
+        _config(tmp_path),
+        record,
+        _RecordingSender(),
+        record_warning=record.add_warning,
+        monotonic=clock.monotonic,
+    )
+
+    assert monitor.next_deadline() == 60
+    assert monitor.due_events(125) == ("heartbeat",)
+    assert monitor.next_deadline() == 180
+
+
+@pytest.mark.asyncio
+async def test_health_snapshot_counts_pending_caption_without_mutating_record(
+    tmp_path: Path,
+) -> None:
+    clock = _ManualClock()
+    sender = _RecordingSender()
+    manager, engine, record = await _join(
+        tmp_path,
+        admitted=True,
+        caption=True,
+        clock=clock,
+        sender=sender,
+    )
+
+    assert record.caption_lines == 0
+    await clock.advance(60)
+    assert sender.health[-1]["caption_lines"] == 1
+    assert record.caption_lines == 0
+
+    engine.finish.set()
+    await asyncio.wait_for(manager._managed_sessions[record.session_id].task, timeout=1)
+    assert sender.terminal[-1]["caption_lines"] == 1
 
 
 @pytest.mark.asyncio

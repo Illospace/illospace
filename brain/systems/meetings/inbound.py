@@ -17,10 +17,14 @@ from brain.systems.inbound.handlers import (
     InboundHandlerContext,
 )
 from brain.systems.inbound.surface_admission import (
+    RejectedSurfaceEnvelope,
     SurfaceAdmissionSpec,
     SurfaceIdentity,
     SurfaceTarget,
+    admit_prepared_surface_envelope,
     admit_surface_envelope,
+    complete_prepared_surface_envelope,
+    prepare_surface_envelope,
 )
 from brain.systems.meetings.message import (
     MAX_TRANSCRIPT_INLINE_CHARS,
@@ -29,6 +33,7 @@ from brain.systems.meetings.message import (
     compose_meeting_health_warning_message,
     compose_post_meeting_run_message,
 )
+from brain.systems.runs.work_intake import WorkIntakeEvent
 from brain.systems.slack.delivery_routes import (
     SlackDeliveryRoute,
     build_delivery_trigger,
@@ -82,13 +87,46 @@ async def process_meeting_session_health_envelope(
 ) -> dict[str, Any]:
     """Persist health observations and admit only warnings to the meeting route."""
 
-    return await admit_surface_envelope(
+    preparation = await prepare_surface_envelope(
         session,
         context=context,
         event=event,
         normalized=normalized,
         complete=complete,
-        spec=MEETING_SESSION_HEALTH_ADMISSION,
+        spec=MEETING_SESSION_HEALTH_SURFACE,
+    )
+    if isinstance(preparation, RejectedSurfaceEnvelope):
+        return preparation.result
+
+    surface_context = dict(preparation.payload.get("_meeting_surface") or {})
+    payload = dict(surface_context.get("payload") or {})
+    if not payload.get("warning"):
+        return await complete_prepared_surface_envelope(
+            context=context,
+            event=event,
+            normalized=normalized,
+            complete=complete,
+            spec=MEETING_SESSION_HEALTH_SURFACE,
+            prepared=preparation,
+        )
+
+    trigger_payload = _build_meeting_health_work_intake_payload(
+        context=context,
+        event=event,
+        normalized=normalized,
+        payload=payload,
+        slack_route=surface_context.get("slack_route"),
+        authority_user_id=str(preparation.identity.authority_user_id),
+    )
+    return await admit_prepared_surface_envelope(
+        session,
+        context=context,
+        event=event,
+        normalized=normalized,
+        complete=complete,
+        spec=MEETING_SESSION_HEALTH_SURFACE,
+        prepared=preparation,
+        work=WorkIntakeEvent.from_trigger_payload(trigger_payload),
     )
 
 
@@ -140,7 +178,7 @@ async def _build_meeting_payload(
         slack_route=slack_route,
         authority_user_id=str(identity.authority_user_id),
     )
-    trigger_payload["_meeting_admission"] = {
+    trigger_payload["_meeting_surface"] = {
         "kind": MEETING_TRANSCRIPT_ENVELOPE_KIND,
         "payload": payload,
         "slack_route": slack_route,
@@ -148,29 +186,22 @@ async def _build_meeting_payload(
     return trigger_payload
 
 
-async def _build_meeting_health_payload(
+async def _build_meeting_health_observation(
     session: AsyncSession,
     context: InboundHandlerContext,
-    event: InboundEventRow,
+    _event: InboundEventRow,
     normalized: Mapping[str, Any],
-    identity: SurfaceIdentity,
+    _identity: SurfaceIdentity,
 ) -> dict[str, Any]:
     payload = _validate_health_payload(normalized.get("payload"))
     slack_route = await _resolve_meeting_route(session, context, payload)
-    trigger_payload = _build_meeting_health_work_intake_payload(
-        context=context,
-        event=event,
-        normalized=normalized,
-        payload=payload,
-        slack_route=slack_route,
-        authority_user_id=str(identity.authority_user_id),
-    )
-    trigger_payload["_meeting_admission"] = {
-        "kind": MEETING_SESSION_HEALTH_ENVELOPE_KIND,
-        "payload": payload,
-        "slack_route": slack_route,
+    return {
+        "_meeting_surface": {
+            "kind": MEETING_SESSION_HEALTH_ENVELOPE_KIND,
+            "payload": payload,
+            "slack_route": slack_route,
+        }
     }
-    return trigger_payload
 
 
 async def _resolve_meeting_route(
@@ -191,12 +222,12 @@ def _meeting_target(
     trigger_payload: Mapping[str, Any],
     _normalized: Mapping[str, Any],
 ) -> SurfaceTarget:
-    admission_context = dict(trigger_payload.get("_meeting_admission") or {})
-    payload = dict(admission_context.get("payload") or {})
-    slack_route = admission_context.get("slack_route")
+    surface_context = dict(trigger_payload.get("_meeting_surface") or {})
+    payload = dict(surface_context.get("payload") or {})
+    slack_route = surface_context.get("slack_route")
     target = {
         "kind": str(
-            admission_context.get("kind") or MEETING_TRANSCRIPT_ENVELOPE_KIND
+            surface_context.get("kind") or MEETING_TRANSCRIPT_ENVELOPE_KIND
         ),
         "session_id": payload["session_id"],
         "routing": slack_route.routing if slack_route else "run_inbox",
@@ -217,8 +248,8 @@ def _meeting_ack(
     trigger_payload: Mapping[str, Any],
     target: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    admission_context = dict(trigger_payload.get("_meeting_admission") or {})
-    payload = dict(admission_context.get("payload") or {})
+    surface_context = dict(trigger_payload.get("_meeting_surface") or {})
+    payload = dict(surface_context.get("payload") or {})
     return {
         "meeting_status": _meeting_capture_status(payload),
         "routing": target["routing"],
@@ -231,8 +262,8 @@ def _meeting_health_ack(
     trigger_payload: Mapping[str, Any],
     target: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    admission_context = dict(trigger_payload.get("_meeting_admission") or {})
-    payload = dict(admission_context.get("payload") or {})
+    surface_context = dict(trigger_payload.get("_meeting_surface") or {})
+    payload = dict(surface_context.get("payload") or {})
     return {
         "routing": target["routing"],
         "observed_at": payload["observed_at"],
@@ -240,15 +271,6 @@ def _meeting_health_ack(
         "caption_lines": payload["caption_lines"],
         "warning": bool(payload.get("warning")),
     }
-
-
-def _meeting_health_requires_warning(
-    trigger_payload: Mapping[str, Any],
-    _normalized: Mapping[str, Any],
-) -> bool:
-    admission_context = dict(trigger_payload.get("_meeting_admission") or {})
-    payload = dict(admission_context.get("payload") or {})
-    return bool(payload.get("warning"))
 
 
 def _meeting_capture_status(payload: Mapping[str, Any]) -> str:
@@ -689,20 +711,20 @@ MEETING_TRANSCRIPT_ADMISSION = SurfaceAdmissionSpec(
 )
 
 
-MEETING_SESSION_HEALTH_ADMISSION = SurfaceAdmissionSpec(
+MEETING_SESSION_HEALTH_SURFACE = SurfaceAdmissionSpec(
     kind=MEETING_SESSION_HEALTH_ENVELOPE_KIND,
     action_type=ACTION_MEETING_HEALTH_OBSERVED,
     success_operation="meeting_health_observed",
     failure_operation="meeting_health_admission_failed",
     tool_type="meeting_session_health_intake",
     resolve_identity=_resolve_meeting_identity,
-    build_payload=_build_meeting_health_payload,
+    build_payload=_build_meeting_health_observation,
     build_target=_meeting_target,
     build_ack=_meeting_health_ack,
     success_tool_status="accepted",
     success_reasoning=(
-        "The meetbot health observation was persisted, and warnings were admitted "
-        "with the available Slack origin preserved."
+        "The meetbot health observation was persisted. A warning, when present, "
+        "was admitted with the available Slack origin preserved."
     ),
     admission_failure_reasoning=(
         "The meeting health warning AgentRun could not be admitted."
@@ -716,14 +738,13 @@ MEETING_SESSION_HEALTH_ADMISSION = SurfaceAdmissionSpec(
     missing_authority_failure_operation="meeting_health_payload_rejected",
     include_origin_in_outcome=False,
     action_result_target_fields=("session_id",),
-    admit_when=_meeting_health_requires_warning,
 )
 
 
 __all__ = [
     "ACTION_MEETING_HEALTH_OBSERVED",
     "ACTION_MEETING_RUN_ADMITTED",
-    "MEETING_SESSION_HEALTH_ADMISSION",
+    "MEETING_SESSION_HEALTH_SURFACE",
     "MEETING_SESSION_HEALTH_ENVELOPE_KIND",
     "MEETING_TRANSCRIPT_ADMISSION",
     "MEETING_TRANSCRIPT_ENVELOPE_KIND",

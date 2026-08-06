@@ -1,4 +1,4 @@
-"""Completion webhook delivery with retry and durable dead letters."""
+"""Meeting webhook delivery with retry and durable dead letters."""
 
 from __future__ import annotations
 
@@ -11,27 +11,27 @@ from typing import Awaitable, Callable, Protocol
 import httpx
 
 from meetbot.config import MeetbotConfig
-from meetbot.models import SessionRecord
+from meetbot.models import SessionHealthSnapshot, SessionRecord
 
 logger = logging.getLogger(__name__)
 
 
-class CompletionSender(Protocol):
+class MeetingWebhookSender(Protocol):
     """Meeting webhook delivery interface used by the session manager."""
 
-    async def send(self, record: SessionRecord) -> None: ...
+    async def send_transcript(self, record: SessionRecord) -> None: ...
 
     async def send_health(
         self,
-        record: SessionRecord,
+        snapshot: SessionHealthSnapshot,
         *,
         sequence: int,
         warning: str | None = None,
     ) -> None: ...
 
 
-class CompletionCallback:
-    """POST terminal meeting records to Illospace's webhook ingress."""
+class MeetingWebhookCallback:
+    """POST terminal transcripts and live health to Illospace webhook ingress."""
 
     def __init__(
         self,
@@ -44,7 +44,7 @@ class CompletionCallback:
         self._private_root = config.private_root
         self._sleep = sleep
 
-    async def send(self, record: SessionRecord) -> None:
+    async def send_transcript(self, record: SessionRecord) -> None:
         """Try three deliveries, then save the envelope for manual replay."""
 
         key = f"meeting-{record.session_id}"
@@ -60,38 +60,38 @@ class CompletionCallback:
             envelope=envelope,
             dead_letter_name=f"dead-letter-meeting-{record.session_id}.json",
             failure_log=(
-                "Meetbot completion callback attempt %d/3 failed for session %s: %s"
+                "Meetbot transcript webhook attempt %d/3 failed for session %s: %s"
             ),
-            dead_letter_log="Meetbot completion callback saved to dead letter %s",
+            dead_letter_log="Meetbot transcript webhook saved to dead letter %s",
         )
 
     async def send_health(
         self,
-        record: SessionRecord,
+        snapshot: SessionHealthSnapshot,
         *,
         sequence: int,
         warning: str | None = None,
     ) -> None:
-        """Deliver one active-session observation with the completion retry policy."""
+        """Deliver one active-session observation with the shared retry policy."""
 
-        key = f"meeting-health-{record.session_id}-{sequence}"
+        key = f"meeting-health-{snapshot.session_id}-{sequence}"
         envelope = {
             "origin": "meetbot",
             "kind": "meeting_session_health",
-            "payload": record.health_payload(warning=warning),
+            "payload": snapshot.webhook_payload(warning=warning),
             "idempotency_key": key,
         }
         await self._deliver(
-            session_id=record.session_id,
+            session_id=snapshot.session_id,
             key=key,
             envelope=envelope,
             dead_letter_name=(
-                f"dead-letter-meeting-health-{record.session_id}-{sequence}.json"
+                f"dead-letter-meeting-health-{snapshot.session_id}-{sequence}.json"
             ),
             failure_log=(
-                "Meetbot health callback attempt %d/3 failed for session %s: %s"
+                "Meetbot health webhook attempt %d/3 failed for session %s: %s"
             ),
-            dead_letter_log="Meetbot health callback saved to dead letter %s",
+            dead_letter_log="Meetbot health webhook saved to dead letter %s",
         )
 
     async def _deliver(
@@ -108,7 +108,7 @@ class CompletionCallback:
             "Authorization": f"Bearer {self._bridge_token}",
             "X-Illo-Idempotency-Key": key,
         }
-        last_error = "unknown callback failure"
+        last_error = "unknown webhook failure"
         async with httpx.AsyncClient(timeout=15.0) as client:
             for attempt in range(1, 4):
                 try:

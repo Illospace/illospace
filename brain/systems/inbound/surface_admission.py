@@ -55,10 +55,6 @@ AckBuilder = Callable[
     [str, Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]],
     Mapping[str, Any],
 ]
-AdmissionPredicate = Callable[
-    [Mapping[str, Any], Mapping[str, Any]],
-    bool,
-]
 
 
 @dataclass(frozen=True)
@@ -87,7 +83,22 @@ class SurfaceAdmissionSpec:
     missing_authority_failure_operation: str | None = None
     include_origin_in_outcome: bool = True
     action_result_target_fields: tuple[str, ...] = ()
-    admit_when: AdmissionPredicate | None = None
+
+
+@dataclass(frozen=True)
+class PreparedSurfaceEnvelope:
+    """Validated surface payload, identity, and receipt target."""
+
+    identity: SurfaceIdentity
+    payload: dict[str, Any]
+    surface_target: SurfaceTarget
+
+
+@dataclass(frozen=True)
+class RejectedSurfaceEnvelope:
+    """Receipt result completed while preparing a surface envelope."""
+
+    result: dict[str, Any]
 
 
 async def admit_surface_envelope(
@@ -101,21 +112,56 @@ async def admit_surface_envelope(
 ) -> dict[str, Any]:
     """Resolve authority, build a trigger, admit work, and complete its receipt."""
 
+    preparation = await prepare_surface_envelope(
+        session,
+        context=context,
+        event=event,
+        normalized=normalized,
+        complete=complete,
+        spec=spec,
+    )
+    if isinstance(preparation, RejectedSurfaceEnvelope):
+        return preparation.result
+    return await admit_prepared_surface_envelope(
+        session,
+        context=context,
+        event=event,
+        normalized=normalized,
+        complete=complete,
+        spec=spec,
+        prepared=preparation,
+        work=WorkIntakeEvent.from_trigger_payload(preparation.payload),
+    )
+
+
+async def prepare_surface_envelope(
+    session: AsyncSession,
+    *,
+    context: InboundHandlerContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+    complete: InboundEventCompleter,
+    spec: SurfaceAdmissionSpec,
+) -> PreparedSurfaceEnvelope | RejectedSurfaceEnvelope:
+    """Resolve authority, validate payload, and construct the receipt target."""
+
     identity = await spec.resolve_identity(session, context, normalized)
     if not identity.authority_user_id:
-        return await _complete_failure(
-            complete,
-            spec=spec,
-            event=event,
-            reason=spec.missing_authority_reason,
-            error=spec.missing_authority_error,
-            target={"kind": spec.kind},
-            reasoning_summary=spec.missing_authority_reasoning,
-            operation=spec.missing_authority_failure_operation,
+        return RejectedSurfaceEnvelope(
+            await _complete_failure(
+                complete,
+                spec=spec,
+                event=event,
+                reason=spec.missing_authority_reason,
+                error=spec.missing_authority_error,
+                target={"kind": spec.kind},
+                reasoning_summary=spec.missing_authority_reasoning,
+                operation=spec.missing_authority_failure_operation,
+            )
         )
 
     try:
-        trigger_payload = await spec.build_payload(
+        payload = await spec.build_payload(
             session,
             context,
             event,
@@ -123,57 +169,121 @@ async def admit_surface_envelope(
             identity,
         )
     except spec.payload_error_types as exc:
+        return RejectedSurfaceEnvelope(
+            await _complete_failure(
+                complete,
+                spec=spec,
+                event=event,
+                reason=spec.invalid_payload_reason,
+                error=str(exc),
+                target={"kind": spec.kind},
+                reasoning_summary=str(exc),
+                operation=spec.payload_failure_operation,
+            )
+        )
+
+    return PreparedSurfaceEnvelope(
+        identity=identity,
+        payload=payload,
+        surface_target=spec.build_target(payload, normalized),
+    )
+
+
+async def admit_prepared_surface_envelope(
+    session: AsyncSession,
+    *,
+    context: InboundHandlerContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+    complete: InboundEventCompleter,
+    spec: SurfaceAdmissionSpec,
+    prepared: PreparedSurfaceEnvelope,
+    work: WorkIntakeEvent,
+) -> dict[str, Any]:
+    """Admit prepared work and complete its receipt with a concrete run ID."""
+
+    admission = await admit_work(session, work)
+    if not admission.ok or admission.run_id is None:
+        reason = admission.skipped_reason or "run_admission_failed"
         return await _complete_failure(
             complete,
             spec=spec,
             event=event,
-            reason=spec.invalid_payload_reason,
-            error=str(exc),
-            target={"kind": spec.kind},
-            reasoning_summary=str(exc),
-            operation=spec.payload_failure_operation,
+            reason=reason,
+            error=reason,
+            target=prepared.surface_target.value,
+            reasoning_summary=(
+                admission.skipped_reason or spec.admission_failure_reasoning
+            ),
+            origin=(
+                normalized.get("origin")
+                if spec.include_origin_in_outcome
+                else None
+            ),
+            include_target_copy=True,
         )
-
-    surface_target = spec.build_target(trigger_payload, normalized)
-    target = dict(surface_target.value)
-    should_admit = spec.admit_when is None or spec.admit_when(
-        trigger_payload,
-        normalized,
+    return await _complete_prepared_surface_envelope(
+        context=context,
+        event=event,
+        normalized=normalized,
+        complete=complete,
+        spec=spec,
+        prepared=prepared,
+        run_id=admission.run_id,
     )
-    run_id = None
-    if should_admit:
-        admission = await admit_work(
-            session,
-            WorkIntakeEvent.from_trigger_payload(trigger_payload),
-        )
-        if not admission.ok:
-            reason = admission.skipped_reason or "run_admission_failed"
-            return await _complete_failure(
-                complete,
-                spec=spec,
-                event=event,
-                reason=reason,
-                error=reason,
-                target=target,
-                reasoning_summary=(
-                    admission.skipped_reason or spec.admission_failure_reasoning
-                ),
-                origin=(
-                    normalized.get("origin")
-                    if spec.include_origin_in_outcome
-                    else None
-                ),
-                include_target_copy=True,
-            )
-        run_id = admission.run_id
 
-    if run_id is not None:
-        target["run_id"] = run_id
+
+async def complete_prepared_surface_envelope(
+    *,
+    context: InboundHandlerContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+    complete: InboundEventCompleter,
+    spec: SurfaceAdmissionSpec,
+    prepared: PreparedSurfaceEnvelope,
+) -> dict[str, Any]:
+    """Complete a prepared observation without claiming run admission."""
+
+    return await _complete_prepared_surface_envelope(
+        context=context,
+        event=event,
+        normalized=normalized,
+        complete=complete,
+        spec=spec,
+        prepared=prepared,
+    )
+
+
+async def _complete_prepared_surface_envelope(
+    *,
+    context: InboundHandlerContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+    complete: InboundEventCompleter,
+    spec: SurfaceAdmissionSpec,
+    prepared: PreparedSurfaceEnvelope,
+    run_id: int | None = None,
+) -> dict[str, Any]:
+    """Complete a prepared receipt with its optional admitted-run context."""
+
+    target = dict(prepared.surface_target.value)
     action_result: dict[str, Any] = {
         "operation": spec.success_operation,
-        "run_id": run_id,
         "event_id": str(event.id),
     }
+    tool_use: dict[str, Any] = {
+        "type": spec.tool_type,
+        **(
+            {"status": spec.success_tool_status}
+            if spec.success_tool_status is not None
+            else {}
+        ),
+        **dict(prepared.surface_target.tool_context),
+    }
+    if run_id is not None:
+        target["run_id"] = run_id
+        action_result["run_id"] = run_id
+        tool_use["run_id"] = run_id
     if spec.include_origin_in_outcome:
         action_result["origin"] = normalized.get("origin")
     if spec.outcome_target_key:
@@ -186,21 +296,11 @@ async def admit_surface_envelope(
             spec.build_ack(
                 str(event.id),
                 normalized,
-                trigger_payload,
+                prepared.payload,
                 target,
             )
         )
 
-    tool_use = {
-        "type": spec.tool_type,
-        **(
-            {"status": spec.success_tool_status}
-            if spec.success_tool_status is not None
-            else {}
-        ),
-        "run_id": run_id,
-        **dict(surface_target.tool_context),
-    }
     return await complete(
         InboundCompletion(
             status=STATUS_PROCESSED,
@@ -259,8 +359,13 @@ async def _complete_failure(
 
 
 __all__ = [
+    "PreparedSurfaceEnvelope",
+    "RejectedSurfaceEnvelope",
     "SurfaceAdmissionSpec",
     "SurfaceIdentity",
     "SurfaceTarget",
+    "admit_prepared_surface_envelope",
     "admit_surface_envelope",
+    "complete_prepared_surface_envelope",
+    "prepare_surface_envelope",
 ]

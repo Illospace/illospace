@@ -300,7 +300,7 @@ async def test_healthy_session_health_is_persisted_without_admitting_a_run(sessi
     receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
     assert result["status"] == "processed"
     assert result["ilo_outcome"]["operation"] == "meeting_health_observed"
-    assert result["ilo_outcome"]["run_id"] is None
+    assert "run_id" not in result["ilo_outcome"]
     assert event.kind == "meeting_session_health"
     assert event.raw_payload["participant_count"] == 0
     assert receipt.tool_use["type"] == "meeting_session_health_intake"

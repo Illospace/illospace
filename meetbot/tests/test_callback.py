@@ -7,9 +7,9 @@ from typing import Any
 import httpx
 import pytest
 
-from meetbot.callback import CompletionCallback
+from meetbot.callback import MeetingWebhookCallback
 from meetbot.config import MeetbotConfig
-from meetbot.models import Origin, SessionRecord
+from meetbot.models import Origin, SessionHealthSnapshot, SessionRecord
 from meetbot.transcript import TranscriptWriter
 
 
@@ -61,7 +61,7 @@ def _terminal_record(session_id: str = "session-1") -> SessionRecord:
 
 
 @pytest.mark.asyncio
-async def test_completion_callback_uses_webhook_envelope_and_headers(
+async def test_transcript_webhook_uses_envelope_and_headers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -72,9 +72,9 @@ async def test_completion_callback_uses_webhook_envelope_and_headers(
         callback_url="http://api:8000",
         private_root=tmp_path,
     )
-    sender = CompletionCallback(config)
+    sender = MeetingWebhookCallback(config)
 
-    await sender.send(_terminal_record())
+    await sender.send_transcript(_terminal_record())
 
     assert len(client.posts) == 1
     url, body, headers = client.posts[0]
@@ -90,13 +90,13 @@ async def test_completion_callback_uses_webhook_envelope_and_headers(
 
 
 @pytest.mark.asyncio
-async def test_health_callback_uses_non_terminal_envelope_and_unique_key(
+async def test_health_webhook_uses_non_terminal_envelope_and_unique_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _Client()
     monkeypatch.setattr("meetbot.callback.httpx.AsyncClient", lambda **_: client)
-    sender = CompletionCallback(
+    sender = MeetingWebhookCallback(
         MeetbotConfig(
             bridge_token="bridge-secret",
             callback_url="http://api:8000",
@@ -108,7 +108,7 @@ async def test_health_callback_uses_non_terminal_envelope_and_unique_key(
     record.ended_at = None
 
     await sender.send_health(
-        record,
+        SessionHealthSnapshot.capture(record, observed_caption_count=4),
         sequence=3,
         warning="No participants were observed.",
     )
@@ -141,7 +141,7 @@ async def test_health_callback_uses_non_terminal_envelope_and_unique_key(
 
 
 @pytest.mark.asyncio
-async def test_completion_callback_retries_three_times_then_dead_letters(
+async def test_transcript_webhook_retries_three_times_then_dead_letters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -151,11 +151,11 @@ async def test_completion_callback_retries_three_times_then_dead_letters(
     async def no_sleep(_: float) -> None:
         return None
 
-    sender = CompletionCallback(
+    sender = MeetingWebhookCallback(
         MeetbotConfig(private_root=tmp_path),
         sleep=no_sleep,
     )
-    await sender.send(_terminal_record("failed-callback"))
+    await sender.send_transcript(_terminal_record("failed-callback"))
 
     assert len(client.posts) == 3
     dead_letter = tmp_path / "dead-letter-meeting-failed-callback.json"
@@ -166,7 +166,7 @@ async def test_completion_callback_retries_three_times_then_dead_letters(
 
 
 @pytest.mark.asyncio
-async def test_health_callback_reuses_retries_and_durable_dead_letters(
+async def test_health_webhook_reuses_retries_and_durable_dead_letters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -176,7 +176,7 @@ async def test_health_callback_reuses_retries_and_durable_dead_letters(
     async def no_sleep(_: float) -> None:
         return None
 
-    sender = CompletionCallback(
+    sender = MeetingWebhookCallback(
         MeetbotConfig(private_root=tmp_path),
         sleep=no_sleep,
     )
@@ -184,7 +184,10 @@ async def test_health_callback_reuses_retries_and_durable_dead_letters(
     record.status = "lobby"
     record.ended_at = None
 
-    await sender.send_health(record, sequence=7)
+    await sender.send_health(
+        SessionHealthSnapshot.capture(record, observed_caption_count=4),
+        sequence=7,
+    )
 
     assert len(client.posts) == 3
     dead_letter = tmp_path / "dead-letter-meeting-health-health-failed-7.json"
