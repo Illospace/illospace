@@ -465,7 +465,6 @@ async def record_cycle_run_evaluation(
     if usage is not None:
         context_snapshot["usage"] = usage
     run.context_snapshot = jsonable(context_snapshot)
-    run.self_review_summary = summary
     session.add(
         CycleRunEvaluation(
             cycle_id=cycle.id,

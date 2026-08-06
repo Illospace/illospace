@@ -16,6 +16,12 @@ from brain.systems.cycles.common import (
 from brain.systems.cycles.degradation import mandatory_escalations
 
 SCHEDULED_REVIEW_WINDOW_HOURS = 24
+SELF_REVIEW_SUMMARY_MARKER = "Self-review summary:"
+SELF_REVIEW_SUMMARY_MARKERS = (
+    SELF_REVIEW_SUMMARY_MARKER,
+    # Existing Reflex answers use the shorter label; keep one gate-owned alias.
+    "Self-review:",
+)
 
 # One source of truth for the base result-contract keys and the visible sections
 # named in the launch prompt. The gate validates these same labels/aliases.
@@ -24,7 +30,7 @@ RESULT_CONTRACT_OUTPUT_SECTIONS = {
     "summarize_workspace_evidence_or_explicit_gaps": "`Evidence reviewed:`",
     "report_evidence_health": "`Evidence health:`",
     "record_next_action_or_blocker": "`Next action:` or `Blocker:`",
-    "short_self_review_summary": "`Self-review summary:`",
+    "short_self_review_summary": f"`{SELF_REVIEW_SUMMARY_MARKER}`",
 }
 
 # Keep each coordinator run kind's complete contract visible here. Do not derive
