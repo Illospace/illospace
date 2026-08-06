@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.kernel.common.time import assume_utc_optional
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUS_VALUES
 
@@ -25,14 +26,8 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _aware_utc(value: datetime | None) -> datetime | None:
-    if value is not None and value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value
-
-
 def _cycle_row_payload(cycle: Cycle, *, now: datetime) -> dict[str, Any]:
-    next_run_at = _aware_utc(cycle.next_run_at)
+    next_run_at = assume_utc_optional(cycle.next_run_at)
     overdue_seconds = int((now - next_run_at).total_seconds()) if next_run_at else None
     return {
         "id": cycle.id,
@@ -46,7 +41,7 @@ def _cycle_row_payload(cycle: Cycle, *, now: datetime) -> dict[str, Any]:
 
 
 def _cycle_run_row_payload(run: CycleRun, *, now: datetime) -> dict[str, Any]:
-    scheduled_for = _aware_utc(run.scheduled_for)
+    scheduled_for = assume_utc_optional(run.scheduled_for)
     stale_seconds = int((now - scheduled_for).total_seconds()) if scheduled_for else None
     return {
         "id": run.id,
