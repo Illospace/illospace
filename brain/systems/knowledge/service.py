@@ -27,6 +27,7 @@ from brain.systems.knowledge.connectors.base import (
     KnowledgeConnector,
     KnowledgeDraft,
 )
+from brain.systems.knowledge.connectors.memory import MemoryConnector
 from brain.systems.knowledge.distillation import (
     DISTILLATION_CURSOR_KEY,
     DISTILLATION_MANIFEST_VERSION,
@@ -704,6 +705,34 @@ async def _ingest_drafts(
             )
 
 
+async def index_memory_node(
+    session: AsyncSession,
+    *,
+    node_id: int,
+) -> KnowledgeSyncStats:
+    """Upsert one committed memory node without advancing the sweep cursor."""
+
+    stats = KnowledgeSyncStats()
+    connector = MemoryConnector(max_items=1)
+    draft = await connector.draft_for_node(
+        session,
+        node_id=node_id,
+    )
+    if draft is None:
+        stats.skipped = 1
+        return stats
+
+    bounded_draft, _ = _bounded_draft(draft)
+    await _ingest_drafts(
+        session,
+        source=connector.source_key,
+        drafts=[(bounded_draft, True)],
+        stats=stats,
+        run_at=datetime.now(timezone.utc),
+    )
+    return stats
+
+
 async def sync_connector(
     session: AsyncSession,
     connector: KnowledgeConnector,
@@ -887,5 +916,6 @@ __all__ = [
     "build_embedding_text",
     "build_search_text",
     "content_digest",
+    "index_memory_node",
     "sync_connector",
 ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
@@ -10,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler
 
 from brain.app.api.auth import get_current_user
@@ -30,7 +31,13 @@ from brain.platform.db.models.knowledge import (
     KnowledgeSyncState,
 )
 from brain.platform.db.models.org import Org, User
-from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
+from brain.platform.db.models.reconstructive_memory import (
+    MemoryAssertionNode,
+    MemoryEdgeNode,
+    MemoryNode,
+    MemorySource,
+    MemorySpan,
+)
 from brain.systems.knowledge.connectors.base import (
     EnumerationFailure,
     EnumerationFailureKind,
@@ -49,7 +56,10 @@ from brain.systems.knowledge.connectors.github import (
 )
 from brain.systems.knowledge.connectors.memory import MemoryConnector
 from brain.systems.knowledge.search import reciprocal_rank_fusion, search_knowledge
-from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS, sync_connector
+from brain.systems.knowledge.service import (
+    RAW_TEXT_MAX_CHARS,
+    sync_connector,
+)
 from brain.systems.external_agents import service as external_agents
 from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
 from brain.systems.cortex.project_context.github import (
@@ -317,7 +327,10 @@ async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
             KnowledgeItem.__table__,
             KnowledgeItemEmbedding.__table__,
             KnowledgeSyncState.__table__,
+            MemorySource.__table__,
+            MemorySpan.__table__,
             MemoryNode.__table__,
+            MemoryAssertionNode.__table__,
             MemoryEdgeNode.__table__,
         ]
     )
@@ -579,6 +592,300 @@ async def test_memory_connector_skips_orgless_nodes_and_keeps_organization_scope
     )
     assert items[0].extra["org_id"] == _ORG_ID
     assert "skipped node 14: org_id is missing" in caplog.text
+
+
+def _committing_unit_of_work(session):
+    class _CommittingUnitOfWork:
+        async def __aenter__(self):
+            self.session = session
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            del exc, traceback
+            if exc_type is None:
+                await session.commit()
+            else:
+                await session.rollback()
+            return False
+
+    return _CommittingUnitOfWork
+
+
+async def _wait_for_memory_knowledge_index(memory_ingestion):
+    await asyncio.sleep(0)
+    if memory_ingestion._POST_COMMIT_TASKS:
+        await asyncio.gather(*list(memory_ingestion._POST_COMMIT_TASKS))
+
+
+async def _ingest_shared_memory_at_canonical_boundary(
+    session,
+    monkeypatch,
+    *,
+    content: str,
+    source_ref: str,
+):
+    from brain.systems.reconstructive_memory import embeddings as memory_embeddings
+    from brain.systems.reconstructive_memory import ingestion as memory_ingestion
+
+    monkeypatch.setattr(
+        memory_ingestion,
+        "UnitOfWork",
+        _committing_unit_of_work(session),
+    )
+    monkeypatch.setattr(memory_embeddings, "embed_node_texts", AsyncMock())
+    result = await memory_ingestion.ingest_memory_source(
+        session,
+        content=content,
+        content_kind="decision",
+        source_kind="contract_test",
+        source_ref=source_ref,
+        org_id=_ORG_ID,
+        user_id="22222222-2222-4222-8222-222222222222",
+        visibility="team",
+        confidence=0.9,
+    )
+    await session.commit()
+    await _wait_for_memory_knowledge_index(memory_ingestion)
+    return result.to_dict()
+
+
+async def test_memory_ingest_indexes_committed_node_for_immediate_search(
+    session,
+    embedding_runtime,
+    monkeypatch,
+):
+    del embedding_runtime
+    distinctive = "Zephyr quokka release ownership stays with the active worker."
+
+    payload = await _ingest_shared_memory_at_canonical_boundary(
+        session,
+        monkeypatch,
+        content=distinctive,
+        source_ref="immediate-knowledge-search",
+    )
+
+    source_ref = f"memory_node:{payload['content_node_id']}"
+    item = await session.scalar(
+        select(KnowledgeItem).where(
+            KnowledgeItem.source == "memory",
+            KnowledgeItem.source_ref == source_ref,
+        )
+    )
+    search = await search_knowledge(session, "zephyr quokka", org_id=_ORG_ID)
+
+    assert item is not None
+    assert item.summary == distinctive
+    assert [result["source_ref"] for result in search["results"]] == [source_ref]
+
+
+async def test_memory_connector_immediate_and_sweep_eligibility_are_identical(
+    session,
+):
+    updated_at = datetime(2026, 8, 5, 14, 0, tzinfo=timezone.utc)
+    superseded = _memory_node(22, updated_at, visibility="team")
+    superseded.truth_status = "superseded"
+    rows = [
+        _memory_node(16, updated_at, visibility="org"),
+        _memory_node(17, updated_at, visibility="team"),
+        _memory_node(18, updated_at, node_kind="summary", visibility="org"),
+        _memory_node(19, updated_at, org_id=None, visibility="org"),
+        _memory_node(20, updated_at, visibility="private"),
+        _memory_node(21, updated_at, visibility="private"),
+        superseded,
+    ]
+    session.add_all(rows)
+    session.add(
+        KnowledgeItem(
+            source="memory",
+            kind="memory",
+            source_ref="memory_node:21",
+            title="Formerly shared memory",
+            summary="Formerly shared memory",
+            raw_text="Formerly shared memory",
+            search_text="Formerly shared memory",
+            extra={"org_id": _ORG_ID},
+            content_digest="former-shared-memory",
+        )
+    )
+    await session.flush()
+
+    connector = MemoryConnector(max_items=20)
+    immediate_drafts = {}
+    for row in rows:
+        draft = await connector.draft_for_node(session, node_id=row.id)
+        if draft is not None:
+            immediate_drafts[draft.source_ref] = draft
+    enumeration = await connector.enumerate_changed(session, {})
+    sweep_drafts = {draft.source_ref: draft for draft in enumeration.drafts}
+
+    assert immediate_drafts == sweep_drafts
+    assert set(immediate_drafts) == {
+        "memory_node:16",
+        "memory_node:17",
+        "memory_node:21",
+        "memory_node:22",
+    }
+    assert immediate_drafts["memory_node:21"].extra["mirror_status"] == (
+        "visibility_withdrawn"
+    )
+    assert immediate_drafts["memory_node:22"].archived_at == updated_at
+
+
+async def test_memory_index_waits_for_outer_commit_after_savepoint_release(
+    session,
+    monkeypatch,
+):
+    from brain.systems.reconstructive_memory import embeddings as memory_embeddings
+    from brain.systems.reconstructive_memory import ingestion as memory_ingestion
+
+    spawn_index = MagicMock()
+    monkeypatch.setattr(memory_embeddings, "embed_node_texts", AsyncMock())
+    monkeypatch.setattr(
+        memory_ingestion,
+        "_spawn_knowledge_index_task",
+        spawn_index,
+    )
+
+    async with session.begin_nested():
+        ingested = await memory_ingestion.ingest_memory_source(
+            session,
+            content="Savepoint release must not publish a memory projection early.",
+            content_kind="decision",
+            source_kind="contract_test",
+            org_id=_ORG_ID,
+            visibility="team",
+        )
+
+    await asyncio.sleep(0)
+    spawn_index.assert_not_called()
+
+    await session.commit()
+    await asyncio.sleep(0)
+    spawn_index.assert_called_once_with([ingested.content_node_id])
+
+
+async def test_memory_index_queue_is_cleared_on_outer_rollback(
+    session,
+    monkeypatch,
+):
+    from brain.systems.reconstructive_memory import embeddings as memory_embeddings
+    from brain.systems.reconstructive_memory import ingestion as memory_ingestion
+
+    spawn_index = MagicMock()
+    monkeypatch.setattr(memory_embeddings, "embed_node_texts", AsyncMock())
+    monkeypatch.setattr(
+        memory_ingestion,
+        "_spawn_knowledge_index_task",
+        spawn_index,
+    )
+
+    await memory_ingestion.ingest_memory_source(
+        session,
+        content="Rolled-back memory must never publish a knowledge projection.",
+        content_kind="decision",
+        source_kind="contract_test",
+        org_id=_ORG_ID,
+        visibility="team",
+    )
+    await session.rollback()
+    await asyncio.sleep(0)
+
+    spawn_index.assert_not_called()
+    assert session.sync_session.info[memory_ingestion._INFO_QUEUE_KEY] == []
+
+
+async def test_memory_sweep_and_cursor_rewalk_are_idempotent_after_immediate_ingest(
+    session,
+    embedding_runtime,
+    monkeypatch,
+):
+    del embedding_runtime
+    payload = await _ingest_shared_memory_at_canonical_boundary(
+        session,
+        monkeypatch,
+        content="Cobalt narwhal decisions remain searchable after every reconciler pass.",
+        source_ref="immediate-then-sweep",
+    )
+    source_ref = f"memory_node:{payload['content_node_id']}"
+    before = await session.scalar(
+        select(KnowledgeItem).where(KnowledgeItem.source_ref == source_ref)
+    )
+    assert before is not None
+    item_id = before.id
+    digest = before.content_digest
+
+    first_sweep = await sync_connector(session, MemoryConnector(max_items=20))
+    await session.execute(
+        delete(KnowledgeSyncState).where(KnowledgeSyncState.source == "memory")
+    )
+    await session.flush()
+    rewalk = await sync_connector(session, MemoryConnector(max_items=20))
+
+    items = list(
+        (
+            await session.scalars(
+                select(KnowledgeItem).where(KnowledgeItem.source_ref == source_ref)
+            )
+        ).all()
+    )
+    embeddings = list(
+        (
+            await session.scalars(
+                select(KnowledgeItemEmbedding).where(
+                    KnowledgeItemEmbedding.item_id == item_id
+                )
+            )
+        ).all()
+    )
+    assert first_sweep.stats["ingested"] == 0
+    assert first_sweep.stats["skipped"] == 1
+    assert rewalk.stats["ingested"] == 0
+    assert rewalk.stats["skipped"] == 1
+    assert len(items) == 1
+    assert items[0].id == item_id
+    assert items[0].content_digest == digest
+    assert len(embeddings) == 1
+
+
+async def test_memory_index_failure_does_not_fail_committed_ingest(
+    session,
+    monkeypatch,
+    caplog,
+):
+    from brain.systems.knowledge import service as knowledge_service
+    from brain.systems.reconstructive_memory import embeddings as memory_embeddings
+    from brain.systems.reconstructive_memory import ingestion as memory_ingestion
+
+    monkeypatch.setattr(
+        memory_ingestion,
+        "UnitOfWork",
+        _committing_unit_of_work(session),
+    )
+    monkeypatch.setattr(memory_embeddings, "embed_node_texts", AsyncMock())
+    monkeypatch.setattr(
+        knowledge_service,
+        "index_memory_node",
+        AsyncMock(side_effect=RuntimeError("knowledge mirror unavailable")),
+    )
+
+    with caplog.at_level("ERROR", logger=memory_ingestion.__name__):
+        result = await memory_ingestion.ingest_memory_source(
+            session,
+            content="Amber kestrel preservation remains durable during an index outage.",
+            content_kind="episode",
+            source_kind="contract_test",
+            source_ref="failed-immediate-index",
+            org_id=_ORG_ID,
+            user_id="22222222-2222-4222-8222-222222222222",
+            visibility="org",
+        )
+        await session.commit()
+        await _wait_for_memory_knowledge_index(memory_ingestion)
+
+    node = await session.get(MemoryNode, result.content_node_id)
+    assert node is not None
+    assert node.text == "Amber kestrel preservation remains durable during an index outage."
+    assert "Immediate knowledge indexing failed for committed memory node" in caplog.text
 
 
 async def test_memory_connector_resumes_a_bounded_same_timestamp_backfill(

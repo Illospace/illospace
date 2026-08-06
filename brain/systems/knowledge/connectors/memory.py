@@ -30,6 +30,12 @@ _KNOWLEDGE_NODE_KINDS = ("content",)
 logger = logging.getLogger(__name__)
 
 
+def _candidate_node_query():
+    return select(MemoryNode).where(
+        MemoryNode.node_kind.in_(_KNOWLEDGE_NODE_KINDS)
+    )
+
+
 def _required_org_id(node: MemoryNode) -> str:
     if node.org_id is None:
         raise ValueError(f"Memory node {node.id} has no organization")
@@ -110,25 +116,29 @@ class MemoryConnector:
     def __init__(self, *, max_items: int = KNOWLEDGE_CONNECTOR_BATCH_SIZE):
         self.max_items = max(1, int(max_items))
 
-    async def enumerate_changed(
+    async def draft_for_node(
         self,
         session: AsyncSession,
-        cursor: dict[str, Any],
-    ) -> KnowledgeEnumeration:
-        watermark = UpdatedAtCursor.from_mapping(cursor)
-        statement = (
-            select(MemoryNode)
-            .where(MemoryNode.node_kind.in_(_KNOWLEDGE_NODE_KINDS))
-            .order_by(MemoryNode.updated_at.asc(), MemoryNode.id.asc())
-            .limit(self.max_items)
-        )
-        changed_after = watermark.changed_after(MemoryNode.updated_at, MemoryNode.id)
-        if changed_after is not None:
-            statement = statement.where(changed_after)
+        *,
+        node_id: int,
+    ) -> KnowledgeDraft | None:
+        """Build one immediate-index draft with the sweep's eligibility rules."""
 
-        rows = list((await session.scalars(statement)).all())
+        node = await session.scalar(
+            _candidate_node_query().where(MemoryNode.id == node_id)
+        )
+        if node is None:
+            return None
+        drafts = await self._drafts_for_rows(session, [node])
+        return drafts[0] if drafts else None
+
+    async def _drafts_for_rows(
+        self,
+        session: AsyncSession,
+        rows: list[MemoryNode],
+    ) -> list[KnowledgeDraft]:
         if not rows:
-            return KnowledgeEnumeration(drafts=[], cursor=dict(cursor))
+            return []
         source_refs = [f"memory_node:{node.id}" for node in rows]
         existing_org_ids = {
             source_ref: extra["org_id"]
@@ -178,7 +188,7 @@ class MemoryConnector:
             source_node_id: target_node_id
             for source_node_id, target_node_id in supersession_rows
         }
-        drafts = [
+        return [
             _draft_for_memory(node, superseded_by=superseded_by.get(node.id))
             if node.visibility in _SHARED_VISIBILITIES
             else _withdrawn_draft(
@@ -187,6 +197,26 @@ class MemoryConnector:
             )
             for node in draft_rows
         ]
+
+    async def enumerate_changed(
+        self,
+        session: AsyncSession,
+        cursor: dict[str, Any],
+    ) -> KnowledgeEnumeration:
+        watermark = UpdatedAtCursor.from_mapping(cursor)
+        statement = (
+            _candidate_node_query()
+            .order_by(MemoryNode.updated_at.asc(), MemoryNode.id.asc())
+            .limit(self.max_items)
+        )
+        changed_after = watermark.changed_after(MemoryNode.updated_at, MemoryNode.id)
+        if changed_after is not None:
+            statement = statement.where(changed_after)
+
+        rows = list((await session.scalars(statement)).all())
+        if not rows:
+            return KnowledgeEnumeration(drafts=[], cursor=dict(cursor))
+        drafts = await self._drafts_for_rows(session, rows)
         last = rows[-1]
         return KnowledgeEnumeration(
             drafts=drafts,
