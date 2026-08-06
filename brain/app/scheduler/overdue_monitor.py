@@ -175,34 +175,46 @@ class SchedulerOverdueMonitor:
                 last_tick_at=observation.last_tick_at,
             )
 
-        await self._deliver_alert(
-            policy=SlackFailureAlertPolicy(
-                provide_client=slack_web_client_from_runtime,
-                requested_by=self.name,
-                reason="Deliver an overdue scheduler job alert to the team.",
-                channel=(
-                    os.getenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "").strip()
-                    or "#alerts"
+        try:
+            await self._deliver_alert(
+                policy=SlackFailureAlertPolicy(
+                    provide_client=slack_web_client_from_runtime,
+                    requested_by=self.name,
+                    reason="Deliver an overdue scheduler job alert to the team.",
+                    channel=(
+                        os.getenv(
+                            "ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL",
+                            "",
+                        ).strip()
+                        or "#alerts"
+                    ),
+                    unknown_error_text="Scheduler jobs stopped advancing",
                 ),
-                unknown_error_text="Scheduler jobs stopped advancing",
-            ),
-            subject=FailureAlertSubject(
-                identity_label="Job key",
-                identity=overdue_candidates[0].job_key,
-                url_label="Scheduler",
-                url=f"{public_app_base_url()}/api/system/scheduler",
-                link_label="open scheduler state",
-            ),
-            presentation=FailureAlertPresentation(
-                title="Scheduler jobs overdue",
-                summary=_alert_summary(
-                    overdue_candidates,
-                    now=now,
-                    last_tick_at=observation.last_tick_at,
+                subject=FailureAlertSubject(
+                    identity_label="Job key",
+                    identity=overdue_candidates[0].job_key,
+                    url_label="Scheduler",
+                    url=f"{public_app_base_url()}/api/system/scheduler",
+                    link_label="open scheduler state",
                 ),
-            ),
-            error_text="Scheduler jobs stopped advancing past next_run_at.",
-        )
+                presentation=FailureAlertPresentation(
+                    title="Scheduler jobs overdue",
+                    summary=_alert_summary(
+                        overdue_candidates,
+                        now=now,
+                        last_tick_at=observation.last_tick_at,
+                    ),
+                ),
+                error_text="Scheduler jobs stopped advancing past next_run_at.",
+            )
+        except Exception:  # noqa: BLE001 - release lets the next tick retry
+            try:
+                await self._release_alert()
+            except Exception:  # noqa: BLE001 - preserve the delivery error
+                logger.exception(
+                    "Failed to release scheduler overdue alert after delivery failure"
+                )
+            raise
         return _SchedulerOverdueCheck(
             overdue_job_keys=overdue_job_keys,
             alert_sent=True,

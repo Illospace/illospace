@@ -167,6 +167,51 @@ async def test_alert_fires_once_per_freeze_and_rearms_after_recovery():
     assert len(deliveries) == 2
 
 
+async def test_failed_alert_delivery_releases_claim_and_retries_next_tick():
+    alert_latch = _FakeAlertLatch()
+    delivery_attempts = 0
+    successful_deliveries = []
+    release_calls = 0
+
+    async def candidates(_session, *, now):
+        return (_candidate(now=now, lag_seconds=60 * 60),)
+
+    async def liveness_checkpoint(_session):
+        return NOW
+
+    async def release_alert():
+        nonlocal release_calls
+        release_calls += 1
+        await alert_latch.release()
+
+    async def deliver_alert(**kwargs):
+        nonlocal delivery_attempts
+        delivery_attempts += 1
+        if delivery_attempts == 1:
+            raise RuntimeError("Slack delivery failed")
+        successful_deliveries.append(kwargs)
+
+    monitor = _monitor(
+        alert_latch=alert_latch,
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        release_alert=release_alert,
+        deliver_alert=deliver_alert,
+    )
+
+    with pytest.raises(RuntimeError, match="Slack delivery failed"):
+        await monitor._check(object(), now=NOW)
+
+    assert release_calls == 1
+    assert alert_latch.claimed is False
+
+    retry = await monitor._check(object(), now=NOW + timedelta(minutes=1))
+
+    assert retry.alert_sent is True
+    assert delivery_attempts == 2
+    assert len(successful_deliveries) == 1
+
+
 async def test_api_restart_mid_freeze_uses_the_existing_scheduler_claim():
     deliveries = []
     alert_latch = _FakeAlertLatch()
