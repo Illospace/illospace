@@ -36,6 +36,7 @@ from brain.systems.knowledge.connectors.base import (
     EnumerationFailureKind,
     KnowledgeDraft,
     KnowledgeEnumeration,
+    KnowledgeScope,
 )
 from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS
 from brain.systems.vault import async_resolve_org_project_bound_env_tokens
@@ -344,6 +345,7 @@ def _draft_for_issue(
         source="github",
         kind=kind,
         source_ref=f"github:{repo}#{number}",
+        scope=KnowledgeScope.ORGANIZATION,
         title=str(issue.get("title") or f"{repo}#{number}"),
         summary=summary,
         resolution=resolution,

@@ -13,6 +13,7 @@ from brain.systems.knowledge.connectors import (
     DomainRecordsConnector,
     GitHubConnector,
     MemoryConnector,
+    SkillsConnector,
     SlackKnowledgeConnector,
 )
 from brain.systems.knowledge.connectors.base import KnowledgeConnector
@@ -25,6 +26,7 @@ CONNECTOR_FACTORIES: tuple[Callable[[], KnowledgeConnector], ...] = (
     GitHubConnector,
     SlackKnowledgeConnector,
     MemoryConnector,
+    SkillsConnector,
 )
 
 
