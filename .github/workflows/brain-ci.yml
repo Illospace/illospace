@@ -215,10 +215,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check selected CI jobs
-        run: |
-          set -euo pipefail
-          bash scripts/ci_result_gate.sh \
-            "${{ needs.changes.result }}" \
-            "${{ needs.backend-fast.result }}" \
-            "${{ needs.frontend.result }}" \
-            "${{ needs.db-contract.result }}"
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: bash scripts/ci_result_gate.sh
