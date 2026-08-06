@@ -9,11 +9,15 @@ import re
 from typing import Any
 
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.config import KNOWLEDGE_EMBEDDING_DIM
 from brain.platform.db.models.knowledge import KnowledgeItem, KnowledgeItemEmbedding
+from brain.systems.knowledge.scope import (
+    KNOWLEDGE_SCOPE_EXTRA_KEY,
+    KnowledgeScope,
+)
 from brain.systems.knowledge.search_contract import (
     KNOWLEDGE_SEARCH_DEFAULT_RESULTS,
     KnowledgeSearchResponse,
@@ -149,7 +153,11 @@ def knowledge_item_filters(
         raise ValueError("org_id is required for knowledge search")
     filters: list[Any] = [
         KnowledgeItem.archived_at.is_(None),
-        KnowledgeItem.extra["org_id"].as_string() == clean_org_id,
+        or_(
+            KnowledgeItem.extra["org_id"].as_string() == clean_org_id,
+            KnowledgeItem.extra[KNOWLEDGE_SCOPE_EXTRA_KEY].as_string()
+            == KnowledgeScope.GLOBAL.value,
+        ),
     ]
     clean_sources = [str(value).strip() for value in sources or [] if str(value).strip()]
     clean_kinds = [str(value).strip() for value in kinds or [] if str(value).strip()]

@@ -1,7 +1,7 @@
 """Add durable Cycle execution-policy keys.
 
 Revision ID: 0052_cycle_execution_policy_key
-Revises: 0050_scheduler_cold_start
+Revises: 0051_open_ask_terminal_states
 Create Date: 2026-08-05
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 revision = "0052_cycle_execution_policy_key"
-down_revision = "0050_scheduler_cold_start"
+down_revision = "0051_open_ask_terminal_states"
 branch_labels = None
 depends_on = None
 

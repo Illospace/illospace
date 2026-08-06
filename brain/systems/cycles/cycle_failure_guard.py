@@ -10,14 +10,13 @@ import os
 from types import MappingProxyType
 from typing import Protocol, TypeAlias
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.common.time import ensure_utc
 from brain.platform.db.models.cycle import (
     Cycle,
-    CycleFailureGuardLatch,
     CycleFailureGuardObservation,
     CycleFailureGuardTriggerState,
 )
@@ -26,7 +25,6 @@ from brain.systems.failure_guard.core import (
     FailureRecord,
     FailureGuardEvaluation,
     FailureGuardLifecycleEvent,
-    FailureGuardLatch,
     FailureGuardStatefulTrigger,
     FailureGuardTrigger,
     FailureGuardTriggerKind,
@@ -37,6 +35,7 @@ from brain.systems.failure_guard.core import (
     async_transition_failure_guard_trigger_states,
     failure_signature,
 )
+from brain.systems.failure_guard.cycle_latches import CycleAlertLatchStore
 from brain.systems.failure_guard.state_repository import (
     SqlAlchemyFailureGuardStateStore,
 )
@@ -335,48 +334,10 @@ def cycle_failure_guard_registry() -> CycleFailureGuardRegistry:
 
 
 @dataclass(frozen=True)
-class CycleFailureGuardStore:
-    """Persist cycle latches and unique run-observation claims."""
+class CycleFailureObservationStore:
+    """Claim each terminal run once for cycle-failure evaluation."""
 
     session: AsyncSession
-    cycle_id: int
-
-    async def load_latches(
-        self,
-    ) -> dict[FailureGuardTriggerKind, CycleFailureGuardLatch]:
-        result = await self.session.scalars(
-            select(CycleFailureGuardLatch).where(
-                CycleFailureGuardLatch.cycle_id == self.cycle_id,
-            )
-        )
-        return {
-            FailureGuardTriggerKind(latch.trigger_kind): latch
-            for latch in result.all()
-        }
-
-    async def create_latch(
-        self,
-        trigger_kind: FailureGuardTriggerKind,
-        alerted_at: datetime,
-    ) -> FailureGuardLatch:
-        latch = CycleFailureGuardLatch(
-            cycle_id=self.cycle_id,
-            trigger_kind=str(trigger_kind),
-            alerted_at=alerted_at,
-        )
-        self.session.add(latch)
-        return latch
-
-    async def delete_latch(
-        self,
-        trigger_kind: FailureGuardTriggerKind,
-    ) -> None:
-        await self.session.execute(
-            delete(CycleFailureGuardLatch).where(
-                CycleFailureGuardLatch.cycle_id == self.cycle_id,
-                CycleFailureGuardLatch.trigger_kind == str(trigger_kind),
-            )
-        )
 
     async def claim_observation(
         self,
@@ -430,13 +391,14 @@ async def async_apply_cycle_terminal_failure_guard(
     cycle_run_id: int,
     status: str,
     error_text: str | None,
+    latch_store: CycleAlertLatchStore,
     now: datetime | None = None,
 ) -> FailureGuardEvaluation | None:
     """Claim and apply one canonical terminal cycle outcome exactly once."""
     policy = CYCLE_TERMINAL_POLICIES[status]
     now = ensure_utc(now)
-    store = CycleFailureGuardStore(session=session, cycle_id=cycle.id)
-    if not await store.claim_observation(cycle_run_id, now):
+    observation_store = CycleFailureObservationStore(session=session)
+    if not await observation_store.claim_observation(cycle_run_id, now):
         return None
     if isinstance(policy, IgnoreCycleTerminalPolicy):
         return None
@@ -453,10 +415,10 @@ async def async_apply_cycle_terminal_failure_guard(
     registry = cycle_failure_guard_registry()
     state_store = _cycle_failure_guard_state_store(session, locked_cycle.id)
     if isinstance(policy, ResetCycleTerminalPolicy):
-        latches = dict(await store.load_latches())
+        latches = dict(await latch_store.load_latches())
         for trigger in registry.triggers:
             if trigger.kind in latches:
-                await store.delete_latch(trigger.kind)
+                await latch_store.delete_latch(trigger.kind)
         await async_transition_failure_guard_trigger_states(
             triggers=registry.triggers,
             context=CycleFailureGuardLifecycleContext(
@@ -486,11 +448,11 @@ async def async_apply_cycle_terminal_failure_guard(
         store=state_store,
     )
     if signature_changed:
-        latches = dict(await store.load_latches())
+        latches = dict(await latch_store.load_latches())
         reset_latch = False
         for trigger in registry.triggers:
             if trigger.kind in latches:
-                await store.delete_latch(trigger.kind)
+                await latch_store.delete_latch(trigger.kind)
                 reset_latch = True
         if reset_latch:
             await session.flush()
@@ -509,7 +471,7 @@ async def async_apply_cycle_terminal_failure_guard(
         failure_signature=locked_cycle.failure_signature,
         last_error=locked_cycle.last_failure_error,
         now=now,
-        store=store,
+        store=latch_store,
         latch_new_edges=True,
     )
     await session.flush()

@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import func, select
 
 from brain.kernel.common.serialization import jsonable
+from brain.kernel.common.time import assume_utc_optional
 from brain.platform.db.models.cycle import (
     Cycle,
     CycleGuidance,
@@ -14,6 +15,9 @@ from brain.platform.db.models.cycle import (
     CycleRevision,
     CycleRun,
     CycleRunEvaluation,
+)
+from brain.systems.briefing.packet_outcome_monitor import (
+    async_monitor_packet_outcomes,
 )
 from brain.systems.cycles.common import (
     CYCLE_LEDGER_OUTPUT_TARGET_TYPE,
@@ -56,6 +60,7 @@ from brain.systems.runs.token_usage import (
     usage_totals_payload,
 )
 from brain.systems.failure_guard.core import serialize_failure_guard
+from brain.systems.failure_guard.cycle_latches import CycleAlertLatchStore
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +299,7 @@ def append_cycle_run_output_target_snapshot(
     run.output_targets_snapshot = jsonable(output_targets)
 
 
-async def _apply_cycle_terminal_failure_guard(
+async def _apply_cycle_terminal_guards(
     session,
     run: CycleRun,
     cycle: Cycle,
@@ -303,12 +308,33 @@ async def _apply_cycle_terminal_failure_guard(
     error: str | None,
     now,
 ) -> None:
+    latch_store = CycleAlertLatchStore(session=session, cycle_id=cycle.id)
+    run_kind = str(
+        cycle_run_launch_context(run).get("run_kind")
+        or SCHEDULED_DIGEST_RUN_KIND
+    )
+    if run_kind == SCHEDULED_DIGEST_RUN_KIND:
+        try:
+            await async_monitor_packet_outcomes(
+                session,
+                cycle,
+                cycle_run_id=run.id,
+                now=now,
+                latch_store=latch_store,
+            )
+        except Exception:
+            logger.exception(
+                "Packet outcome monitor failed safely: cycle_id=%s cycle_run_id=%s",
+                cycle.id,
+                run.id,
+            )
     evaluation = await async_apply_cycle_terminal_failure_guard(
         session,
         cycle,
         cycle_run_id=run.id,
         status=status,
         error_text=error,
+        latch_store=latch_store,
         now=now,
     )
     if evaluation is not None:
@@ -344,7 +370,7 @@ async def finalize_cycle_run(
         error=error,
         skip_reason=skip_reason,
     )
-    await _apply_cycle_terminal_failure_guard(
+    await _apply_cycle_terminal_guards(
         session,
         run,
         cycle,
@@ -381,15 +407,15 @@ async def finalize_stale_cycle_run(
         skip_reason=skip_reason,
         evaluator_type="recovery",
     )
-    cycle_last_run_at = _aware_utc(cycle.last_run_at)
-    scheduled_for = _aware_utc(run.scheduled_for)
+    cycle_last_run_at = assume_utc_optional(cycle.last_run_at)
+    scheduled_for = assume_utc_optional(run.scheduled_for)
     if cycle_last_run_at is None or (
         scheduled_for is not None and scheduled_for >= cycle_last_run_at
     ):
         cycle.last_run_at = now
         cycle.last_status = status
         cycle.last_error = error
-    await _apply_cycle_terminal_failure_guard(
+    await _apply_cycle_terminal_guards(
         session,
         run,
         cycle,
@@ -582,11 +608,3 @@ def cycle_run_evaluation_summary(
         detail = skip_reason or "unknown skip reason"
         return f"Cycle run was skipped and recorded in the Cycle ledger: {detail}" + burn
     return f"Cycle run reached status {status} and was recorded in the Cycle ledger." + burn
-
-
-def _aware_utc(value):
-    from datetime import timezone
-
-    if value is not None and value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value

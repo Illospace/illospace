@@ -7,6 +7,7 @@ nodes, and graph edges in one transaction.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.db.repositories.reconstructive_memory import (
     AssertionDraft,
     EdgeDraft,
@@ -26,6 +28,10 @@ from brain.platform.db.repositories.reconstructive_memory import (
 )
 
 logger = logging.getLogger(__name__)
+
+_INFO_QUEUE_KEY = "illo_memory_knowledge_index_queue"
+_INFO_ARMED_KEY = "illo_memory_knowledge_index_listeners_armed"
+_POST_COMMIT_TASKS: set[asyncio.Task] = set()
 
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
 _STOP_WORDS = {
@@ -90,6 +96,115 @@ class IngestedMemorySource:
             "tag_node_ids": list(self.tag_node_ids),
             "edge_ids": list(self.edge_ids),
         }
+
+
+async def _index_committed_memory_node(node_id: int) -> None:
+    """Best-effort mirror write after the memory transaction is durable."""
+
+    from brain.systems.knowledge.service import index_memory_node
+
+    try:
+        async with UnitOfWork() as uow:
+            stats = await index_memory_node(uow.session, node_id=node_id)
+            if stats.failed:
+                logger.warning(
+                    "Immediate knowledge indexing degraded for committed memory node %s",
+                    node_id,
+                )
+    except Exception:
+        # Knowledge is a disposable mirror. A failed index write must never
+        # change the successful outcome of the committed memory ingest.
+        logger.exception(
+            "Immediate knowledge indexing failed for committed memory node %s",
+            node_id,
+        )
+
+
+async def _index_committed_memory_nodes(node_ids: list[int]) -> None:
+    for node_id in node_ids:
+        await _index_committed_memory_node(node_id)
+
+
+def _reap_knowledge_index_task(task: asyncio.Task) -> None:
+    _POST_COMMIT_TASKS.discard(task)
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+    if exc is not None:
+        logger.exception(
+            "Immediate knowledge indexing failed for committed memory node",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+
+def _spawn_knowledge_index_task(node_ids: list[int]) -> None:
+    try:
+        task = asyncio.ensure_future(_index_committed_memory_nodes(node_ids))
+        _POST_COMMIT_TASKS.add(task)
+        task.add_done_callback(_reap_knowledge_index_task)
+    except Exception:
+        logger.exception(
+            "Immediate knowledge indexing failed for committed memory node %s",
+            node_ids,
+        )
+
+
+def _schedule_post_commit_knowledge_index(
+    session: AsyncSession,
+    *,
+    node_id: int,
+) -> bool:
+    """Queue immediate indexing for the session's next outer commit."""
+
+    try:
+        sync_session = getattr(session, "sync_session", None)
+        if sync_session is None:
+            return False
+        loop = asyncio.get_running_loop()
+        queue: list[int] = sync_session.info.setdefault(_INFO_QUEUE_KEY, [])
+        queue.append(int(node_id))
+        if sync_session.info.get(_INFO_ARMED_KEY):
+            return True
+
+        def _drain_into_task(target_session: Any) -> None:
+            # SQLAlchemy fires after_commit for a savepoint release too. The
+            # nested transaction is still available during that callback, so
+            # keep the queue until the outer transaction commits.
+            previous = target_session.get_nested_transaction()
+            if getattr(previous, "nested", False):
+                return
+            drained = list(dict.fromkeys(target_session.info.get(_INFO_QUEUE_KEY) or []))
+            target_session.info[_INFO_QUEUE_KEY] = []
+            if not drained:
+                return
+            try:
+                loop.call_soon_threadsafe(_spawn_knowledge_index_task, drained)
+            except Exception:
+                logger.exception(
+                    "Immediate knowledge indexing failed for committed memory node %s",
+                    drained,
+                )
+
+        def _on_rollback(target_session: Any, previous: Any) -> None:
+            if getattr(previous, "nested", False):
+                return
+            target_session.info[_INFO_QUEUE_KEY] = []
+
+        from sqlalchemy import event
+
+        event.listen(sync_session, "after_commit", _drain_into_task)
+        event.listen(sync_session, "after_soft_rollback", _on_rollback)
+        sync_session.info[_INFO_ARMED_KEY] = True
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Immediate knowledge indexing not armed for memory node %s (%s); "
+            "the periodic sweep will deliver it",
+            node_id,
+            exc,
+        )
+        return False
 
 
 async def ingest_memory_source(
@@ -254,7 +369,7 @@ async def ingest_memory_source(
             exc,
         )
 
-    return IngestedMemorySource(
+    result = IngestedMemorySource(
         source_id=source.id,
         span_ids=span_ids,
         content_node_id=content_node.id,
@@ -263,6 +378,11 @@ async def ingest_memory_source(
         tag_node_ids=tuple(node.id for node in tag_nodes),
         edge_ids=tuple(edge.id for edge in edges),
     )
+    _schedule_post_commit_knowledge_index(
+        session,
+        node_id=result.content_node_id,
+    )
+    return result
 
 
 def _clean_content(content: str) -> str:

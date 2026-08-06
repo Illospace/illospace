@@ -14,6 +14,7 @@ from starlette.responses import JSONResponse
 
 from brain.app.api.config import CORS_ORIGINS, SECRET_KEY, validate_auth_config
 from brain.app.api.deps import get_db
+from brain.app.scheduler.overdue_monitor import SchedulerOverdueMonitor
 
 validate_auth_config()
 
@@ -43,6 +44,7 @@ _OPS_TRIGGER_EVENTS = frozenset(
 _ops_pending = False
 _OPS_THROTTLE_SEC = 2.0
 _run_event_consumer_task: asyncio.Task | None = None
+_scheduler_overdue_monitor_task: asyncio.Task[None] | None = None
 _GLOBAL_WS_EVENT_ALLOWLIST: frozenset[str] = frozenset()
 
 # Reference to the main asyncio event loop, set during lifespan startup.
@@ -192,12 +194,22 @@ def _schedule_product_event_publish(event_type, data):
 @asynccontextmanager
 async def lifespan(app):
     """Wire the brain event bus to WebSocket broadcasting on startup."""
-    global _main_loop, _run_event_consumer_task
+    global _main_loop, _run_event_consumer_task, _scheduler_overdue_monitor_task
     _main_loop = asyncio.get_running_loop()
     inline_runner_started = False
 
     from brain.systems.cortex.events import set_publisher
     set_publisher(_schedule_product_event_publish)
+    scheduler_overdue_monitor = SchedulerOverdueMonitor()
+    _scheduler_overdue_monitor_task = _main_loop.create_task(
+        scheduler_overdue_monitor.run(),
+        name=scheduler_overdue_monitor.name,
+    )
+    logger.info(
+        "scheduler_overdue_monitor_started",
+        host="api",
+        monitor=scheduler_overdue_monitor.name,
+    )
     await _ensure_starting_skill_bundle()
     if _should_start_run_event_consumer():
         _run_event_consumer_task = _main_loop.create_task(_run_event_consumer_loop())
@@ -232,6 +244,18 @@ async def lifespan(app):
     try:
         yield
     finally:
+        if _scheduler_overdue_monitor_task is not None:
+            _scheduler_overdue_monitor_task.cancel()
+            try:
+                await _scheduler_overdue_monitor_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "scheduler_overdue_monitor_stop_failed",
+                    error=str(exc),
+                )
+            _scheduler_overdue_monitor_task = None
         if _run_event_consumer_task is not None:
             _run_event_consumer_task.cancel()
             try:

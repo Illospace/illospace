@@ -19,11 +19,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from brain.contracts.statuses import OPEN_ASK_STATUS_VALUES, OpenAskStatus
 from brain.platform.db.base import Base, TimestampMixin
 from brain.platform.db.constraints import check_in_constraint
 
 
-OPEN_ASK_STATUSES = ("open", "answered")
 OBLIGATION_NOTICE_STATES = ("pending", "posting", "delivered", "superseded")
 UUIDString = UUID(as_uuid=False).with_variant(String, "sqlite")
 
@@ -38,7 +38,6 @@ OPEN_ASK_OBLIGATION_KINDS = tuple(kind.value for kind in ObligationKind)
 __all__ = [
     "OBLIGATION_NOTICE_STATES",
     "OPEN_ASK_OBLIGATION_KINDS",
-    "OPEN_ASK_STATUSES",
     "ObligationKind",
     "ObligationNotice",
     "OpenAsk",
@@ -51,7 +50,7 @@ class OpenAsk(Base, TimestampMixin):
     __tablename__ = "open_asks"
     __table_args__ = (
         CheckConstraint(
-            check_in_constraint("status", OPEN_ASK_STATUSES),
+            check_in_constraint("status", OPEN_ASK_STATUS_VALUES),
             name="ck_open_asks_status",
         ),
         CheckConstraint(
@@ -131,8 +130,8 @@ class OpenAsk(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
-        server_default=text("'open'"),
-        default="open",
+        server_default=text(f"'{OpenAskStatus.OPEN.value}'"),
+        default=OpenAskStatus.OPEN,
     )
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     answer_text: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -145,11 +144,20 @@ class OpenAsk(Base, TimestampMixin):
     )
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivered_message_ts: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    routed_to_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    routed_to_slack_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    routed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     @property
     def owner_label(self) -> str:
         """Display ownership without pretending every obligation has a requester."""
 
+        if self.status == OpenAskStatus.ROUTED and self.routed_to_name:
+            return str(self.routed_to_name)
+        if self.status == OpenAskStatus.ROUTED and self.routed_to_slack_id:
+            return f"<@{self.routed_to_slack_id}>"
         if self.obligation_kind == ObligationKind.HUMAN_ASK:
             if self.requester_name:
                 return str(self.requester_name)

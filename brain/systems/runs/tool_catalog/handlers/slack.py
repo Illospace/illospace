@@ -19,7 +19,11 @@ from brain.systems.cycles.exception_ping import (
     slack_mentioned_teammates,
 )
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
-from brain.systems.runs.obligation_specs import ObligationSettlementPolicy, obligation_spec_from_metadata
+from brain.systems.runs.obligation_specs import (
+    ObligationSettlementPolicy,
+    obligation_spec_from_metadata,
+)
+from brain.systems.runs.outbound_reply_admission import admit_outbound_reply
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _current_runtime_secret_context
 from brain.systems.slack.client import SlackApiError, SlackDeliveryError
 from brain.systems.slack.exception_ping_posting import post_exception_ping
@@ -443,12 +447,20 @@ async def _handle_post_slack_reply(
     image_alt: str | None = None,
     answers_open_ask: bool = False,
     exception_ping: dict[str, Any] | None = None,
+    coordination: dict[str, Any] | None = None,
 ) -> str:
     """Post an Illo-authored reply to the originating Slack surface."""
 
     answers_open_ask = _coerce_bool(answers_open_ask, default=False)
-    obligation_spec = obligation_spec_from_metadata(_execution_metadata().get("obligation_spec"))
-    if obligation_spec and obligation_spec.settlement_policy is ObligationSettlementPolicy.ANSWERER_SLACK_REPLY:
+    obligation_spec = obligation_spec_from_metadata(
+        _execution_metadata().get("obligation_spec")
+    )
+    routes_open_ask = bool(
+        obligation_spec
+        and obligation_spec.settlement_policy
+        is ObligationSettlementPolicy.ANSWERER_SLACK_REPLY
+    )
+    if routes_open_ask:
         answers_open_ask = False
     submitted_text = str(body or "")
     text = submitted_text
@@ -463,6 +475,15 @@ async def _handle_post_slack_reply(
         return json.dumps({"error": str(exc)})
     if not text.strip() and image_upload is None:
         return json.dumps({"error": "post_slack_reply requires body or image_data"})
+
+    admission = admit_outbound_reply(
+        agent_context=_agent_context,
+        content=text,
+        coordination=coordination,
+        review_completion=False,
+    )
+    if not admission.admitted:
+        return json.dumps(admission.blocked_result, default=str)
 
     if _makes_persistence_claim(text):
         try:
@@ -754,6 +775,7 @@ async def _handle_post_slack_reply(
     submitted_chars = int(response.get("submitted_chars", len(text)))
     posted_chars = int(response.get("posted_chars", submitted_chars))
     answered_open_asks = 0
+    routed_open_asks = 0
     execution_metadata = _execution_metadata()
     run_id = execution_metadata.get("run_id") or getattr(
         _agent_context,
@@ -776,29 +798,44 @@ async def _handle_post_slack_reply(
         ).strip() or None
     if target_visibility == "public" and obligation_thread_ts and org_id:
         from brain.systems.runs.slack_delivery import (
-            DeliveredSlackReply,
+            DeliveredSlackAnswer,
+            DeliveredSlackRoute,
             delivered_message_ts,
             persist_delivered_slack_answer,
+            persist_delivered_slack_route,
         )
 
-        counts = await persist_delivered_slack_answer(
-            DeliveredSlackReply(
-                org_id=org_id,
-                channel_id=target_channel,
-                thread_ts=obligation_thread_ts,
-                answering_run_id=run_id,
-                slack_message_ts=delivered_message_ts(response) or "",
-                answer_text=text,
-                is_answer=answers_open_ask,
-                artifact_kind="slack_image" if image_upload is not None else None,
-                artifact_ref=(
-                    str(image_filename or image_title or "").strip() or None
-                    if image_upload is not None
-                    else None
-                ),
+        message_ts = delivered_message_ts(response) or ""
+        if routes_open_ask and obligation_spec is not None and run_id is not None:
+            routed_open_asks = await persist_delivered_slack_route(
+                DeliveredSlackRoute(
+                    org_id=org_id,
+                    channel_id=target_channel,
+                    thread_ts=obligation_thread_ts,
+                    answering_run_id=run_id,
+                    slack_message_ts=message_ts,
+                    routed_to_name=obligation_spec.answerer.name,
+                    routed_to_slack_id=obligation_spec.answerer.slack_user_id,
+                )
             )
-        )
-        answered_open_asks = counts.answered_open_asks
+        elif answers_open_ask:
+            counts = await persist_delivered_slack_answer(
+                DeliveredSlackAnswer(
+                    org_id=org_id,
+                    channel_id=target_channel,
+                    thread_ts=obligation_thread_ts,
+                    answering_run_id=run_id,
+                    slack_message_ts=message_ts,
+                    answer_text=text,
+                    artifact_kind="slack_image" if image_upload is not None else None,
+                    artifact_ref=(
+                        str(image_filename or image_title or "").strip() or None
+                        if image_upload is not None
+                        else None
+                    ),
+                )
+            )
+            answered_open_asks = counts.answered_open_asks
     return json.dumps(
         {
             "ok": True,
@@ -814,6 +851,7 @@ async def _handle_post_slack_reply(
             "truncated": bool(response.get("truncated", False)),
             "answers_open_ask": bool(answers_open_ask),
             "answered_open_asks": answered_open_asks,
+            "routed_open_asks": routed_open_asks,
             "slack": response,
         },
         default=str,

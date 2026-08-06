@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from brain.platform.db.models.cycle import Cycle, CycleRun
-from brain.systems.cycles.execution_effects import CycleExecutionEffect
 from brain.systems.cycles.promotion_readiness import (
     PROMOTION_READINESS_POLICY,
+    PromotionReadinessOutcome,
     async_apply_promotion_readiness_gate,
 )
 
@@ -25,7 +25,7 @@ class CycleExecutionGate(Protocol):
         *,
         cycle: Cycle,
         run: CycleRun,
-    ) -> CycleExecutionEffect | None: ...
+    ) -> PromotionReadinessOutcome | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +108,7 @@ async def async_apply_cycle_execution_policy(
     *,
     cycle: Cycle,
     run: CycleRun,
-) -> CycleExecutionEffect | None:
+) -> PromotionReadinessOutcome | None:
     """Apply the configured policy, or fail the run when it cannot resolve."""
 
     configured_key = getattr(cycle, "execution_policy_key", None)
@@ -140,7 +140,7 @@ async def async_apply_cycle_execution_policy(
                 "error": error,
             },
         )
-        return CycleExecutionEffect.finalize(status="failed", error=error)
+        return PromotionReadinessOutcome.CONFIGURATION_ERROR
     return await gate(session, cycle=cycle, run=run)
 
 

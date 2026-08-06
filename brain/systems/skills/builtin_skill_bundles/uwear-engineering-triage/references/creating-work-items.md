@@ -17,6 +17,29 @@ Two different places can hold work, and they are NOT the same thing:
 
 Decide as follows.
 
+### Pre-create ownership and readiness gate
+
+Immediately before every `create_github_issue` call, including calls for
+customer-support reports, apply the core operating doc's **Ownership** section
+to the evidence collected for the issue. That section is the single canonical
+resolver: do not copy its people or work-class rules into this playbook.
+
+- An explicit human assignment wins. Otherwise, resolve builder-first and use
+  the core specialization and load-balancing tie-breakers. Pass the resolved
+  GitHub login in `assignees` on the same `create_github_issue` call; do not
+  create the issue first and plan to assign it later.
+- For a customer-generation report, the investigation hypothesis must exist
+  before this gate runs. "No owner up front" is an investigation rule, not an
+  instruction to file the resulting issue unassigned.
+- Apply `ready-for-agent` in `labels` when the issue meets the definition in
+  the core **States** section: it is scoped enough for an autonomous agent to
+  implement and open a PR without human judgment, credentials, external
+  testing, or a manual design/release decision.
+- If the ownership evidence remains genuinely ambiguous, omit `assignees` and
+  add `Ownership: Unassigned — <specific ambiguity or missing evidence>.` to
+  the issue body. An empty assignee list without that explanation is not a
+  completed ownership decision.
+
 ### Customer-bug filing policy
 
 - **Customer-reported bugs have one declared destination.** The durable artifact
@@ -24,7 +47,8 @@ Decide as follows.
   mirror, never a substitute. Create the GitHub issue first, then mirror it with
   the returned issue number/URL and stable external id. The issue body must carry
   the customer's own words, the concrete impact (including credit loss), and the
-  Slack `origin_ref`; honor an explicit assignee request using the verified GitHub
+  Slack `origin_ref`; run the pre-create ownership and readiness gate above,
+  including honoring an explicit assignee request using the verified GitHub
   identity. If no more-specific tracker exists, use Domain `1` as the existing
   default. Never create a Domain during filing: propose the schema change for
   later review and complete the immediate mirror in Domain `1`.

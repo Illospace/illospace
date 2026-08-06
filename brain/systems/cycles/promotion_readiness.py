@@ -23,7 +23,6 @@ from brain.systems.cycles.cycle_verdict_ledger import (
     ClosingBlockVerdict,
     persist_cycle_run_short_circuit_verdict,
 )
-from brain.systems.cycles.execution_effects import CycleExecutionEffect
 
 BaselineReader = Callable[[Any, str], Awaitable[tuple[str | None, str | None]]]
 TokenResolver = Callable[[Cycle], Awaitable[str]]
@@ -38,6 +37,7 @@ class PromotionReadinessOutcome(StrEnum):
     IDLE = "idle"
     EVALUATE = "evaluate"
     UNAVAILABLE = "unavailable"
+    CONFIGURATION_ERROR = "configuration_error"
 
 
 @dataclass(frozen=True)
@@ -97,24 +97,6 @@ PROMOTION_READINESS_POLICY = PromotionReadinessPolicy(
     gate_name="promotion_readiness_sha_pair",
     snapshot_key="promotion_readiness_gate",
 )
-
-
-_OUTCOME_EFFECTS = {
-    PromotionReadinessOutcome.UNCHANGED: CycleExecutionEffect.admit(
-        admission_metadata_patch={
-            "tool_policy": {
-                "disabled_tools": ["read_github_source"],
-                "reason": "promotion_readiness_unchanged",
-            }
-        }
-    ),
-    PromotionReadinessOutcome.IDLE: CycleExecutionEffect.finalize(
-        status="skipped",
-        skip_reason="promotion_readiness_idle",
-    ),
-    PromotionReadinessOutcome.EVALUATE: CycleExecutionEffect.admit(),
-    PromotionReadinessOutcome.UNAVAILABLE: CycleExecutionEffect.admit(),
-}
 
 
 async def _async_last_evaluated_pair(
@@ -220,8 +202,8 @@ async def async_apply_promotion_readiness_gate(
     token_resolver: TokenResolver | None = None,
     branch_head_reader: BranchHeadReader | None = None,
     branch_comparison_reader: BranchComparisonReader | None = None,
-) -> CycleExecutionEffect | None:
-    """Return one generic execution effect for the configured scheduled Cycle."""
+) -> PromotionReadinessOutcome | None:
+    """Record and return the policy outcome for the configured scheduled Cycle."""
 
     launch_context = cycle_run_launch_context(run)
     if launch_context.get("run_kind") != SCHEDULED_DIGEST_RUN_KIND:
@@ -318,7 +300,7 @@ async def async_apply_promotion_readiness_gate(
     if outcome is PromotionReadinessOutcome.IDLE:
         run.started_at = run.started_at or evaluated_at
         persist_cycle_run_short_circuit_verdict(run, _idle_closing_verdict(evidence))
-    return _OUTCOME_EFFECTS[outcome]
+    return outcome
 
 
 __all__ = [

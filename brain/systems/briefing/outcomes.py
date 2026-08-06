@@ -26,10 +26,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import math
 from statistics import median
 from typing import Any
 
 IGNORED_AFTER_HOURS = 48
+DEFAULT_OUTCOME_WINDOW_HOURS = 168.0
+MIN_OUTCOME_WINDOW_HOURS = 1.0
+MAX_OUTCOME_WINDOW_HOURS = 24.0 * 90.0
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,30 @@ class OutcomeSummary:
             "median_minutes_to_launch": self.median_minutes_to_launch,
             "per_member": dict(self.per_member),
         }
+
+
+@dataclass(frozen=True)
+class PacketOutcomeReport:
+    """One time-anchored outcomes read shared by packet consumers."""
+
+    since_hours: float
+    now: datetime
+    summary: OutcomeSummary
+
+    @property
+    def digest_line(self) -> str | None:
+        return format_outcomes_line(self.summary)
+
+
+def normalize_outcome_window_hours(value: Any = None) -> float:
+    """Return one finite packet-outcome window within the supported bounds."""
+    try:
+        hours = DEFAULT_OUTCOME_WINDOW_HOURS if value is None else float(value)
+    except (TypeError, ValueError):
+        hours = DEFAULT_OUTCOME_WINDOW_HOURS
+    if not math.isfinite(hours):
+        hours = DEFAULT_OUTCOME_WINDOW_HOURS
+    return max(MIN_OUTCOME_WINDOW_HOURS, min(hours, MAX_OUTCOME_WINDOW_HOURS))
 
 
 def _meta(row: Any) -> dict[str, Any]:
@@ -173,4 +201,28 @@ async def load_packet_handoffs(session: Any, *, org_id: str, since: datetime) ->
         )
         .scalars()
         .all()
+    )
+
+
+async def load_packet_outcome_report(
+    session: Any,
+    *,
+    org_id: str,
+    now: datetime,
+    since_hours: float = DEFAULT_OUTCOME_WINDOW_HOURS,
+) -> PacketOutcomeReport:
+    """Load one shared, time-anchored packet outcome report for an org."""
+    anchored_now = _ts(now)
+    if anchored_now is None:
+        raise ValueError("packet outcome report requires a datetime anchor")
+    window_hours = normalize_outcome_window_hours(since_hours)
+    rows = await load_packet_handoffs(
+        session,
+        org_id=org_id,
+        since=anchored_now - timedelta(hours=window_hours),
+    )
+    return PacketOutcomeReport(
+        since_hours=window_hours,
+        now=anchored_now,
+        summary=packet_outcomes(rows, now=anchored_now),
     )
