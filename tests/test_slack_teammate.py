@@ -762,7 +762,7 @@ async def test_post_slack_reply_tool_posts_to_triggering_thread(monkeypatch):
 async def test_post_slack_reply_closes_ledger_only_for_a_delivered_answer(monkeypatch):
     from brain.platform.db.models.open_ask import ObligationKind
     from brain.systems.runs.execution_context import bind_agent_context
-    from brain.systems.runs.open_asks import DeliveredSlackAnswerCounts
+    from brain.systems.runs.open_ask_settlement import DeliveredSlackAnswerCounts
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
 
     class _SlackClient:

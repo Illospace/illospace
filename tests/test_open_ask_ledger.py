@@ -268,7 +268,7 @@ async def test_failure_or_failed_thread_delivery_never_closes_open_ask(
 async def test_admission_preserves_verbatim_ask_and_answer_requires_delivery_timestamp(
     session,
 ):
-    from brain.systems.runs.open_asks import mark_open_ask_answered
+    from brain.systems.runs.open_ask_settlement import mark_open_ask_answered
     from brain.systems.runs.work_intake import admit_work
 
     event = _slack_admission_event()
@@ -376,7 +376,7 @@ async def test_run_deferral_is_durable_deduplicated_and_closed_only_by_delivery(
     monkeypatch,
 ):
     from brain.systems.runs.failures import terminal_run_notice_condition
-    from brain.systems.runs.open_asks import list_open_ask_stragglers
+    from brain.systems.runs.open_ask_digest import list_open_ask_stragglers
     from brain.systems.runs.obligation_notices import (
         deliver_pending_obligation_notices,
     )
@@ -583,7 +583,7 @@ async def test_uncommitted_deferral_never_reaches_slack_when_outer_transaction_f
 
 
 def test_delivered_slack_transition_commands_have_disjoint_fields():
-    from brain.systems.runs.open_asks import (
+    from brain.systems.runs.open_ask_settlement import (
         DeliveredSlackAnswer,
         DeliveredSlackRoute,
     )
@@ -597,11 +597,11 @@ def test_delivered_slack_transition_commands_have_disjoint_fields():
 
 @pytest.mark.asyncio
 async def test_stale_notice_claim_is_disambiguated_before_any_resend(session):
-    from brain.systems.runs.open_asks import record_run_deferral
     from brain.systems.runs.obligation_notices import (
         STALE_NOTICE_POSTING_GRACE,
         deliver_pending_obligation_notices,
     )
+    from brain.systems.runs.run_deferrals import record_run_deferral
 
     run = await _create_slack_run(session)
     _obligation, notice, _created = await record_run_deferral(
@@ -664,15 +664,15 @@ async def test_stale_notice_claim_is_disambiguated_before_any_resend(session):
 
 @pytest.mark.asyncio
 async def test_answer_supersedes_a_stale_notice_proven_absent(session):
-    from brain.systems.runs.open_asks import (
+    from brain.systems.runs.open_ask_settlement import (
         DeliveredSlackAnswer,
         record_delivered_slack_answer,
-        record_run_deferral,
     )
     from brain.systems.runs.obligation_notices import (
         STALE_NOTICE_POSTING_GRACE,
         deliver_pending_obligation_notices,
     )
+    from brain.systems.runs.run_deferrals import record_run_deferral
 
     run = await _create_slack_run(session)
     _obligation, notice, _created = await record_run_deferral(
@@ -731,11 +731,11 @@ async def test_delivered_answer_returns_kind_counts_and_closes_all_matching_kind
     session,
 ):
     from brain.platform.db.models.open_ask import ObligationKind
-    from brain.systems.runs.open_asks import (
+    from brain.systems.runs.open_ask_settlement import (
         DeliveredSlackAnswer,
         record_delivered_slack_answer,
-        record_run_deferral,
     )
+    from brain.systems.runs.run_deferrals import record_run_deferral
 
     run_id, human_ask = await _admit_originating_ask(session)
     run = await session.get(AgentRunRow, run_id)

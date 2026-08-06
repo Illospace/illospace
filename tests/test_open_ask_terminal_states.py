@@ -133,7 +133,9 @@ async def test_contact_form_acknowledgement_routes_then_owner_reply_answers(
     monkeypatch,
 ):
     from brain.systems.runs.execution_context import bind_agent_context
-    from brain.systems.runs.open_asks import record_inbound_slack_obligation_answer
+    from brain.systems.runs.open_ask_settlement import (
+        record_inbound_slack_obligation_answer,
+    )
     from brain.systems.runs.tool_catalog.handlers.slack import _handle_post_slack_reply
     from brain.systems.runs.work_intake import admit_work
 
@@ -221,10 +223,8 @@ async def test_scheduled_straggler_collection_expires_only_old_terminal_deferral
     terminal_session,
 ):
     from brain.systems.cycles.service import _async_attach_open_ask_stragglers
-    from brain.systems.runs.open_asks import (
-        RUN_DEFERRAL_EXPIRY_AFTER,
-        list_open_ask_stragglers,
-    )
+    from brain.systems.runs.open_ask_digest import list_open_ask_stragglers
+    from brain.systems.runs.run_deferrals import RUN_DEFERRAL_EXPIRY_AFTER
 
     now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
     runs = []
@@ -346,14 +346,14 @@ async def test_failed_scheduled_sweep_rolls_back_its_savepoint(
     monkeypatch,
 ):
     from brain.systems.cycles.service import _async_attach_open_ask_stragglers
-    from brain.systems.runs import open_asks
+    from brain.systems.runs import run_deferrals
 
     async def fail_during_sweep(session, **_kwargs):
         session.add(Org(id=ORG_ID, name="Duplicate", slug="duplicate"))
         await session.flush()
 
     monkeypatch.setattr(
-        open_asks,
+        run_deferrals,
         "expire_stale_run_deferrals",
         fail_during_sweep,
     )

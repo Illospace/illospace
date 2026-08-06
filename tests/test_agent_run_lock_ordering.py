@@ -40,7 +40,7 @@ class _PostgresBind:
 
 
 async def test_inbound_slack_obligation_answer_only_locks_mutated_tables():
-    from brain.systems.runs.open_asks import (
+    from brain.systems.runs.open_ask_settlement import (
         record_inbound_slack_obligation_answer,
     )
 
