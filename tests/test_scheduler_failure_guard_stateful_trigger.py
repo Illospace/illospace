@@ -98,6 +98,7 @@ async def test_stateful_third_trigger_flows_through_production_registry(
 ):
     monkeypatch.setenv("SCHEDULER_FAILURE_ALERT_THRESHOLD", "99")
     monkeypatch.setenv("SCHEDULER_FAILURE_RATE_THRESHOLD", "99")
+    monkeypatch.setenv("SCHEDULER_STANDING_FAILURE_ALERT_THRESHOLD", "99")
     monkeypatch.setenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "C_ALERTS")
     monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
     base = datetime(2026, 4, 21, 4, 0, tzinfo=timezone.utc)
@@ -118,7 +119,12 @@ async def test_stateful_third_trigger_flows_through_production_registry(
         for trigger in (
             scheduler_failure_guard.scheduler_failure_guard_registry().triggers
         )
-    ] == ["consecutive", "rolling_window", "distinct_failure_classes"]
+    ] == [
+        "consecutive",
+        "standing_failure",
+        "rolling_window",
+        "distinct_failure_classes",
+    ]
 
     deliveries: list[dict[str, str]] = []
 

@@ -45,6 +45,7 @@ from brain.app.scheduler.detached_agent_runs import (
     async_reconcile_detached_runs,
 )
 from brain.app.scheduler.scheduler_failure_guard import (
+    async_latch_scheduler_failure_alerts,
     async_record_scheduler_job_failure,
     async_reset_scheduler_job_failure_guard,
 )
@@ -570,10 +571,6 @@ async def _async_apply_failure_guard(
         error_text=error_text,
         now=now,
     )
-    run.result_summary = {
-        **(run.result_summary or {}),
-        "failure_guard": serialize_failure_guard(guard),
-    }
     crossed_edges = guard.crossed_edges
     if crossed_edges:
         alert_title = (
@@ -605,6 +602,17 @@ async def _async_apply_failure_guard(
                 job.job_key,
                 run.id,
             )
+        else:
+            guard = await async_latch_scheduler_failure_alerts(
+                session,
+                job,
+                guard,
+                now=now,
+            )
+    run.result_summary = {
+        **(run.result_summary or {}),
+        "failure_guard": serialize_failure_guard(guard),
+    }
     await session.flush()
 
 

@@ -472,7 +472,7 @@ async def async_apply_cycle_terminal_failure_guard(
         last_error=locked_cycle.last_failure_error,
         now=now,
         store=latch_store,
-        latch_new_edges=True,
+        new_edge_mode="latch",
     )
     await session.flush()
 
