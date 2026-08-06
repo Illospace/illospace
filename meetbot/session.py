@@ -238,11 +238,11 @@ class SessionManager:
         if record.status in TERMINAL_STATUSES:
             return
         managed = self._active_managed_session(record.session_id)
-        await self._transition(record, status)
         await managed.health_monitor.stop()
         final_lines = managed.buffer.flush()
         self._commit_lines(record, final_lines)
         record.caption_lines = len(managed.lines)
+        await self._transition(record, status)
         managed.writer.finalize(record, managed.lines)
         try:
             await self._webhook_sender.send_transcript(record)
