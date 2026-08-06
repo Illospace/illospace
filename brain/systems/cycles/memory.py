@@ -90,6 +90,7 @@ async def async_record_cycle_revision(
         enabled=cycle.enabled,
         model_override=cycle.model_override,
         thinking_override=cycle.thinking_override,
+        execution_policy_key=cycle.execution_policy_key,
         target_idea_id=cycle.target_idea_id,
         context_policy={
             "workspace_id": string_or_none(cycle.org_id),

@@ -259,6 +259,8 @@
       enabled: overrides.enabled ?? true,
       model_override: overrides.model_override !== undefined ? overrides.model_override : null,
       thinking_override: overrides.thinking_override !== undefined ? overrides.thinking_override : null,
+      execution_policy_key:
+        overrides.execution_policy_key !== undefined ? overrides.execution_policy_key : null,
       execution_mode: 'reuse_same_idea',
       target_idea_id:
         overrides.target_idea_id !== undefined ? overrides.target_idea_id : `preview-cycle-${id}`,

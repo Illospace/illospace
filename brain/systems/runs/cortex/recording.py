@@ -830,6 +830,7 @@ def _cycle_payload(cycle: Cycle) -> dict[str, Any]:
         "enabled": cycle.enabled,
         "model_override": cycle.model_override,
         "thinking_override": cycle.thinking_override,
+        "execution_policy_key": getattr(cycle, "execution_policy_key", None),
         "execution_mode": cycle.execution_mode,
         "target_idea_id": cycle.target_idea_id,
         "reopen_archived": cycle.reopen_archived,

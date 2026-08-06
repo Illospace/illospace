@@ -31,9 +31,6 @@ from brain.systems.cycles.admission import (
 from brain.systems.cycles.quota_preflight import (
     async_append_cycle_quota_notice,
 )
-from brain.systems.cycles.promotion_readiness import (
-    async_validate_promotion_readiness_policy_configuration,
-)
 from brain.systems.cycles.common import (
     MANUAL_CYCLE_ORIGIN,
     MAX_CYCLE_TIMEOUT_SECONDS,
@@ -632,9 +629,6 @@ async def _async_materialize_due_cycle_runs_once(
 ) -> list[int]:
     executable_run_ids: list[int] = []
     async with UnitOfWork() as uow:
-        await async_validate_promotion_readiness_policy_configuration(
-            uow.session
-        )
         stmt = (
             select(Cycle)
             .where(
@@ -999,6 +993,12 @@ async def async_execute_cycle_run(run_id: int) -> None:
             status, error, skip_reason = (
                 _CYCLE_ADMISSION_FINALIZATION_SETTLEMENTS[type(admission)]
             )
+            if isinstance(admission, CycleAdmissionPromotionConfigurationError):
+                policy_snapshot = json_dict(run.context_snapshot).get(
+                    "execution_policy"
+                )
+                if isinstance(policy_snapshot, dict):
+                    error = str(policy_snapshot.get("error") or "").strip() or error
             await _finalize_cycle_run(
                 run,
                 cycle,

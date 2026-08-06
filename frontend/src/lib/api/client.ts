@@ -378,6 +378,7 @@ export interface CycleRead {
   enabled: boolean;
   model_override: string | null;
   thinking_override: string | null;
+  execution_policy_key: string | null;
   execution_mode: 'reuse_same_idea';
   target_idea_id: string | null;
   reopen_archived: boolean;
@@ -1385,6 +1386,7 @@ export const api = {
     enabled?: boolean;
     model_override?: string | null;
     thinking_override?: string | null;
+    execution_policy_key?: string | null;
     execution_mode?: 'reuse_same_idea';
     target_idea_id?: string | null;
     reopen_archived?: boolean | null;
@@ -1401,6 +1403,7 @@ export const api = {
       enabled: boolean;
       model_override: string | null;
       thinking_override: string | null;
+      execution_policy_key: string | null;
       execution_mode: 'reuse_same_idea';
       target_idea_id: string | null;
       reopen_archived: boolean | null;

@@ -680,6 +680,7 @@ ACT_CAPABILITIES: dict[str, dict[str, Any]] = {
             "enabled": "boolean",
             "model_override": "string",
             "thinking_override": "string",
+            "execution_policy_key": "string | null",
             "target_idea_id": "string",
             "guidance": "string",
             "target_type": "string",
@@ -1157,6 +1158,9 @@ async def _act_manage_cycle(
             enabled=bool(arguments.get("enabled", True)),
             model_override=_clean_optional_string(arguments.get("model_override")),
             thinking_override=_clean_optional_string(arguments.get("thinking_override")),
+            execution_policy_key=_clean_optional_string(
+                arguments.get("execution_policy_key")
+            ),
             target_idea_id=target_idea_id,
             guidance=_clean_optional_string(arguments.get("guidance")),
             rationale=rationale,
@@ -1175,6 +1179,11 @@ async def _act_manage_cycle(
         if target_idea_id is not UNSET_CYCLE_FIELD:
             target_idea_id = _clean_optional_string(target_idea_id)
             await _validate_cycle_target_idea(db, principal, target_idea_id)
+        execution_policy_key = arguments.get(
+            "execution_policy_key", UNSET_CYCLE_FIELD
+        )
+        if execution_policy_key is not UNSET_CYCLE_FIELD:
+            execution_policy_key = _clean_optional_string(execution_policy_key)
         cycle = await command_update_cycle(
             db,
             cycle,
@@ -1187,6 +1196,7 @@ async def _act_manage_cycle(
             enabled=arguments.get("enabled", UNSET_CYCLE_FIELD),
             model_override=arguments.get("model_override", UNSET_CYCLE_FIELD),
             thinking_override=arguments.get("thinking_override", UNSET_CYCLE_FIELD),
+            execution_policy_key=execution_policy_key,
             target_idea_id=target_idea_id,
             guidance=_clean_optional_string(arguments.get("guidance")),
             rationale=rationale,

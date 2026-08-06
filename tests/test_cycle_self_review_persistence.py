@@ -113,7 +113,7 @@ async def test_cycle_evaluation_omits_usage_when_no_usage_was_recorded(monkeypat
 async def test_failed_promotion_run_records_that_the_closing_gate_was_not_reached():
     session = _CaptureSession()
     cycle, run = _cycle_and_run()
-    cycle.name = PROMOTION_READINESS_POLICY.expected_cycle_name
+    cycle.execution_policy_key = PROMOTION_READINESS_POLICY.execution_policy_key
     run.run_id = None
     run.context_snapshot = {
         "result_contract": cycle_result_contract(

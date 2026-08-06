@@ -43,6 +43,7 @@ def test_build_cycle_run_memory_snapshot_returns_jsonb_safe_values():
     revision.enabled = True
     revision.model_override = None
     revision.thinking_override = "medium"
+    revision.execution_policy_key = "example_policy"
     revision.target_idea_id = target_idea_id
     revision.context_policy = {"workspace_id": workspace_id, "captured_at": created_at}
     revision.created_at = created_at
@@ -89,6 +90,10 @@ def test_build_cycle_run_memory_snapshot_returns_jsonb_safe_values():
     assert snapshot["context_snapshot"]["revision"]["context_policy"][
         "workspace_id"
     ] == str(workspace_id)
+    assert (
+        snapshot["context_snapshot"]["revision"]["execution_policy_key"]
+        == "example_policy"
+    )
     assert snapshot["guidance_snapshot"][0]["created_at"] == created_at.isoformat()
     assert snapshot["output_targets_snapshot"][0]["created_at"] == created_at.isoformat()
     assert (
