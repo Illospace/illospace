@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any, Literal, TypeAlias, cast
+from dataclasses import dataclass, field
+from typing import Any, Literal, Mapping, TypeAlias, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,10 @@ from brain.systems.cycles.auth_preflight import (
 from brain.systems.cycles.common import json_dict
 from brain.systems.cycles.quota_preflight import (
     preflight_cycle_external_quota,
+)
+from brain.systems.cycles.promotion_readiness import (
+    PromotionReadinessOutcome,
+    async_apply_promotion_readiness_gate,
 )
 
 logger = logging.getLogger("cycles")
@@ -81,6 +85,17 @@ class CycleAdmissionAdmitted:
     """A complete decision to admit work through one resolved route."""
 
     route: CycleProviderRoute
+    metadata_patch: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CycleAdmissionPromotionIdle:
+    """The promotion gate found no work and short-circuited the run."""
+
+
+@dataclass(frozen=True, slots=True)
+class CycleAdmissionPromotionConfigurationError:
+    """The promotion policy binding was unsafe, so admission failed closed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +124,12 @@ CycleAdmissionRejected: TypeAlias = (
     | CycleAdmissionQuotaBlocked
     | CycleAdmissionQuotaDeferred
 )
-CycleAdmissionOutcome: TypeAlias = CycleAdmissionAdmitted | CycleAdmissionRejected
+CycleAdmissionFinalized: TypeAlias = (
+    CycleAdmissionPromotionIdle | CycleAdmissionPromotionConfigurationError
+)
+CycleAdmissionOutcome: TypeAlias = (
+    CycleAdmissionAdmitted | CycleAdmissionFinalized | CycleAdmissionRejected
+)
 
 
 def _cycle_run_overrides(cycle: Cycle, run: CycleRun) -> dict[str, Any]:
@@ -181,7 +201,33 @@ async def async_prepare_cycle_run_admission(
     cycle: Cycle,
     run: CycleRun,
 ) -> CycleAdmissionOutcome:
-    """Resolve one route, then run auth and quota checks in order."""
+    """Run policy gates, then resolve one route and complete admission checks."""
+
+    promotion_outcome = await async_apply_promotion_readiness_gate(
+        session,
+        cycle=cycle,
+        run=run,
+    )
+    if promotion_outcome is PromotionReadinessOutcome.IDLE:
+        return CycleAdmissionPromotionIdle()
+    if promotion_outcome is PromotionReadinessOutcome.CONFIGURATION_ERROR:
+        return CycleAdmissionPromotionConfigurationError()
+    metadata_patch: dict[str, Any] = {}
+    if promotion_outcome is PromotionReadinessOutcome.UNCHANGED:
+        metadata_patch = {
+            "tool_policy": {
+                "disabled_tools": ["read_github_source"],
+                "reason": "promotion_readiness_unchanged",
+            }
+        }
+    elif promotion_outcome not in {
+        None,
+        PromotionReadinessOutcome.EVALUATE,
+        PromotionReadinessOutcome.UNAVAILABLE,
+    }:
+        raise AssertionError(
+            f"unsupported promotion-readiness outcome: {promotion_outcome!r}"
+        )
 
     route = await async_resolve_cycle_provider_route(
         session,
@@ -203,13 +249,19 @@ async def async_prepare_cycle_run_admission(
         return CycleAdmissionQuotaBlocked(notice=quota)
     if isinstance(quota, ProviderQuotaDeferredPreflightResult):
         return CycleAdmissionQuotaDeferred(notice=quota)
-    return CycleAdmissionAdmitted(route=route)
+    return CycleAdmissionAdmitted(
+        route=route,
+        metadata_patch=metadata_patch,
+    )
 
 
 __all__ = [
     "CycleAdmissionAdmitted",
     "CycleAdmissionAuthBlocked",
+    "CycleAdmissionFinalized",
     "CycleAdmissionOutcome",
+    "CycleAdmissionPromotionConfigurationError",
+    "CycleAdmissionPromotionIdle",
     "CycleAdmissionQuotaBlocked",
     "CycleAdmissionQuotaDeferred",
     "CycleAdmissionRejected",

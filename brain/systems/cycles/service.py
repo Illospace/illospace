@@ -19,6 +19,9 @@ from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUSES, CYCLE_RUN_TER
 from brain.systems.cycles.admission import (
     CycleAdmissionAdmitted,
     CycleAdmissionAuthBlocked,
+    CycleAdmissionFinalized,
+    CycleAdmissionPromotionConfigurationError,
+    CycleAdmissionPromotionIdle,
     CycleAdmissionQuotaBlocked,
     CycleAdmissionQuotaDeferred,
     CycleAdmissionRejected,
@@ -27,6 +30,9 @@ from brain.systems.cycles.admission import (
 )
 from brain.systems.cycles.quota_preflight import (
     async_append_cycle_quota_notice,
+)
+from brain.systems.cycles.promotion_readiness import (
+    async_validate_promotion_readiness_policy_configuration,
 )
 from brain.systems.cycles.common import (
     MANUAL_CYCLE_ORIGIN,
@@ -47,6 +53,8 @@ from brain.systems.cycles.contracts import normalize_cycle_run_kind
 from brain.systems.cycles.contract_gate import (
     async_prepare_cycle_run_visible_finalization,
     cycle_finalization_status_from_verdict,
+)
+from brain.systems.cycles.cycle_verdict_ledger import (
     persisted_cycle_contract_verdict,
 )
 from brain.systems.cycles.memory import (
@@ -349,6 +357,19 @@ _CYCLE_ADMISSION_REJECTION_SETTLEMENTS = {
     ),
 }
 
+_CYCLE_ADMISSION_FINALIZATION_SETTLEMENTS = {
+    CycleAdmissionPromotionIdle: (
+        "skipped",
+        None,
+        "promotion_readiness_idle",
+    ),
+    CycleAdmissionPromotionConfigurationError: (
+        "failed",
+        "promotion_readiness_policy_configuration_error",
+        None,
+    ),
+}
+
 
 async def async_run_cycle_now(
     cycle_id: int,
@@ -611,6 +632,9 @@ async def _async_materialize_due_cycle_runs_once(
 ) -> list[int]:
     executable_run_ids: list[int] = []
     async with UnitOfWork() as uow:
+        await async_validate_promotion_readiness_policy_configuration(
+            uow.session
+        )
         stmt = (
             select(Cycle)
             .where(
@@ -879,6 +903,7 @@ async def _async_start_admitted_cycle_run(
 ) -> tuple[int, dict, dict | None, dict] | None:
     run.started_at = datetime.now(timezone.utc)
     run_metadata = _cycle_run_metadata(cycle, run)
+    run_metadata.update(admission.metadata_patch)
     run_message = _cycle_run_message(idea, cycle, run)
     agent_run_id = await _async_admit_cycle_run(
         session,
@@ -970,6 +995,19 @@ async def async_execute_cycle_run(run_id: int) -> None:
             cycle=cycle,
             run=run,
         )
+        if isinstance(admission, CycleAdmissionFinalized):
+            status, error, skip_reason = (
+                _CYCLE_ADMISSION_FINALIZATION_SETTLEMENTS[type(admission)]
+            )
+            await _finalize_cycle_run(
+                run,
+                cycle,
+                status=status,
+                error=error,
+                skip_reason=skip_reason,
+                session=uow.session,
+            )
+            return
         if isinstance(admission, CycleAdmissionRejected):
             message_payload, status_payload, idea_snapshot = (
                 await _async_settle_rejected_cycle_run(

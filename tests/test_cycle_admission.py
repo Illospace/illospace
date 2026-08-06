@@ -245,6 +245,20 @@ def test_cycle_rejection_variants_reject_independent_settlement_fields(rejection
         rejection_type(notice=object(), status="auth_blocked")
 
 
+@pytest.mark.parametrize(
+    "decision_type",
+    [
+        admission.CycleAdmissionPromotionIdle,
+        admission.CycleAdmissionPromotionConfigurationError,
+    ],
+)
+def test_cycle_promotion_finalization_variants_reject_freeform_settlement_fields(
+    decision_type,
+):
+    with pytest.raises(TypeError):
+        decision_type(status="skipped", error="contradictory")
+
+
 @pytest.mark.asyncio
 async def test_cycle_admission_returns_complete_auth_rejection(monkeypatch):
     auth = ProviderAuthBlockedPreflightResult(

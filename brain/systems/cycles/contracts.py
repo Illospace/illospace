@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from brain.kernel.common.time import assume_utc_optional
@@ -17,6 +18,7 @@ from brain.systems.cycles.common import (
 from brain.systems.cycles.degradation import mandatory_escalations
 
 SCHEDULED_REVIEW_WINDOW_HOURS = 24
+CLOSING_BLOCK_VERDICT_REQUIRED_OUTPUT = "closing_block_verdict"
 SELF_REVIEW_SUMMARY_MARKER = "Self-review summary:"
 SELF_REVIEW_SUMMARY_MARKERS = (
     SELF_REVIEW_SUMMARY_MARKER,
@@ -32,6 +34,10 @@ RESULT_CONTRACT_OUTPUT_SECTIONS = {
     "report_evidence_health": "`Evidence health:`",
     "record_next_action_or_blocker": "`Next action:` or `Blocker:`",
     "short_self_review_summary": f"`{SELF_REVIEW_SUMMARY_MARKER}`",
+    CLOSING_BLOCK_VERDICT_REQUIRED_OUTPUT: (
+        "a final `Risk:` / `Evaluated:` / `Posted:` block that states why a post "
+        "was sent or withheld"
+    ),
 }
 
 # Keep each coordinator run kind's complete contract visible here. Do not derive
@@ -51,6 +57,14 @@ CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND = {
     ),
 }
 VALID_CYCLE_RUN_KINDS = frozenset(CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND)
+
+
+@dataclass(frozen=True)
+class CycleResultContractExtension:
+    """Typed policy-owned additions to a generic Cycle result contract."""
+
+    required_outputs: tuple[str, ...]
+    agent_instructions: tuple[Mapping[str, Any], ...]
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -88,6 +102,7 @@ def cycle_result_contract(
     degradation_tracking: dict[str, Any] | None = None,
     *,
     run_kind: str,
+    extension: CycleResultContractExtension | None = None,
 ) -> dict[str, Any]:
     """The minimum output contract for autonomous cycle runs."""
     clean_run_kind = normalize_cycle_run_kind(run_kind)
@@ -121,7 +136,34 @@ def cycle_result_contract(
             "next_required_digest_at. The visible digest MUST name every cause exactly; "
             "off-cadence silence is not allowed to consume the escalation."
         )
-    return contract
+    return extend_cycle_result_contract(contract, extension)
+
+
+def extend_cycle_result_contract(
+    contract: Mapping[str, Any],
+    extension: CycleResultContractExtension | None,
+) -> dict[str, Any]:
+    """Apply one typed policy extension without teaching this module its policy."""
+
+    extended = dict(contract)
+    if extension is None:
+        return extended
+    required_outputs = list(extended.get("required_outputs") or [])
+    for required_output in extension.required_outputs:
+        if required_output not in required_outputs:
+            required_outputs.append(required_output)
+    extended["required_outputs"] = required_outputs
+    instructions = [
+        dict(value)
+        for value in extended.get("agent_instructions", [])
+        if isinstance(value, dict)
+    ]
+    for instruction in extension.agent_instructions:
+        instruction_data = dict(instruction)
+        if instruction_data not in instructions:
+            instructions.append(instruction_data)
+    extended["agent_instructions"] = instructions
+    return extended
 
 
 def pending_evidence_health_receipt(scheduled_for: datetime | None) -> dict[str, Any]:

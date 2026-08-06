@@ -30,7 +30,10 @@ from brain.systems.cycles.common import (
     string_or_none,
     validate_nonempty_trimmed,
 )
-from brain.systems.cycles.contract_gate import MISSION_RESULT_CONTRACT_VERDICT_KEY
+from brain.systems.cycles.cycle_verdict_ledger import (
+    MISSION_RESULT_CONTRACT_VERDICT_KEY,
+    ensure_cycle_run_closing_verdict,
+)
 from brain.systems.cycles.contracts import (
     cycle_launch_receipt,
     cycle_result_contract,
@@ -434,6 +437,12 @@ async def record_cycle_run_evaluation(
 ) -> None:
     if run.id is None:
         raise ValueError("CycleRun must be flushed before recording an evaluation")
+    ensure_cycle_run_closing_verdict(
+        run,
+        status=status,
+        error=error,
+        skip_reason=skip_reason,
+    )
     usage = None
     if run.run_id is not None:
         try:
