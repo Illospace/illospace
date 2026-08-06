@@ -69,8 +69,8 @@ def test_cli_and_checker_public_error_values_use_safe_failure_projectors():
     assert not any(ast.unparse(value) in {"str(e)", "str(exc)"} for value in returned_error_values)
 
     checker = _function(
-        "brain/systems/runs/tool_catalog/handlers/cortex_reply.py",
-        "_build_final_reply_check_context",
+        "brain/systems/runs/outbound_reply_admission.py",
+        "build_final_reply_check_context",
     )
     checker_source = ast.unparse(checker)
     assert "worker_result.output or worker_result.error" not in checker_source

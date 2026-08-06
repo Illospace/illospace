@@ -12,7 +12,10 @@ from typing import Any
 from sqlalchemy import text
 
 from brain.platform.db.models.idea import Idea
-from brain.platform.integrations.provider_auth_preflight import async_probe_provider_auth
+from brain.platform.integrations.provider_auth_preflight import (
+    ProviderAuthBlockedPreflightResult,
+    async_probe_provider_auth,
+)
 from brain.platform.providers.model_policy import (
     EFFORT_TIER_SET,
     async_get_default_model,
@@ -27,8 +30,12 @@ from brain.systems.runs.direct_targets import (
     resolve_direct_target,
 )
 from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
+from brain.systems.runs.interactive_reply import is_interactive_slack_reply_context
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
-from brain.systems.runs.status_questions import build_status_question_context
+from brain.systems.runs.status_questions import (
+    build_same_thread_run_context,
+    is_status_question,
+)
 from brain.systems.runs.store import AsyncAgentRunStore
 
 _VALID_MODEL_PROVIDERS = {"anthropic", "openai"}
@@ -711,20 +718,40 @@ async def build_agent_run_request(
             model_policy["model"] = target_model
             model_policy.pop("model_override", None)
             request = replace(request, model_policy=model_policy)
-    status_context = await build_status_question_context(
+    status_question = is_status_question(request.message)
+    interactive_slack_thread = _is_interactive_slack_thread(request)
+    if not status_question and not interactive_slack_thread:
+        return request
+
+    same_thread_context = await build_same_thread_run_context(
         session,
         thread_id=request.thread_id,
         org_id=request.org_id,
-        message=request.message,
+        include_status_details=status_question,
     )
-    if status_context is None:
+    live_siblings = (
+        list(same_thread_context.get("live_sibling_runs") or [])
+        if isinstance(same_thread_context, dict)
+        else []
+    )
+    if not status_question and not live_siblings:
         return request
     return replace(
         request,
         metadata={
             **request.metadata,
-            "status_question_context": status_context,
+            "same_thread_run_context": same_thread_context,
         },
+    )
+
+
+def _is_interactive_slack_thread(request: AgentRunRequest) -> bool:
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    target = request.target_ref if isinstance(request.target_ref, dict) else {}
+    return bool(
+        str(request.thread_id or "").startswith("slack:")
+        and target.get("kind") == "slack_message"
+        and is_interactive_slack_reply_context(metadata, target)
     )
 
 
@@ -1141,7 +1168,7 @@ async def admit_work(
                 provider=provider,
                 model=model,
             )
-            if auth_preflight.blocked:
+            if isinstance(auth_preflight, ProviderAuthBlockedPreflightResult):
                 reason = (
                     f"{auth_preflight.error_code}: provider={provider} model={model} "
                     f"credential={auth_preflight.credential or 'unavailable'}"

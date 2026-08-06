@@ -273,13 +273,159 @@ async def test_slack_work_intake_attaches_same_thread_status_context(session):
         ),
     )
 
-    status_context = request.metadata["status_question_context"]
+    status_context = request.metadata["same_thread_run_context"]
     assert request.thread_id == slack_thread_id
     assert status_context["originating_run"]["run_id"] == 2328
     assert status_context["originating_run"]["status"] == "running"
     assert status_context["live_sibling_runs"] == [
         {"run_id": 2328, "status": "running"}
     ]
+
+
+async def test_slack_work_intake_attaches_active_sibling_to_non_status_question(session):
+    from brain.systems.runs.context import RunContextLoader
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    thread_ts = "1785870481.000100"
+    slack_thread_id = f"slack:T:C:{thread_ts}"
+    session.add(
+        AgentRunRow(
+            id=14644,
+            org_id=ORG_ID,
+            user_id=USER_ID,
+            thread_id=slack_thread_id,
+            root_run_id=14644,
+            profile="fast",
+            recipe="fast",
+            status="running",
+            input_message="Investigate the customer's generation payloads.",
+            target_ref={},
+            workspace_ref={},
+            model_policy={},
+            metadata_={},
+            created_at=datetime(2026, 8, 4, 18, 51, 53, tzinfo=timezone.utc),
+        )
+    )
+    await session.flush()
+    session.add(
+        AgentRunRow(
+            id=14646,
+            org_id=ORG_ID,
+            user_id=USER_ID,
+            thread_id=slack_thread_id,
+            parent_run_id=14644,
+            root_run_id=14644,
+            parent_step_key_hash="payload-batch-step",
+            profile="fast",
+            recipe="fast",
+            status="running",
+            input_message="Inspect one payload batch.",
+            target_ref={},
+            workspace_ref={},
+            model_policy={},
+            metadata_={},
+            created_at=datetime(2026, 8, 4, 18, 52, 10, tzinfo=timezone.utc),
+        )
+    )
+    await session.flush()
+
+    request = await build_agent_run_request(
+        session,
+        WorkIntakeEvent(
+            source="slack",
+            event_type="slack.message",
+            org_id=ORG_ID,
+            actor={"id": USER_ID, "org_id": ORG_ID, "internal": False},
+            target={
+                "kind": "slack_message",
+                "team_id": "T",
+                "channel_id": "C",
+                "thread_ts": thread_ts,
+            },
+            payload={
+                "message": "Which image model is she trying to use?",
+                "metadata": {
+                    "slack_trigger": {
+                        "team_id": "T",
+                        "channel_id": "C",
+                        "thread_ts": thread_ts,
+                    }
+                },
+            },
+        ),
+    )
+
+    assert request.thread_id == slack_thread_id
+    assert request.metadata["same_thread_run_context"]["live_sibling_runs"] == [
+        {"run_id": 14644, "status": "running"}
+    ]
+    assert all(
+        item["run_id"] != 14646
+        for item in request.metadata["same_thread_run_context"]["live_sibling_runs"]
+    )
+
+    context = RunContextLoader().load(
+        thread_id=request.thread_id,
+        message=request.message,
+        target_ref=request.target_ref,
+        metadata=request.metadata,
+    ).prompt_context()
+    assert "Authoritative active-sibling evidence" in context
+    assert "Sibling run 14644 status: running" in context
+    assert "wait for the active work" in context
+    assert "coordination field" in context
+
+
+async def test_slack_work_intake_without_active_sibling_has_no_deferral_context(session):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    thread_ts = "1785870481.000200"
+    request = await build_agent_run_request(
+        session,
+        WorkIntakeEvent(
+            source="slack",
+            event_type="slack.message",
+            org_id=ORG_ID,
+            actor={"id": USER_ID, "org_id": ORG_ID, "internal": False},
+            target={
+                "kind": "slack_message",
+                "team_id": "T",
+                "channel_id": "C",
+                "thread_ts": thread_ts,
+            },
+            payload={
+                "message": "Which image model is she trying to use?",
+                "metadata": {
+                    "slack_trigger": {
+                        "team_id": "T",
+                        "channel_id": "C",
+                        "thread_ts": thread_ts,
+                    }
+                },
+            },
+        ),
+    )
+
+    assert "same_thread_run_context" not in request.metadata
+
+
+def test_interactive_slack_classifier_uses_surface_policy_for_monitors():
+    from brain.systems.runs.interactive_reply import is_interactive_slack_reply_context
+
+    assert not is_interactive_slack_reply_context(
+        {
+            "origin": "slack_channel_monitor",
+            "headless": True,
+            "final_answer_target_surface": "headless",
+        }
+    )
+    assert is_interactive_slack_reply_context(
+        {
+            "origin": "slack_channel_monitor",
+            "headless": False,
+            "final_answer_target_surface": "slack",
+        }
+    )
 
 
 def test_run_context_prompt_includes_thread_context():
@@ -307,9 +453,10 @@ def test_run_context_prompt_marks_live_status_work_as_in_progress():
         thread_id="idea-1",
         message="was it done?",
         metadata={
-            "status_question_context": {
+            "same_thread_run_context": {
                 "thread_id": "idea-1",
                 "lookup_status": "verified",
+                "status_question": True,
                 "originating_run": {
                     "run_id": 2327,
                     "status": "running",

@@ -64,6 +64,24 @@ LAUNCH_HANDOFF_STATUS_VALUES = (
 )
 
 
+class OpenAskStatus(StrEnum):
+    OPEN = "open"
+    ANSWERED = "answered"
+    ROUTED = "routed"
+    EXPIRED = "expired"
+
+
+OPEN_ASK_STATUS_VALUES = tuple(status.value for status in OpenAskStatus)
+ACTIVE_OPEN_ASK_STATUS_VALUES = (
+    OpenAskStatus.OPEN.value,
+    OpenAskStatus.ROUTED.value,
+)
+TERMINAL_OPEN_ASK_STATUS_VALUES = (
+    OpenAskStatus.ANSWERED.value,
+    OpenAskStatus.EXPIRED.value,
+)
+
+
 class RunStatus(StrEnum):
     QUEUED = "queued"
     STARTING = "starting"

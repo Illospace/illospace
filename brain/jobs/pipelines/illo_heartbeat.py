@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import StrEnum
 import json
 import logging
@@ -20,6 +20,10 @@ from brain.platform.db.models.org import User
 from brain.platform.db.models.vault import Secret, VaultProjectBinding
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cortex.project_context.github import GITHUB_API_BASE
+from brain.systems.liveness_state import (
+    LivenessSnapshot,
+    build_liveness_snapshot,
+)
 from brain.systems.vault import async_resolve_project_bound_env_tokens
 
 
@@ -30,39 +34,14 @@ PROJECT_SLUG = REPO_SLUG.lower()
 HEARTBEAT_BRANCH = "ops/heartbeat"
 HEARTBEAT_PATH = "heartbeat.json"
 HEARTBEAT_INSTALLATION_PERMISSIONS = {"contents": "write"}
-_KNOWN_SURFACES = {
-    "ai_timeline",
-    "api",
-    "cortex",
-    "headless",
-    "illo",
-    "mcp",
-    "scheduler",
-    "slack",
-    "thread_discussion",
-}
+HeartbeatPayload = LivenessSnapshot
+build_heartbeat_payload = build_liveness_snapshot
 
 
 @dataclass(frozen=True)
 class HeartbeatActor:
     user_id: str
     org_id: str
-
-
-@dataclass(frozen=True)
-class HeartbeatPayload:
-    """The complete public heartbeat document accepted by the write boundary."""
-
-    ts: str
-    last_run_id: int | None
-    last_surface: str
-
-    def as_public_dict(self) -> dict[str, str | int | None]:
-        return {
-            "ts": self.ts,
-            "last_run_id": self.last_run_id,
-            "last_surface": self.last_surface,
-        }
 
 
 class HeartbeatPublishOutcome(StrEnum):
@@ -83,46 +62,6 @@ class HeartbeatGitHubError(RuntimeError):
     def __init__(self, status_code: int, operation: str):
         super().__init__(f"GitHub returned {status_code} while {operation}")
         self.status_code = status_code
-
-
-def _utc_z(value: datetime) -> str:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    else:
-        value = value.astimezone(timezone.utc)
-    return value.isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def _coarse_surface(run: AgentRunRow | Any | None) -> str:
-    if run is None:
-        return "unknown"
-    metadata = run.metadata_ if isinstance(getattr(run, "metadata_", None), dict) else {}
-    target_ref = run.target_ref if isinstance(getattr(run, "target_ref", None), dict) else {}
-    for key in (
-        "originating_surface",
-        "source_surface",
-        "triggering_surface",
-        "origin",
-    ):
-        value = str(metadata.get(key) or target_ref.get(key) or "").strip().lower()
-        if value in _KNOWN_SURFACES:
-            return value
-    return "unknown"
-
-
-def build_heartbeat_payload(
-    latest_run: AgentRunRow | Any | None,
-    *,
-    now: datetime | None = None,
-) -> HeartbeatPayload:
-    """Build the complete public payload; no other fields may be emitted."""
-    clock = now or datetime.now(timezone.utc)
-    run_id = getattr(latest_run, "id", None)
-    return HeartbeatPayload(
-        ts=_utc_z(clock),
-        last_run_id=int(run_id) if run_id is not None else None,
-        last_surface=_coarse_surface(latest_run),
-    )
 
 
 async def _heartbeat_actor() -> HeartbeatActor | None:

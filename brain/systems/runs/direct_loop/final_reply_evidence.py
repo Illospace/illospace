@@ -184,8 +184,8 @@ class ToolFailureStateEvidence:
 
 
 @dataclass(frozen=True)
-class StatusRunEvidence:
-    """One prior same-thread run relevant to a status question."""
+class SameThreadRunSnapshot:
+    """One typed top-level run from the admission-time thread snapshot."""
 
     run_id: int | None = None
     status: RunStatus = RunStatus.FAILED
@@ -193,7 +193,7 @@ class StatusRunEvidence:
     final_output: str | None = None
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> "StatusRunEvidence":
+    def from_mapping(cls, value: Mapping[str, Any]) -> "SameThreadRunSnapshot":
         return cls(
             run_id=_coerce_optional_int(value.get("run_id")),
             status=coerce_run_status(
@@ -238,21 +238,22 @@ class StatusDeliverableEvidence:
 
 
 @dataclass(frozen=True)
-class StatusQuestionEvidence:
-    """Typed snapshot of the originating and live same-thread runs."""
+class SameThreadRunContextEvidence:
+    """The single typed contract for same-thread status and coordination rules."""
 
     thread_id: str = ""
     lookup_status: str = ""
     lookup_error: str | None = None
-    originating_run: StatusRunEvidence | None = None
-    live_sibling_runs: tuple[StatusRunEvidence, ...] = ()
+    status_question: bool = False
+    originating_run: SameThreadRunSnapshot | None = None
+    live_sibling_runs: tuple[SameThreadRunSnapshot, ...] = ()
     deliverables: tuple[StatusDeliverableEvidence, ...] = ()
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> "StatusQuestionEvidence":
+    def from_mapping(cls, value: Mapping[str, Any]) -> "SameThreadRunContextEvidence":
         origin = value.get("originating_run")
         live_runs = tuple(
-            StatusRunEvidence.from_mapping(item)
+            SameThreadRunSnapshot.from_mapping(item)
             for item in list(value.get("live_sibling_runs") or [])
             if isinstance(item, Mapping)
         )
@@ -271,8 +272,9 @@ class StatusQuestionEvidence:
                 if value.get("lookup_error")
                 else None
             ),
+            status_question=bool(value.get("status_question")),
             originating_run=(
-                StatusRunEvidence.from_mapping(origin)
+                SameThreadRunSnapshot.from_mapping(origin)
                 if isinstance(origin, Mapping)
                 else None
             ),
@@ -289,6 +291,7 @@ class StatusQuestionEvidence:
             "thread_id": self.thread_id,
             "lookup_status": self.lookup_status,
             "lookup_error": self.lookup_error,
+            "status_question": self.status_question,
             "originating_run": (
                 self.originating_run.cache_payload()
                 if self.originating_run is not None
@@ -310,7 +313,7 @@ class FinalReplyEvidence:
     tool_results: tuple[ToolResultEvidence, ...] = ()
     execution_artifacts: tuple[Mapping[str, Any], ...] = ()
     worker_results: tuple[Mapping[str, Any], ...] = ()
-    status_question: StatusQuestionEvidence | None = None
+    same_thread_run_context: SameThreadRunContextEvidence | None = None
     tool_failure_state: ToolFailureStateEvidence | None = None
 
     @classmethod
@@ -338,13 +341,13 @@ class FinalReplyEvidence:
                     "evidence": getattr(item, "evidence", None),
                 }
             )
-        status_question = _status_question_evidence_from_context(agent_context)
+        same_thread_run_context = _same_thread_run_context_evidence(agent_context)
         failure_state = _tool_failure_state_from_context(agent_context, tool_results)
         return cls(
             tool_results=tuple(tool_results),
             execution_artifacts=artifacts,
             worker_results=tuple(workers),
-            status_question=status_question,
+            same_thread_run_context=same_thread_run_context,
             tool_failure_state=failure_state,
         )
 
@@ -417,9 +420,9 @@ class FinalReplyEvidence:
             "tool_results": [item.cache_payload() for item in self.tool_results],
             "execution_artifacts": self.execution_artifacts,
             "worker_results": self.worker_results,
-            "status_question": (
-                self.status_question.cache_payload()
-                if self.status_question is not None
+            "same_thread_run_context": (
+                self.same_thread_run_context.cache_payload()
+                if self.same_thread_run_context is not None
                 else None
             ),
             "tool_failure_state": (
@@ -474,26 +477,44 @@ def _coerce_tool_names(value: Any) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _find_status_question_mapping(value: Any, *, depth: int = 0) -> Mapping[str, Any] | None:
+def _find_context_mapping(
+    value: Any,
+    context_key: str,
+    *,
+    depth: int = 0,
+) -> Mapping[str, Any] | None:
     if not isinstance(value, Mapping) or depth > 3:
         return None
-    direct = value.get("status_question_context")
+    direct = value.get(context_key)
     if isinstance(direct, Mapping):
         return direct
     for key in ("execution_provenance", "metadata", "request_metadata"):
         nested = value.get(key)
-        found = _find_status_question_mapping(nested, depth=depth + 1)
+        found = _find_context_mapping(
+            nested,
+            context_key,
+            depth=depth + 1,
+        )
         if found is not None:
             return found
     return None
 
 
-def _status_question_evidence_from_context(agent_context: Any) -> StatusQuestionEvidence | None:
+def _same_thread_run_context_evidence(
+    agent_context: Any,
+) -> SameThreadRunContextEvidence | None:
     execution_metadata = getattr(agent_context, "execution_metadata", None)
-    mapping = _find_status_question_mapping(execution_metadata)
+    mapping = _find_context_mapping(execution_metadata, "same_thread_run_context")
     if mapping is None:
-        mapping = _find_status_question_mapping(getattr(agent_context, "metadata", None))
-    return StatusQuestionEvidence.from_mapping(mapping) if mapping is not None else None
+        mapping = _find_context_mapping(
+            getattr(agent_context, "metadata", None),
+            "same_thread_run_context",
+        )
+    return (
+        SameThreadRunContextEvidence.from_mapping(mapping)
+        if mapping is not None
+        else None
+    )
 
 
 def _tool_failure_state_from_context(
@@ -534,9 +555,9 @@ def _tool_failure_state_from_context(
 __all__ = [
     "DEFAULT_TOOL_FAILURE_THRESHOLD",
     "FinalReplyEvidence",
+    "SameThreadRunContextEvidence",
+    "SameThreadRunSnapshot",
     "StatusDeliverableEvidence",
-    "StatusQuestionEvidence",
-    "StatusRunEvidence",
     "ToolFailureStateEvidence",
     "ToolResultEvidence",
 ]

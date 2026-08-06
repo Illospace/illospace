@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from brain.platform.db.models.cycle import Cycle, CycleRun
-from brain.systems.cycles.execution_effects import CycleExecutionDisposition
 from brain.systems.cycles.promotion_readiness import (
     PROMOTION_READINESS_POLICY,
+    PromotionReadinessOutcome,
     async_apply_promotion_readiness_gate,
     async_validate_promotion_readiness_policy_configuration,
 )
@@ -51,7 +51,7 @@ async def test_unchanged_pair_skips_per_pr_sweep_but_keeps_posting_path():
         assert token == "app-token"
         return {"staging": "staging-same", "main": "main-same"}[branch]
 
-    effect = await async_apply_promotion_readiness_gate(
+    outcome = await async_apply_promotion_readiness_gate(
         object(),
         cycle=cycle,
         run=run,
@@ -63,14 +63,7 @@ async def test_unchanged_pair_skips_per_pr_sweep_but_keeps_posting_path():
         configured_cycle_ids_reader=_configured_cycle_ids(),
     )
 
-    assert effect is not None
-    assert effect.disposition is CycleExecutionDisposition.ADMIT
-    assert effect.admission_metadata_patch == {
-        "tool_policy": {
-            "disabled_tools": ["read_github_source"],
-            "reason": "promotion_readiness_unchanged",
-        }
-    }
+    assert outcome is PromotionReadinessOutcome.UNCHANGED
     compare.assert_awaited_once()
     assert run.started_at is None
     gate = run.context_snapshot["promotion_readiness_gate"]
@@ -90,7 +83,7 @@ async def test_changed_pair_with_staging_ahead_reaches_agent_review_path():
         assert token == "app-token"
         return {"staging": "staging-new", "main": "main-new"}[branch]
 
-    effect = await async_apply_promotion_readiness_gate(
+    outcome = await async_apply_promotion_readiness_gate(
         object(),
         cycle=cycle,
         run=run,
@@ -102,9 +95,7 @@ async def test_changed_pair_with_staging_ahead_reaches_agent_review_path():
         configured_cycle_ids_reader=_configured_cycle_ids(),
     )
 
-    assert effect is not None
-    assert effect.disposition is CycleExecutionDisposition.ADMIT
-    assert effect.admission_metadata_patch == {}
+    assert outcome is PromotionReadinessOutcome.EVALUATE
     assert run.context_snapshot["promotion_readiness_gate"]["outcome"] == "evaluate"
     assert run.context_snapshot["promotion_readiness_gate"]["evidence"][
         "ahead_by"
@@ -125,7 +116,7 @@ async def test_changed_pair_without_staging_ahead_short_circuits_as_idle():
     async def read_head(_repo, branch, *, token):
         return {"staging": "staging-new", "main": "main-new"}[branch]
 
-    effect = await async_apply_promotion_readiness_gate(
+    outcome = await async_apply_promotion_readiness_gate(
         object(),
         cycle=cycle,
         run=run,
@@ -139,10 +130,7 @@ async def test_changed_pair_without_staging_ahead_short_circuits_as_idle():
         configured_cycle_ids_reader=_configured_cycle_ids(),
     )
 
-    assert effect is not None
-    assert effect.disposition is CycleExecutionDisposition.FINALIZE
-    assert effect.final_status == "skipped"
-    assert effect.final_skip_reason == "promotion_readiness_idle"
+    assert outcome is PromotionReadinessOutcome.IDLE
     assert run.context_snapshot["promotion_readiness_gate"]["outcome"] == "idle"
     assert "Risk: IDLE" in run.self_review_summary
     assert "Posted: No — staging is not ahead" in run.self_review_summary
@@ -152,7 +140,7 @@ async def test_changed_pair_without_staging_ahead_short_circuits_as_idle():
 async def test_failed_cheap_read_degrades_open_to_agent_review():
     cycle, run = _cycle_and_run()
 
-    effect = await async_apply_promotion_readiness_gate(
+    outcome = await async_apply_promotion_readiness_gate(
         object(),
         cycle=cycle,
         run=run,
@@ -164,8 +152,7 @@ async def test_failed_cheap_read_degrades_open_to_agent_review():
         configured_cycle_ids_reader=_configured_cycle_ids(),
     )
 
-    assert effect is not None
-    assert effect.disposition is CycleExecutionDisposition.ADMIT
+    assert outcome is PromotionReadinessOutcome.UNAVAILABLE
     gate = run.context_snapshot["promotion_readiness_gate"]
     assert gate["outcome"] == "unavailable"
     assert gate["evidence"]["error"] == "RuntimeError: status record unavailable"
@@ -176,7 +163,7 @@ async def test_failed_cheap_read_degrades_open_to_agent_review():
 async def test_ambiguous_configured_cycle_finishes_with_a_configuration_verdict():
     cycle, run = _cycle_and_run()
 
-    effect = await async_apply_promotion_readiness_gate(
+    outcome = await async_apply_promotion_readiness_gate(
         object(),
         cycle=cycle,
         run=run,
@@ -184,10 +171,7 @@ async def test_ambiguous_configured_cycle_finishes_with_a_configuration_verdict(
         configured_cycle_ids_reader=AsyncMock(return_value=(9, 10)),
     )
 
-    assert effect is not None
-    assert effect.disposition is CycleExecutionDisposition.FINALIZE
-    assert effect.final_status == "failed"
-    assert effect.final_error == "promotion_readiness_policy_configuration_error"
+    assert outcome is PromotionReadinessOutcome.CONFIGURATION_ERROR
     assert run.context_snapshot["promotion_readiness_gate"] == {
         "outcome": "configuration_error",
         "evidence": {

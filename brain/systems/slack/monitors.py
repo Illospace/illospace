@@ -97,12 +97,12 @@ def contact_form_lead_mandate(
     return value or None
 
 
-def _typed_intake_origins() -> frozenset[str]:
+def _configurable_intake_origins() -> frozenset[str]:
     from brain.systems.slack.monitored_intakes import (
-        typed_monitored_intake_origins,
+        configurable_monitored_intake_origins,
     )
 
-    return typed_monitored_intake_origins()
+    return configurable_monitored_intake_origins()
 
 
 def disabled_intake_origins(
@@ -113,7 +113,7 @@ def disabled_intake_origins(
     raw = _slack_metadata(connection).get(DISABLED_INTAKES_KEY)
     if not isinstance(raw, (list, tuple, set, frozenset)):
         return set()
-    valid_origins = _typed_intake_origins()
+    valid_origins = _configurable_intake_origins()
     return {
         origin
         for item in raw
@@ -212,7 +212,7 @@ async def clear_contact_form_lead_mandate(
     )
 
 
-def _validated_typed_intake_origin(intake: str) -> str:
+def _validated_configurable_intake_origin(intake: str) -> str:
     from brain.systems.slack.monitored_intakes import (
         SLACK_CHANNEL_MESSAGE_ORIGIN,
     )
@@ -225,7 +225,7 @@ def _validated_typed_intake_origin(intake: str) -> str:
             f"{SLACK_CHANNEL_MESSAGE_ORIGIN} is the fallback intake; "
             "use unmonitor_channel for channel-level monitoring"
         )
-    valid_origins = _typed_intake_origins()
+    valid_origins = _configurable_intake_origins()
     if clean_intake not in valid_origins:
         valid = ", ".join(sorted(valid_origins)) or "(none)"
         raise SlackMonitorConfigError(
@@ -243,7 +243,7 @@ async def _write_intake_enabled(
     enabled: bool,
     org_id: str | None = None,
 ) -> dict[str, Any]:
-    clean_intake = _validated_typed_intake_origin(intake)
+    clean_intake = _validated_configurable_intake_origin(intake)
     connection = await _connection_for_org(session, connection_id, org_id)
     disabled_intakes = disabled_intake_origins(connection)
     if enabled:

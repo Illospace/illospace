@@ -10,6 +10,7 @@ from brain.kernel.common.coercion import as_mapping, optional_text
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.inbound import InboundEventRow
 from brain.platform.db.models.org import User
+from brain.systems.liveness_state import latest_liveness_snapshot
 from brain.systems.inbound.handlers import (
     InboundEventCompleter,
     InboundHandlerContext,
@@ -31,6 +32,10 @@ from brain.systems.slack.identity import (
     SlackIdentitySource,
     normalize_slack_identities,
 )
+from brain.systems.slack.monitored_intakes import (
+    ImmediateReplyPolicy,
+    monitored_intake_policy,
+)
 from brain.systems.slack.triggers import (
     SLACK_MESSAGE_ENVELOPE_KIND,
     build_slack_work_intake_payload,
@@ -49,6 +54,16 @@ async def process_slack_message_envelope(
     complete: InboundEventCompleter,
 ) -> dict[str, Any]:
     """Admit an Illo run for a normalized Slack mention or DM."""
+
+    policy = monitored_intake_policy(normalized)
+    if isinstance(policy, ImmediateReplyPolicy):
+        disposition = policy.build_disposition(
+            normalized,
+            event_id=str(event.id),
+            source_kind=context.source_kind,
+            snapshot=await latest_liveness_snapshot(session),
+        )
+        return await complete(disposition.completion)
 
     return await admit_surface_envelope(
         session,

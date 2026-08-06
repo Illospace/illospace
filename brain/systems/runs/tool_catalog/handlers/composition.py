@@ -27,7 +27,6 @@ from brain.systems.runs.tool_catalog.handlers.browser import (
 )
 from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
 from brain.systems.runs.tool_catalog.handlers.cortex_reply import (
-    _build_final_reply_check_context,
     _handle_cortex_reply,
     _handle_cortex_visual_reply,
 )

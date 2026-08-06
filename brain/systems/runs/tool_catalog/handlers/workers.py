@@ -13,6 +13,7 @@ from typing import Any
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.effort import EFFORT_TIERS, EFFORT_TIER_SET
 from brain.platform.integrations.provider_auth_preflight import (
+    ProviderAuthBlockedPreflightResult,
     ProviderAuthPreflightResult,
     async_probe_provider_auth,
     skipped_provider_auth_preflight,
@@ -67,7 +68,7 @@ _SPAWN_WORKER_AUTH_PROVIDERS = frozenset({"anthropic", "openai"})
 def _with_spawn_worker_auth_presentation(
     result: ProviderAuthPreflightResult,
 ) -> ProviderAuthPreflightResult:
-    if not result.blocked:
+    if not isinstance(result, ProviderAuthBlockedPreflightResult):
         return result
 
     credential = result.credential or "provider"
@@ -575,7 +576,7 @@ async def _handle_spawn_worker(
                 org_id=parent.org_id,
                 model=str(child_policy["model"]),
             )
-            if preflight.blocked:
+            if isinstance(preflight, ProviderAuthBlockedPreflightResult):
                 shard = str(worker_metadata["worker_shard"])
                 failure = WorkerEvidenceFailure.for_admission(
                     worker_role=assignment.role,

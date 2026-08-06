@@ -42,7 +42,7 @@ def _run_triage_probe(*, since_hours: float) -> int:
     the PR. Dev CLI: queries all orgs, ignores archival — fine at Uwear
     scale."""
     import asyncio
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
 
     async def _probe() -> int:
         try:
@@ -127,9 +127,7 @@ def _run_outcomes(*, since_hours: float) -> int:
         try:
             from brain.platform.db.repositories.unit_of_work import UnitOfWork
             from brain.systems.briefing.outcomes import (
-                format_outcomes_line,
-                load_packet_handoffs,
-                packet_outcomes,
+                load_packet_outcome_report,
             )
 
             now = datetime.now(timezone.utc)
@@ -141,12 +139,17 @@ def _run_outcomes(*, since_hours: float) -> int:
 
                 org_ids = (await session.execute(select(Org.id))).scalars().all()
                 for org_id in org_ids:
-                    rows = await load_packet_handoffs(
-                        session, org_id=str(org_id), since=now - timedelta(hours=since_hours)
+                    report = await load_packet_outcome_report(
+                        session,
+                        org_id=str(org_id),
+                        now=now,
+                        since_hours=since_hours,
                     )
-                    summary = packet_outcomes(rows, now=now)
-                    print(f"org {org_id}: {format_outcomes_line(summary) or 'no packets in window'}")
-                    print(_json.dumps(summary.to_dict(), indent=2))
+                    print(
+                        f"org {org_id}: "
+                        f"{report.digest_line or 'no packets in window'}"
+                    )
+                    print(_json.dumps(report.summary.to_dict(), indent=2))
                 await session.rollback()
             return 0
         except Exception as exc:  # noqa: BLE001 — dev CLI fails helpfully

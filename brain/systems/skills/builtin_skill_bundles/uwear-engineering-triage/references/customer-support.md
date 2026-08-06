@@ -32,12 +32,15 @@ Do the mechanical investigation yourself, read-only, then act:
    [customer-bug filing policy](creating-work-items.md#customer-bug-filing-policy).
    For generation/API behavior, use `uwear-ai/uwear-backend`; add the payload
    evidence + hypothesis and point the owner at the payload to confirm or deny.
-   Apply an explicitly requested assignee only after the hypothesis is formed.
+   Run that playbook's **Pre-create ownership and readiness gate** after the
+   hypothesis is formed and before `create_github_issue`. Apply its result in
+   the create call, including an explicitly requested assignee when present.
 4. **Reply in-thread** on the alert with the resulting artifact references and a
    one-line hypothesis.
 
-**Owner: none up front.** Illo runs the first-pass investigation. Route to a
-human only when the fix needs product judgment, credentials, or a design/release
-decision — and attach the hypothesis when you do. Do not auto-assign a
-customer-generation issue to Axel merely because the output came from an AI
-model.
+**Owner: none during investigation; resolved before filing.** Illo runs the
+first-pass investigation. Once the hypothesis exists, the shared pre-create gate
+selects the human owner and readiness label from the core rules. Do not
+auto-assign a customer-generation issue to Axel merely because the output came
+from an AI model. If the shared gate cannot resolve ownership, file it
+unassigned with the required ambiguity statement in the issue body.

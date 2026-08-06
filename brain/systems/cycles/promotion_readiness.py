@@ -25,7 +25,6 @@ from brain.systems.cycles.cycle_verdict_ledger import (
     ensure_cycle_run_closing_verdict,
     persist_cycle_run_short_circuit_verdict,
 )
-from brain.systems.cycles.execution_effects import CycleExecutionEffect
 
 logger = logging.getLogger(__name__)
 
@@ -103,28 +102,6 @@ PROMOTION_READINESS_POLICY = PromotionReadinessPolicy(
     gate_name="promotion_readiness_sha_pair",
     snapshot_key="promotion_readiness_gate",
 )
-
-
-_OUTCOME_EFFECTS = {
-    PromotionReadinessOutcome.UNCHANGED: CycleExecutionEffect.admit(
-        admission_metadata_patch={
-            "tool_policy": {
-                "disabled_tools": ["read_github_source"],
-                "reason": "promotion_readiness_unchanged",
-            }
-        }
-    ),
-    PromotionReadinessOutcome.IDLE: CycleExecutionEffect.finalize(
-        status="skipped",
-        skip_reason="promotion_readiness_idle",
-    ),
-    PromotionReadinessOutcome.EVALUATE: CycleExecutionEffect.admit(),
-    PromotionReadinessOutcome.UNAVAILABLE: CycleExecutionEffect.admit(),
-    PromotionReadinessOutcome.CONFIGURATION_ERROR: CycleExecutionEffect.finalize(
-        status="failed",
-        error="promotion_readiness_policy_configuration_error",
-    ),
-}
 
 
 async def _async_last_evaluated_pair(
@@ -277,13 +254,16 @@ async def async_apply_promotion_readiness_gate(
     branch_head_reader: BranchHeadReader | None = None,
     branch_comparison_reader: BranchComparisonReader | None = None,
     configured_cycle_ids_reader: ConfiguredCycleIdsReader | None = None,
-) -> CycleExecutionEffect | None:
-    """Return one generic execution effect for the configured scheduled Cycle."""
+) -> PromotionReadinessOutcome | None:
+    """Record and return the policy outcome for the configured scheduled Cycle."""
 
     launch_context = cycle_run_launch_context(run)
     if launch_context.get("run_kind") != SCHEDULED_DIGEST_RUN_KIND:
         return None
-    if str(cycle.name or "").strip() != PROMOTION_READINESS_POLICY.expected_cycle_name:
+    if (
+        str(getattr(cycle, "name", None) or "").strip()
+        != PROMOTION_READINESS_POLICY.expected_cycle_name
+    ):
         return None
 
     _apply_contract_extension(run)
@@ -326,7 +306,7 @@ async def async_apply_promotion_readiness_gate(
                 "executing_cycle_id": cycle.id,
             },
         )
-        return _OUTCOME_EFFECTS[outcome]
+        return outcome
 
     baseline_reader = baseline_reader or _async_last_evaluated_pair
     token_resolver = token_resolver or _async_cycle_repo_token
@@ -413,7 +393,7 @@ async def async_apply_promotion_readiness_gate(
     if outcome is PromotionReadinessOutcome.IDLE:
         run.started_at = run.started_at or evaluated_at
         persist_cycle_run_short_circuit_verdict(run, _idle_closing_verdict(evidence))
-    return _OUTCOME_EFFECTS[outcome]
+    return outcome
 
 
 __all__ = [

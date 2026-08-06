@@ -182,6 +182,41 @@ async def test_lifespan_ensures_starting_skill_bundle():
     ensure_bundle.assert_awaited_once_with()
 
 
+@pytest.mark.asyncio
+async def test_lifespan_hosts_scheduler_overdue_monitor_outside_daemon():
+    monitor_started = asyncio.Event()
+
+    async def monitor_loop():
+        monitor_started.set()
+        await asyncio.Future()
+
+    monitor = MagicMock()
+    monitor.name = "scheduler_overdue_monitor"
+    monitor.run = monitor_loop
+
+    with patch("brain.app.api.main._should_start_inline_runner", return_value=False):
+        with patch("brain.app.api.main._should_start_run_event_consumer", return_value=False):
+            with patch("brain.systems.cortex.events.set_publisher"):
+                with patch(
+                    "brain.app.api.main._ensure_starting_skill_bundle",
+                    new=AsyncMock(),
+                ):
+                    with patch(
+                        "brain.app.api.main.SchedulerOverdueMonitor",
+                        return_value=monitor,
+                    ) as monitor_type:
+                        async with api_main.lifespan(app):
+                            await asyncio.wait_for(monitor_started.wait(), timeout=1)
+                            assert api_main._scheduler_overdue_monitor_task is not None
+                            assert (
+                                api_main._scheduler_overdue_monitor_task.get_name()
+                                == "scheduler_overdue_monitor"
+                            )
+
+    monitor_type.assert_called_once_with()
+    assert api_main._scheduler_overdue_monitor_task is None
+
+
 def test_inline_runner_honors_launcher_dispatcher_env(monkeypatch):
     monkeypatch.delenv("CORTEX_INLINE_RUNNER", raising=False)
     monkeypatch.setenv("CORTEX_INLINE_DISPATCHER", "1")

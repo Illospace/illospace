@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunRow
 from brain.platform.db.models.org import User
 from brain.platform.providers.model_policy import async_get_bulk_route
-from brain.systems.knowledge.connectors.base import KnowledgeDraft
+from brain.systems.knowledge.connectors.base import KnowledgeDraft, KnowledgeScope
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
 
@@ -139,6 +139,7 @@ def serialize_draft(draft: KnowledgeDraft) -> dict[str, Any]:
         "source": draft.source,
         "kind": draft.kind,
         "source_ref": draft.source_ref,
+        "scope": draft.scope.value,
         "title": draft.title,
         "summary": draft.summary,
         "resolution": draft.resolution,
@@ -163,6 +164,9 @@ def deserialize_draft(value: Mapping[str, Any]) -> KnowledgeDraft:
         source=str(value["source"]),
         kind=str(value["kind"]),
         source_ref=str(value["source_ref"]),
+        scope=KnowledgeScope(
+            str(value.get("scope") or KnowledgeScope.ORGANIZATION)
+        ),
         title=str(value["title"]),
         summary=str(value["summary"]),
         resolution=(str(value["resolution"]) if value.get("resolution") is not None else None),

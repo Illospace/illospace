@@ -5,6 +5,33 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
+SUPPORT_INTAKE_RECALL_MANDATE = "\n".join(
+    [
+        "Mandatory customer-support recall gate (complete this before classification "
+        "or action):",
+        "- For every customer support intake or report, call `search_knowledge` once "
+        "for each requester email, company id, and error signature that the intake or "
+        "its Slack context actually provides. Do this before the first visible Slack "
+        "reply (including a clarifying question) and before creating or updating an "
+        "issue. Do not skip an available identifier.",
+        "- For a customer generation report, call `brain_skills` to resolve "
+        "`uwear-customer-generation-report-triage`, then call `skill_view` to load "
+        "skill 54's current procedure and follow its evidence-first payload "
+        "investigation. Do not depend on phrase-triggered skill discovery.",
+        "- The visible reply or filed issue must state what prior context those "
+        "searches found, or state that no prior context was found. Silence is not "
+        "allowed for a customer support intake.",
+        "- When a teammate asks a question about customer state, first use the "
+        "appropriate read-only payload reader and `search_knowledge`; only then "
+        "answer with `post_slack_reply`. Do not answer from the report text alone. "
+        "Search any additional requester, company, or error identifier revealed by "
+        "the payload before answering.",
+        "- This evidence gate runs before the existing triage branches. It does not "
+        "change their order or make casual chatter actionable.",
+    ]
+)
+
+
 def slack_channel_monitor_message(
     payload: Mapping[str, Any],
     slack_trigger_payload: Mapping[str, Any],
@@ -22,6 +49,8 @@ def slack_channel_monitor_message(
         "Do not use react_to_slack_message for another routine acknowledgement in this passive triage run.",
         "",
         durable_preference_guidance(),
+        "",
+        SUPPORT_INTAKE_RECALL_MANDATE,
         "",
         "Classify this message and act accordingly:",
         "- A human explicitly stating a durable presentation/behaviour preference requires a "
@@ -154,4 +183,8 @@ def _clean(value: Any) -> str:
     return str(value or "").strip()
 
 
-__all__ = ["durable_preference_guidance", "slack_channel_monitor_message"]
+__all__ = [
+    "SUPPORT_INTAKE_RECALL_MANDATE",
+    "durable_preference_guidance",
+    "slack_channel_monitor_message",
+]
