@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 
 from brain.contracts.statuses import TERMINAL_RUN_STATUS_VALUES
 from brain.platform.integrations.provider_auth_preflight import (
-    ProviderAuthPreflightResult,
+    ProviderAuthBlockedPreflightResult,
 )
 from brain.systems.cortex.events import publish
 from brain.systems.cortex.thought_lifecycle import ThreadMessageCommand, post_thread_message
@@ -277,7 +277,7 @@ async def _async_append_cycle_auth_blocked_thread_message(
     idea: Idea,
     cycle: Cycle,
     cycle_run: CycleRun,
-    preflight: ProviderAuthPreflightResult,
+    preflight: ProviderAuthBlockedPreflightResult,
 ) -> tuple[dict, dict | None]:
     metadata = {
         "source": "cycle",

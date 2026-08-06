@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Self, TypeAlias
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,26 +11,58 @@ from brain.platform.integrations.llm import async_resolve_llm_client
 from brain.platform.providers.model_policy import required_openai_auth_mode
 
 
-@dataclass(frozen=True, slots=True)
-class ProviderAuthPreflightResult:
-    status: str
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ProviderAuthPreflightResult:
     provider: str
     model: str
-    credential: str | None = None
-    error_code: str | None = None
+
+    def _to_dict(
+        self,
+        *,
+        status: str,
+        credential: str | None = None,
+        error_code: str | None = None,
+        repair_action: str | None = None,
+        visible_message: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "provider": self.provider,
+            "model": self.model,
+            "credential": credential,
+            "error_code": error_code,
+            "repair_action": repair_action,
+            "visible_message": visible_message,
+        }
+
+
+class ProviderAuthPassedPreflightResult(_ProviderAuthPreflightResult):
+    __slots__ = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return self._to_dict(status="passed")
+
+
+class ProviderAuthSkippedPreflightResult(_ProviderAuthPreflightResult):
+    __slots__ = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return self._to_dict(status="skipped")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProviderAuthBlockedPreflightResult(_ProviderAuthPreflightResult):
+    credential: str
+    error_code: str
     repair_action: str | None = None
     visible_message: str | None = None
-
-    @property
-    def blocked(self) -> bool:
-        return self.status == "auth_blocked"
 
     def with_presentation(
         self,
         *,
         repair_action: str,
         visible_message: str,
-    ) -> ProviderAuthPreflightResult:
+    ) -> Self:
         return replace(
             self,
             repair_action=repair_action,
@@ -38,24 +70,28 @@ class ProviderAuthPreflightResult:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "status": self.status,
-            "provider": self.provider,
-            "model": self.model,
-            "credential": self.credential,
-            "error_code": self.error_code,
-            "repair_action": self.repair_action,
-            "visible_message": self.visible_message,
-        }
+        return self._to_dict(
+            status="auth_blocked",
+            credential=self.credential,
+            error_code=self.error_code,
+            repair_action=self.repair_action,
+            visible_message=self.visible_message,
+        )
+
+
+ProviderAuthPreflightResult: TypeAlias = (
+    ProviderAuthPassedPreflightResult
+    | ProviderAuthSkippedPreflightResult
+    | ProviderAuthBlockedPreflightResult
+)
 
 
 def skipped_provider_auth_preflight(
     *,
     provider: str,
     model: str,
-) -> ProviderAuthPreflightResult:
-    return ProviderAuthPreflightResult(
-        status="skipped",
+) -> ProviderAuthSkippedPreflightResult:
+    return ProviderAuthSkippedPreflightResult(
         provider=provider,
         model=model,
     )
@@ -112,8 +148,7 @@ async def async_probe_provider_auth(
             session=session,
         )
     except Exception as exc:
-        return ProviderAuthPreflightResult(
-            status="auth_blocked",
+        return ProviderAuthBlockedPreflightResult(
             provider=provider,
             model=model,
             credential=_credential_label(
@@ -125,15 +160,17 @@ async def async_probe_provider_auth(
             error_code="provider_credential_unavailable",
         )
 
-    return ProviderAuthPreflightResult(
-        status="passed",
+    return ProviderAuthPassedPreflightResult(
         provider=provider,
         model=model,
     )
 
 
 __all__ = [
+    "ProviderAuthBlockedPreflightResult",
+    "ProviderAuthPassedPreflightResult",
     "ProviderAuthPreflightResult",
+    "ProviderAuthSkippedPreflightResult",
     "async_probe_provider_auth",
     "skipped_provider_auth_preflight",
 ]

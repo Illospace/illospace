@@ -50,12 +50,11 @@ def _stub_spawn_worker_auth_preflight(monkeypatch, worker_handlers):
     developer laptop and the auth_blocked path on credential-free CI.
     """
     from brain.platform.integrations.provider_auth_preflight import (
-        ProviderAuthPreflightResult,
+        ProviderAuthPassedPreflightResult,
     )
 
     async def passed_preflight(_session, *, model, **_kwargs):
-        return ProviderAuthPreflightResult(
-            status="passed",
+        return ProviderAuthPassedPreflightResult(
             provider="openai",
             model=model,
         )
@@ -336,7 +335,7 @@ async def test_run_admission_marks_idea_working_without_worker_details(monkeypat
 
 async def test_run_admission_rejects_uncredentialed_anthropic_before_creation(monkeypatch):
     from brain.platform.integrations.provider_auth_preflight import (
-        ProviderAuthPreflightResult,
+        ProviderAuthBlockedPreflightResult,
     )
     from brain.systems.runs.domain import AgentRunRequest
     from brain.systems.runs import work_intake
@@ -354,8 +353,7 @@ async def test_run_admission_rejects_uncredentialed_anthropic_before_creation(mo
         return request
 
     async def blocked_probe(_session, **kwargs):
-        return ProviderAuthPreflightResult(
-            status="auth_blocked",
+        return ProviderAuthBlockedPreflightResult(
             provider="anthropic",
             model=kwargs["model"],
             credential="Anthropic API key",
@@ -1761,7 +1759,7 @@ async def _captured_spawn_worker(
     **spawn_kwargs,
 ):
     from brain.platform.integrations.provider_auth_preflight import (
-        ProviderAuthPreflightResult,
+        ProviderAuthPassedPreflightResult,
     )
     from brain.systems.runs.domain import RunProfile, RunRecipe
     from brain.systems.runs.evidence_health import WorkerEvidenceReceipt
@@ -1826,8 +1824,7 @@ async def _captured_spawn_worker(
 
     async def fake_preflight(*_args, **_kwargs):
         captured["preflight"] = dict(_kwargs)
-        return preflight_result or ProviderAuthPreflightResult(
-            status="passed",
+        return preflight_result or ProviderAuthPassedPreflightResult(
             provider="openai",
             model="openai/gpt-5.6-sol",
         )
@@ -2057,11 +2054,10 @@ async def test_spawn_worker_auth_preflight_rejects_missing_provider_credential_b
     monkeypatch,
 ):
     from brain.platform.integrations.provider_auth_preflight import (
-        ProviderAuthPreflightResult,
+        ProviderAuthBlockedPreflightResult,
     )
 
-    blocked = ProviderAuthPreflightResult(
-        status="auth_blocked",
+    blocked = ProviderAuthBlockedPreflightResult(
         provider="anthropic",
         model="anthropic/claude-sonnet-4-6",
         credential="Anthropic API key",
@@ -2136,7 +2132,7 @@ async def test_neutral_auth_probe_names_missing_anthropic_configuration(
         model="anthropic/claude-sonnet-4-6",
     )
 
-    assert result.status == "auth_blocked"
+    assert result.to_dict()["status"] == "auth_blocked"
     assert result.error_code == "provider_credential_unavailable"
     assert result.credential == "Anthropic API key"
     assert result.visible_message is None
@@ -2147,7 +2143,7 @@ async def test_spawn_worker_auth_policy_probes_anthropic_and_owns_wording(
     monkeypatch,
 ):
     from brain.platform.integrations.provider_auth_preflight import (
-        ProviderAuthPreflightResult,
+        ProviderAuthBlockedPreflightResult,
     )
     import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
 
@@ -2155,8 +2151,7 @@ async def test_spawn_worker_auth_policy_probes_anthropic_and_owns_wording(
 
     async def blocked_probe(_session, **kwargs):
         captured.update(kwargs)
-        return ProviderAuthPreflightResult(
-            status="auth_blocked",
+        return ProviderAuthBlockedPreflightResult(
             provider="anthropic",
             model=kwargs["model"],
             credential="Anthropic API key",
@@ -2182,7 +2177,7 @@ async def test_spawn_worker_auth_policy_probes_anthropic_and_owns_wording(
         "provider": "anthropic",
         "model": "anthropic/claude-sonnet-4-6",
     }
-    assert result.blocked is True
+    assert isinstance(result, ProviderAuthBlockedPreflightResult)
     assert result.repair_action == (
         "Add an Anthropic API key in Settings > Access, then retry the run."
     )
@@ -2195,15 +2190,14 @@ async def test_cycle_auth_policy_blocks_anthropic_without_credentials(monkeypatc
     from brain.systems.cycles import auth_preflight
     from brain.systems.cycles.admission import CycleProviderRoute
     from brain.platform.integrations.provider_auth_preflight import (
-        ProviderAuthPreflightResult,
+        ProviderAuthBlockedPreflightResult,
     )
 
     probes = []
 
     async def blocked_probe(*_args, **kwargs):
         probes.append(kwargs)
-        return ProviderAuthPreflightResult(
-            status="auth_blocked",
+        return ProviderAuthBlockedPreflightResult(
             provider="anthropic",
             model=kwargs["model"],
             credential="Anthropic API key",
@@ -2225,7 +2219,7 @@ async def test_cycle_auth_policy_blocks_anthropic_without_credentials(monkeypatc
         ),
     )
 
-    assert result.status == "auth_blocked"
+    assert isinstance(result, ProviderAuthBlockedPreflightResult)
     assert result.provider == "anthropic"
     assert probes[0]["provider"] == "anthropic"
     assert "Add an Anthropic API key" in result.visible_message

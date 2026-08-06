@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.integrations.provider_auth_preflight import (
+    ProviderAuthBlockedPreflightResult,
     ProviderAuthPreflightResult,
     async_probe_provider_auth,
 )
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
 def _with_cycle_presentation(
     result: ProviderAuthPreflightResult,
 ) -> ProviderAuthPreflightResult:
-    if not result.blocked:
+    if not isinstance(result, ProviderAuthBlockedPreflightResult):
         return result
     if result.provider == "anthropic":
         repair_action = (
