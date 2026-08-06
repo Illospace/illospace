@@ -187,6 +187,7 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         f"{degradation_instruction}"
         f"{open_ask_instruction}"
         f"{exception_ping_instruction}"
+        f"{_packet_outcomes_instruction(cycle, result_contract)}"
         f"{completion_instruction}\n"
         "## Result Contract\n"
         f"{_json_block(result_contract)}\n\n"
@@ -336,3 +337,22 @@ def _exception_ping_instruction(cycle: Cycle) -> str:
 
 def _json_block(value: dict) -> str:
     return json.dumps(value, default=str, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _packet_outcomes_instruction(cycle: Cycle, result_contract: dict) -> str:
+    """Require the coordinator digest to consume the canonical packet read."""
+    from brain.systems.briefing.outcomes import DEFAULT_OUTCOME_WINDOW_HOURS
+
+    if (
+        cycle.name != _UWEAR_COORDINATOR_CYCLE_NAME
+        or result_contract.get("run_kind") != SCHEDULED_DIGEST_RUN_KIND
+    ):
+        return ""
+    return (
+        "- MANDATORY PACKET OUTCOMES FOOTER: call the MCP read capability "
+        f"`packets.outcomes` with `since_hours: {DEFAULT_OUTCOME_WINDOW_HOURS:g}` "
+        "during the same evidence sweep as "
+        "this digest. If its `digest_line` is non-null, append that value verbatim as "
+        "one footer line next to the per-person recap. Do not recalculate or paraphrase "
+        "its packet counts.\n"
+    )

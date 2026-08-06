@@ -515,9 +515,8 @@ async def test_terminal_observation_claim_reraises_unrelated_integrity_error():
         async def get(self, model, primary_key):
             return None
 
-    store = cycle_failure_guard.CycleFailureGuardStore(
+    store = cycle_failure_guard.CycleFailureObservationStore(
         session=FailingSession(),
-        cycle_id=1,
     )
 
     with pytest.raises(IntegrityError, match="unrelated constraint"):
